@@ -5,6 +5,7 @@ import traceback
 from typing import Optional, Iterator, List, Any, Generator, AsyncGenerator, Dict, Union
 from transformers import PreTrainedTokenizer
 from maga_transformer.utils.util import get_mem_info
+from maga_transformer.utils.time_util import Timer
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.models.base_model import BaseModel, BaseTokenizer
 from maga_transformer.config.generate_config import GenerateConfig
@@ -40,6 +41,11 @@ class AsyncModel:
     def stop(self):
         self.decoder_engine_.stop()
 
+    def update(self, lora_infos: Dict[str, str]):
+        with Timer() as timer:
+            self.decoder_engine_.executor_.model_ops.gpt_op.weight.lora_resource.update(lora_infos)                        
+        logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
+
     @torch.no_grad()
     async def generate_stream(self, # type: ignore
                         input_token_ids: torch.Tensor,
@@ -64,3 +70,4 @@ class AsyncModel:
         except Exception as e:
             logging.error(f'generate error: {e}, Traceback: {traceback.format_exc()}')
             raise e
+

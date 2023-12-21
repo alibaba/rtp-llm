@@ -7,7 +7,7 @@ import torch.serialization
 from typing import List, Set, Optional, Tuple
 from itertools import repeat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
-    WeightInfo, W, ModelWeights, LoRAWeights, LoRAMap
+    WeightInfo, W, ModelWeights, LoRAWeights
 from maga_transformer.utils.ckpt_database import CkptDatabase, CkptFileInfo
 from maga_transformer.utils.util import get_mem_info
 
@@ -29,7 +29,7 @@ class ModelWeightsLoader:
         self._weights_info.process_meta(self._database.FinetuneFileList)
         self.preprocessed = 'ft_module' in self._all_tensor_names
         self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info(self.preprocessed, self._all_tensor_names)
-        self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora()
+        self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
         logging.info(f"merge lora {self._merge_lora}")
         
     def set_data_type(self, data_type):
@@ -71,14 +71,6 @@ class ModelWeightsLoader:
         
         for name, tensor in self._load_medusa_weights(self._model_weights_info.medusa_weights):
             weights.append_pytorch_weight(name, tensor)
-
-        # dynamic lora
-        if not self._merge_lora:
-            for lora_config in self._database.LoraFileList.keys():
-                lora_name = lora_config.name
-                lora_weights = self.load_lora_weights_from_scratch(lora_name, int8_mode, device)
-                # save lora_weight to lora_map to avoid free memory
-                _ = weights.lora_map.add_lora_name(lora_name, lora_weights)
         
         return weights
     
@@ -91,7 +83,7 @@ class ModelWeightsLoader:
             name = weight.tensor_name(None)
             results.append((name, self.load_tensor(name)[0]))
         return results
-
+            
     def load_lora_weights_from_scratch(self, lora_name: str, int8_mode: int, device: str='cuda:0'):
         lora_weights = LoRAWeights(self._num_layers)
         # set lora rank
@@ -283,8 +275,8 @@ def estimate_load_parallel_num(config, tp_size):
         parallel_num = 1 # 单元测试
     logging.info(f'free_mem: {free_mem:.2f} model_mem: {model_mem:.2f}, load weights by {parallel_num} process')
     return parallel_num
-    
-def load_weights(weights_info: ModelDeployWeightInfo, database: CkptDatabase, compute_dtype, load_parallel_num):
+
+def get_model_weights_loader(weights_info: ModelDeployWeightInfo, database: CkptDatabase, compute_dtype):
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception('invalid tp_size %d for config.head_num %d' \
                         % (weights_info.tp_size, weights_info._head_num))
@@ -294,7 +286,4 @@ def load_weights(weights_info: ModelDeployWeightInfo, database: CkptDatabase, co
     
     model_weights_loader = ModelWeightsLoader(weights_info, database)
     model_weights_loader.set_data_type(compute_dtype)
-    weights = model_weights_loader.load_weights_from_scratch(
-        weights_info._int8_mode, num_process=load_parallel_num)
-    model_weights_loader.show_warns()
-    return weights
+    return model_weights_loader

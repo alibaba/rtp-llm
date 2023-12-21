@@ -11,6 +11,7 @@ class ExceptionType(IntEnum):
     UNKNOWN_ERROR = 514
     UNSUPPORTED_OPERATION = 515
     ERROR_GENERATE_CONFIG_FORMAT = 516
+    UPDATE_ERROR = 601
     
 
 class FtRuntimeException(Exception):

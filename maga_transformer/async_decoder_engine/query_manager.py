@@ -6,6 +6,7 @@ import torch
 from threading import Lock
 from maga_transformer.async_decoder_engine.cache_manager import CacheManager, CacheConfig
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery, QueryStats
 from maga_transformer.models.base_model import BaseTokenizer
@@ -71,7 +72,8 @@ class QueryManager:
                               tokenizer: Optional[BaseTokenizer],
                               context_lengths: torch.Tensor,
                               images: List[List[str]],
-                              generate_config: GenerateConfig):
+                              generate_config: GenerateConfig,
+                              lora_resource: Optional[LoraResource]):
         queries: List[QueryStats] = []
         try:
             for i in range(input_token_ids.shape[0]):
@@ -80,7 +82,7 @@ class QueryManager:
                     if not isinstance(generate_config.adapter_name, list):
                         raise Exception(f"batch query generate config type error {type(generate_config.adapter_name)}")
                     adapter_name = generate_config.adapter_name[i]
-                query = self._gen_new_request(input_token_ids[i, :int(context_lengths[i])], images[i], tokenizer, generate_config, adapter_name)
+                query = self._gen_new_request(input_token_ids[i, :int(context_lengths[i])], images[i], tokenizer, generate_config, adapter_name, lora_resource)
 
                 queries.append(query)
         except Exception as e:
@@ -90,7 +92,7 @@ class QueryManager:
         [self.wait_queries_.append(q) for q in queries]
         return queries
 
-    def _gen_new_request(self, inputs: torch.Tensor, images: List[str], tokenizer: Optional[BaseTokenizer], generate_config: GenerateConfig, adapter_name: str):
+    def _gen_new_request(self, inputs: torch.Tensor, images: List[str], tokenizer: Optional[BaseTokenizer], generate_config: GenerateConfig, adapter_name: str, lora_resource: Optional[LoraResource]):
         seq_length: int = inputs.shape[-1]
         # reuse length represent for ptuning length or kvcache reuse length
         block_size = (seq_length - 2 + self.gen_num_per_circle) // self.cache_config_.seq_size_per_block + 1
@@ -119,7 +121,8 @@ class QueryManager:
                           block_indice=block_indice,
                           slice_length=slice_length,
                           generate_config=generate_config,
-                          adapter_name = adapter_name)
+                          adapter_name = adapter_name,
+                          lora_resource=lora_resource)
 
     def has_query(self) -> bool:
         return len(self.batch_query_.queries) > 0 or len(self.wait_queries_) > 0
@@ -217,6 +220,7 @@ class QueryManager:
         return (next_length - current_block_length - 1) // self.config_.seq_size_per_block + 1
 
     def _release_query_resource(self, query: QueryStats):
+        query.release()
         block_indice = query.pop_block_indice()
         if not block_indice:
             return

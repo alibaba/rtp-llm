@@ -41,6 +41,10 @@ class BaseModelExecutor(ExecutorBase):
         self.query_manager_ = query_manager
         dump_engine_to_table(self.create_config_json())
 
+    @property
+    def base_model_ops(self):
+        return self.model_ops
+
     @staticmethod
     def _to_cuda_tensor(t: Optional[List[Any]], dtype: torch.dtype=torch.int32):
         return to_cuda(torch.tensor(t, dtype=dtype)) if t is not None else None
@@ -76,7 +80,7 @@ class BaseModelExecutor(ExecutorBase):
             k_cache_scale, v_cache_scale = self.query_manager_.get_kv_cache_scale_base()
             prefix_lengths, count_length, max_prefix_length = self.query_manager_.get_prefix_args(batch_query)
 
-            lora_ids = [self.model_ops.gpt_op.weight.lora_map.get_id(lora_name) for lora_name in batch_query.lora_names]
+            lora_ids = [self.model_ops.gpt_op.weight.lora_resource.get_id(lora_name) for lora_name in batch_query.lora_names]
             # TODO(ldj) when tp > 1 broadcast lora ids.
             if len(lora_ids) == 0:
                 lora_ids = [-1]

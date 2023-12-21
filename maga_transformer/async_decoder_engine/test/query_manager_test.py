@@ -50,7 +50,7 @@ class QueryManagerTest(TestCase):
         images = [[]] * 2
 
         queries = query_manager.put_requests_to_queue(
-            inputs, None, context_lengths, images, generate_config)
+            inputs, None, context_lengths, images, generate_config, None)
         self.assertEqual(len(query_manager.cache_manager_.free_blocks_index), 5)
         self.assertEqual(query_manager.running_batch_size(), 0)
         self.assertEqual(query_manager.wait_query_size(), 2)        
@@ -101,7 +101,7 @@ class QueryManagerTest(TestCase):
 
         with self.assertRaisesRegex(Exception, "failed to malloc 2 blocks, only 1 blocks left"):
             queries = query_manager.put_requests_to_queue(
-                inputs, None, context_lengths, images,generate_config)
+                inputs, None, context_lengths, images,generate_config, None)
         self.assertEqual(len(query_manager.cache_manager_.free_blocks_index), 7)
 
     def test_extend_lack_mem(self):
@@ -115,7 +115,7 @@ class QueryManagerTest(TestCase):
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
         queries = query_manager.put_requests_to_queue(
-            inputs, None, context_lengths, images, generate_config)
+            inputs, None, context_lengths, images, generate_config, None)
         self.assertEqual(len(query_manager.cache_manager_.free_blocks_index), 0)
         batch_query = self._get_batch_query(query_manager)
         finished = torch.BoolTensor([False, False, False])
@@ -148,7 +148,7 @@ class QueryManagerTest(TestCase):
         context_lengths = torch.IntTensor([16])
         images = [[]]
         generate_config: GenerateConfig = GenerateConfig(using_hf_sampling=False, chat_id='aaaa')
-        queries = query_manager.put_requests_to_queue(inputs, None, context_lengths, images, generate_config)
+        queries = query_manager.put_requests_to_queue(inputs, None, context_lengths, images, generate_config, None)
         self.assertEqual(queries[0].block_indice, [[1, 2]])
         self.assertEqual(len(query_manager.cache_manager_.free_blocks_index), 5)
         batch_query = self._get_batch_query(query_manager)
@@ -168,7 +168,7 @@ class QueryManagerTest(TestCase):
         self.assertEqual(len(query_manager.batch_query_.queries), 0)
 
         context_lengths = torch.IntTensor([32])
-        queries = query_manager.put_requests_to_queue(inputs, None, context_lengths, images, generate_config)
+        queries = query_manager.put_requests_to_queue(inputs, None, context_lengths, images, generate_config, None)
         self.assertEqual(len(query_manager.cache_manager_.free_blocks_index), 3)
         self.assertEqual(queries[0].block_indice, [[1, 2, 3, 4]])
         self.assertEqual(queries[0].reuse_length, 16)
@@ -183,7 +183,7 @@ class QueryManagerTest(TestCase):
         self.assertEqual(len(query_manager.batch_query_.queries), 0)
 
         context_lengths = torch.IntTensor([24])
-        queries = query_manager.put_requests_to_queue(inputs, None, context_lengths, images, generate_config)
+        queries = query_manager.put_requests_to_queue(inputs, None, context_lengths, images, generate_config, None)
         self.assertEqual(len(query_manager.cache_manager_.free_blocks_index), 4)
         self.assertEqual(queries[0].block_indice, [[1, 2, 3]])
         self.assertEqual(queries[0].reuse_length, 23)
@@ -222,7 +222,7 @@ class QueryManagerTest(TestCase):
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
         queries = query_manager.put_requests_to_queue(
-                inputs, None, context_lengths, images, generate_config)
+                inputs, None, context_lengths, images, generate_config, None)
         batch_query = self._get_batch_query(query_manager)
         prefix_lengths, count_length, max_prefix_length = query_manager.get_prefix_args(batch_query)
 

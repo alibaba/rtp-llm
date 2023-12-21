@@ -11,6 +11,10 @@ class SpModelExecutor(ExecutorBase):
         self.sp_executor = sp_executor
         self.gen_num = gen_num
 
+    @property
+    def base_model_ops(self):
+        return self.validate_executor.base_model_ops
+
     def process(self, batch_query: BatchQuery) -> Tuple[torch.Tensor, torch.Tensor, List[List[int]], Any]:
         with torch.cuda.nvtx.range("speculative gen"):
             cum_probs, output_tokens = self._speculative_gen(batch_query)

@@ -1,5 +1,6 @@
 import copy
 import torch
+import logging
 import numpy as np
 from typing import Any, List, Optional
 from threading import Lock
@@ -11,6 +12,7 @@ from maga_transformer.utils.stop_utils import create_stop_criteria_list
 from maga_transformer.async_decoder_engine.ptuning import PrefixType
 from maga_transformer.utils.util import to_cuda, to_cpu
 from maga_transformer.metrics import kmonitor, GaugeMetrics
+from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.models.base_model import BaseTokenizer
 
 '''
@@ -36,6 +38,7 @@ class QueryStats:
             slice_length : int,
             images: List[str] = [],
             adapter_name: str = "",
+            lora_resource: Optional[LoraResource] = None
     ) -> None:
         self.max_seq_len = max_seq_len
         self.reuse_length = reuse_length
@@ -68,6 +71,17 @@ class QueryStats:
 
 
         self.block_indice: List[List[int]] = [block_indice]
+        self.lora_resource = lora_resource
+
+    def acquire(self):
+        if self.lora_resource != None:
+            logging.info(f"query read_acquire:[{self.adapter_name}] RWLock")
+            self.lora_resource.read_acquire(self.adapter_name)
+    
+    def release(self):
+        if self.lora_resource != None:
+            logging.info(f"query read_release:[{self.adapter_name}] RWLock")
+            self.lora_resource.read_release(self.adapter_name)
 
     @property
     def max_new_tokens(self) -> int:
@@ -313,6 +327,7 @@ class BatchQuery:
             return
         self.clear()
         [q.set_running() for q in new_queries]
+        [q.acquire() for q in new_queries]
 
         self.generate_batch_size = len(self.queries)
         self.context_batch_size = len(new_queries)

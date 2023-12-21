@@ -46,11 +46,15 @@ struct LoRAWeight {
         int lora_rank = lora_ranks[lora_id];
         if (lora_rank == max_rank) {
             lora_ranks.erase(lora_id);
-            auto it = std::max_element(lora_ranks.begin(), lora_ranks.end(), 
-                [](const std::pair<int, int>& p1, const std::pair<int, int>& p2) {
-                    return p1.second < p2.second;
-                });
-            max_rank = it->second;
+            if (lora_map.size() > 0) {
+                auto it = std::max_element(lora_ranks.begin(), lora_ranks.end(), 
+                    [](const std::pair<int, int>& p1, const std::pair<int, int>& p2) {
+                        return p1.second < p2.second;
+                    });
+                max_rank = it->second;
+            } else {
+                max_rank = 0;
+            }
         }
     }
 };

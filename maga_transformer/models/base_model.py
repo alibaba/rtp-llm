@@ -314,8 +314,7 @@ class BaseModel(object):
                 lora_names = generate_config.adapter_name
         if len(lora_names) != 0:
             for lora_name in lora_names:
-                if self.weight.lora_map is not None:
-                    lora_ids.append(self.weight.lora_map.get_id(lora_name))
+                lora_ids.append(self.weight.lora_resource.get_id(lora_name))
 
         lora_ids += [-1] * (batch_size - len(lora_names))
 
@@ -373,6 +372,15 @@ class BaseModel(object):
         else:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "calculate_loss in generate_config can only be 0, 1 or 2")
 
+    def acquire_resource(self, generate_config: GenerateConfig) -> None:
+        if generate_config.adapter_name != None:
+            for name in generate_config.adapter_name:
+                self.weight.lora_resource.read_acquire(name)
+
+    def release_resource(self, generate_config: GenerateConfig) -> None:
+        if generate_config.adapter_name != None:
+            for name in generate_config.adapter_name:
+                self.weight.lora_resource.read_release(name)
 
     @torch.no_grad()
     async def generate_stream(self, # type: ignore
@@ -381,6 +389,20 @@ class BaseModel(object):
                  input_lengths: Optional[torch.Tensor],
                  images: List[List[str]],
                  generate_config: GenerateConfig) -> AsyncGenerator[GenerateOutput, None]:
+        self.acquire_resource(generate_config)
+        try:
+            for element in self.generate_stream_wrapper(input_token_ids, tokenizer, input_lengths, images, generate_config):
+                yield element
+        finally:
+            self.release_resource(generate_config)
+
+    @torch.no_grad()
+    def generate_stream_wrapper(self, # type: ignore
+                 input_token_ids: torch.Tensor,
+                 tokenizer: BaseTokenizer,
+                 input_lengths: Optional[torch.Tensor],
+                 images: List[Any],
+                 generate_config: GenerateConfig):
         """
 
         # Args.
@@ -391,7 +413,6 @@ class BaseModel(object):
         # Returns
             Iterator[GenerateOutput]
         """
-
         generate_context = self.prepare_context(input_token_ids, input_lengths, images, generate_config)
 
         context_decoder_output, k_cache, v_cache, hidden_states = self.context_decoder.forward(
@@ -473,6 +494,7 @@ class BaseModel(object):
                                         generate_context.beam_width)[:step + 1, ...].permute(1, 2, 0),
                                  finished,
                                  aux_info, loss, logits)
+            
 
 
     def _do_pipline_first_token_emb(self, batch_size: int, max_input_length: int,

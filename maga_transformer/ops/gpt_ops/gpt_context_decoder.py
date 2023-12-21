@@ -32,10 +32,10 @@ class GptContextDecoder(FTOPBase):
             self.weight.int8_scales,
             self.remove_padding)
         
-        if self.weight.lora_map != None:
-            for id, lora_weight in self.weight.lora_map.weights_map.items():
-                self.ft_op.add_lora(id, lora_weight.lora_a_weights, lora_weight.lora_b_weights)
+        for id, lora_weight in self.weight.lora_resource.lora_map.weights_map.items():
+            self.ft_op.add_lora(id, lora_weight.lora_a_weights, lora_weight.lora_b_weights)
 
+         
     def forward(self, # type: ignore
                 input_embeds: torch.Tensor,
                 attention_mask: torch.Tensor,

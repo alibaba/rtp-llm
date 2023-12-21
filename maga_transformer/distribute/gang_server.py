@@ -123,12 +123,12 @@ class GangServer:
             if resposne.status_code != 200:
                 raise Exception(f"member {member.ip}:{member.server_port} /health status_code: {resposne.status_code}, is not ready")
 
-    def request_workers(self, req: Dict[str, Any]):
+    def request_workers(self, req: Dict[str, Any], uri: str = 'inference_internal'):
         req = copy.deepcopy(req)
         def curl_impl(url: str):
             _ = requests.post(url, json=req)
         for member in self._gang_info.workers():
-            url = f'http://{member.ip}:{member.server_port}/inference_internal'
+            url = f'http://{member.ip}:{member.server_port}/{uri}'
             self._request_threadpool.submit(curl_impl, url)
 
     def _health_check_impl(self):

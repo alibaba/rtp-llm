@@ -62,7 +62,7 @@ class DecoderEngine:
             dtype=torch.int32
         )
         try:
-            queries = self.query_manager_.put_requests_to_queue(input_token_ids, tokenizer, input_lengths, images, generate_config)
+            queries = self.query_manager_.put_requests_to_queue(input_token_ids, tokenizer, input_lengths, images, generate_config, self.executor_.base_model_ops.gpt_op.weight.lora_resource)
             counter = self.wait_decode_counter_.get()
             iter_count = 0
             while not all(finished):

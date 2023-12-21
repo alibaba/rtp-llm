@@ -22,6 +22,7 @@ sys.path.append(os.path.join(str(CUR_PATH), '..'))
 
 from maga_transformer.utils.time_util import Timer, current_time_ms
 from maga_transformer.utils.util import AtomicCounter
+from maga_transformer.utils.model_weight import LoraCountException, LoraPathException
 from maga_transformer.metrics import sys_reporter, kmonitor, AccMetrics, GaugeMetrics
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.config.uvicorn_config import UVICORN_LOGGING_CONFIG
@@ -30,6 +31,7 @@ from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_in
 from maga_transformer.distribute.gang_server import GangServer
 from maga_transformer.inference import InferenceWorker
 from maga_transformer.utils.concurrency_controller import ConcurrencyController, ConcurrencyException
+from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.access_logger.access_logger import AccessLogger
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatCompletionStreamResponse
@@ -138,11 +140,31 @@ class FastApiServer(object):
             return FastApiServer.format_exception(e.expcetion_type, e.message)
         elif isinstance(e, ConcurrencyException):
             return FastApiServer.format_exception(ExceptionType.CONCURRENCY_LIMIT_ERROR, str(e))
+        elif isinstance(e, LoraCountException) or isinstance(e, LoraPathException):
+            return FastApiServer.format_exception(ExceptionType.UPDATE_ERROR, str(e))
         elif isinstance(e, Exception):
             error_msg = f'ErrorMsg: {str(e)} \n Traceback: {traceback.format_exc()}'
             return FastApiServer.format_exception(ExceptionType.UNKNOWN_ERROR, error_msg)
         else:
             return FastApiServer.format_exception(ExceptionType.UNKNOWN_ERROR, str(e))
+
+    def _update_wrap(self, version_info: VersionInfo):
+        id = self._atomic_count.increment()
+        try:
+            assert self._inference_worker is not None
+            with Timer() as t:
+                if g_parallel_info.is_master and g_parallel_info.world_size > 1:
+                    self._gang_server.request_workers(version_info.__dict__, 'update_internal')
+                ret = self._inference_worker.update(version_info)
+            rep = JSONResponse(content=ret)
+            kmonitor.report(AccMetrics.UPDATE_QPS_METRIC, 1)
+            kmonitor.report(GaugeMetrics.UPDATE_LANTENCY_METRIC, t.cost_ms())
+        except Exception as e:
+            self._access_logger.log_exception_access(version_info.__dict__, e, id)
+            kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
+            error_code = 500
+            rep = JSONResponse(self.handler_exceptions(e), status_code=error_code)
+        return rep
 
     async def _infer_wrap(self, req: Union[str,Dict[Any, Any]]):
         id = self._atomic_count.increment()
@@ -254,6 +276,21 @@ class FastApiServer(object):
             if not g_parallel_info.is_master:
                 return FastApiServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION, "gang worker should not access this / api directly!")
             return await self._infer_wrap(req)
+    
+        # update for worker RANK != 0
+        @app.post("/update_internal")
+        def update_internal(version_info: VersionInfo):
+            if g_parallel_info.is_master:
+                return FastApiServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION, "gang cluster is None or role is master, should not access /inference_internal!")
+            return self._update_wrap(version_info)
+        
+        # update for worker RANK == 0
+        @app.post("/update")
+        def update(version_info: VersionInfo):
+            if not g_parallel_info.is_master:
+                return FastApiServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION, "gang worker should not access this / api directly!")
+            return self._update_wrap(version_info)
+        
 
         @app.get("/v1/models")
         async def list_models():

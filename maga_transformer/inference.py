@@ -12,6 +12,7 @@ sys.path.append(str(current_file_path.parent.absolute()))
 
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.utils.util import copy_gemm_config
+from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.models.base_model import GenerateResponse
 from maga_transformer.config.generate_config import RequestFormat
@@ -298,3 +299,9 @@ class InferenceWorker():
             req.get('generation_config',
                     req.get('generate_config', {})
                     ).get('yield_generator', False))
+    
+    def update(self, version_info: VersionInfo):
+        lora_infos = dict()
+        if version_info.peft_info != None:
+            lora_infos = version_info.peft_info.get("lora_info", {})
+        return self.model.update(lora_infos)

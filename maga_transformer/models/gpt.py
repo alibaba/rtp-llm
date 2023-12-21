@@ -3,15 +3,17 @@ import json
 import math
 import torch
 import logging
+import gc
 from typing import Optional, Union, List, Dict
 from torch.nn.utils.init import skip_init
 import torch.nn.functional as F
 
 from maga_transformer.utils.util import get_device, to_torch_dtype
 from maga_transformer.models.gpt_util.rms import RMSNorm
-from maga_transformer.utils.model_weights_loader import load_weights, estimate_load_parallel_num
-from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, LoRAModelWeightInfo
+from maga_transformer.utils.model_weights_loader import get_model_weights_loader, estimate_load_parallel_num
+from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, LoRAModelWeightInfo, LoRAMap
 from maga_transformer.utils.time_util import Timer
+from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.ckpt_database import CkptDatabase
 from maga_transformer.ops.gpt_ops.gpt_decoder import GptDecoder
@@ -192,6 +194,11 @@ class GPT(BaseModel):
     def load_vit_weight(self, ctype: str):
         raise NotImplementedError
 
+    def update(self, lora_infos: Dict[str, str]):
+        with Timer() as timer:
+            self.weight.lora_resource.update(lora_infos)
+        logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
+
     def load(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         device = device or get_device()
         compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
@@ -201,15 +208,18 @@ class GPT(BaseModel):
 
         with Timer() as timer:
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
-            self.database = CkptDatabase(self.config.ckpt_path)
-            if self.config.lora_infos is not None:
-                for lora_name, lora_path in self.config.lora_infos.items():
-                    self.database.load_lora(lora_name, lora_path)
+            database = CkptDatabase(self.config.ckpt_path)
             load_parallel_num = estimate_load_parallel_num(
                 self.config, g_parallel_info.tp_size)
-            self.weight = load_weights(weights_info, self.database,
-                                       compute_dtype=compute_dtype,
-                                       load_parallel_num=load_parallel_num)
+            model_weights_loader = get_model_weights_loader(weights_info, database, compute_dtype=compute_dtype)
+            self.weight = model_weights_loader.load_weights_from_scratch(weights_info._int8_mode, num_process=load_parallel_num)
+            model_weights_loader.show_warns()
+
+            self.weight.lora_resource = LoraResource({}, database, weights_info, LoRAMap())
+            self.weight.lora_resource.model_weights_loader = model_weights_loader
+            self.weight.lora_resource.ft_op = [self.context_decoder, self.decoder]
+            if self.config.lora_infos is not None:
+                self.update(self.config.lora_infos)
 
         logging.info(f'load weights time: {timer.cost_ms() / 1000 :.2f} s')
 

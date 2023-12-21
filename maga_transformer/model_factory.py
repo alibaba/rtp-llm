@@ -95,7 +95,7 @@ class ModelFactory:
     def create_from_env():
         tokenizer_path = os.environ["TOKENIZER_PATH"]
         ckpt_path = os.environ["CHECKPOINT_PATH"]
-        lora_infos = os.environ.get("LORA_INFO", None)
+        lora_infos = os.environ.get("LORA_INFO", "{}")
 
         extra_data_path = os.environ.get('EXTRA_DATA_PATH', "")
         if extra_data_path:

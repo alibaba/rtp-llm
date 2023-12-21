@@ -52,6 +52,7 @@ def _init_base(model: BaseModel, config: GptInitModelParameters, ptuning_args: O
     cache_config = CacheConfigGenerator.create_config(config)
     query_manager = QueryManager(config, cache_config, ptuning_args, 1, nccl_op)
     executor = BaseModelExecutor(model_ops, query_manager)
+    model.weight.lora_resource.ft_op = [model_ops.gpt_op]
     return DecoderEngine(executor, query_manager, config)
 
 def _init_sp(model: BaseModel, config: GptInitModelParameters, sp_model: BaseModel, sp_config: GptInitModelParameters) -> DecoderEngine:
