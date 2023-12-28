@@ -164,5 +164,5 @@ $ bazel test //maga_transformer/test/model_test/fake_test:all_fake_model_test --
 
 ## 联系我们
 
-* ![钉钉群](https://github.com/alibaba/rtp-llm/blob/main/1703752358083.png)
-* ![微信群](https://github.com/alibaba/rtp-llm/blob/main/IMG_6972.JPG)
+* ![钉钉群](https://github.com/alibaba/rtp-llm/blob/main/picture/dingding.png)
+* ![微信群](https://github.com/alibaba/rtp-llm/blob/main/picture/weixin.JPG)

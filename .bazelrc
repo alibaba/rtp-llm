@@ -1,0 +1,85 @@
+common --spawn_strategy=local # avoid nvcc conflicts
+common --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
+
+build --action_env PYTHON_BIN_PATH="/opt/conda310/bin/python3"
+build --cxxopt="-std=c++17" --copt="-DGTEST_USE_OWN_TR1_TUPLE=0" --copt="-DEIGEN_MAX_CPP_VER=11" --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
+build -c opt
+build --copt -O2
+build --copt -g --strip=never
+build --copt -w
+build --copt -Werror=unused-variable
+build --copt -Werror=unused
+build --copt -Werror=sign-compare
+build --copt -Werror=reorder
+build --copt -Werror=narrowing
+
+build --copt="-DGOOGLE_CUDA=1"
+build --copt="-DBUILD_MULTI_GPU_TCP=ON"
+build --copt="-DBUILD_MULTI_GPU=ON"
+build --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
+build --copt="-DUSE_WEIGHT_ONLY=1"
+
+build --copt="-DUSE_NVTX=ON"
+build --copt="-DENABLE_BF16=1"
+build --linkopt="-lm"
+build --define=using_cuda=true --define=using_cuda_nvcc=true
+build --crosstool_top=@local_config_cuda//crosstool:toolchain
+build --action_env CUDA_TOOLKIT_PATH="/usr/local/cuda/"
+build --host_action_env CUDA_TOOLKIT_PATH="/usr/local/cuda/"
+build --action_env TF_CUDA_VERSION="11.4"
+build --host_action_env TF_CUDA_VERSION="11.4"
+build --action_env TF_CUDA_PATHS="/usr/local/cuda/"
+build --host_action_env TF_CUDA_PATHS="/usr/local/cuda/"
+build --action_env TF_CUDA_CLANG="0"
+build --host_action_env TF_CUDA_CLANG="0"
+build --action_env TF_NEED_CUDA="1"
+build --host_action_env TF_NEED_CUDA="1"
+# 6.0 = P100, 7.0 = V100, 7.5 = T4, 8.6 = A10, 8.0 = A100
+build --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6"
+build --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6"
+build --action_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/cuda/lib64:$LD_LIBRARY_PATH:$HADOOP_HOME/lib/native/:./aios/fslib:/opt/taobao/java/jre/lib/amd64/server/"
+build --host_action_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/cuda/lib64:$LD_LIBRARY_PATH:$HADOOP_HOME/lib/native/:./aios/fslib:/opt/taobao/java/jre/lib/amd64/server/"
+build --action_env NCCL_INSTALL_PATH="/usr/local/cuda/"
+build --action_env NCCL_HDR_PATH="/usr/local/cuda/include"
+build --action_env TF_NCCL_VERSION="2"
+build --action_env CUDNN_INSTALL_PATH="/usr/local/cuda/"
+build --action_env TF_CUDNN_VERSION="8"
+build --action_env LIBRARY_PATH=/opt/conda310/lib
+
+# 8.9 = L, 9.0 = H800
+build:cuda12 --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
+build:cuda12 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
+build:cuda12 --action_env TF_CUDA_VERSION="12.3"
+build:cuda12 --host_action_env TF_CUDA_VERSION="12.3"
+build:cuda12 --define=use_cuda12=true
+build:cuda12 --copt="-DUSE_CUDA12=1"
+
+build:cuda12_2 --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
+build:cuda12_2 --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
+build:cuda12_2 --action_env TF_CUDA_VERSION="12.2"
+build:cuda12_2 --host_action_env TF_CUDA_VERSION="12.2"
+build:cuda12_2 --define=use_cuda12=true
+build:cuda12_2 --copt="-DUSE_CUDA12=1"
+
+build:debug -c dbg
+build:debug --copt -g --copt -O0
+build:debug --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
+
+# remote cache conflicts with remote executor.
+build --remote_cache=grpc://100.67.130.31:8989 --remote_local_fallback --noremote_upload_local_results
+build:remote --remote_executor=grpc://100.67.130.31:8989 --remote_cache=grpc://100.67.130.31:8989
+build:remote --jobs=500 --local_test_jobs=HOST_CPUS*.8 --build_request_id="https://host?ENSURE_OUTPUTS_PRESENT=true#00000000-0000-0000-0000-000000000000"
+build:remote --remote_local_fallback_strategy=sandboxed
+build:remote --experimental_remote_merkle_tree_cache
+build:remote --define=with_remote_exec=true
+build:remote --remote_download_minimal
+
+build:cicd --remote_upload_local_results
+build:cicd --worker_verbose
+build:cicd --show_result=0 --noverbose_failures --auto_output_filter=all
+test:cicd --test_output=errors --max_test_output_bytes=102400 --experimental_ui_max_stdouterr_bytes=3145728
+
+test --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"
+test --test_env OMP_NUM_THREADS=8
+test --test_env FT_SERVER_TEST="1"
+
