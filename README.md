@@ -98,29 +98,32 @@ $ bazel test //maga_transformer/test/model_test/fake_test:all_fake_model_test --
 
 #### 环境变量说明：
 
+常用选项：
 | 环境变量名 | 类型 | 说明 |
 | --- | --- | --- |
 | `TOKENIZER_PATH` | `str`, required | tokenizer路径  |
 | `CHECKPOINT_PATH` | `str`, required | checkpoint路径 |
 | `MODEL_TYPE` | `str`, required | 模型类型 |
+| `MAX_SEQ_LEN` | `str`, optional | 输入+输出最大长度 |
+| `WEIGHTS_TYPE` | `str`, optional | 模型加载使用的weight 类型:FP16/INT8 |
 | `ASYNC_MODE` | `str`, optional | 异步模式（1:打开，0:关闭），支持dynamic batching、paged (token) attention等优化 |
 | `CONCURRENCY_LIMIT` | `str`, optional | 模型最大并发数 |
-| `EXTRA_DATA_PATH` | `str`, optional | 除了ckpt/tokenizer,额外需要的数据,比如LLAVA的 VIT数据 |
-| `HF_PIPELINES` | `str`, optional | hugging face 模型名 |
-| `INT8_KV_CACHE` | `str`, optional | 高级选项:kv cache 使用int8类型,可节省显存 |
-| `KV_CACHE_MEM_MB` | `str`, optional | kv cache 预留显存大小，单位(MB) |
-| `MAX_SEQ_LEN` | `str`, optional | 输入+输出最大长度 |
-| `PRE_ALLOCATE_OP_MEM` | `str`, optional | 是否提前预分配显存,与KV_CACHE_MEM_MB配合使用 |
-| `TP_SPLIT_EMB_AND_LMHEAD` | `str`, optional | TensorParallel时是否切分Emb和LmHead计算(1:打开，0:关闭) |
-| `USE_BLOCK_CACHE` | `str`, optional | query之间复用kvcache |
-| `WEIGHTS_TYPE` | `str`, optional | 模型加载使用的weight 类型:FP16/INT8 |
-
 
 * TOKENIZER_PATH和CHECKPOINT_PATH必须为本地路径。
 * 当前支持的模型类型为：
 * chatglm/chat_glm/chatglm2/chat_glm_2/chatglm3/chat_glm_3/glm_130b/gpt_bigcode/wizardcoder/sgpt_bloom/sgpt_bloom_vector/
 * bloom/llama/xverse/llava/baichuan/gpt_neox/
 * qwen_7b/qwen_13b/qwen_1b8/qwen_vl/falcon/mpt/internlm/phi/aquila
+
+高级选项：
+| 环境变量名 | 类型 | 说明 |
+| --- | --- | --- |
+| `INT8_KV_CACHE` | `str`, optional | 高级选项:kv cache 使用int8类型,可节省显存 |
+| `KV_CACHE_MEM_MB` | `str`, optional | kv cache 预留显存大小，单位(MB) |
+| `PRE_ALLOCATE_OP_MEM` | `str`, optional | 是否提前预分配显存,与KV_CACHE_MEM_MB配合使用 |
+| `TP_SPLIT_EMB_AND_LMHEAD` | `str`, optional | TensorParallel时是否切分Emb和LmHead计算(1:打开，0:关闭) |
+| `USE_BLOCK_CACHE` | `str`, optional | query之间复用kvcache |
+| `EXTRA_DATA_PATH` | `str`, optional | 除了ckpt/tokenizer,额外需要的数据,比如LLAVA的 VIT数据 |
 
 #### requests的组成说明：
 
@@ -147,11 +150,19 @@ $ bazel test //maga_transformer/test/model_test/fake_test:all_fake_model_test --
 | `return_logits`/`output_logits` | `bool` | 是否返回logits |
 | `yield_generator` | `bool` | 是否流式输出 |
 
+## 相关文档
+* [LoRA使用文档](docs/LoRA-Tutorial.md)
+* [PTuning使用文档](PTuning-Tutorial.md)
+
 ## 致谢：
 我们的项目主要基于[FasterTransformer](https://github.com/NVIDIA/FasterTransformer)，并在此基础上集成了[TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)的部分kernel实现。FasterTransformer和TensorRT-LLM为我们提供了可靠的性能保障。[Flash-Attention2](https://github.com/Dao-AILab/flash-attention)和[cutlass](https://github.com/NVIDIA/cutlass)也在我们持续的性能优化过程中提供了大量帮助。我们的continuous batching和increment decoding参考了[vllm](https://github.com/vllm-project/vllm)的实现；采样参考了[hf transformers](https://github.com/huggingface/transformers)，投机采样部分集成了[Medusa](https://github.com/FasterDecoding/Medusa)的实现，多模态部分集成了[llava](https://github.com/haotian-liu/LLaVA)和[qwen-vl](https://github.com/QwenLM/Qwen-VL)的实现。感谢这些项目对我们的启发和帮助。
 
-## 联系我们
-
 ## 对外应用场景（持续更新）
 * 淘宝问问
+* 阿里巴巴国际AI平台[aidge](https://aidc-ai.com/)
 * [OpenSearch LLM智能问答版](https://www.aliyun.com/activity/bigdata/opensearch/llmsearch)
+
+## 联系我们
+
+* ![钉钉群](https://github.com/alibaba/rtp-llm/blob/main/1703752358083.png)
+* ![微信群](https://github.com/alibaba/rtp-llm/blob/main/IMG_6972.JPG)

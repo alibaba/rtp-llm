@@ -53,6 +53,6 @@ generate_config = {
     "top_k":1
 }
 result = worker.inference(prompt=prompt, generate_config=generate_config)
-print(result
+print(result)
 ```
 LORA_INFO 为json字符串，其内容是一个dict，key 为adapter名字，value 为LoRA ckpt文件所在的地址。元素个数>`1`generate_config 指定LoRA的adpater名。当不指定adapter_name的时候则返回底座模型预测结果.
