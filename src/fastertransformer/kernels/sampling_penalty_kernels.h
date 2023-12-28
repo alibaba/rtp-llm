@@ -39,6 +39,7 @@ void invokeApplyRepetitionPenalty(T*                          logits,
 
 template<typename T>
 void invokeBatchApplyRepetitionPenalty(T*                          logits,
+                                       T*                          penalty_logits,
                                        const float*                penalties,
                                        const int*                  output_ids,
                                        const int                   batch_size,

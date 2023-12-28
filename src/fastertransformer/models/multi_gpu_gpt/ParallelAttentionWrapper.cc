@@ -1020,7 +1020,7 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
     }
     else {
         softmax_lse_ = (float*)allocator_->reMalloc(
-            qk_buf_, sizeof(float) * context_batch_size * local_head_num_ * params_.max_seq_len_, true);
+            softmax_lse_, sizeof(float) * context_batch_size * local_head_num_ * params_.max_seq_len_, true);
     }
 
     if (is_qk_buf_float_ == true) {
@@ -1063,6 +1063,7 @@ void ParallelAttentionWrapper<T>::freeBuffer()
         allocator_->free((void**)(&q_buf_2_));
         allocator_->free((void**)(&qk_buf_));
         allocator_->free((void**)(&qkv_buf_2_));
+        allocator_->free((void**)(&softmax_lse_));
 
         if (is_qk_buf_float_ == true) {
             allocator_->free((void**)(&qk_buf_float_));

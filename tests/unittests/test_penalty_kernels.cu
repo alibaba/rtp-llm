@@ -516,6 +516,7 @@ public:
         }
         else {
             invokeBatchApplyRepetitionPenalty(d_logits_,
+                                              (T*)nullptr,
                                               d_repetition_penalties_,
                                               d_output_ids_,
                                               batch_size_,
@@ -573,6 +574,7 @@ public:
         T* d_logits_batch = reinterpret_cast<T*>(allocator->malloc(sizeof(T) * batch_size_ * vocab_size_padded_));
         cudaAutoCpy(d_logits_batch, h_logits_, batch_size_ * vocab_size_padded_, stream);
         invokeBatchApplyRepetitionPenalty(d_logits_batch,
+                                          (T*)nullptr,
                                           d_repetition_penalties_,
                                           d_output_ids_,
                                           batch_size_,

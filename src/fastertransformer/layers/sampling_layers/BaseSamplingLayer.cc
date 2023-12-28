@@ -35,6 +35,9 @@ void BaseSamplingLayer<T>::allocateBuffer(size_t batch_size, Tensor top_k, Tenso
         allocator_->reMalloc(random_seeds_buf_, sizeof(unsigned long long) * batch_size, false));
     temperature_buf_ =
         reinterpret_cast<float*>(allocator_->reMalloc(temperature_buf_, sizeof(float) * batch_size, false));
+    // penalty_logits tmp support to 64K
+    penalty_logits_ =
+        reinterpret_cast<T*>(allocator_->reMalloc(penalty_logits_, sizeof(T) * batch_size * 64 * 1024, false));
     repetition_penalty_buf_ =
         reinterpret_cast<float*>(allocator_->reMalloc(repetition_penalty_buf_, sizeof(float) * batch_size, false));
     min_lengths_buf_ = reinterpret_cast<int*>(allocator_->reMalloc(min_lengths_buf_, sizeof(int) * batch_size, false));
@@ -60,6 +63,7 @@ void BaseSamplingLayer<T>::freeBuffer()
         allocator_->free((void**)(&curandstate_buf_));
         allocator_->free((void**)(&random_seeds_buf_));
         allocator_->free((void**)(&temperature_buf_));
+        allocator_->free((void**)(&penalty_logits_));
         allocator_->free((void**)(&repetition_penalty_buf_));
         allocator_->free((void**)(&min_lengths_buf_));
         allocator_->free((void**)(&runtime_logits_buf_));
@@ -321,6 +325,7 @@ void BaseSamplingLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_t
         if (!ALL_OF(repetition_penalty_ + ite * local_batch_size, local_batch_size, float, default_value)) {
             invokeBatchApplyRepetitionPenalty(
                 logits,
+                penalty_logits_,
                 repetition_penalty_buf_ + ite * local_batch_size,
                 output_tensors->at("output_ids").getPtrWithOffset<int>(ite * local_batch_size),
                 batch_size,

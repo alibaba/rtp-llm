@@ -46,6 +46,7 @@ protected:
 
     float* temperature_        = nullptr;
     float* repetition_penalty_ = nullptr;
+    T*     penalty_logits_     = nullptr;
     int*   min_lengths_        = nullptr;
     bool*  skip_decode_        = nullptr;
     bool   skip_any_           = false;
