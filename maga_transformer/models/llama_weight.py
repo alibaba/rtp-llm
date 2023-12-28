@@ -1,0 +1,196 @@
+
+import functools
+import logging
+from typing import List
+import torch
+from typing import List, Any
+
+from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, LoRAModelWeightInfo, \
+    ModelDeployWeightInfo, CkptWeightInfo, concat_1, concat_0, identity, zeros, transpose
+
+# permute for sliced rotary
+def permute(w, head_num, dim1, dim2):
+    return w.view(head_num, dim1 // head_num // 2, 2, dim2).transpose(1, 2).reshape(dim1, dim2)
+
+def merge_qkv(ts, hidden_size, head_num_kv, head_num):
+    q, k, v = ts
+    q = permute(q, head_num, hidden_size, hidden_size)
+    k = permute(k, head_num_kv, head_num_kv * hidden_size // head_num, hidden_size)
+    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    return qkv_weight
+
+def merge_qkv_hf(ts, hidden_size, head_num_kv, head_num):
+    q, k, v = ts
+    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    return qkv_weight
+
+def merge_qkv_b(ts):
+    q, k, v = ts
+    qkv_b = torch.concat([q, k, v], dim=0).contiguous()
+    return qkv_b
+
+def merge_qkv_lora_A(ts: torch.Tensor):
+    q, k, v = ts
+    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    return qkv_weight
+
+def merge_qkv_lora_B(ts: List[torch.Tensor]):
+    q, k, v = ts
+    t = torch.zeros_like(q)
+    return torch.cat((torch.cat((q, t, t), dim=1),
+                      torch.cat((t, k, t), dim=1),
+                      torch.cat((t, t, v), dim=1))).T.contiguous()
+
+class DefaultWeightNames:
+    WQ = 'layers.{i}.attention.wq.weight'
+    WK = 'layers.{i}.attention.wk.weight'
+    WV = 'layers.{i}.attention.wv.weight'
+    WO = 'layers.{i}.attention.wo.weight'
+    FFW1 = 'layers.{i}.feed_forward.w1.weight'
+    FFW2 = 'layers.{i}.feed_forward.w2.weight'
+    FFW3 = 'layers.{i}.feed_forward.w3.weight'
+    ATTEN_NORM = 'layers.{i}.attention_norm.weight'
+    FFN_NORM = 'layers.{i}.ffn_norm.weight'
+    TOKEN_EMBEDDING = 'tok_embeddings.weight'
+    NORM = 'norm.weight'
+    OUTPUT = 'output.weight'
+
+class HfWeightNames:
+    WQ = 'model.layers.{i}.self_attn.q_proj.weight'
+    WK = 'model.layers.{i}.self_attn.k_proj.weight'
+    WV = 'model.layers.{i}.self_attn.v_proj.weight'
+    WO = 'model.layers.{i}.self_attn.o_proj.weight'
+    FFW1 = 'model.layers.{i}.mlp.gate_proj.weight'
+    FFW2 = 'model.layers.{i}.mlp.down_proj.weight'
+    FFW3 = 'model.layers.{i}.mlp.up_proj.weight'
+    ATTEN_NORM = 'model.layers.{i}.input_layernorm.weight'
+    FFN_NORM = 'model.layers.{i}.post_attention_layernorm.weight'
+    TOKEN_EMBEDDING = 'model.embed_tokens.weight'
+    NORM = 'model.norm.weight'
+    OUTPUT = 'lm_head.weight'
+
+class YiWeightNames(HfWeightNames):
+    ATTEN_NORM = 'model.layers.{i}.ln1.weight'
+    FFN_NORM = 'model.layers.{i}.ln2.weight'
+
+class BaichuanWeightNames(HfWeightNames):
+    W_QKV = 'model.layers.{i}.self_attn.W_pack.weight'
+
+class InternlmWeightNames(HfWeightNames):
+    BQ = 'model.layers.{i}.self_attn.q_proj.bias'
+    BK = 'model.layers.{i}.self_attn.k_proj.bias'
+    BV = 'model.layers.{i}.self_attn.v_proj.bias'
+    BO = 'model.layers.{i}.self_attn.o_proj.bias'
+
+class LlamaWeightInfo(ModelDeployWeightInfo):
+    def __init__(self, config, tp_size, tp_rank):
+        super().__init__(config, tp_size, tp_rank)
+        self._names = None
+        self._merge_qkv = None
+        self._merge_qkv_b = None
+
+    def _process_meta(self, meta_dict):
+        if YiWeightNames.FFN_NORM.format(i='0') in meta_dict:
+            logging.info('load Yi style weight')
+            self._names = YiWeightNames
+            self._merge_qkv = merge_qkv_hf
+        elif BaichuanWeightNames.W_QKV.format(i='0') in meta_dict:
+            logging.info('load baichuan style weight')
+            self._names = BaichuanWeightNames
+            self._merge_qkv = None
+        elif InternlmWeightNames.BQ.format(i='0') in meta_dict:
+            logging.info('load internlm style weight')
+            self._names = InternlmWeightNames
+            self._merge_qkv = merge_qkv_hf
+            self._merge_qkv_b = merge_qkv_b
+        elif DefaultWeightNames.OUTPUT in meta_dict:
+            logging.info('load default llama1 style weight')
+            self._names = DefaultWeightNames
+            self._merge_qkv = merge_qkv
+        elif (HfWeightNames.OUTPUT in meta_dict and
+              self._names not in [BaichuanWeightNames, InternlmWeightNames, YiWeightNames]):
+            logging.info('load hf llama1 style weight')
+            self._names = HfWeightNames
+            self._merge_qkv = merge_qkv_hf
+        else:
+            # PP 切分，只有一份有 token embedding 作为判断
+            pass
+
+    def _get_weight_info(self):
+        weights = [
+            WeightInfo(W.embedding, [CkptWeightInfo(self._names.TOKEN_EMBEDDING, concat_1)], identity),
+            WeightInfo(W.lm_head, [CkptWeightInfo(self._names.OUTPUT, concat_0)], identity),
+            WeightInfo(W.final_ln_gamma, [CkptWeightInfo(self._names.NORM, identity)], identity),
+            WeightInfo(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
+        ]
+
+        layer_weights = [
+            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo(self._names.ATTEN_NORM, identity)], identity),
+
+            WeightInfo(W.attn_qkv_b, [], functools.partial(zeros, shape=[self._hidden_size * 3])),
+
+            WeightInfo(W.attn_o_w, [CkptWeightInfo(self._names.WO, concat_1)], transpose),
+
+            WeightInfo(W.attn_o_b, [], functools.partial(zeros, shape=[self._hidden_size])),
+
+            WeightInfo(W.ffn_w1, [CkptWeightInfo(self._names.FFW1, concat_0)], transpose),
+
+            WeightInfo(W.ffn_b1, [], functools.partial(zeros, shape=[self._inter_size])),
+
+            WeightInfo(W.ffn_w3, [CkptWeightInfo(self._names.FFW3, concat_0)], transpose),
+
+            WeightInfo(W.ffn_b3, [], functools.partial(zeros, shape=[self._inter_size])),
+
+            WeightInfo(W.ffn_w2, [CkptWeightInfo(self._names.FFW2, concat_1)], transpose),
+
+            WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self._names.FFN_NORM, identity)], identity),
+        ]
+        if self._names == InternlmWeightNames:
+            layer_weights[1] = WeightInfo(W.attn_qkv_b,
+                                [CkptWeightInfo(self._names.BQ, identity),
+                                CkptWeightInfo(self._names.BK, identity),
+                                CkptWeightInfo(self._names.BV, identity)],
+                                functools.partial(self._merge_qkv_b))
+            layer_weights[3] = WeightInfo(W.attn_o_b, [CkptWeightInfo(self._names.BO, identity)], identity)
+
+        if self._merge_qkv is not None:
+            layer_weights.append(
+                WeightInfo(W.attn_qkv_w,
+                           [CkptWeightInfo(self._names.WQ, concat_0),
+                            CkptWeightInfo(self._names.WK, concat_0),
+                            CkptWeightInfo(self._names.WV, concat_0)],
+                           functools.partial(self._merge_qkv,
+                                             hidden_size=self._hidden_size,
+                                             head_num_kv=self._head_num_kv,
+                                             head_num=self._head_num)))
+        else:
+            layer_weights.append(
+                WeightInfo(W.attn_qkv_w, [CkptWeightInfo(self._names.W_QKV, identity)], transpose))
+        
+        lora_base_name = "base_model.model.{}.{}.weight"
+        lora_weights = []
+        for lora_name in ['lora_A', 'lora_B']:
+            lora_weights.append(
+                WeightInfo(W.attn_o_w + "." + lora_name, [CkptWeightInfo(lora_base_name.format(HfWeightNames.WO[:-len(".weight")], lora_name), concat_1)], transpose))
+            lora_weights.append(
+                WeightInfo(W.ffn_w1 + "." + lora_name, [CkptWeightInfo(lora_base_name.format(HfWeightNames.FFW1[:-len(".weight")], lora_name), concat_0)], transpose))
+            
+            lora_weights.append(
+                WeightInfo(W.ffn_w2 + "." + lora_name, [CkptWeightInfo(lora_base_name.format(HfWeightNames.FFW2[:-len(".weight")], lora_name), concat_1)], transpose))
+            lora_weights.append(
+                WeightInfo(W.ffn_w3 + "." + lora_name, [CkptWeightInfo(lora_base_name.format(HfWeightNames.FFW3[:-len(".weight")], lora_name), concat_0)], transpose))
+            
+        lora_weights.append(WeightInfo(W.attn_qkv_w + "." + 'lora_A',
+                        [CkptWeightInfo(lora_base_name.format(HfWeightNames.WQ[:-len(".weight")], 'lora_A'), identity),
+                        CkptWeightInfo(lora_base_name.format(HfWeightNames.WK[:-len(".weight")], 'lora_A'), identity),
+                        CkptWeightInfo(lora_base_name.format(HfWeightNames.WV[:-len(".weight")], 'lora_A'), identity)],
+                        functools.partial(merge_qkv_lora_A)))
+        
+        lora_weights.append(WeightInfo(W.attn_qkv_w + "." + 'lora_B',
+                        [CkptWeightInfo(lora_base_name.format(HfWeightNames.WQ[:-len(".weight")], 'lora_B'), identity),
+                        CkptWeightInfo(lora_base_name.format(HfWeightNames.WK[:-len(".weight")], 'lora_B'), identity),
+                        CkptWeightInfo(lora_base_name.format(HfWeightNames.WV[:-len(".weight")], 'lora_B'), identity)],
+                        functools.partial(merge_qkv_lora_B)))
+
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights,
+                               tp_strategy=W.gpt_style_tp_strategy, lora_weights=lora_weights)

@@ -1,0 +1,100 @@
+
+filegroup(
+    name = "testdata",
+    srcs = glob([
+        "testdata/*",
+        "testdata/**",
+    ]),
+)
+
+py_test(
+    name = "generate_config_test",
+    srcs = [
+        "generate_config_test.py",
+    ],
+    data = [
+        "//maga_transformer/test/model_test/fake_test/testdata:testdata",
+        "//maga_transformer:sdk"
+    ],
+    deps = [
+        "//maga_transformer:testlib",
+    ],
+    imports = ["aios/kmonitor/python_client"],
+)
+
+py_test(
+    name = "default_plugin_test",
+    srcs = [
+        "default_plugin_test.py",
+    ],
+    data = [
+        "//maga_transformer/test/model_test/fake_test/testdata:testdata",
+        "//maga_transformer:sdk"
+    ],
+    deps = [
+        "//maga_transformer:testlib",
+    ],
+    imports = ["aios/kmonitor/python_client"],
+)
+
+py_test(
+    name = "slice_stop_word_list_test",
+    srcs = [
+        "slice_stop_word_list_test.py",
+    ],
+    data = [
+        "//maga_transformer/test/model_test/fake_test/testdata:testdata",
+        "//maga_transformer:sdk"
+    ],
+    deps = [
+        "//maga_transformer:testlib",
+        "//maga_transformer/test/model_test/test_util",
+    ],
+    imports = ["aios/kmonitor/python_client"],
+)
+
+
+py_test(
+    name = "chatapi_test",
+    srcs = [
+        "chatapi_test.py",
+    ],
+    deps = [
+        "//maga_transformer:sdk",
+        "//maga_transformer:testlib",
+    ],
+)
+
+
+py_test(
+    name = "server_test",
+    srcs = [
+        "server_test.py",
+    ],
+    data = [
+        ":testdata",
+        "//maga_transformer:sdk"
+    ],
+    deps = [
+        "//maga_transformer:uvicorn",
+        "//maga_transformer:fastapi",
+        "//maga_transformer:psutil",
+        "//maga_transformer:tiktoken",
+        "//maga_transformer:testlib",
+    ],
+    imports = ["aios/kmonitor/python_client"],
+    tags = ["manual"],
+    timeout = 'eternal',
+)
+
+# py_test(
+#     name = "async_gather_batch_test",
+#     srcs = [
+#         "async_gather_batch_test.py"
+#     ],
+#     deps = [
+#         "//maga_transformer:sdk",
+#         "//maga_transformer:testlib",
+#         "//maga_transformer/test/model_test/test_util",
+#     ]
+# )
