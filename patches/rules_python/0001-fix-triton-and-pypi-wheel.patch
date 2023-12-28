@@ -1,0 +1,56 @@
+From b65239404166f4b344839f2cffae3ee35493b25c Mon Sep 17 00:00:00 2001
+From: "baowending.bwd" <baowending.bwd@alibaba-inc.com>
+Date: Wed, 12 Jul 2023 16:26:16 +0800
+Subject: [PATCH] fix triton and pypi wheel
+
+---
+ python/pip_install/extract_wheels/lib/bazel.py | 4 ++++
+ python/pip_install/repositories.bzl            | 4 ++--
+ python/requirements.txt                        | 2 +-
+ 3 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git python/pip_install/extract_wheels/lib/bazel.py python/pip_install/extract_wheels/lib/bazel.py
+index ef0d6e8..10c193d 100644
+--- python/pip_install/extract_wheels/lib/bazel.py
++++ python/pip_install/extract_wheels/lib/bazel.py
+@@ -183,6 +183,10 @@ def extract_wheel(
+     sanitised_wheel_file_dependencies = [
+         '"//%s:%s"' % (sanitise_name(d), WHEEL_FILE_LABEL) for d in whl_deps
+     ]
++    
++    if whl.name == "triton":
++        sanitised_dependencies = [s for s in sanitised_dependencies if 'torch' not in s]
++        sanitised_wheel_file_dependencies = [s for s in sanitised_wheel_file_dependencies if 'torch' not in s]
+ 
+     with open(os.path.join(directory, "BUILD"), "w") as build_file:
+         contents = generate_build_file_contents(
+diff --git python/pip_install/repositories.bzl python/pip_install/repositories.bzl
+index 828ab53..978f642 100644
+--- python/pip_install/repositories.bzl
++++ python/pip_install/repositories.bzl
+@@ -21,8 +21,8 @@ _RULE_DEPS = [
+     ),
+     (
+         "pypi__wheel",
+-        "https://files.pythonhosted.org/packages/c9/0b/e0fd299d93cd9331657f415085a4956422959897b333e3791dde40bd711d/wheel-0.36.1-py2.py3-none-any.whl",
+-        "906864fb722c0ab5f2f9c35b2c65e3af3c009402c108a709c0aca27bc2c9187b",
++        "https://files.pythonhosted.org/packages/bd/7c/d38a0b30ce22fc26ed7dbc087c6d00851fb3395e9d0dac40bec1f905030c/wheel-0.38.4-py3-none-any.whl",
++        "b60533f3f5d530e971d6737ca6d58681ee434818fab630c83a734bb10c083ce8",
+     ),
+ ]
+ 
+diff --git python/requirements.txt python/requirements.txt
+index 164fa26..94f0e89 100644
+--- python/requirements.txt
++++ python/requirements.txt
+@@ -1,6 +1,6 @@
+ pip==9.0.3
+ setuptools==44.0.0
+-wheel==0.30.0a0
++wheel==0.38.4
+ 
+ # For tests
+ mock==2.0.0
+-- 
+2.19.1.6.gb485710b
+

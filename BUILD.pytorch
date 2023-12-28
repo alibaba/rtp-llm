@@ -1,0 +1,37 @@
+cc_library(
+    name = "torch",
+    srcs = [
+        "torch/lib/libtorch.so",
+        "torch/lib/libtorch_python.so",
+        "torch/lib/libtorch_cpu.so",
+        "torch/lib/libshm.so",
+        "torch/lib/libc10.so",
+    ] + glob([
+         "torch/lib/libgomp*.so*",
+         "torch/lib/libcudart*.so*",
+         "torch/lib/libnvToolsExt*.so*",
+    ]),
+    hdrs = glob([
+        "torch/include/*.h",
+        "torch/include/**/*.h",
+        "torch/include/**/*.cuh",
+        "torch/include/**/*.hpp",
+    ]),
+    deps = [
+        "@local_config_python//:python_headers",
+    ],
+    strip_include_prefix = "torch/include",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "torch_api",
+    hdrs = glob([
+        "torch/include/torch/csrc/api/include/**/*.h",
+    ]),
+    deps = [
+        "@local_config_python//:python_headers",
+    ],
+    strip_include_prefix = "torch/include/torch/csrc/api/include",
+    visibility = ["//visibility:public"],
+)
