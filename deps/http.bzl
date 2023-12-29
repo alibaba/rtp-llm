@@ -33,7 +33,7 @@ def http_deps():
         name = "torch_2.1_py310_cpu",
         sha256 = "5077921fc2b54e69a534f3a9c0b98493c79a5547c49d46f5e77e42da3610e011",
         urls = [
-            "http://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp%2Ftorch210%2Ftorch-2.1.0%2Bcpu-cp310-cp310-linux_x86_64.whl",
+            "https://download.pytorch.org/whl/cpu/torch-2.1.0%2Bcpu-cp310-cp310-linux_x86_64.whl#sha256=5077921fc2b54e69a534f3a9c0b98493c79a5547c49d46f5e77e42da3610e011",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),

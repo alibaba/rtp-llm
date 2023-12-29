@@ -68,11 +68,9 @@ $ python3 ./create_container.py enter <CONTAINER_NAME> --gpu
 ### 使用pip来安装【待上传rtp-llm包】
 您可以使用pip来安装rtp-llm：
 ```
-$ # 构建一个conda环境(可选)
-$ conda create -n myenv python=3.10 -y
-$ conda activate myenv
 $ # 安装rtp-llm（cuda = 11.4）
 $ cd rtp-llm
+$ pip3 install -r ./maga_transformer/requirements_torch_gpu.txt
 $ pip3 install rtp-llm
 $ # 修改test.py中的模型路径
 $ python3 example/test.py  
@@ -163,6 +161,8 @@ $ bazel test //maga_transformer/test/model_test/fake_test:all_fake_model_test --
 * [OpenSearch LLM智能问答版](https://www.aliyun.com/activity/bigdata/opensearch/llmsearch)
 
 ## 联系我们
+#### 钉钉群 
+![钉钉群](https://github.com/alibaba/rtp-llm/blob/main/picture/dingding.png)
 
-* ![钉钉群](https://github.com/alibaba/rtp-llm/blob/main/picture/dingding.png)
-* ![微信群](https://github.com/alibaba/rtp-llm/blob/main/picture/weixin.JPG)
+#### 微信群
+![微信群](https://github.com/alibaba/rtp-llm/blob/main/picture/weixin.JPG)

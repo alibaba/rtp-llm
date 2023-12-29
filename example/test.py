@@ -14,9 +14,9 @@ async def main() -> None:
         for k in range(50):
             result = await response.__anext__()
             print("result = ", result)
-      
-    os.environ["TOKENIZER_PATH"] = "/home/admin/xinfei.sxf/work/model/Qwen-7B"
-    os.environ["CHECKPOINT_PATH"] = "/home/admin/xinfei.sxf/work/model/Qwen-7B"
+    
+    os.environ["TOKENIZER_PATH"] = "/mnt/nas1/hf/Qwen-7B"
+    os.environ["CHECKPOINT_PATH"] = "/mnt/nas1/hf/Qwen-7B"
     os.environ["MODEL_TYPE"] = "qwen_7b"
     os.environ["ASYNC_MODE"] = "1"
 
