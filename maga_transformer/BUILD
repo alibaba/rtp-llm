@@ -21,7 +21,8 @@ requirement([
     "thrift",
     "torch",
     "torchvision",
-    "einops"
+    "einops",
+    "prettytable"
 ])
 
 py_library(
@@ -84,6 +85,7 @@ py_library(
     deps = [
         ":sentencepiece",
         ":transformers",
+        ":prettytable",
         ":pynvml",
         ":tiktoken",
         ":protobuf",
@@ -238,6 +240,7 @@ py_wheel(
         "Pillow",
         "protobuf==3.20.0",
         "torchvision==0.16.0",
+        "prettytable"
     ],
 )
 

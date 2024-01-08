@@ -5,7 +5,8 @@ from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.medusa.medusa_config import MedusaState, MedusaBuffer
 from maga_transformer.async_decoder_engine.query_manager import QueryManager, BatchQuery
 from maga_transformer.async_decoder_engine.base_model_executor import BaseModelExecutor, ModelOps
-from maga_transformer.async_decoder_engine.medusa.utils import generate_medusa_buffers, generate_candidates, evaluate_posterior
+from maga_transformer.async_decoder_engine.medusa.utils import generate_candidates, evaluate_posterior
+from maga_transformer.utils.util import to_cuda
 
 class MedusaModelExecutor(BaseModelExecutor):
     def __init__(self, model_ops: ModelOps, query_manager: QueryManager, medusa_buffer: MedusaBuffer):
@@ -135,8 +136,8 @@ class MedusaModelExecutor(BaseModelExecutor):
             if batch_query.reuse_lengths_list[i] == 0:
                 position_ids.extend(list(range(batch_query.context_lengths_list[i])))
             else:
-                position_ids.extend(self.medusa_buffer.medusa_position_ids)
-        return torch.tensor(position_ids, device='cuda:0', dtype=torch.int32)
+                position_ids.extend([x + batch_query.reuse_lengths_list[i] for x in self.medusa_buffer.medusa_position_ids])
+        return to_cuda(torch.IntTensor(position_ids))
 
     def process(self, batch_query: BatchQuery) -> None:
         medusa_query = self._create_batch_query(batch_query)

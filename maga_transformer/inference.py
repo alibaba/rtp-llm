@@ -5,7 +5,7 @@ import json
 import logging
 import pathlib
 import torch
-from typing import Any, Dict, Generator, List, Tuple, Optional, Union
+from typing import Any, Dict, List, Tuple, Optional, Union
 
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
@@ -14,7 +14,7 @@ from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.utils.util import copy_gemm_config
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.models.base_model import GenerateResponse
-from maga_transformer.config.generate_config import GenerateConfig, RequestFormat
+from maga_transformer.config.generate_config import RequestFormat
 from maga_transformer.model_factory import ModelFactory, AsyncModel
 
 class InferenceWorker():
@@ -27,6 +27,11 @@ class InferenceWorker():
         self.model = ModelFactory.create_from_env()
         self.pipeline = Pipeline(self.model, self.model.tokenizer)
         logging.info("Load model done.")
+    
+    def inference(self, **kwargs: Any):
+        num_return_sequences  = self._format_request(kwargs)
+        input_texts, input_images, batch_inference = self._get_input(kwargs)
+        return self._yield_generate(input_texts, input_images, num_return_sequences, batch_inference, **kwargs)
 
     def stop(self) -> None:
         if isinstance(self.model, AsyncModel):
@@ -47,25 +52,7 @@ class InferenceWorker():
             new_finished.append(all(single_finished))
         return new_responses, new_finished
 
-    def format_loss_response(self, gen_responses: GenerateResponse, batch_response: bool) -> Dict[str, Any]:
-        batch_loss = gen_responses.batch_loss
-        if batch_response:
-            response = {
-                "response_batch": [
-                    {
-                        "response": loss,
-                    }
-                    for loss in batch_loss
-                ]
-            }
-        else:
-            response = {
-                "response": batch_loss[0],
-            }
-        return response
-
-
-    def format_response(self, gen_responses: GenerateResponse,
+    def _format_response(self, gen_responses: GenerateResponse,
                         batch_response: bool, num_return_sequences: Optional[int],
                         last_response: bool = False, return_hidden_states: bool = False,
                         calculate_loss: int = 0, return_logits: bool = False) -> Dict[str, Any]:
@@ -167,7 +154,7 @@ class InferenceWorker():
 
         return response
 
-    async def yield_generate(self, texts: List[str], images: List[List[str]], num_return_sequences: Optional[int], batch_response: bool, **kwargs: Any):
+    async def _yield_generate(self, texts: List[str], images: List[List[str]], num_return_sequences: Optional[int], batch_response: bool, **kwargs: Any):
         if num_return_sequences:
             new_texts: List[str] = []
             for text in texts:
@@ -187,16 +174,18 @@ class InferenceWorker():
             return_hidden_states = generate_config.get("return_hidden_states", False) or generate_config.get("output_hidden_states", False)
             calculate_loss = generate_config.get("calculate_loss", 0)
             return_logits = generate_config.get("return_logits", False) or generate_config.get("output_logits", False)
+            output_input_ids = generate_config.get("output_input_ids", False)
 
             generate_config["return_hidden_states"] = return_hidden_states
             generate_config["return_logits"] = return_logits
+            generate_config["return_input_ids"] = output_input_ids
 
         stream = self.pipeline.pipeline_async(prompts=new_texts, images=new_images, **kwargs)
         generate_response = None
         async for generate_response in stream:
-            yield self.format_response(generate_response, batch_response, num_return_sequences, False, return_hidden_states, calculate_loss, return_logits)
+            yield self._format_response(generate_response, batch_response, num_return_sequences, False, return_hidden_states, calculate_loss, return_logits)
         assert generate_response is not None
-        yield self.format_response(generate_response, batch_response, num_return_sequences, True, return_hidden_states, calculate_loss, return_logits)
+        yield self._format_response(generate_response, batch_response, num_return_sequences, True, return_hidden_states, calculate_loss, return_logits)
 
     def _format_chat_api_messages(self, kwargs: Any) -> None:
         if 'messages' in kwargs:
@@ -302,11 +291,6 @@ class InferenceWorker():
         if input_texts is None:
             raise FtRuntimeException(ExceptionType.NO_PROMPT_ERROR, "not input prompt")
         return input_texts, input_images, batch_inference
-
-    def inference(self, **kwargs: Any):
-        num_return_sequences  = self._format_request(kwargs)
-        input_texts, input_images, batch_inference = self._get_input(kwargs)
-        return self.yield_generate(input_texts, input_images, num_return_sequences, batch_inference, **kwargs)
 
     def is_streaming(self, req: Dict[str, Any]):
         return req.get(

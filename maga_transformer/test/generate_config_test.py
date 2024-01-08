@@ -2,7 +2,7 @@ import os
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.models.starcoder import StarcoderTokenizer
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from unittest import TestCase, main
 from typing import Any
 

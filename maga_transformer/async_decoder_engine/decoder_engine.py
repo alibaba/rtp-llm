@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Iterator, List, Optional, Tuple, Union, Any, Dict
 from maga_transformer.utils.util import get_mem_info, AtomicCounter
 from maga_transformer.async_decoder_engine.batch_query import QueryStats
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.query_manager import QueryManager
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -98,6 +98,8 @@ class DecoderEngine:
                     if finish:
                         # release query first, let other query use
                         # self.query_manager_.free([query])
+                        if query.generate_config.return_input_ids:
+                            aux_info[i].update({"input_ids": query.input_token_ids.tolist()})
                         finished[i * beam_width: (i + 1) * beam_width] = [True] * beam_width
                         continue
                 yield (hidden_states, output_tokens,

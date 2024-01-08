@@ -80,6 +80,10 @@ class Pipeline(object):
         self.has_init_decode_stop_words: bool = False
         self._init_pipeline_func()
 
+    def stop(self):
+        if isinstance(self.model, AsyncModel):
+            self.model.stop()
+        
     def _get_func(self, func_name: str, default: Callable[..., Any]) -> Callable[..., Any]:
         ft_plugin = plguin_loader.get_plugin()
         if getattr(ft_plugin, func_name, None) is not None:
@@ -102,7 +106,7 @@ class Pipeline(object):
         self.modify_response_func  = self._get_func("modify_response_plugin", DefaultFunc.modify_response_func)
         self.stop_generate_func= self._get_func("stop_generate_plugin", DefaultFunc.stop_generatre_func)
 
-    def __call__(self, prompt: List[str], images: List[List[str]], **kwargs: Any):
+    def __call__(self, prompt: List[str], images: Optional[List[List[str]]] = None, **kwargs: Any) -> Iterator[GenerateResponse]:
         # if not multimodal model, just pass images = [[]] * len(prompt)
         return self.pipeline(prompt, images, **kwargs)
 
@@ -211,10 +215,13 @@ class Pipeline(object):
     def pipeline_async( # type: ignore
         self,
         prompts: List[str],
-        images: List[List[str]],
+        images: Optional[List[List[str]]] = None,
         **kwargs: Any
-    ) -> Generator[GenerateResponse, None, None]:
+    ) -> AsyncGenerator[GenerateResponse, None]:
         begin_time = current_time_ms()
+        # align images and prompts
+        if images is None or len(images) == 0:
+            images = [[]] * len(prompts)
         generate_config_json = kwargs.pop("generate_config", {})
         generate_config = self.create_generate_config(self.process_decode_func,
                                                       self.model.config.special_tokens,
@@ -239,17 +246,23 @@ class Pipeline(object):
 
     def pipeline(self,
                  prompts: List[str],
-                 images: List[List[str]],
-                 **kwargs: Any):
+                 images: Optional[List[List[str]]] = None,
+                 **kwargs: Any) -> Iterator[GenerateResponse]:
         q = queue.Queue()
 
-        async def generator():
+        async def generator():            
+            res = None
             try:
-                async for x in self.pipeline_async(prompts, images, **kwargs):
+                res = self.pipeline_async(prompts, images, **kwargs)
+                async for x in res:
                     q.put(x)
                 q.put(None)
             except Exception as e:
                 q.put(e)
+            finally:
+                # if pipline break, should call aclose() to remove async_generator task from loop
+                if res is not None:
+                    res.aclose()
 
         def start_loop():
             loop = asyncio.new_event_loop()

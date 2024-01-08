@@ -5,7 +5,7 @@ from typing import List, Dict, Tuple, NamedTuple, Union, Optional
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.async_decoder_engine.cache_manager import CacheManager
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 class PrefixType(Enum):
     PromptTuning = 0

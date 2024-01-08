@@ -1,12 +1,4 @@
 
-filegroup(
-    name = "testdata",
-    srcs = glob([
-        "testdata/*",
-        "testdata/**",
-    ]),
-)
-
 py_test(
     name = "generate_config_test",
     srcs = [
@@ -65,6 +57,19 @@ py_test(
     ],
 )
 
+py_test(
+    name = "template_test",
+    srcs = [
+        "template_test.py",
+    ],
+    deps = [
+        "//maga_transformer:sdk",
+        "//maga_transformer:testlib",
+    ],
+    data = [
+        "//maga_transformer/test/model_test/fake_test/testdata:testdata",
+    ],
+)
 
 py_test(
     name = "server_test",
@@ -72,7 +77,6 @@ py_test(
         "server_test.py",
     ],
     data = [
-        ":testdata",
         "//maga_transformer:sdk"
     ],
     deps = [

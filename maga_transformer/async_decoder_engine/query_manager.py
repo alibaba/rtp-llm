@@ -1,11 +1,11 @@
 import os
 import logging
 from collections import deque
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Union, Dict
 import torch
 from threading import Lock
 from maga_transformer.async_decoder_engine.cache_manager import CacheManager, CacheConfig
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery, QueryStats
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
@@ -29,6 +29,16 @@ class QueryManager:
         self.reset_ptuning(prefix_params)
         logging.info("block_size after Ptuning: " + str(len(self.cache_manager_.free_blocks_index)))
         self.max_attention_mem = self.config_.max_context_batch_size * self.config_.max_seq_len
+
+    def create_config_json(self) -> Dict[str, Any]:
+        config_json = {
+            "use_block_cache": self.use_cache_,
+            "use_ptuning": self.ptuning_ is not None,
+            "gen_num_per_circle": self.gen_num_per_circle,
+            "block_num": self.cache_config_.block_nums,
+            "seq_size_per_block": self.cache_config_.seq_size_per_block
+        }
+        return config_json
 
     def reset_ptuning(self, prefix_params: Optional[PrefixParams]):
         if prefix_params is None:
@@ -112,9 +122,6 @@ class QueryManager:
         return len(self.batch_query_.queries) > 0 or len(self.wait_queries_) > 0
 
     def check_query_to_append(self, query: QueryStats, new_queries: List[QueryStats]) -> bool:
-        # batch context query has bug, tmp just allow one
-        if len(new_queries) > 1:
-            return False
         self.max_context_len = max(query.context_length, self.max_context_len)
         if (len(new_queries) + 1) * self.max_context_len > self.max_attention_mem:
             return False
@@ -182,6 +189,8 @@ class QueryManager:
                     token,
                     cum_log_probs[start_idx: end_idx],
                 )
+                if query.need_finish():
+                    break
             if finished[start_idx] or query.need_finish():
                 query.finish = True
             else:

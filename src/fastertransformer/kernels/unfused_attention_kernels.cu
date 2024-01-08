@@ -1595,15 +1595,16 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
             }
         }
     }
-
-    const int rotary_seq_idx = position_ids == nullptr ? seq_idx : position_ids[token_idx];
+    
+    const int position_id = position_ids == nullptr ? -1 : position_ids[token_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx];
     context_rope(rotary_embedding_style,
                 q,
                 k,
                 reinterpret_cast<T*>(smem_),
                 tidx,
-                rotary_seq_idx,
+                seq_idx,
+                position_id,
                 rotary_embedding_dim,
                 seq_len,
                 rotary_embedding_base,

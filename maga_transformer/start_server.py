@@ -31,7 +31,7 @@ from maga_transformer.inference import InferenceWorker
 from maga_transformer.utils.concurrency_controller import ConcurrencyController, ConcurrencyException
 from maga_transformer.access_logger.access_logger import AccessLogger
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
-from maga_transformer.openai.api_datatype import ChatCompletionRequest
+from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatCompletionStreamResponse
 from anyio.lowlevel import RunVar
 from anyio import CapacityLimiter
 
@@ -43,6 +43,8 @@ StreamObjectType = Union[Dict[str, Any], BaseModel]
 class FastApiServer(object):
 
     def __init__(self):
+        if 'LOAD_CKPT_NUM_PROCESS' not in os.environ:
+            os.environ['LOAD_CKPT_NUM_PROCESS'] = '0'
         self._access_logger = AccessLogger()
         self._gang_server = GangServer()
         self._inference_worker = None
@@ -103,17 +105,18 @@ class FastApiServer(object):
     async def stream_response(
             self, request: Dict[str, Any], response: AsyncGenerator[StreamObjectType, None], id: int
     ):
+        is_openai_response = response.__qualname__.startswith("OpenaiEndopoint")
+        response_data_prefix = "data: " if is_openai_response else "data:"
         try:
             last_response = ''
             async for res in response:
                 last_response = res
-                json_options = {"ensure_ascii": False}
-                data_str = res.json(**json_options) if isinstance(res, BaseModel) \
-                    else json.dumps(res, **json_options)
-                yield "data:" + data_str + "\r\n\r\n"
+                data_str = res.model_dump_json() if isinstance(res, BaseModel) \
+                    else json.dumps(res, ensure_ascii=False)
+                yield response_data_prefix + data_str + "\r\n\r\n"
                 await asyncio.sleep(0)
-            if isinstance(last_response, Dict):
-                yield "data:[done]\r\n\r\n" # For compatibility. openai endpoint does not need this.
+            if not is_openai_response:
+                yield f"data:[done]\r\n\r\n"
             self._access_logger.log_success_access(request, last_response, id)
         except asyncio.CancelledError as e:
             self._access_logger.log_exception_access(request, e, id)
@@ -121,7 +124,8 @@ class FastApiServer(object):
         except Exception as e:
             self._access_logger.log_exception_access(request, e, id)
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
-            yield "data:" + json.dumps(FastApiServer.handler_exceptions(e), ensure_ascii=False) + "\r\n\r\n"
+            yield response_data_prefix + \
+                json.dumps(FastApiServer.handler_exceptions(e), ensure_ascii=False) + "\r\n\r\n"
 
     @staticmethod
     def format_exception(errcode: int, message: str) -> Dict[str, Any]:
@@ -259,7 +263,7 @@ class FastApiServer(object):
             completion_response = await completion_future
             if isinstance(completion_response, AsyncGenerator):
                 return StreamingResponse(
-                    self.stream_response(request.dict(), completion_response, id), media_type="text/event-stream"
+                    self.stream_response(request.model_dump(), completion_response, id), media_type="text/event-stream"
                 )
             else:
                 return completion_response
@@ -271,6 +275,7 @@ def local_rank_main():
     try:
         # avoid multiprocessing load failed
         if os.environ.get('FT_SERVER_TEST', None) is None:
+            logging.error("ggg")
             logging.config.dictConfig(LOGGING_CONFIG)
         # reload for multiprocessing.start_method == fork
         g_parallel_info.reload()

@@ -26,8 +26,8 @@ def find_th_transformer(current_dir: str):
 
 try:
     torch.classes.load_library(os.path.join(libs_path, "libth_transformer.so")) # type: ignore
-except:
-    logging.warn(f"failed to load libth_transformer.so with exception: {traceback.format_exc()}, try use another path")
+except Exception as e:
+    logging.info(f"failed to load libth_transformer.so with exception: [{str(e)}], try use another path")
     # for debug useage, read in bazel-bin and bazel-bin's subdir
     bazel_bin_dir = os.path.join(parent_dir, "../bazel-bin")
     so_path = find_th_transformer(bazel_bin_dir)

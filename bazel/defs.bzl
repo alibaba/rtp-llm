@@ -88,7 +88,7 @@ def pyc_wheel(name, src):
     native.genrule(
         name = name,
         srcs = [src],
-        outs = [name + "-0.1.0-py3-none-any.whl"],
+        outs = [name + "-0.1.0-cp310-cp310-manylinux1_x86_64.whl"],
         exec_tools = ["//bazel:pyc_wheel.py"],
         cmd = "bash -c 'set -xe;" +
             "cp $(locations %s) $(OUTS);" % (src) +

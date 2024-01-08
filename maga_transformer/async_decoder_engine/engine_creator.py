@@ -2,7 +2,7 @@ import logging
 from enum import Enum
 from typing import Iterator, List, Optional, Tuple, Union, Any, Dict
 from maga_transformer.utils.util import get_mem_info
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.query_manager import QueryManager
 from maga_transformer.async_decoder_engine.cache_manager import CacheConfigGenerator
 from maga_transformer.config.generate_config import GenerateConfig
@@ -35,6 +35,7 @@ def check_exeutor_type(model: BaseModel, config: GptInitModelParameters, specula
 def create_engine(model: BaseModel, config: GptInitModelParameters, ptuning_args: Optional[PrefixParams],
                   speculative_model: Any = None, speculative_config: Optional[GptInitModelParameters] = None) -> DecoderEngine:
     executor_type = check_exeutor_type(model, config, speculative_model, speculative_config)
+    logging.info(f"executor_type: {executor_type}")
     if executor_type == ExecutorType.Base:
         return _init_base(model, config, ptuning_args)
     elif executor_type == ExecutorType.Speculative:

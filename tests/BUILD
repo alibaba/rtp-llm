@@ -114,6 +114,7 @@ cc_library(
         "rotary_embedding/*.cpp",
         "attention_logn/*.cpp",
         "gemm_dequantize/*.cc",
+        "gemm_group/*.cc",
         "unittests/test_activation.cu"
     ]),
     hdrs = glob([
@@ -198,6 +199,20 @@ py_test(
     name = "test_th_decode_op",
     srcs = [
         "unittests/th_op/test_th_decode_op.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+    ],
+)
+
+py_test(
+    name = "th_gemm_group",
+    srcs = [
+        "gemm_group/th_gemm_group.py"
     ],
     data = [
         "//:th_transformer",

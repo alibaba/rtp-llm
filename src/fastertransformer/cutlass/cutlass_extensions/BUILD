@@ -7,6 +7,7 @@ cc_library(
     ]),
     deps = [
         "@cutlass//:cutlass",
+        "@cutlass//:cutlass_utils",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],

@@ -1,5 +1,5 @@
 
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.chat_glm import ChatGlm
 from maga_transformer.model_factory_register import register_model
 

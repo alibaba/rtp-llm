@@ -1,5 +1,5 @@
 import torch
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 class PrefixEncoder(torch.nn.Module):
     """

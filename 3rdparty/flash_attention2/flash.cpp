@@ -16,9 +16,6 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
     });
 }
 
-bool flash_attention_enabled() {
-    return true;
-}
 
 bool is_sm8x() {
     static bool IS_SM8X = [](){

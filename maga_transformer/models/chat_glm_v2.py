@@ -1,7 +1,7 @@
 from typing import List, Any, Dict
 import torch
 
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.tokenizer.tokenization_chatglm2 import ChatGLMTokenizer
 from maga_transformer.models.glm_v2_weight import GlmV2WeightInfo

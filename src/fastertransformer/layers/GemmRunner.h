@@ -18,11 +18,21 @@ private:
     IAllocator*  allocator_;
     cublasMMWrapper*                                      cublas_wrapper_;
     std::shared_ptr<CutlassFpAIntBGemmRunner<T, uint8_t>> weight_only_int8_fc_runner_;
+    std::shared_ptr<CutlassGroupGemmRunner<T>>         group_gemm_runner_;
     static constexpr int SMALL_M_FAST_PATH = 4;
     static constexpr int MAX_BATCH_SIZE = 1024;
     bool weight_only_cuda_kernel_enabled_;
 
-    cudaEvent_t finished_copy = nullptr;
+    T* input_array_cpu[MAX_BATCH_SIZE]    = {};
+    T* lora_a_array_cpu[MAX_BATCH_SIZE]   = {};
+    T* lora_b_array_cpu[MAX_BATCH_SIZE]   = {};
+    T* lora_buf_array_cpu[MAX_BATCH_SIZE] = {};
+    T* output_array_cpu[MAX_BATCH_SIZE]   = {};
+    int m_array_cpu[MAX_BATCH_SIZE]       = {};
+    int n_array_cpu[MAX_BATCH_SIZE]       = {};
+    int k_array_cpu[MAX_BATCH_SIZE]       = {};
+    int r_array_cpu[MAX_BATCH_SIZE]       = {};
+
     T* lora_buf_ = nullptr;
 
 public:
@@ -42,6 +52,8 @@ public:
 #else
         weight_only_cuda_kernel_enabled_ = false;
 #endif
+        group_gemm_runner_ = std::make_shared<CutlassGroupGemmRunner<T>>();
+
     }
 
     ~GemmRunner()
@@ -76,16 +88,8 @@ public:
               int                      m_padded);
 
 private:
-    void allocateBuffer(size_t s, size_t r);
-    void setArray(const int            b,
-                  const int            m,
-                  const int            k,
-                  const int            n,
-                  const int            r,
-                  int*                 lora_ids,
-                  const LoRAWeight<T>* lora_weights,
-                  T*                   input,
-                  T*                   output);
+    void allocateBuffer(size_t s, size_t k, size_t n, size_t r);
+
     void LoRAGemm(const int m,
                   const int n,
                   const int k,
@@ -93,6 +97,31 @@ private:
                   const T*  input,
                   const T*  lora_a,
                   const T*  lora_b,
+                  T*        lora_buf,
                   T*        output);
+    
+    void BatchLoraGemm(const int b, const int k, const int n);
+    
+    void GroupLoraGemm(int* m,
+                       int* n,
+                       int* k,
+                       int* r, 
+                       T**  input,
+                       T**  lora_a,
+                       T**  lora_b,
+                       T**  lora_buf,
+                       T**  output,
+                       int count);
+    
+    void ForLoraGemm(int* m,
+                    int* n,
+                    int* k,
+                    int* r, 
+                    T**  input,
+                    T**  lora_a,
+                    T**  lora_b,
+                    T**  lora_buf,
+                    T**  output,
+                    int count);
 };
 }  // namespace fastertransformer

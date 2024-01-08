@@ -420,7 +420,8 @@ __global__ void batchApplyRepetitionPenalty(T*           logits,
         if (index >= input_length && index < max_input_length) {
             continue;
         }
-        logits[penalty_indices[index]] = penalty_logits[index];
+        if (penalty_indices[index] >= 0)
+            logits[penalty_indices[index]] = penalty_logits[index];
     }
 }
 

@@ -9,6 +9,7 @@ from itertools import repeat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
     WeightInfo, W, ModelWeights, LoRAWeights, LoRAMap
 from maga_transformer.utils.ckpt_database import CkptDatabase, CkptFileInfo
+from maga_transformer.utils.util import get_mem_info
 
 class ModelWeightsLoader:
 
@@ -44,11 +45,10 @@ class ModelWeightsLoader:
     def _process_ckpt_metas(self):
         self._weights_info.process_meta(self._ckpt_metas)
 
-    def load_weights_from_scratch(self, int8_mode: int, device: str='cuda:0'):
+    def load_weights_from_scratch(self, int8_mode: int, device: str='cuda:0', num_process=1):
         weights = ModelWeights(self._num_layers)
-        ctx = multiprocessing.get_context('spawn')
-        num_process = int(os.environ.get('LOAD_CKPT_NUM_PROCESS', '1'))
         if num_process > 1:
+            ctx = multiprocessing.get_context('spawn')
             with ctx.Pool(num_process) as pool:
                 all_results = pool.starmap(
                     self._load_layer_weight,
@@ -265,7 +265,27 @@ class ModelWeightsLoader:
     def _sanitize(self, t):
         return t.contiguous().clone().to(self._data_type)
 
-def load_weights(weights_info: ModelDeployWeightInfo, database: CkptDatabase, compute_dtype):
+def estimate_load_parallel_num(config, tp_size):
+    parallel_num = os.environ.get('LOAD_CKPT_NUM_PROCESS', None)
+    if parallel_num is None:
+        return 1
+    parallel_num = int(parallel_num)
+    if parallel_num > 0:
+        logging.info(f'load weights by {parallel_num} process from env')
+        return parallel_num
+    model_size = config.eval_model_size()
+    cuda_runtime_mem = 2
+    weight_compute_mem = 2
+    free_mem = get_mem_info().free / (1024.0 ** 3)
+    model_mem = model_size / tp_size / (1024.0 ** 3)
+    parallel_num = int((free_mem - model_mem) / (weight_compute_mem + cuda_runtime_mem))
+    parallel_num = min(max(parallel_num, 1), 4) # 以防并发太多影响 io 效率
+    if model_mem < 1:
+        parallel_num = 1 # 单元测试
+    logging.info(f'free_mem: {free_mem:.2f} model_mem: {model_mem:.2f}, load weights by {parallel_num} process')
+    return parallel_num
+    
+def load_weights(weights_info: ModelDeployWeightInfo, database: CkptDatabase, compute_dtype, load_parallel_num):
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception('invalid tp_size %d for config.head_num %d' \
                         % (weights_info.tp_size, weights_info._head_num))
@@ -275,6 +295,7 @@ def load_weights(weights_info: ModelDeployWeightInfo, database: CkptDatabase, co
     
     model_weights_loader = ModelWeightsLoader(weights_info, database)
     model_weights_loader.set_data_type(compute_dtype)
-    weights = model_weights_loader.load_weights_from_scratch(weights_info._int8_mode)
+    weights = model_weights_loader.load_weights_from_scratch(
+        weights_info._int8_mode, num_process=load_parallel_num)
     model_weights_loader.show_warns()
     return weights

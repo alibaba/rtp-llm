@@ -21,8 +21,7 @@ namespace fastertransformer
 namespace kernels
 {
 #if defined(USE_WEIGHT_ONLY) && USE_WEIGHT_ONLY==1
-void weight_only_batched_gemv_launcher(WeightOnlyQuantType qtype, WeightOnlyType wtype, WeightOnlyActivationType atype,
-    const WeightOnlyParams& params, cudaStream_t stream);
+void weight_only_batched_gemv_launcher(const WeightOnlyParams& params, cudaStream_t stream);
 
 // for compile, impl in enable.cc
 extern bool isWeightOnlyBatchedGemvEnabled(WeightOnlyQuantType qtype);

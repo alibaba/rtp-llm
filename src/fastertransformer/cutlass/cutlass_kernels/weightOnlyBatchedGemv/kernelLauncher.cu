@@ -84,10 +84,12 @@ void select_arch(const WeightOnlyParams& params, cudaStream_t stream)
     }
 }
 
-void weight_only_batched_gemv_launcher(WeightOnlyQuantType qtype, WeightOnlyType wtype, WeightOnlyActivationType atype,
-    const WeightOnlyParams& params, cudaStream_t stream)
+void weight_only_batched_gemv_launcher(const WeightOnlyParams& params, cudaStream_t stream)
 {
-    if (wtype == WeightOnlyType::PerChannel && qtype == WeightOnlyQuantType::Int8b) {
+    assert(params.act_func_type == WeightOnlyActivationFunctionType::Identity);
+    assert(params.weight_only_type == WeightOnlyType::PerChannel);
+    assert(params.quant_type== WeightOnlyQuantType::Int8b);
+    if (params.weight_only_type == WeightOnlyType::PerChannel && params.quant_type == WeightOnlyQuantType::Int8b) {
         switch (params.m) {
             case 1: {
                 select_arch<WeightOnlyQuantType::Int8b, WeightOnlyPerChannel, IdentityActivation, 1>(params, stream);

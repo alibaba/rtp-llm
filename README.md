@@ -65,15 +65,17 @@ $ python3 ./create_container.py create <CONTAINER_NAME> --gpu
 $ python3 ./create_container.py enter <CONTAINER_NAME> --gpu
 ```
 
-### 使用pip来安装【待上传rtp-llm包】
+### 使用pip来安装
 您可以使用pip来安装rtp-llm：
 ```
 $ # 安装rtp-llm（cuda = 11.4）
 $ cd rtp-llm
 $ pip3 install -r ./maga_transformer/requirements_torch_gpu.txt
-$ pip3 install rtp-llm
+$ # 使用release版本中对应的whl, 这里以0.1.0版本为例子
+$ wget https://github.com/alibaba/rtp-llm/releases/download/v0.1.0/maga_transformer-0.1.0-py3-none-any.whl
+$ pip3 install maga_transformer-0.1.0-py3-none-any.whl
 $ # 修改test.py中的模型路径
-$ python3 example/test.py  
+$ python3 example/test.py
 ```
 
 ### 从源代码开始构建
@@ -89,8 +91,83 @@ $ bazel test //maga_transformer/test/model_test/fake_test:all_fake_model_test --
 ```
 
 ## 大模型预测
-当前rtp-llm仅支持读取本地模型文件来进行模型推理，样例代码在源代码目录的example文件夹下
-在test.py中可以修改tokenizer/checkpoint路径，模型类型和推理参数等。
+当前rtp-llm支持两种加载模型方式：
+### 读取Huggingface模型
+huggingface模型支持从通过模型名从远程下载模型，代码如下：(如果无法访问huggingface需要配置环境变量`HF_ENDPOINT`)
+``` python
+from maga_transformer.pipeline import Pipeline
+from maga_transformer.model_factory import ModelFactory
+
+if __name__ == '__main__':
+    model = ModelFactory.from_huggingface("Qwen/Qwen-7B-Chat")
+    pipeline = Pipeline(model, model.tokenizer)
+    for res in pipeline(["hello, what's your name"], max_new_tokens = 100):
+        print(res.batch_response)
+    pipeline.stop()
+
+```
+也支持通过模型路径加载
+``` python
+model = ModelFactory.from_huggingface("/path/to/dir")
+```
+构建模型时默认使用基础配置参数，也可以通过构建`ModelConfig`自行修改配置，`ModelConfig`参数的介绍在下一节
+``` python
+from maga_transformer.utils.util import WEIGHT_TYPE
+
+model_config = ModelConfig(
+    async_mode=True,
+    weight_type=WEIGHT_TYPE.INT8,
+    max_seq_len=2000,
+    ...
+)
+```
+
+如果存在框架无法推断出模型类型，但是已经适配实现的case，可以自行指定模型类型
+``` python
+model_config = ModelConfig(
+    model_type='chatglm',
+    ckpt_path='/path/to/ckpt',
+    tokenizer_path='/path/to/tokenizer',
+    async_mode=True,
+    weight_type=WEIGHT_TYPE.INT8,
+    max_seq_len=2000,
+    ...
+)
+```
+### ModelConfig
+
+| 参数名 | 类型 | 说明 |
+| --- | --- | --- |
+| `model_type` | `str, default=''` | 模型类型 |
+| `ckpt_path` | `str, default=''` | 模型路径 |
+| `tokenizer_path` | `str, default=''` | tokenizer路径 |
+| `async_mode` | `bool, default=False`| 是否开启异步凑批模型 |
+| `weight_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | 模型weights量化类型 |
+| `act_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | 模型weights存储类型 |
+| `max_seq_len` | `bool, default=0` | beam search的个数 |
+| `seq_size_per_block` | `int, default=8` | async模式下每个block的序列长度 |
+| `gen_num_per_circle` | `int, default=1` | 每轮可能新增的token数，仅在投机采样情况下>1 |
+| `ptuning_path` | `Optional[str], default=None` | ptuning ckpt的存储路径 |
+| `lora_infos` | `Optional[Dict[str, str]]` | lora ckpt存储路径 |
+
+目前我们支持的所有模型列表可以在`maga_transformer/models/__init__.py`查看，具体模型对应的`model_type`可以查看模型文件的`register_model`
+
+## 大模型服务
+rtp-llm使用fastapi构建了高性能模型服务，使用异步编程尽量避免cpu线程压力过大干扰gpu高效运行
+### 服务Demo
+``` shell
+export MODEL_TYPE=model_type
+export TOKENIZER_PATH=/path/to/tokenizer
+export CHECKPOINT_PATH=/path/to/model
+export FT_SERVER_TEST=1
+export START_PORT=12345
+
+python3 -m maga_transformer.start_server
+
+# request to server
+curl -XPOST http://localhost:12345 -d '{"prompt": "hello, what is your name", "generate_config: {"max_new_tokens": 1000}}'
+```
+默认服务的log会写到启动路径的logs文件夹下，可以添加环境变量`FT_SERVER_TEST=1`把日志写到shell
 
 ### 配置的含义
 
@@ -103,7 +180,7 @@ $ bazel test //maga_transformer/test/model_test/fake_test:all_fake_model_test --
 | `CHECKPOINT_PATH` | `str`, required | checkpoint路径 |
 | `MODEL_TYPE` | `str`, required | 模型类型 |
 | `MAX_SEQ_LEN` | `str`, optional | 输入+输出最大长度 |
-| `WEIGHTS_TYPE` | `str`, optional | 模型加载使用的weight 类型:FP16/INT8 |
+| `WEIGHT_TYPE` | `str`, optional | 模型加载使用的weight 类型:FP16/INT8 |
 | `ASYNC_MODE` | `str`, optional | 异步模式（1:打开，0:关闭），支持dynamic batching、paged (token) attention等优化 |
 | `CONCURRENCY_LIMIT` | `str`, optional | 模型最大并发数 |
 
@@ -148,21 +225,33 @@ $ bazel test //maga_transformer/test/model_test/fake_test:all_fake_model_test --
 | `return_logits`/`output_logits` | `bool` | 是否返回logits |
 | `yield_generator` | `bool` | 是否流式输出 |
 
+#### 使用 openai api 接口访问
+
+rtp-llm同时提供了openai风格服务接口，详见[OpenAI接口使用文档](docs/OpenAI-Tutorial.md)。
+
+## 注意事项
+1. 默认模型运行时的log_level=WARNING，可以添加环境变量`PY_LOG_LEVEL=INFO` 显示更多日志
+2. 可以配置环境变量`LOAD_CKPT_NUM_PROCESS=x`多进程加载模型。多进程加载的时候需要使用`if __name__ == '_main__':`作为入口，因为默认程序会使用spawn的方式起多进程；同时进程数过多可能会导致cuda out of memory
+
 ## 相关文档
 * [LoRA使用文档](docs/LoRA-Tutorial.md)
 * [PTuning使用文档](docs/PTuning-Tutorial.md)
+* [多模态使用文档](docs/Multimodal-Tutorial.md)
+* [结构化剪枝使用文档](docs/Sparse-Tutorial.md)
+* [投机采样使用文档](docs/SpeculativeDecoding-Tutroial.md)
 
 ## 致谢：
 我们的项目主要基于[FasterTransformer](https://github.com/NVIDIA/FasterTransformer)，并在此基础上集成了[TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)的部分kernel实现。FasterTransformer和TensorRT-LLM为我们提供了可靠的性能保障。[Flash-Attention2](https://github.com/Dao-AILab/flash-attention)和[cutlass](https://github.com/NVIDIA/cutlass)也在我们持续的性能优化过程中提供了大量帮助。我们的continuous batching和increment decoding参考了[vllm](https://github.com/vllm-project/vllm)的实现；采样参考了[hf transformers](https://github.com/huggingface/transformers)，投机采样部分集成了[Medusa](https://github.com/FasterDecoding/Medusa)的实现，多模态部分集成了[llava](https://github.com/haotian-liu/LLaVA)和[qwen-vl](https://github.com/QwenLM/Qwen-VL)的实现。感谢这些项目对我们的启发和帮助。
 
 ## 对外应用场景（持续更新）
 * 淘宝问问
-* 阿里巴巴国际AI平台[aidge](https://aidc-ai.com/)
+* 阿里巴巴国际AI平台[Aidge](https://aidc-ai.com/)
 * [OpenSearch LLM智能问答版](https://www.aliyun.com/activity/bigdata/opensearch/llmsearch)
+* [Large Language Model based Long-tail Query Rewriting in Taobao Search](https://arxiv.org/abs/2311.03758)
 
 ## 联系我们
-#### 钉钉群 
-![钉钉群](https://github.com/alibaba/rtp-llm/blob/main/picture/dingding.png)
+#### 钉钉群
+<img src=picture/dingding.png width="200px">
 
 #### 微信群
-![微信群](https://github.com/alibaba/rtp-llm/blob/main/picture/weixin.JPG)
+<img src=picture/weixin.JPG width="200px">

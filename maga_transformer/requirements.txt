@@ -5,7 +5,7 @@ typing-extensions
 importlib_metadata
 transformers==4.33.1
 sentencepiece==0.1.99
-fastapi==0.95.0
+fastapi==0.108.0
 uvicorn==0.21.1
 dacite
 pynvml
@@ -21,3 +21,4 @@ pyodps
 Pillow
 protobuf==3.20.0
 einops
+pydantic>=2.5.3

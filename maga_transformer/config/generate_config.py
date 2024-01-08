@@ -69,6 +69,7 @@ class GenerateConfig:
     calculate_loss: int = 0
     return_logits: bool = False
     return_incremental: bool = False
+    return_input_ids: bool = False
     md5_value: str = ""
     custom_prop: str = "{}"
 

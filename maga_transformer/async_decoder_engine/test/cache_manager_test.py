@@ -1,6 +1,6 @@
 from unittest import TestCase, main
 from maga_transformer.async_decoder_engine.cache_manager import CacheManager, CacheConfigGenerator
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from unittest import mock
 
 class MockMemInfo:

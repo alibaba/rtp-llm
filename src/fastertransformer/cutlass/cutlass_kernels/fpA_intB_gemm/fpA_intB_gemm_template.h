@@ -438,7 +438,7 @@ void CutlassFpAIntBGemmRunner<T, WeightType>::dispatch_to_arch<EpilogueTag>(cons
                                                                             int*              occupancy)
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    if (sm_ >= 80 && sm_ < 90) {
+    if (sm_ >= 80 && sm_ <= 90) {
         dispatch_gemm_to_cutlass<T, WeightType, cutlass::arch::Sm80, EpilogueTag>(
             A, B, weight_scales, biases, C, m, n, k, workspace_ptr, workspace_bytes, gemm_config, stream, occupancy);
     }

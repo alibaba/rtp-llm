@@ -33,7 +33,7 @@ cc_library(
     ]),    
     deps = [        
         "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",    
+        "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
     visibility = ["//visibility:public"],    

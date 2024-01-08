@@ -1,6 +1,6 @@
 from typing import Any, Dict
 from maga_transformer.utils.util import get_config_from_path
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import W, WeightInfo, \
     ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, identity, transpose
 from maga_transformer.models.gpt import GPT

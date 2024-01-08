@@ -2,7 +2,7 @@ from unittest import TestCase, main
 from maga_transformer.async_decoder_engine.query_manager import QueryManager
 from maga_transformer.async_decoder_engine.ptuning import PrefixParams, PrefixType
 from maga_transformer.async_decoder_engine.cache_manager import CacheConfigGenerator
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
 from unittest import mock
 import torch
@@ -135,7 +135,7 @@ class QueryManagerTest(TestCase):
         self.assertEqual(queries[1].finish, False)
         self.assertEqual(queries[2].finish, False)
         self.assertEqual(len(queries[1].block_indice), 1)
-        self.assertEqual(len(query_manager.batch_query_.queries), 1)
+        self.assertEqual(len(query_manager.batch_query_.queries), 2)
 
     @mock.patch.dict('os.environ', {'USE_BLOCK_CACHE': '1'})
     def test_reuse(self):

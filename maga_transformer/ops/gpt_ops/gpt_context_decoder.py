@@ -2,7 +2,7 @@ from typing import Any, Optional
 from threading import Lock
 import torch
 from maga_transformer.ops.ft_op_base import FTOPBase
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
 
 class GptContextDecoder(FTOPBase):

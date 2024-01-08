@@ -2,11 +2,12 @@ import os
 import torch
 import logging
 from typing import List, Optional, Tuple, Union, Any
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import LoRAMap
 from maga_transformer.async_decoder_engine.query_manager import QueryManager, BatchQuery
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.sample_utils import BaseSampler, SamplerSetupParams, SamplingParams
+from maga_transformer.utils.dump_config_utils import dump_engine_to_table
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.ops.gpt_ops.gpt_op import GptOp
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -38,6 +39,7 @@ class BaseModelExecutor(ExecutorBase):
     def __init__(self, model_ops: ModelOps, query_manager: QueryManager):
         self.model_ops = model_ops
         self.query_manager_ = query_manager
+        dump_engine_to_table(self.create_config_json())
 
     @staticmethod
     def _to_cuda_tensor(t: Optional[List[Any]], dtype: torch.dtype=torch.int32):
@@ -50,6 +52,13 @@ class BaseModelExecutor(ExecutorBase):
             return
         with torch.cuda.nvtx.range('post_process'):
             self._post_process(batch_query, hidden_states, all_hidden_states)
+
+    def create_config_json(self):
+        config_json = {
+            "engine_type": type(self).__name__,
+        }
+        config_json.update(self.query_manager_.create_config_json())
+        return config_json
 
     def _unpack_hidden_states(self, batch_query: BatchQuery, hidden_states: torch.Tensor):
         index_lst = list(range(0, batch_query.generate_batch_size * batch_query.beam_width))
@@ -81,7 +90,7 @@ class BaseModelExecutor(ExecutorBase):
                 value_cache_scale=v_cache_scale,
                 input_lengths=torch.tensor(batch_query.context_lengths_list, dtype=torch.int32),
                 sequence_lengths=torch.tensor([i - 1 for i in batch_query.seq_lengths_list], dtype=torch.int32),
-                block_index_map=torch.tensor(batch_query.cache_block_indice, dtype=torch.int32),
+                block_index_map=batch_query.cache_block_indice,
                 position_ids=position_ids,
                 attention_mask=attention_mask,
                 linear_bias_slopes=self.model_ops.model.linear_bias_slopes,
@@ -91,10 +100,18 @@ class BaseModelExecutor(ExecutorBase):
                 lora_ids=torch.IntTensor(lora_ids))
 
         return hidden_states
+    
+    def _create_position_ids_for_rotary(self, batch_query: BatchQuery) -> Optional[torch.Tensor]:
+        if self.model_ops.model.position_encoding is None:
+            return None
+            # generate query
+        position_ids = [i - 1 for i in batch_query.seq_lengths_list]
+        # context query
+        for i in range(batch_query.generate_batch_size, batch_query.total_batch_size):            
+            position_ids.extend(range(batch_query.reuse_lengths_list[i], batch_query.reuse_lengths_list[i] + batch_query.context_lengths_list[i]))
+        return to_cuda(torch.IntTensor(position_ids))
 
-    def _packed_tokens(
-        self, batch_query: BatchQuery, need_position_ids: bool
-    ) -> Tuple[torch.Tensor, Union[None, torch.Tensor], List[Any]]:
+    def _packed_tokens(self, batch_query: BatchQuery) -> Tuple[torch.Tensor, List[Any]]:
         combo_tokens: List[int] = []
         combo_imgs: List[Any] = []
         for i in range(batch_query.generate_batch_size):
@@ -102,23 +119,14 @@ class BaseModelExecutor(ExecutorBase):
         for i in range(batch_query.context_batch_size):
             combo_tokens.extend(batch_query.context_query_output_tokens(i).numpy().tolist())
             combo_imgs = batch_query.images
-        position_ids: List[int] = []
-        if need_position_ids:
-            # generate query
-            position_ids = [i - 1 for i in batch_query.seq_lengths_list]
-            # context query
-            for length in batch_query.context_query_context_lengths_list:
-                position_ids.extend(range(length))
         if (not self.model_ops.config.is_multimodal):
             if any([t < 0 or t >= self.model_ops.config.vocab_size for t in combo_tokens]):
                 raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')
         else:
             special_set = set([v for v in self.model_ops.config.vit_related_params.vit_special_token_ids.values()])
             if any([((t < 0 or t >= self.model_ops.config.vocab_size) and (t not in special_set)) for t in combo_tokens]):
-                raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')
-
-        return to_cuda(torch.IntTensor(combo_tokens)), to_cuda(torch.IntTensor(
-            position_ids)) if position_ids else None, combo_imgs
+                raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')        
+        return to_cuda(torch.IntTensor(combo_tokens)), combo_imgs
 
     # static for ut
     @staticmethod
@@ -140,8 +148,8 @@ class BaseModelExecutor(ExecutorBase):
         self, batch_query: BatchQuery,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         model = self.model_ops.model
-        combo_tokens, position_ids, images = self._packed_tokens(
-            batch_query, model.position_encoding is not None)
+        combo_tokens, images = self._packed_tokens(batch_query)        
+        position_ids = self._create_position_ids_for_rotary(batch_query)
 
         assert model.word_embedding is not None
         input_embeds = model.async_input_word_embedding(combo_tokens, [images])
@@ -153,11 +161,8 @@ class BaseModelExecutor(ExecutorBase):
             input_embeds = model.pre_decoder_layernorm(input_embeds)
 
         attention_mask = self._create_context_attention_mask(batch_query)
-        position_ids = self._create_position_ids_for_rotary(batch_query)
-        return input_embeds, attention_mask, position_ids
 
-    def _create_position_ids_for_rotary(self, batch_query: BatchQuery):
-        return None
+        return input_embeds, attention_mask, position_ids
 
     def _create_context_attention_mask(self, batch_query: BatchQuery):
         if batch_query.has_context_query():

@@ -7,7 +7,7 @@ import shutil
 import pynvml
 import threading
 from enum import Enum
-from typing import Optional, Union, Dict, Any
+from typing import Optional, Union, Dict, Any, List, Set
 from maga_transformer import _ft_pickler
 from pathlib import Path
 
@@ -93,16 +93,16 @@ def generate_pad_mask(input_lengths: torch.Tensor, memory_length: int, init_step
         step_indices >= input_lengths, step_indices < init_step + max_input_length)
     return masked_tokens
 
-def get_ckpt_file_from_index(ckpt_path, model_index_file):
+def get_ckpt_file_from_index(ckpt_path: str, model_index_file: str) -> List[str]:
     with open(model_index_file) as reader:
         index_json = json.loads(reader.read())
-    ckpt_set = set()
+    ckpt_set: Set[str] = set()
     for _, ckpt_file in index_json['weight_map'].items():
         ckpt_set.add(ckpt_file)
     return [os.path.join(ckpt_path, ckpt_file) for ckpt_file in ckpt_set]
 
 
-def load_ckpt(ckpt_path: str) -> dict:
+def load_ckpt(ckpt_path: str) -> Dict[str, Any]:
     if os.path.isfile(ckpt_path):
         return torch.load(ckpt_path, map_location='cpu', pickle_module=_ft_pickler)
     elif os.path.isdir(ckpt_path):
@@ -152,7 +152,7 @@ class WEIGHT_TYPE(Enum):
     FP32 = ["float32", "fp32"]
     BF16 = ["bfloat16", "bp16", "bf16"]
     @classmethod
-    def from_str(cls, value) -> 'WEIGHT_TYPE':
+    def from_str(cls, value: str) -> 'WEIGHT_TYPE':
         lower_value = value.lower()
         for name, member in cls.__members__.items():
             if lower_value in map(str.lower, member.value):
@@ -160,7 +160,7 @@ class WEIGHT_TYPE(Enum):
         raise ValueError('No enum member with value %s' % value)
 
 
-def get_weight_type_from_env(env_param) -> WEIGHT_TYPE:
+def get_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
     weight_type_str = env_param.get("WEIGHT_TYPE", None)
     if weight_type_str:
         weight_type = WEIGHT_TYPE.from_str(weight_type_str)
@@ -169,7 +169,7 @@ def get_weight_type_from_env(env_param) -> WEIGHT_TYPE:
         weight_type = WEIGHT_TYPE.INT8 if int8_mode  == 1 else WEIGHT_TYPE.FP16
     return weight_type
 
-def get_sp_weight_type_from_env(env_param) -> WEIGHT_TYPE:
+def get_sp_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
     sp_weight_type_str = env_param.get("SP_WEIGHT_TYPE", None)
     if sp_weight_type_str:
         sp_weight_type = WEIGHT_TYPE.from_str(sp_weight_type_str)

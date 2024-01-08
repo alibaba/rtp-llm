@@ -48,6 +48,7 @@ class QueryStats:
         self.lock = Lock()
         self.seq_length: int = self.context_length
         self.beam_width: int = generate_config.num_beams
+        self.input_token_ids = input_tokens
         self.output_token_ids_: torch.Tensor = torch.zeros([self.beam_width, max_seq_len], dtype=torch.int32)
         self.output_token_ids_[0, : self.seq_length] = input_tokens
         self.hidden_states = None

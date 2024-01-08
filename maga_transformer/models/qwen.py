@@ -10,7 +10,7 @@ from typing import List, Any
 from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
     ModelDeployWeightInfo, CkptWeightInfo, \
     concat_0, concat_1, identity, zeros, transpose, trans_qkv, trans_qkv_b, trans_lora_qkv
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.base_model import BaseTokenizer
 from maga_transformer.models.gpt import GPT
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer as QwenTokenizerOrigin
@@ -174,7 +174,7 @@ class QWenWeight(ModelDeployWeightInfo):
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
 
-class QWen(GPT):
+class QWenBase(GPT):
     @staticmethod
     def get_weight_cls():
         return QWenWeight
@@ -232,7 +232,23 @@ class QWen(GPT):
 
     def load_tokenizer(self):
         self.tokenizer = QWenTokenizer.from_pretrained(self.config.tokenizer_path)
-class QWen_7B(QWen):
+
+class QWen(QWenBase):    
+    @staticmethod
+    def _create_config(ckpt_path: str):
+        config = GptInitModelParameters(
+            head_num=0,
+            head_num_kv=0,
+            size_per_head=0,
+            layer_num=0,
+            inter_size=0, # 13696
+            vocab_size=152064,
+            max_seq_len=8192)
+        QWenBase._common_config(config, ckpt_path)
+        assert config.head_num > 0 and config.head_num_kv > 0 and config.size_per_head > 0 and config.layer_num > 0 and config.inter_size > 0, "error config"
+        return config
+
+class QWen_7B(QWenBase):
     @staticmethod
     def _create_config(ckpt_path: str):
         config = GptInitModelParameters(
@@ -243,10 +259,10 @@ class QWen_7B(QWen):
             inter_size=hidden_to_inter(4096), # 11008
             vocab_size=151936,
             max_seq_len=8192)
-        QWen._common_config(config, ckpt_path)
+        QWenBase._common_config(config, ckpt_path)
         return config
 
-class QWen_13B(QWen):
+class QWen_13B(QWenBase):
     @staticmethod
     def _create_config(ckpt_path: str):
         config = GptInitModelParameters(
@@ -260,7 +276,7 @@ class QWen_13B(QWen):
         QWen._common_config(config, ckpt_path)
         return config
 
-class QWen_1B8(QWen):
+class QWen_1B8(QWenBase):
     @staticmethod
     def _create_config(ckpt_path: str):
         config = GptInitModelParameters(
@@ -271,9 +287,10 @@ class QWen_1B8(QWen):
             inter_size=hidden_to_inter(2048), # 5504
             vocab_size=151936,
             max_seq_len=2048)
-        QWen._common_config(config, ckpt_path)
+        QWenBase._common_config(config, ckpt_path)
         return config
 
+register_model('qwen', QWen)
 register_model('qwen_7b', QWen_7B)
 register_model('qwen_13b', QWen_13B)
 register_model('qwen_1b8', QWen_1B8)

@@ -938,6 +938,7 @@ __device__ inline void context_rope(int      RopeStyle,
                                     scalar_t* smem,
                                     int       tidx,
                                     int       seqidx,
+                                    int       position_id,
                                     int       dim,
                                     int       seq_len,
                                     int       base,
@@ -954,6 +955,9 @@ __device__ inline void context_rope(int      RopeStyle,
     if (PREFIX_PROMPT && count_length) {
         input_len = input_len + prefix_prompt_length;
         seqidx = seqidx + prefix_prompt_length;
+    }
+    if (position_id > 0) {
+        seqidx = position_id;
     }
 
     switch (RopeStyle) {

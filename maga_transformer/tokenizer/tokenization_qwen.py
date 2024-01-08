@@ -33,6 +33,45 @@ SPECIAL_TOKENS = (
     IMEND,
 ) + EXTRAS
 
+QWEN_CHAT_TEMPLATE = (
+    # system message at start.
+    "{% if messages[0]['role'] != 'system' %}"
+        "{{ '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' }}"
+    "{% endif %}"
+
+    # functions
+    "{% if functions %}"
+        "{{ '<|im_start|>user\n' }}"
+        "{{ 'Answer the following questions as best you can. You have access to the following APIs:\n\n'}}"
+        "{% for function in functions %}"
+            "{{ function['name'] + ': Call this tool to interact with the ' + function['name'] + ' API. ' }}"
+            "{{ 'What is the ' + function['name'] + ' API useful for? ' + function['description']}}"
+            "{{ ' Parameters: ' + json.dumps(function['parameters']) + '\n\n'}}"
+        "{% endfor %}"
+"""Use the following format:
+
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tools_name_text}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can be repeated zero or more times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+
+Begin!
+
+"""
+    "{% endif %}"
+
+    "{% for message in messages %}"
+        "{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}"
+    "{% endfor %}"
+
+    "{% if add_generation_prompt %}"
+        "{{ '<|im_start|>assistant\n' }}"
+    "{% endif %}"
+)
 
 def _load_tiktoken_bpe(tiktoken_bpe_file: str) -> Dict[bytes, int]:
     contents = open(tiktoken_bpe_file, "rb").read()

@@ -1,0 +1,12 @@
+{
+  "add_prefix_space": false,
+  "bos_token": "<|beginoftext|>",
+  "clean_up_tokenization_spaces": true,
+  "eos_token": "<|endoftext|>",
+  "mask_token": "<mask>",
+  "model_max_length": 1024,
+  "pad_token": "<pad>",
+  "padding_side": "right",
+  "tokenizer_class": "FlotTokenizer",
+  "unk_token": "<unk>"
+}

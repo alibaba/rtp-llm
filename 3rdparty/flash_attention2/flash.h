@@ -13,6 +13,37 @@ constexpr int D_DIM = 2;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+struct PhiloxCudaState {
+  PhiloxCudaState() = default;
+  // Called if graph capture is not underway
+  PhiloxCudaState(uint64_t seed,
+                  uint64_t offset) {
+    seed_.val = seed;
+    offset_.val = offset;
+  }
+  // Called if graph capture is underway
+  PhiloxCudaState(int64_t* seed,
+                  int64_t* offset_extragraph,
+                  uint32_t offset_intragraph) {
+    seed_.ptr = seed;
+    offset_.ptr = offset_extragraph;
+    offset_intragraph_ = offset_intragraph;
+    captured_ = true;
+  }
+
+  // Public members, directly accessible by at::cuda::philox::unpack.
+  // If we made them private with getters/setters, the getters/setters
+  // would have to be __device__, and we can't declare __device__ in ATen.
+  union Payload {
+    uint64_t val;
+    int64_t* ptr;
+  };
+
+  Payload seed_;
+  Payload offset_;
+  uint32_t offset_intragraph_ = 0;
+  bool captured_ = false;
+};
 struct Qkv_params {
     using index_t = uint32_t;
     // The QKV matrices.
@@ -59,7 +90,7 @@ struct Flash_fwd_params : public Qkv_params {
     void * __restrict__ softmax_lseaccum_ptr;
 
     // The dimensions.
-    int b, seqlen_q, seqlen_k, seqlen_knew, d, seqlen_q_rounded, seqlen_k_rounded, d_rounded;
+    int b, seqlen_q, seqlen_k, seqlen_knew, d, seqlen_q_rounded, seqlen_k_rounded, d_rounded, rotary_dim;
 
     // The scaling factors for the kernel.
     float scale_softmax;
@@ -83,6 +114,13 @@ struct Flash_fwd_params : public Qkv_params {
     index_t knew_head_stride;
     index_t vnew_head_stride;
 
+    // The cos and sin matrices for rotary embedding.
+    void * __restrict__ rotary_cos_ptr;
+    void * __restrict__ rotary_sin_ptr;
+
+    // The indices to index into the KV cache.
+    int *__restrict__ cache_batch_idx;
+
     // The dropout probability (probability of keeping an activation).
     float p_dropout;
     // uint32_t p_dropout_in_uint;
@@ -93,11 +131,14 @@ struct Flash_fwd_params : public Qkv_params {
     float rp_dropout;
     float scale_softmax_rp_dropout;
 
+    // Local window size
+    int window_size_left, window_size_right;
+
     // Random state.
-    // at::PhiloxCudaState philox_args;
+    PhiloxCudaState philox_args;
 
     // Pointer to the RNG seed (idx 0) and offset (idx 1).
-    // uint64_t * rng_state;
+    uint64_t * rng_state;
 
     bool is_bf16;
     bool is_causal;
@@ -106,9 +147,15 @@ struct Flash_fwd_params : public Qkv_params {
     // Otherwise it's cu_seqlens_k[bidb], i.e., we use cu_seqlens_k to store the sequence lengths of K.
     bool is_seqlens_k_cumulative;
 
+    bool is_rotary_interleaved;
+
     int num_splits;  // For split-KV version
     bool is_alibi;
     void * __restrict__ linear_bias_slopes;
+
+    bool is_fixed_seqs() const {
+        return cu_seqlens_q == nullptr && cu_seqlens_k == nullptr;
+    }
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -132,4 +179,3 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
 
 bool is_sm8x();
 
-bool flash_attention_enabled();

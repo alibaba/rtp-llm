@@ -13,3 +13,20 @@ cc_library(
     strip_include_prefix = "include",
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "cutlass_utils",
+    hdrs = glob([
+        "tools/util/include/cutlass/util/*.h",
+        "tools/util/include/cutlass/util/*.hpp",
+        "tools/util/include/cutlass/util/*.cuh"
+    ]),
+    deps = [
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    strip_include_prefix = "tools/util/include/",
+    visibility = ["//visibility:public"],
+)
+
+

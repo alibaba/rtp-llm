@@ -10,6 +10,13 @@ def git_deps():
     )
 
     new_git_repository(
+        name = "flash_attention_ppu",
+        remote = "git@gitlab.alibaba-inc.com:ppu_open_source/flash-attention.git",
+        commit = "11f08a9fbb0ac4a27ce093e10e7b45a0dd52ed3e",
+        build_file = str(Label("//FasterTransformer-PPU/3rdparty/flash_attention_ppu:flash_attention.BUILD")),
+    )
+
+    new_git_repository(
         name = "cutlass",
         remote = "https://github.com/NVIDIA/cutlass.git",
         commit = "8783c41851cd3582490e04e69e0cd756a8c1db7f",

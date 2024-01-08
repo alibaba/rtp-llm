@@ -1,14 +1,3 @@
-From b65239404166f4b344839f2cffae3ee35493b25c Mon Sep 17 00:00:00 2001
-From: "baowending.bwd" <baowending.bwd@alibaba-inc.com>
-Date: Wed, 12 Jul 2023 16:26:16 +0800
-Subject: [PATCH] fix triton and pypi wheel
-
----
- python/pip_install/extract_wheels/lib/bazel.py | 4 ++++
- python/pip_install/repositories.bzl            | 4 ++--
- python/requirements.txt                        | 2 +-
- 3 files changed, 7 insertions(+), 3 deletions(-)
-
 diff --git python/pip_install/extract_wheels/lib/bazel.py python/pip_install/extract_wheels/lib/bazel.py
 index ef0d6e8..10c193d 100644
 --- python/pip_install/extract_wheels/lib/bazel.py
@@ -25,10 +14,17 @@ index ef0d6e8..10c193d 100644
      with open(os.path.join(directory, "BUILD"), "w") as build_file:
          contents = generate_build_file_contents(
 diff --git python/pip_install/repositories.bzl python/pip_install/repositories.bzl
-index 828ab53..978f642 100644
+index 828ab53..dc216c9 100644
 --- python/pip_install/repositories.bzl
 +++ python/pip_install/repositories.bzl
-@@ -21,8 +21,8 @@ _RULE_DEPS = [
+@@ -16,13 +16,13 @@ _RULE_DEPS = [
+     ),
+     (
+         "pypi__setuptools",
+-        "https://files.pythonhosted.org/packages/ab/b5/3679d7c98be5b65fa5522671ef437b792d909cf3908ba54fe9eca5d2a766/setuptools-44.1.0-py2.py3-none-any.whl",
+-        "992728077ca19db6598072414fb83e0a284aca1253aaf2e24bb1e55ee6db1a30",
++        "https://files.pythonhosted.org/packages/55/3a/5121b58b578a598b269537e09a316ad2a94fdd561a2c6eb75cd68578cc6b/setuptools-69.0.3-py3-none-any.whl",
++        "385eb4edd9c9d5c17540511303e39a147ce2fc04bc55289c322b9e5904fe2c05",
      ),
      (
          "pypi__wheel",
@@ -40,17 +36,15 @@ index 828ab53..978f642 100644
  ]
  
 diff --git python/requirements.txt python/requirements.txt
-index 164fa26..94f0e89 100644
+index 164fa26..743bc87 100644
 --- python/requirements.txt
 +++ python/requirements.txt
 @@ -1,6 +1,6 @@
  pip==9.0.3
- setuptools==44.0.0
+-setuptools==44.0.0
 -wheel==0.30.0a0
++setuptools==69.0.3
 +wheel==0.38.4
  
  # For tests
  mock==2.0.0
--- 
-2.19.1.6.gb485710b
-

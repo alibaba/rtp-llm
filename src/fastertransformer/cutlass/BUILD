@@ -64,10 +64,31 @@ cc_library(
 )
 
 cc_library(
+    name = "group_cu",
+    srcs = glob([
+        "cutlass_kernels/group_gemm/*.cu",
+        "cutlass_kernels/group_gemm/*.h",
+    ]),
+    hdrs = glob([
+        "cutlass_kernels/group_gemm/group_gemm_template.h",
+        "cutlass_kernels/group_gemm/group_gemm.h",
+    ]),
+    include_prefix = "src",
+    deps = [
+    	":cutlass_kernels_common",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    alwayslink = True,
+)
+
+cc_library(
     name = "cutlass_kernels_impl",
     deps = [
         ":fpA_intB_cu",
-        ":weight_only_gemm_cu"
+        ":weight_only_gemm_cu",
+        ":group_cu"
     ],
     visibility = ["//visibility:public"],
 )
@@ -77,6 +98,7 @@ cc_library(
     hdrs = [
         "interface.h",
         "cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h",
+        "cutlass_kernels/group_gemm/group_gemm.h",
         "cutlass_kernels/cutlass_preprocessors.h",
         "cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h",
         "cutlass_kernels/weightOnlyBatchedGemv/common.h"

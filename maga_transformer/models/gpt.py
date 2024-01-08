@@ -9,10 +9,10 @@ import torch.nn.functional as F
 
 from maga_transformer.utils.util import get_device, to_torch_dtype
 from maga_transformer.models.gpt_util.rms import RMSNorm
-from maga_transformer.utils.model_weights_loader import load_weights
+from maga_transformer.utils.model_weights_loader import load_weights, estimate_load_parallel_num
 from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, LoRAModelWeightInfo
 from maga_transformer.utils.time_util import Timer
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.ckpt_database import CkptDatabase
 from maga_transformer.ops.gpt_ops.gpt_decoder import GptDecoder
 from maga_transformer.ops.gpt_ops.gpt_context_decoder import GptContextDecoder
@@ -205,7 +205,11 @@ class GPT(BaseModel):
             if self.config.lora_infos is not None:
                 for lora_name, lora_path in self.config.lora_infos.items():
                     self.database.load_lora(lora_name, lora_path)
-            self.weight = load_weights(weights_info, self.database, compute_dtype=compute_dtype)
+            load_parallel_num = estimate_load_parallel_num(
+                self.config, g_parallel_info.tp_size)
+            self.weight = load_weights(weights_info, self.database,
+                                       compute_dtype=compute_dtype,
+                                       load_parallel_num=load_parallel_num)
 
         logging.info(f'load weights time: {timer.cost_ms() / 1000 :.2f} s')
 

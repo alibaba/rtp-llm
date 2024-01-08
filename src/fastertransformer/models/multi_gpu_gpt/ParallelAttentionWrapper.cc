@@ -14,7 +14,7 @@ namespace fastertransformer {
 template<typename T>
 bool ParallelAttentionWrapper<T>::CheckUseFMHA() {
     char* fmha_env        = std::getenv("FMHA_ENABLE");
-    bool  fmha_enable     = (fmha_env == nullptr || std::string(fmha_env) != "OFF") && flash_attention_enabled();
+    bool  fmha_enable     = (fmha_env == nullptr || std::string(fmha_env) != "OFF");
     char* block_cache_env = std::getenv("USE_BLOCK_CACHE");
     bool  not_prefix_prompt =
         params_.pre_seq_len_ == 0 && (block_cache_env == nullptr || std::string(block_cache_env) != "1");
@@ -835,19 +835,19 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
             qk_buf_,
             attention_seq_len_2,
             attention_seq_len_1 * (local_head_num / local_head_num_kv) * attention_seq_len_2,
-            qkv_buf,
+            qkv_buf_3_,
             params_.size_per_head_,
             attention_seq_len_1 * (local_head_num / local_head_num_kv) * params_.size_per_head_,
             context_batch_size * local_head_num_kv);
         POP_RANGE;
 
-        print_bhsd(layer_id, "qkv_weighted", qkv_buf, 1, local_head_num, attention_seq_len_1, params_.size_per_head_);
+        print_bhsd(layer_id, "qkv_weighted", qkv_buf_3_, context_batch_size, local_head_num, attention_seq_len_1, params_.size_per_head_);
 
         // transpose (batch_size, num_heads, L, Dh) to (batch_size, L, num_heads * Dh)
         PUSH_RANGE(stream_, "transpose");
         if (padding_offset == nullptr) {
             invokeTransposeQKV(qkv_buf_2,
-                               qkv_buf,
+                               qkv_buf_3_,
                                context_batch_size,
                                attention_seq_len_1,
                                local_head_num,
@@ -858,7 +858,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
             sync_check_cuda_error();
         }
         else {
-            invokeTransposeAttentionOutRemovePadding(qkv_buf,
+            invokeTransposeAttentionOutRemovePadding(qkv_buf_3_,
                                                      qkv_buf_2,
                                                      context_h_token_num,
                                                      context_batch_size,
@@ -1017,6 +1017,8 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
     if (allocate_qk_buf) {
         qk_buf_ = (T*)allocator_->reMalloc(
             qk_buf_, sizeof(T) * context_batch_size * local_head_num_ * seq_len * seq_len_with_prefix, true);
+        qkv_buf_3_ =
+            (T*)allocator_->reMalloc(qkv_buf_3_, sizeof(T) * context_batch_size * seq_len * local_hidden_units_, true);
     }
     else {
         softmax_lse_ = (float*)allocator_->reMalloc(
@@ -1062,6 +1064,7 @@ void ParallelAttentionWrapper<T>::freeBuffer()
         allocator_->free((void**)(&qkv_buf_));
         allocator_->free((void**)(&q_buf_2_));
         allocator_->free((void**)(&qk_buf_));
+        allocator_->free((void**)(&qkv_buf_3_));
         allocator_->free((void**)(&qkv_buf_2_));
         allocator_->free((void**)(&softmax_lse_));
 

@@ -10,12 +10,12 @@ import torch.distributed as dist
 
 from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.utils.util import WEIGHT_TYPE
-from maga_transformer.utils.sample_utils import FtGenerationMixin, FtSampler, BaseSampler, \
-    SamplerSetupParams, SamplingParams
+from maga_transformer.utils.sample_utils import HuggingfaceSampler, FtSampler, BaseSampler, \
+    SamplerSetupParams, SamplingParams, DynamicDecodeOp, BeamSearchSampler
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import RequestFormat
 from maga_transformer.utils.model_weight import LoRAMap
 
@@ -44,6 +44,18 @@ class BaseTokenizer(object):
 
     def decode(self, outputs: List[int]) -> str:
         raise NotImplementedError()
+
+    @property
+    def chat_template(self) -> Optional[str]:
+        return None
+
+    @property
+    def default_chat_template(self) -> Optional[str]:
+        return None
+
+    @property
+    def additional_special_tokens(self) -> Optional[List[str]]:
+        return None
 
 class GenerateOutput(NamedTuple):
     hidden_states: Union[torch.Tensor, List[torch.Tensor]]
@@ -79,12 +91,12 @@ class GenerateContext(NamedTuple):
 
 
 class ModelConfigBase(NamedTuple):
-    model_type: str
-    ckpt_path: str
-    tokenizer_path: str
-    async_mode: bool
-    weight_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
-    act_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
+    model_type: str = ""
+    ckpt_path: str = ""
+    tokenizer_path: str = ""
+    async_mode: bool = False
+    weight_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16
+    act_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16
     max_seq_len: int = 0
     seq_size_per_block: int = 8
     gen_num_per_circle: int = 1
@@ -96,7 +108,11 @@ class ModelConfig(ModelConfigBase):
     def int8_mode(self):
         return 1 if self.weight_type == WEIGHT_TYPE.INT8 else 0
 
-class BaseModel(FtGenerationMixin):
+class BaseModel(object):
+
+    config: GptInitModelParameters
+    vocab_size_padded: int
+
     @classmethod
     def create_config(cls, model_config: ModelConfig) -> GptInitModelParameters:
         config: GptInitModelParameters = cls._create_config(model_config.ckpt_path)
@@ -104,9 +120,13 @@ class BaseModel(FtGenerationMixin):
         if not ptuning_path:
             inner_ptuing_path = os.path.join(model_config.ckpt_path, 'ptuning')
             if os.path.exists(inner_ptuing_path):
+                logging.info(f"ckpt contain ptuning ckpt files, {model_config.ckpt_path}/ptuning")
                 ptuning_path = inner_ptuing_path
             else:
+                logging.info(f"try using base ckpt as the ptuning dir for compatibility with base ckpt that has been merged with ptuning")
                 ptuning_path = model_config.ckpt_path
+        else:
+            logging.info(f"use ptuning from model_config set by env, {ptuning_path}")
         config.ptuning_path = ptuning_path
         config.update_prefix_prompt(ptuning_path)
 
@@ -643,46 +663,24 @@ class BaseModel(FtGenerationMixin):
 
     @staticmethod
     def eval_model_size(config: GptInitModelParameters):
-        hidden_size = config.size_per_head * config.head_num
+        return config.eval_model_size()
 
-        # logging.info(config.layer_num, config.layer_head_num, config.layer_inter_size, config.size_per_head, config.head_num, config.head_num_kv, config.layer_num)
-        layer_weight_param_count = 0
-        # qkv
-        if config.layer_head_num and isinstance(config.layer_head_num, list):
-            for head_num in config.layer_head_num:
-                layer_weight_param_count = layer_weight_param_count + head_num * config.size_per_head * hidden_size *3
-        elif config.head_num_kv != config.head_num:
-            layer_weight_param_count = layer_weight_param_count + config.layer_num * hidden_size * hidden_size + \
-                config.layer_num * (config.head_num_kv * config.size_per_head) * 2
+    def _create_hf_sampler(self, generate_config: GenerateConfig) -> HuggingfaceSampler:
+        return HuggingfaceSampler(generate_config)
+
+    def _create_ft_sampler(self, generate_config: GenerateConfig) -> FtSampler:
+        dynamic_decoder = DynamicDecodeOp(self.config.vocab_size, self.vocab_size_padded)
+        return FtSampler(config=generate_config, dynamic_decoder=dynamic_decoder)
+
+    def _create_beam_search_sampler(self, generate_config: GenerateConfig) -> BeamSearchSampler:
+        dynamic_decoder = DynamicDecodeOp(self.config.vocab_size, self.vocab_size_padded)
+        return BeamSearchSampler(generate_config, dynamic_decoder)
+
+    def create_sampler(self, generate_config: GenerateConfig) -> BaseSampler:
+        using_hf_sampling = generate_config.using_hf_sampling or self.config.using_hf_sampling
+        if generate_config.num_beams > 1:
+            return self._create_beam_search_sampler(generate_config)
+        elif using_hf_sampling:
+            return self._create_hf_sampler(generate_config)
         else:
-            layer_weight_param_count = layer_weight_param_count + config.layer_num * hidden_size * hidden_size *3
-
-        # attn_o_w
-        if config.layer_head_num and isinstance(config.layer_head_num, list):
-            for head_num in config.layer_head_num:
-                layer_weight_param_count = layer_weight_param_count + head_num * config.size_per_head * hidden_size
-        else:
-            layer_weight_param_count = layer_weight_param_count + config.layer_num * hidden_size * hidden_size
-
-        # ffn w1, w2, w3
-        ffn_w_count = 2 if config.activation_type == 'gelu' else 3
-        if config.layer_inter_size and isinstance(config.layer_inter_size, list):
-            for layer_inter_size in config.layer_inter_size:
-                layer_weight_param_count = layer_weight_param_count + layer_inter_size * hidden_size * ffn_w_count
-
-        else:
-            layer_weight_param_count = layer_weight_param_count + config.layer_num * config.inter_size * hidden_size * ffn_w_count
-
-        # other small tensor
-        layer_weight_param_count = layer_weight_param_count + config.layer_num * hidden_size * 11
-
-
-        word_emb_param_count =  config.vocab_size * hidden_size
-        layer_param_bytes = 2 - config.int8_mode
-
-        model_size = word_emb_param_count * 2 + \
-            layer_weight_param_count * layer_param_bytes + \
-                hidden_size * layer_param_bytes + \
-                word_emb_param_count * 2  # maybe some model donot have lm_head
-
-        return model_size
+            return self._create_ft_sampler(generate_config)

@@ -7,9 +7,7 @@ import sys
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from maga_transformer.models.base_model import BaseModel, ModelConfig
-
-_model_factory: Dict[str, Type[BaseModel]] = {}
+_model_factory: Dict[str, Type[Any]] = {}
 
 def register_model(name: str, model_type: Any):
     global _model_factory

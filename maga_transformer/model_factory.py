@@ -7,12 +7,16 @@ import sys
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
+from maga_transformer.internal import fetch_remote_file_to_local
 from maga_transformer.models.base_model import BaseModel, ModelConfig
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
+from maga_transformer.tools.api.hf_model_helper import get_model_info_from_hf
 from maga_transformer.utils.util import WEIGHT_TYPE, get_weight_type_from_env, get_sp_weight_type_from_env
-from maga_transformer.internal import fetch_remote_file_to_local
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.utils.dump_config_utils import dump_model_to_table
 
-from maga_transformer.model_factory_register import _model_factory, register_model
+
+from maga_transformer.model_factory_register import _model_factory
 
 class ModelFactory:
     @staticmethod
@@ -42,9 +46,25 @@ class ModelFactory:
         if model_config.model_type not in _model_factory:
             raise Exception(f"model {model_config.model_type} not registered!")
         model_cls = _model_factory[model_config.model_type]
-        config = model_cls.create_config(model_config)
+        config: GptInitModelParameters = model_cls.create_config(model_config)
         model = model_cls.from_config(config)
+        dump_model_to_table(ModelFactory.model_config_json(model_cls, model_config, config))
         return model
+    
+    #TODO: remove model_config, get all info from gpt_config
+    @staticmethod
+    def model_config_json(model_cls: Type[Any], model_config: ModelConfig, config: GptInitModelParameters) -> Dict[str, Any]:
+        config_json = {
+            "model_type": model_cls.__name__,
+            "act_type": str(model_config.act_type),
+            "weight_type": str(model_config.weight_type),
+            "max_seq_len": config.max_seq_len,
+            "use_sparse_head": config.is_sparse_head,
+            "use_multi_task_prompt": config.multi_task_prompt,
+            "use_medusa": config.use_medusa,
+            "lora_infos": config.lora_infos
+        }
+        return config_json
 
     @staticmethod
     def from_model_type(model_config: ModelConfig, sp_model_config: Optional[ModelConfig] = None) -> Union[AsyncModel, BaseModel]:
@@ -53,6 +73,24 @@ class ModelFactory:
             sp_model = None if sp_model_config is None else ModelFactory._create_model(sp_model_config)
             model = AsyncModel(model, sp_model)
         return model
+
+    @staticmethod
+    def from_huggingface(model_path_or_name: str, revision: Optional[str] = None, model_config: ModelConfig = ModelConfig()):
+        model_path, model_type = get_model_info_from_hf(model_path_or_name, revision)
+        new_model_config = ModelConfig(
+            model_type=model_type,
+            ckpt_path=model_path,
+            tokenizer_path=model_path,
+            async_mode=model_config.async_mode,
+            weight_type=model_config.weight_type,
+            act_type=model_config.act_type,
+            max_seq_len=model_config.max_seq_len,
+            seq_size_per_block=model_config.seq_size_per_block,
+            gen_num_per_circle=model_config.gen_num_per_circle,
+            ptuning_path=model_config.ptuning_path,
+            lora_infos=model_config.lora_infos
+        )
+        return ModelFactory.from_model_type(new_model_config)
 
     @staticmethod
     def create_from_env():
@@ -98,7 +136,8 @@ class ModelFactory:
                                    weight_type=weight_type,
                                    act_type=act_type,
                                    max_seq_len=max_seq_len,
-                                   lora_infos=lora_infos)
+                                   lora_infos=lora_infos,
+                                   ptuning_path=ptuning_path)
         # speculative model params
         sp_model_config = None
         sp_model_type = os.environ.get("SP_MODEL_TYPE", None)
@@ -107,8 +146,7 @@ class ModelFactory:
                 raise Exception("SP_CONFIG should only be used in aysnc mode")
             logging.info("use sp model")
             sp_ckpt_path = fetch_remote_file_to_local(os.environ['SP_CHECKPOINT_PATH'])
-            sp_tokenizer_path = fetch_remote_file_to_local(os.environ['SP_TOKENIZER_PATH'])
-            logging.info(f"load sp model from tokenizer_path: {sp_tokenizer_path}, ckpt_path: {sp_ckpt_path}")
+            logging.info(f"load sp model from ckpt_path: {sp_ckpt_path}")
 
             gen_num_per_circle = int(os.environ.get('GEN_NUM_PER_CIRCLE', '5'))
 
@@ -119,14 +157,14 @@ class ModelFactory:
                 sp_act_type = WEIGHT_TYPE.from_str(os.environ.get(SP_ACT_TYPE))
 
             sp_model_config = ModelConfig(model_type=sp_model_type,
-                                                       ckpt_path=sp_ckpt_path,
-                                                       tokenizer_path=sp_tokenizer_path,
-                                                       lora_infos=lora_infos,
-                                                       async_mode=False,
-                                                       weight_type=sp_weight_type,
-                                                       act_type=sp_act_type,
-                                                       max_seq_len=max_seq_len,
-                                                       gen_num_per_circle=gen_num_per_circle)
+                                          ckpt_path=sp_ckpt_path,
+                                          tokenizer_path=tokenizer_path,
+                                          lora_infos=None,
+                                          async_mode=False,
+                                          weight_type=sp_weight_type,
+                                          act_type=sp_act_type,
+                                          max_seq_len=max_seq_len,
+                                          gen_num_per_circle=gen_num_per_circle)
 
         model = ModelFactory.from_model_type(model_config, sp_model_config)
 

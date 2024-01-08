@@ -8,7 +8,6 @@ from transformers.generation.stopping_criteria import StoppingCriteriaList, Stop
 from transformers.generation.logits_process import LogitsProcessorList
 
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.ops.comm.dynamic_decode_op import DynamicDecodeOp, SampleConfig
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
@@ -244,27 +243,6 @@ class StopWordIdsCriteria(StoppingCriteria):
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
         return torch.all(input_ids[:,-2:].cpu() == torch.Tensor(self.stop_word_ids)).item() # type: ignore
+    
 
-class FtGenerationMixin(GenerationMixin):
-    config: GptInitModelParameters
-    vocab_size_padded: int
-
-    def _create_hf_sampler(self, generate_config: GenerateConfig) -> HuggingfaceSampler:
-        return HuggingfaceSampler(generate_config)
-
-    def _create_ft_sampler(self, generate_config: GenerateConfig) -> FtSampler:
-        dynamic_decoder = DynamicDecodeOp(self.config.vocab_size, self.vocab_size_padded)
-        return FtSampler(config=generate_config, dynamic_decoder=dynamic_decoder)
-
-    def _create_beam_search_sampler(self, generate_config: GenerateConfig) -> BeamSearchSampler:
-        dynamic_decoder = DynamicDecodeOp(self.config.vocab_size, self.vocab_size_padded)
-        return BeamSearchSampler(generate_config, dynamic_decoder)
-
-    def create_sampler(self, generate_config: GenerateConfig) -> BaseSampler:
-        using_hf_sampling = generate_config.using_hf_sampling or self.config.using_hf_sampling
-        if generate_config.num_beams > 1:
-            return self._create_beam_search_sampler(generate_config)
-        elif using_hf_sampling:
-            return self._create_hf_sampler(generate_config)
-        else:
-            return self._create_ft_sampler(generate_config)
+    

@@ -3,7 +3,7 @@ import os
 import json
 import functools
 
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, \
     ModelDeployWeightInfo, CkptWeightInfo, identity, zeros, transpose
 from maga_transformer.models.gpt import GPT

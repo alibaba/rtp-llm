@@ -75,6 +75,7 @@ protected:
     float* softmax_lse_          = nullptr;
     float* qk_buf_float_         = nullptr;
     T*     qkv_buf_2_            = nullptr;
+    T*     qkv_buf_3_            = nullptr;
     char*  mixed_gemm_workspace_ = nullptr;
     size_t mixed_gemm_ws_bytes_  = 0;
     char*  int8_gemm_workspace_  = nullptr;

@@ -29,12 +29,6 @@ model_list = {
         "ckpt_path": os.path.join(os.getcwd(), "maga_transformer/test/model_test/fake_test/testdata/llama/fake/hf_source"),
         "weight_type": WEIGHT_TYPE.FP16
     },
-    "gpt_neox": {
-        "model_type": "gpt_neox",
-        "tokenizer_path": os.path.join(os.getcwd(), "maga_transformer/test/model_test/fake_test/testdata/gpt_neox/tokenizer"),
-        "ckpt_path": os.path.join(os.getcwd(), "maga_transformer/test/model_test/fake_test/testdata/gpt_neox/fake"),
-        "weight_type": WEIGHT_TYPE.FP16
-    },
     "bloom": {
         "model_type": "bloom",
         "tokenizer_path": os.path.join(os.getcwd(), "maga_transformer/test/model_test/fake_test/testdata/bloom/tokenizer"),

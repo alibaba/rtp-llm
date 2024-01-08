@@ -8,7 +8,7 @@ from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.utils.util import get_dtype_size, to_torch_dtype
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.lru_dict import LruDict
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 from maga_transformer.utils.concurrency_controller import ConcurrencyException
 

@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 _hf_architecture_2_ft = {}
 def register_hf_architecture(name: str, model_type: str):
@@ -18,7 +19,7 @@ def register_hf_repo(name: str, model_type: str):
 
 class ModelDict:
     @staticmethod
-    def get_ft_model_type_by_hf_repo(repo):
+    def get_ft_model_type_by_hf_repo(repo: str) -> Optional[str]:
         global _hf_repo_2_ft
         return _hf_repo_2_ft.get(repo, None)
 
@@ -28,7 +29,7 @@ class ModelDict:
         return _hf_architecture_2_ft.get(architecture, None)
 
     @staticmethod
-    def get_ft_model_type_by_config(config):
+    def get_ft_model_type_by_config(config) ->Optional[str]:
         if config.get('architectures', []):
             # hack for ChatGLMModel: chatglm and chatglm2 use same architecture
             architecture = config.get('architectures')[0]
@@ -42,7 +43,6 @@ class ModelDict:
             if architecture == 'QWenLMHeadModel':
                 if config.get('visual'):
                     return 'qwen_vl'
-            logging.info(f"get architecture: {architecture} model_type")
             return ModelDict.get_ft_model_type_by_hf_architectures(architecture)   
         return None  
     
@@ -64,7 +64,6 @@ register_hf_architecture("QWenLMHeadModel", "qwen_7b")
 register_hf_architecture("YiForCausalLM", "llama")
 register_hf_architecture("FalconForCausalLM", "falcon")
 register_hf_architecture("LlavaLlamaForCausalLM", "llava")
-register_hf_architecture("LlavaTuringForCausalLM", "turing_005_vl")
 
 # fix chatglm architectures一样，但是ft 类型不一样
 register_hf_repo("THUDM/chatglm-6b", "chatglm")

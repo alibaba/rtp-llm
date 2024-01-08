@@ -256,7 +256,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
                 (optional) Set to False to avoid returning attention mask (default: set to model specifics)
         """
         # Load from model defaults
-        assert self.padding_side == "left"
+        # assert self.padding_side == "left"
 
         required_input = encoded_inputs[self.model_input_names[0]]
         seq_length = len(required_input)

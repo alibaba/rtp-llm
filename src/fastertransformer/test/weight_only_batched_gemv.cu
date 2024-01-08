@@ -49,25 +49,32 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
 
     cublasStatus_t status = CUBLAS_STATUS_SUCCESS;
 
-    fastertransformer::kernels::WeightOnlyParams params{reinterpret_cast<const uint8_t*>(w_ptr1),
-                                                        reinterpret_cast<const half*>(s_ptr1),
-                                                        nullptr,
-                                                        reinterpret_cast<const half*>(in_ptr1),
-                                                        nullptr,
-                                                        reinterpret_cast<half*>(out_ptr1),
-                                                        m,
-                                                        n,
-                                                        k,
-                                                        0};
+    fastertransformer::kernels::WeightOnlyActivationType weight_only_act_type =
+        fastertransformer::kernels::WeightOnlyActivationType::FP16;
+    fastertransformer::kernels::WeightOnlyParams params{
+        reinterpret_cast<const uint8_t*>(w_ptr1),
+        s_ptr1,
+        nullptr,
+        in_ptr1,
+        nullptr,
+        out_ptr1,
+        m,
+        n,
+        k,
+        0,
+        fastertransformer::kernels::WeightOnlyQuantType::Int8b,
+        fastertransformer::kernels::WeightOnlyType::PerChannel,
+        fastertransformer::kernels::WeightOnlyActivationFunctionType::Identity,
+        weight_only_act_type};
     CutlassFpAIntBGemmRunner<half, uint8_t> runner;
     char*                                   ws_ptr = nullptr;
     deviceMalloc(&ws_ptr, runner.getWorkspaceSize(m, n, k));
 
     // warm up
 
-    int iterations = 100;
-    float total_time_gemv =0;
-    float total_time_fpaintb =0;
+    int   iterations         = 100;
+    float total_time_gemv    = 0;
+    float total_time_fpaintb = 0;
 
     cudaEvent_t start1, stop1;
     cudaEventCreate(&start1);
@@ -81,11 +88,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     cudaEventSynchronize(start1);
     cudaEventRecord(start1, stream);
     for (int iter = 0; iter < iterations; iter++) {
-        weight_only_batched_gemv_launcher(fastertransformer::kernels::WeightOnlyQuantType::Int8b,
-                                          fastertransformer::kernels::WeightOnlyType::PerChannel,
-                                          fastertransformer::kernels::WeightOnlyActivationType::Identity,
-                                          params,
-                                          stream);
+        weight_only_batched_gemv_launcher(params, stream);
     }
     cudaEventRecord(stop1, stream);
     cudaEventSynchronize(stop1);

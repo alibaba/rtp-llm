@@ -12,7 +12,7 @@ from PIL import Image
 from io import BytesIO
 from transformers.models.llama.tokenization_llama import LlamaTokenizer
 
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.llava_weight import LlavaWeightInfo, LlavaVitWeights
 from maga_transformer.models.llama import Llama
 from maga_transformer.models.base_model import BaseTokenizer, BaseModel

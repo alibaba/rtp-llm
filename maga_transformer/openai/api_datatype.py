@@ -18,11 +18,16 @@ class ModelList(BaseModel):
     data: List[ModelCard] = []
 
 class FunctionCall(BaseModel):
-    name: str
-    arguments: str
+    name: Optional[str]
+    arguments: Optional[str]
+
+class ToolCallFunction(BaseModel):
+    name: Optional[str] = None
+    arguments: Optional[str] = None
 
 class ToolCall(BaseModel):
-    id: str
+    index: int
+    id: Optional[str] = None
     type: str
     function: FunctionCall
 
@@ -35,15 +40,30 @@ class RoleEnum(str, Enum):
 
 class ChatMessage(BaseModel):
     role: RoleEnum
-    content: Optional[Union[str, Dict[str, Any]]]                     # Dict is for function role
-    tool_calls: Optional[List[ToolCall]] = None                       # tool call request from model
-    tool_call_id: Optional[str] = None                                # tool call id for tool call response
-    name: Optional[str] = None                                        # function name for tool call response
+    content: str = ""
+    function_call: Optional[FunctionCall] = None
+    tool_calls: Optional[List[ToolCall]] = None
+
+# NOTE: according to openai api definition, `function_call` is deprecated, and replaced by `tool_calls`.
+# see `openai/types/chat/chat_completion_chunk.py`
+
+# TODO: maybe also implement Qwen Style function call.
+# See https://github.com/QwenLM/Qwen/blob/35023b6f2a932bde6ed27f21ec03164ccf09a25f/examples/function_call_examples.py#L47
+
+class GPTFunctionDefinition(BaseModel):
+    name: str
+    description: str
+    parameters: Dict[str, Any]
+
+    # These parameters are for qwen style function.
+    name_for_model: Optional[str] = None
+    name_for_human: Optional[str] = None
+    description_for_model: Optional[str] = None
 
 class ChatCompletionRequest(BaseModel):
-    model: Optional[str]
+    model: Optional[str] = None
     messages: List[ChatMessage]
-    functions: Optional[List[Dict[str, Any]]] = None
+    functions: Optional[List[GPTFunctionDefinition]] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
@@ -85,8 +105,10 @@ class ChatCompletionResponse(BaseModel):
     usage: UsageInfo
 
 class DeltaMessage(BaseModel):
-    role: Optional[str] = None
+    role: Optional[RoleEnum] = None
     content: Optional[str] = ""
+    function_call: Optional[FunctionCall] = None
+    tool_calls: Optional[List[ToolCall]] = None
 
 class ChatCompletionResponseStreamChoice(BaseModel):
     index: int

@@ -104,25 +104,27 @@ Tensor fused_gemv_dq_helper(
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    fastertransformer::kernels::WeightOnlyParams params{reinterpret_cast<const uint8_t*>(weight_ptr),
-                                                        reinterpret_cast<const half*>(scales_ptr),
-                                                        nullptr,
-                                                        reinterpret_cast<const half*>(input_act_ptr),
-                                                        nullptr,
-                                                        reinterpret_cast<half*>(output_tensor_ptr),
-                                                        m,
-                                                        n,
-                                                        k,
-                                                        0};
+    fastertransformer::kernels::WeightOnlyActivationType weight_only_act_type =
+        fastertransformer::kernels::WeightOnlyActivationType::FP16;
+    fastertransformer::kernels::WeightOnlyParams params{
+        reinterpret_cast<const uint8_t*>(weight_ptr),
+        reinterpret_cast<const void*>(scales_ptr),
+        nullptr,
+        reinterpret_cast<const void*>(input_act_ptr),
+        nullptr,
+        reinterpret_cast<void*>(output_tensor_ptr),
+        m,
+        n,
+        k,
+        0,
+        fastertransformer::kernels::WeightOnlyQuantType::Int8b,
+        fastertransformer::kernels::WeightOnlyType::PerChannel,
+        fastertransformer::kernels::WeightOnlyActivationFunctionType::Identity,
+        weight_only_act_type};
 
     cudaEventRecord(start, stream);
     for (int64_t iter = 0; iter < timing_iterations; ++iter) {
-        fastertransformer::kernels::weight_only_batched_gemv_launcher(
-            fastertransformer::kernels::WeightOnlyQuantType::Int8b,
-            fastertransformer::kernels::WeightOnlyType::PerChannel,
-            fastertransformer::kernels::WeightOnlyActivationType::Identity,
-            params,
-            stream);
+        fastertransformer::kernels::weight_only_batched_gemv_launcher(params, stream);
     }
     cudaEventRecord(stop, stream);
     cudaEventSynchronize(stop);

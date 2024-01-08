@@ -1,9 +1,9 @@
 import torch
 from typing import Any, List, Optional, Iterator
 
-from maga_transformer.model_factory import register_model
+from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.base_model import BaseTokenizer, BaseModel, GenerateOutput
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
 
 class FakeTokenizer(BaseTokenizer):
@@ -18,21 +18,24 @@ class FakeConfig(object):
         self.eos_token_id = 1
 
 class FakeModel(BaseModel):
-    def __init__(self):
+    def __init__(self, config: GptInitModelParameters):
         super().__init__()
         self.tokenizer = FakeTokenizer()
-        self.config = GptInitModelParameters(head_num = 2, size_per_head = 128,
-                                             layer_num = 2, max_seq_len = 2048, vocab_size = 500000)
-        self.config.special_tokens.eos_token_id = 1
+        self.config = config
 
     @staticmethod
     def create_config(ckpt_path: str, **kwargs: Any) -> Any:
-        return GptInitModelParameters(head_num = 2, size_per_head = 128,
-                                             layer_num = 2, max_seq_len = 2048, vocab_size = 500000)
+        config = GptInitModelParameters(head_num = 2, size_per_head = 128,
+                                             layer_num = 2, max_seq_len = 2048, vocab_size = 500000, multi_task_prompt=None)
+        config.lora_infos = None
+        config.multi_task_prompt = None
+        config.is_sparse_head = False
+        config.use_medusa = False
+        return config
 
     @classmethod
     def from_config(cls, config: Any) -> 'FakeModel':
-        return cls()
+        return cls(config)
 
     @torch.no_grad()
     async def generate_stream(

@@ -1,18 +1,16 @@
 
 import torch
-import unicodedata
-import types
-import functools
 import os
 import json
+import re
 from typing import List, Any, Tuple
 
 from transformers import AutoTokenizer
 
-from maga_transformer.utils.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.qwen import QWen
-from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo, ClipQWenVLVitWeights
-from maga_transformer.vision_transformer import ClipVit
+from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo
+from maga_transformer.vision_transformer import ClipVit, ClipVitWeights
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 from maga_transformer.model_factory_register import register_model
@@ -88,6 +86,7 @@ class QWen_VL(QWen, MultiModalMixin):
         config.vit_related_params.width = vit_config['width']
 
         config.vit_related_params.visual = ClipVit(**vit_config)
+        config.vit_related_params.weights = ClipVitWeights(config.vit_related_params.visual)
     
     def load_tokenizer(self):
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
@@ -98,21 +97,18 @@ class QWen_VL(QWen, MultiModalMixin):
     
     def load_vit_weight(self, ctype: str):
         config = self.config
-        layers = config.vit_related_params.layers
+        hf_prefix = config.vit_related_params.weights.hf_prefix
+        ft_prefix = config.vit_related_params.weights.ft_prefix
+        weight_names = config.vit_related_params.weights.weight_names
 
         def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
             param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(ctype).to('cuda:0')
 
-        for w in set.union(ClipQWenVLVitWeights.vit_weights, ClipQWenVLVitWeights.vit_attn_pool_weight):
-            w_name = w[len('transformer.visual.'):]
-            param = eval('self.visual.' + w_name)
-            _safe_load_from_module(param, w, ctype)
-        
-        for w in ClipQWenVLVitWeights.vit_layer_weights:
-            for i in range(0, layers):
-                w_name = 'transformer.resblocks[{i}].'.format(i = i) + w[len('transformer.visual.transformer.resblocks.{i}.'):]
-                param = eval('self.visual.' + w_name)
-                _safe_load_from_module(param, w.format(i = i), ctype)
+        for w in weight_names:
+            w_name = ft_prefix + w
+            w_name = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', w_name)
+            param = eval(w_name)
+            _safe_load_from_module(param, hf_prefix + w, ctype)
 
     def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[str]]):
         inputs = inputs.reshape(1, -1)
@@ -162,8 +158,8 @@ class QWen_VL(QWen, MultiModalMixin):
         data_width = 4
         
         llm_size += (3 * width * patch_size ** 2 + width * 2) * data_width
-        llm_size += (layers * (width * 2 * 2 + width ** 2 * 4 + mlp_width * width * 2)) * data_width
-        llm_size += (width * embed_dim + embed_dim ** 2 + embed_dim * 2 * 3) * data_width
+        llm_size += (layers * (width * 2 * 2 + width ** 2 * 4 + width * 4 + mlp_width * width * 2 + mlp_width + width)) * data_width
+        llm_size += (width * embed_dim + embed_dim ** 2 + embed_dim + embed_dim * 2 * 3) * data_width
 
         return llm_size
     
