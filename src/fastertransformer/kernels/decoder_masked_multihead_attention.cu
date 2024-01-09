@@ -146,7 +146,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         const float*  qkv_scale_out,
                                         const float*  attention_out_scale,
                                         const int     int8_mode,
-                                        const int     multi_block_mode,
+                                        const bool    multi_block_mode,
                                         int           max_seq_len_tile,
                                         T*            partial_out,
                                         float*        partial_sum,
@@ -291,7 +291,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                                      const float*  qkv_scale_out,                                      \
                                                      const float*  attention_out_scale,                                \
                                                      const int     int8_mode,                                          \
-                                                     const int     multi_block_mode,                                   \
+                                                     const bool    multi_block_mode,                                   \
                                                      int           max_seq_tile,                                       \
                                                      T*            partial_out,                                        \
                                                      float*        partial_sum,                                        \
