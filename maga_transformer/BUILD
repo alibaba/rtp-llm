@@ -224,7 +224,7 @@ py_wheel(
         "importlib_metadata",
         "transformers==4.33.1",
         "sentencepiece==0.1.99",
-        "fastapi==0.95.0",
+        "fastapi==0.108.0",
         "uvicorn==0.21.1",
         "dacite",
         "pynvml",
@@ -240,12 +240,26 @@ py_wheel(
         "Pillow",
         "protobuf==3.20.0",
         "torchvision==0.16.0",
-        "prettytable"
+        "prettytable",
+        "pydantic>=2.5.3"
     ],
 )
 
 pyc_wheel(
     name = "maga_transformer",
+    package_name = "maga_transformer-0.0.1",
+    src = ":maga_transformer_whl",
+)
+
+pyc_wheel(
+    name = "maga_transformer_cuda11",
+    package_name = "maga_transformer-0.0.1+cuda118",
+    src = ":maga_transformer_whl",
+)
+
+pyc_wheel(
+    name = "maga_transformer_cuda12",
+    package_name = "maga_transformer-0.0.1+cuda121",
     src = ":maga_transformer_whl",
 )
 

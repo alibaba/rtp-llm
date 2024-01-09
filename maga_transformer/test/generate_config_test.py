@@ -9,8 +9,6 @@ from typing import Any
 class GenerateConfigTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        tokenizer_path = os.path.join(os.getcwd(), 'maga_transformer/test/model_test/fake_test/testdata/starcoder/tokenizer')
-        self.tokenizer = StarcoderTokenizer.from_pretrained(tokenizer_path)
         
     def _create_generate_config(self):
         return {
@@ -32,14 +30,14 @@ class GenerateConfigTest(TestCase):
     
     def test_simple(self):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
-        generate_config = Pipeline.create_generate_config(None, parameter.special_tokens, tokenizer=self.tokenizer, generate_config=self._create_generate_config())
+        generate_config = Pipeline.create_generate_config(special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
         self.assertEqual(generate_config.stop_words_list, [[8848]])
         self.assertEqual(generate_config.stop_words_str, ["hello", "what's your name"])
         self.assertEqual(generate_config.top_k, 1)
         self.assertEqual(generate_config.top_p, 0.95)
         self.assertEqual(generate_config.max_new_tokens, 100)
         
-        generate_config = Pipeline.create_generate_config(None, parameter.special_tokens, tokenizer=self.tokenizer, generate_config={}, **self._create_generate_config())
+        generate_config = Pipeline.create_generate_config(special_tokens=parameter.special_tokens, generate_config={}, **self._create_generate_config())
         self.assertEqual(generate_config.stop_words_list, [[8848]])
         self.assertEqual(generate_config.stop_words_str, ["hello", "what's your name"])
         self.assertEqual(generate_config.top_k, 1)
@@ -49,7 +47,7 @@ class GenerateConfigTest(TestCase):
         
     def test_kwargs_overwrite(self):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
-        generate_config = Pipeline.create_generate_config(None, parameter.special_tokens, generate_config=self._create_generate_config(), tokenizer=self.tokenizer, **self._create_kwargs())
+        generate_config = Pipeline.create_generate_config(special_tokens=parameter.special_tokens, generate_config=self._create_generate_config(), **self._create_kwargs())
         self.assertEqual(generate_config.stop_words_list, [[1551]])
         self.assertEqual(generate_config.stop_words_str, ["hi"])
         self.assertEqual(generate_config.top_k, 2)
@@ -60,7 +58,7 @@ class GenerateConfigTest(TestCase):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
         parameter.special_tokens.stop_words_list = [[1233, 19912]]
         parameter.special_tokens.stop_words_str = ["gg"]
-        generate_config = Pipeline.create_generate_config(None, parameter.special_tokens, generate_config=self._create_generate_config(), tokenizer=self.tokenizer)
+        generate_config = Pipeline.create_generate_config(special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
         self.assertEqual(generate_config.stop_words_list, [[8848], [1233, 19912]])
         self.assertEqual(generate_config.stop_words_str, ["hello", "what's your name", "gg"])
         
@@ -69,8 +67,8 @@ class GenerateConfigTest(TestCase):
         parameter.special_tokens.stop_words_list = [[1233, 19912]]
         parameter.special_tokens.stop_words_str = ["gg"]
 
-        a = Pipeline.create_generate_config(None, parameter.special_tokens, generate_config=self._create_generate_config(), tokenizer=self.tokenizer)
-        b = Pipeline.create_generate_config(None, parameter.special_tokens, generate_config=self._create_generate_config(), tokenizer=self.tokenizer)
+        a = Pipeline.create_generate_config(special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
+        b = Pipeline.create_generate_config(special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
         a.gen_hash_value()
         b.gen_hash_value()
         self.assertTrue(a.is_same(b))

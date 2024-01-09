@@ -10,7 +10,6 @@ from typing import Optional, Iterator, List, Any, Dict
 
 from maga_transformer.model_factory import ModelFactory, ModelConfig, AsyncModel
 from maga_transformer.pipeline.pipeline import Pipeline
-from maga_transformer.models.chat_glm import ChatGlm
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.async_decoder_engine.decoder_engine import DecoderEngine
 from maga_transformer.utils.util import get_mem_info
@@ -38,37 +37,19 @@ class query_thread(threading.Thread):
         finally:
             print('thread {i} end'.format(i = self.id))
 
-class FakeDecoderEngine(DecoderEngine):
-    def __init__(self, model, config, ptuning_params, speculative_model = None, speculative_config = None):
-        super().__init__(model, config, ptuning_params, speculative_model, speculative_config)
-        self.gathered_batch = False
-
-    def report_metric(self, cost_ms: float):
-        if self.query_manager_.wait_query_size() > 1:
-            self.gathered_batch = True
-
-class FakeAsyncModel(AsyncModel):
-    def __init__(self, model, sp_model = None) -> None:
-        self.model = model
-        self.sp_model = sp_model
-        self.config = model.config
-        assert self.config.max_seq_len > 0
-        self.tokenizer = model.tokenizer
-        logging.info(f'first mem info: used:{get_mem_info().used} free: {get_mem_info().free}')
-        if self.sp_model is not None:
-            self.decoder_engine_ = FakeDecoderEngine(self.model, self.config, None, self.sp_model, self.sp_model.config)
-        else:
-            ptuning_args = get_ptuning_params(self.model, self.tokenizer)
-            self.decoder_engine_ = FakeDecoderEngine(model, self.config, ptuning_args)
+def report_metric(self, cost_ms: float):
+    if self.query_manager_.wait_query_size() > 1:
+        self.gathered_batch = True
 
 class async_gather_batch_test(TestCase):
     def test_simple(self):
-        ckpt_path = '/mnt/nas1/hf/chatglm-6b'
-        model_config = ModelConfig('chatglm', ckpt_path, ckpt_path, False, 0)
-        config = ChatGlm.create_config(model_config)
-        config.layer_num = 2
+        ckpt_path = 'maga_transformer/test/model_test/fake_test/testdata/llama/fake/hf_source'
+        tokenizer_path = 'maga_transformer/test/model_test/fake_test/testdata/llama/fake/hf_source'
+        model_config = ModelConfig('llama', ckpt_path, tokenizer_path, False, 0)
         model = ModelFactory.from_model_type(model_config)
-        model = FakeAsyncModel(model)
+        DecoderEngine.gathered_batch = False
+        DecoderEngine.report_metric = report_metric
+        model = AsyncModel(model)
         pipeline = Pipeline(model, model.tokenizer)
         threads = []
         state = True
@@ -90,4 +71,5 @@ class async_gather_batch_test(TestCase):
         self.assertEqual(state, True)
         self.assertEqual(model.decoder_engine_.gathered_batch, True)
 if __name__ == "__main__":
+    os.environ['KV_CACHE_MEM_MB'] = '128'
     main()

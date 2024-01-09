@@ -83,7 +83,7 @@ class Pipeline(object):
     def stop(self):
         if isinstance(self.model, AsyncModel):
             self.model.stop()
-        
+
     def _get_func(self, func_name: str, default: Callable[..., Any]) -> Callable[..., Any]:
         ft_plugin = plguin_loader.get_plugin()
         if getattr(ft_plugin, func_name, None) is not None:
@@ -118,7 +118,7 @@ class Pipeline(object):
 
     def encode_tokens(self, prompts: List[str], generate_config: GenerateConfig, **kwargs: Any) -> Tuple[torch.Tensor, torch.Tensor]:
         tokens_list = [self.process_encode_func(prompt,
-                                                generate_config=generate_config.to_dict(),
+                                                generate_config=generate_config.model_dump(),
                                                 tokenizer=self.tokenizer,
                                                 special_tokens=self._special_tokens,
                                                 **kwargs)
@@ -159,7 +159,7 @@ class Pipeline(object):
             output_lens.append([(t.nelement() - int(input_length)) for t in tokens])
             responses = [self.process_decode_func(input_length,
                                                   tokens.tolist(),
-                                                  generate_config=generate_config.to_dict(),
+                                                  generate_config=generate_config.model_dump(),
                                                   tokenizer=self.tokenizer,
                                                   decoding_state=state,
                                                   return_incremental=generate_config.return_incremental,
@@ -189,22 +189,19 @@ class Pipeline(object):
 
     # static for ut
     @staticmethod
-    def create_generate_config(decode_func,
-                               special_tokens,
-                               generate_config: Dict[str, Any],
-                               tokenizer: BaseTokenizer,
-                               **kwargs: Any) -> GenerateConfig:
-        config = GenerateConfig()
-        # 如果同时在外面和里面都有设置采样参数，选择使用外面的
+    def create_generate_config(generate_config: Dict[str, Any], special_tokens: Any, **kwargs: Any) -> GenerateConfig:
         generate_config.update(kwargs)
+        try:
+            config = GenerateConfig(**generate_config)
+        except Exception as e:
+            raise FtRuntimeException(ExceptionType.ERROR_GENERATE_CONFIG_FORMAT, f"generate_config validate failed: {str(e)}")
+        # 如果同时在外面和里面都有设置采样参数，选择使用外面的
         # 这里假设外部传进来的stop_word_list和stop_word_str都不包含batch维度
-        generate_config['stop_words_list'] = generate_config.pop("stop_words_list", []) + special_tokens.stop_words_list
-        generate_config['stop_words_str'] = generate_config.pop("stop_words_str", []) + special_tokens.stop_words_str
+        config.stop_words_list += special_tokens.stop_words_list
+        config.stop_words_str += special_tokens.stop_words_str
         adapter_name = generate_config.get("adapter_name", None)
         if adapter_name and isinstance(adapter_name, str):
-            generate_config["adapter_name"] = [adapter_name]
-        config.update(generate_config)
-        config.create_stop_word_criteria(decode_func, tokenizer)
+            config.adapter_name = [adapter_name]
         config.check_data_type()
         return config
 
@@ -223,16 +220,12 @@ class Pipeline(object):
         if images is None or len(images) == 0:
             images = [[]] * len(prompts)
         generate_config_json = kwargs.pop("generate_config", {})
-        generate_config = self.create_generate_config(self.process_decode_func,
-                                                      self.model.config.special_tokens,
-                                                      generate_config_json,
-                                                      self.tokenizer,
-                                                      **kwargs)
+        generate_config = self.create_generate_config(generate_config_json, self.model.config.special_tokens, **kwargs)
         # for delete stop word from output
-        prompts = [self.modify_prompt_func(prompts[i], generate_config=generate_config.to_dict(), image=images[i], **kwargs) for i in range(len(prompts))]
+        prompts = [self.modify_prompt_func(prompts[i], generate_config=generate_config.model_dump(), image=images[i], **kwargs) for i in range(len(prompts))]
 
         if self.model.is_multimodal:
-            modified_results = [self.multimodal_modify_prompt_func(prompts[i], generate_config=generate_config.to_dict(), image=images[i], img_token=self._img_token, **kwargs) for i in range(len(prompts))]
+            modified_results = [self.multimodal_modify_prompt_func(prompts[i], generate_config=generate_config.model_dump(), image=images[i], img_token=self._img_token, **kwargs) for i in range(len(prompts))]
             [prompts, images] = list(zip(*modified_results))
 
         input_token_ids, input_lengths = self.encode_tokens(prompts, generate_config, **kwargs)
@@ -250,7 +243,7 @@ class Pipeline(object):
                  **kwargs: Any) -> Iterator[GenerateResponse]:
         q = queue.Queue()
 
-        async def generator():            
+        async def generator():
             res = None
             try:
                 res = self.pipeline_async(prompts, images, **kwargs)
@@ -295,7 +288,7 @@ class Pipeline(object):
         stop_word_strs = self._get_stop_word_strs(self.tokenizer, generate_config)
         stop_word_str_slices = get_stop_word_slice_list(stop_word_strs)
 
-        batch_stream = self.model.generate_stream(input_token_ids, input_lengths, images, generate_config)
+        batch_stream = self.model.generate_stream(input_token_ids, self.tokenizer, input_lengths, images, generate_config)
 
         iter_count = 0
         last_finished: Optional[List[bool]] = None
@@ -314,7 +307,7 @@ class Pipeline(object):
             if beam_width == 1:
                 generated_batch_result = [
                     self.modify_response_func(response, hidden_states=hidden_states,
-                                              generate_config=generate_config.to_dict(),
+                                              generate_config=generate_config.model_dump(),
                                               **kwargs)
                     for hidden_states, response in zip(hidden_states, generated_batch_result)
                 ]

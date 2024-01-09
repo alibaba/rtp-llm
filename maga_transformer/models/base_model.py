@@ -12,6 +12,7 @@ from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.utils.sample_utils import HuggingfaceSampler, FtSampler, BaseSampler, \
     SamplerSetupParams, SamplingParams, DynamicDecodeOp, BeamSearchSampler
+from maga_transformer.utils.stop_utils import create_stop_criteria_list
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
@@ -376,6 +377,7 @@ class BaseModel(object):
     @torch.no_grad()
     async def generate_stream(self, # type: ignore
                  input_token_ids: torch.Tensor,
+                 tokenizer: BaseTokenizer,
                  input_lengths: Optional[torch.Tensor],
                  images: List[List[str]],
                  generate_config: GenerateConfig) -> AsyncGenerator[GenerateOutput, None]:
@@ -454,7 +456,7 @@ class BaseModel(object):
                 k_cache,
                 v_cache,
                 generate_context.cum_log_probs,
-                generate_config.criteria_list,
+                create_stop_criteria_list(generate_config.stop_words_list, generate_config.stop_words_str, tokenizer)
             )
             aux_info = None
             if generate_context.cum_log_probs != None:

@@ -16,7 +16,7 @@ from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessa
 from maga_transformer.openai.renderers.custom_renderer import RendererParams, ProcessedOutput, \
     StreamResponseObject
 from maga_transformer.openai.renderers.renderer_factory import ChatRendererFactory
-from maga_transformer.config.generate_config import GenerateConfig, StopWordIdsCriteria
+from maga_transformer.config.generate_config import GenerateConfig
 
 class OpenaiEndopoint():
     def __init__(self, model: Union[AsyncModel, BaseModel]):
@@ -62,9 +62,7 @@ class OpenaiEndopoint():
             config.top_p = request.top_p
         if request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
-        config.criteria_list = [
-            StopWordIdsCriteria(self.stop_word_ids_list)
-        ]
+        config.stop_words_list = self.stop_word_ids_list
         return config
 
     async def _complete_non_stream_response(
@@ -134,6 +132,7 @@ class OpenaiEndopoint():
 
         output_generator: AsyncGenerator[GenerateOutput, None] = self.model.generate_stream(
             input_id_tensor,
+            self.tokenizer,
             input_length_tensor,
             input_images,
             generate_config

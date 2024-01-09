@@ -10,6 +10,7 @@ class ExceptionType(IntEnum):
     CONCURRENCY_LIMIT_ERROR = 513
     UNKNOWN_ERROR = 514
     UNSUPPORTED_OPERATION = 515
+    ERROR_GENERATE_CONFIG_FORMAT = 516
     
 
 class FtRuntimeException(Exception):

@@ -8,6 +8,7 @@ from maga_transformer.async_decoder_engine.cache_manager import CacheManager, Ca
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery, QueryStats
+from maga_transformer.models.base_model import BaseTokenizer
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
 
 
@@ -67,6 +68,7 @@ class QueryManager:
 
     def put_requests_to_queue(self,
                               input_token_ids: torch.Tensor,
+                              tokenizer: Optional[BaseTokenizer],
                               context_lengths: torch.Tensor,
                               images: List[List[str]],
                               generate_config: GenerateConfig):
@@ -78,7 +80,7 @@ class QueryManager:
                     if not isinstance(generate_config.adapter_name, list):
                         raise Exception(f"batch query generate config type error {type(generate_config.adapter_name)}")
                     adapter_name = generate_config.adapter_name[i]
-                query = self._gen_new_request(input_token_ids[i, :int(context_lengths[i])], images[i], generate_config, adapter_name)
+                query = self._gen_new_request(input_token_ids[i, :int(context_lengths[i])], images[i], tokenizer, generate_config, adapter_name)
 
                 queries.append(query)
         except Exception as e:
@@ -88,7 +90,7 @@ class QueryManager:
         [self.wait_queries_.append(q) for q in queries]
         return queries
 
-    def _gen_new_request(self, inputs: torch.Tensor, images: List[str], generate_config: GenerateConfig, adapter_name: str):
+    def _gen_new_request(self, inputs: torch.Tensor, images: List[str], tokenizer: Optional[BaseTokenizer], generate_config: GenerateConfig, adapter_name: str):
         seq_length: int = inputs.shape[-1]
         # reuse length represent for ptuning length or kvcache reuse length
         block_size = (seq_length - 2 + self.gen_num_per_circle) // self.cache_config_.seq_size_per_block + 1
@@ -110,6 +112,7 @@ class QueryManager:
             self.cache_manager_.free(block_indice)
             raise e
         return QueryStats(input_tokens=inputs,
+                          tokenizer=tokenizer,
                           images=images,
                           max_seq_len=self.config_.max_seq_len,
                           reuse_length=reuse_length,

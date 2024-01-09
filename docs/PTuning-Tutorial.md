@@ -24,7 +24,7 @@ generate_config = {
 }
 pipeline = Pipeline(model, model.tokenizer)
 
-for res in pipeline(["hello, what's your name"], max_new_tokens = 
+for res in pipeline(["hello, what's your name"], generate_config = 
 generate_config):
     print(res.batch_response)
 pipeline.stop()

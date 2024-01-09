@@ -118,7 +118,6 @@ class ModelTestBase(TestCase):
     def _test_ft_score(self, pipeline: Pipeline, expect_result_file: str):
         generate_config = {
             "top_k": 1,
-            "temperature": None,
             "max_new_tokens": 10
         }
         self._test_score(pipeline, generate_config, expect_result_file)
@@ -126,7 +125,6 @@ class ModelTestBase(TestCase):
     def _test_ft_async_score(self, pipeline: Pipeline, expect_result_file: str):
         generate_config = {
             "top_k": 1,
-            "temperature": None,
             "max_new_tokens": 1
         }
         self._test_async_score(pipeline, generate_config, expect_result_file)
@@ -156,7 +154,6 @@ class ModelTestBase(TestCase):
     def _test_loss(self, pipeline: Pipeline, expect_result_file: str):
         generate_config = {
             "top_k": 1,
-            "temperature": None,
             "max_new_tokens": 10,
             "repetition_penalty": 1,
             "calculate_loss": True

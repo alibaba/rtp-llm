@@ -90,6 +90,12 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
             "<eos>": self.tokenizer.eos_id,
             "<pad>": self.tokenizer.pad_id
         }
+        # fix for eos_token bug
+        if 'eos_token' in kwargs:
+            if kwargs['eos_token'] != self.eos_token:
+                raise Exception("eos_token from config is not equal to default")
+            else:
+                del kwargs['eos_token']
         super().__init__(padding_side=padding_side, clean_up_tokenization_spaces=clean_up_tokenization_spaces, **kwargs)
 
     def get_command(self, token):

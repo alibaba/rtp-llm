@@ -5,7 +5,7 @@ import traceback
 from typing import Optional, Iterator, List, Any, Generator, AsyncGenerator, Dict
 from maga_transformer.utils.util import get_mem_info
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
-from maga_transformer.models.base_model import BaseModel
+from maga_transformer.models.base_model import BaseModel, BaseTokenizer
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.decoder_engine import DecoderEngine
 from maga_transformer.async_decoder_engine.engine_creator import create_engine
@@ -42,6 +42,7 @@ class AsyncModel:
     @torch.no_grad()
     async def generate_stream(self, # type: ignore
                         input_token_ids: torch.Tensor,
+                        tokenizer: BaseTokenizer,
                         input_lengths: Optional[torch.Tensor],
                         images: List[List[str]],
                         generate_config: GenerateConfig) -> AsyncGenerator[GenerateOutput, None]:
@@ -56,7 +57,7 @@ class AsyncModel:
         if input_lengths is None:
             input_lengths = torch.IntTensor([len(v[v != self.config.special_tokens.eos_token_id]) for v in inputs_np])
         try:
-            batch_stream = self.decoder_engine_.decoder(input_token_ids, input_lengths, images, generate_config)
+            batch_stream = self.decoder_engine_.decoder(input_token_ids, tokenizer, input_lengths, images, generate_config)
             async for hidden_states, token_streams, finished, aux_info, loss, logits in batch_stream:
                 yield GenerateOutput(hidden_states, token_streams, finished, aux_info, loss, logits)
         except Exception as e:

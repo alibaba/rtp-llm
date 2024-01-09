@@ -51,7 +51,7 @@ class HuggingfaceSampler(BaseSampler, GenerationMixin):
                  stopping_criteria: Optional[StoppingCriteriaList] = None
     ):
         self.config = HfGenerateConfig()
-        self.config.update(**generate_config.to_dict())
+        self.config.update(**generate_config.model_dump())
         if self.config.max_length is None:
             self.config.max_length = FT_DEFAULT_MAX_LENGTH
         self.logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()

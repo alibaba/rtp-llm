@@ -10,6 +10,7 @@ from typing import Iterator, List, Optional, Tuple, Union, Any, Dict
 from maga_transformer.utils.util import get_mem_info, AtomicCounter
 from maga_transformer.async_decoder_engine.batch_query import QueryStats
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.models.base_model import BaseTokenizer
 from maga_transformer.async_decoder_engine.query_manager import QueryManager
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -40,6 +41,7 @@ class DecoderEngine:
     async def decoder(
         self, 
         input_token_ids: torch.Tensor,
+        tokenizer:  BaseTokenizer,
         input_lengths: Optional[torch.Tensor],
         images: List[List[str]],
         generate_config: GenerateConfig
@@ -60,7 +62,7 @@ class DecoderEngine:
             dtype=torch.int32
         )
         try:
-            queries = self.query_manager_.put_requests_to_queue(input_token_ids, input_lengths, images, generate_config)
+            queries = self.query_manager_.put_requests_to_queue(input_token_ids, tokenizer, input_lengths, images, generate_config)
             counter = self.wait_decode_counter_.get()
             iter_count = 0
             while not all(finished):

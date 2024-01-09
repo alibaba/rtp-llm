@@ -108,37 +108,42 @@ class GangTest(unittest.TestCase):
         os.environ['ALL_USE_ONE_GPU'] = 'true'
         torch_device_count.return_value = 4
         g_parallel_info.reload()
-       
+
         procs: List[Process] = list()
-        if torch_device_count.return_value == 1:        
+        if torch_device_count.return_value == 1:
             proc = multiprocessing.Process(target=main)
             proc.start()
             procs.append(proc)
         else:
             procs = main()
-            
-        time.sleep(30)
-        
-        for i in range(0, int(os.environ['WORLD_SIZE'])):
-            gang_hb_port = WorkerInfo.gang_hb_port_offset(i)
-            response = requests.post(f"http://localhost:{gang_hb_port}/heartbeat", json={"name": 'fake_name', "ip": 'fake_ip'})
-            self.assertEqual(response.json()['initializing'], False)
-            
-        server_port = WorkerInfo.server_port_offset(0)
-        resposne = requests.post(f"http://localhost:{server_port}", json={"prompt": "hello"})
 
-        self.assertEqual(resposne.json()['finished'], True)
-        self.assertEqual(resposne.json()['response'], ['fake output'])
-        logging.info("Start test terminate gang worker")
-        
-        if torch_device_count.return_value == 1:        
-            os.kill(proc.pid, signal.SIGTERM)
-        else:        
-            procs[0].terminate()
-            time.sleep(10)
+        time.sleep(30)
+
+        try:
+            for i in range(0, int(os.environ['WORLD_SIZE'])):
+                gang_hb_port = WorkerInfo.gang_hb_port_offset(i)
+                hb_response = requests.post(f"http://localhost:{gang_hb_port}/heartbeat", json={"name": 'fake_name', "ip": 'fake_ip'}, timeout=5)
+                print("raw response: ", hb_response)
+                self.assertEqual(hb_response.json()['initializing'], False)
+
+            server_port = WorkerInfo.server_port_offset(0)
+            response = requests.post(f"http://localhost:{server_port}", json={"prompt": "hello"}, timeout=5)
+            print("raw response: ", response.text)
+
+            self.assertEqual(response.json()['finished'], True)
+            self.assertEqual(response.json()['response'], ['fake output'])
+            logging.info("Start test terminate gang worker")
+
+            # test gang heartbeat loss will cause other process terminate
+            if torch_device_count.return_value > 1:
+                procs[0].terminate()
+                time.sleep(10)
+                for proc in procs:
+                    self.assertTrue(proc.is_alive() == False)
+        finally:
             for proc in procs:
-                os.kill(proc.pid, signal.SIGTERM)
-                self.assertTrue(proc.is_alive() == False)
+                if proc.is_alive():
+                    proc.terminate()
 
 if __name__ == '__main__':
     unittest.main()

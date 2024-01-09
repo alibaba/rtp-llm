@@ -41,6 +41,7 @@ class FakeModel(BaseModel):
     async def generate_stream(
             self, # type: ignore
             inputs: torch.Tensor,
+            tokenizer: Any,
             input_lengths: Optional[torch.Tensor],
             images: List[List[str]],
             generate_config: GenerateConfig) -> Iterator[GenerateOutput]:

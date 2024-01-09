@@ -275,7 +275,6 @@ def local_rank_main():
     try:
         # avoid multiprocessing load failed
         if os.environ.get('FT_SERVER_TEST', None) is None:
-            logging.error("ggg")
             logging.config.dictConfig(LOGGING_CONFIG)
         # reload for multiprocessing.start_method == fork
         g_parallel_info.reload()

@@ -6,9 +6,12 @@ from threading import Lock
 from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
+from transformers.generation.stopping_criteria import StoppingCriteria
+from maga_transformer.utils.stop_utils import create_stop_criteria_list
 from maga_transformer.async_decoder_engine.ptuning import PrefixType
 from maga_transformer.utils.util import to_cuda, to_cpu
 from maga_transformer.metrics import kmonitor, GaugeMetrics
+from maga_transformer.models.base_model import BaseTokenizer
 
 '''
 input_tokens:    prompt tokens
@@ -25,13 +28,14 @@ class QueryStats:
     def __init__(
             self,
             input_tokens: torch.Tensor,
+            tokenizer: Optional[BaseTokenizer],
             max_seq_len: int,
             reuse_length: int,
             generate_config: GenerateConfig,
             block_indice: List[int],
             slice_length : int,
             images: List[str] = [],
-            adapter_name: str = ""
+            adapter_name: str = "",
     ) -> None:
         self.max_seq_len = max_seq_len
         self.reuse_length = reuse_length
@@ -57,8 +61,12 @@ class QueryStats:
         self.cum_log_probs = torch.zeros([self.beam_width], dtype=torch.float32)
         self.medusa_state = None
         self.begin_time = current_time_ms()
+        self.stop_criteria_list: List[StoppingCriteria] = \
+            create_stop_criteria_list(generate_config.stop_words_list,
+                                      generate_config.stop_words_str,
+                                      tokenizer)
 
-        # only resource
+
         self.block_indice: List[List[int]] = [block_indice]
 
     @property
@@ -132,7 +140,7 @@ class QueryStats:
             return block_indice
 
     def _invoke_stop_words_criterion(self):
-        for stop_criteria in self.generate_config.criteria_list:
+        for stop_criteria in self.stop_criteria_list:
             tokens_to_check = self.output_token_ids[0]
             if stop_criteria(tokens_to_check.tolist(), self.context_length):
                 return True
@@ -247,7 +255,7 @@ class BatchQuery:
     @property
     def max_seq_length(self):
         return max(self.seq_lengths_list) if self.seq_lengths_list else 0
-    
+
     @property
     def decoder_batch_size(self):
         return self.beam_width * self.generate_batch_size + self.context_batch_size
