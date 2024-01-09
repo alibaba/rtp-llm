@@ -290,12 +290,12 @@ void mmha_launch_kernel_dispatch(const KernelParamsType& params,
                                  const cudaStream_t&     stream)
 {
     int const tlength = params.timestep;
-    if (tlength < 1024) {
+    if (tlength < 2048) {
         mmha_launch_kernel_dispatch_8bits_kv_cache<T, KVCacheBuffer, KernelParamsType, Dh, 256, HAS_BEAMS, false>(
             params, kv_cache_buffer, stream, tlength);
     }
     else {
-        if (params.multi_block_mode) {
+        if (params.multi_block_mode && (tlength > 8192 || params.batch_size < 4)) {
             mmha_launch_kernel_dispatch_8bits_kv_cache<T, KVCacheBuffer, KernelParamsType, Dh, 256, HAS_BEAMS, true>(
                 params, kv_cache_buffer, stream, tlength);
         }
