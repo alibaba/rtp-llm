@@ -1,11 +1,14 @@
 import json
 import os
-import torch
+import re
 from typing import List, Optional, Union, Dict
 from sentencepiece import SentencePieceProcessor
 from transformers import PreTrainedTokenizer
 from transformers.utils import logging, PaddingStrategy
 from transformers.tokenization_utils_base import EncodedInput, BatchEncoding
+
+
+logger = logging.get_logger(__name__)
 
 
 class SPTokenizer:
@@ -21,17 +24,30 @@ class SPTokenizer:
         self.pad_id: int = self.sp_model.unk_id()
         assert self.sp_model.vocab_size() == self.sp_model.get_piece_size()
 
-        special_tokens = ["[MASK]", "[gMASK]", "[sMASK]", "sop", "eop", "<|system|>", "<|user|>", "<|assistant|>",
-                          "<|observation|>"]
+        role_special_tokens = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
+        special_tokens = ["[MASK]", "[gMASK]", "[sMASK]", "sop", "eop"] + role_special_tokens
         self.special_tokens = {}
         self.index_special_tokens = {}
         for token in special_tokens:
             self.special_tokens[token] = self.n_words
             self.index_special_tokens[self.n_words] = token
             self.n_words += 1
+        self.role_special_token_expression = "|".join([re.escape(token) for token in role_special_tokens])
 
-    def tokenize(self, s: str):
-        return self.sp_model.EncodeAsPieces(s)
+    def tokenize(self, s: str, encode_special_tokens=False):
+        if encode_special_tokens:
+            last_index = 0
+            t = []
+            for match in re.finditer(self.role_special_token_expression, s):
+                if last_index < match.start():
+                    t.extend(self.sp_model.EncodeAsPieces(s[last_index:match.start()]))
+                t.append(s[match.start():match.end()])
+                last_index = match.end()
+            if last_index < len(s):
+                t.extend(self.sp_model.EncodeAsPieces(s[last_index:]))
+            return t
+        else:
+            return self.sp_model.EncodeAsPieces(s)
 
     def encode(self, s: str, bos: bool = False, eos: bool = False) -> List[int]:
         assert type(s) is str
@@ -70,61 +86,82 @@ class SPTokenizer:
         """Converts an index (integer) in a token (str) using the vocab."""
         if index in self.index_special_tokens:
             return self.index_special_tokens[index]
-        if index in [self.eos_id, self.bos_id, self.pad_id] or index < 0:
+        if index in [self.eos_id, self.bos_id, self.pad_id] or index < 0 or index > self.sp_model.vocab_size():
             return ""
         return self.sp_model.IdToPiece(index)
 
 
 class ChatGLMTokenizer(PreTrainedTokenizer):
-    vocab_files_names = {"vocab_file": "tokenizer.model"}
 
+    vocab_files_names = {"vocab_file": "tokenizer.model"}
     model_input_names = ["input_ids", "attention_mask", "position_ids"]
 
-    def __init__(self, vocab_file, padding_side="left", clean_up_tokenization_spaces=False, **kwargs):
+    def __init__(
+        self,
+        vocab_file,
+        padding_side="left",
+        clean_up_tokenization_spaces=False,
+        encode_special_tokens=False,
+        **kwargs
+    ):
         self.name = "GLMTokenizer"
-
         self.vocab_file = vocab_file
         self.tokenizer = SPTokenizer(vocab_file)
         self.special_tokens = {
             "<bos>": self.tokenizer.bos_id,
             "<eos>": self.tokenizer.eos_id,
+            "<unk>": self.tokenizer.pad_id,
             "<pad>": self.tokenizer.pad_id
         }
-        # fix for eos_token bug
-        if 'eos_token' in kwargs:
-            if kwargs['eos_token'] != self.eos_token:
-                raise Exception("eos_token from config is not equal to default")
-            else:
-                del kwargs['eos_token']
-        super().__init__(padding_side=padding_side, clean_up_tokenization_spaces=clean_up_tokenization_spaces, **kwargs)
+        self.encode_special_tokens = encode_special_tokens
+
+        super().__init__(
+            padding_side=padding_side,
+            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
+            **kwargs
+        )
 
     def get_command(self, token):
-        print("self.special_tokens = ", self.special_tokens)
         if token in self.special_tokens:
             return self.special_tokens[token]
-       	print("self.tokenizer.special_tokens = ", self.tokenizer.special_tokens)
         assert token in self.tokenizer.special_tokens, f"{token} is not a special token for {self.name}"
         return self.tokenizer.special_tokens[token]
 
     @property
     def unk_token(self) -> str:
-        return "<unk>"
+        return self.tokenizer.sp_model.IdToPiece(self.get_command("<unk>"))
 
     @property
     def pad_token(self) -> str:
-        return "<unk>"
-
-    @property
-    def pad_token_id(self):
-        return self.get_command("<pad>")
+        return self.tokenizer.sp_model.IdToPiece(self.get_command("<pad>"))
 
     @property
     def eos_token(self) -> str:
-        return "</s>"
+        return self.tokenizer.sp_model.IdToPiece(self.get_command("<eos>"))
+
+    @property
+    def unk_token_id(self) -> int:
+        return self.get_command("<unk>")
+
+    @property
+    def pad_token_id(self) -> int:
+        return self.get_command("<pad>")
 
     @property
     def eos_token_id(self):
         return self.get_command("<eos>")
+
+    @unk_token.setter
+    def unk_token(self, value):
+        logger.warning("Setting unk_token is not supported, use the default one.")
+
+    @pad_token.setter
+    def pad_token(self, value):
+        logger.warning("Setting pad_token is not supported, use the default one.")
+
+    @eos_token.setter
+    def eos_token(self, value):
+        logger.warning("Setting eos_token is not supported, use the default one.")
 
     @property
     def vocab_size(self):
@@ -137,7 +174,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         return vocab
 
     def _tokenize(self, text, **kwargs):
-        return self.tokenizer.tokenize(text)
+        return self.tokenizer.tokenize(text, encode_special_tokens=self.encode_special_tokens)
 
     def _convert_token_to_id(self, token):
         """ Converts a token (str) in an id using the vocab. """
@@ -203,7 +240,7 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
         return self.batch_encode_plus([input_ids], return_tensors="pt", is_split_into_words=True)
 
     def build_inputs_with_special_tokens(
-            self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
+        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
     ) -> List[int]:
         """
         Build model inputs from a sequence or a pair of sequence for sequence classification tasks by concatenating and
@@ -222,21 +259,18 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
             `List[int]`: List of [input IDs](../glossary#input-ids) with the appropriate special tokens.
         """
         prefix_tokens = self.get_prefix_tokens()
-        print("prefix_tokens = ", prefix_tokens)
         token_ids_0 = prefix_tokens + token_ids_0
-        print("token_ids_0 here = ", token_ids_0)
-        print("token_ids_1 = ", token_ids_1)
         if token_ids_1 is not None:
             token_ids_0 = token_ids_0 + token_ids_1 + [self.get_command("<eos>")]
         return token_ids_0
 
     def _pad(
-            self,
-            encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
-            max_length: Optional[int] = None,
-            padding_strategy: PaddingStrategy = PaddingStrategy.DO_NOT_PAD,
-            pad_to_multiple_of: Optional[int] = None,
-            return_attention_mask: Optional[bool] = None,
+        self,
+        encoded_inputs: Union[Dict[str, EncodedInput], BatchEncoding],
+        max_length: Optional[int] = None,
+        padding_strategy: PaddingStrategy = PaddingStrategy.DO_NOT_PAD,
+        pad_to_multiple_of: Optional[int] = None,
+        return_attention_mask: Optional[bool] = None,
     ) -> dict:
         """
         Pad encoded inputs (on left/right and up to predefined length or max length in the batch)

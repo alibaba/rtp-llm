@@ -10,7 +10,7 @@ class ChatGlmV3(ChatGlmV2):
     def load_tokenizer(self):
         self.tokenizer = None
         if self.config.tokenizer_path:
-            self.tokenizer = ChatGLMTokenizer.from_pretrained(self.config.tokenizer_path)
+            self.tokenizer = ChatGLMTokenizer.from_pretrained(self.config.tokenizer_path, encode_special_tokens=True)
             self.config.special_tokens.eos_token_id = self.tokenizer.tokenizer.eos_id
 
     @staticmethod
