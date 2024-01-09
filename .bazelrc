@@ -63,11 +63,9 @@ build:cuda12_2 --copt="-DUSE_CUDA12=1"
 
 build:debug -c dbg
 build:debug --copt -g --copt -O0
-build:debug --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
+build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 
 # remote cache conflicts with remote executor.
-build --remote_cache=grpc://100.67.130.31:8989 --remote_local_fallback --noremote_upload_local_results
-build:remote --remote_executor=grpc://100.67.130.31:8989 --remote_cache=grpc://100.67.130.31:8989
 build:remote --jobs=500 --local_test_jobs=HOST_CPUS*.8 --build_request_id="https://host?ENSURE_OUTPUTS_PRESENT=true#00000000-0000-0000-0000-000000000000"
 build:remote --remote_local_fallback_strategy=sandboxed
 build:remote --experimental_remote_merkle_tree_cache
@@ -82,4 +80,5 @@ test:cicd --test_output=errors --max_test_output_bytes=102400 --experimental_ui_
 test --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"
 test --test_env OMP_NUM_THREADS=8
 test --test_env FT_SERVER_TEST="1"
+test --test_env PY_LOG_LEVEL="INFO"
 
