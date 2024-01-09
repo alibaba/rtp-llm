@@ -256,6 +256,8 @@ class FastApiServer(object):
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
         async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
+            # TODO(wangyin): Exception handling
+            # TODO(wangyin): add concurrency control
             id = self._atomic_count.increment()
             assert (self._openai_endpoint != None)
             completion_future = self._openai_endpoint.chat_completion(request, raw_request)
