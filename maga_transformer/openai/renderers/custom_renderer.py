@@ -7,7 +7,7 @@ from transformers import PreTrainedTokenizer
 
 from maga_transformer.models.base_model import BaseTokenizer, GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
-    ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason
+    ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, RoleEnum
 
 @dataclass
 class ProcessedOutput:
@@ -57,7 +57,64 @@ class CustomChatRenderer():
             request: ChatCompletionRequest,
             input_token_length: int,
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        raise NotImplementedError
+        index = 0
+        yield StreamResponseObject(
+            choices=[ChatCompletionResponseStreamChoice(
+                index=index,
+                delta=DeltaMessage(
+                    role=RoleEnum.assistant,
+                ),
+            )]
+        )
+
+        responded_token_length = 0
+        output_token_length = 0
+        responded_string = ""
+        finish_reason = None
+
+        async for output in output_generator:
+            index += 1
+            processed_output = self._process_output_ids_tensor(
+                input_token_length + responded_token_length, output.output_ids)
+            delta_output_string = processed_output.output_str
+            delta_output_token_length = processed_output.output_token_length
+            finish_reason = processed_output.finish_reason
+            output_token_length = responded_token_length + delta_output_token_length
+            if len(delta_output_string) > 0:
+                responded_token_length += delta_output_token_length
+                responded_string += delta_output_string
+                yield StreamResponseObject(
+                    choices=[ChatCompletionResponseStreamChoice(
+                        index=index,
+                        delta=DeltaMessage(
+                            content=delta_output_string,
+                        ),
+                    )],
+                    usage=UsageInfo(
+                        prompt_tokens=input_token_length,
+                        total_tokens=input_token_length + output_token_length,
+                        completion_tokens=output_token_length
+                    )
+                )
+
+        if finish_reason == None:
+            logging.debug(f"output [{responded_string}] found no stop reason! use stop as default.")
+            finish_reason = FinisheReason.stop
+
+        yield StreamResponseObject(
+            choices=[ChatCompletionResponseStreamChoice(
+                index=index + 1,
+                delta=DeltaMessage(
+                    content="",
+                ),
+                finish_reason=finish_reason
+            )],
+            usage=UsageInfo(
+                prompt_tokens=input_token_length,
+                total_tokens=input_token_length + output_token_length,
+                completion_tokens=output_token_length
+            )
+        )
 
     def _check_finish_reason(self, token_ids: List[int]) -> Optional[FinisheReason]:
         if len(token_ids) >= self.max_seq_len:
