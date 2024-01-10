@@ -230,18 +230,16 @@ struct outputCrossAttentionParam {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #define DECLARE_MMHA_NORMAL_AND_PAGED(T)                                                                               \
-    void masked_multihead_attention(const Masked_multihead_attention_params<T>& params,                                \
-                                    const KVBlockArray&                         block_array,                           \
-                                    const cudaStream_t&                         stream);                                                       \
-    void masked_multihead_attention(const Masked_multihead_attention_params<T>& params,                                \
-                                    const KVLinearBuffer&                       kv_cache_buffer,                       \
-                                    const cudaStream_t&                         stream);                                                       \
-    void masked_multihead_attention(const Cross_multihead_attention_params<T>& params,                                 \
-                                    const KVBlockArray&                        block_array,                            \
-                                    const cudaStream_t&                        stream);                                                       \
-    void masked_multihead_attention(const Cross_multihead_attention_params<T>& params,                                 \
-                                    const KVLinearBuffer&                      kv_cache_buffer,                        \
-                                    const cudaStream_t&                        stream);
+    void masked_multihead_attention(                                                                                   \
+        Masked_multihead_attention_params<T>& params, const KVBlockArray& block_array, const cudaStream_t& stream);    \
+    void masked_multihead_attention(Masked_multihead_attention_params<T>& params,                                      \
+                                    const KVLinearBuffer&                 kv_cache_buffer,                             \
+                                    const cudaStream_t&                   stream);                                                       \
+    void masked_multihead_attention(                                                                                   \
+        Cross_multihead_attention_params<T>& params, const KVBlockArray& block_array, const cudaStream_t& stream);     \
+    void masked_multihead_attention(Cross_multihead_attention_params<T>& params,                                       \
+                                    const KVLinearBuffer&                kv_cache_buffer,                              \
+                                    const cudaStream_t&                  stream);
 DECLARE_MMHA_NORMAL_AND_PAGED(float);
 DECLARE_MMHA_NORMAL_AND_PAGED(uint16_t);
 #ifdef ENABLE_BF16
