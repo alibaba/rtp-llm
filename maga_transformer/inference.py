@@ -174,7 +174,7 @@ class InferenceWorker():
             return_hidden_states = generate_config.get("return_hidden_states", False) or generate_config.get("output_hidden_states", False)
             calculate_loss = generate_config.get("calculate_loss", 0)
             return_logits = generate_config.get("return_logits", False) or generate_config.get("output_logits", False)
-            output_input_ids = generate_config.get("output_input_ids", False)
+            output_input_ids = generate_config.get("output_input_ids", False) or generate_config.get("return_input_ids", False)
 
             generate_config["return_hidden_states"] = return_hidden_states
             generate_config["return_logits"] = return_logits
