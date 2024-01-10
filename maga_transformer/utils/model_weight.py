@@ -557,28 +557,6 @@ class LoRAWeights:
             for name, weight in layer_weights.items():
                 self.lora_b_weights[i][name] = weight * scale
 
-    def padding_lora_rank(self, new_rank: int):
-        # lora_a: [m, r] -> [m, new_rank]
-        # lora_b: [r, n] -> [new_rank, n]
-        if self.lora_rank >= new_rank:
-            return
-        for i, layer_weights in enumerate(self.lora_a_weights):
-            for name, weight in layer_weights.items():
-                padding_size = int(new_rank - self.lora_rank)
-                self.lora_a_weights[i][name] = \
-                    torch.cat([weight, torch.zeros(weight.shape[0], padding_size,
-                      dtype=weight.dtype, device=weight.device)], dim=1).contiguous()
-
-        for i, layer_weights in enumerate(self.lora_b_weights):
-            for name, weight in layer_weights.items():
-                    padding_size = int(new_rank - self.lora_rank)
-                    self.lora_b_weights[i][name] = \
-                        torch.cat([weight, torch.zeros(padding_size, weight.shape[1],
-                        dtype=weight.dtype, device=weight.device)], dim=0).contiguous()
-
-        self.set_lora_rank(new_rank)
-
-
 class LoRAMap():
 
     def __init__(self) -> None:
@@ -609,13 +587,6 @@ class LoRAMap():
             id = self.name_id_map[name]
             del self.name_id_map[name]
             del self.weights_map[id]
-
-    def padding_lora_rank(self, lora_rank: int):
-        if lora_rank != self.max_rank:
-            for _, weights in self.weights_map.items():
-                weights.padding_lora_rank(lora_rank)
-        if lora_rank > self.max_rank:
-            self.max_rank = lora_rank
 
     def split(self, lora_names: List[str]):
         result = LoRAMap()

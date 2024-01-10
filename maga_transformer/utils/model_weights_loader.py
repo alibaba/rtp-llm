@@ -79,7 +79,6 @@ class ModelWeightsLoader:
                 lora_weights = self.load_lora_weights_from_scratch(lora_name, int8_mode, device)
                 # save lora_weight to lora_map to avoid free memory
                 _ = weights.lora_map.add_lora_name(lora_name, lora_weights)
-                # self.lora_map.padding_lora_rank(lora_weight.lora_rank)
         
         return weights
     

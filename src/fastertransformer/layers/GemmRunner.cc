@@ -25,6 +25,18 @@ void GemmRunner<T>::freeBuffer()
 {
     allocator_->free((void**)&lora_buf_);
 }
+
+
+/// @brief apply different lora or unique lora to multiple tokens.
+/// @tparam s: the token num of inputs.
+/// @tparam b: the batch size of inputs.
+/// @tparam input_lengths: [batch] the token num for each batch, 
+///         the sum of input_lengths must be equal to s.
+/// @tparam k: the hidden units
+/// @tparam n: the intersize
+/// @tparam lora_ids: [batch] the lora model id for each batch.
+/// @tparam lora_weights: all lora model weights ref.
+
 template<typename T>
 void GemmRunner<T>::applyLoRA(const int            s,
                               const int            b,
