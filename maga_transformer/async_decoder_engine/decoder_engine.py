@@ -26,7 +26,7 @@ class DecoderEngine:
 
         self.stop_flag_ = False
         self.has_quit_process_flag_ = False
-        self.p = threading.Thread(target=self.async_process)
+        self.p = threading.Thread(target=self.async_process, daemon=True)
         self.p.start()
         self.wait_decode_counter_ = AtomicCounter()
 
