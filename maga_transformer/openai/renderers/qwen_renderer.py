@@ -2,6 +2,8 @@ import copy
 import json
 import re
 import logging
+import torch
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 
 from transformers import PreTrainedTokenizer
@@ -41,6 +43,12 @@ DUMMY_THOUGHT = {
 }
 
 _TEXT_COMPLETION_CMD = object()
+
+@dataclass
+class ProcessedOutput:
+    output_str: str
+    output_token_length: int
+    finish_reason: Optional[FinisheReason]
 
 # TODO(wangyin): pass `max_window_size` to here.
 def make_context(
@@ -274,6 +282,25 @@ class QwenRenderer(CustomChatRenderer):
         # z = response.rfind("\nFinal Answer: ")
         # if z >= 0:
         #     response = response[z + len("\nFinal Answer: ") :]
+
+    def _process_output_ids_tensor(
+            self, input_length, output_ids_tensor: torch.Tensor, finished: bool = False
+    ) -> ProcessedOutput:
+        output_ids_tensor = output_ids_tensor.cpu().reshape([-1])
+        # TODO(wangyin): This slicing shouldn't be done here.
+        # model should return output length, ids should be sliced with output length.
+        output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()
+        finish_reason = self._check_finish_reason(output_ids) if finished else None
+
+        output_ids = output_ids[input_length:]
+        output_length = len(output_ids)
+        output_ids = self._remove_stop_word_ids(output_ids)
+        output_str = self.tokenizer.decode(output_ids)
+        output_str = output_str.strip(u'\uFFFD')
+
+        for stop_word in self.stop_words_list:
+            output_str = output_str.replace(stop_word, "")
+        return ProcessedOutput(output_str, output_length, finish_reason)
 
     async def render_response_stream(
             self,

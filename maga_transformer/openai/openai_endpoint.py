@@ -13,7 +13,7 @@ from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessage, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, UsageInfo, \
     FinisheReason, DeltaMessage, ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse
-from maga_transformer.openai.renderers.custom_renderer import RendererParams, ProcessedOutput, \
+from maga_transformer.openai.renderers.custom_renderer import RendererParams, \
     StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderers.renderer_factory import ChatRendererFactory
 from maga_transformer.config.generate_config import GenerateConfig

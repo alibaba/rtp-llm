@@ -10,12 +10,6 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, RoleEnum
 
 @dataclass
-class ProcessedOutput:
-    output_str: str
-    output_token_length: int
-    finish_reason: Optional[FinisheReason]
-
-@dataclass
 class StreamResponseObject:
     choices: List[ChatCompletionResponseStreamChoice] = field(default_factory=list)
     usage: Optional[UsageInfo] = None
@@ -67,21 +61,28 @@ class CustomChatRenderer():
             )]
         )
 
-        responded_token_length = 0
         output_token_length = 0
+        responded_output_ids = []
         responded_string = ""
         finish_reason = None
 
         async for output in output_generator:
             index += 1
-            processed_output = self._process_output_ids_tensor(
-                input_token_length + responded_token_length, output.output_ids)
-            delta_output_string = processed_output.output_str
-            delta_output_token_length = processed_output.output_token_length
-            finish_reason = processed_output.finish_reason
-            output_token_length = responded_token_length + delta_output_token_length
+            output_ids = self._clean_output_ids(input_token_length, output.output_ids)
+            output_token_length = len(output_ids)
+            finish_reason = self._check_finish_reason(output_ids)
+            output_ids = self._remove_stop_word_ids(output_ids)
+            # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
+            decoded_prev_token = self.tokenizer.decode(responded_output_ids[-1:])
+            tokens_to_decode = responded_output_ids[-1:] + output_ids[len(responded_output_ids):]
+            decoded_string = self.tokenizer.decode(tokens_to_decode)
+            delta_output_string = decoded_string[len(decoded_prev_token):]
+
+            responded_output_ids = output_ids
+            responded_string += delta_output_string
+            print(f"tokens_to_decode: {tokens_to_decode}, decoded_string: [{decoded_string}], delta_output_string: [{delta_output_string}]")
+
             if len(delta_output_string) > 0:
-                responded_token_length += delta_output_token_length
                 responded_string += delta_output_string
                 yield StreamResponseObject(
                     choices=[ChatCompletionResponseStreamChoice(
@@ -128,28 +129,16 @@ class CustomChatRenderer():
 
     def _remove_stop_word_ids(self, output_ids: List[int]) -> List[int]:
         for stop_word_ids in self.stop_word_ids_list:
-            for i in range(1, len(stop_word_ids)):
+            for i in range(1, len(stop_word_ids) + 1):
                 if output_ids[-i:] == stop_word_ids[:i]:
                     output_ids = output_ids[:-i]
                     break
         return output_ids
 
-    def _process_output_ids_tensor(
-            self, input_length, output_ids_tensor: torch.Tensor, finished: bool = False
-    ) -> ProcessedOutput:
+    def _clean_output_ids(self, input_length: int, output_ids_tensor: torch.Tensor) -> list[int]:
         output_ids_tensor = output_ids_tensor.cpu().reshape([-1])
         # TODO(wangyin): This slicing shouldn't be done here.
         # model should return output length, ids should be sliced with output length.
-        output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()
-        finish_reason = self._check_finish_reason(output_ids) if finished else None
-
-        output_ids = output_ids[input_length:]
-        output_length = len(output_ids)
-        output_ids = self._remove_stop_word_ids(output_ids)
-        output_str = self.tokenizer.decode(output_ids)
-        output_str = output_str.strip(u'\uFFFD')
-
-        for stop_word in self.stop_words_list:
-            output_str = output_str.replace(stop_word, "")
-        return ProcessedOutput(output_str, output_length, finish_reason)
+        output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()[input_length:]
+        return output_ids
 
