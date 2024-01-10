@@ -143,3 +143,18 @@ print(f"2 function response: {json.dumps(response, indent=4, ensure_ascii=False)
 ```
 
 当前 function call 功能当前仅支持 qwen 系列模型，其他模型待扩展。
+
+# 其他客户端的接入方法
+
+首先，以服务方式运行rtp-llm
+
+``` bash
+export MODEL_TYPE=model_type
+export TOKENIZER_PATH=/path/to/tokenizer
+export CHECKPOINT_PATH=/path/to/model
+export START_PORT=port
+
+python3 -m maga_transformer.start_server
+```
+
+在客户端对应位置填写API URL：`{server_ip}:{port}`即可

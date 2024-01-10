@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi import FastAPI
 from fastapi import Request
+from fastapi.middleware.cors import CORSMiddleware
 import torch
 import asyncio
 
@@ -205,6 +206,14 @@ class FastApiServer(object):
     def create_server(self):
         app = FastAPI()
 
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["POST,GET,OPTIONS"],
+            allow_headers=["*"]
+        )
+
         @app.on_event("startup")
         async def startup():
             RunVar("_default_thread_limiter").set(CapacityLimiter(self._controller.max_concurrency * 2))
@@ -251,8 +260,6 @@ class FastApiServer(object):
             assert (self._openai_endpoint != None)
             return await self._openai_endpoint.list_models()
 
-        @app.options("/chat/completions")
-        @app.options("/v1/chat/completions")
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
         async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
