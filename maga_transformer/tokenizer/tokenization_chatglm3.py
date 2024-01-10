@@ -32,13 +32,13 @@ class SPTokenizer:
             self.special_tokens[token] = self.n_words
             self.index_special_tokens[self.n_words] = token
             self.n_words += 1
-        self.role_special_token_expression = "|".join([re.escape(token) for token in role_special_tokens])
+        self.special_token_expression = "|".join([re.escape(token) for token in special_tokens])
 
     def tokenize(self, s: str, encode_special_tokens=False):
         if encode_special_tokens:
             last_index = 0
             t = []
-            for match in re.finditer(self.role_special_token_expression, s):
+            for match in re.finditer(self.special_token_expression, s):
                 if last_index < match.start():
                     t.extend(self.sp_model.EncodeAsPieces(s[last_index:match.start()]))
                 t.append(s[match.start():match.end()])
@@ -326,3 +326,22 @@ class ChatGLMTokenizer(PreTrainedTokenizer):
             encoded_inputs[self.model_input_names[0]] = [self.pad_token_id] * difference + required_input
 
         return encoded_inputs
+
+    @property
+    def default_chat_template(self):
+        """
+        Copied from https://huggingface.co/THUDM/chatglm3-6b/blob/main/tokenizer_config.json
+        """
+
+        return (
+            "{% for message in messages %}"
+                "{% if loop.first %}"
+                    "[gMASK]sop<|{{ message['role'] }}|> \n {{ message['content'] }}"
+                "{% else %}"
+                    "<|{{ message['role'] }}|> \n {{ message['content'] }}"
+                "{% endif %}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}"
+                "<|assistant|>"
+            "{% endif %}"
+        )

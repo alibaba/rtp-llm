@@ -88,9 +88,10 @@ class BasicRenderer(CustomChatRenderer):
         return jinja_env.from_string(chat_template)
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
+        request_dict = json.loads(request.model_dump_json())
         rendered = self.compiled_template.render(
-            messages=request.messages,
-            functions=request.functions,
+            messages=request_dict['messages'],
+            functions=request_dict['functions'],
             json=json,
             add_generation_prompt=self.add_generation_prompt,
             **self.special_tokens_map
