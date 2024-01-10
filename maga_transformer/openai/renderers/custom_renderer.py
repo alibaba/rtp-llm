@@ -80,7 +80,6 @@ class CustomChatRenderer():
 
             responded_output_ids = output_ids
             responded_string += delta_output_string
-            print(f"tokens_to_decode: {tokens_to_decode}, decoded_string: [{decoded_string}], delta_output_string: [{delta_output_string}]")
 
             if len(delta_output_string) > 0:
                 responded_string += delta_output_string
