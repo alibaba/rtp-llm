@@ -26,16 +26,14 @@ namespace fastertransformer {
 
 // Forward declaration of the kernel launcher to avoid including decoderMaskedMultiheadAttentionLaunch.h
 template<typename T, typename KVCacheBuffer, typename T_PARAMS, int Dh>
-void mmha_launch_kernel(const T_PARAMS& params, const KVCacheBuffer& kv_cache_buffer, const cudaStream_t& stream);
+void mmha_launch_kernel(T_PARAMS& params, const KVCacheBuffer& kv_cache_buffer, const cudaStream_t& stream);
 
 #define MMHA_LAUNCH_KERNEL(Dh)                                                                                         \
     mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, Dh>(params, kv_cache_buffer, stream);                     \
     break;
 
 template<typename T, typename KVCacheBuffer, typename KERNEL_PARAMS_TYPE>
-void multihead_attention_(const KERNEL_PARAMS_TYPE& params,
-                          const KVCacheBuffer&      kv_cache_buffer,
-                          const cudaStream_t&       stream)
+void multihead_attention_(KERNEL_PARAMS_TYPE& params, const KVCacheBuffer& kv_cache_buffer, const cudaStream_t& stream)
 {
     switch (params.hidden_size_per_head) {
         // case 32: mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 32>(params, kv_cache_buffer, stream);
@@ -77,16 +75,16 @@ void multihead_attention_(const KERNEL_PARAMS_TYPE& params,
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #define INSTANTIATE_MMHA_NORMAL_AND_PAGED(T, CROSS_ATTENTION)                                                          \
-    void masked_multihead_attention(const Multihead_attention_params<T, CROSS_ATTENTION>& params,                      \
-                                    const KVBlockArray&                                   kv_cache_buffer,             \
-                                    const cudaStream_t&                                   stream)                      \
+    void masked_multihead_attention(Multihead_attention_params<T, CROSS_ATTENTION>& params,                            \
+                                    const KVBlockArray&                             kv_cache_buffer,                   \
+                                    const cudaStream_t&                             stream)                            \
     {                                                                                                                  \
         multihead_attention_<T, KVBlockArray, Multihead_attention_params<T, CROSS_ATTENTION>>(                         \
             params, kv_cache_buffer, stream);                                                                          \
     }                                                                                                                  \
-    void masked_multihead_attention(const Multihead_attention_params<T, CROSS_ATTENTION>& params,                      \
-                                    const KVLinearBuffer&                                 kv_cache_buffer,             \
-                                    const cudaStream_t&                                   stream)                      \
+    void masked_multihead_attention(Multihead_attention_params<T, CROSS_ATTENTION>& params,                            \
+                                    const KVLinearBuffer&                           kv_cache_buffer,                   \
+                                    const cudaStream_t&                             stream)                            \
     {                                                                                                                  \
         multihead_attention_<T, KVLinearBuffer, Multihead_attention_params<T, CROSS_ATTENTION>>(                       \
             params, kv_cache_buffer, stream);                                                                          \

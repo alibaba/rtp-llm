@@ -155,16 +155,16 @@ struct Multihead_attention_params_base {
     bool fp8_kv_cache  = false;
 
     // Multi-block setups
-    mutable bool multi_block_mode = false;
+    bool multi_block_mode = false;
 
     // Number of streaming processors on the device.
     // Tune block size to maximum occupancy.
     int multi_processor_count = 1;
 
-    mutable int timesteps_per_block = -1;
-    mutable int seq_len_tile        = -1;
+    int timesteps_per_block = -1;
+    int seq_len_tile        = -1;
 
-    mutable int max_seq_len_tile = -1;
+    int max_seq_len_tile = -1;
     // The partial output buffer. Dimensions max_seq_len_tile x B x D. (for each timestep only seq_len_tile x B x D is
     // needed)
     T* partial_out = nullptr;

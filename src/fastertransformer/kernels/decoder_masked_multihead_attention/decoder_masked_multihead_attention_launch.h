@@ -32,7 +32,7 @@
 namespace fastertransformer {
 
 template<typename T, int Dh, bool DO_MULTI_BLOCK, bool DO_CROSS_ATTENTION>
-inline size_t smem_size_in_bytes(const Multihead_attention_params<T, DO_CROSS_ATTENTION>& params, int threads_per_block)
+inline size_t smem_size_in_bytes(Multihead_attention_params<T, DO_CROSS_ATTENTION>& params, int threads_per_block)
 {
     using Tk = typename kernel_type_t<T>::Type;
     // The amount of shared memory needed to store the Q*K^T values in float.
@@ -80,16 +80,14 @@ inline size_t smem_size_in_bytes(const Multihead_attention_params<T, DO_CROSS_AT
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T, int Dh, bool DO_CROSS_ATTENTION>
-inline void multi_block_grid_setup(dim3&                                                    grid,
-                                   const Multihead_attention_params<T, DO_CROSS_ATTENTION>& params,
-                                   int                                                      blocks_per_sm,
-                                   int                                                      block_size,
-                                   int                                                      tlength,
-                                   bool                                                     do_multi_block)
+inline void multi_block_grid_setup(dim3&                                              grid,
+                                   Multihead_attention_params<T, DO_CROSS_ATTENTION>& params,
+                                   int                                                blocks_per_sm,
+                                   int                                                block_size,
+                                   int                                                tlength,
+                                   bool                                               do_multi_block)
 {
     if (!do_multi_block) {
-        // auto& volatile_params = const_cast<Multihead_attention_params<T, DO_CROSS_ATTENTION>&>(params);
-        // volatile_params.multi_block_mode = false;
         params.multi_block_mode = false;
         return;
     }
@@ -113,64 +111,60 @@ inline void multi_block_grid_setup(dim3&                                        
 }
 
 #define MMHA_LAUNCH_CHECK(DYNAMIC_THDS_PER_BLOCK)                                                                      \
-    std::size_t const dynamic_smem_sz{                                                                                 \
-        smem_size_in_bytes<T, Dh, DO_MULTI_BLOCK>(params, DYNAMIC_THDS_PER_BLOCK)};                              \
+    std::size_t const dynamic_smem_sz{smem_size_in_bytes<T, Dh, DO_MULTI_BLOCK>(params, DYNAMIC_THDS_PER_BLOCK)};      \
     /* Set 46KB threshold here because we have to take static/driver shared memory into consideration. */              \
     if (dynamic_smem_sz >= 46 * 1024) {                                                                                \
-        cudaError_t res =                                                                                              \
-            cudaFuncSetAttribute(masked_multihead_attention_kernel<T,                                            \
-                                                                         T_cache,                                      \
-                                                                         KVCacheBuffer,                                \
-                                                                         Dh,                                           \
-                                                                         DYNAMIC_THDS_PER_BLOCK,                       \
-                                                                         KernelParamsType::DO_CROSS_ATTENTION,         \
-                                                                         HAS_BEAMS,                                    \
-                                                                         DO_MULTI_BLOCK>,                              \
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,                                          \
-                                 dynamic_smem_sz);                                                                     \
-        FT_CHECK_WITH_INFO(res == cudaSuccess,                                                                       \
-                             "Sequence Length is too long for the MMHA kernel (not enough shared memory).");           \
+        cudaError_t res = cudaFuncSetAttribute(masked_multihead_attention_kernel<T,                                    \
+                                                                                 T_cache,                              \
+                                                                                 KVCacheBuffer,                        \
+                                                                                 Dh,                                   \
+                                                                                 DYNAMIC_THDS_PER_BLOCK,               \
+                                                                                 KernelParamsType::DO_CROSS_ATTENTION, \
+                                                                                 HAS_BEAMS,                            \
+                                                                                 DO_MULTI_BLOCK>,                      \
+                                               cudaFuncAttributeMaxDynamicSharedMemorySize,                            \
+                                               dynamic_smem_sz);                                                       \
+        FT_CHECK_WITH_INFO(res == cudaSuccess,                                                                         \
+                           "Sequence Length is too long for the MMHA kernel (not enough shared memory).");             \
     }                                                                                                                  \
-    check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(                                                     \
+    check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(                                                    \
         &available_blocks,                                                                                             \
-        masked_multihead_attention_kernel<T,                                                                     \
-                                                T_cache,                                                               \
-                                                KVCacheBuffer,                                                         \
-                                                Dh,                                                                    \
-                                                DYNAMIC_THDS_PER_BLOCK,                                                \
-                                                KernelParamsType::DO_CROSS_ATTENTION,                                  \
-                                                HAS_BEAMS,                                                             \
-                                                DO_MULTI_BLOCK>,                                                       \
+        masked_multihead_attention_kernel<T,                                                                           \
+                                          T_cache,                                                                     \
+                                          KVCacheBuffer,                                                               \
+                                          Dh,                                                                          \
+                                          DYNAMIC_THDS_PER_BLOCK,                                                      \
+                                          KernelParamsType::DO_CROSS_ATTENTION,                                        \
+                                          HAS_BEAMS,                                                                   \
+                                          DO_MULTI_BLOCK>,                                                             \
         DYNAMIC_THDS_PER_BLOCK,                                                                                        \
         dynamic_smem_sz));
 
 #define MMHA_KERNEL(DYNAMIC_THDS_PER_BLOCK, ENABLE_MULTI_BLOCK)                                                        \
-    std::size_t const dynamic_smem_sz{                                                                                 \
-        smem_size_in_bytes<T, Dh, ENABLE_MULTI_BLOCK>(params, DYNAMIC_THDS_PER_BLOCK)};                          \
+    std::size_t const dynamic_smem_sz{smem_size_in_bytes<T, Dh, ENABLE_MULTI_BLOCK>(params, DYNAMIC_THDS_PER_BLOCK)};  \
     /* Set 46KB threshold here because we have to take static/driver shared memory into consideration. */              \
     if (dynamic_smem_sz >= 46 * 1024) {                                                                                \
-        cudaError_t res =                                                                                              \
-            cudaFuncSetAttribute(masked_multihead_attention_kernel<T,                                            \
-                                                                         T_cache,                                      \
-                                                                         KVCacheBuffer,                                \
-                                                                         Dh,                                           \
-                                                                         DYNAMIC_THDS_PER_BLOCK,                       \
-                                                                         KernelParamsType::DO_CROSS_ATTENTION,         \
-                                                                         HAS_BEAMS,                                    \
-                                                                         ENABLE_MULTI_BLOCK>,                          \
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,                                          \
-                                 dynamic_smem_sz);                                                                     \
-        FT_CHECK_WITH_INFO(res == cudaSuccess,                                                                       \
-                             "Sequence Length is too long for the MMHA kernel (not enough shared memory).");           \
+        cudaError_t res = cudaFuncSetAttribute(masked_multihead_attention_kernel<T,                                    \
+                                                                                 T_cache,                              \
+                                                                                 KVCacheBuffer,                        \
+                                                                                 Dh,                                   \
+                                                                                 DYNAMIC_THDS_PER_BLOCK,               \
+                                                                                 KernelParamsType::DO_CROSS_ATTENTION, \
+                                                                                 HAS_BEAMS,                            \
+                                                                                 ENABLE_MULTI_BLOCK>,                  \
+                                               cudaFuncAttributeMaxDynamicSharedMemorySize,                            \
+                                               dynamic_smem_sz);                                                       \
+        FT_CHECK_WITH_INFO(res == cudaSuccess,                                                                         \
+                           "Sequence Length is too long for the MMHA kernel (not enough shared memory).");             \
     }                                                                                                                  \
-    masked_multihead_attention_kernel<T,                                                                         \
-                                            T_cache,                                                                   \
-                                            KVCacheBuffer,                                                             \
-                                            Dh,                                                                        \
-                                            DYNAMIC_THDS_PER_BLOCK,                                                    \
-                                            KernelParamsType::DO_CROSS_ATTENTION,                                      \
-                                            HAS_BEAMS,                                                                 \
-                                            ENABLE_MULTI_BLOCK>                                                        \
+    masked_multihead_attention_kernel<T,                                                                               \
+                                      T_cache,                                                                         \
+                                      KVCacheBuffer,                                                                   \
+                                      Dh,                                                                              \
+                                      DYNAMIC_THDS_PER_BLOCK,                                                          \
+                                      KernelParamsType::DO_CROSS_ATTENTION,                                            \
+                                      HAS_BEAMS,                                                                       \
+                                      ENABLE_MULTI_BLOCK>                                                              \
         <<<grid, DYNAMIC_THDS_PER_BLOCK, dynamic_smem_sz, stream>>>(params, kv_cache_buffer);
 
 // if resources are not enough to launch 512 threads per block, we will fallback to 256.
@@ -204,10 +198,10 @@ template<typename T,
          int  THDS_PER_BLOCK,
          bool HAS_BEAMS,
          bool DO_MULTI_BLOCK>
-void mmha_launch_kernel_ex(const KernelParamsType& params,
-                           const KVCacheBuffer&    kv_cache_buffer,
-                           const cudaStream_t&     stream,
-                           int                     tlength)
+void mmha_launch_kernel_ex(KernelParamsType&    params,
+                           const KVCacheBuffer& kv_cache_buffer,
+                           const cudaStream_t&  stream,
+                           int                  tlength)
 {
     dim3 grid{static_cast<unsigned>(params.num_heads), static_cast<unsigned>(params.batch_size), 1};
 
@@ -226,13 +220,13 @@ void mmha_launch_kernel_ex(const KernelParamsType& params,
     check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
         &num_blocks_per_sm,
         masked_multihead_attention_kernel<T,
-                                                T_cache,
-                                                KVCacheBuffer,
-                                                Dh,
-                                                THDS_PER_BLOCK,
-                                                KernelParamsType::DO_CROSS_ATTENTION,
-                                                HAS_BEAMS,
-                                                DO_MULTI_BLOCK>,
+                                          T_cache,
+                                          KVCacheBuffer,
+                                          Dh,
+                                          THDS_PER_BLOCK,
+                                          KernelParamsType::DO_CROSS_ATTENTION,
+                                          HAS_BEAMS,
+                                          DO_MULTI_BLOCK>,
         THDS_PER_BLOCK,
         0));
 
@@ -283,6 +277,8 @@ void mmha_launch_kernel_ex(const KernelParamsType& params,
                 MMHA_KERNEL(1024, false);
             }
             break;
+        default:
+            MMHA_KERNEL(1024, false);
     }
 }
 
@@ -293,10 +289,10 @@ template<typename T,
          int  THDS_PER_BLOCK,
          bool HAS_BEAMS,
          bool DO_MULTI_BLOCK>
-void mmha_launch_kernel_dispatch_8bits_kv_cache(const KernelParamsType& params,
-                                                const KVCacheBuffer&    kv_cache_buffer,
-                                                const cudaStream_t&     stream,
-                                                int                     tlength)
+void mmha_launch_kernel_dispatch_8bits_kv_cache(KernelParamsType&    params,
+                                                const KVCacheBuffer& kv_cache_buffer,
+                                                const cudaStream_t&  stream,
+                                                int                  tlength)
 {
     if (params.int8_kv_cache) {
         mmha_launch_kernel_ex<T,
@@ -327,9 +323,9 @@ void mmha_launch_kernel_dispatch_8bits_kv_cache(const KernelParamsType& params,
 }
 
 template<typename T, typename KVCacheBuffer, typename KernelParamsType, int Dh, bool HAS_BEAMS>
-void mmha_launch_kernel_dispatch(const KernelParamsType& params,
-                                 const KVCacheBuffer&    kv_cache_buffer,
-                                 const cudaStream_t&     stream)
+void mmha_launch_kernel_dispatch(KernelParamsType&    params,
+                                 const KVCacheBuffer& kv_cache_buffer,
+                                 const cudaStream_t&  stream)
 {
     int const tlength = params.timestep;
     if (params.multi_block_mode) {
@@ -343,9 +339,7 @@ void mmha_launch_kernel_dispatch(const KernelParamsType& params,
 }
 
 template<typename T, typename KVCacheBuffer, typename KernelParamsType, int Dh>
-void mmha_launch_kernel(const KernelParamsType& params,
-                        const KVCacheBuffer&    kv_cache_buffer,
-                        const cudaStream_t&     stream)
+void mmha_launch_kernel(KernelParamsType& params, const KVCacheBuffer& kv_cache_buffer, const cudaStream_t& stream)
 {
     assert(params.rotary_embedding_dim > 0);
     if (params.beam_width == 1) {
@@ -356,23 +350,22 @@ void mmha_launch_kernel(const KernelParamsType& params,
     }
 }
 
-
 #define INSTANTIATE_MMHA_LAUNCHERS(T, Dh)                                                                              \
     template void mmha_launch_kernel<T, KVLinearBuffer, Masked_multihead_attention_params<T>, Dh>(                     \
-        const Masked_multihead_attention_params<T>& params,                                                            \
-        const KVLinearBuffer&                       kv_cache_buffer,                                                   \
-        const cudaStream_t&                         stream);                                                                                   \
+        Masked_multihead_attention_params<T> & params,                                                                 \
+        const KVLinearBuffer& kv_cache_buffer,                                                                         \
+        const cudaStream_t&   stream);                                                                                   \
     template void mmha_launch_kernel<T, KVBlockArray, Masked_multihead_attention_params<T>, Dh>(                       \
-        const Masked_multihead_attention_params<T>& params,                                                            \
-        const KVBlockArray&                         kv_cache_buffer,                                                   \
-        const cudaStream_t&                         stream);                                                                                   \
+        Masked_multihead_attention_params<T> & params,                                                                 \
+        const KVBlockArray& kv_cache_buffer,                                                                           \
+        const cudaStream_t& stream);                                                                                   \
     template void mmha_launch_kernel<T, KVLinearBuffer, Cross_multihead_attention_params<T>, Dh>(                      \
-        const Cross_multihead_attention_params<T>& params,                                                             \
-        const KVLinearBuffer&                      kv_cache_buffer,                                                    \
-        const cudaStream_t&                        stream);                                                                                   \
+        Cross_multihead_attention_params<T> & params,                                                                  \
+        const KVLinearBuffer& kv_cache_buffer,                                                                         \
+        const cudaStream_t&   stream);                                                                                   \
     template void mmha_launch_kernel<T, KVBlockArray, Cross_multihead_attention_params<T>, Dh>(                        \
-        const Cross_multihead_attention_params<T>& params,                                                             \
-        const KVBlockArray&                        kv_cache_buffer,                                                    \
-        const cudaStream_t&                        stream);
+        Cross_multihead_attention_params<T> & params,                                                                  \
+        const KVBlockArray& kv_cache_buffer,                                                                           \
+        const cudaStream_t& stream);
 
 }  // namespace fastertransformer
