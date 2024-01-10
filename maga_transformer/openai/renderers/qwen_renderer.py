@@ -339,31 +339,7 @@ class QwenRenderer(CustomChatRenderer):
                 continue
 
             if (generating_function_call):
-                if (output_string.strip().endswith("\nObservation:")):
-                    generating_function_call = False
-                    function_message = self._parse_function_response(output_string[responded_length:])
-                    if (function_message == None):
-                        logging.warn(f"output [{output_string}] failed to parse function call. "
-                                     "regarded as normal output.")
-                    else:
-                        finish_reason = FinisheReason.function_call
-                        responded_string = output_string
-                        responded_length = output_length
-                        yield StreamResponseObject(
-                            choices=[ChatCompletionResponseStreamChoice(
-                                index=index,
-                                delta=function_message,
-                                finish_reason=finish_reason,
-                            )],
-                            usage=UsageInfo(
-                                prompt_tokens=input_token_length,
-                                total_tokens=input_token_length + output_token_length,
-                                completion_tokens=output_token_length
-                            )
-                        )
-                        continue
-                else:
-                    continue
+                continue
 
             if (output_length > responded_length + len('\nAction:')):
                 delta_string = output_string[responded_length : output_length - len('Action:')]
@@ -376,6 +352,28 @@ class QwenRenderer(CustomChatRenderer):
                         delta=DeltaMessage(
                             content=delta_string,
                         ),
+                    )],
+                    usage=UsageInfo(
+                        prompt_tokens=input_token_length,
+                        total_tokens=input_token_length + output_token_length,
+                        completion_tokens=output_token_length
+                    )
+                )
+
+        if (generating_function_call):
+            function_message = self._parse_function_response(output_string[responded_length:])
+            if (function_message == None):
+                logging.warn(f"output [{output_string}] failed to parse function call. "
+                                "regarded as normal output.")
+            else:
+                finish_reason = FinisheReason.function_call
+                responded_string = output_string
+                responded_length = output_length
+                yield StreamResponseObject(
+                    choices=[ChatCompletionResponseStreamChoice(
+                        index=index,
+                        delta=function_message,
+                        finish_reason=finish_reason,
                     )],
                     usage=UsageInfo(
                         prompt_tokens=input_token_length,

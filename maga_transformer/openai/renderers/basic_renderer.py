@@ -61,17 +61,12 @@ class BasicRenderer(CustomChatRenderer):
                 self.chat_template = DEFAULT_CHAT_API_TEMPLATE
                 self.extra_stop_word_ids_list.append(self.tokenizer.encode("<|im_end|>"))
 
-        self.extra_stop_words = None
         try:
             self.extra_stop_words = tokenizer.additional_special_tokens
+            if self.extra_stop_words != None:
+                self.stop_words_list.extend(self.extra_stop_words)
         except:
             pass
-        if self.extra_stop_words == None or self.extra_stop_words == []:
-            self.extra_stop_words = ["<|im_start|>", "<|im_end|>"]
-        self.extra_stop_word_ids_list = [
-            tokenizer.encode(stop_word) for stop_word in self.extra_stop_words
-        ]
-        self.stop_words_list.extend(self.extra_stop_words)
         self.stop_word_ids_list.extend(self.extra_stop_word_ids_list)
 
         logging.info(f"use chat template: [ {self.chat_template} ]  ")
