@@ -76,12 +76,11 @@ class CustomChatRenderer():
             decoded_prev_token = self.tokenizer.decode(responded_output_ids[-1:])
             tokens_to_decode = responded_output_ids[-1:] + output_ids[len(responded_output_ids):]
             decoded_string = self.tokenizer.decode(tokens_to_decode)
+            decoded_string = decoded_string.strip(u'\uFFFD')
             delta_output_string = decoded_string[len(decoded_prev_token):]
 
-            responded_output_ids = output_ids
-            responded_string += delta_output_string
-
             if len(delta_output_string) > 0:
+                responded_output_ids = output_ids
                 responded_string += delta_output_string
                 yield StreamResponseObject(
                     choices=[ChatCompletionResponseStreamChoice(

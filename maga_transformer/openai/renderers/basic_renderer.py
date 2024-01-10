@@ -65,6 +65,9 @@ class BasicRenderer(CustomChatRenderer):
             self.extra_stop_words = tokenizer.additional_special_tokens
             if self.extra_stop_words != None:
                 self.stop_words_list.extend(self.extra_stop_words)
+                self.extra_stop_word_ids_list.extend(
+                    [self.tokenizer.encode(extra_stop_word) for extra_stop_word in self.extra_stop_words]
+                )
         except:
             pass
         self.stop_word_ids_list.extend(self.extra_stop_word_ids_list)
