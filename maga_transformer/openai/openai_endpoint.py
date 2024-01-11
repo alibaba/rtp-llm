@@ -119,9 +119,9 @@ class OpenaiEndopoint():
                 usage=response.usage,
             )
 
-    async def chat_completion(
+    def chat_completion(
             self, chat_request: ChatCompletionRequest, raw_request: Request
-    ) -> Union[ChatCompletionResponse, AsyncGenerator[ChatCompletionStreamResponse, None]]:
+    ) -> Union[Coroutine[Any, Any, ChatCompletionResponse], AsyncGenerator[ChatCompletionStreamResponse, None]]:
         rendered_input = self.chat_renderer.render_chat(chat_request)
         input_ids = rendered_input.input_ids
         input_length = len(input_ids)
@@ -146,7 +146,7 @@ class OpenaiEndopoint():
         )
 
         if chat_request.stream:
-            return self._complete_stream_response(choice_generator) # type: ignore
+            return self._complete_stream_response(choice_generator)
         else:
-            return await self._complete_non_stream_response(choice_generator) # type: ignore
+            return self._complete_non_stream_response(choice_generator)
 

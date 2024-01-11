@@ -8,7 +8,7 @@ import uvicorn
 import traceback
 import multiprocessing
 from multiprocessing import Process
-from typing import Generator, Union, Any, Dict, List, AsyncGenerator
+from typing import Generator, Union, Any, Dict, List, AsyncGenerator, Callable, Coroutine
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi import FastAPI
@@ -108,7 +108,7 @@ class FastApiServer(object):
     async def stream_response(
             self, request: Dict[str, Any], response: AsyncGenerator[StreamObjectType, None], id: int
     ):
-        is_openai_response = response.__qualname__.startswith("OpenaiEndopoint")
+        is_openai_response = request.get("stream", False)
         response_data_prefix = "data: " if is_openai_response else "data:"
         try:
             last_response = ''
@@ -181,16 +181,17 @@ class FastApiServer(object):
             rep = JSONResponse(self.handler_exceptions(e), status_code=error_code)
         return rep
 
-    async def _wrapped_generator(self, req: Dict[str, Any]):
+    async def _call_generate_with_report(
+            self, generate_call: Callable[[], AsyncGenerator[StreamObjectType, None]]
+    ) -> AsyncGenerator[StreamObjectType, None]:
         assert self._inference_worker is not None
         try:
             with Timer() as t:
-                if g_parallel_info.is_master and g_parallel_info.world_size > 1 and not self._async_mode:
-                    self._gang_server.request_workers(req)
                 last_iterate_time = current_time_ms()
                 first_token = True
                 iter_count = 0
-                async for x in self._inference_worker.inference(**req):
+                response_generator = generate_call()
+                async for x in response_generator:
                     end_time = current_time_ms()
                     if first_token:
                         first_token = False
@@ -216,7 +217,14 @@ class FastApiServer(object):
         self._access_logger.log_query_access(req, id)
         is_streaming = self._inference_worker.is_streaming(req)
         self._controller.increment()
-        res = self._wrapped_generator(req)
+
+        def generate_call():
+            assert self._inference_worker is not None
+            if g_parallel_info.is_master and g_parallel_info.world_size > 1 and not self._async_mode:
+                self._gang_server.request_workers(req)
+            return self._inference_worker.inference(**req)
+
+        res = self._call_generate_with_report(generate_call)
         if is_streaming:
             return StreamingResponse(self.stream_response(req, res, id), media_type="text/event-stream")
         last_element = None
@@ -276,21 +284,21 @@ class FastApiServer(object):
             if not g_parallel_info.is_master:
                 return FastApiServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION, "gang worker should not access this / api directly!")
             return await self._infer_wrap(req)
-    
+
         # update for worker RANK != 0
         @app.post("/update_internal")
         def update_internal(version_info: VersionInfo):
             if g_parallel_info.is_master:
                 return FastApiServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION, "gang cluster is None or role is master, should not access /inference_internal!")
             return self._update_wrap(version_info)
-        
+
         # update for worker RANK == 0
         @app.post("/update")
         def update(version_info: VersionInfo):
             if not g_parallel_info.is_master:
                 return FastApiServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION, "gang worker should not access this / api directly!")
             return self._update_wrap(version_info)
-        
+
 
         @app.get("/v1/models")
         async def list_models():
@@ -301,7 +309,6 @@ class FastApiServer(object):
         @app.post("/v1/chat/completions")
         async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
             # TODO(wangyin): deal with long context
-            # TODO(wangyin): report detailed qps
             try:
                 self._controller.increment()
             except ConcurrencyException as e:
@@ -313,15 +320,23 @@ class FastApiServer(object):
                 id = self._atomic_count.increment()
                 kmonitor.report(AccMetrics.QPS_METRIC, 1)
                 self._access_logger.log_query_access(request.model_dump(), id)
-                completion_future = self._openai_endpoint.chat_completion(request, raw_request)
 
-                completion_response = await completion_future
-                if isinstance(completion_response, AsyncGenerator):
+                if request.stream:
+                    # async def async_generate_call():
+                    def generate_call():
+                        assert (self._openai_endpoint != None)
+                        response = self._openai_endpoint.chat_completion(request, raw_request)
+                        assert (isinstance(response, AsyncGenerator))
+                        return response
+                    reported_response = self._call_generate_with_report(generate_call)
                     return StreamingResponse(
-                        self.stream_response(request.model_dump(), completion_response, id), media_type="text/event-stream"
+                        self.stream_response(request.model_dump(), reported_response, id),
+                        media_type="text/event-stream"
                     )
                 else:
-                    return completion_response
+                    response = self._openai_endpoint.chat_completion(request, raw_request)
+                    assert (isinstance(response, Coroutine))
+                    return await response
             except Exception as e:
                 kmonitor.report(AccMetrics.ERROR_QPS_METRIC)
                 return JSONResponse(self.handler_exceptions(e), status_code=500)
