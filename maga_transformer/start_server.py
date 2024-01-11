@@ -308,7 +308,6 @@ class FastApiServer(object):
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
         async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
-            # TODO(wangyin): deal with long context
             try:
                 self._controller.increment()
             except ConcurrencyException as e:
@@ -339,6 +338,7 @@ class FastApiServer(object):
                     return await response
             except Exception as e:
                 kmonitor.report(AccMetrics.ERROR_QPS_METRIC)
+                logging.error(f'chat_completion error: {e}, trace: {traceback.format_exc()}')
                 return JSONResponse(self.handler_exceptions(e), status_code=500)
             finally:
                 self._controller.decrement()

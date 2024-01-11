@@ -75,12 +75,10 @@ class QueryStats:
 
     def acquire(self):
         if self.lora_resource != None:
-            logging.info(f"query read_acquire:[{self.adapter_name}] RWLock")
             self.lora_resource.read_acquire(self.adapter_name)
-    
+
     def release(self):
         if self.lora_resource != None:
-            logging.info(f"query read_release:[{self.adapter_name}] RWLock")
             self.lora_resource.read_release(self.adapter_name)
 
     @property
