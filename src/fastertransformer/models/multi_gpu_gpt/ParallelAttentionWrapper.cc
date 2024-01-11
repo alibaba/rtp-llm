@@ -166,8 +166,8 @@ void ParallelAttentionWrapper<T>::TRTFMHA(const ContextAttentionParams& params, 
                            params.num_tokens,
                            params.is_alibi,
                            params.is_alibi_with_sacle,
-                           tensor_para_.world_size_,
-                           tensor_para_.rank_);
+                           1,
+                           0);
         mFMHARunner->run(const_cast<T*>(params.attention_input), cu_q_seqlens, params.context_buf, stream);
         POP_RANGE;
         sync_check_cuda_error();
@@ -972,9 +972,9 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     if (use_trt_fmha_) {
         // Load kernels for contiguous cache and paged kv cache at the same time.
         mFMHARunner.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(
-            data_type, params_.head_num_, params_.size_per_head_, q_scaling_));
+            data_type, local_head_num_, params_.size_per_head_, q_scaling_));
         // Set flags: force_fp32_acc, is_s_padded, causal_mask, num_kv_heads.
-        mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, true, params_.head_num_kv_);
+        mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, true, local_head_num_kv_);
     }
 #endif
     use_open_source_fmha_ = UseOpenSourceFMHA();
