@@ -16,6 +16,7 @@ class StreamResponseObject:
 
 @dataclass
 class RendererParams:
+    model_type: str
     max_seq_len: int
     eos_token_id: int
     stop_word_ids_list: List[List[int]]
@@ -31,6 +32,7 @@ class CustomChatRenderer():
                  renderer_params: RendererParams,
     ):
         self.tokenizer = tokenizer
+        self.model_type = renderer_params.model_type
         self.max_seq_len = renderer_params.max_seq_len
         self.eos_token_id = renderer_params.eos_token_id
         self.stop_word_ids_list = renderer_params.stop_word_ids_list
@@ -38,6 +40,23 @@ class CustomChatRenderer():
             self.tokenizer.decode(stop_word_ids) for stop_word_ids in self.stop_word_ids_list
         ]
         self.extra_stop_word_ids_list: List[List[int]] = []
+
+    def __str__(self) -> str:
+        proerpty_str = ", \n".join([f"{k}={v}" for k, v in self.get_print_properties().items()])
+        return f"[{self.__class__.__name__}](\n{proerpty_str}\n)"
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
+    def get_print_properties(self) -> dict:
+        return {
+            "model_type": self.model_type,
+            "max_seq_len": self.max_seq_len,
+            "eos_token_id": self.eos_token_id,
+            "stop_word_ids_list": self.stop_word_ids_list,
+            "stop_words_list": self.stop_words_list,
+            "extra_stop_word_ids_list": self.extra_stop_word_ids_list,
+        }
 
     def get_extra_stop_word_ids_list(self) -> List[List[int]]:
         return self.extra_stop_word_ids_list

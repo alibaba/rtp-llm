@@ -1,6 +1,7 @@
 from fastapi import Request
 import torch
 from typing import Union, Optional, List, Dict, Generator, Coroutine, AsyncGenerator, Any, Iterator
+import os
 import time
 import logging
 from dataclasses import dataclass
@@ -40,11 +41,13 @@ class OpenaiEndopoint():
         ]
 
         render_params = RendererParams(
+            model_type=os.environ["MODEL_TYPE"],
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_word_ids_list,
         )
         self.chat_renderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)
+        logging.info(f"chat_renderer [{self.chat_renderer}] is created.")
         extra_stop_word_ids_list = self.chat_renderer.get_extra_stop_word_ids_list()
         self.stop_word_ids_list.extend(extra_stop_word_ids_list)
 

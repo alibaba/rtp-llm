@@ -81,6 +81,13 @@ class BasicRenderer(CustomChatRenderer):
         logging.info(f"use chat template: [ {self.chat_template} ]  ")
         self.compiled_template = self._compile_jinja_template(self.chat_template)
 
+    def get_print_properties(self) -> dict:
+        properties = super().get_print_properties()
+        properties.update({
+            "chat_template": self.chat_template
+        })
+        return properties
+
     @lru_cache
     def _compile_jinja_template(self, chat_template) -> jinja2.Template:
 

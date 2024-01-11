@@ -7,12 +7,14 @@ from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGener
 from transformers import PreTrainedTokenizer
 from dataclasses import dataclass
 
-from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
     ChatCompletionRequest, RoleEnum, FunctionCall
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
+<<<<<<< HEAD
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, PromptWithImages
+=======
+>>>>>>> feat: add llama_template_renderer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
     ContentPart, ContentPartTypeEnum
