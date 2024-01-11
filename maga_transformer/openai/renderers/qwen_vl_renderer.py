@@ -12,15 +12,10 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, RoleEnum, FunctionCall
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
-from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
+from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, PromptWithImages
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
     ContentPart, ContentPartTypeEnum
-
-@dataclass
-class PromptWithImages:
-    prompt: str
-    image_urls: List[str]
 
 class QwenVLRenderer(CustomChatRenderer):
     def __init__(self, tokenizer: PreTrainedTokenizer, renderer_params: RendererParams):

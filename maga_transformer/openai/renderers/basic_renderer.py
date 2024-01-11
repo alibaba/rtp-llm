@@ -6,6 +6,7 @@ from packaging import version
 import json
 
 from transformers import PreTrainedTokenizer
+from dataclasses import dataclass
 
 import jinja2
 from jinja2.exceptions import TemplateError
@@ -26,6 +27,11 @@ DEFAULT_CHAT_API_TEMPLATE = (
         "{{ '<|im_start|>assistant\n' }}"
     "{% endif %}"
 )
+
+@dataclass
+class PromptWithImages:
+    prompt: str
+    image_urls: List[str]
 
 # This class is designed to replace `PreTrainedTokenizer.apply_chat_template` functionality,
 # providing more capability to customize the template.

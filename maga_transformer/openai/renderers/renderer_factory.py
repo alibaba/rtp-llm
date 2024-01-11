@@ -7,6 +7,7 @@ from transformers import PreTrainedTokenizer
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
 from maga_transformer.openai.renderers.qwen_renderer import QwenRenderer
 from maga_transformer.openai.renderers.qwen_vl_renderer import QwenVLRenderer
+from maga_transformer.openai.renderers.llava_renderer import LlavaRenderer
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from maga_transformer.models.base_model import BaseTokenizer
@@ -31,6 +32,8 @@ class ChatRendererFactory():
         if model_type == "qwen_vl":
             assert (isinstance(tokenizer, PreTrainedTokenizer))
             return QwenVLRenderer(tokenizer, params)
+        elif model_type == "llava":
+            return LlavaRenderer(tokenizer, params)
 
         try:
             if tokenizer.chat_template != None:
