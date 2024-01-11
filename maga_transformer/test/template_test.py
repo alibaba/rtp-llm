@@ -21,9 +21,9 @@ class ChatapiTest(TestCase):
         )
 
     def test_qwen(self):
-        os.environ["MODEL_TYPE"] = "qwen"
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         render_params = RendererParams(
+            model_type="qwen",
             max_seq_len=1024,
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
@@ -146,10 +146,10 @@ Thought:"""
         assert (prompt == expected_prompt)
 
     def test_qwen_vl(self):
-        os.environ["MODEL_TYPE"] = "qwen_vl"
         tokenizer = AutoTokenizer.from_pretrained(f"{self.test_data_path}/qwen_vl/tokenizer/", trust_remote_code=True)
         assert(isinstance(tokenizer, PreTrainedTokenizer))
         render_params = RendererParams(
+            model_type="qwen_vl",
             max_seq_len=1024,
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],

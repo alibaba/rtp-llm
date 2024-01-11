@@ -81,12 +81,12 @@ class LlamaTemplateRenderer(CustomChatRenderer):
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         template_args = self._extract_history(request.messages)
         assert isinstance(self.tokenizer, PreTrainedTokenizer)
-        self.template.encode_oneturn(
+        encoded_ids = self.template.encode_oneturn(
             self.tokenizer,
             query=template_args.query,
             resp=template_args.resp,
             history=template_args.history,
             system=template_args.system,
-        )
-        return RenderedInputs(input_ids=[])
+        )[0]
+        return RenderedInputs(input_ids=encoded_ids)
 
