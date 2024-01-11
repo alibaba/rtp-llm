@@ -192,6 +192,7 @@ class BatchQuery:
         self.context_lengths_list: List[int] = []
         self.record_index_prob: Optional[torch.Tensor] = None
         self.lora_names: List[int] = []
+        self.lora_ids: List[int] = []
 
         # output
         self.update_length: List[int] = []
@@ -218,6 +219,7 @@ class BatchQuery:
         new_batch_query.reuse_lengths_list = copy.deepcopy(self.reuse_lengths_list)
         new_batch_query.context_lengths_list = copy.deepcopy(self.context_lengths_list)
         new_batch_query.lora_names = copy.deepcopy(self.lora_names)
+        new_batch_query.lora_ids = copy.deepcopy(self.lora_ids)
         new_batch_query.update_length = self.update_length
         return new_batch_query
 
@@ -227,7 +229,8 @@ class BatchQuery:
                 output_token_ids: {self.output_token_ids}, \
                 seq_length: {self.seq_lengths_list},\
                 context_length: {self.context_lengths_list}, \
-                lora_names: {self.lora_names}'
+                lora_names: {self.lora_names}, \
+                lora_ids: {self.lora_ids}'
 
     def tp_sync(self):
         if g_parallel_info.tp_size <= 1:
@@ -237,6 +240,7 @@ class BatchQuery:
         shape_hints = torch.IntTensor([check_num, self.generate_batch_size, self.context_batch_size, self.output_token_ids.shape[1], self.cache_block_indice.shape[1], check_num2])
         shape_hints = to_cuda(shape_hints)
         self.nccl_op_.broadcast_tp([shape_hints])
+        torch.cuda.current_stream().synchronize()
         shape_hints = shape_hints.cpu().numpy()
         assert shape_hints[0] == check_num and shape_hints[5] == check_num2
         if g_parallel_info.tp_rank == 0:
@@ -245,6 +249,7 @@ class BatchQuery:
             context_lengths_tensor = to_cuda(torch.IntTensor(self.context_lengths_list))
             output_token_ids = to_cuda(self.output_token_ids)
             cache_block_indice = to_cuda(self.cache_block_indice)
+            lora_ids_tensor = to_cuda(torch.IntTensor(self.lora_ids))
         else:
             self.generate_batch_size = int(shape_hints[1])
             self.context_batch_size = int(shape_hints[2])
@@ -254,13 +259,15 @@ class BatchQuery:
             seq_lengths_tensor = torch.zeros((self.generate_batch_size), dtype=torch.int32, device="cuda:0")
             reuse_lengths_tensor = torch.zeros((self.total_batch_size), dtype=torch.int32, device="cuda:0")
             context_lengths_tensor = torch.zeros((self.total_batch_size), dtype=torch.int32, device="cuda:0")
-        self.nccl_op_.broadcast_tp([cache_block_indice, output_token_ids, seq_lengths_tensor, reuse_lengths_tensor, context_lengths_tensor])
+            lora_ids_tensor = torch.zeros((max(1, self.total_batch_size)), dtype=torch.int32, device="cuda:0")
+        self.nccl_op_.broadcast_tp([cache_block_indice, output_token_ids, seq_lengths_tensor, reuse_lengths_tensor, context_lengths_tensor, lora_ids_tensor])
         if g_parallel_info.tp_rank > 0:
             self.cache_block_indice = to_cpu(cache_block_indice)
             self.output_token_ids = to_cpu(output_token_ids)
             self.seq_lengths_list = to_cpu(seq_lengths_tensor).numpy().tolist()
             self.reuse_lengths_list = to_cpu(reuse_lengths_tensor).numpy().tolist()
             self.context_lengths_list = to_cpu(context_lengths_tensor).numpy().tolist()
+            self.lora_ids = to_cpu(lora_ids_tensor).numpy().tolist()
 
     @property
     def max_context_length(self):
@@ -350,6 +357,7 @@ class BatchQuery:
         )
         images = []
         lora_names = []
+        lora_ids = []
         for i, query in enumerate(self.queries):
             images.extend(query.images)
             query.images = []
@@ -371,6 +379,7 @@ class BatchQuery:
                 self.context_lengths_list.append(QueryHelper.context_input_length(self.count_prefix_length, query))
             if query.adapter_name is not None:
                 lora_names += [query.adapter_name]
+                lora_ids += [query.lora_resource.get_id(query.adapter_name)]
 
             self.generate_configs.append(query.generate_config)
         self.seq_lengths_list = self.seq_lengths_list[:self.generate_batch_size * self.beam_width]
@@ -379,6 +388,9 @@ class BatchQuery:
         self.cache_block_indice = torch.IntTensor(cache_block_indice)
         self.merge_generate_config = self.union_generate_config(self.generate_configs)
         self.lora_names = lora_names
+        self.lora_ids = lora_ids
+        if len(self.lora_ids) == 0:
+            self.lora_ids = [-1]
         self.check()
 
     def clear(self):

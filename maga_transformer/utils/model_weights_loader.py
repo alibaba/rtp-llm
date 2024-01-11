@@ -125,8 +125,6 @@ class ModelWeightsLoader:
                 logging.error(f'load {weight.name} in layer {layer_id} failed: {e}')
                 raise e
 
-        gc.collect()
-        torch.cuda.empty_cache()
         return results, self._weight_access_log
 
     def _load_layer_weight(self, layer_id: int, int8_mode: int, device: str = "cuda:0"):

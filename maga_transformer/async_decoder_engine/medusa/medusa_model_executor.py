@@ -1,3 +1,4 @@
+import copy
 import torch
 import numpy as np
 from typing import Any, List, Tuple
@@ -22,6 +23,8 @@ class MedusaModelExecutor(BaseModelExecutor):
         medusa_query.context_batch_size = batch_query.total_batch_size
         medusa_query.cache_block_indice = batch_query.cache_block_indice
         medusa_query.queries = batch_query.queries
+        medusa_query.lora_names = copy.deepcopy(batch_query.lora_names)
+        medusa_query.lora_ids = copy.deepcopy(batch_query.lora_ids)
 
         validate_token_length = self.medusa_buffer.medusa_attn_mask.size(0)
         max_medusa_length = max([q.seq_length for q in batch_query.queries]) + validate_token_length

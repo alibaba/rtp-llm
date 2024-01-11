@@ -82,6 +82,22 @@ def sp_head_b(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broad
         vs = sp_neg1(t[hidden_size + qk_hidden_size:], tp, tp_rank)
     return torch.concat([qs, ks, vs], dim=0).contiguous()
 
+def sp_head_lora(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+    # lora_b[dim0, 3*hidden_size]
+    dim0 = t.shape[0]
+    if len(t.shape) == 2 and t.shape[1] != hidden_size * 3:
+        qk_hidden_size = (t.shape[1] - hidden_size) // 2
+        qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
+        if kv_broadcast:
+            ks = t[:,hidden_size:hidden_size + qk_hidden_size]
+            vs = t[:,hidden_size + qk_hidden_size:]
+        else:
+            ks = sp_neg1(t[:,hidden_size:hidden_size + qk_hidden_size], tp, tp_rank)
+            vs = sp_neg1(t[:,hidden_size + qk_hidden_size:], tp, tp_rank)
+        return torch.concat([qs, ks, vs], dim=1).contiguous()
+    else:
+        return sp_neg1(t.reshape(dim0, 3, hidden_size), tp, tp_rank)
+
 def trans_qkv(ts: List[torch.Tensor], hidden_size: int, head_num: int, size_per_head: int = -1) -> torch.Tensor:
     if size_per_head == -1:
         size_per_head = hidden_size // head_num
@@ -170,6 +186,18 @@ class W:
     ffn_w2 = 'ffn_weights.intermediate_weight2.kernel'
     ffn_b2 = 'ffn_weights.intermediate_weight2.bias'
 
+    # lora
+    attn_qkv_w_lora_a = 'self_attention_weights.query_weight.kernel.lora_A'
+    attn_qkv_w_lora_b = 'self_attention_weights.query_weight.kernel.lora_B'
+    attn_o_w_lora_a = 'self_attention_weights.attention_output_weight.kernel.lora_A'
+    attn_o_w_lora_b = 'self_attention_weights.attention_output_weight.kernel.lora_B'
+    ffn_w1_lora_a = 'ffn_weights.intermediate_weight.kernel.lora_A'
+    ffn_w1_lora_b = 'ffn_weights.intermediate_weight.kernel.lora_B'
+    ffn_w3_lora_a = 'ffn_weights.intermediate_weight3.kernel.lora_A'
+    ffn_w3_lora_b = 'ffn_weights.intermediate_weight3.kernel.lora_B'
+    ffn_w2_lora_a = 'ffn_weights.intermediate_weight2.kernel.lora_A'
+    ffn_w2_lora_b = 'ffn_weights.intermediate_weight2.kernel.lora_B'
+
     # medusa lm_head
     medusa_head = 'medusa_head'
 
@@ -206,6 +234,16 @@ class W:
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
         wpe: sp_id,
+        attn_qkv_w_lora_a: sp_id,
+        attn_qkv_w_lora_b: sp_head_lora,
+        attn_o_w_lora_a: sp_0,
+        attn_o_w_lora_b: sp_id,
+        ffn_w1_lora_a: sp_id,
+        ffn_w1_lora_b: sp_neg1,
+        ffn_w3_lora_a: sp_id,
+        ffn_w3_lora_b: sp_neg1,
+        ffn_w2_lora_a: sp_0,
+        ffn_w2_lora_b: sp_id,
     }
 
     weights_list = [
@@ -629,6 +667,7 @@ class LoraResource():
         self.rlock_map: Dict[str, RWLock] = {}
         self.to_add_lora_id = list()
         self.to_remove_lora_id = list()
+        self.stream = torch.cuda.Stream()
 
     def clear_for_update(self):
         self.to_add_lora_id.clear()
@@ -692,13 +731,17 @@ class LoraResource():
     def update(self, lora_infos: Dict[str, str]):
         if self.max_lora_model_size != -1 and len(lora_infos) > self.max_lora_model_size:
             raise LoraCountException(f'lora_infos[{lora_infos}]\'s size exceed MAX_LORA_MODEL_SIZE[{self.max_lora_model_size}]')
-        self.check_remaining_lora(lora_infos)
-        self.remove_old_lora(lora_infos)
-        self.add_new_lora(lora_infos)
+        with torch.cuda.stream(self.stream):
+            self.check_remaining_lora(lora_infos)
+            self.remove_old_lora(lora_infos)
+            self.add_new_lora(lora_infos)
         self.lora_infos = lora_infos
     
     def get_id(self, name: str) -> int:
-        return self.lora_map.get_id(name)
+        if self.lora_map != None:
+            return self.lora_map.get_id(name)
+        else:
+            return -1
 
     def read_acquire(self, lora_name: str):
         if lora_name in self.rlock_map:

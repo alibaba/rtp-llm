@@ -80,11 +80,6 @@ class BaseModelExecutor(ExecutorBase):
             k_cache_scale, v_cache_scale = self.query_manager_.get_kv_cache_scale_base()
             prefix_lengths, count_length, max_prefix_length = self.query_manager_.get_prefix_args(batch_query)
 
-            lora_ids = [self.model_ops.gpt_op.weight.lora_resource.get_id(lora_name) for lora_name in batch_query.lora_names]
-            # TODO(ldj) when tp > 1 broadcast lora ids.
-            if len(lora_ids) == 0:
-                lora_ids = [-1]
-
         with torch.cuda.nvtx.range('run_model'):
             hidden_states = self.model_ops.gpt_op.forward(
                 decoder_input=input_embeds,
@@ -101,7 +96,7 @@ class BaseModelExecutor(ExecutorBase):
                 prefix_lengths=prefix_lengths,
                 count_length=count_length,
                 max_prefix_length=max_prefix_length,
-                lora_ids=torch.IntTensor(lora_ids))
+                lora_ids=torch.IntTensor(batch_query.lora_ids))
 
         return hidden_states
     
