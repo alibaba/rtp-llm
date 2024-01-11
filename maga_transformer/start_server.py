@@ -300,19 +300,33 @@ class FastApiServer(object):
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
         async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
-            # TODO(wangyin): Exception handling
-            # TODO(wangyin): add concurrency control
-            id = self._atomic_count.increment()
-            assert (self._openai_endpoint != None)
-            completion_future = self._openai_endpoint.chat_completion(request, raw_request)
+            # TODO(wangyin): deal with long context
+            # TODO(wangyin): report detailed qps
+            try:
+                self._controller.increment()
+            except ConcurrencyException as e:
+                kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
+                return JSONResponse(self.handler_exceptions(e), status_code=409)
 
-            completion_response = await completion_future
-            if isinstance(completion_response, AsyncGenerator):
-                return StreamingResponse(
-                    self.stream_response(request.model_dump(), completion_response, id), media_type="text/event-stream"
-                )
-            else:
-                return completion_response
+            try:
+                assert (self._openai_endpoint != None)
+                id = self._atomic_count.increment()
+                kmonitor.report(AccMetrics.QPS_METRIC, 1)
+                self._access_logger.log_query_access(request.model_dump(), id)
+                completion_future = self._openai_endpoint.chat_completion(request, raw_request)
+
+                completion_response = await completion_future
+                if isinstance(completion_response, AsyncGenerator):
+                    return StreamingResponse(
+                        self.stream_response(request.model_dump(), completion_response, id), media_type="text/event-stream"
+                    )
+                else:
+                    return completion_response
+            except Exception as e:
+                kmonitor.report(AccMetrics.ERROR_QPS_METRIC)
+                return JSONResponse(self.handler_exceptions(e), status_code=500)
+            finally:
+                self._controller.decrement()
 
         return app
 
