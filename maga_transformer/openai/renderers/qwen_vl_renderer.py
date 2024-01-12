@@ -11,10 +11,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, RoleEnum, FunctionCall
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
-<<<<<<< HEAD
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, PromptWithImages
-=======
->>>>>>> feat: add llama_template_renderer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
     ContentPart, ContentPartTypeEnum

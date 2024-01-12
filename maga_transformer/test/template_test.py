@@ -193,21 +193,21 @@ Thought:"""
         assert (ids == expected_ids)
 
     def test_llava(self):
-        os.environ["MODEL_TYPE"] = "llava"
         os.environ["CHECKPOINT_PATH"] = "llava-v1.5"
         tokenizer = LlavaTokenizer(
-            tokenzier_path = f"{self.test_data_path}/llava/tokenizer/", 
-            mm_use_im_start_end = False, 
-            image_expand = 576, 
-            vit_special_token_ids = {'ignore_token_index': -100, 'image_token_index': -200}, 
+            tokenzier_path = f"{self.test_data_path}/llava/tokenizer/",
+            mm_use_im_start_end = False,
+            image_expand = 576,
+            vit_special_token_ids = {'ignore_token_index': -100, 'image_token_index': -200},
             vit_special_tokens = {
-                'default_image_token': '<image>', 
-                'default_im_start_token': '<im_start>', 
+                'default_image_token': '<image>',
+                'default_im_start_token': '<im_start>',
                 'default_im_end_token': '<im_end>'
             }
         )
 
         render_params = RendererParams(
+            model_type="llava",
             max_seq_len=1024,
             eos_token_id=tokenizer.tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
