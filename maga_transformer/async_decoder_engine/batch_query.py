@@ -45,6 +45,7 @@ class QueryStats:
         self.images = images
         self.context_length = input_tokens.shape[-1]
         self.generate_config = generate_config
+        self.max_new_tokens = self.generate_config.max_new_tokens
         self.adapter_name = adapter_name
         self.error_info_ = ''
         self.stop = False
@@ -80,10 +81,6 @@ class QueryStats:
     def release(self):
         if self.lora_resource != None:
             self.lora_resource.read_release(self.adapter_name)
-
-    @property
-    def max_new_tokens(self) -> int:
-        return self.generate_config.max_new_tokens
 
     @property
     def chat_id(self):
@@ -420,9 +417,9 @@ class BatchQuery:
                               output_index_prob: Optional[torch.Tensor] = None,
                               medusa_states: Optional[List[Any]] = None) -> None:
         self.finished = to_cpu(finished)
-        self.hidden_states = to_cpu(hidden_states)
-        self.logits = to_cpu(logits)
-        self.cum_log_probs = to_cpu(cum_log_probs)
+        self.hidden_states = hidden_states
+        self.logits = logits
+        self.cum_log_probs = cum_log_probs
         self.updated_token_ids = to_cpu(updated_token_ids)
         self.update_length = update_length
 

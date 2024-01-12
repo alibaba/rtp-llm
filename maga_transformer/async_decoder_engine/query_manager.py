@@ -16,6 +16,7 @@ from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams,
 class QueryManager:
     def __init__(self, config: GptInitModelParameters, cache_config: CacheConfig, prefix_params: Optional[PrefixParams] = None, gen_num_per_circle: int = 1, nccl_op: Any = None) -> None:
         self.config_ = config
+        self.seq_size_per_block_ = self.config_.seq_size_per_block
         self.cache_config_ = cache_config
         self.cache_manager_ = CacheManager(cache_config, nccl_op)
         self.gen_num_per_circle = gen_num_per_circle
@@ -38,7 +39,7 @@ class QueryManager:
             "use_ptuning": self.ptuning_ is not None,
             "gen_num_per_circle": self.gen_num_per_circle,
             "block_num": self.cache_config_.block_nums,
-            "seq_size_per_block": self.cache_config_.seq_size_per_block
+            "seq_size_per_block": self.seq_size_per_block_
         }
         return config_json
 
@@ -95,7 +96,7 @@ class QueryManager:
     def _gen_new_request(self, inputs: torch.Tensor, images: List[str], tokenizer: Optional[BaseTokenizer], generate_config: GenerateConfig, adapter_name: str, lora_resource: Optional[LoraResource]):
         seq_length: int = inputs.shape[-1]
         # reuse length represent for ptuning length or kvcache reuse length
-        block_size = (seq_length - 2 + self.gen_num_per_circle) // self.cache_config_.seq_size_per_block + 1
+        block_size = (seq_length - 2 + self.gen_num_per_circle) // self.seq_size_per_block_ + 1
         block_indice = []
         slice_length = 0
         try:
@@ -216,8 +217,8 @@ class QueryManager:
         # 在ptuning-v2场景下,seq_len需要加上prefix_length
         if not self.count_prefix_length:
             next_length += query.reuse_length
-        current_block_length = len(query.block_indice[0]) * self.config_.seq_size_per_block
-        return (next_length - current_block_length - 1) // self.config_.seq_size_per_block + 1
+        current_block_length = len(query.block_indice[0]) * self.seq_size_per_block_
+        return (next_length - current_block_length - 1) // self.seq_size_per_block_ + 1
 
     def _release_query_resource(self, query: QueryStats):
         query.release()
