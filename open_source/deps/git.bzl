@@ -19,6 +19,6 @@ def git_deps():
     git_repository(
         name = "com_google_googletest",
         remote = "https://github.com/google/googletest.git",
-        commit = "1a9f2cf450187ff4e52ad8fc6dae4aaac6924c7b",
+        commit = "f8d7d77c06936315286eb55f8de22cd23c188571",
         shallow_since = "1640057570 +0800",
     )
