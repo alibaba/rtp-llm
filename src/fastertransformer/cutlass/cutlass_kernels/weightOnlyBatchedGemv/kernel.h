@@ -93,9 +93,6 @@ struct WeightLayoutDetails<ActType, WeightOnlyQuantType::Int4b, cutlass::arch::S
     //
     // Converted fp16 data layout
     //      [elt_7  elt_6  elt_5  elt_4  elt_3  elt_2  elt_1  elt_0] (each elt occupies 16 bits)
-    static constexpr int kConvertCount = 8;
-    using Converter
-        = cutlass::FastInterleavedAndBiasedNumericArrayConverter<cutlass::half_t, cutlass::uint4b_t, kConvertCount>;
 
     // Each warp completes the internal reduce and writes the [Batch * NPerBlock * Interleave] results to the
     // corresponding address in shared memory
@@ -153,8 +150,6 @@ struct WeightLayoutDetails<ActType, WeightOnlyQuantType::Int8b, cutlass::arch::S
     //
     // Converted fp16 data layout
     //      [elt_3  elt_2  elt_1  elt_0] (each elt occupies 16 bits)
-    static constexpr int kConvertCount = 4;
-    using Converter = cutlass::FastInterleavedAndBiasedNumericArrayConverter<cutlass::half_t, uint8_t, kConvertCount>;
 
     // Each warp completes the internal reduce and writes the [Batch * NPerBlock * Interleave] results to the
     // corresponding address in shared memory
@@ -189,8 +184,6 @@ struct WeightLayoutDetails<ActType, WeightOnlyQuantType::Int8b, cutlass::arch::S
     static constexpr int kElemBits = 8;
     static constexpr int kInterleave = 1;
     static constexpr int kStride = 64;
-    static constexpr int kConvertCount = 4;
-    using Converter = cutlass::FastInterleavedAndBiasedNumericArrayConverter<cutlass::half_t, uint8_t, kConvertCount>;
 
     // Each warp completes the internal reduce and writes the [Batch * NPerBlock * Interleave] results to the
     // corresponding address in shared memory
@@ -351,7 +344,7 @@ public:
 
 template <typename ActType, WeightOnlyQuantType QType, typename Arch, typename WeightOnlyFlag, template <typename T> class ActOp, bool Zero, bool Bias,
     int NPerBlock, int Batch, int BlockSize>
-__global__ void weight_only_batched_gemv_sm70(const uint8_t* qweight, const ActType* scales, const ActType* zeros, const ActType* in,
+__device__ void weight_only_batched_gemv_sm70(const uint8_t* qweight, const ActType* scales, const ActType* zeros, const ActType* in,
     const ActType* bias, ActType* out, const int n, const int k)
 {
     static_assert(NPerBlock == 1 || (NPerBlock % 2 == 0));
@@ -543,7 +536,7 @@ __global__ void weight_only_batched_gemv_sm70(const uint8_t* qweight, const ActT
 
 template <typename ActType, WeightOnlyQuantType QType, typename Arch, typename WeightOnlyFlag, template <typename T> class ActOp, bool Zero, bool Bias,
     int NPerBlock, int Batch, int BlockSize>
-__global__ void weight_only_batched_gemv(const uint8_t* qweight, const ActType* scales, const ActType* zeros, const ActType* in,
+__device__ void weight_only_batched_gemv(const uint8_t* qweight, const ActType* scales, const ActType* zeros, const ActType* in,
     const ActType* bias, ActType* out, const int n, const int k)
 {
     static_assert(NPerBlock == 1 || (NPerBlock % 2 == 0));
@@ -695,6 +688,45 @@ __global__ void weight_only_batched_gemv(const uint8_t* qweight, const ActType* 
     }
 }
 
+template<typename ActType, WeightOnlyQuantType QType, typename Arch, typename WeightOnlyFlag, template<typename T> class ActOp, bool Zero,
+         bool Bias, int  NPerBlock, int  Batch, int  BlockSize>
+__global__ void weight_only_batched_gemv_sm70_wrapper(const uint8_t* qweight,
+                                                      const ActType* scales,
+                                                      const ActType* zeros,
+                                                      const ActType* in,
+                                                      const ActType* bias,
+                                                      ActType*       out,
+                                                      const int      n,
+                                                      const int      k)
+{
+    if constexpr (std::is_same_v<ActType, half>) {
+        weight_only_batched_gemv_sm70<ActType,
+                                      QType,
+                                      Arch,
+                                      WeightOnlyFlag,
+                                      ActOp,
+                                      Zero,
+                                      Bias,
+                                      NPerBlock,
+                                      Batch,
+                                      BlockSize>(qweight, scales, zeros, in, bias, out, n, k);
+    }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && defined(ENABLE_BF16))
+    else if (std::is_same_v<ActType, nv_bfloat16>) {
+        weight_only_batched_gemv_sm70<ActType,
+                                      QType,
+                                      Arch,
+                                      WeightOnlyFlag,
+                                      ActOp,
+                                      Zero,
+                                      Bias,
+                                      NPerBlock,
+                                      Batch,
+                                      BlockSize>(qweight, scales, zeros, in, bias, out, n, k);
+    }
+#endif
+}
+
 template <WeightOnlyQuantType QType, typename Arch, typename WeightOnlyFlag, template <typename T> class ActOp, bool Zero, bool Bias,
     int Batch, int BlockSize>
 struct WeightOnlyBatchedGemvKernelSm70Launcher
@@ -707,7 +739,7 @@ struct WeightOnlyBatchedGemvKernelSm70Launcher
             dim3 grid(params.n / NPerBlock);
             dim3 block(BlockSize);
             int  size = sizeof(float) * BlockSize / 32 * Batch * NPerBlock;
-            weight_only_batched_gemv_sm70<half, QType, Arch, WeightOnlyFlag, ActOp, Zero, Bias, NPerBlock, Batch, BlockSize>
+            weight_only_batched_gemv_sm70_wrapper<half, QType, Arch, WeightOnlyFlag, ActOp, Zero, Bias, NPerBlock, Batch, BlockSize>
                 <<<grid, block, size, stream>>>(params.qweight,
                                                 reinterpret_cast<const half*>(params.scales),
                                                 reinterpret_cast<const half*>(params.zeros),
@@ -717,12 +749,12 @@ struct WeightOnlyBatchedGemvKernelSm70Launcher
                                                 params.n,
                                                 params.k);
         }
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && defined(ENABLE_BF16))
+#ifdef ENABLE_BF16
         else if (params.act_type == WeightOnlyActivationType::BF16) {
             dim3 grid(params.n / NPerBlock);
             dim3 block(BlockSize);
             int  size = sizeof(float) * BlockSize / 32 * Batch * NPerBlock;
-            weight_only_batched_gemv_sm70<__nv_bfloat16, QType, Arch, WeightOnlyFlag, ActOp, Zero, Bias, NPerBlock, Batch, BlockSize>
+            weight_only_batched_gemv_sm70_wrapper<__nv_bfloat16, QType, Arch, WeightOnlyFlag, ActOp, Zero, Bias, NPerBlock, Batch, BlockSize>
                 <<<grid, block, size, stream>>>(params.qweight,
                                                 reinterpret_cast<const __nv_bfloat16*>(params.scales),
                                                 reinterpret_cast<const __nv_bfloat16*>(params.zeros),
@@ -735,6 +767,45 @@ struct WeightOnlyBatchedGemvKernelSm70Launcher
 #endif
     }
 };
+
+template<typename ActType, WeightOnlyQuantType QType, typename Arch, typename WeightOnlyFlag, template<typename T> class ActOp,
+         bool Zero, bool Bias, int  NPerBlock, int  Batch, int  BlockSize>
+__global__ void weight_only_batched_gemv_wrapper(const uint8_t* qweight,
+                                                 const ActType* scales,
+                                                 const ActType* zeros,
+                                                 const ActType* in,
+                                                 const ActType* bias,
+                                                 ActType*       out,
+                                                 const int      n,
+                                                 const int      k)
+{
+    if constexpr (std::is_same_v<ActType, half>) {
+        weight_only_batched_gemv<ActType,
+                                 QType,
+                                 Arch,
+                                 WeightOnlyFlag,
+                                 ActOp,
+                                 Zero,
+                                 Bias,
+                                 NPerBlock,
+                                 Batch,
+                                 BlockSize>(qweight, scales, zeros, in, bias, out, n, k);
+    }
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && defined(ENABLE_BF16))
+    else if (std::is_same_v<ActType, nv_bfloat16>) {
+        weight_only_batched_gemv<ActType,
+                                 QType,
+                                 Arch,
+                                 WeightOnlyFlag,
+                                 ActOp,
+                                 Zero,
+                                 Bias,
+                                 NPerBlock,
+                                 Batch,
+                                 BlockSize>(qweight, scales, zeros, in, bias, out, n, k);
+    }
+#endif
+}
 
 template <WeightOnlyQuantType QType, typename Arch, typename WeightOnlyFlag, template <typename T> class ActOp, bool Zero, bool Bias,
     int Batch, int BlockSize>
@@ -749,7 +820,7 @@ struct WeightOnlyBatchedGemvKernelLauncher
             dim3 grid(params.n / NPerBlock / kInterleave);
             dim3 block(BlockSize);
             int  size = sizeof(float) * BlockSize / 32 * Batch * NPerBlock * kInterleave;
-            weight_only_batched_gemv<half, QType, Arch, WeightOnlyFlag, ActOp, Zero, Bias, NPerBlock, Batch, BlockSize>
+            weight_only_batched_gemv_wrapper<half, QType, Arch, WeightOnlyFlag, ActOp, Zero, Bias, NPerBlock, Batch, BlockSize>
                 <<<grid, block, size, stream>>>(params.qweight,
                                                 reinterpret_cast<const half*>(params.scales),
                                                 reinterpret_cast<const half*>(params.zeros),
@@ -759,13 +830,13 @@ struct WeightOnlyBatchedGemvKernelLauncher
                                                 params.n,
                                                 params.k);
         }
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && defined(ENABLE_BF16))
+#ifdef ENABLE_BF16
         else if (params.act_type == WeightOnlyActivationType::BF16) {
             static constexpr int kInterleave = WeightLayoutDetails<__nv_bfloat16, QType, Arch>::kInterleave;
             dim3 grid(params.n / NPerBlock / kInterleave);
             dim3 block(BlockSize);
             int  size = sizeof(float) * BlockSize / 32 * Batch * NPerBlock * kInterleave;
-            weight_only_batched_gemv<__nv_bfloat16, QType, Arch, WeightOnlyFlag, ActOp, Zero, Bias, NPerBlock, Batch, BlockSize>
+            weight_only_batched_gemv_wrapper<__nv_bfloat16, QType, Arch, WeightOnlyFlag, ActOp, Zero, Bias, NPerBlock, Batch, BlockSize>
                 <<<grid, block, size, stream>>>(params.qweight,
                                                 reinterpret_cast<const __nv_bfloat16*>(params.scales),
                                                 reinterpret_cast<const __nv_bfloat16*>(params.zeros),
