@@ -244,6 +244,41 @@ Thought:"""
         print(f"------- ids: {ids}")
         assert (ids == expected_ids)
 
+    def test_baichuan2(self):
+        tokenizer = AutoTokenizer.from_pretrained(
+            f"{self.test_data_path}/baichuan/tokenizer/", trust_remote_code=True
+        )
+        render_params = RendererParams(
+            model_type="baichuan2",
+            max_seq_len=1024,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        assert (isinstance(tokenizer, PreTrainedTokenizer))
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+
+        messages = [
+            ChatMessage(**{
+                "role": RoleEnum.user,
+                "content": "你是谁？",
+            }),
+            ChatMessage(**{
+                "role": RoleEnum.assistant,
+                "content": "我是百川大模型",
+            }),
+            ChatMessage(**{
+                "role": RoleEnum.assistant,
+                "content": "展开讲讲",
+            }),
+        ]
+        request = ChatCompletionRequest(messages=messages)
+
+        ids = chat_renderer.render_chat(request).input_ids
+        prompt = tokenizer.decode(ids)
+        print(f"rendered prompt: \n{prompt}\n-----------------------------------")
+        expected_ids = [195, 92067, 68, 196, 6461, 70335, 92366, 9528, 195, 8277, 57056, 196]
+        print(f"------- ids: {ids}")
+        assert (ids == expected_ids)
 
 if __name__ == '__main__':
     main()

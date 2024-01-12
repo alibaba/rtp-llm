@@ -116,10 +116,10 @@ class Baichuan(Llama):
     @staticmethod
     def _create_config(ckpt_path: str):
         config = Llama._create_config(ckpt_path)
-        if config.layer_num == 40:
-            config.rotary_embedding_style = 0
-            config.rotary_embedding_dim = 0
-            config.use_attention_linear_bias = True
+        # if config.layer_num == 40:
+        config.rotary_embedding_style = 0
+        config.rotary_embedding_dim = 0
+        config.use_attention_linear_bias = True
         config.special_tokens.bos_token_id = -1
         config.special_tokens.user.token_ids = [195]
         config.special_tokens.user.eos_token_ids = []
