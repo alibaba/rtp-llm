@@ -88,6 +88,11 @@ class ChatCompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
 
+    # These params are hacked for our framework, not standard.
+    private_request: bool = False
+    trace_id: Optional[str] = None
+    chat_id: Optional[str] = None
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0

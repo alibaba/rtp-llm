@@ -66,6 +66,8 @@ class OpenaiEndopoint():
         if request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
         config.stop_words_list = self.stop_word_ids_list
+        if request.chat_id != None:
+            config.chat_id = request.chat_id
         return config
 
     async def _complete_non_stream_response(
