@@ -18,7 +18,7 @@ _ReportWorker__REPORT_HOST = os.getenv("HIPPO_SLAVE_IP", 'localhost')
 _ReportWorker__REPORT_PORT = 4141
 _ReportWorker__FLUME_CLIENT_TIMEOUT_MS = 1000
 
-_ReportWorker__REPORT_INTERVAL_SECOND = 10
+_ReportWorker__REPORT_INTERVAL_SECOND = 1
 _ReportWorker__REPORT_HEADERS = {
     'topic': 'py_kmonitor'
 }

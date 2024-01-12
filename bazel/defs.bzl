@@ -84,11 +84,11 @@ def upload_wheel(name, src, dir, wheel_prefix):
         visibility = ["//visibility:public"],
     )
 
-def pyc_wheel(name, package_name, src):
+def pyc_wheel(name, src):
     native.genrule(
         name = name,
         srcs = [src],
-        outs = [package_name + "-cp310-cp310-manylinux1_x86_64.whl"],
+        outs = [name + "-0.1.0-cp310-cp310-manylinux1_x86_64.whl"],
         exec_tools = ["//bazel:pyc_wheel.py"],
         cmd = "bash -c 'set -xe;" +
             "cp $(locations %s) $(OUTS);" % (src) +

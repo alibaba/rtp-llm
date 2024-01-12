@@ -1,4 +1,4 @@
-package(default_visibility = ["//maga_transformer:__subpackages__"])
+package(default_visibility = ["//maga_transformer:__subpackages__", "//internal_source:__subpackages__"])
 
 py_binary(
     name = "fake_glm",

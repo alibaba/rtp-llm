@@ -61,7 +61,5 @@ def fake_bloom():
 
     fake_model("bloom", default_config, save_config_func)
 
-# rm -f -r ./maga_transformer/test/model_test/fake_test/testdata/bloom/fake/ && /opt/conda310/bin/python3 ./maga_transformer/tools/fake_bloom.py -p ./maga_transformer/test/model_test/fake_test/testdata/bloom/fake/ -i /mnt/nas1/hf/bloomz-1b7
-
 if __name__ == '__main__':
     fake_bloom()

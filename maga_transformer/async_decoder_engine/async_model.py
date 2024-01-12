@@ -2,7 +2,8 @@ import gc
 import torch
 import logging
 import traceback
-from typing import Optional, Iterator, List, Any, Generator, AsyncGenerator, Dict
+from typing import Optional, Iterator, List, Any, Generator, AsyncGenerator, Dict, Union
+from transformers import PreTrainedTokenizer
 from maga_transformer.utils.util import get_mem_info
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.models.base_model import BaseModel, BaseTokenizer
@@ -25,7 +26,7 @@ class AsyncModel:
         if self.sp_model is not None:
             assert ptuning_args is None, "speculative don't support ptuning yet"
             self.decoder_engine_ = create_engine(self.model, self.config, None, self.sp_model, self.sp_model.config)
-        else:            
+        else:
             self.decoder_engine_ = create_engine(model, self.config, ptuning_args)
 
     @property
@@ -42,7 +43,7 @@ class AsyncModel:
     @torch.no_grad()
     async def generate_stream(self, # type: ignore
                         input_token_ids: torch.Tensor,
-                        tokenizer: BaseTokenizer,
+                        tokenizer: Union[BaseTokenizer, PreTrainedTokenizer],
                         input_lengths: Optional[torch.Tensor],
                         images: List[List[str]],
                         generate_config: GenerateConfig) -> AsyncGenerator[GenerateOutput, None]:

@@ -2,7 +2,7 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//experimental/python:wheel.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "pyc_wheel")
-load("//bazel:arch_select.bzl", "requirement")
+load("//bazel:arch_select.bzl", "requirement", "whl_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
 requirement([
@@ -137,7 +137,6 @@ py_library(
     srcs = glob([
         "*.py",
     ]),
-    data = ["requirements.txt"],
     deps = [
         ":models",
         ":uvicorn",
@@ -177,10 +176,9 @@ py_library(
         "//maga_transformer/tools:model_assistant",
         "//maga_transformer/distribute:distribute",
         ":tokenizer",
-        "//maga_transformer/internal:internal_lib",
         "//maga_transformer/aios/kmonitor:kmonitor_py",
         "//maga_transformer/metrics:metrics",
-        "//maga_transformer/access_logger:access_logger"
+        "//maga_transformer/access_logger:access_logger",
     ],
     data = [
         "//maga_transformer/libs:libs"
@@ -197,15 +195,6 @@ py_package(
     ],
 )
 
-bundle_files(
-    name = "requirements_bund",
-    srcs = [
-        "requirements.txt",
-    ],
-    tags = ["manual"],
-    prefix="maga_transformer"
-)
-
 # target for wheel
 py_wheel(
     name = "maga_transformer_whl",
@@ -215,6 +204,7 @@ py_wheel(
     version = "0.0.1",
     deps = [
         ":maga_transformer_package",
+        "//deps:extension_package",
     ],
     requires=[
         "filelock",
@@ -241,25 +231,12 @@ py_wheel(
         "protobuf==3.20.0",
         "torchvision==0.16.0",
         "prettytable",
-        "pydantic>=2.5.3"
-    ],
+        "pydantic>=2.5.3",
+    ] + whl_deps(),
 )
 
 pyc_wheel(
     name = "maga_transformer",
-    package_name = "maga_transformer-0.0.1",
-    src = ":maga_transformer_whl",
-)
-
-pyc_wheel(
-    name = "maga_transformer_cuda11",
-    package_name = "maga_transformer-0.0.1+cuda118",
-    src = ":maga_transformer_whl",
-)
-
-pyc_wheel(
-    name = "maga_transformer_cuda12",
-    package_name = "maga_transformer-0.0.1+cuda121",
     src = ":maga_transformer_whl",
 )
 

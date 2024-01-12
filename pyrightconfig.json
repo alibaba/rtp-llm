@@ -1,0 +1,31 @@
+{
+    "include": ["maga_transformer"],
+    "exclude": [
+        "bazel-*",
+        "**/node_modules",
+        "**/__pycache__",
+        "3rdparty",
+        "src",
+        "examples",
+        "docs",
+        "docker",
+        "tests",
+        "build",
+        "templates",       
+        "cmake"
+    ],
+    "defineConstant": {
+        "DEBUG": true
+    },
+    "typeCheckingMode": "strict",
+    "reportMissingImports": "warning",
+    "reportUnknownMemberType": "warning",
+    "reportUnknownArgumentType": "warning",
+    "reportUnknownParameterType": "warning",
+    "reportUnknownVariableType": "warning",
+    "useLibraryCodeForTypes": true,
+    "reportMissingImports": true,
+    "reportMissingTypeStubs": false,
+    "reportGeneralTypeIssues": "warning",
+    "pythonVersion": "3.10"
+}

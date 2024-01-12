@@ -75,7 +75,5 @@ def fake_qwen():
 
     fake_model("qwen_7b", default_config, save_config_func)
 
-# rm -f -r ./maga_transformer/test/model_test/fake_test/testdata/qwen_7b/fake/ && /opt/conda310/bin/python3 ./maga_transformer/tools/fake_qwen.py -p ./maga_transformer/test/model_test/fake_test/testdata/qwen_7b/fake/ -i /mnt/nas1/hf/Qwen-7B 
-
 if __name__ == '__main__':
     fake_qwen()

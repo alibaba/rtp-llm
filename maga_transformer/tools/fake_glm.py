@@ -14,7 +14,5 @@ def fake_glm():
 
     fake_model("chatglm", default_config, default_save_config_func)
 
-# rm -f -r ./maga_transformer/test/model_test/fake_test/testdata/chatglm/fake/ && /opt/conda310/bin/python3 ./maga_transformer/tools/fake_glm.py -p ./maga_transformer/test/model_test/fake_test/testdata/chatglm/fake/ -i /mnt/nas1/hf/chatglm-6b
-
 if __name__ == '__main__':
     fake_glm()

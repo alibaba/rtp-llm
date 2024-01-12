@@ -46,6 +46,7 @@ class ModelDict:
             return ModelDict.get_ft_model_type_by_hf_architectures(architecture)   
         return None  
     
+register_hf_architecture("FlotForCausalLM", "flot")
 register_hf_architecture("GPTNeoXForCausalLM", "gpt_neox")
 register_hf_architecture("BaichuanForCausalLM", "baichuan")
 register_hf_architecture("BaiChuanForCausalLM", "baichuan")
@@ -64,6 +65,7 @@ register_hf_architecture("QWenLMHeadModel", "qwen_7b")
 register_hf_architecture("YiForCausalLM", "llama")
 register_hf_architecture("FalconForCausalLM", "falcon")
 register_hf_architecture("LlavaLlamaForCausalLM", "llava")
+register_hf_architecture("LlavaTuringForCausalLM", "turing_005_vl")
 
 # fix chatglm architectures一样，但是ft 类型不一样
 register_hf_repo("THUDM/chatglm-6b", "chatglm")

@@ -14,7 +14,7 @@ from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessa
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, UsageInfo, \
     FinisheReason, DeltaMessage, ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse
 from maga_transformer.openai.renderers.custom_renderer import RendererParams, ProcessedOutput, \
-    StreamResponseObject
+    StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderers.renderer_factory import ChatRendererFactory
 from maga_transformer.config.generate_config import GenerateConfig
 
@@ -122,12 +122,13 @@ class OpenaiEndopoint():
     async def chat_completion(
             self, chat_request: ChatCompletionRequest, raw_request: Request
     ) -> Union[ChatCompletionResponse, AsyncGenerator[ChatCompletionStreamResponse, None]]:
-        input_ids = self.chat_renderer.render_chat(chat_request)
+        rendered_input = self.chat_renderer.render_chat(chat_request)
+        input_ids = rendered_input.input_ids
         input_length = len(input_ids)
 
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
         input_length_tensor = torch.Tensor([input_length]).int()
-        input_images = [[]]
+        input_images = [rendered_input.input_images]
         generate_config = self._extract_generation_config(chat_request)
 
         output_generator: AsyncGenerator[GenerateOutput, None] = self.model.generate_stream(

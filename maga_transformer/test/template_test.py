@@ -57,7 +57,7 @@ class ChatapiTest(TestCase):
             "stream": False,
         })
 
-        ids = chat_renderer.render_chat(request)
+        ids = chat_renderer.render_chat(request).input_ids
         prompt = tokenizer.decode(ids)
         print(f"rendered prompt: \n{prompt}\n-----------------------------------")
         expected_prompt = \
@@ -107,7 +107,7 @@ Question: 波士顿天气如何？<|im_end|>
         )
 
         request.messages = messages
-        ids = chat_renderer.render_chat(request)
+        ids = chat_renderer.render_chat(request).input_ids
         prompt = tokenizer.decode(ids)
         print(f"rendered prompt: \n{prompt}\n-----------------------------------")
         expected_prompt = \

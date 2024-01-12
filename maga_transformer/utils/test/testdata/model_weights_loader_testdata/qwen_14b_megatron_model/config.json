@@ -1,0 +1,14 @@
+{
+  "activation_type": "swiglu",
+  "n_head": 5,
+  "head_num_kv": 5,
+  "hidden_size": 640,
+  "inter_size": 3424,
+  "layer_num": 1,
+  "n_layer": 1,
+  "layernorm_eps": 1e-05,
+  "max_seq_len": 8192,
+  "num_attention_heads": 5,
+  "tie_word_embeddings": false,
+  "vocab_size": 152064
+}

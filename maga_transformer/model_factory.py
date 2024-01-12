@@ -7,14 +7,13 @@ import sys
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from maga_transformer.internal import fetch_remote_file_to_local
 from maga_transformer.models.base_model import BaseModel, ModelConfig
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.tools.api.hf_model_helper import get_model_info_from_hf
-from maga_transformer.utils.util import WEIGHT_TYPE, get_weight_type_from_env, get_sp_weight_type_from_env
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.dump_config_utils import dump_model_to_table
-
+from maga_transformer.utils.fuser import fetch_remote_file_to_local
+from maga_transformer.utils.util import WEIGHT_TYPE, get_weight_type_from_env, get_sp_weight_type_from_env
 
 from maga_transformer.model_factory_register import _model_factory
 

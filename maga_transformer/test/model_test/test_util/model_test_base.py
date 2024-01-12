@@ -211,7 +211,8 @@ class ModelTestBase(TestCase):
                     model_str += '/V100'
 
             expected_path = "maga_transformer/test/model_test/" + self.fake_name + "/testdata/" + self.model_type + model_str
-
+            if not os.path.exists(expected_path):
+                expected_path = "internal_source/maga_transformer/test/" + self.fake_name + "/testdata/" + self.model_type + model_str
             if self.test_loss:
                 expected_path += "/expect.loss"
                 self._test_loss(pipeline, expected_path)

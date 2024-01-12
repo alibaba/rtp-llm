@@ -11,7 +11,7 @@ from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
     ChatCompletionRequest, RoleEnum, FunctionCall
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
-    StreamResponseObject
+    StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
@@ -104,20 +104,22 @@ def make_context(
     raw_text += f"\n{im_start}user\n{query}{im_end}\n{im_start}assistant\n"
     return raw_text, context_tokens
 
-class QwenRenderer(BasicRenderer):
+class QwenRenderer(CustomChatRenderer):
     def __init__(self, tokenizer: QWenTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.extra_stop_word_ids_list.append([37763, 367, 25]) # Observation:
 
-    def render_chat(self, request: ChatCompletionRequest) -> List[int]:
+    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         assert (isinstance(self.tokenizer, QWenTokenizer))
         query, history = self.parse_messages(request.messages, request.functions)
+        input_ids = []
         if (query == _TEXT_COMPLETION_CMD):
-            return self.text_complete_last_message(history)
+            input_ids = self.text_complete_last_message(history)
         else:
             assert (isinstance(query, str))
-            return make_context(self.tokenizer, query, history,
+            input_ids = make_context(self.tokenizer, query, history,
                                 system="You are a helpful assistant.")[1]
+        return RenderedInputs(input_ids=input_ids)
 
     def text_complete_last_message(self, history):
         im_start = "<|im_start|>"

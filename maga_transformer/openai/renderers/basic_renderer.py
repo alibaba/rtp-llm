@@ -12,7 +12,7 @@ from jinja2.exceptions import TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, \
-    RendererParams, ProcessedOutput, StreamResponseObject
+    RendererParams, ProcessedOutput, StreamResponseObject, RenderedInputs
 from maga_transformer.models.base_model import BaseTokenizer, GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
@@ -87,7 +87,7 @@ class BasicRenderer(CustomChatRenderer):
         jinja_env.globals["raise_exception"] = raise_exception
         return jinja_env.from_string(chat_template)
 
-    def render_chat(self, request: ChatCompletionRequest) -> List[int]:
+    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         rendered = self.compiled_template.render(
             messages=request.messages,
             functions=request.functions,
@@ -96,7 +96,7 @@ class BasicRenderer(CustomChatRenderer):
             **self.special_tokens_map
         )
         logging.debug(f"request [{request.model_dump_json(indent=4)}] rendered string: [{rendered}]]")
-        return self.tokenizer.encode(rendered)
+        return RenderedInputs(input_ids=self.tokenizer.encode(rendered))
 
     async def render_response_stream(
             self,

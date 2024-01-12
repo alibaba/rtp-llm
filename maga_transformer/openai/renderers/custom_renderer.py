@@ -26,6 +26,11 @@ class RendererParams:
     eos_token_id: int
     stop_word_ids_list: List[List[int]]
 
+@dataclass
+class RenderedInputs:
+    input_ids: List[int] = field(default_factory=list)
+    input_images: List[str] = field(default_factory=list)
+
 class CustomChatRenderer():
     def __init__(self,
                  tokenizer: Union[PreTrainedTokenizer, BaseTokenizer],
@@ -43,7 +48,7 @@ class CustomChatRenderer():
     def get_extra_stop_word_ids_list(self) -> List[List[int]]:
         return self.extra_stop_word_ids_list
 
-    def render_chat(self, request: ChatCompletionRequest) -> List[int]:
+    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
 
     async def render_response_stream(

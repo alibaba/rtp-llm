@@ -65,7 +65,5 @@ def fake_gpt_neox():
 
     fake_model("gpt_neox", default_config, save_config_func)
 
-# rm -f -r ./maga_transformer/test/model_test/fake_test/testdata/gpt_neox/fake/ && /opt/conda310/bin/python3 ./maga_transformer/tools/fake_gpt_neox.py -p ./maga_transformer/test/model_test/fake_test/testdata/gpt_neox/fake/ -i /mnt/nas1/dm/v2_ft_23d_14k/
-
 if __name__ == '__main__':
     fake_gpt_neox()

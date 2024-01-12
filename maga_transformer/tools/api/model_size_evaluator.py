@@ -9,7 +9,7 @@ from maga_transformer.models.base_model import ModelConfig
 from maga_transformer.tools.api.utils import handler_error
 from maga_transformer.utils.util import WEIGHT_TYPE, get_weight_type_from_env
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.internal import fetch_remote_file_to_local
+from maga_transformer.utils.fuser import fetch_remote_file_to_local
 from maga_transformer.tools.api.hf_model_helper import HF_MODEL_INFO_HELPER, HfModelInfo, HfModelInfoHelper
 
 def eval_model_size(env_params, model_type, model_path, ptuning_path):

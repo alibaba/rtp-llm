@@ -58,8 +58,6 @@ rtp-llm 是一个python库，包含了编译好的c++库，cuda库以及python�
 * NVIDIA GPU: Compute Capability 7.0 或者更高 (例如V100, T4, RTX20xx, A100, L4, H100等)
 
 ### 进入docker
-如果接下来是准备使用whl包来安装，那么进入docker是可选的。如果是从源代码构建，那么进入docker是必选的。
-如果本机环境比较复杂，建议进入docker，环境比较干净。
 ```
 $ git clone https://github.com/alibaba/rtp-llm.git
 $ cd docker
@@ -67,14 +65,15 @@ $ python3 ./create_container.py create <CONTAINER_NAME> --gpu
 $ python3 ./create_container.py enter <CONTAINER_NAME> --gpu
 ```
 
-### 使用whl来安装
-您可以使用whl来安装rtp-llm：
+### 使用pip来安装
+您可以使用pip来安装rtp-llm：
 ```
-$ # 安装rtp-llm（cuda = 11.8）
+$ # 安装rtp-llm（cuda = 11.4）
 $ cd rtp-llm
 $ pip3 install -r ./maga_transformer/requirements_torch_gpu.txt
-$ # 使用release版本中对应的whl, 这里以0.1.0的cuda11版本为例子，cuda12请查看release发布页。
-$ pip3 install maga_transformer-0.0.1+cuda118-cp310-cp310-manylinux1_x86_64.whl
+$ # 使用release版本中对应的whl, 这里以0.1.0版本为例子
+$ wget https://github.com/alibaba/rtp-llm/releases/download/v0.1.0/maga_transformer-0.1.0-py3-none-any.whl
+$ pip3 install maga_transformer-0.1.0-py3-none-any.whl
 $ # 修改test.py中的模型路径
 $ python3 example/test.py
 ```
@@ -83,7 +82,6 @@ $ python3 example/test.py
 您也可以通过源代码来进行编译。源码构建使用bazel作为构建系统，推荐版本`5.2.0`。
 ```
 $ cd rtp-llm
-$ # 这里使用cuda11作为例子, cuda12使用requirements_torch_gpu_cuda12.txt
 $ pip3 install -r ./maga_transformer/requirements_torch_gpu.txt
 $ bazel build //maga_transformer:maga_transformer --jobs 100 --verbose_failures
 $ # 修改test.py中的模型路径，运行一个实际的模型
@@ -103,12 +101,11 @@ from maga_transformer.model_factory import ModelFactory
 if __name__ == '__main__':
     model = ModelFactory.from_huggingface("Qwen/Qwen-7B-Chat")
     pipeline = Pipeline(model, model.tokenizer)
-    for res in pipeline(["<|im_start|>user\nhello, what's your name<|im_end|>\n<|im_start|>assistant\n"], max_new_tokens = 100):
+    for res in pipeline(["hello, what's your name"], max_new_tokens = 100):
         print(res.batch_response)
     pipeline.stop()
-```
-其中pipeline中prompt格式是qwen模型的prompt格式，您需要换成您的模型的prompt格式。
 
+```
 也支持通过模型路径加载
 ``` python
 model = ModelFactory.from_huggingface("/path/to/dir")
@@ -242,7 +239,6 @@ rtp-llm同时提供了openai风格服务接口，详见[OpenAI接口使用文档
 * [多模态使用文档](docs/Multimodal-Tutorial.md)
 * [结构化剪枝使用文档](docs/Sparse-Tutorial.md)
 * [投机采样使用文档](docs/SpeculativeDecoding-Tutroial.md)
-* [OpenAI接口使用文档](docs/OpenAI-Tutorial.md)
 
 ## 致谢：
 我们的项目主要基于[FasterTransformer](https://github.com/NVIDIA/FasterTransformer)，并在此基础上集成了[TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)的部分kernel实现。FasterTransformer和TensorRT-LLM为我们提供了可靠的性能保障。[Flash-Attention2](https://github.com/Dao-AILab/flash-attention)和[cutlass](https://github.com/NVIDIA/cutlass)也在我们持续的性能优化过程中提供了大量帮助。我们的continuous batching和increment decoding参考了[vllm](https://github.com/vllm-project/vllm)的实现；采样参考了[hf transformers](https://github.com/huggingface/transformers)，投机采样部分集成了[Medusa](https://github.com/FasterDecoding/Medusa)的实现，多模态部分集成了[llava](https://github.com/haotian-liu/LLaVA)和[qwen-vl](https://github.com/QwenLM/Qwen-VL)的实现。感谢这些项目对我们的启发和帮助。

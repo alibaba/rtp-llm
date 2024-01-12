@@ -15,3 +15,10 @@ from .mpt import Mpt
 from .phi import Phi
 from .llava import Llava
 from .qwen_vl import QWen_VL
+
+import logging
+try:
+    from internal_source.maga_transformer.models import internal_init
+except ImportError:
+    logging.info('no internal_source found')
+    pass

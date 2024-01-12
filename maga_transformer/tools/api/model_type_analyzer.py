@@ -9,7 +9,7 @@ from maga_transformer.tools.api.hf_model_helper import HF_MODEL_INFO_HELPER, HfM
 from maga_transformer.tools.api.model_dict import ModelDict
 from maga_transformer.tools.api.utils import handler_error
 
-from maga_transformer.internal import fetch_remote_file_to_local
+from maga_transformer.utils.fuser import fetch_remote_file_to_local
 
 
 GENERAL_HF_MODEL = "HuggingFacePipeline"

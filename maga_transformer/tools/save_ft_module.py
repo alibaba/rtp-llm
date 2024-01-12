@@ -97,12 +97,4 @@ def main():
 
 
 if __name__ == '__main__':
-    # os.environ["CHECKPOINT_PATH"] = "/mnt/nas1/hf/starcoder"
-    # os.environ["MODEL_TYPE"] = "gpt_bigcode"
-
-    # os.environ["CHECKPOINT_PATH"] = "/mnt/nas1/hf/Baichuan-7B"
-    # os.environ["MODEL_TYPE"] = "baichuan"
-
-    # os.environ["CHECKPOINT_PATH"] = "/mnt/nas1/hf/chatglm2-6b"
-    # os.environ["MODEL_TYPE"] = "chatglm2"
     main()

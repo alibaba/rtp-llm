@@ -38,9 +38,22 @@ class RoleEnum(str, Enum):
     function = "function"
     tool = "tool"
 
+class ContentPartTypeEnum(str, Enum):
+    text = "text"
+    image = "image_url"
+
+class ImageURL(BaseModel):
+    url: str
+    detail: Optional[str] = "auto"
+
+class ContentPart(BaseModel):
+    type: ContentPartTypeEnum
+    text: Optional[str] = None
+    image_url: Optional[str] = None
+
 class ChatMessage(BaseModel):
     role: RoleEnum
-    content: str = ""
+    content: Union[str, ContentPart] = ""
     function_call: Optional[FunctionCall] = None
     tool_calls: Optional[List[ToolCall]] = None
 
