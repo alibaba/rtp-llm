@@ -419,7 +419,7 @@ class BatchQuery:
         self.finished = to_cpu(finished)
         self.hidden_states = hidden_states
         self.logits = logits
-        self.cum_log_probs = cum_log_probs
+        self.cum_log_probs = to_cpu(cum_log_probs)
         self.updated_token_ids = to_cpu(updated_token_ids)
         self.update_length = update_length
 
