@@ -1,4 +1,4 @@
-# 使用方法描述
+# 使用方法
 
 rtp-llm 支持 openai chat 格式的接口调用，可以作为 openai 接口服务的无缝 drop-in 。
 
