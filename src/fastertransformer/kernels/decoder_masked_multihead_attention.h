@@ -96,9 +96,12 @@ struct Multihead_attention_params_base {
     int batch_size = 0;
     // The beam width
     int beam_width = 0;
-    // The sequence length.
-    // TODO: change name max_seq_len
-    int memory_max_len = 0;
+    // By default, max_kv_cache_length == cyclic_kv_cache_length
+    // unless each layer has different cyclic kv cache length.
+    // Max cache capacity (used to allocate KV cache)
+    int max_kv_cache_length = 0;
+    // Cyclic kv cache capacity (used to get the cyclic kv cache position for new tokens)
+    int cyclic_kv_cache_length = 0;
     // The number of heads (H).
     int num_heads = 0;
     // Controls MHA/MQA/GQA
@@ -126,7 +129,7 @@ struct Multihead_attention_params_base {
     int        position_embeddings_scale = 1;
     int        base_scale                = 1;
 
-    // The current timestep. TODO Check that do we only this param in cross attention?
+// The current timestep. TODO Check that do we only this param in cross attention?
     int timestep = 0;
     // The current timestep of each sentences (support different timestep for different sentences)
 

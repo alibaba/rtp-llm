@@ -530,12 +530,13 @@ void cross_attention_dispatch(T*                               query_buf,
         params.batch_size = inference_batch_size;
         // TODO(bhsueh) We can use batch but not batch * beam_width in k/v cache in cross attention
         // because they are same for all beams.
-        params.beam_width           = 1;  // We don't care the beam_width in cross attention, set to 1 is enough.
-        params.memory_max_len       = memory_max_len;
-        params.timestep             = step - 1;
-        params.num_heads            = head_num;
-        params.hidden_size_per_head = size_per_head;
-        params.inv_sqrt_dh          = 1.F / (sqrtf((float)params.hidden_size_per_head) * q_scaling);
+        params.beam_width             = 1;  // We don't care the beam_width in cross attention, set to 1 is enough.
+        params.max_kv_cache_length    = memory_max_len;
+        params.cyclic_kv_cache_length = memory_max_len;
+        params.timestep               = step - 1;
+        params.num_heads              = head_num;
+        params.hidden_size_per_head   = size_per_head;
+        params.inv_sqrt_dh            = 1.F / (sqrtf((float)params.hidden_size_per_head) * q_scaling);
 
         // output cross attentions
         params.max_decoder_seq_len        = output_cross_attention_params.max_decoder_seq_len;

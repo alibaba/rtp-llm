@@ -36,9 +36,9 @@ inline size_t smem_size_in_bytes(Multihead_attention_params<T, DO_CROSS_ATTENTIO
 {
     using Tk = typename kernel_type_t<T>::Type;
     // The amount of shared memory needed to store the Q*K^T values in float.
-    const int  max_timesteps = DO_CROSS_ATTENTION ? params.memory_max_len :
-                                                    min((DO_MULTI_BLOCK ? params.timesteps_per_block : params.timestep),
-                                                       params.memory_max_len);
+    const int max_timesteps = DO_CROSS_ATTENTION
+        ? params.cyclic_kv_cache_length
+        : min((DO_MULTI_BLOCK ? params.timesteps_per_block : params.timestep), params.cyclic_kv_cache_length);
     const auto qk_elts = static_cast<std::size_t>(divUp(max_timesteps + 1, 4));  // explicit cast because of the sign
     const auto qk_sz   = qk_elts * 16;
 
