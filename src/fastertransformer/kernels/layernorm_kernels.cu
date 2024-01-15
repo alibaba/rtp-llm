@@ -1563,23 +1563,7 @@ void invokeGeneralAddBiasResidualT5PreLayerNorm(T*           output,
                                                 cudaStream_t stream)
 {
     if (beta != nullptr) {
-        invokeGeneralAddBiasResidualPreLayerNorm(output,
-                                                 norm_output,
-                                                 output,
-                                                 input,
-                                                 (const T*)nullptr,
-                                                 gamma,
-                                                 beta,
-                                                 bias,
-                                                 layernorm_eps,
-                                                 m,
-                                                 n,
-                                                 (float*)nullptr,
-                                                 (float*)nullptr,
-                                                 (float*)nullptr,
-                                                 (float*)nullptr,
-                                                 0,
-                                                 stream);
+        FT_CHECK_WITH_INFO(false, "rmsnorm beta should always be nullptr");
     }
     else if (bias != nullptr) {
         dim3 grid(m);

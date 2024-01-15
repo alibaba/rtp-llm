@@ -111,7 +111,6 @@ class QWenWeight(ModelDeployWeightInfo):
                        transpose),
             WeightInfo(W.ffn_w2, [CkptWeightInfo('layers.{i}.mlp.dense_4h_to_h.weight', concat_1)],
                        transpose),
-            WeightInfo(W.post_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo('layers.{i}.post_attention_layernorm.weight', identity)],
                        identity),
         ]
@@ -153,7 +152,6 @@ class QWenWeight(ModelDeployWeightInfo):
                        functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
             WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.weight', identity)],
                        functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1)),
-            WeightInfo(W.post_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_2.weight', identity)],
                        identity),
         ]
@@ -191,7 +189,8 @@ class QWenBase(GPT):
         config.layernorm_eps = 1e-5
         config.special_tokens.bos_token_id = -1
         config.special_tokens.eos_token_id = 151643
-        config.special_tokens.stop_words_list = [[151645]]
+        # <|im_start|> and <|im_end|>
+        config.special_tokens.stop_words_list = [[151645], [151644]]
         config.special_tokens.system.token_ids = [151644, 8948, 198] # '<|im_start|>system\n'
         config.special_tokens.system.eos_token_ids = [151645, 198] # '<|im_end|>\n'
         config.special_tokens.user.token_ids = [151644, 872, 198] # '<|im_start|>user\n'
@@ -233,7 +232,7 @@ class QWenBase(GPT):
     def load_tokenizer(self):
         self.tokenizer = QWenTokenizer.from_pretrained(self.config.tokenizer_path)
 
-class QWen(QWenBase):    
+class QWen(QWenBase):
     @staticmethod
     def _create_config(ckpt_path: str):
         config = GptInitModelParameters(
