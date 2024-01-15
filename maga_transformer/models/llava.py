@@ -167,6 +167,7 @@ class Llava(Llama, MultiModalMixin):
             Llava.from_params(config, param_json)
         else:
             raise Exception("llava parameter from unkown source")
+        config.tp_split_emb_and_lm_head = False # llava embedding can't tp
         return config
 
     @staticmethod

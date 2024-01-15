@@ -39,7 +39,7 @@ class SpModelExecutor(ExecutorBase):
         if model_ops.model.post_decoder_layernorm is not None:
             hidden_states = model_ops.model.post_decoder_layernorm(hidden_states)
         assert model_ops.model.lm_head is not None
-        logits = model_ops.model.lm_head(hidden_states)
+        logits = model_ops.model.lm_head(hidden_states).float()
 
         finished = torch.zeros((batch_query.total_batch_size)).bool()
         soft = torch.nn.functional.softmax(logits, dim=-1)
@@ -105,7 +105,7 @@ class SpModelExecutor(ExecutorBase):
 
         return fake_sample_query
 
-    def _speculative_accept(self, batch_query: BatchQuery, token_probs: List[torch.Tensor], output_token_list: List[torch.Tensor], validate_tensor: torch.Tensor):
+    def _speculative_accept(self, batch_query: BatchQuery, token_probs: List[torch.Tensor], output_token_list: List[torch.Tensor], validate_hiddens: torch.Tensor):
         def accept(sp_prob: float, model_prob: float):
             rand = random.random()
             if sp_prob <= model_prob:
@@ -115,7 +115,8 @@ class SpModelExecutor(ExecutorBase):
 
         # shape: [batch, gen_num]
         fake_batch_query = self._creata_fake_sample_query(batch_query, self.gen_num, output_token_list)
-        self.validate_executor._post_process(fake_batch_query, validate_tensor, validate_tensor)
+        validate_logits = self.validate_executor._post_transformer_nn(validate_hiddens)
+        self.validate_executor._post_process(fake_batch_query, validate_logits, validate_hiddens)
         next_tokens = fake_batch_query.slice_output_token(0, fake_batch_query.total_batch_size + 1, 1)
         index_probs = fake_batch_query.output_index_prob
 
@@ -150,5 +151,5 @@ class SpModelExecutor(ExecutorBase):
         validate_batch_query = self._create_validate_query(batch_query, output_token_list)
         # shape = [batch_size, validate_len]
         hidden_states = self.validate_executor._process(validate_batch_query)
-        validate_list = self._unpack_validate_list(validate_batch_query, len(output_token_list), hidden_states)
-        return self._speculative_accept(batch_query, cum_probs, output_token_list, validate_list)
+        validate_hiddens = self._unpack_validate_list(validate_batch_query, len(output_token_list), hidden_states)
+        return self._speculative_accept(batch_query, cum_probs, output_token_list, validate_hiddens)

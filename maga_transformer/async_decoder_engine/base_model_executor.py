@@ -52,10 +52,12 @@ class BaseModelExecutor(ExecutorBase):
     def process(self, batch_query: BatchQuery) -> None:
         all_hidden_states = self._process(batch_query)
         hidden_states = self._unpack_hidden_states(batch_query, all_hidden_states)
+        self._calculate_loss(batch_query, all_hidden_states)
+        logits = self._post_transformer_nn(hidden_states)
         if g_parallel_info.tp_size > 1 and g_parallel_info.tp_rank > 0:
             return
         with torch.cuda.nvtx.range('post_process'):
-            self._post_process(batch_query, hidden_states, all_hidden_states)
+            self._post_process(batch_query, logits, hidden_states)
 
     def create_config_json(self):
         config_json = {
@@ -229,16 +231,8 @@ class BaseModelExecutor(ExecutorBase):
     def _post_transformer_nn(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.model_ops.model.post_decoder_layernorm is not None:
             hidden_states = self.model_ops.model.post_decoder_layernorm(hidden_states)
-        # We use logits of fp32 type to avoid overflow issue.
         assert self.model_ops.model.lm_head is not None
-        if self.model_ops.model.use_fp32_to_compute_logit:
-            # The FT GPT op internally uses FP32 compute type for matrix multiplication.
-            # This will produce the same result with the end-to-end FT's GPT op.
-            logits = torch.nn.functional.linear(hidden_states.float(),
-                                                self.model_ops.model.lm_head.weight)
-        else:
-            logits = self.model_ops.model.lm_head(hidden_states).float()
-        # print('hidden_states2:', logits)
+        logits = self.model_ops.model.lm_head(hidden_states).float()
         return logits
 
     def _reset_sampler(self, batch_query: BatchQuery) -> None:
@@ -280,12 +274,8 @@ class BaseModelExecutor(ExecutorBase):
     def _post_process(
             self,
             batch_query: BatchQuery,
-            hidden_states: torch.Tensor,
-            all_hidden_states: torch.Tensor
-    ) -> None:
-        self._calculate_loss(batch_query, all_hidden_states)
-        logits = self._post_transformer_nn(hidden_states)
-
+            logits: torch.Tensor,
+            hidden_states: torch.Tensor) -> None:
         beam_width = batch_query.beam_width
         key_cache, value_cache = self.query_manager_.get_kv_cache_base()
         if beam_width > 1:

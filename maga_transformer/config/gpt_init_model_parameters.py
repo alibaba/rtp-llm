@@ -108,7 +108,7 @@ class GptInitModelParameters:
         self.has_lm_head_bias = False
         self.kv_cache_mem_mb = -1
         self.src_quantization_bit = 0
-        self.tp_split_emb_and_lm_head = False
+        self.tp_split_emb_and_lm_head = True
         self.medusa_config = None
         self.vit_related_params = ViTConfig()
         for k, v in kwargs.items():
@@ -246,7 +246,9 @@ class GptInitModelParameters:
         logging.info(f'pre_allocate_op_mem: {self.pre_allocate_op_mem}')
         self.int8_kv_cache = bool(int(os.environ.get('INT8_KV_CACHE', 0)))
         logging.info(f'int8_kv_cache: {self.int8_kv_cache}')
-        self.tp_split_emb_and_lm_head = str_to_bool(os.environ.get('TP_SPLIT_EMB_AND_LMHEAD', '0'))
+        value = os.environ.get('TP_SPLIT_EMB_AND_LMHEAD')
+        if value is not None:
+            self.tp_split_emb_and_lm_head = str_to_bool(value)
         logging.info(f'tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}')
 
         # Update stop_words_str and stop_word_ids from ENV
