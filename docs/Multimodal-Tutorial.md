@@ -57,11 +57,10 @@ for res in pipeline(["Picture 1:<img>https://qianwen-res.oss-cn-beijing.aliyuncs
 export MODEL_TYPE=qwen_vl
 export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
-export FT_SERVER_TEST=1 # print log to shell instead of log file
-export START_PORT=12345
+export FT_SERVER_TEST=1
 
 python3 -m maga_transformer.start_server
 
 # request to server
-curl -XPOST http://localhost:12345 -d '{"prompt": "Picture 1:<img>https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg</img>\n这是什么", "generate_config: {"max_new_tokens": 1000}}'
+curl -XPOST http://localhost:8088 -d '{"prompt": "Picture 1:<img>https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg</img>\n这是什么", "generate_config: {"max_new_tokens": 1000}}'
 ```
