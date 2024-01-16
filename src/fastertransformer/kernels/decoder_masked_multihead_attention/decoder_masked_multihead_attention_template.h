@@ -76,6 +76,8 @@ __inline__ __host__ __device__ T constexpr flat_index2(T const& index_0, T const
 // Seems to slightly improve the accuracy
 #define MMHA_USE_FP32_ACCUM_FOR_OUT
 
+#define MMHA_USE_FP32_ACCUM_FOR_LOGITS 
+
 #if 0 && defined(MMHA_USE_FP32_ACCUM_FOR_OUT)
  // Does not seem to improve the accuracy
  //#define MMHA_USE_FP32_ACCUM_FOR_LOGITS
@@ -862,49 +864,6 @@ struct Qk_dot<uint16_t, THREADS_PER_KEY> {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Tk, typename V_vec_accum, typename V_vec_m, bool INT8_KV_CACHE, bool FP8_KV_CACHE>
-inline __device__ void
-Logit_value_fma(V_vec_accum& out, const Tk* logits_smem, const V_vec_m& v_vec, const float v_scale, const bool is_mask)
-{
-#if defined(MMHA_USE_FP32_ACCUM_FOR_LOGITS)
-    float logit = is_mask ? 0.f : reinterpret_cast<float*>(logits_smem)[0];
-    if constexpr (INT8_KV_CACHE) {
-        V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
-        out                = fma(logit, cast_to_float(v_vec_), out);
-    }
-    else if constexpr (FP8_KV_CACHE) {
-#ifdef MMHA_FP8_SCALE_P_INSTEAD_OF_V
-        out = fma(logit, cast_to_float(v_vec), out);
-#else
-        V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
-        out                = fma(logit, cast_to_float(v_vec_), out);
-#endif  // MMHA_FP8_SCALE_P_INSTEAD_OF_V
-    }
-    else {
-        out = fma(logit, cast_to_float(v_vec), out);
-    }
-#else  // MMHA_USE_FP32_ACCUM_FOR_LOGITS
-    Tk logit = is_mask ? Tk(0.f) : logits_smem[0];
-    if constexpr (INT8_KV_CACHE) {
-        V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
-        out                = fma(logit, v_vec_, out);
-    }
-    else if constexpr (FP8_KV_CACHE) {
-#ifdef MMHA_FP8_SCALE_P_INSTEAD_OF_V
-        out = fma(logit, v_vec, out);
-#else
-        V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
-        out                = fma(logit, v_vec_, out);
-#endif  // MMHA_FP8_SCALE_P_INSTEAD_OF_V
-    }
-    else {
-        out = fma(logit, v_vec, out);
-    }
-#endif  // MMHA_USE_FP32_ACCUM_FOR_LOGITS
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
 template<int WARPS_PER_BLOCK, int WARP_SIZE = 32>
 inline __device__ float block_sum(float* red_smem, float sum)
 {
@@ -1121,6 +1080,49 @@ __device__ inline constexpr uint2 chunk_index(unsigned tidx)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+template<typename Tk, typename V_vec_accum, typename V_vec_m, bool INT8_KV_CACHE, bool FP8_KV_CACHE>
+inline __device__ void
+Logit_value_fma(V_vec_accum& out, const Tk* logits_smem, const V_vec_m& v_vec, const float v_scale, const bool is_mask)
+{
+#if defined(MMHA_USE_FP32_ACCUM_FOR_LOGITS)
+    float logit = is_mask ? 0.f : reinterpret_cast<float*>(const_cast<Tk*>(logits_smem))[0];
+    if constexpr (INT8_KV_CACHE) {
+        V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
+        out                = fma(logit, cast_to_float(v_vec_), out);
+    }
+    else if constexpr (FP8_KV_CACHE) {
+#ifdef MMHA_FP8_SCALE_P_INSTEAD_OF_V
+        out = fma(logit, cast_to_float(v_vec), out);
+#else
+        V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
+        out                = fma(logit, cast_to_float(v_vec_), out);
+#endif  // MMHA_FP8_SCALE_P_INSTEAD_OF_V
+    }
+    else {
+        out = fma(logit, cast_to_float(v_vec), out);
+    }
+#else  // MMHA_USE_FP32_ACCUM_FOR_LOGITS
+    Tk logit = is_mask ? Tk(0.f) : logits_smem[0];
+    if constexpr (INT8_KV_CACHE) {
+        V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
+        out                = fma(logit, v_vec_, out);
+    }
+    else if constexpr (FP8_KV_CACHE) {
+#ifdef MMHA_FP8_SCALE_P_INSTEAD_OF_V
+        out = fma(logit, v_vec, out);
+#else
+        V_vec_accum v_vec_ = mul<V_vec_accum, float, V_vec_m>(v_scale, v_vec);
+        out                = fma(logit, v_vec_, out);
+#endif  // MMHA_FP8_SCALE_P_INSTEAD_OF_V
+    }
+    else {
+        out = fma(logit, v_vec, out);
+    }
+#endif  // MMHA_USE_FP32_ACCUM_FOR_LOGITS
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 template<
     // The type of the inputs. Supported types: float, uint16_t, nv_bfloat16.
     typename T,
@@ -1320,10 +1322,10 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
 
     // The actual sequence length excluding the paddings.
     // minus 1 because it includes the current timestep while tlength denotes the kv cache length.
-    const int tlength =
-        DO_CROSS_ATTENTION ?
-            params.memory_length_per_sample[batch_beam_idx] - 1 :
-            (params.length_per_sample ? (params.length_per_sample[batch_beam_idx] - 1) : static_cast<int>(timestep));
+    const int tlength             = DO_CROSS_ATTENTION ? params.memory_length_per_sample[batch_beam_idx] - 1 :
+                                                         (params.length_per_sample ?
+                                                              (params.length_per_sample[batch_beam_idx] + params.max_prefix_prompt_length) :
+                                                              static_cast<int>(timestep));
     bool      count_prefix_length = params.count_prefix_length;
     // We will use cyclic kv cache when it exceeds the limit.
     // The length position for storing new key and value.
@@ -1454,7 +1456,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                       reinterpret_cast<T*>(smem_),
                       tidx,
                       tlength,
-                      params.timestep,
+                      timestep,
                       params.rotary_embedding_dim,
                       params.length_per_sample[batch_beam_idx],
                       params.rotary_embedding_base,
