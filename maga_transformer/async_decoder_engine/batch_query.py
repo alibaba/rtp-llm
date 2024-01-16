@@ -235,12 +235,18 @@ class BatchQuery:
             return
         check_num: int = 998244353
         check_num2: int = 1000000007
-        shape_hints = torch.IntTensor([check_num, self.generate_batch_size, self.context_batch_size, self.output_token_ids.shape[1], self.cache_block_indice.shape[1], check_num2])
+        shape_hints = torch.IntTensor([
+            check_num,
+            self.generate_batch_size, self.context_batch_size, self.beam_width,
+            self.output_token_ids.shape[1], self.cache_block_indice.shape[1],
+            check_num2
+        ])
         shape_hints = to_cuda(shape_hints)
         self.nccl_op_.broadcast_tp([shape_hints])
         torch.cuda.current_stream().synchronize()
         shape_hints = shape_hints.cpu().numpy()
-        assert shape_hints[0] == check_num and shape_hints[5] == check_num2
+        assert shape_hints[0] == check_num and shape_hints[-1] == check_num2
+
         if g_parallel_info.tp_rank == 0:
             seq_lengths_tensor = to_cuda(torch.IntTensor(self.seq_lengths_list))
             reuse_lengths_tensor = to_cuda(torch.IntTensor(self.reuse_lengths_list))
@@ -251,14 +257,18 @@ class BatchQuery:
         else:
             self.generate_batch_size = int(shape_hints[1])
             self.context_batch_size = int(shape_hints[2])
-            output_token_ids = torch.zeros((self.total_batch_size, int(shape_hints[3])), dtype=torch.int32, device="cuda:0")
+            self.beam_width = int(shape_hints[3])
+            output_token_ids = torch.zeros((self.decoder_batch_size, int(shape_hints[4])), dtype=torch.int32, device="cuda:0")
             cache_block_indice = torch.zeros(
-                (self.total_batch_size, int(shape_hints[4])), dtype=torch.int32, device="cuda:0")
-            seq_lengths_tensor = torch.zeros((self.generate_batch_size), dtype=torch.int32, device="cuda:0")
-            reuse_lengths_tensor = torch.zeros((self.total_batch_size), dtype=torch.int32, device="cuda:0")
-            context_lengths_tensor = torch.zeros((self.total_batch_size), dtype=torch.int32, device="cuda:0")
+                (self.decoder_batch_size, int(shape_hints[5])), dtype=torch.int32, device="cuda:0")
+            seq_lengths_tensor = torch.zeros((self.generate_batch_size * self.beam_width), dtype=torch.int32, device="cuda:0")
+            reuse_lengths_tensor = torch.zeros((self.decoder_batch_size), dtype=torch.int32, device="cuda:0")
+            context_lengths_tensor = torch.zeros((self.decoder_batch_size), dtype=torch.int32, device="cuda:0")
             lora_ids_tensor = torch.zeros((max(1, self.total_batch_size)), dtype=torch.int32, device="cuda:0")
-        self.nccl_op_.broadcast_tp([cache_block_indice, output_token_ids, seq_lengths_tensor, reuse_lengths_tensor, context_lengths_tensor, lora_ids_tensor])
+        self.nccl_op_.broadcast_tp([
+            cache_block_indice, output_token_ids, seq_lengths_tensor,
+            reuse_lengths_tensor, context_lengths_tensor, lora_ids_tensor
+        ])
         if g_parallel_info.tp_rank > 0:
             self.cache_block_indice = to_cpu(cache_block_indice)
             self.output_token_ids = to_cpu(output_token_ids)
