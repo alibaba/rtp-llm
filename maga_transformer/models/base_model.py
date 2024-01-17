@@ -135,6 +135,7 @@ class BaseModel(object):
             ckpt_path=model_config.ckpt_path,
             tokenizer_path=model_config.tokenizer_path,
             int8_mode= model_config.int8_mode,
+            data_type=model_config.act_type,
             max_seq_len=model_config.max_seq_len,
             seq_size_per_block=model_config.seq_size_per_block,
             tp_size=g_parallel_info.tp_size,

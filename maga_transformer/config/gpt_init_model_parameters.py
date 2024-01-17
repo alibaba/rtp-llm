@@ -5,6 +5,7 @@ import torch
 import logging
 # make sure so init
 from dataclasses import dataclass, field, fields
+from maga_transformer.utils.util import WEIGHT_TYPE
 
 updated_params: Set[str] = set()
 
@@ -212,6 +213,7 @@ class GptInitModelParameters:
                       lora_infos: Optional[Dict[str, str]],
                       tokenizer_path: str,
                       int8_mode: int,
+                      data_type: WEIGHT_TYPE,
                       max_seq_len: int,
                       seq_size_per_block: int,
                       tp_size: int,
@@ -220,6 +222,7 @@ class GptInitModelParameters:
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path
         self.int8_mode = int8_mode
+        self.data_type = data_type.to_str()
         self.gen_num_per_circle = gen_num_per_circle
         if max_seq_len != 0:
             self.max_seq_len = max_seq_len

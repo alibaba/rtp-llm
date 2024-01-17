@@ -150,7 +150,7 @@ class ModelFactory:
             gen_num_per_circle = int(os.environ.get('GEN_NUM_PER_CIRCLE', '5'))
 
             sp_weight_type = get_sp_weight_type_from_env(os.environ)
-            sp_act_type = sp_weight_type if sp_weight_type in [ WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else weight_type
+            sp_act_type = sp_weight_type if sp_weight_type in [ WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16
             SP_ACT_TYPE = "SP_ACT_TYPE"
             if os.environ.get(SP_ACT_TYPE, None):
                 sp_act_type = WEIGHT_TYPE.from_str(os.environ.get(SP_ACT_TYPE))

@@ -159,6 +159,8 @@ class WEIGHT_TYPE(Enum):
                 return member
         raise ValueError('No enum member with value %s' % value)
 
+    def to_str(self) -> str:
+        return self.value[0]
 
 def get_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
     weight_type_str = env_param.get("WEIGHT_TYPE", None)
