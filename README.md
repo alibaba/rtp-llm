@@ -34,22 +34,32 @@
 
 ### 安装和启动
 ```bash
+
+# 安装rtp-llm
 cd rtp-llm
+# cuda12的环境请使用 requirements_torch_gpu_cuda12.txt
 pip3 install -r ./maga_transformer/requirements_torch_gpu.txt
-# 使用release版本中对应的whl, 这里以0.1.0版本为例子
-wget https://github.com/alibaba/rtp-llm/releases/download/v0.1.0/maga_transformer-0.1.0-py3-none-any.whl
-pip3 install maga_transformer-0.1.0-py3-none-any.whl
+# 使用release版本中对应的whl, 这里以0.1.0的cuda11版本为例子，cuda12的whl包请查看release发布页。
+pip3 install maga_transformer-0.0.1+cuda118-cp310-cp310-manylinux1_x86_64.whl
+
+# 修改test.py中的模型路径，直接启动程序
+python3 example/test.py
+
+# 或者启动 http 服务
+# rtp-llm使用fastapi构建了高性能模型服务，使用异步编程尽量避免cpu线程压力过大干扰gpu高效运行
 export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
 export FT_SERVER_TEST=1
 python3 -m maga_transformer.start_server
 
 # request to server
-curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config: {"max_new_tokens": 1000}}'
+curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 ```
+模型的配置参数等参考以下详细文档。
 
 ## 文档
 * [配置参数](docs/Config.md)
+* [源码构建](docs/Build.md)
 * [请求格式](docs/Request.md)
 * [OpenAI接口](docs/OpenAI-Tutorial.md)
 * [LoRA](docs/LoRA-Tutorial.md)
@@ -58,7 +68,6 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [结构化剪枝](docs/Sparse-Tutorial.md)
 * [投机采样](docs/SpeculativeDecoding-Tutroial.md)
 * [作为 Python 库引用](docs/HF.md)
-* [源码构建](docs/Build.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)
 

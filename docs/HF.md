@@ -5,13 +5,14 @@ from maga_transformer.pipeline import Pipeline
 from maga_transformer.model_factory import ModelFactory
 
 if __name__ == '__main__':
-    model = ModelFactory.from_huggingface("Qwen/Qwen-7B-Chat")
+    model = ModelFactory.from_huggingface("Qwen/Qwen-1_8B-Chat")
     pipeline = Pipeline(model, model.tokenizer)
-    for res in pipeline(["hello, what's your name"], max_new_tokens = 100):
+    for res in pipeline(["<|im_start|>user\nhello, what's your name<|im_end|>\n<|im_start|>assistant\n"], max_new_tokens = 100):
         print(res.batch_response)
     pipeline.stop()
-
 ```
+其中pipeline中prompt格式是qwen模型的prompt格式，您需要换成您的模型的prompt格式。
+
 也支持通过模型路径加载
 ``` python
 model = ModelFactory.from_huggingface("/path/to/dir")
@@ -40,20 +41,3 @@ model_config = ModelConfig(
     ...
 )
 ```
-# ModelConfig
-
-| 参数名 | 类型 | 说明 |
-| --- | --- | --- |
-| `model_type` | `str, default=''` | 模型类型 |
-| `ckpt_path` | `str, default=''` | 模型路径 |
-| `tokenizer_path` | `str, default=''` | tokenizer路径 |
-| `async_mode` | `bool, default=False`| 是否开启异步凑批模型 |
-| `weight_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | 模型weights量化类型 |
-| `act_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | 模型weights存储类型 |
-| `max_seq_len` | `bool, default=0` | beam search的个数 |
-| `seq_size_per_block` | `int, default=8` | async模式下每个block的序列长度 |
-| `gen_num_per_circle` | `int, default=1` | 每轮可能新增的token数，仅在投机采样情况下>1 |
-| `ptuning_path` | `Optional[str], default=None` | ptuning ckpt的存储路径 |
-| `lora_infos` | `Optional[Dict[str, str]]` | lora ckpt存储路径 |
-
-目前我们支持的所有模型列表可以在`maga_transformer/models/__init__.py`查看，具体模型对应的`model_type`可以查看模型文件的`register_model`
