@@ -161,7 +161,9 @@ Thought:"""
             "content": [
                 ContentPart(**{
                     "type": ContentPartTypeEnum.image_url,
-                    "image_url": "https://modelscope.cn/api/v1/models/damo/speech_eres2net_sv_zh-cn_16k-common/repo?Revision=master&FilePath=images/ERes2Net_architecture.png"
+                    "image_url": {
+                        "url": "https://modelscope.cn/api/v1/models/damo/speech_eres2net_sv_zh-cn_16k-common/repo?Revision=master&FilePath=images/ERes2Net_architecture.png"
+                    }
                 }),
                 ContentPart(**{
                     "type": ContentPartTypeEnum.text,
@@ -218,7 +220,9 @@ Thought:"""
             "content": [
                 ContentPart(**{
                     "type": ContentPartTypeEnum.image_url,
-                    "image_url": "https://modelscope.cn/api/v1/models/damo/speech_eres2net_sv_zh-cn_16k-common/repo?Revision=master&FilePath=images/ERes2Net_architecture.png"
+                    "image_url": {
+                        "url": "https://modelscope.cn/api/v1/models/damo/speech_eres2net_sv_zh-cn_16k-common/repo?Revision=master&FilePath=images/ERes2Net_architecture.png"
+                    }
                 }),
                 ContentPart(**{
                     "type": ContentPartTypeEnum.text,

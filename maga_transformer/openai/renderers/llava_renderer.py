@@ -35,7 +35,7 @@ class Conversation:
         images: List[str] = []
         if messages[0].role != RoleEnum.system:
             prompt = self.system_content + prompt + self.seps[0]
-        
+
         for index, message in enumerate(messages):
             if isinstance(message.content, str):
                 prompt += f"{self.roles[message.role]}: {message.content}"
@@ -47,8 +47,8 @@ class Conversation:
                         assert (isinstance(content_part.text, str))
                         now_prompt += content_part.text
                     elif content_part.type == ContentPartTypeEnum.image_url:
-                        assert (isinstance(content_part.image_url, str))
-                        images.append(content_part.image_url)
+                        assert (content_part.image_url != None)
+                        images.append(content_part.image_url.url)
                         now_prompt = f"<image>\n" + now_prompt
                 if self.sep_style == SeparatorStyle.SINGLE:
                     now_prompt += self.seps[0]

@@ -49,7 +49,7 @@ class ImageURL(BaseModel):
 class ContentPart(BaseModel):
     type: ContentPartTypeEnum
     text: Optional[str] = None
-    image_url: Optional[str] = None
+    image_url: Optional[ImageURL] = None
 
 class ChatMessage(BaseModel):
     role: RoleEnum

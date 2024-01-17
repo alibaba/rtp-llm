@@ -36,9 +36,10 @@ class QwenVLRenderer(CustomChatRenderer):
                         assert (isinstance(content_part.text, str))
                         prompt += content_part.text
                     elif content_part.type == ContentPartTypeEnum.image_url:
-                        assert (isinstance(content_part.image_url, str))
-                        images.append(content_part.image_url)
-                        prompt += f"Picture {len(images)}: <img>{content_part.image_url}</img>\n"
+                        assert (content_part.image_url != None)
+                        url = content_part.image_url.url
+                        images.append(url)
+                        prompt += f"Picture {len(images)}: <img>{url}</img>\n"
                 prompt += "<|im_end|>\n"
         prompt += "<|im_start|>assistant\n"
         return PromptWithImages(prompt=prompt, image_urls=images)
