@@ -200,7 +200,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
     params.batch_size               = inference_batch_size;
     params.beam_width               = beam_width;
     params.max_kv_cache_length      = memory_max_len;
-    params.cyclic_kv_cache_length   = memory_max_len;
+    params.cyclic_kv_cache_length   = memory_max_len + max_prefix_prompt_length;
     params.prefix_prompt_lengths    = prefix_prompt_lengths;
     params.max_prefix_prompt_length = max_prefix_prompt_length;
     params.count_prefix_length =

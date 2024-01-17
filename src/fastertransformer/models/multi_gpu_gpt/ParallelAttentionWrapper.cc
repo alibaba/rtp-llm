@@ -470,7 +470,7 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
     const int      max_blocks_per_batch = block_pointers ? input_tensors->at("block_pointers").shape[3] : 0;
     const int      local_head_num       = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
     const int    local_head_num_kv = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
-    const bool   has_ia3           = input_tensors->isExist("ia3_tasks");
+const bool   has_ia3           = input_tensors->isExist("ia3_tasks");
     KVBlockArray kv_block_array(generate_batch_size, max_blocks_per_batch, params_.seq_size_per_block_, 0);
     kv_block_array.data = const_cast<int64_t*>(block_pointers);
     if (params_.int8_kv_cache_) {
