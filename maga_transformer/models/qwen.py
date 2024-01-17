@@ -96,7 +96,6 @@ class QWenWeight(ModelDeployWeightInfo):
 
     def _get_megatron_layer_weight_info(self, layer_id):
         layer_weights = [
-            WeightInfo(W.pre_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('layers.{i}.input_layernorm.weight', identity)],
                        identity),
             WeightInfo(W.attn_qkv_w, [CkptWeightInfo('layers.{i}.self_attention.query_key_value.weight', concat_0)],
@@ -137,7 +136,6 @@ class QWenWeight(ModelDeployWeightInfo):
     def _get_hf_layer_weight_info(self, layer_id):
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
         layer_weights = [
-            WeightInfo(W.pre_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_1.weight', identity)],
                        identity),
             WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.weight', identity)],
