@@ -76,7 +76,7 @@ __inline__ __host__ __device__ T constexpr flat_index2(T const& index_0, T const
 // Seems to slightly improve the accuracy
 #define MMHA_USE_FP32_ACCUM_FOR_OUT
 
-#define MMHA_USE_FP32_ACCUM_FOR_LOGITS 
+// #define MMHA_USE_FP32_ACCUM_FOR_LOGITS 
 
 #if 0 && defined(MMHA_USE_FP32_ACCUM_FOR_OUT)
  // Does not seem to improve the accuracy
@@ -1062,6 +1062,13 @@ inline __device__ constexpr uint32_t shfl_mask(int threads)
     return threads == 32 ? -1u : (1u << threads) - 1u;
 }
 
+inline __device__ constexpr uint32_t shfl_mask_and_index(int threads, int index)
+{
+    assert(threads <= 32);
+    assert((index + 1) * threads <= 32);
+    return threads == 32 ? -1u : ((1u << threads) - 1u) << (index * threads);
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T, typename T_VEC, unsigned VECS_PER_CHUNK>
@@ -1673,6 +1680,16 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
         for (int k_loop = 0; k_loop < K_LOOP_UNROLL; ++k_loop) {
             const int local_time_now = time_now + k_loop * K_PER_ITER;
             const int local_ti       = ti + k_loop * K_PER_ITER;
+             
+            float k_scale = 1.f;
+
+            if constexpr (ENABLE_8BITS_CACHE) {
+                const int valid_time_now = min(time_now + k_loop * K_PER_ITER, context_length - 1);
+                const int seqIdx         = batch_idx * beam_width;
+                float*    k_scale_ptr    = reinterpret_cast<float*>(kvCacheBuffer.getKScalePtr(seqIdx, valid_time_now));
+                int       inScaleIdx     = kvCacheBuffer.getKVScaleLocalIdx(valid_time_now, hi_kv);
+                k_scale                  = k_scale_ptr[inScaleIdx];
+            }
 
             // Perform the dot product and normalize qk.
             //
@@ -1727,7 +1744,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
             {
                 if constexpr (ENABLE_8BITS_CACHE) {
                     qk_ =
-                        Qk_dot<T, THREADS_PER_KEY>::scale_dot(q_vec, k_vec, kv_scale_quant_orig_f) * params.inv_sqrt_dh;
+                        Qk_dot<T, THREADS_PER_KEY>::scale_dot(q_vec, k_vec, k_scale) * params.inv_sqrt_dh;
                 }
                 else {
                     qk_ = Qk_dot<T, THREADS_PER_KEY>::dot(q_vec, k_vec) * params.inv_sqrt_dh;
@@ -1789,7 +1806,15 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                 Tcache* k_cache_batch = reinterpret_cast<Tcache*>(kvCacheBuffer.getKBlockPtr(seqIdx, valid_time_now));
 
                 int inBlockIdx = kvCacheBuffer.getKVLocalIdx(valid_time_now, hi_kv, Dh, jj);
-                k_vec[k_vec_i] = (*reinterpret_cast<const K_vec_m*>(&k_cache_batch[inBlockIdx]));
+                if constexpr (ENABLE_8BITS_CACHE) {
+                    float* k_scale_ptr = reinterpret_cast<float*>(kvCacheBuffer.getKScalePtr(seqIdx, valid_time_now));
+                    int    inScaleIdx  = kvCacheBuffer.getKVScaleLocalIdx(valid_time_now, hi_kv);
+                    load_8bits_kv_cache_vec(
+                        &k_vec[k_vec_i], k_cache_batch, inBlockIdx, k_scale_ptr[inBlockIdx - inScaleIdx]);
+                }
+                else {
+                    k_vec[k_vec_i] = (*reinterpret_cast<const K_vec_m*>(&k_cache_batch[inBlockIdx]));
+                }
             }
 
             // Is it active?
@@ -1923,7 +1948,17 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
         Tcache* k_cache = reinterpret_cast<Tcache*>(kvCacheBuffer.getKBlockPtr(batch_beam_idx, cyclic_tlength));
 
         if constexpr (ENABLE_8BITS_CACHE) {
-            store_8bits_kv_cache_vec(reinterpret_cast<Tcache*>(k_cache), k_vec, inBlockIdx, kv_scale_orig_quant);
+            float k_max = vector_abs_max(k);
+#pragma unroll
+            for (int mask = QK_VECS_PER_Dh_MAX / 2; mask >= 1; mask /= 2) {
+                k_max = fmaxf(k_max, __shfl_xor_sync(shfl_mask(QK_VECS_PER_Dh_MAX), k_max, mask));
+            }
+            store_8bits_kv_cache_vec(reinterpret_cast<Tcache*>(k_cache), k, inBlockIdx, float(1 << (8 - 1)) / k_max);
+            if (k_idx == 0) {
+                float* k_scale_ptr = reinterpret_cast<float*>(kvCacheBuffer.getKScalePtr(batch_beam_idx, tlength));
+                int    inScaleIdx  = kvCacheBuffer.getKVScaleLocalIdx(tlength, hi_kv);
+                *reinterpret_cast<float*>(&k_scale_ptr[inScaleIdx]) = k_max / float(1 << (8 - 1));
+            }
         }
         else {
             *reinterpret_cast<Qk_vec_m*>(&k_cache[inBlockIdx]) = vec_conversion<Qk_vec_m, Qk_vec_k>(k_vec);
@@ -1975,7 +2010,8 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
 
 // Normalize the logits.
 #ifdef MMHA_FP8_SCALE_P_INSTEAD_OF_V
-    float logit_scale = (FP8_KV_CACHE ? kv_scale_quant_orig_f : 1.0f);
+    // float logit_scale = (FP8_KV_CACHE ? kv_scale_quant_orig_f : 1.0f);
+    float logit_scale = 1.0f;
 #else
     float logit_scale = 1.f;
 #endif  // MMHA_FP8_SCALE_P_INSTEAD_OF_V
@@ -2081,17 +2117,26 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
 
 #pragma unroll
             for (int v_loop = 0; v_loop < V_LOOP_UNROLL; v_loop++) {
+                float v_scale = 1.f;
                 V_vec_m v_vec = reinterpret_cast<V_vec_m*>(&v_vec_cache[v_loop])[0];
+                int rowIdx   = batch_idx * beam_width;
 
                 int local_time_idx = ti + v_loop * V_PER_ITER;
                 int time_idx       = local_time_idx + (MULTI_BLOCK_FLAG ? c_tile_times_timesteps_per_block : 0);
-
                 const bool is_mask =
                     (MULTI_BLOCK_FLAG && local_time_idx >= timesteps_per_block) || (time_idx >= context_length);
+
+                if constexpr (ENABLE_8BITS_CACHE) {
+                    int    local_time  = min(time_idx, tlength - 1);
+                    float* v_scale_ptr = reinterpret_cast<float*>(kvCacheBuffer.getVScalePtr(rowIdx, local_time));
+                    int    inScaleIdx  = kvCacheBuffer.getKVScaleLocalIdx(local_time, hi_kv);
+                    v_scale            = v_scale_ptr[inScaleIdx];
+                }
+
                 // Load the logits from shared memory.
                 // Note that fma will convert 8bit vec to the accumulation data type (float by default).
                 Logit_value_fma<Tk, V_vec_accum, V_vec_m, INT8_KV_CACHE, FP8_KV_CACHE>(
-                    out, reinterpret_cast<Tk*>(logits_smem + local_time_idx), v_vec, kv_scale_quant_orig_f, is_mask);
+                    out, reinterpret_cast<Tk*>(logits_smem + local_time_idx), v_vec, v_scale, is_mask);
             }
         }
 
@@ -2113,12 +2158,19 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                     const int inBlockIdx = kvCacheBuffer.getKVLocalIdx(time_idx, hi_kv, Dh, vi);
                     // The base pointer for the value in the cache buffer.
                     Tcache* v_cache_batch = reinterpret_cast<Tcache*>(kvCacheBuffer.getVBlockPtr(rowIdx, time_idx));
-                    V_vec_m v_vec         = reinterpret_cast<const V_vec_m*>(&v_cache_batch[inBlockIdx])[0];
+                    // V_vec_m v_vec;
+                    V_vec_m    v_vec = reinterpret_cast<const V_vec_m*>(&v_cache_batch[inBlockIdx])[0];
+                    float v_scale = 1.f;
+                    if (ENABLE_8BITS_CACHE) {
+                        float* v_scale_ptr = reinterpret_cast<float*>(kvCacheBuffer.getVScalePtr(rowIdx, time_idx));
+                        int    inScaleIdx  = kvCacheBuffer.getKVScaleLocalIdx(time_idx, hi_kv);
+                        v_scale =  v_scale_ptr[inScaleIdx];
+                    }
 
                     // Load the logits from shared memory.
                     // Note that fma will convert 8bit vec to the accumulation data type (float by default).
                     Logit_value_fma<Tk, V_vec_accum, V_vec_m, INT8_KV_CACHE, FP8_KV_CACHE>(
-                        out, reinterpret_cast<Tk*>(logits_smem + local_time_idx), v_vec, kv_scale_quant_orig_f, false);
+                        out, reinterpret_cast<Tk*>(logits_smem + local_time_idx), v_vec, v_scale, false);
                 }
             }
         }
@@ -2176,9 +2228,23 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
         //*reinterpret_cast<V_vec_k*>(&v_cache[params.timestep*Dh]) = v;
         // For MQA/GQA mode, write only with the first Q head of each group per KV head.
         if (hi == (hi_kv * qhead_per_kv)) {
-            if (ENABLE_8BITS_CACHE) {
-                store_8bits_kv_cache_vec(v_cache_base, v, inBlockIdx, kv_scale_orig_quant);
+            if constexpr (ENABLE_8BITS_CACHE) {
+                float v_max = vector_abs_max(v);
+#pragma unroll
+                for (int mask = THREADS_PER_VALUE / 2; mask >= 1; mask /= 2) {
+                    v_max =
+                        fmaxf(v_max,
+                              __shfl_xor_sync(
+                                  shfl_mask_and_index(THREADS_PER_VALUE, vo % (32 / THREADS_PER_VALUE)), v_max, mask));
+                }
+                store_8bits_kv_cache_vec(v_cache_base, v, inBlockIdx, float(1 << (8 - 1)) / v_max);
+                if (vi == 0) {
+                    float* v_scale_ptr = reinterpret_cast<float*>(kvCacheBuffer.getVScalePtr(batch_beam_idx, tokenIdx));
+                    int    inScaleIdx  = kvCacheBuffer.getKVScaleLocalIdx(tokenIdx, hi_kv);
+                    *reinterpret_cast<float*>(&v_scale_ptr[inScaleIdx]) = v_max / float(1 << (8 - 1));
+                }
             }
+
             else {
                 *reinterpret_cast<V_vec_k*>(&v_cache_base[inBlockIdx]) = v;
             }

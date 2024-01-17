@@ -633,6 +633,8 @@ template <>          struct num_elems<Float8_>          { static constexpr int v
 template <>          struct num_elems<half>            { static constexpr int value = 1; };
 template <>          struct num_elems<half2>           { static constexpr int value = 2; };
 template <>          struct num_elems<uint32_t>           { static constexpr int value = 2; };
+template <>          struct num_elems<int32_t>           { static constexpr int value = 2; };
+template <>          struct num_elems<int64_t>           { static constexpr int value = 4; };
 template <>          struct num_elems<uint2>           { static constexpr int value = 4; };
 template <>          struct num_elems<uint4>           { static constexpr int value = 8; };
 

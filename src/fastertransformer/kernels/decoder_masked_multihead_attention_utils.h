@@ -18,6 +18,7 @@
 
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/utils/cuda_type_utils.cuh"
+#include "src/fastertransformer/utils/cuda_utils.h"
 #include <stdint.h>
 
 #ifdef ENABLE_BF16
@@ -273,7 +274,8 @@ inline __device__ float vector_abs_max(bf16_4_t a)
 
 inline __device__ float vector_abs_max(bf16_8_t a)
 {
-    return cuda_max(cuda_max(vector_abs_max(a.x), vector_abs_max(a.y)), cuda_max(vector_abs_max(a.z), vector_abs_max(a.w)));
+    return cuda_max(cuda_max(vector_abs_max(a.x), vector_abs_max(a.y)),
+                    cuda_max(vector_abs_max(a.z), vector_abs_max(a.w)));
 }
 #endif  // ENABLE_BF16
 
@@ -2524,6 +2526,18 @@ inline __device__ void convert_from_float(Float8_* dst, Float8_ src)
     *dst = src;
 }
 
+inline __device__ void convert_from_float(int32_t* dst, float2 src)
+{
+    *dst = float2_to_half2(src);
+}
+
+inline __device__ void convert_from_float(int64_t* dst, float4 src)
+{
+    uint2* tmp;
+    convert_from_float(tmp, src);
+    dst = reinterpret_cast<int64_t*>(tmp);
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename A>
@@ -2968,7 +2982,7 @@ template<typename Vec_k>
 inline __device__ void load_8bits_kv_cache_vec(Vec_k* vec, const int8_t* pointer, int idx, float scale)
 {
     using Packed_8bits_t = typename packed_type<int8_t, num_elems<Vec_k>::value>::type;
-    using Packed_Float_t = typename packed_type<float, num_elems<Vec_k>::value>::type;
+        using Packed_Float_t = typename packed_type<float, num_elems<Vec_k>::value>::type;
     const auto quant     = *reinterpret_cast<const Packed_8bits_t*>(&pointer[idx]);
 
     convert_from_float(vec, mul<Packed_Float_t>(scale, float_from_int8(quant)));
