@@ -27,6 +27,49 @@
 
 namespace fastertransformer {
 
+template<typename T>
+__global__ void embedding_lookup_kernel(T*                    from_tensor,
+                                        const T*              embedding_table,
+                                        const T*              pos_table,
+                                        const int*            input_ids,
+                                        const int*            input_pos,
+                                        const int             token_num,
+                                        const int64_t         hidden_units)
+{
+    for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < token_num * hidden_units;
+         index += blockDim.x * gridDim.x) {
+        const int token_index     = index / hidden_units;
+        const int col_index       = index % hidden_units;
+        const int input_id        = input_ids[token_index];
+        T         embedding       = (T)0.0f;
+        embedding = embedding_table[input_id * hidden_units + col_index];
+        T pos_embed        = pos_table == nullptr ? (T)0.0f : pos_table[input_pos[token_index] * hidden_units + col_index];
+        from_tensor[index] = embedding + pos_embed;
+    }
+}
+
+template<typename T>
+void invokeEmebeddingLookup(T*                    from_tensor,
+                            const T*              embedding_table,
+                            const T*              pos_table,
+                            const int*            input_ids,
+                            const int*            input_pos,
+                            const int             token_num,
+                            const int             hidden_units,
+                            cudaStream_t          stream)
+{
+    dim3       grid(min(token_num, 65536));
+    dim3       block(min(hidden_units, 1024));
+    embedding_lookup_kernel<<<grid, block, 0, stream>>>(from_tensor,
+                                                        embedding_table,
+                                                        pos_table,
+                                                        input_ids,
+                                                        input_pos,
+                                                        token_num,
+                                                        hidden_units);
+}
+
+
 // PROMPT_SRC: 0 --> no prompts, 1 --> from loaded prompts, 2 --> from request prompts
 template<typename T, bool OUTPUT_ID, int PROMPT_SRC>
 __global__ void start_id_embedding_position_lookups_kernel(T*                    from_tensor,
@@ -200,6 +243,22 @@ template void invokeInputIdsEmbeddingLookupPosEncoding(__nv_bfloat16*           
                                                        cudaStream_t                      stream);
 #endif
 
+#define INSTANTIATE_INVOKE_EMBEDDING_LOOKUP(T)                          \
+    template void invokeEmebeddingLookup(T*                    from_tensor, \
+        const T*              embedding_table,                          \
+        const T*              pos_table,                                \
+        const int*            input_ids,                                \
+        const int*            input_pos,                                \
+        const int             token_num,                                \
+        const int             hidden_units,                             \
+        cudaStream_t          stream)
+
+INSTANTIATE_INVOKE_EMBEDDING_LOOKUP(float);
+INSTANTIATE_INVOKE_EMBEDDING_LOOKUP(half);
+#ifdef ENABLE_BF16
+INSTANTIATE_INVOKE_EMBEDDING_LOOKUP(__nv_bfloat16);
+#endif
+
 template<typename T>
 __global__ void inputIdsEmbeddingLookupPosEncodingSoftPrompt(inputIdsEmbeddingLookupPosEncodingSoftPromptParam<T> param)
 {
@@ -322,6 +381,11 @@ invokeTransposeAxis01(float* out, float* in, const int dim0, const int dim1, con
 
 template void
 invokeTransposeAxis01(half* out, half* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
+
+#ifdef ENABLE_BF16
+template void
+invokeTransposeAxis01(__nv_bfloat16* out, __nv_bfloat16* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
+#endif
 
 template void
 invokeTransposeAxis01(int* out, int* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);

@@ -54,6 +54,7 @@ cc_library(
     hdrs = [
         "src/fastertransformer/th_op/th_utils.h",
         "src/fastertransformer/th_op/GptInitParameter.h",
+        "src/fastertransformer/th_op/GptCommonInputs.h",
     ],
     deps = [
         "//src/fastertransformer/utils:torch_utils",

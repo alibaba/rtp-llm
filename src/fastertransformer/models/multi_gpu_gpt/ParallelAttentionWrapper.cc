@@ -720,7 +720,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                                         context_batch_size,    // batch_size
                                                         context_h_token_num,   // localNbTokens,
                                                         max_blocks_per_batch,  // max_blocks_per_sequence
-                                                        linear_bias_slopes};
+                                                        linear_bias_slopes != nullptr};
         TRTFMHA(context_attention_params, stream_);
     }
     else if (use_open_source_fmha_) {

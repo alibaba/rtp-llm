@@ -60,6 +60,17 @@ struct KVBlockArray {
         mTokensPerBlockLog2 = static_cast<int>(tokensPerBlockSeqLog2);
     }
 
+    KVBlockArray(KVBlockArray const& kv):
+        int8_mode(kv.int8_mode),
+        mMaxBlocksPerSeq(kv.mMaxBlocksPerSeq),
+        mMaxSeqs(kv.mMaxSeqs),
+        mTokensPerBlock(kv.mTokensPerBlock),
+        mTokensPerBlockLog2(kv.mTokensPerBlockLog2),
+        data(kv.data),
+        scale(kv.scale)
+    {
+    }
+
     __host__ __device__ inline void** getRowPtr(KVIdxType kvIdx, int32_t seqIdx)
     {
         // Returns pointer to array of pointers to K or V cache for one specific sequence seqIdx.

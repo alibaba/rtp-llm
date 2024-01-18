@@ -30,6 +30,24 @@ void TensorParallelFfnLayer<T>::forward(std::vector<fastertransformer::Tensor>* 
 }
 
 template<typename T>
+void TensorParallelFfnLayer<T>::forward(Tensor &ffn_output,
+                                        const Tensor &ffn_input,
+                                        int layer_id,
+                                        const Tensor &lora_ids,
+                                        const Tensor &lora_input_lengths,
+                                        int ffn_batch_size_lora,
+                                        const FfnWeight<T>*                           ffn_weights)
+{
+    TensorMap input_tensor({{"ffn_input", ffn_input},
+                            {"layer_id", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &layer_id}},
+                            {"lora_ids", lora_ids},
+                            {"lora_input_lengths", lora_input_lengths},
+                            {"batch_size", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &ffn_batch_size_lora}}});
+    TensorMap output_tensor({{"ffn_output", ffn_output}});
+    forward(&output_tensor, &input_tensor, ffn_weights);
+}
+
+template<typename T>
 void TensorParallelFfnLayer<T>::forward(TensorMap*          output_tensors,
                                         TensorMap*          input_tensors,
                                         const FfnWeight<T>* ffn_weights)

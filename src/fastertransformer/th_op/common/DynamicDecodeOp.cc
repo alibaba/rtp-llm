@@ -208,6 +208,11 @@ void FtDynamicDecode<T>::forward(th::Tensor&              logits,  // (batch_siz
 
 #undef SAFE_INSERT
 
+    forward(input_tensors, output_tensors);
+}
+
+template<typename T>
+void FtDynamicDecode<T>::forward(ft::TensorMap &input_tensors, ft::TensorMap &output_tensors) {
     dynamic_decode_layer_->forward(&output_tensors, &input_tensors);
 }
 

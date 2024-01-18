@@ -19,6 +19,8 @@
 #include <cstdlib>
 #include <map>
 #include <string>
+#include <iomanip>
+#include <pthread.h>
 
 #include "src/fastertransformer/utils/string_utils.h"
 
@@ -101,9 +103,22 @@ private:
         return getPrefix(level, rank);
     }
 
+    inline const std::string getTimeStr()
+    {
+        time_t     now = time(0);
+        struct tm* t   = localtime(&now);
+        char       buffer[80];
+        std::stringstream ss;
+        ss << std::put_time(t, "%y-%m-%d %H:%M:%S");
+        return ss.str();
+    }
+
     inline const std::string getPrefix(const Level level, const int rank)
     {
-        return PREFIX + "[" + getLevelName(level) + "][" + std::to_string(rank) + "] ";
+        return PREFIX + "[" + getLevelName(level) + "][RANK "
+                      + std::to_string(rank) + "]["
+                      + std::to_string(pthread_self()) + "]["
+                      + getTimeStr() + "] ";
     }
 };
 

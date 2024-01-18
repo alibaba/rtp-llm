@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "src/fastertransformer/utils/allocator.h"
 #include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
 #include "src/fastertransformer/utils/cuda_fp8_utils.h"
 #include "src/fastertransformer/utils/cuda_utils.h"
@@ -59,38 +60,39 @@ typedef enum datatype_enum {
 template<typename T>
 DataType getTensorType()
 {
-    if (std::is_same<T, float>::value || std::is_same<T, const float>::value) {
+    using RealT = typename std::remove_cv<T>::type;
+    if (std::is_same<RealT, float>::value) {
         return TYPE_FP32;
     }
-    else if (std::is_same<T, half>::value || std::is_same<T, const half>::value) {
+    else if (std::is_same<RealT, half>::value) {
         return TYPE_FP16;
     }
 #ifdef ENABLE_BF16
-    else if (std::is_same<T, __nv_bfloat16>::value || std::is_same<T, const __nv_bfloat16>::value) {
+    else if (std::is_same<RealT, __nv_bfloat16>::value) {
         return TYPE_BF16;
     }
 #endif
 #ifdef ENABLE_FP8
-    else if (std::is_same<T, __nv_fp8_e4m3>::value || std::is_same<T, const __nv_fp8_e4m3>::value) {
+    else if (std::is_same<RealT, __nv_fp8_e4m3>::value) {
         return TYPE_FP8_E4M3;
     }
 #endif
-    else if (std::is_same<T, int>::value || std::is_same<T, const int>::value) {
+    else if (std::is_same<RealT, int>::value) {
         return TYPE_INT32;
     }
-    else if (std::is_same<T, int8_t>::value || std::is_same<T, const int8_t>::value) {
+    else if (std::is_same<RealT, int8_t>::value) {
         return TYPE_INT8;
     }
-    else if (std::is_same<T, uint>::value || std::is_same<T, const uint>::value) {
+    else if (std::is_same<RealT, uint>::value) {
         return TYPE_UINT32;
     }
-    else if (std::is_same<T, unsigned long long int>::value || std::is_same<T, const unsigned long long int>::value) {
+    else if (std::is_same<RealT, unsigned long long int>::value || std::is_same<RealT, uint64_t>::value) {
         return TYPE_UINT64;
     }
-    else if (std::is_same<T, bool>::value || std::is_same<T, const bool>::value) {
+    else if (std::is_same<RealT, bool>::value) {
         return TYPE_BOOL;
     }
-    else if (std::is_same<T, char>::value || std::is_same<T, const char>::value) {
+    else if (std::is_same<RealT, char>::value) {
         return TYPE_BYTES;
     }
     else {
@@ -105,19 +107,29 @@ typedef enum memorytype_enum {
 } MemoryType;
 
 struct Tensor {
-    const MemoryType          where;
-    const DataType            type;
-    const std::vector<size_t> shape;
-    const void*               data;  // TODO(bhseuh) modify from const void* to void* const
-    const std::vector<size_t> offsets = std::vector<size_t>{};
+    MemoryType          where;
+    DataType            type;
+    std::vector<size_t> shape;
+    void*               data      = nullptr;
+    IAllocator*         allocator = nullptr;
 
     Tensor();
-    Tensor(const MemoryType _where, const DataType _type, const std::vector<size_t> _shape, const void* _data);
     Tensor(const MemoryType          _where,
            const DataType            _type,
            const std::vector<size_t> _shape,
-           const void*               _data,
-           const std::vector<size_t> _offset);
+           IAllocator*               _allocator,
+           const bool                is_set_zero);
+    Tensor(const MemoryType _where, const DataType _type, const std::vector<size_t> _shape, const void* _data);
+
+    ~Tensor();
+
+    Tensor(const Tensor& tensor)            = default;
+    Tensor(Tensor&& tensor)                 = default;
+    Tensor& operator=(const Tensor& tensor) = default;
+    Tensor& operator=(Tensor&& tensor)      = default;
+
+    bool operator==(const Tensor& tensor) const;
+    bool operator!=(const Tensor& tensor) const;
 
     size_t size() const;
     size_t sizeBytes() const;
@@ -146,7 +158,8 @@ struct Tensor {
         }
         if (where == MEMORY_CPU) {
             return ((T*)data)[index];
-        } else {
+        }
+        else {
             using ValueType = typename std::remove_const<T>::type;
             ValueType val;
             cudaMemcpy(&val, (ValueType*)data + index, sizeof(ValueType), cudaMemcpyDeviceToHost);
@@ -302,11 +315,11 @@ struct Tensor {
 
     Tensor slice(std::vector<size_t> shape, size_t offset = 0) const;
 
-    template <typename T>
+    template<typename T>
     std::string dataToString(size_t num_to_print = 0, size_t start = 0) const
     {
         std::string str = "";
-        num_to_print = num_to_print == 0 ? size() : std::min(num_to_print, size() - start);
+        num_to_print    = num_to_print == 0 ? size() : std::min(num_to_print, size() - start);
         for (size_t i = start; i < num_to_print; ++i) {
             str += std::to_string(getVal<T>(i));
             if (i != size() - 1) {
@@ -319,6 +332,10 @@ struct Tensor {
 private:
     static void parseNpyIntro(FILE*& f_ptr, uint32_t& header_len, uint32_t& start_data);
     static int  parseNpyHeader(FILE*& f_ptr, uint32_t header_len, DataType& type, std::vector<size_t>& shape);
+
+private:
+    bool                 owned;
+    std::shared_ptr<int> ref_counter;
 };
 
 class TensorMap {
@@ -389,7 +406,7 @@ public:
                            fmtstr("Cannot find a tensor of name %s in the tensor map (keys: %s)",
                                   key.c_str(),
                                   vec2str(keys()).c_str()));
-        return tensor_map_.at(key);
+        return std::move(tensor_map_.at(key));
     }
 
     inline Tensor& at(const std::string& key, Tensor& default_tensor)
@@ -518,7 +535,7 @@ public:
         return tensor_map_.end();
     }
 
-    std::string      toString();
+    std::string      toString() const;
     static TensorMap fromNpyFolder(const std::string& base_folder);
     void             saveNpy(const std::string& base_folder);
 };

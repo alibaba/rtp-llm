@@ -148,6 +148,8 @@ public:
                  th::optional<th::Tensor> min_normed_scores,
                  th::optional<th::Tensor> num_beams) override;
 
+    void forward(ft::TensorMap &input_tensors, ft::TensorMap &output_tensors);
+
     void broadcastFromLastPipeline(std::vector<th::Tensor> tensors) override;
 
 private:

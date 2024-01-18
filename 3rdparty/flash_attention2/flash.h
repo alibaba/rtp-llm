@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cuda.h>
+#include <builtin_types.h>
 #include <vector>
 
 constexpr int TOTAL_DIM = 0;

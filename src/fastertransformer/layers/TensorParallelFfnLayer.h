@@ -60,6 +60,13 @@ public:
                  const std::vector<fastertransformer::Tensor>* input_tensors,
                  const FfnWeight<T>*                           ffn_weights) override;
     void forward(TensorMap* output_tensors, TensorMap* input_tensors, const FfnWeight<T>* ffn_weights) override;
+    void forward(Tensor &ffn_output,
+                 const Tensor &ffn_input,
+                 const int layer_id,
+                 const Tensor &lora_ids,
+                 const Tensor &lora_input_lengths,
+                 const int ffn_batch_size_lora,
+                 const FfnWeight<T>* ffn_weights);
 };
 
 }  // namespace fastertransformer
