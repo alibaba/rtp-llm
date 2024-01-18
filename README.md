@@ -1,6 +1,6 @@
 [English](README.md) [中文](README_cn.md)
 
-## Abort
+## About
 * rtp-llm is an LLM inference acceleration engine developed by Alibaba's big model prediction team. rtp-llm is widely used within Alibaba and supports the large model inference operations of various departments, including Taobao, Tmall, Cainiao, Amap, Ele.me, AE, Lazada, and others.
 * rtp-llm offers high-performance, low-cost, and user-friendly inference services, helping customers and developers tailor inference services suitable for their own businesses, thus boosting business growth.
 * rtp-llm is a subproject of the [havenask](https://github.com/alibaba/havenask) project.
