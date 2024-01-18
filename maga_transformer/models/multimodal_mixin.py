@@ -1,10 +1,17 @@
 import json
+import torch
 from typing import Any, Dict, List, Union, Tuple
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import RequestFormat
 
+class BaseImageEmbedding:
+    def image_embedding(self, images, device) -> torch.Tensor:
+        raise NotImplementedError()
+
 class MultiModalMixin:
+    visual: BaseImageEmbedding
+
     @staticmethod
     def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], special_tokens: Any, tokenizer: Any, **kwargs: Any) -> List[int]:
         if len(prompt) == 0:
@@ -14,8 +21,9 @@ class MultiModalMixin:
         return tokenizer.encode(prompt)
 
     @staticmethod
-    def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], **kwargs: Any) -> Tuple[str, List[Any]]:
-        img_token: str = kwargs.get('img_token')
+    def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str], 
+                                        img_token: str, **kwargs: Any) -> Tuple[str, List[Any]]:
+        # should delete after chatapi interface update
         if kwargs.get('generate_config', {})['request_format'] == RequestFormat.CHAT_API:
             if isinstance(prompt, str):
                 messages = json.loads(prompt, strict=False)
@@ -45,4 +53,4 @@ class MultiModalMixin:
             return new_prompt + 'ASSISTANT :', new_images
         elif isinstance(prompt, List):
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "raw request format cannot accept dict prompt")
-        return prompt, kwargs['image']
+        return prompt, images

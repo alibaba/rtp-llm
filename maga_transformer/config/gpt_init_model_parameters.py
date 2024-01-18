@@ -70,10 +70,6 @@ class SparseConfig(DataClassBase):
             return False
         return True
 
-class ViTConfig:
-    vit_special_token_ids: Dict[str, int] = {}
-    vit_special_tokens: Dict[str, str] = {}
-
 class GptInitModelParameters:
     __slots__ = {
         'gpt_init_params',
@@ -111,7 +107,10 @@ class GptInitModelParameters:
         self.src_quantization_bit = 0
         self.tp_split_emb_and_lm_head = True
         self.medusa_config = None
-        self.vit_related_params = ViTConfig()
+        self.vit_related_params: Dict[str, Any] = {
+            "vit_special_token_ids": {},
+            "vit_special_tokens": {}
+        }
         for k, v in kwargs.items():
             setattr(self, k, v)
 

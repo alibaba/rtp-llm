@@ -3,7 +3,7 @@ import torch
 import os
 import json
 import re
-from typing import List, Any, Tuple
+from typing import List, Any, Tuple, Dict
 
 from transformers import AutoTokenizer
 
@@ -12,12 +12,30 @@ from maga_transformer.models.qwen import QWen
 from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo
 from maga_transformer.vision_transformer import ClipVit, ClipVitWeights
 from maga_transformer.models.base_model import BaseModel
-from maga_transformer.models.multimodal_mixin import MultiModalMixin
+from maga_transformer.models.multimodal_mixin import MultiModalMixin, BaseImageEmbedding
 from maga_transformer.model_factory_register import register_model
+
+class QwenVLClipVitWeight(ClipVitWeights):
+    def __init__(self, vit):
+        self.hf_prefix = "transformer.visual."
+        self.ft_prefix = "self.visual.clip."
+        self.weight_names = self._get_vit_params(vit)
+
+class QwenVLImageEmbedding(BaseImageEmbedding):
+    def __init__(self, config: Dict[str, Any]):
+        self.clip = ClipVit(**config)
+        self.weights = QwenVLClipVitWeight(self.clip)
+    
+    def image_embedding(self, images: List[str], device) -> torch.Tensor:
+        if len(images) != 0:
+            images = self.clip.encode(images)
+            assert images.shape[0] == len(images)
+        return images.to(device=device)
 
 class QWen_VL(QWen, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        self.visual = config.vit_related_params.visual
+        self.visual = QwenVLImageEmbedding(config.vit_related_params)
+        config.vit_related_params["weights"] = self.visual.weights
 
         QWen.__init__(self, config)
 
@@ -70,23 +88,14 @@ class QWen_VL(QWen, MultiModalMixin):
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
-        
+
         vit_config = config_json['visual']
-        config.vit_related_params.heads = vit_config['heads']
-        config.vit_related_params.image_size = vit_config['image_size']
-        config.vit_related_params.vit_special_token_ids.update({
+        config.vit_related_params.update(vit_config)
+        config.vit_related_params["vit_special_token_ids"].update({
             'image_start_id': vit_config['image_start_id'],
             'image_end_id': vit_config['image_start_id'] + 1,
             'image_pad_id': vit_config['image_start_id'] + 2})
-        config.vit_related_params.vit_special_tokens.update({'default_image_token': '<img/>'})
-        config.vit_related_params.layers = vit_config['layers']
-        config.vit_related_params.mlp_ratio = vit_config['mlp_ratio']
-        config.vit_related_params.output_dim = vit_config['output_dim']
-        config.vit_related_params.patch_size = vit_config['patch_size']
-        config.vit_related_params.width = vit_config['width']
-
-        config.vit_related_params.visual = ClipVit(**vit_config)
-        config.vit_related_params.weights = ClipVitWeights(config.vit_related_params.visual)
+        config.vit_related_params["vit_special_tokens"].update({'default_image_token': '<img/>'})
     
     def load_tokenizer(self):
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
@@ -97,9 +106,9 @@ class QWen_VL(QWen, MultiModalMixin):
     
     def load_vit_weight(self, ctype: str):
         config = self.config
-        hf_prefix = config.vit_related_params.weights.hf_prefix
-        ft_prefix = config.vit_related_params.weights.ft_prefix
-        weight_names = config.vit_related_params.weights.weight_names
+        hf_prefix = config.vit_related_params["weights"].hf_prefix
+        ft_prefix = config.vit_related_params["weights"].ft_prefix
+        weight_names = config.vit_related_params["weights"].weight_names
 
         def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
             param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(ctype).to('cuda:0')
@@ -119,9 +128,9 @@ class QWen_VL(QWen, MultiModalMixin):
     
     # QWen_VL tokenizer encode image urls into tokens, so that multimodal_embedding don't need images as input
     def multimodal_embedding(self, input_ids: torch.Tensor):
-        img_start_id: int = self.config.vit_related_params.vit_special_token_ids['image_start_id']
-        img_end_id: int = self.config.vit_related_params.vit_special_token_ids['image_end_id']
-        img_pad_id: int = self.config.vit_related_params.vit_special_token_ids['image_pad_id']
+        img_start_id: int = self.config.vit_related_params['vit_special_token_ids']['image_start_id']
+        img_end_id: int = self.config.vit_related_params['vit_special_token_ids']['image_end_id']
+        img_pad_id: int = self.config.vit_related_params['vit_special_token_ids']['image_pad_id']
         bos_pos = torch.where(input_ids == img_start_id)
         eos_pos = torch.where(input_ids == img_end_id)
         assert (bos_pos[0] == eos_pos[0]).all()
@@ -134,7 +143,7 @@ class QWen_VL(QWen, MultiModalMixin):
             images.append(bytes(image).decode('utf-8'))
 
         if len(images) != 0:
-            images = self.visual.encode(images)
+            images = self.visual.image_embedding(images, self.device)
             assert images.shape[0] == len(images)
 
         input_embeds = self.word_embedding(input_ids)
@@ -149,11 +158,11 @@ class QWen_VL(QWen, MultiModalMixin):
     def eval_model_size(config: GptInitModelParameters):
         llm_size = BaseModel.eval_model_size(config)
         
-        embed_dim = config.vit_related_params.output_dim
-        width = config.vit_related_params.width
-        layers = config.vit_related_params.layers
-        patch_size = config.vit_related_params.patch_size
-        mlp_ratio = config.vit_related_params.mlp_ratio
+        embed_dim = config.vit_related_params["output_dim"]
+        width = config.vit_related_params["width"]
+        layers = config.vit_related_params["layers"]
+        patch_size = config.vit_related_params["patch_size"]
+        mlp_ratio = config.vit_related_params["mlp_ratio"]
         mlp_width = int(mlp_ratio * width)
         data_width = 4
         

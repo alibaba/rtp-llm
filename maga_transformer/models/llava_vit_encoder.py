@@ -1,12 +1,50 @@
-from typing import Dict, Any
+from typing import Dict, List, Any
 import os
+import re
 
 import torch
 import torch.nn as nn
 
 from PIL import Image
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
+from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
 
+class LlavaImageEmbedding(BaseImageEmbedding):
+    def __init__(self, config: Dict[str, Any]):
+        self.vision_tower = build_vision_tower(config)
+        self.mm_projector, self.proj_layers = build_vision_projector(config)
+        self.config = config
+    
+    def image_embedding(self, images: List[List[str]], device) -> torch.Tensor:
+        image_data = []
+        for i in range(len(images)):    
+            now_image_data = []
+            for image in images[i]:
+                if image.startswith('/'):
+                    now_image_data.append(Image.open(open(image, 'rb')))
+                else:
+                    now_image_data.append(Image.open(BytesIO(requests.get(image).content)))
+            image_data.append(now_image_data)
+        
+        images = process_batch_images(image_data, 
+                                      self.config.get('image_aspect_ratio', None), 
+                                      self.vision_tower.image_processor, 
+                                      device)
+
+        image_features = []
+        for query_images in images:
+            image_features.append(self.encode_images(query_images, device))
+
+        return image_features
+    
+    def encode_images(self, images, device):
+        if images.shape[0] == 0:
+            return images
+        image_features = self.vision_tower(images).to(device=device)
+        image_features = self.mm_projector(image_features)
+        return image_features
+
+# ViT
 class CLIPVisionTower(nn.Module):
     def __init__(self, vision_tower, args, delay_load=False):
         super().__init__()
@@ -81,13 +119,46 @@ class CLIPVisionTower(nn.Module):
 def build_vision_tower(vision_tower_cfg: Dict[str, Any], **kwargs: Any):
     vision_tower = os.environ.get('LOCAL_EXTRA_DATA_PATH', None)
     if vision_tower is None:
-        vision_tower = vision_tower_cfg.get('mm_vision_tower', vision_tower_cfg.get('vision_tower', None))
+        vision_tower = vision_tower_cfg['vit_tower_path']
     is_absolute_path_exists = os.path.exists(vision_tower)
     if is_absolute_path_exists or vision_tower.startswith("openai") or vision_tower.startswith("laion"):
         return CLIPVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
     
     raise ValueError(f'Unknown vision tower: {vision_tower}')
 
+# Projector
+class IdentityMap(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, *args, **kwargs):
+        return x
+
+    @property
+    def config(self):
+        return {"mm_projector_type": 'identity'}
+    
+def build_vision_projector(config, delay_load=False, **kwargs):
+    projector_type = config.get('mm_projector_type', 'linear')
+
+    if projector_type == 'linear':
+        return torch.nn.Linear(config['mm_hidden_size'], config['hidden_size'], device='cuda:0'), 1
+
+    mlp_gelu_match = re.match(r'^mlp(\d+)x_gelu$', projector_type)
+    if mlp_gelu_match:
+        mlp_depth = int(mlp_gelu_match.group(1))
+        modules = [torch.nn.Linear(config['mm_hidden_size'], config['hidden_size'], device='cuda:0')]
+        for _ in range(1, mlp_depth):
+            modules.append(torch.nn.GELU())
+            modules.append(torch.nn.Linear(config['hidden_size'], config['hidden_size'], device='cuda:0'))
+        return torch.nn.Sequential(*modules), mlp_depth
+
+    if projector_type == 'identity':
+        return IdentityMap(), 0
+
+    raise ValueError(f'Unknown projector type: {projector_type}')
+
+# image preprocess
 def expand2square(pil_img, background_color):
     width, height = pil_img.size
     if width == height:

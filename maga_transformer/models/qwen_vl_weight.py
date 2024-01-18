@@ -9,8 +9,8 @@ from maga_transformer.models.qwen import QWenWeight
 class QWenVLWeightInfo(QWenWeight):
     def __init__(self, config, tp_size, tp_rank):
         super().__init__(config, tp_size, tp_rank)
-        self.layers = config.vit_related_params.layers
-        self.weights = config.vit_related_params.weights
+        self.layers = config.vit_related_params["layers"]
+        self.weights = config.vit_related_params["weights"]
     
     def _get_weight_info(self):
         qwen_vl_weight = super()._get_weight_info()

@@ -76,7 +76,7 @@ class Pipeline(object):
         self.model = model
         self.tokenizer = tokenizer
         self._special_tokens: int = self.model.config.special_tokens
-        self._img_token: str = self.model.config.vit_related_params.vit_special_tokens.get('default_image_token', '')
+        self._img_token: str = self.model.config.vit_related_params["vit_special_tokens"].get('default_image_token', '')
         self.has_init_decode_stop_words: bool = False
         self._init_pipeline_func()
 
@@ -225,8 +225,9 @@ class Pipeline(object):
         prompts = [self.modify_prompt_func(prompts[i], generate_config=generate_config.model_dump(), image=images[i], **kwargs) for i in range(len(prompts))]
 
         if self.model.is_multimodal:
-            modified_results = [self.multimodal_modify_prompt_func(prompts[i], generate_config=generate_config.model_dump(), image=images[i], img_token=self._img_token, **kwargs) for i in range(len(prompts))]
-            [prompts, images] = list(zip(*modified_results))
+            modified_results = [self.multimodal_modify_prompt_func(prompts[i], images=images[i], img_token=self._img_token, generate_config=generate_config.model_dump(), **kwargs) for i in range(len(prompts))]
+            prompts, images = zip(*modified_results)
+            prompts, images = list(prompts), list(images)
 
         input_token_ids, input_lengths = self.encode_tokens(prompts, generate_config, **kwargs)
         input_lengths_list: List[int] = input_lengths.tolist()
