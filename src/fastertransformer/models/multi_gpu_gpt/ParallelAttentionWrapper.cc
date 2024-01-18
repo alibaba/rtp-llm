@@ -80,6 +80,26 @@ bool ParallelAttentionWrapper<T>::UseTRTFMHA() {
 }
 
 template<typename T>
+bool ParallelAttentionWrapper<T>::UseMultiBlockMode()
+{
+    bool use_multi_block_mode = false;
+
+    char* multi_block_mode_env    = std::getenv("ENABLE_MULTI_BLOCK_MODE");
+    bool  multi_block_mode_enable = (multi_block_mode_env == nullptr || std::string(multi_block_mode_env) != "OFF");
+#if (CUDART_VERSION >= 11070)
+    if (!multi_block_mode_enable) {
+        FT_LOG_WARNING("MMHA multi_block_mode is disabled");
+        return false;
+    }
+    if (sm_ == 80 || sm_ >= 89) {
+        FT_LOG_INFO("MMHA multi_block_mode is enabled");
+        use_multi_block_mode = true;
+    }
+#endif
+    return use_multi_block_mode;
+}
+
+template<typename T>
 void ParallelAttentionWrapper<T>::TRTFMHA(const ContextAttentionParams& params, cudaStream_t stream)
 {
 #if (CUDART_VERSION >= 12000)
@@ -945,11 +965,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     q_scaling_(1.0f),
     tensor_para_(tensor_para)
 {
-#if (CUDART_VERSION >= 11070)
-    if (sm_ == 80 || sm_ >= 89) {
-        multi_block_mode_ = true;
-    }
-#endif
+    multi_block_mode_ = UseMultiBlockMode();
 
     if (params_.int8_mode_ == 2) {
         abort();

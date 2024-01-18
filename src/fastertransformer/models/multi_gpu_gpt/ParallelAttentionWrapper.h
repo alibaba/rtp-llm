@@ -150,6 +150,7 @@ public:
     bool CheckUseFMHA();
     bool UseOpenSourceFMHA();
     bool UseTRTFMHA();
+    bool UseMultiBlockMode();
 
     void TRTFMHA(const ContextAttentionParams& params, cudaStream_t stream);
     void OpenSourceFMHA(T* qkv, int* cu_seqlens, const int batch_size, const int num_heads, const int num_heads_kv, const int head_size, const int max_seqlen, const float softmax_scale, T *linear_bias_slopes, T* out, cudaStream_t stream);
