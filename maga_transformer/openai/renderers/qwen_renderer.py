@@ -308,17 +308,7 @@ class QwenRenderer(CustomChatRenderer):
             request: ChatCompletionRequest,
             input_token_length: int,
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        # TODO(wangyin): maybe deal with the case of multiple returns.
         index = 0
-        yield StreamResponseObject(
-            choices=[ChatCompletionResponseStreamChoice(
-                index=index,
-                delta=DeltaMessage(
-                    role=RoleEnum.assistant,
-                ),
-            )]
-        )
-
         output_string = ""
         output_length = 0
         responded_string = ""
@@ -328,6 +318,16 @@ class QwenRenderer(CustomChatRenderer):
         generating_function_call = False
 
         async for output in output_generator:
+            if output_token_length == 0:
+                yield StreamResponseObject(
+                    choices=[ChatCompletionResponseStreamChoice(
+                        index=index,
+                        delta=DeltaMessage(
+                            role=RoleEnum.assistant,
+                        ),
+                    )]
+                )
+
             processed_output = self._process_output_ids_tensor(input_token_length, output.output_ids)
             output_string = processed_output.output_str.strip()
             output_length = len(processed_output.output_str)

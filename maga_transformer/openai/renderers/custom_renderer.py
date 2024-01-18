@@ -71,21 +71,22 @@ class CustomChatRenderer():
             input_token_length: int,
     ) -> AsyncGenerator[StreamResponseObject, None]:
         index = 0
-        yield StreamResponseObject(
-            choices=[ChatCompletionResponseStreamChoice(
-                index=index,
-                delta=DeltaMessage(
-                    role=RoleEnum.assistant,
-                ),
-            )]
-        )
-
         output_token_length = 0
         responded_output_ids = []
         responded_string = ""
         finish_reason = None
 
         async for output in output_generator:
+            if index == 0:
+                yield StreamResponseObject(
+                    choices=[ChatCompletionResponseStreamChoice(
+                        index=index,
+                        delta=DeltaMessage(
+                            role=RoleEnum.assistant,
+                        ),
+                    )]
+                )
+
             index += 1
             output_ids = self._clean_output_ids(input_token_length, output.output_ids)
             output_token_length = len(output_ids)
