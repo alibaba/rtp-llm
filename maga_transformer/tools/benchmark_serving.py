@@ -16,7 +16,6 @@ from typing import AsyncGenerator, List, Tuple
 import aiohttp
 import numpy as np
 from transformers import PreTrainedTokenizerBase
-from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # (prompt len, output len, latency)
 REQUEST_LATENCY: List[Tuple[int, int, float]] = []
