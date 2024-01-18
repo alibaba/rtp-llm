@@ -387,6 +387,7 @@ class QwenRenderer(CustomChatRenderer):
             finish_reason = FinisheReason.stop
 
         if responded_length < output_length:
+            index += 1
             yield StreamResponseObject(
                 choices=[ChatCompletionResponseStreamChoice(
                     index=index,
@@ -394,6 +395,11 @@ class QwenRenderer(CustomChatRenderer):
                         content=output_string[responded_length:],
                     ),
                 )],
+                usage=UsageInfo(
+                    prompt_tokens=input_token_length,
+                    total_tokens=input_token_length + output_token_length,
+                    completion_tokens=output_token_length
+                )
             )
 
         yield StreamResponseObject(
