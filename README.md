@@ -1,108 +1,92 @@
-## 项目介绍
+[English](README.md) [中文](README_cn.md)
 
-* rtp-llm 是阿里巴巴大模型预测团队开发的大模型推理加速引擎，也是阿里巴巴内部广泛使用的大规模分布式大模型推理引擎，支持了包括淘宝、天猫、菜鸟、高德、饿了么、AE、Lazada 等多个部门的大模型推理业务。
-* 为用户提供高性能、低成本、易用的推理服务，帮助客户和开发者量身定做适合自身业务的推理服务，助力业务增长。
-* rtp-llm项目是[havenask](https://github.com/alibaba/havenask)项目的子项目。
-
-## 核心能力
-### 高性能
-* 使用高性能的 cuda kernel。
-* 框架上对动态凑批的 overhead 进行了细致优化。
-* 支持 paged attention 和 kv cache 量化。
-* 支持 flash attention2。
-* 支持 weight only INT8 量化。支持加载时自动量化。
-* 对 V100 进行了特别优化。
-
-### 非常灵活并且易于使用
-* 和流行的HuggingFace模型无缝对接，支持多种权重格式。无需额外转换流程。
-* 支持单模型实例同时部署多 LoRA 服务。
-* 支持多模态(图片和文本混合输入)
-* 支持多机/多卡 tensor 并行。
-* 支持加载 P-tuning 模型。
-
-### 高级推理加速方法
-* 支持剪枝后的不规则模型加载
-* 支持多轮对话上下文 Cache。
-* 支持 Speculative Decoding 加速。
-* 支持 Medusa 加速。
-
-## 使用方法
-### 需求
-* 操作系统: Linux
+## Abort
+* rtp-llm is an LLM inference acceleration engine developed by Alibaba's big model prediction team. rtp-llm is widely used within Alibaba and supports the large model inference operations of various departments, including Taobao, Tmall, Cainiao, Amap, Ele.me, AE, Lazada, and others.
+* rtp-llm offers high-performance, low-cost, and user-friendly inference services, helping customers and developers tailor inference services suitable for their own businesses, thus boosting business growth.
+* rtp-llm is a subproject of the [havenask](https://github.com/alibaba/havenask) project.
+## Features
+### High Performance
+* Utilizes high-performance cuda kernels.
+* The framework has finely optimized the overhead of dynamic batching.
+* Supports paged attention and kv cache quantization.
+* Supports flash attention2.
+* Supports weight only INT8 quantization with automatic quantization at load time.
+* Specially optimized for the V100.
+### Extremely Flexible and Easy to Use
+* Seamlessly interfaces with popular HuggingFace models, supporting multiple weight formats without the need for additional conversion processes.
+* Supports deployment of multiple LoRA services with a single model instance.
+* Supports multimodal inputs (mixed image and text).
+* Supports multi-machine/multi-card tensor parallelism.
+* Supports loading P-tuning models.
+### Advanced Inference Acceleration Methods
+* Supports loading of irregular models after pruning.
+* Supports multi-round dialogue context Cache.
+* Supports Speculative Decoding acceleration.
+* Supports Medusa acceleration.
+## How to Use
+### Requirements
+* Operating System: Linux
 * Python: 3.10
-* NVIDIA GPU: Compute Capability 7.0 或者更高 (例如V100, T4, RTX20xx, A100, L4, H100等)
-
-### 安装和启动
+* NVIDIA GPU: Compute Capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
+### Installation and Startup
 ```bash
-
-# 安装rtp-llm
+# Install rtp-llm
 cd rtp-llm
-# cuda12的环境请使用 requirements_torch_gpu_cuda12.txt
+# For cuda12 environment, please use requirements_torch_gpu_cuda12.txt
 pip3 install -r ./maga_transformer/requirements_torch_gpu.txt
-# 使用release版本中对应的whl, 这里以0.1.0的cuda11版本为例子，cuda12的whl包请查看release发布页。
+# Use the corresponding whl from the release version, here's an example for the cuda11 version 0.1.0, for the cuda12 whl package please check the release page.
 pip3 install maga_transformer-0.0.1+cuda118-cp310-cp310-manylinux1_x86_64.whl
-
-# 修改test.py中的模型路径，直接启动程序
+# Modify the model path in test.py, and start the program directly
 python3 example/test.py
-
-# 或者启动 http 服务
-# rtp-llm使用fastapi构建了高性能模型服务，使用异步编程尽量避免cpu线程压力过大干扰gpu高效运行
+# Or start the http service
+# rtp-llm uses fastapi to build high-performance model services and uses asynchronous programming to minimize CPU thread pressure interference with efficient GPU operation
 export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
 export FT_SERVER_TEST=1
 python3 -m maga_transformer.start_server
-
 # request to server
 curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 ```
-模型的配置参数等参考以下详细文档。
-
-## 文档
-* [配置参数](docs/Config.md)
-* [源码构建](docs/Build.md)
-* [请求格式](docs/Request.md)
-* [OpenAI接口](docs/OpenAI-Tutorial.md)
+Refer to the detailed documentation below for model configuration parameters, etc.
+## Documentation
+* [Configuration Parameters](docs/Config.md)
+* [Source Code Build](docs/Build.md)
+* [Request Format](docs/Request.md)
+* [OpenAI Interface](docs/OpenAI-Tutorial.md)
 * [LoRA](docs/LoRA-Tutorial.md)
 * [PTuning](docs/PTuning-Tutorial.md)
-* [多模态](docs/Multimodal-Tutorial.md)
-* [结构化剪枝](docs/Sparse-Tutorial.md)
-* [投机采样](docs/SpeculativeDecoding-Tutroial.md)
-* [作为 Python 库引用](docs/HF.md)
+* [Multimodal](docs/Multimodal-Tutorial.md)
+* [Structured Pruning](docs/Sparse-Tutorial.md)
+* [Speculative Sampling](docs/SpeculativeDecoding-Tutorial.md)
+* [Using as a Python Library](docs/HF.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)
-
-## 致谢
-我们的项目主要基于[FasterTransformer](https://github.com/NVIDIA/FasterTransformer)，并在此基础上集成了[TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)的部分kernel实现。FasterTransformer和TensorRT-LLM为我们提供了可靠的性能保障。[Flash-Attention2](https://github.com/Dao-AILab/flash-attention)和[cutlass](https://github.com/NVIDIA/cutlass)也在我们持续的性能优化过程中提供了大量帮助。我们的continuous batching和increment decoding参考了[vllm](https://github.com/vllm-project/vllm)的实现；采样参考了[transformers](https://github.com/huggingface/transformers)，投机采样部分集成了[Medusa](https://github.com/FasterDecoding/Medusa)的实现，多模态部分集成了[llava](https://github.com/haotian-liu/LLaVA)和[qwen-vl](https://github.com/QwenLM/Qwen-VL)的实现。感谢这些项目对我们的启发和帮助。
-
-## 对外应用场景（持续更新）
-* 淘宝问问
-* 阿里巴巴国际AI平台[Aidge](https://aidc-ai.com/)
-* [OpenSearch LLM智能问答版](https://www.aliyun.com/activity/bigdata/opensearch/llmsearch)
+## Acknowledgments
+Our project is mainly based on [FasterTransformer](https://github.com/NVIDIA/FasterTransformer), and on this basis, we have integrated some kernel implementations from [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM). FasterTransformer and TensorRT-LLM have provided us with reliable performance guarantees. [Flash-Attention2](https://github.com/Dao-AILab/flash-attention) and [cutlass](https://github.com/NVIDIA/cutlass) have also provided a lot of help in our continuous performance optimization process. Our continuous batching and increment decoding draw on the implementation of [vllm](https://github.com/vllm-project/vllm); sampling draws on [transformers](https://github.com/huggingface/transformers), with speculative sampling integrating [Medusa](https://github.com/FasterDecoding/Medusa)'s implementation, and the multimodal part integrating implementations from [llava](https://github.com/haotian-liu/LLaVA) and [qwen-vl](https://github.com/QwenLM/Qwen-VL). We thank these projects for their inspiration and help.
+## External Application Scenarios (Continuously Updated)
+* Taobao Wenda
+* Alibaba's International AI Platform [Aidge](https://aidc-ai.com/)
+* [OpenSearch LLM Smart Q&A Edition](https://www.aliyun.com/activity/bigdata/opensearch/llmsearch)
 * [Large Language Model based Long-tail Query Rewriting in Taobao Search](https://arxiv.org/abs/2311.03758)
-
-## 支持模型列表
-
+## Supported Model List
 ### LLM
-* Aquila 和 Aquila2(BAAI/AquilaChat2-7B, BAAI/AquilaChat2-34B, BAAI/Aquila-7B, BAAI/AquilaChat-7B等)
-* Baichuan 和 Baichuan2 (baichuan-inc/Baichuan2-13B-Chat, baichuan-inc/Baichuan-7B)
+* Aquila and Aquila2 (BAAI/AquilaChat2-7B, BAAI/AquilaChat2-34B, BAAI/Aquila-7B, BAAI/AquilaChat-7B, etc.)
+* Baichuan and Baichuan2 (baichuan-inc/Baichuan2-13B-Chat, baichuan-inc/Baichuan-7B)
 * Bloom (bigscience/bloom, bigscience/bloomz)
 * ChatGlm (THUDM/chatglm2-6b, THUDM/chatglm3-6b)
-* Falcon (tiiuae/falcon-7b, tiiuae/falcon-40b, tiiuae/falcon-rw-7b等)
+* Falcon (tiiuae/falcon-7b, tiiuae/falcon-40b, tiiuae/falcon-rw-7b, etc.)
 * GptNeox (EleutherAI/gpt-neox-20b)
-* GPT BigCode (bigcode/starcoder等)
-* LLaMA 和 LLaMA-2 (meta-llama/Llama-2-7b, meta-llama/Llama-2-13b-hf, meta-llama/Llama-2-70b-hf, lmsys/vicuna-33b-v1.3, 01-ai/Yi-34B, xverse/XVERSE-13B等)
-* MPT (mosaicml/mpt-30b-chat等)
-* Phi (microsoft/phi-1_5等)
-* Qwen (Qwen/Qwen-7B, Qwen/Qwen-7B-Chat, Qwen/Qwen-14B, Qwen/Qwen-14B-Chat等)
-* InternLM (internlm/internlm-7b, internlm/internlm-chat-7b等)
-
-### LLM + 多模态
+* GPT BigCode (bigcode/starcoder, etc.)
+* LLaMA and LLaMA-2 (meta-llama/Llama-2-7b, meta-llama/Llama-2-13b-hf, meta-llama/Llama-2-70b-hf, lmsys/vicuna-33b-v1.3, 01-ai/Yi-34B, xverse/XVERSE-13B, etc.)
+* MPT (mosaicml/mpt-30b-chat, etc.)
+* Phi (microsoft/phi-1_5, etc.)
+* Qwen (Qwen/Qwen-7B, Qwen/Qwen-7B-Chat, Qwen/Qwen-14B, Qwen/Qwen-14B-Chat, etc.)
+* InternLM (internlm/internlm-7b, internlm/internlm-chat-7b, etc.)
+### LLM + Multimodal
 * LLAVA (liuhaotian/llava-v1.5-13b, liuhaotian/llava-v1.5-7b)
 * Qwen-VL (Qwen/Qwen-VL)
-
-## 联系我们
-#### 钉钉群
+## Contact Us
+#### DingTalk Group
 <img src=picture/dingding.png width="200px">
-
-#### 微信群
+#### WeChat Group
 <img src=picture/weixin.JPG width="200px">
