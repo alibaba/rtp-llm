@@ -92,25 +92,11 @@ class Llama(GPT):
         return config
 
     def load_tokenizer(self):
-        # legacy 对 ['。', '<|im_end|>'] convert_tokens_to_string 会多输出一个前缀空格
-        # 最终对 Yi 这样的模型会出现结尾有两个 。。 的效果。
-        # fast 版本没这个问题
         tokenizer_config_file = os.path.join(self.config.tokenizer_path, "tokenizer_config.json")
-
-        try:
-            with open(tokenizer_config_file, "r") as f:
-                tokenizer_config = json.load(f)
-        except Exception as _:
-            logging.info(f"load tokenizer config failed {tokenizer_config_file} failed")
-            tokenizer_config = {}
-
-        tokenizer_cls = tokenizer_config.get("tokenizer_class", "LLaMATokenizer")
-        if tokenizer_cls in ["LLaMATokenizer", "YiTokenizer"]:
-            logging.info("llama load LlamaTokenizer")
-            self.tokenizer = LlamaTokenizer.from_pretrained(self.config.tokenizer_path, legacy=False)
-        else:
-            logging.info("llama load super tokenzier")
+        if os.path.exists(tokenizer_config_file):
             super().load_tokenizer()
+        else:
+            self.tokenizer = LlamaTokenizer.from_pretrained(self.config.tokenizer_path)
 
 class Baichuan(Llama):
     @staticmethod
