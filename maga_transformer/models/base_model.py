@@ -318,10 +318,7 @@ class BaseModel(object):
                 lora_ids.append(self.weight.lora_resource.get_id(lora_name))
 
         lora_ids += [-1] * (batch_size - len(lora_names))
-
         extra_args['lora_ids'] = torch.IntTensor(lora_ids)
-        logging.info(f"base model lora_ids is {lora_ids}")
-
 
         cache_indirection = None
         cum_log_probs = None
