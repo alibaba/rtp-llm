@@ -832,3 +832,20 @@ register_template(
     ],
     efficient_eos=True
 )
+
+register_template(
+    name="mixtral",
+    prefix=[
+        "<s>",
+    ],
+    prompt=[
+        "[INST]{{query}}[/INST]"
+    ],
+    stop_words=[
+        "</s>",
+    ],
+    sep=[
+        "</s>",
+    ],
+    system="",
+)
