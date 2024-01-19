@@ -63,20 +63,15 @@ class BasicRenderer(CustomChatRenderer):
                 assert (self.chat_template != None)
             except:
                 logging.info(f"tokenizer {tokenizer} has no chat_template nor "
-                                "default_chat_template attribute. Use default template.")
+                              "default_chat_template attribute. Use default template.")
                 self.chat_template = DEFAULT_CHAT_API_TEMPLATE
-                self.extra_stop_word_ids_list.append(self.tokenizer.encode("<|im_end|>"))
+                self.add_extra_stop_words(["<|im_end|>"])
 
         try:
-            self.extra_stop_words = tokenizer.additional_special_tokens
-            if self.extra_stop_words != None:
-                self.stop_words_list.extend(self.extra_stop_words)
-                self.extra_stop_word_ids_list.extend(
-                    [self.tokenizer.encode(extra_stop_word) for extra_stop_word in self.extra_stop_words]
-                )
+            if tokenizer.additional_special_tokens != None:
+                self.add_extra_stop_words(tokenizer.additional_special_tokens)
         except:
             pass
-        self.stop_word_ids_list.extend(self.extra_stop_word_ids_list)
 
         logging.info(f"use chat template: [ {self.chat_template} ]  ")
         self.compiled_template = self._compile_jinja_template(self.chat_template)

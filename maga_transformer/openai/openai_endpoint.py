@@ -36,9 +36,6 @@ class OpenaiEndopoint():
             self.eos_token_id = self.model.config.special_tokens.eos_token_id
 
         self.stop_word_ids_list = self.model.config.special_tokens.stop_words_list
-        self.stop_words_list = [
-            self.tokenizer.decode(stop_word_ids) for stop_word_ids in self.stop_word_ids_list
-        ]
 
         render_params = RendererParams(
             model_type=os.environ["MODEL_TYPE"],
@@ -46,10 +43,14 @@ class OpenaiEndopoint():
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_word_ids_list,
         )
+
         self.chat_renderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)
         logging.info(f"chat_renderer [{self.chat_renderer}] is created.")
-        extra_stop_word_ids_list = self.chat_renderer.get_extra_stop_word_ids_list()
+        extra_stop_word_ids_list = self.chat_renderer.get_all_extra_stop_word_ids_list()
         self.stop_word_ids_list.extend(extra_stop_word_ids_list)
+        self.stop_words_list = [
+            self.tokenizer.decode(stop_word_ids) for stop_word_ids in self.stop_word_ids_list
+        ]
 
     async def list_models(self):
         global model_args

@@ -28,18 +28,7 @@ class LlamaTemplateRenderer(CustomChatRenderer):
         super().__init__(tokenizer, renderer_params)
         model_name = renderer_params.model_type
         self.template = get_template_and_fix_tokenizer(model_name, tokenizer)
-
-        extra_stop_words = self.template.stop_words
-        extra_stop_word_ids: List[List[int]] = []
-        for word in extra_stop_words:
-            token_id = tokenizer.convert_tokens_to_ids(word)
-            assert(isinstance(token_id, int))
-            if token_id:
-                extra_stop_word_ids.append([token_id])
-            else:
-                extra_stop_word_ids.append(tokenizer.encode(word, add_special_tokens=True))
-        self.extra_stop_word_ids = extra_stop_word_ids
-        self.stop_word_ids_list.extend(extra_stop_word_ids)
+        self.add_extra_stop_words(self.template.stop_words)
 
     def get_print_properties(self) -> dict:
         properties = super().get_print_properties()

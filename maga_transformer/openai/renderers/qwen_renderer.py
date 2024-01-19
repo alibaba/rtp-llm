@@ -115,7 +115,7 @@ def make_context(
 class QwenRenderer(CustomChatRenderer):
     def __init__(self, tokenizer: QWenTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
-        self.extra_stop_word_ids_list.append([37763, 367, 25]) # Observation:
+        self.add_extra_stop_word_ids([[37763, 367, 25]]) # Observation:
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         assert (isinstance(self.tokenizer, QWenTokenizer))

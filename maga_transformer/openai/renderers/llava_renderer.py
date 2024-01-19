@@ -9,7 +9,7 @@ from enum import Enum, auto
 from transformers import PreTrainedTokenizer
 from dataclasses import dataclass
 
-from maga_transformer.models.base_model import GenerateOutput
+from maga_transformer.models.base_model import BaseTokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
     ChatCompletionRequest, RoleEnum, FunctionCall
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
@@ -78,7 +78,7 @@ conv_templates = {
 }
 
 class LlavaRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: PreTrainedTokenizer, renderer_params: RendererParams):
+    def __init__(self, tokenizer: BaseTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
 
     def _get_conv_template(self, model_name: str) -> Conversation:

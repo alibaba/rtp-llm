@@ -10,6 +10,7 @@ from maga_transformer.openai.renderers.qwen_vl_renderer import QwenVLRenderer
 from maga_transformer.openai.renderers.llava_renderer import LlavaRenderer
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderers.llama_template_renderer import LlamaTemplateRenderer
+from maga_transformer.openai.renderers.fast_chat_renderer import FastChatRenderer
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from maga_transformer.models.base_model import BaseTokenizer
 
@@ -40,17 +41,21 @@ class ChatRendererFactory():
         #                    > model customized renderer (e.g. Qwen, which implemented function call)
         #                    > LlamaTemplateRenderer > default chat template
         # tokenizer.chat_template has the highest priority because it might be user customized.
-        #
-        # The special cases are:
-        # 1. Multimodal models (e.g. QwenVL): need to deal with images.
 
         params = ChatRendererFactory._maybe_change_model_type(params)
         model_type = params.model_type
+
+        use_llama_template_name = os.environ.get("USE_LLAMA_TEMPLATE_NAME", None)
+        if use_llama_template_name != None:
+            logging.info(f"USE_LLAMA_TEMPLATE_NAME is set to {use_llama_template_name}, use llama template.")
+            assert (isinstance(tokenizer, PreTrainedTokenizer))
+            return LlamaTemplateRenderer(tokenizer, params)
 
         if model_type == "qwen_vl":
             assert (isinstance(tokenizer, PreTrainedTokenizer))
             return QwenVLRenderer(tokenizer, params)
         elif model_type == "llava":
+            assert (isinstance(tokenizer, BaseTokenizer))
             return LlavaRenderer(tokenizer, params)
 
         try:

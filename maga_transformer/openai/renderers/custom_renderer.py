@@ -39,6 +39,9 @@ class CustomChatRenderer():
         self.stop_words_list = [
             self.tokenizer.decode(stop_word_ids) for stop_word_ids in self.stop_word_ids_list
         ]
+
+        # NOTE: stop words or their ids only need to be added to one of these two lists.
+        self.extra_stop_words: List[str] = []
         self.extra_stop_word_ids_list: List[List[int]] = []
 
     def __str__(self) -> str:
@@ -58,8 +61,26 @@ class CustomChatRenderer():
             "extra_stop_word_ids_list": self.extra_stop_word_ids_list,
         }
 
-    def get_extra_stop_word_ids_list(self) -> List[List[int]]:
-        return self.extra_stop_word_ids_list
+    def add_extra_stop_words(self, extra_stop_words: List[str]):
+        self.extra_stop_words.extend(extra_stop_words)
+
+    def add_extra_stop_word_ids(self, extra_stop_word_ids: List[List[int]]):
+        self.extra_stop_word_ids_list.extend(extra_stop_word_ids)
+
+    def get_all_extra_stop_word_ids_list(self) -> List[List[int]]:
+        ids_list_from_words = []
+        for word in self.extra_stop_words:
+            if isinstance(self.tokenizer, PreTrainedTokenizer):
+                token_id = self.tokenizer.convert_tokens_to_ids(word)
+                if isinstance(token_id, int):
+                    ids_list_from_words.append([token_id])
+                elif isinstance(token_id, list):
+                    ids_list_from_words.append(token_id)
+                else:
+                    ids_list_from_words.append(self.tokenizer.encode(word, add_special_tokens=True))
+            else:
+                ids_list_from_words.append(self.tokenizer.encode(word))
+        return self.extra_stop_word_ids_list + ids_list_from_words
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
