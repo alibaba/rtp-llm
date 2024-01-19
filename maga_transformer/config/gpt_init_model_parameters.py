@@ -204,10 +204,18 @@ class GptInitModelParameters:
         prompt_file_path =  os.environ.get('MULTI_TASK_PROMPT', None)
         if not prompt_file_path:
             self.multi_task_prompt = None
+        else:
+            with open(prompt_file_path, 'r') as reader:
+                multi_task_prompt = json.loads(reader.read())
+                self.multi_task_prompt = multi_task_prompt
+                return
+
+        prompt_str =  os.environ.get('MULTI_TASK_PROMPT_STR', None)
+        if not prompt_str:
+            self.multi_task_prompt = None
+        else:
+            self.multi_task_prompt = json.loads(prompt_str)
             return
-        with open(prompt_file_path, 'r') as reader:
-            multi_task_prompt = json.loads(reader.read())
-            self.multi_task_prompt = multi_task_prompt
 
     def update_common(self,
                       ckpt_path: str,
