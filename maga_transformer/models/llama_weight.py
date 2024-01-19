@@ -4,6 +4,7 @@ import logging
 from typing import List
 import torch
 from typing import List, Any
+from einops import rearrange
 
 from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, LoRAModelWeightInfo, \
     ModelDeployWeightInfo, CkptWeightInfo, concat_1, concat_0, identity, zeros, transpose
@@ -40,6 +41,17 @@ def merge_qkv_lora_B(ts: List[torch.Tensor]):
     return torch.cat((torch.cat((q, t, t), dim=1),
                       torch.cat((t, k, t), dim=1),
                       torch.cat((t, t, v), dim=1))).T.contiguous()
+
+def qkv_rerange(ts, hidden_size, head_num_kv, head_num):
+    num_key_value_groups = int(head_num // head_num_kv)
+    size_per_head = int(hidden_size / head_num)
+    w = rearrange(ts[0].T, "q (h gs d) -> q h gs d",
+                  gs=2 + num_key_value_groups,
+                  d=size_per_head)
+    wq = w[..., : num_key_value_groups, :].reshape(w.shape[0], -1)
+    wk = w[..., -2, :].reshape(w.shape[0], -1)
+    wv = w[..., -1, :].reshape(w.shape[0], -1)
+    return torch.concat([wq, wk, wv], dim=1)
 
 class DefaultWeightNames:
     WQ = 'layers.{i}.attention.wq.weight'
@@ -82,6 +94,18 @@ class InternlmWeightNames(HfWeightNames):
     BV = 'model.layers.{i}.self_attn.v_proj.bias'
     BO = 'model.layers.{i}.self_attn.o_proj.bias'
 
+class Internlm2WeightNames:
+    W_QKV = 'model.layers.{i}.attention.wqkv.weight'
+    WO = 'model.layers.{i}.attention.wo.weight'
+    FFW1 = 'model.layers.{i}.feed_forward.w1.weight'
+    FFW2 = 'model.layers.{i}.feed_forward.w2.weight'
+    FFW3 = 'model.layers.{i}.feed_forward.w3.weight'
+    ATTEN_NORM = 'model.layers.{i}.attention_norm.weight'
+    FFN_NORM = 'model.layers.{i}.ffn_norm.weight'
+    TOKEN_EMBEDDING = 'model.tok_embeddings.weight'
+    NORM = 'model.norm.weight'
+    OUTPUT = 'output.weight'
+
 class LlamaWeightInfo(ModelDeployWeightInfo):
     def __init__(self, config, tp_size, tp_rank):
         super().__init__(config, tp_size, tp_rank)
@@ -90,7 +114,11 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
         self._merge_qkv_b = None
 
     def _process_meta(self, meta_dicts, weight_keys):
-        if YiWeightNames.FFN_NORM.format(i='0') in weight_keys:
+        if Internlm2WeightNames.W_QKV.format(i='0') in weight_keys:
+            logging.info('load internlm2 style weight')
+            self._names = Internlm2WeightNames
+            self._merge_qkv = qkv_rerange
+        elif YiWeightNames.FFN_NORM.format(i='0') in weight_keys:
             logging.info('load Yi style weight')
             self._names = YiWeightNames
             self._merge_qkv = merge_qkv_hf

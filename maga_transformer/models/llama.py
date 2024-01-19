@@ -128,6 +128,7 @@ class Baichuan(Llama):
         return config
 
 register_model('internlm', Llama)
+register_model('internlm2', Llama)
 register_model('llama', Llama)
 register_model('xverse', Llama)
 register_model('aquila', Llama)

@@ -810,3 +810,25 @@ register_template(
         "\n"
     ]
 )
+
+register_template(
+    name="internlm2",
+    prefix=[
+        "<s>[UNUSED_TOKEN_146]system\n{{system}}[UNUSED_TOKEN_145]\n"
+    ],
+    prompt=[
+        "[UNUSED_TOKEN_146]user\n{{query}}[UNUSED_TOKEN_145]\n[UNUSED_TOKEN_146]assistant\n",
+    ],
+    system="You are an AI assistant whose name is InternLM (书生·浦语).\n"
+    "- InternLM (书生·浦语) is a conversational language model that is developed by Shanghai AI Laboratory (上海人工智能实验室). It is designed to be helpful, honest, and harmless.\n"
+    "- InternLM (书生·浦语) can understand and communicate fluently in the language chosen by the user such as English and 中文.",
+    sep=[
+        {"token": "[UNUSED_TOKEN_145]"},
+        "\n"
+    ],
+    stop_words=[
+        "[UNUSED_TOKEN_145]",
+        "</s>",
+    ],
+    efficient_eos=True
+)

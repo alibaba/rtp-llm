@@ -92,6 +92,7 @@ py_library(
         ":Pillow",
         ":torch",
         ":torchvision",
+        ":einops",
         ":utils",
         ":ops",
         ":vision_transformer"
