@@ -75,18 +75,19 @@ class QWenWeight(ModelDeployWeightInfo):
         return meta
 
 
-    def _process_meta(self, meta_dict):
-        if 'model' in meta_dict:
-            language_model = meta_dict['model']['language_model']
-            if 'encoder' in language_model:
-                meta_dict.update(language_model['encoder'])
-            if 'embedding' in language_model:
-                meta_dict['emb'] = language_model['embedding']['word_embeddings']['weight']
-            if 'output_layer' in language_model.keys():
-                meta_dict['lm_head'] =language_model['output_layer']['weight']
-            self._megatron = True
-        else:
-            self._megatron = False
+    def _process_meta(self, meta_dicts, weight_keys):
+        for meta_dict in meta_dicts:
+            if 'model' in meta_dict:
+                language_model = meta_dict['model']['language_model']
+                if 'encoder' in language_model:
+                    meta_dict.update(language_model['encoder'])
+                if 'embedding' in language_model:
+                    meta_dict['emb'] = language_model['embedding']['word_embeddings']['weight']
+                if 'output_layer' in language_model.keys():
+                    meta_dict['lm_head'] =language_model['output_layer']['weight']
+                self._megatron = True
+            else:
+                self._megatron = False
 
     def _get_weight_info(self):
         if self._megatron:

@@ -9,10 +9,10 @@ from maga_transformer.models.gpt import GPT
 from maga_transformer.model_factory_register import register_model
 
 class FalconWeightInfo(ModelDeployWeightInfo):
-    def _process_meta(self, meta_dict):
-        if 'transformer.h.0.ln_attn.weight' in meta_dict:
+    def _process_meta(self, meta_dicts, weight_keys):
+        if 'transformer.h.0.ln_attn.weight' in weight_keys:
             self.falcon_40b = True
-        elif 'transformer.h.0.input_layernorm.weight' in meta_dict:
+        elif 'transformer.h.0.input_layernorm.weight' in weight_keys:
             self.falcon_40b = False
 
     def _get_weight_info(self):

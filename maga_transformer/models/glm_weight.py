@@ -11,8 +11,8 @@ from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, 
 
 
 class GlmWeightInfo(ModelDeployWeightInfo):
-    def _process_meta(self, meta_dict):
-        if 'transformer.prefix_encoder.embedding.weight' in meta_dict:
+    def _process_meta(self, meta_dicts, weight_keys):
+        if 'transformer.prefix_encoder.embedding.weight' in weight_keys:
             self._has_prefix_encoder = True
 
     def _get_weight_info(self):
@@ -68,7 +68,7 @@ class GlmWeightInfo(ModelDeployWeightInfo):
         if self._src_quantization_bit in [4, 8]:
             for idx, layer_weight in enumerate(layer_weights):
                 new_weight = layer_weight.weights + [CkptWeightInfo(layer_weight.weights[0].name + '_scale', functools.partial(identity, allow_empty = True))]
-                layer_weights[idx] = WeightInfo(layer_weight.name, new_weight, 
+                layer_weights[idx] = WeightInfo(layer_weight.name, new_weight,
                                                 functools.partial(extract_weight_to_half, source_bit_width = self._src_quantization_bit, sufix_func = layer_weight.process_fun))
 
 

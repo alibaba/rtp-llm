@@ -1,7 +1,8 @@
 import logging
 import math
-import torch
 import os
+from functools import reduce
+import torch
 import torch.serialization
 from typing import Any, NamedTuple, Callable, List, Dict, Set, Tuple, Optional, Union
 from maga_transformer.utils.ckpt_database import FinetuneType, TrainType, CkptFileInfo, LoraConfig
@@ -438,7 +439,7 @@ class ModelDeployWeightInfo:
         self._src_quantization_bit = config.src_quantization_bit
         self.tp_split_emb_and_lm_head = config.tp_split_emb_and_lm_head
 
-        self._is_medusa_model = config.gpt_init_params.use_medusa        
+        self._is_medusa_model = config.gpt_init_params.use_medusa
         self._medusa_head_num = 0 if config.medusa_config is None else config.medusa_config.medusa_num_heads
         self._medusa_layer_num = 0 if config.medusa_config is None else config.medusa_config.medusa_num_layers
 
@@ -518,10 +519,11 @@ class ModelDeployWeightInfo:
         if 'ft_module' not in ckpt_metas[0].get_tensor_names():
             # call subclass process_meta
             self.fix_megatron_layer_id(ckpt_metas)
-            for ckpt_file in ckpt_metas:
-                self._process_meta(ckpt_file.get_metadata())
+            meta_dicts = [ckpt_file.get_metadata() for ckpt_file in ckpt_metas]
+            weight_keys = set(reduce(lambda x,y:x+y, [list(meta.keys()) for meta in meta_dicts], []))
+            self._process_meta(meta_dicts, weight_keys)
 
-    def _process_meta(self, meta_dict):
+    def _process_meta(self, meta_dict, weight_keys):
         pass
 
     def fix_megatron_layer_id(self, meta_dict: List[CkptFileInfo]):
@@ -627,7 +629,7 @@ class LoRAMap():
         if name not in self.name_id_map:
             return -1
         return self.name_id_map[name]
-    
+
     def add_lora_name(self, name: str, weights: LoRAWeights) -> int:
         self._create_id(name)
         id = self.name_id_map[name]
@@ -692,7 +694,7 @@ class LoraResource():
         self.rlock_map[name] = RWlock()
         self.to_add_lora_id.append(id)
         return id
-    
+
     def remove_lora_name(self, name: str):
         id = self.lora_map.remove_lora_name(name)
         self.to_remove_lora_id.append(id)
@@ -723,7 +725,7 @@ class LoraResource():
                 self.write_release(lora_name)
         for lora_name in remove_lora_names:
             self.delete_rlock(lora_name)
-        
+
     def add_new_lora(self, lora_infos: Dict[str, str]):
         for lora_name, lora_path in lora_infos.items():
             if lora_name not in self.lora_infos:
@@ -737,7 +739,7 @@ class LoraResource():
             _ = self.add_lora_name(lora_name, lora_weights)
         for op in self.ft_op:
             op.update_lora()
-        
+
     def update(self, lora_infos: Dict[str, str]):
         if self.max_lora_model_size != -1 and len(lora_infos) > self.max_lora_model_size:
             raise LoraCountException(f'lora_infos[{lora_infos}]\'s size exceed MAX_LORA_MODEL_SIZE[{self.max_lora_model_size}]')
@@ -746,7 +748,7 @@ class LoraResource():
             self.remove_old_lora(lora_infos)
             self.add_new_lora(lora_infos)
         self.lora_infos = lora_infos
-    
+
     def get_id(self, name: str) -> int:
         if self.lora_map != None:
             return self.lora_map.get_id(name)

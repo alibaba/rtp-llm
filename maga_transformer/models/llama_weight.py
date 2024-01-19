@@ -89,32 +89,30 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
         self._merge_qkv = None
         self._merge_qkv_b = None
 
-    def _process_meta(self, meta_dict):
-        if YiWeightNames.FFN_NORM.format(i='0') in meta_dict:
+    def _process_meta(self, meta_dicts, weight_keys):
+        if YiWeightNames.FFN_NORM.format(i='0') in weight_keys:
             logging.info('load Yi style weight')
             self._names = YiWeightNames
             self._merge_qkv = merge_qkv_hf
-        elif BaichuanWeightNames.W_QKV.format(i='0') in meta_dict:
+        elif BaichuanWeightNames.W_QKV.format(i='0') in weight_keys:
             logging.info('load baichuan style weight')
             self._names = BaichuanWeightNames
             self._merge_qkv = None
-        elif InternlmWeightNames.BQ.format(i='0') in meta_dict:
+        elif InternlmWeightNames.BQ.format(i='0') in weight_keys:
             logging.info('load internlm style weight')
             self._names = InternlmWeightNames
             self._merge_qkv = merge_qkv_hf
             self._merge_qkv_b = merge_qkv_b
-        elif DefaultWeightNames.OUTPUT in meta_dict:
+        elif DefaultWeightNames.OUTPUT in weight_keys:
             logging.info('load default llama1 style weight')
             self._names = DefaultWeightNames
             self._merge_qkv = merge_qkv
-        elif (HfWeightNames.OUTPUT in meta_dict and
-              self._names not in [BaichuanWeightNames, InternlmWeightNames, YiWeightNames]):
+        elif HfWeightNames.OUTPUT in weight_keys:
             logging.info('load hf llama1 style weight')
             self._names = HfWeightNames
             self._merge_qkv = merge_qkv_hf
         else:
-            # PP 切分，只有一份有 token embedding 作为判断
-            pass
+            raise Exception('unknown weights format')
 
     def _get_weight_info(self):
         weights = [
@@ -154,11 +152,14 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
             layer_weights[3] = WeightInfo(W.attn_o_b, [CkptWeightInfo(self._names.BO, identity)], identity)
 
         if self._merge_qkv is not None:
+            if hasattr(self._names, 'W_QKV'):
+                infos = [CkptWeightInfo(self._names.W_QKV, identity)]
+            else:
+                infos = [CkptWeightInfo(self._names.WQ, concat_0),
+                         CkptWeightInfo(self._names.WK, concat_0),
+                         CkptWeightInfo(self._names.WV, concat_0)]
             layer_weights.append(
-                WeightInfo(W.attn_qkv_w,
-                           [CkptWeightInfo(self._names.WQ, concat_0),
-                            CkptWeightInfo(self._names.WK, concat_0),
-                            CkptWeightInfo(self._names.WV, concat_0)],
+                WeightInfo(W.attn_qkv_w, infos,
                            functools.partial(self._merge_qkv,
                                              hidden_size=self._hidden_size,
                                              head_num_kv=self._head_num_kv,
@@ -166,7 +167,7 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
         else:
             layer_weights.append(
                 WeightInfo(W.attn_qkv_w, [CkptWeightInfo(self._names.W_QKV, identity)], transpose))
-        
+
         lora_base_name = "base_model.model.{}.{}.weight"
         lora_weights = []
         for lora_name in ['lora_A', 'lora_B']:
@@ -174,18 +175,18 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                 WeightInfo(W.attn_o_w + "." + lora_name, [CkptWeightInfo(lora_base_name.format(HfWeightNames.WO[:-len(".weight")], lora_name), concat_1)], transpose))
             lora_weights.append(
                 WeightInfo(W.ffn_w1 + "." + lora_name, [CkptWeightInfo(lora_base_name.format(HfWeightNames.FFW1[:-len(".weight")], lora_name), concat_0)], transpose))
-            
+
             lora_weights.append(
                 WeightInfo(W.ffn_w2 + "." + lora_name, [CkptWeightInfo(lora_base_name.format(HfWeightNames.FFW2[:-len(".weight")], lora_name), concat_1)], transpose))
             lora_weights.append(
                 WeightInfo(W.ffn_w3 + "." + lora_name, [CkptWeightInfo(lora_base_name.format(HfWeightNames.FFW3[:-len(".weight")], lora_name), concat_0)], transpose))
-            
+
         lora_weights.append(WeightInfo(W.attn_qkv_w + "." + 'lora_A',
                         [CkptWeightInfo(lora_base_name.format(HfWeightNames.WQ[:-len(".weight")], 'lora_A'), identity),
                         CkptWeightInfo(lora_base_name.format(HfWeightNames.WK[:-len(".weight")], 'lora_A'), identity),
                         CkptWeightInfo(lora_base_name.format(HfWeightNames.WV[:-len(".weight")], 'lora_A'), identity)],
                         functools.partial(merge_qkv_lora_A)))
-        
+
         lora_weights.append(WeightInfo(W.attn_qkv_w + "." + 'lora_B',
                         [CkptWeightInfo(lora_base_name.format(HfWeightNames.WQ[:-len(".weight")], 'lora_B'), identity),
                         CkptWeightInfo(lora_base_name.format(HfWeightNames.WK[:-len(".weight")], 'lora_B'), identity),
