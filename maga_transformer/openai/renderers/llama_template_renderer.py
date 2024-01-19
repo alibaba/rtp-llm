@@ -33,7 +33,7 @@ class LlamaTemplateRenderer(CustomChatRenderer):
         extra_stop_word_ids: List[List[int]] = []
         for word in extra_stop_words:
             token_id = tokenizer.convert_tokens_to_ids(word)
-            assert (token_id is int)
+            assert(isinstance(token_id, int))
             if token_id:
                 extra_stop_word_ids.append([token_id])
             else:

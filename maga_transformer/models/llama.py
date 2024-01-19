@@ -105,12 +105,12 @@ class Llama(GPT):
             tokenizer_config = {}
 
         tokenizer_cls = tokenizer_config.get("tokenizer_class", "LLaMATokenizer")
-        if tokenizer_cls == "GPT2Tokenizer":
+        if tokenizer_cls in ["LLaMATokenizer", "YiTokenizer"]:
+            logging.info("llama load LlamaTokenizer")
+            self.tokenizer = LlamaTokenizer.from_pretrained(self.config.tokenizer_path, legacy=False)
+        else:
             logging.info("llama load super tokenzier")
             super().load_tokenizer()
-        else:
-            logging.info("llamaload LlamaTokenizer")
-            self.tokenizer = LlamaTokenizer.from_pretrained(self.config.tokenizer_path, legacy=False)
 
 class Baichuan(Llama):
     @staticmethod

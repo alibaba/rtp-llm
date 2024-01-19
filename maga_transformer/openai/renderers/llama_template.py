@@ -513,7 +513,7 @@ register_template(
 
 
 register_template(
-    name="intern",
+    name="internlm",
     prefix=[
         "{{system}}"
     ],

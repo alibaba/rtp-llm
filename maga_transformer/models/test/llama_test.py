@@ -5,7 +5,6 @@ import sys
 from unittest import TestCase, main
 
 from maga_transformer.models.llama import Llama, LlamaTokenizer
-from maga_transformer.models.gpt import GPTTokenizer
 
 class LlamaTest(TestCase):
     @staticmethod
@@ -31,7 +30,6 @@ class LlamaTest(TestCase):
         model = Llama(config)
         model.load_tokenizer()
         self.assertEqual([1457], model.tokenizer.encode("000"))
-        self.assertTrue(isinstance(model.tokenizer, GPTTokenizer))
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO,

@@ -63,20 +63,6 @@ class Linear(torch.nn.Module):
             return all_gather(output)
         return output
 
-class GPTTokenizer:
-    def __init__(self, tokenizer_path: str):
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
-    def decode(self, tokens: List[int]) -> str:
-        return self.tokenizer.decode(tokens)
-
-    def encode(self, prompts: str) -> List[int]:
-        return self.tokenizer.encode(prompts)
-
-    @property
-    def eos_token_id(self):
-        return self.tokenizer.eos_token_id
-
 class GPT(BaseModel):
     def __init__(self, config: GptInitModelParameters):
         super().__init__()
@@ -184,7 +170,7 @@ class GPT(BaseModel):
     def load_tokenizer(self):
         self.tokenizer = None
         if self.config.tokenizer_path:
-            self.tokenizer = GPTTokenizer(self.config.tokenizer_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
             self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
 
     @staticmethod
