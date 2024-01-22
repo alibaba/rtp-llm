@@ -26,12 +26,22 @@ from maga_transformer.model_factory_register import register_model
 class LlavaTokenizer(BaseTokenizer):
     def __init__(self, 
                  tokenzier_path: str, 
+                 mm_use_im_patch_token: bool,
                  mm_use_im_start_end: bool, 
                  image_expand: int, 
                  vit_special_token_ids: Dict[str, Any],
                  vit_special_tokens: Dict[str, Any]):
         self.tokenizer = LlamaTokenizer.from_pretrained(tokenzier_path)
+        self.mm_use_im_patch_token = mm_use_im_patch_token
         self.mm_use_im_start_end = mm_use_im_start_end
+
+        extra_tokens: List[str] = []
+        if self.mm_use_im_patch_token:
+            extra_tokens.extend(["<im_patch>"])
+        if self.mm_use_im_start_end:
+            extra_tokens.extend(["<im_start>", "<im_end>"])
+        self.tokenizer.add_tokens(extra_tokens, special_tokens=True)
+
         self.image_expand = image_expand
         self.image_token_index: int = vit_special_token_ids["image_token_index"]
         self.ignore_token_index: int = vit_special_token_ids["ignore_token_index"]
@@ -140,6 +150,7 @@ class Llava(Llama, MultiModalMixin):
         Llama.from_huggingface(config, config_json)
 
         vit_related_params_list = [
+            ("mm_use_im_patch_token", False),
             ("mm_use_im_start_end", False),
             ("image_aspect_ratio", None),
             ("tune_mm_mlp_adapter", False),
@@ -171,6 +182,7 @@ class Llava(Llama, MultiModalMixin):
 
     def load_tokenizer(self):
         self.tokenizer = LlavaTokenizer(self.config.tokenizer_path, 
+                                        self.config.vit_related_params["mm_use_im_patch_token"], 
                                         self.config.vit_related_params["mm_use_im_start_end"], 
                                         self.config.vit_related_params["img_expand_len"], 
                                         self.config.vit_related_params["vit_special_token_ids"],

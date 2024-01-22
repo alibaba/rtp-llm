@@ -198,6 +198,7 @@ Thought:"""
         os.environ["CHECKPOINT_PATH"] = "llava-v1.5"
         tokenizer = LlavaTokenizer(
             tokenzier_path = f"{self.test_data_path}/llava/tokenizer/",
+            mm_use_im_patch_token = False,
             mm_use_im_start_end = False,
             image_expand = 576,
             vit_special_token_ids = {'ignore_token_index': -100, 'image_token_index': -200},
