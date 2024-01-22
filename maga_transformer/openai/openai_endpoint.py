@@ -13,7 +13,8 @@ from maga_transformer.models.base_model import BaseModel, BaseTokenizer, Generat
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessage, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, UsageInfo, \
-    FinisheReason, DeltaMessage, ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse
+    FinisheReason, DeltaMessage, ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse, \
+    DebugInfo
 from maga_transformer.openai.renderers.custom_renderer import RendererParams, \
     StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderers.renderer_factory import ChatRendererFactory
@@ -51,6 +52,7 @@ class OpenaiEndopoint():
         self.stop_words_list = [
             self.tokenizer.decode(stop_word_ids) for stop_word_ids in self.stop_word_ids_list
         ]
+        logging.info(f"use stop_words_list [{self.stop_words_list}]")
 
     async def list_models(self):
         global model_args
@@ -66,13 +68,17 @@ class OpenaiEndopoint():
             config.top_p = request.top_p
         if request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
-        config.stop_words_list = self.stop_word_ids_list
+        request_stop_words_list = request.stop if request.stop != None else []
+        if isinstance(request_stop_words_list, str):
+            request_stop_words_list = [request_stop_words_list]
+        config.stop_words_list = self.stop_word_ids_list + request_stop_words_list
         if request.chat_id != None:
             config.chat_id = request.chat_id
         return config
 
     async def _complete_non_stream_response(
             self, choice_generator: AsyncGenerator[StreamResponseObject, None],
+            debug_info: Optional[DebugInfo],
     ) -> ChatCompletionResponse:
         all_choices = []
         usage = None
@@ -113,17 +119,36 @@ class OpenaiEndopoint():
         return ChatCompletionResponse(
             choices=all_choices,
             usage=usage,
-            model=self.model.__class__.__name__
+            model=self.model.__class__.__name__,
+            debug_info=debug_info
         )
 
     async def _complete_stream_response(
             self, choice_generator: AsyncGenerator[StreamResponseObject, None],
+            debug_info: Optional[DebugInfo],
     ) -> AsyncGenerator[ChatCompletionStreamResponse, None]:
+        debug_info_responded = False
         async for response in choice_generator:
             yield ChatCompletionStreamResponse(
                 choices=response.choices,
                 usage=response.usage,
+                debug_info=debug_info if not debug_info_responded else None
             )
+            debug_info_responded = True
+
+    def _get_debug_info(self, renderered_input: RenderedInputs) -> Optional[DebugInfo]:
+        prompt = self.tokenizer.decode(renderered_input.input_ids)
+        return DebugInfo(
+            input_prompt=prompt,
+            input_ids=renderered_input.input_ids,
+            input_images=renderered_input.input_images,
+            tokenizer_info=str(self.tokenizer),
+            max_seq_len=self.max_seq_len,
+            eos_token_id=self.eos_token_id,
+            stop_word_ids_list=self.stop_word_ids_list,
+            stop_words_list=self.stop_words_list,
+            renderer_info=self.chat_renderer.get_renderer_info(),
+        )
 
     def chat_completion(
             self, chat_request: ChatCompletionRequest, raw_request: Request
@@ -145,6 +170,8 @@ class OpenaiEndopoint():
             generate_config
         )
 
+        debug_info = self._get_debug_info(rendered_input) if chat_request.debug_info else None
+
         choice_generator = self.chat_renderer.render_response_stream(
             output_generator,
             chat_request,
@@ -152,7 +179,7 @@ class OpenaiEndopoint():
         )
 
         if chat_request.stream:
-            return self._complete_stream_response(choice_generator)
+            return self._complete_stream_response(choice_generator, debug_info)
         else:
-            return self._complete_non_stream_response(choice_generator)
+            return self._complete_non_stream_response(choice_generator, debug_info)
 

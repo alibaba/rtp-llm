@@ -92,6 +92,7 @@ class ChatCompletionRequest(BaseModel):
     private_request: bool = False
     trace_id: Optional[str] = None
     chat_id: Optional[str] = None
+    debug_info: Optional[bool] = False
 
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
@@ -109,6 +110,26 @@ class FinisheReason(str, Enum):
     length = "length"
     function_call = "function_call"
 
+class RendererInfo(BaseModel):
+    class_name: str
+    model_type: str
+    extra_stop_word_ids_list: List[List[int]]
+    extra_stop_words_list: List[str]
+    template: Optional[str] = None
+
+class DebugInfo(BaseModel):
+    input_prompt: str
+    input_ids: List[int]
+    input_images: List[str]
+
+    tokenizer_info: str
+    max_seq_len: int
+    eos_token_id: Optional[int]
+    stop_word_ids_list: List[List[str]]
+    stop_words_list: List[str]
+
+    renderer_info: RendererInfo
+
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
@@ -121,6 +142,7 @@ class ChatCompletionResponse(BaseModel):
     model: str = ""
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
+    debug_info: Optional[DebugInfo] = None
 
 class DeltaMessage(BaseModel):
     role: Optional[RoleEnum] = None
@@ -140,3 +162,5 @@ class ChatCompletionStreamResponse(BaseModel):
     model: Optional[str] = None
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+
+    debug_info: Optional[DebugInfo] = None

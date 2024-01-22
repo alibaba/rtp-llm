@@ -13,7 +13,7 @@ from jinja2.exceptions import TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, \
-    RendererParams, StreamResponseObject, RenderedInputs
+    RendererParams, StreamResponseObject, RenderedInputs, RendererInfo
 from maga_transformer.models.base_model import BaseTokenizer, GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
@@ -76,12 +76,10 @@ class BasicRenderer(CustomChatRenderer):
         logging.info(f"use chat template: [ {self.chat_template} ]  ")
         self.compiled_template = self._compile_jinja_template(self.chat_template)
 
-    def get_print_properties(self) -> dict:
-        properties = super().get_print_properties()
-        properties.update({
-            "chat_template": self.chat_template
-        })
-        return properties
+    def get_renderer_info(self) -> RendererInfo:
+        renderer_info = super().get_renderer_info()
+        renderer_info.template = self.chat_template
+        return renderer_info
 
     @lru_cache
     def _compile_jinja_template(self, chat_template) -> jinja2.Template:

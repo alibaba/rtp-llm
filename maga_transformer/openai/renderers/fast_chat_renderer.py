@@ -6,7 +6,7 @@ from .conversation import Conversation, get_conv_template
 from transformers import PreTrainedTokenizer
 
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
-    ChatCompletionRequest, RoleEnum
+    ChatCompletionRequest, RoleEnum, RendererInfo
 from maga_transformer.openai.renderers.llama_template import Template, get_template_and_fix_tokenizer
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
@@ -28,6 +28,11 @@ class FastChatRenderer(CustomChatRenderer):
             self.add_extra_stop_words([self.conv_template.stop_str])
         if self.conv_template.stop_token_ids:
             self.add_extra_stop_word_ids([[id] for id in self.conv_template.stop_token_ids])
+
+    def get_renderer_info(self) -> RendererInfo:
+        renderer_info = super().get_renderer_info()
+        renderer_info.template = str(self.conv_template)
+        return renderer_info
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         conversaion = self.conv_template.copy()

@@ -7,7 +7,8 @@ from transformers import PreTrainedTokenizer
 
 from maga_transformer.models.base_model import BaseTokenizer, GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
-    ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, RoleEnum
+    ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
+    RoleEnum, RendererInfo
 
 @dataclass
 class StreamResponseObject:
@@ -45,21 +46,22 @@ class CustomChatRenderer():
         self.extra_stop_word_ids_list: List[List[int]] = []
 
     def __str__(self) -> str:
-        proerpty_str = ", \n".join([f"{k}={v}" for k, v in self.get_print_properties().items()])
-        return f"[{self.__class__.__name__}](\n{proerpty_str}\n)"
+        return str(self.get_renderer_info())
 
     def __repr__(self) -> str:
         return self.__str__()
 
-    def get_print_properties(self) -> dict:
-        return {
-            "model_type": self.model_type,
-            "max_seq_len": self.max_seq_len,
-            "eos_token_id": self.eos_token_id,
-            "stop_word_ids_list": self.stop_word_ids_list,
-            "stop_words_list": self.stop_words_list,
-            "extra_stop_word_ids_list": self.extra_stop_word_ids_list,
-        }
+    def get_renderer_info(self) -> RendererInfo:
+        extra_stop_word_ids_list = self.get_all_extra_stop_word_ids_list()
+        extra_stop_words_list = [
+            self.tokenizer.decode(stop_word_ids) for stop_word_ids in extra_stop_word_ids_list
+        ]
+        return RendererInfo(
+            class_name=self.__class__.__name__,
+            model_type=self.model_type,
+            extra_stop_word_ids_list=extra_stop_word_ids_list,
+            extra_stop_words_list=extra_stop_words_list,
+        )
 
     def add_extra_stop_words(self, extra_stop_words: List[str]):
         self.extra_stop_words.extend(extra_stop_words)

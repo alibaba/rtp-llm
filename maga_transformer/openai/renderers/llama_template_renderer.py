@@ -8,7 +8,7 @@ from transformers import PreTrainedTokenizer
 from dataclasses import dataclass
 
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
-    ChatCompletionRequest, RoleEnum, FunctionCall
+    ChatCompletionRequest, RoleEnum, FunctionCall, RendererInfo
 from maga_transformer.openai.renderers.llama_template import Template, get_template_and_fix_tokenizer
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
@@ -30,12 +30,10 @@ class LlamaTemplateRenderer(CustomChatRenderer):
         self.template = get_template_and_fix_tokenizer(model_name, tokenizer)
         self.add_extra_stop_words(self.template.stop_words)
 
-    def get_print_properties(self) -> dict:
-        properties = super().get_print_properties()
-        properties.update({
-            "template": self.template,
-        })
-        return properties
+    def get_renderer_info(self) -> RendererInfo:
+        renderer_info = super().get_renderer_info()
+        renderer_info.template = str(self.template)
+        return renderer_info
 
     def _extract_history(self, messages: List[ChatMessage]) -> LlamaTemplateArgs:
         # Messages must be formatted in the following way:
