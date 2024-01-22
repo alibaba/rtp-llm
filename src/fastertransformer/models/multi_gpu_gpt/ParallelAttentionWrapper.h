@@ -145,10 +145,10 @@ public:
                    const int*                input_lengths);
 
     void Attention(TensorMap* output_tensors, TensorMap* input_tensors, const AttentionWeight<T>* attention_weights);
-    bool CheckUseFMHA();
-    bool UseOpenSourceFMHA();
-    bool UseTRTFMHA();
-    bool UseMultiBlockMode();
+    bool CheckUseFMHA() const;
+    bool UseOpenSourceFMHA() const;
+    bool UseTRTFMHA() const;
+    bool UseMultiBlockMode() const;
 
     void TRTFMHA(const ContextAttentionParams& params, cudaStream_t stream);
     void OpenSourceFMHA(T*           qkv,

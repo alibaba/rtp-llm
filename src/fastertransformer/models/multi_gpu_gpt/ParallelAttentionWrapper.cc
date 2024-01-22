@@ -12,8 +12,8 @@
 namespace fastertransformer {
 
 template<typename T>
-bool ParallelAttentionWrapper<T>::CheckUseFMHA() {
-    char* fmha_env        = std::getenv("FMHA_ENABLE");
+bool ParallelAttentionWrapper<T>::CheckUseFMHA() const {
+    char* fmha_env        = std::getenv("ENABLE_FMHA");
     bool  fmha_enable     = (fmha_env == nullptr || std::string(fmha_env) != "OFF");
     char* block_cache_env = std::getenv("USE_BLOCK_CACHE");
     bool  not_prefix_prompt =
@@ -55,10 +55,15 @@ bool ParallelAttentionWrapper<T>::CheckUseFMHA() {
 }
 
 template<typename T>
-bool ParallelAttentionWrapper<T>::UseOpenSourceFMHA() {
+bool ParallelAttentionWrapper<T>::UseOpenSourceFMHA() const {
     bool use_open_source_fmha = CheckUseFMHA();
     if (!(is_sm8x() || is_sm90())){
         FT_LOG_WARNING("FMHA is disabled for pre-ampere");
+        use_open_source_fmha = false;
+    }
+    char* fmha_env = std::getenv("ENABLE_OPENSOURCE_FMHA");
+    if (fmha_env && std::string(fmha_env) == "OFF") {
+        FT_LOG_WARNING("opensource FMHA is disabled for by env");
         use_open_source_fmha = false;
     }
     return use_open_source_fmha;
@@ -66,7 +71,7 @@ bool ParallelAttentionWrapper<T>::UseOpenSourceFMHA() {
 
 
 template<typename T>
-bool ParallelAttentionWrapper<T>::UseTRTFMHA() {
+bool ParallelAttentionWrapper<T>::UseTRTFMHA() const {
     bool use_trt_fmha = CheckUseFMHA();
     if (!(is_sm8x() || is_sm90())){
         FT_LOG_WARNING("FMHA is disabled for pre-ampere");
@@ -76,12 +81,16 @@ bool ParallelAttentionWrapper<T>::UseTRTFMHA() {
         FT_LOG_WARNING("TRT FMHA is disabled for sparse");
         use_trt_fmha = false;
     }
+    char* fmha_env = std::getenv("ENABLE_TRT_FMHA");
+    if (fmha_env && std::string(fmha_env) == "OFF") {
+        FT_LOG_WARNING("TRT FMHA is disabled for by env");
+        use_trt_fmha = false;
+    }
     return use_trt_fmha;
 }
 
 template<typename T>
-bool ParallelAttentionWrapper<T>::UseMultiBlockMode()
-{
+bool ParallelAttentionWrapper<T>::UseMultiBlockMode() const {
     bool use_multi_block_mode = false;
 
     char* multi_block_mode_env    = std::getenv("ENABLE_MULTI_BLOCK_MODE");
