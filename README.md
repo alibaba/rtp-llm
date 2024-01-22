@@ -33,7 +33,7 @@
 # Install rtp-llm
 cd rtp-llm
 # For cuda12 environment, please use requirements_torch_gpu_cuda12.txt
-pip3 install -r ./maga_transformer/requirements_torch_gpu.txt
+pip3 install -r ./open_source/deps/requirements_torch_gpu.txt 
 # Use the corresponding whl from the release version, here's an example for the cuda11 version 0.1.0, for the cuda12 whl package please check the release page.
 pip3 install maga_transformer-0.0.1+cuda118-cp310-cp310-manylinux1_x86_64.whl
 # Modify the model path in test.py, and start the program directly

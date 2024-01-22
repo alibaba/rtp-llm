@@ -40,7 +40,7 @@
 # 安装rtp-llm
 cd rtp-llm
 # cuda12的环境请使用 requirements_torch_gpu_cuda12.txt
-pip3 install -r ./maga_transformer/requirements_torch_gpu.txt
+pip3 install -r ./open_source/deps/requirements_torch_gpu.txt 
 # 使用release版本中对应的whl, 这里以0.1.0的cuda11版本为例子，cuda12的whl包请查看release发布页。
 pip3 install maga_transformer-0.0.1+cuda118-cp310-cp310-manylinux1_x86_64.whl
 
