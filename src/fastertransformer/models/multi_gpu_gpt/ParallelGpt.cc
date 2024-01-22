@@ -408,6 +408,8 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         T* decoder_input  = (l == 0) ? decoder_input_tensor.getPtr<T>() : decoder_layer_output_;
         T* decoder_output = decoder_layer_output_;
         sync_check_cuda_error();
+
+        print_bsd(l, "decoder input", decoder_input, 1, h_token_num, hidden_units);
         if (isFirstLayerParallelId(l) && pipeline_para_.rank_ != 0) {
             PUSH_RANGE(stream_, "input communication");
             const int data_size = h_token_num * hidden_units / tensor_para_.world_size_;
@@ -436,7 +438,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                             nullptr,
                                             params_.int8_mode_,
                                             stream_);
-        print_bsd(l, "pre-mha layernorm", decoder_normed_input_, h_token_num, 1, hidden_units);
+        print_bsd(l, "pre ln", decoder_normed_input_, 1, h_token_num, hidden_units);
         if (pre_attn_ln) {
             norm_wrapper_->preAttentionLayerNorm(attn_normed_input_,
                                                  decoder_input,
@@ -449,6 +451,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                                  nullptr,
                                                  params_.int8_mode_,
                                                  stream_);
+            print_bsd(l, "pre attn ln", attn_normed_input_, 1, h_token_num, hidden_units);
         }
 
         sync_check_cuda_error();
