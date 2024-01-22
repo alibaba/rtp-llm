@@ -26,7 +26,8 @@ class FastChatRenderer(CustomChatRenderer):
             self.add_extra_stop_words(self.conv_template.stop_str)
         elif isinstance(self.conv_template.stop_str, str):
             self.add_extra_stop_words([self.conv_template.stop_str])
-        self.add_extra_stop_word_ids([[id] for id in self.conv_template.stop_token_ids])
+        if self.conv_template.stop_token_ids:
+            self.add_extra_stop_word_ids([[id] for id in self.conv_template.stop_token_ids])
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         conversaion = self.conv_template.copy()
@@ -36,8 +37,11 @@ class FastChatRenderer(CustomChatRenderer):
             if message.role == RoleEnum.system:
                 conversaion.set_system_message(message.content)
             else:
-                conversaion.add_message(self.roles_map[message.role], message.content)
+                conversaion.append_message(self.roles_map[message.role], message.content)
         if request.messages[-1].role != RoleEnum.assistant:
-            conversaion.add_message(self.roles_map[RoleEnum.assistant], "")
+            conversaion.append_message(self.roles_map[RoleEnum.assistant], "")
 
-        return RenderedInputs(input_ids=[])
+        prompt = conversaion.get_prompt()
+        input_ids = self.tokenizer.encode(prompt)
+
+        return RenderedInputs(input_ids=input_ids)

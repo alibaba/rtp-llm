@@ -23,7 +23,9 @@ class ChatRendererFactory():
         tokenizer: Union[PreTrainedTokenizer, BaseTokenizer],
         params: RendererParams,
     ) -> Optional[CustomChatRenderer]:
-        assert (isinstance(tokenizer, PreTrainedTokenizer))
+        if not isinstance(tokenizer, PreTrainedTokenizer):
+            return None
+
         model_type = params.model_type
         try:
             logging.info(f"try fast chat conversation with [{model_type}]")
@@ -31,6 +33,7 @@ class ChatRendererFactory():
         except KeyError:
             logging.info(f"[{model_type}] not found in fast chat conversation, try llama template")
             pass
+
         try:
             return LlamaTemplateRenderer(tokenizer, params)
         except AssertionError as e: # assertion at llama_template.py:229

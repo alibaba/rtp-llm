@@ -10,7 +10,8 @@ from maga_transformer.models.llava import LlavaTokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, RoleEnum, \
     ChatCompletionRequest, GPTFunctionDefinition, ContentPart, ContentPartTypeEnum
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
-from maga_transformer.openai.renderers.renderer_factory import ChatRendererFactory, RendererParams
+from maga_transformer.openai.renderers.renderer_factory import ChatRendererFactory, RendererParams, \
+    CustomChatRenderer, FastChatRenderer, LlamaTemplateRenderer, QwenRenderer
 from maga_transformer.openai.renderers.qwen_vl_renderer import QwenVLRenderer
 
 class ChatapiTest(TestCase):
@@ -29,6 +30,7 @@ class ChatapiTest(TestCase):
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        assert (isinstance(chat_renderer, QwenRenderer))
 
         functions = [
             GPTFunctionDefinition(**{
@@ -284,6 +286,28 @@ Thought:"""
         expected_ids = [195, 92067, 68, 196, 6461, 70335, 92366, 9528, 195, 8277, 57056, 196]
         print(f"------- ids: {ids}")
         assert (ids == expected_ids)
+
+    def test_imported_template(self):
+        tokenizer = AutoTokenizer.from_pretrained(
+            f"{self.test_data_path}/baichuan/tokenizer/", trust_remote_code=True
+        )
+        render_params = RendererParams(
+            model_type="mixtral",
+            max_seq_len=1024,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        assert (isinstance(tokenizer, PreTrainedTokenizer))
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        assert isinstance(chat_renderer, LlamaTemplateRenderer)
+
+        render_params.model_type = "mistral"
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        assert isinstance(chat_renderer, FastChatRenderer)
+
+        render_params.model_type = "mistral"
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        assert isinstance(chat_renderer, FastChatRenderer)
 
 if __name__ == '__main__':
     main()
