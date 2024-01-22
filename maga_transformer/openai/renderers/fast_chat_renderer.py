@@ -17,6 +17,10 @@ class FastChatRenderer(CustomChatRenderer):
     def __init__(self, tokenizer: PreTrainedTokenizer, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.conv_template = get_conv_template(renderer_params.model_type)
+        self.roles_map = {
+            RoleEnum.user: self.conv_template.roles[0],
+            RoleEnum.assistant: self.conv_template.roles[1],
+        }
 
         if isinstance(self.conv_template.stop_str, list):
             self.add_extra_stop_words(self.conv_template.stop_str)
@@ -25,5 +29,15 @@ class FastChatRenderer(CustomChatRenderer):
         self.add_extra_stop_word_ids([[id] for id in self.conv_template.stop_token_ids])
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
+        conversaion = self.conv_template.copy()
+
+        for message in request.messages:
+            assert (isinstance(message.content, str))
+            if message.role == RoleEnum.system:
+                conversaion.set_system_message(message.content)
+            else:
+                conversaion.add_message(self.roles_map[message.role], message.content)
+        if request.messages[-1].role != RoleEnum.assistant:
+            conversaion.add_message(self.roles_map[RoleEnum.assistant], "")
 
         return RenderedInputs(input_ids=[])

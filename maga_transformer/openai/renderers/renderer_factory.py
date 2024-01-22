@@ -19,44 +19,53 @@ class ChatRendererFactory():
         pass
 
     @staticmethod
-    def _maybe_change_model_type(params: RendererParams):
-        if params.model_type.startswith("chat_glm_"):
-            params.model_type.replace("chat_glm_", "chatglm")
-
-        # Online service params does not distinguish baichuan and baichuan2 model.
-        # However, they use different llama template.
-        # We assume baichuan2 model is always used.
-        if params.model_type == "baichuan":
-            logging.info(f"model_type {params.model_type} is changed to baichuan2.")
-            params.model_type = "baichuan2"
-
-        return params
+    def try_get_imported_renderer(
+        tokenizer: Union[PreTrainedTokenizer, BaseTokenizer],
+        params: RendererParams,
+    ) -> Optional[CustomChatRenderer]:
+        assert (isinstance(tokenizer, PreTrainedTokenizer))
+        model_type = params.model_type
+        try:
+            logging.info(f"try fast chat conversation with [{model_type}]")
+            return FastChatRenderer(tokenizer, params)
+        except KeyError:
+            logging.info(f"[{model_type}] not found in fast chat conversation, try llama template")
+            pass
+        try:
+            return LlamaTemplateRenderer(tokenizer, params)
+        except AssertionError as e: # assertion at llama_template.py:229
+            logging.info(f"[{model_type}] not found in llama template.")
+            pass
+        return None
 
     @staticmethod
     def get_renderer(
         tokenizer: Union[PreTrainedTokenizer, BaseTokenizer],
         params: RendererParams,
     ) -> CustomChatRenderer:
-        # renderer priority: special cases > tokenizer.chat_template
+        # renderer priority: multi modal renderers
+        #                    > `MODEL_TEMPLATE_TYPE` env for llama template or fastchat conversation
+        #                    > tokenizer.chat_template
         #                    > model customized renderer (e.g. Qwen, which implemented function call)
-        #                    > LlamaTemplateRenderer > default chat template
-        # tokenizer.chat_template has the highest priority because it might be user customized.
+        #                    > try get template from `MODEL_TYPE`
+        #                    > transformers default chat template
 
-        params = ChatRendererFactory._maybe_change_model_type(params)
-        model_type = params.model_type
-
-        use_llama_template_name = os.environ.get("USE_LLAMA_TEMPLATE_NAME", None)
-        if use_llama_template_name != None:
-            logging.info(f"USE_LLAMA_TEMPLATE_NAME is set to {use_llama_template_name}, use llama template.")
-            assert (isinstance(tokenizer, PreTrainedTokenizer))
-            return LlamaTemplateRenderer(tokenizer, params)
-
-        if model_type == "qwen_vl":
+        if params.model_type == "qwen_vl":
             assert (isinstance(tokenizer, PreTrainedTokenizer))
             return QwenVLRenderer(tokenizer, params)
-        elif model_type == "llava":
+        elif params.model_type == "llava":
             assert (isinstance(tokenizer, BaseTokenizer))
             return LlavaRenderer(tokenizer, params)
+
+        model_template_type = os.environ.get("MODEL_TEMPLATE_TYPE", None)
+        if model_template_type:
+            params.model_type = model_template_type
+            logging.info(f"try get renderer from MODEL_TEMPLATE_TYPE: {model_template_type}")
+            renderer = ChatRendererFactory.try_get_imported_renderer(tokenizer, params)
+            if renderer:
+                return renderer
+            else:
+                raise AttributeError(f"specified MODEL_TEMPLATE_TYPE {model_template_type} not supported.")
 
         try:
             if tokenizer.chat_template != None:
@@ -69,14 +78,11 @@ class ChatRendererFactory():
         if isinstance(tokenizer, QWenTokenizer):
             return QwenRenderer(tokenizer, params)
 
-        try:
-            assert(isinstance(tokenizer, PreTrainedTokenizer))
-            return LlamaTemplateRenderer(tokenizer, params)
-        except AssertionError as e:
-            # model_type is not supported by LlamaTemplateRenderer
-            logging.info(f"llama template is not applicable to model_type {model_type}: {e}")
-            pass
+        imported_template_renderer = ChatRendererFactory.try_get_imported_renderer(tokenizer, params)
+        if imported_template_renderer:
+            logging.info(f"found renderer from imported template for [{params.model_type}]")
+            return imported_template_renderer
 
-        logging.info(f"tokenizer {tokenizer} falls back to basic renderer.")
+        logging.warn(f"model [{params.model_type}] falls back to basic renderer, this is typically unwanted.")
         return BasicRenderer(tokenizer, params)
 
