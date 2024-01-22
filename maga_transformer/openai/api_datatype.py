@@ -112,7 +112,7 @@ class FinisheReason(str, Enum):
 
 class RendererInfo(BaseModel):
     class_name: str
-    model_type: str
+    renderer_model_type: str
     extra_stop_word_ids_list: List[List[int]]
     extra_stop_words_list: List[str]
     template: Optional[str] = None
@@ -125,7 +125,7 @@ class DebugInfo(BaseModel):
     tokenizer_info: str
     max_seq_len: int
     eos_token_id: Optional[int]
-    stop_word_ids_list: List[List[str]]
+    stop_word_ids_list: List[List[int]]
     stop_words_list: List[str]
 
     renderer_info: RendererInfo

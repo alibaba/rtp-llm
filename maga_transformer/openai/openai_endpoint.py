@@ -120,7 +120,7 @@ class OpenaiEndopoint():
             choices=all_choices,
             usage=usage,
             model=self.model.__class__.__name__,
-            debug_info=debug_info
+            debug_info=debug_info,
         )
 
     async def _complete_stream_response(

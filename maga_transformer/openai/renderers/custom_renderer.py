@@ -56,9 +56,11 @@ class CustomChatRenderer():
         extra_stop_words_list = [
             self.tokenizer.decode(stop_word_ids) for stop_word_ids in extra_stop_word_ids_list
         ]
+        if len(extra_stop_words_list) and isinstance(extra_stop_words_list[0], list):
+            extra_stop_words_list = [l[0] for l in extra_stop_words_list]
         return RendererInfo(
             class_name=self.__class__.__name__,
-            model_type=self.model_type,
+            renderer_model_type=self.model_type,
             extra_stop_word_ids_list=extra_stop_word_ids_list,
             extra_stop_words_list=extra_stop_words_list,
         )

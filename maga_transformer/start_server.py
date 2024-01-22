@@ -114,7 +114,7 @@ class FastApiServer(object):
             last_response = ''
             async for res in response:
                 last_response = res
-                data_str = res.model_dump_json() if isinstance(res, BaseModel) \
+                data_str = res.model_dump_json(exclude_none=True) if isinstance(res, BaseModel) \
                     else json.dumps(res, ensure_ascii=False)
                 yield response_data_prefix + data_str + "\r\n\r\n"
                 await asyncio.sleep(0)
@@ -335,7 +335,7 @@ class FastApiServer(object):
                 else:
                     response = self._openai_endpoint.chat_completion(request, raw_request)
                     assert (isinstance(response, Coroutine))
-                    return await response
+                    return (await response).model_dump(exclude_none=True)
             except Exception as e:
                 kmonitor.report(AccMetrics.ERROR_QPS_METRIC)
                 logging.error(f'chat_completion error: {e}, trace: {traceback.format_exc()}')

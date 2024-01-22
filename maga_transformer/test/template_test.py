@@ -8,7 +8,7 @@ from maga_transformer.pipeline.chatapi_format import encode_chatapi
 from maga_transformer.models.starcoder import StarcoderTokenizer
 from maga_transformer.models.llava import LlavaTokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, RoleEnum, \
-    ChatCompletionRequest, GPTFunctionDefinition, ContentPart, ContentPartTypeEnum
+    ChatCompletionRequest, GPTFunctionDefinition, ContentPart, ContentPartTypeEnum, RendererInfo
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from maga_transformer.openai.renderers.renderer_factory import ChatRendererFactory, RendererParams, \
     CustomChatRenderer, FastChatRenderer, LlamaTemplateRenderer, QwenRenderer
@@ -30,6 +30,7 @@ class ChatapiTest(TestCase):
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        print(f"------- chat_renderer.get_renderer_info(): {chat_renderer.get_renderer_info()}")
         assert (isinstance(chat_renderer, QwenRenderer))
 
         functions = [
@@ -297,17 +298,28 @@ Thought:"""
             eos_token_id=tokenizer.eos_token_id or 0,
             stop_word_ids_list=[],
         )
+        expected_renderer_info = RendererInfo(
+            class_name = "LlamaTemplateRenderer",
+            renderer_model_type = "mixtral",
+            extra_stop_word_ids_list = [[2]],
+            extra_stop_words_list = ['</s>'],
+            template = "Template(prefix=['<s>'], prompt=['[INST]{{query}}[/INST]'], system='', sep=['</s>'], stop_words=['</s>'], use_history=True, efficient_eos=False, replace_eos=False)"
+        )
         assert (isinstance(tokenizer, PreTrainedTokenizer))
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        assert isinstance(chat_renderer, LlamaTemplateRenderer)
+        self.assertEqual(chat_renderer.get_renderer_info(), expected_renderer_info)
 
+        expected_renderer_info = RendererInfo(
+            class_name = "FastChatRenderer",
+            renderer_model_type = "mistral",
+            extra_stop_word_ids_list = [],
+            extra_stop_words_list = [],
+            template = "Conversation(name='mistral', system_template='[INST] {system_message}\\n', system_message='', roles=('[INST]', '[/INST]'), messages=[], offset=0, sep_style=<SeparatorStyle.LLAMA2: 7>, sep=' ', sep2='</s>', stop_str=None, stop_token_ids=None)"
+        )
         render_params.model_type = "mistral"
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        assert isinstance(chat_renderer, FastChatRenderer)
+        self.assertEqual(chat_renderer.get_renderer_info(), expected_renderer_info)
 
-        render_params.model_type = "mistral"
-        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        assert isinstance(chat_renderer, FastChatRenderer)
 
 if __name__ == '__main__':
     main()
