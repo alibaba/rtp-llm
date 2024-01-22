@@ -43,13 +43,19 @@ class ModelDict:
             if architecture == 'QWenLMHeadModel':
                 if config.get('visual'):
                     return 'qwen_vl'
+            if architecture == 'BaichuanForCausalLM':
+                vocab_size = config.get('vocab_size', 64000)
+                if vocab_size == 125696:
+                    return 'baichuan2'
+                else:
+                    return 'baichuan'
             return ModelDict.get_ft_model_type_by_hf_architectures(architecture)   
         return None  
     
 register_hf_architecture("FlotForCausalLM", "flot")
 register_hf_architecture("GPTNeoXForCausalLM", "gpt_neox")
 register_hf_architecture("BaichuanForCausalLM", "baichuan")
-register_hf_architecture("BaiChuanForCausalLM", "baichuan")
+# register_hf_architecture("BaiChuanForCausalLM", "baichuan2")
 register_hf_architecture("BloomForCausalLM", "bloom")
 register_hf_architecture("ChatGLMForConditionalGeneration", "")
 register_hf_architecture("ChatGLMModel", "chatglm2")

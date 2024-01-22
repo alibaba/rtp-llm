@@ -73,6 +73,14 @@ class Llama(GPT):
         config.layernorm_eps = config_json['rms_norm_eps']
         config.inter_size = config_json['intermediate_size']
         config.rotary_embedding_base = int(config_json.get('rope_theta', 10000))
+        if config_json.get('rope_scaling', None):
+            if config_json['rope_scaling']['type'] == 'dynamic':
+                config.dynamic_embedding_scalar = config_json['rope_scaling']['factor']
+                config.dynamic_embedding_max_pos = config_json.get('max_position_embeddings', 2048)
+            elif config_json['rope_scaling']['type'] == 'linear':
+                config.position_embeddings_scale = int(config_json['rope_scaling']['factor'])
+            else:
+                raise Exception(f"unsupport rope_scaling {config_json['rope_scaling']}")
         config.special_tokens.eos_token_id = config_json['eos_token_id']
 
     @staticmethod
@@ -94,23 +102,32 @@ class Llama(GPT):
     def load_tokenizer(self):
         tokenizer_config_file = os.path.join(self.config.tokenizer_path, "tokenizer_config.json")
         if os.path.exists(tokenizer_config_file):
+            logging.info("llama load super tokenzier")
             super().load_tokenizer()
         else:
+            logging.info("llamaload LlamaTokenizer")
             self.tokenizer = LlamaTokenizer.from_pretrained(self.config.tokenizer_path)
 
 class Baichuan(Llama):
     @staticmethod
     def _create_config(ckpt_path: str):
         config = Llama._create_config(ckpt_path)
-        # if config.layer_num == 40:
-        config.rotary_embedding_style = 0
-        config.rotary_embedding_dim = 0
-        config.use_attention_linear_bias = True
+        if config.layer_num == 40: # 13B
+            config.rotary_embedding_style = 0
+            config.rotary_embedding_dim = 0
+            config.use_attention_linear_bias = True
         config.special_tokens.bos_token_id = -1
         config.special_tokens.user.token_ids = [195]
         config.special_tokens.user.eos_token_ids = []
         config.special_tokens.assistant.token_ids = [196]
         config.special_tokens.assistant.eos_token_ids = [config.special_tokens.eos_token_id]
+        return config
+
+class Baichuan2(Baichuan):
+    @staticmethod
+    def _create_config(ckpt_path: str):
+        config = Baichuan._create_config(ckpt_path)
+        config.normalize_lm_head_weight = True
         return config
 
 register_model('internlm', Llama)
@@ -119,4 +136,4 @@ register_model('llama', Llama)
 register_model('xverse', Llama)
 register_model('aquila', Llama)
 register_model('baichuan', Baichuan)
-register_model('baichuan2', Baichuan)
+register_model('baichuan2', Baichuan2)

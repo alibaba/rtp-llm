@@ -217,7 +217,10 @@ class GPT(BaseModel):
             lm_head_w = self.weight.steal_pytorch_weight(W.lm_head)
         else:
             lm_head_w = self.word_embedding._emb
-        self.lm_head.set_weight(lm_head_w, self.weight.steal_pytorch_weight(W.lm_head_b))
+        if self.config.normalize_lm_head_weight:
+            self.lm_head.set_weight(F.normalize(lm_head_w), self.weight.steal_pytorch_weight(W.lm_head_b))
+        else:
+            self.lm_head.set_weight(lm_head_w, self.weight.steal_pytorch_weight(W.lm_head_b))
         if self.config.tp_split_emb_and_lm_head:
             self.vocab_size_padded = self.lm_head._w.shape[0] * g_parallel_info.tp_size
         else:
