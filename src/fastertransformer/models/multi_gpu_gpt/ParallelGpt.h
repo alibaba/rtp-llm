@@ -63,6 +63,12 @@ private:
     int64_t* block_pointers_         = nullptr;
     int64_t* block_scale_pointers_   = nullptr;
 
+    // moe
+    T*   expert_scales_                            = nullptr;
+    int* expanded_source_row_to_expanded_dest_row_ = nullptr;
+    int* expert_for_source_row_                    = nullptr;
+    T*   fc2_result_                               = nullptr;
+
     std::vector<int64_t> block_pointers_vector_;
     std::vector<int64_t> block_scale_pointers_vector_;
 protected:

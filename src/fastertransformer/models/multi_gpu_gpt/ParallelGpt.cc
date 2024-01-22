@@ -107,6 +107,17 @@ void ParallelGpt<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num,
         block_scale_pointers_ =
             reinterpret_cast<int64_t*>(allocator_->reMalloc(block_scale_pointers_, sizeof(int64_t) * (2 * params_.num_layers_ * total_batch_size * params_.max_seq_len_ / params_.seq_size_per_block_ + 32), true));
     }
+
+    // for moe
+    expert_scales_ = reinterpret_cast<T*>(
+        allocator_->reMalloc(expert_scales_, sizeof(T) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num), false));
+    expanded_source_row_to_expanded_dest_row_ = reinterpret_cast<int*>(allocator_->reMalloc(
+        expanded_source_row_to_expanded_dest_row_, sizeof(int) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num), false));
+    expert_for_source_row_                    = reinterpret_cast<int*>(
+        allocator_->reMalloc(expert_for_source_row_, sizeof(int) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num), false));
+    fc2_result_ = reinterpret_cast<T*>(
+        allocator_->malloc(sizeof(T) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num * hidden_units), false));
+    
     is_allocate_buffer_ = true;
 }
 
@@ -136,6 +147,10 @@ void ParallelGpt<T>::freeBuffer()
             allocator_->free((void**)(&attention_query_dynamic_scale_));
             allocator_->free((void**)(&ffn_intermediate_dynamic_scale_));
         }
+        allocator_->free((void**)(&expert_scales_));
+        allocator_->free((void**)(&expanded_source_row_to_expanded_dest_row_));
+        allocator_->free((void**)(&expert_for_source_row_));
+        allocator_->free((void**)(&fc2_result_));
         is_allocate_buffer_ = false;
     }
 }
@@ -384,6 +399,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     PUSH_RANGE(stream_, "context_generation");
     for (uint l = 0; l < params_.num_layers_; l++) {
         PUSH_RANGE(stream_, fmtstr("layer_%u", l));
+        bool use_moe = std::find(params_.moe_layer_index_.begin(), params_.moe_layer_index_.end(), l) != params_.moe_layer_index_.end();
         if (isValidLayerParallelId(l) == false) {
             POP_RANGE;  // escape for NVTX Range: layer_%u
             continue;
@@ -568,29 +584,94 @@ void ParallelGpt<T>::forward(TensorMap*                                         
              {"lora_input_lengths", Tensor{MEMORY_GPU, TYPE_INT32, {total_batch_size}, lora_input_lengths}},
              {"batch_size", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &ffn_batch_size_lora}}});
         TensorMap ffn_output_tensors;
-        ffn_output_tensors.insert("ffn_output",
-                                  Tensor{MEMORY_GPU, activation_out_type, {h_token_num, hidden_units}, ffn_output_ptr});
+        size_t moe_k = params_.moe_k_;
+        if (!use_moe || moe_k <= 0) {
+            ffn_output_tensors.insert("ffn_output",
+                                    Tensor{MEMORY_GPU, activation_out_type, {h_token_num, hidden_units}, ffn_output_ptr});
+        } else {
 
+            ffn_input_tensors.insert("moe_k", Tensor{MEMORY_CPU, TYPE_UINT64, {1}, &moe_k});
+
+            ffn_output_tensors.insert("ffn_output",
+                                        Tensor{MEMORY_GPU,
+                                                activation_out_type,
+                                                {moe_k * h_token_num, hidden_units},
+                                                fc2_result_});
+            ffn_output_tensors.insert(
+                "expert_scales", Tensor{MEMORY_GPU, activation_out_type, {h_token_num, moe_k}, expert_scales_});
+            ffn_output_tensors.insert(
+                "expanded_source_row_to_expanded_dest_row",
+                Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expanded_source_row_to_expanded_dest_row_});
+            ffn_output_tensors.insert(
+                "expert_for_source_row",
+                Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expert_for_source_row_});
+        }
         ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->ffn_weights);
         // the adapter after ffn (only pre layernorm currently)
         PUSH_RANGE(stream_, "post ffn");
+        if (!use_moe) {
+            norm_wrapper_->ffnAddBiasResidualLayerNorm(decoder_output,
+                                                    params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ :
+                                                                                            self_attn_output_,
+                                                    ffn_output_ptr,
+                                                    input_residual,
+                                                    layer_weight->ffn_weights.output_weight.bias,
+                                                    layer_weight->self_attn_layernorm_weights.gamma,
+                                                    layer_weight->self_attn_layernorm_weights.beta,
+                                                    params_.layernorm_eps_,
+                                                    h_token_num,
+                                                    hidden_units,
+                                                    nullptr,
+                                                    nullptr,
+                                                    stream_);
 
-        norm_wrapper_->ffnAddBiasResidualLayerNorm(decoder_output,
-                                                   params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ :
-                                                                                         self_attn_output_,
-                                                   ffn_output_ptr,
-                                                   input_residual,
-                                                   layer_weight->ffn_weights.output_weight.bias,
-                                                   layer_weight->self_attn_layernorm_weights.gamma,
-                                                   layer_weight->self_attn_layernorm_weights.beta,
-                                                   params_.layernorm_eps_,
-                                                   h_token_num,
-                                                   hidden_units,
-                                                   nullptr,
-                                                   nullptr,
-                                                   stream_);
+            sync_check_cuda_error();
+        } else {
+            if (params_.layernorm_type_ == LayerNormType::pre_layernorm) {
+                print_bsd(0, "finalize_moe fc2_result input", fc2_result_, 1, h_token_num*params_.moe_k_, hidden_units);
+                print_bsd(0, "finalize_moe normed_self_attn_output_ input", normed_self_attn_output_, 1, h_token_num, hidden_units);
+                finalize_moe_routing_kernelLauncher(fc2_result_,
+                                                    decoder_output,
+                                                    params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ : self_attn_output_,
+                                                    (T*)nullptr,
+                                                    layer_weight->ffn_weights.output_weight.bias,
+                                                    expert_scales_,
+                                                    expanded_source_row_to_expanded_dest_row_,
+                                                    expert_for_source_row_,
+                                                    h_token_num,
+                                                    hidden_units,
+                                                    params_.moe_k_,
+                                                    stream_);
+                sync_check_cuda_error();
+                print_bsd(0, "finalize_moe decoder_output", decoder_output, 1, h_token_num, hidden_units);
+            }
+            else if (params_.layernorm_type_ == LayerNormType::post_layernorm) {
+                finalize_moe_routing_kernelLauncher(fc2_result_,
+                                                    decoder_output,
+                                                    params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ : self_attn_output_,
+                                                    layer_weight->ffn_weights.output_weight.bias,
+                                                    expert_scales_,
+                                                    expanded_source_row_to_expanded_dest_row_,
+                                                    expert_for_source_row_,
+                                                    h_token_num,
+                                                    hidden_units,
+                                                    params_.moe_k_,
+                                                    stream_);
+                invokeGeneralLayerNorm(decoder_output,
+                                       decoder_output,
+                                       layer_weight->self_attn_layernorm_weights.gamma,
+                                       layer_weight->self_attn_layernorm_weights.beta,
+                                       params_.layernorm_eps_,
+                                       h_token_num,
+                                       hidden_units,
+                                       nullptr,
+                                       nullptr,
+                                       params_.int8_mode_,
+                                       stream_);
+                sync_check_cuda_error();
+            }
 
-        sync_check_cuda_error();
+        }
         POP_RANGE;
         // PUSH_RANGE(stream_, "Nccl send");
         if (isLastLayerParallelId(l) == true && (pipeline_para_.rank_ != pipeline_para_.world_size_ - 1)) {

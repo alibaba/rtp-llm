@@ -185,6 +185,7 @@ class W:
     ffn_ln_beta = 'ffn_weights.dense_layernorm.beta'
     ffn_w2 = 'ffn_weights.intermediate_weight2.kernel'
     ffn_b2 = 'ffn_weights.intermediate_weight2.bias'
+    ffn_gate = 'ffn_weights.gate.kernel'
 
     # lora
     attn_qkv_w_lora_a = 'self_attention_weights.query_weight.kernel.lora_A'
@@ -204,6 +205,11 @@ class W:
     int8_quant_w = set([
         attn_qkv_w,
         attn_o_w,
+        ffn_w1,
+        ffn_w2,
+        ffn_w3,
+    ])
+    moe_int8_quant_w = set([
         ffn_w1,
         ffn_w2,
         ffn_w3,
@@ -276,7 +282,8 @@ class W:
         ffn_ln_gamma,
         ffn_ln_beta,
         ffn_w2,
-        ffn_b2
+        ffn_b2,
+        ffn_gate
     ]
 
     skip_weights_list = [
@@ -434,6 +441,9 @@ class ModelDeployWeightInfo:
         self._is_medusa_model = config.gpt_init_params.use_medusa        
         self._medusa_head_num = 0 if config.medusa_config is None else config.medusa_config.medusa_num_heads
         self._medusa_layer_num = 0 if config.medusa_config is None else config.medusa_config.medusa_num_layers
+
+        self.expert_num_ = config.gpt_init_params.expert_num
+        self.moe_k_      = config.gpt_init_params.moe_k
 
     def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:
         # auto create weight info based on exist tensor names

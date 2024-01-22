@@ -138,6 +138,7 @@ class ModelWeightsLoader:
             try:
 
                 int8_flag = int8_mode == 1 and (weight.name in W.int8_quant_w)
+                moe_int8_flag = int8_mode == 1 and (weight.name in W.moe_int8_quant_w) and self._weights_info.expert_num_ > 0
 
                 tensor = self._load_and_convert_tensor(weight, layer_id)
                 
@@ -146,7 +147,9 @@ class ModelWeightsLoader:
 
                 tensor = self._split_and_sanitize_tensor(tensor, weight)
 
-                if int8_flag:
+                if moe_int8_flag:
+                    tensor = self.moe_apply_int8(tensor, device)
+                elif int8_flag:
                     tensor = self.apply_int8(tensor, device)
                 else:
                     tensor = tensor.to(device)
@@ -154,7 +157,7 @@ class ModelWeightsLoader:
                 if use_fp32:
                     tensor = tensor.float()
 
-                results.append((int8_flag, layer_id, weight.name, tensor))
+                results.append((int8_flag or moe_int8_flag, layer_id, weight.name, tensor))
             except Exception as e:
                 logging.error(f'load {weight.name} in layer {layer_id} failed: {e}')
                 raise e
@@ -199,6 +202,24 @@ class ModelWeightsLoader:
         int8_weight, int8_scale = torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix( # type: ignore
             tensor.reshape([shape[0], -1]).cpu(), torch.int8)
         int8_weight = int8_weight.reshape(shape)
+        dummy = torch.IntTensor([0]).to(self._data_type)
+        return (dummy.to(device), int8_weight.to(device), int8_scale.to(device))
+        
+        
+    def moe_apply_int8(self, tensor: torch.Tensor, device: str):
+        assert tensor.dim() == 3
+        tensor_list = torch.chunk(tensor, tensor.shape[0], dim=0)
+        int8_weights = []
+        int8_scales = []
+        for t in tensor_list:
+            t = torch.squeeze(t)
+            shape = t.shape
+            weight, scale = torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix( # type: ignore
+                t.reshape([shape[0], -1]).cpu(), torch.int8)
+            int8_weights.append(weight)
+            int8_scales.append(scale)
+        int8_weight = torch.stack(int8_weights, dim=0)
+        int8_scale = torch.stack(int8_scales, dim=0)
         dummy = torch.IntTensor([0]).to(self._data_type)
         return (dummy.to(device), int8_weight.to(device), int8_scale.to(device))
 

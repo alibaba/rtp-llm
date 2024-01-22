@@ -212,7 +212,7 @@ py_wheel(
         "sympy",
         "typing-extensions",
         "importlib_metadata",
-        "transformers==4.33.1",
+        "transformers==4.36.2",
         "sentencepiece==0.1.99",
         "fastapi==0.108.0",
         "uvicorn==0.21.1",

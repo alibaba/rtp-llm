@@ -47,6 +47,10 @@ private:
     std::shared_ptr<GemmRunner<T>> gemm_runner_;
     std::shared_ptr<CutlassFpAIntBGemmRunner<T, uint8_t>> weight_only_int8_fc_runner_;
 
+    std::shared_ptr<CutlassMoeFCRunner<T, T>>       moe_fc_runner_;
+    std::shared_ptr<CutlassMoeFCRunner<T, uint8_t>> moe_int8_weight_only_fc_runner_;
+
+
     void allocateBuffer() override;
     void freeBuffer() override;
     void allocateBuffer(size_t token_num, int moe_k = 0, bool use_moe = false);
@@ -55,6 +59,8 @@ protected:
     T*    inter_buf_        = nullptr;
     T*    inter_buf_2_      = nullptr;  // for gated activation
     T*    inter_buf_normed_ = nullptr;
+    T*    moe_gates_buf_    = nullptr;
+    char* moe_fc_workspace_ = nullptr;
 
     char*  mixed_gemm_workspace_ = nullptr;
     size_t mixed_gemm_ws_bytes_  = 0;

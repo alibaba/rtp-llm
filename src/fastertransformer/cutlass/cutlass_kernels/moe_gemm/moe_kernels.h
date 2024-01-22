@@ -124,7 +124,7 @@ public:
     CutlassMoeFCRunner();
 
     size_t getWorkspaceSize(
-        const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k);
+        const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k, bool use_gated_activation);
 
     void run_moe_fc(const T*          input_activations,
                     const T*          gating_output,
@@ -167,6 +167,30 @@ public:
                     int*              expanded_source_row_to_expanded_dest_row,
                     int*              expert_for_source_row,
                     cudaStream_t      stream);
+    
+    void run_moe_fc(const T*          input_activations,
+                    const T*          gating_output,
+                    const WeightType* fc1_expert_weights,
+                    const T*          fc1_scales,
+                    const T*          fc1_expert_biases,
+                    ActivationType    fc1_activation_type,
+                    const WeightType* fc2_expert_weights,
+                    const T*          fc2_scales,
+                    const WeightType* fc3_expert_weights,
+                    const T*          fc3_scales,
+                    const int         num_rows,
+                    const int         hidden_size,
+                    const int         inter_size,
+                    const int         num_experts,
+                    const int         k,
+                    char*             workspace_ptr,
+                    T*                fc2_result,
+                    const bool*       finished,
+                    const int         active_rows,
+                    T*                expert_scales,
+                    int*              expanded_source_row_to_expanded_dest_row,
+                    int*              expert_for_source_row,
+                    cudaStream_t      stream);
 
     void compute_total_rows_before_expert(const int*   sorted_indices,
                                           const int    total_indices,
@@ -180,7 +204,8 @@ private:
                            const int hidden_size,
                            const int inter_size,
                            const int num_experts,
-                           const int k);
+                           const int k,
+                           bool use_gated_activation);
 
 private:
     CubKeyValueSorter            sorter_;
@@ -197,6 +222,7 @@ private:
     int64_t* total_rows_before_expert_;
 
     T* fc1_result_;
+    T* inter_result_;
 };
 
 template<typename WeightType>
@@ -205,7 +231,7 @@ public:
     CutlassMoeFCRunner() = default;
 
     size_t getWorkspaceSize(
-        const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k)
+        const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k, bool use_gated_activation)
     {
         return 0;
     }
@@ -241,6 +267,33 @@ public:
                     ActivationType fc1_activation_type,
                     const uint8_t* fc2_expert_weights,
                     const float*   fc2_scales,
+                    const int      num_rows,
+                    const int      hidden_size,
+                    const int      inter_size,
+                    const int      num_experts,
+                    const int      k,
+                    char*          workspace_ptr,
+                    float*         fc2_result,
+                    const bool*    finished,
+                    const int      active_rows,
+                    float*         expert_scales,
+                    int*           expanded_source_row_to_expanded_dest_row,
+                    int*           expert_for_source_row,
+                    cudaStream_t   stream)
+    {
+        FT_CHECK_WITH_INFO(false, "FP32 x int8 MoE not supported.");
+    }
+
+    void run_moe_fc(const float*   input_activations,
+                    const float*   gating_output,
+                    const uint8_t* fc1_expert_weights,
+                    const float*   fc1_scales,
+                    const float*   fc1_expert_biases,
+                    ActivationType fc1_activation_type,
+                    const uint8_t* fc2_expert_weights,
+                    const float*   fc2_scales,
+                    const uint8_t* fc3_expert_weights,
+                    const float*   fc3_scales,
                     const int      num_rows,
                     const int      hidden_size,
                     const int      inter_size,

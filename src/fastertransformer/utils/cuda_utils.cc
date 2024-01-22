@@ -620,6 +620,8 @@ DECLARE_PRINT_TYPE(half);
 DECLARE_PRINT_TYPE(__nv_bfloat16);
 DECLARE_PRINT_TYPE(int8_t);
 DECLARE_PRINT_TYPE(uint8_t);
+DECLARE_PRINT_TYPE(int);
+DECLARE_PRINT_TYPE(int64_t);
 
 /* ************************** end of common utils ************************** */
 }  // namespace fastertransformer

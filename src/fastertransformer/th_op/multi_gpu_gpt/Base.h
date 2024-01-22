@@ -19,14 +19,14 @@ T *maybe_get(const std::unordered_map<std::string, th::Tensor> &m, const std::st
     if (it == m.end()) {
         return nullptr;
     }
-    if ((it->second.count_nonzero().item<int>() == 0) &&
-        (name.find("bias") != std::string::npos) &&
-        (name.find("ffn_weights") != std::string::npos))
-    {
-        it->second.resize_(0); // save memory
-        FT_LOG_INFO("bias tensor [%s] is all zero, not applied", name.c_str());
-        return nullptr;
-    }
+    // if ((it->second.count_nonzero().item<int>() == 0) &&
+    //     (name.find("bias") != std::string::npos) &&
+    //     (name.find("ffn_weights") != std::string::npos))
+    // {
+    //     it->second.resize_(0); // save memory
+    //     FT_LOG_INFO("bias tensor [%s] is all zero, not applied", name.c_str());
+    //     return nullptr;
+    // }
     return get_ptr<T>(it->second);
 }
 
@@ -82,7 +82,7 @@ std::vector<ft::ParallelGptDecoderLayerWeight<T>*> loadWeights(
         gpt_layer_weights[i]->ffn_weights.dense_layernorm.beta                      = maybe_get<T>(weights[i], W::ffn_ln_beta);
         gpt_layer_weights[i]->ffn_weights.output_weight.kernel                      = get_ptr<T>(weights[i].at(W::ffn_w2));
         gpt_layer_weights[i]->ffn_weights.output_weight.bias                        = maybe_get<T>(weights[i], W::ffn_b2);
-
+        gpt_layer_weights[i]->ffn_weights.gating_weight.kernel                     = maybe_get<T>(weights[i], W::ffn_gate);
         if (int8_mode != 0) {
             gpt_layer_weights[i]->self_attention_weights.query_weight.int8_kernel            = maybe_get<int8_t>(quant_weights[i], W::attn_qkv_w);
             gpt_layer_weights[i]->self_attention_weights.attention_output_weight.int8_kernel = maybe_get<int8_t>(quant_weights[i], W::attn_o_w);
