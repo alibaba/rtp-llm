@@ -748,6 +748,9 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
     check_cuda_error(cudaGetLastError());
 #endif
 
+    print_bsd(0, "moe expert_scales", expert_scales, 1, num_rows, k, 0, k);
+    print_bsd(0, "moe expert_for_source_row", expert_for_source_row, 1, num_rows, k, 0, k);
+
     const int sorter_ws_size_bytes = pad_to_multiple_of_16(sorter_.getWorkspaceSize(k * num_rows));
     sorter_.run((void*)fc1_result_,
                 sorter_ws_size_bytes,
@@ -804,6 +807,8 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
     check_cuda_error(cudaGetLastError());
 #endif
 
+    print_bsd(0, "moe fn1", fc1_result_, k, num_rows, inter_size);
+
     if (use_gated_activation) {
         
         moe_gemm_runner_.moe_gemm(permuted_data_,
@@ -816,8 +821,9 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
                                     hidden_size,
                                     num_experts,
                                     stream);
+        print_bsd(0, "moe fn3", inter_result_, k, num_rows, inter_size);
         doMul<T>(fc1_result_, inter_result_, total_rows_before_expert_, inter_size, num_rows * k, stream);
-
+        print_bsd(0, "moe fn1 * 3", fc1_result_, k, num_rows, inter_size);
     }
 #ifndef NDEBUG
     cudaDeviceSynchronize();
@@ -838,6 +844,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
     cudaDeviceSynchronize();
     check_cuda_error(cudaGetLastError());
 #endif
+    print_bsd(0, "moe fn2", fc2_result, k, num_rows, hidden_size);
 }
 
 template<typename T, typename WeightType, typename Enable>
@@ -1062,7 +1069,12 @@ __global__ void finalize_moe_routing_kernel(const T*   expanded_permuted_rows,
 
             const int expert_idx = expert_for_source_row[k_offset];
             const T*  bias_ptr   = bias + expert_idx * cols;
-            scales_sum = scales_sum + row_scale;
+            if (k == 1) {
+                scales_sum = 1.0;
+            } else {
+                scales_sum = scales_sum + row_scale;
+            }
+            
             tmp_sum = tmp_sum + row_scale * (expanded_permuted_rows_row_ptr[tid] + bias_ptr[tid]);
         }
         thread_output = thread_output + tmp_sum / scales_sum;

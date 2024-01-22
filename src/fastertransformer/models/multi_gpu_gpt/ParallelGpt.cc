@@ -628,8 +628,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             sync_check_cuda_error();
         } else {
             if (params_.layernorm_type_ == LayerNormType::pre_layernorm) {
-                print_bsd(0, "finalize_moe fc2_result input", fc2_result_, 1, h_token_num*params_.moe_k_, hidden_units);
-                print_bsd(0, "finalize_moe normed_self_attn_output_ input", normed_self_attn_output_, 1, h_token_num, hidden_units);
                 finalize_moe_routing_kernelLauncher(fc2_result_,
                                                     decoder_output,
                                                     params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ : self_attn_output_,
@@ -643,7 +641,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                                     params_.moe_k_,
                                                     stream_);
                 sync_check_cuda_error();
-                print_bsd(0, "finalize_moe decoder_output", decoder_output, 1, h_token_num, hidden_units);
+                print_bsd(l, "moe decoder_output", decoder_output, 1, h_token_num, hidden_units);
             }
             else if (params_.layernorm_type_ == LayerNormType::post_layernorm) {
                 finalize_moe_routing_kernelLauncher(fc2_result_,

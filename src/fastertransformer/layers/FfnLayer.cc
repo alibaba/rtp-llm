@@ -124,9 +124,10 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                               hidden_units_,
                               moe_gates_buf_,
                               expert_num_);
+        print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_);
         if (int8_mode_ == 0) {
 
-            if (use_gated_activation_) {
+            if (use_gated_activation) {
 
                 FT_CHECK(ffn_weights->intermediate_weight2.kernel != nullptr);
                 moe_fc_runner_->run_moe_fc(input_tensor,
@@ -185,7 +186,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
             FT_CHECK(ffn_weights->output_weight.int8_kernel != NULL
                      && ffn_weights->output_weight.weight_only_quant_scale != NULL);
             
-            if (use_gated_activation_) {
+            if (use_gated_activation) {
                 FT_CHECK(ffn_weights->intermediate_weight2.int8_kernel != NULL
                      && ffn_weights->intermediate_weight2.weight_only_quant_scale != NULL);
                 moe_int8_weight_only_fc_runner_->run_moe_fc(

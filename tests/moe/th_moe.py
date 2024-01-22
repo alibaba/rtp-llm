@@ -361,7 +361,9 @@ class TestMoe(unittest.TestCase):
     gates = F.softmax(input_dict["gating_output"].to(torch.float32), dim=-1).to(input_dict["gating_output"].dtype)
     expert_scales, experts_for_row = torch.topk(gates, k, dim=-1)
 
-    expert_scales = expert_scales / expert_scales.sum(dim=-1, keepdim=True)
+    if k > 1:
+      expert_scales = expert_scales / expert_scales.sum(dim=-1, keepdim=True)
+    
 
     output = torch.zeros_like(input_dict["input_activations"])
     output += input_dict["skip_layer"]
