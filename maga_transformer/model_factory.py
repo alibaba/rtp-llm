@@ -113,7 +113,7 @@ class ModelFactory:
 
         logging.info(f"load model from tokenizer_path: {tokenizer_path}, ckpt_path: {ckpt_path}")
         model_type = os.environ["MODEL_TYPE"]
-        async_mode = bool(int(os.environ.get("ASYNC_MODE", "0")))
+        async_mode = bool(int(os.environ.get("ASYNC_MODE", "1")))
 
         weight_type: WEIGHT_TYPE = get_weight_type_from_env(os.environ)
         act_type = weight_type if weight_type in [ WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16

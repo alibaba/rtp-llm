@@ -56,7 +56,7 @@ class FastApiServer(object):
         self._openai_endpoint = None
         self._system_reporter = sys_reporter
         self._atomic_count = AtomicCounter()
-        self._async_mode = bool(int(os.environ.get("ASYNC_MODE", "0")))
+        self._async_mode = bool(int(os.environ.get("ASYNC_MODE", "1")))
 
     def start(self):
         self._system_reporter.start()

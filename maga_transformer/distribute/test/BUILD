@@ -22,5 +22,6 @@ py_test(
         "//maga_transformer:testlib",
     ],
     timeout = 'short',
+    env = {"ASYNC_MODE":"0"},
     imports = ["aios/kmonitor/python_client"],
 )
