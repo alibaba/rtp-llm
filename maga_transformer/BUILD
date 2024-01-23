@@ -231,8 +231,9 @@ py_wheel(
         "Pillow",
         "protobuf==3.20.0",
         "torchvision==0.16.0",
+        "einops",
         "prettytable",
-        "pydantic>=2.5.3",
+        "pydantic==2.5.3",
     ] + whl_deps(),
 )
 
