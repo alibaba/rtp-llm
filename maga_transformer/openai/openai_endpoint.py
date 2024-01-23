@@ -71,7 +71,8 @@ class OpenaiEndopoint():
         request_stop_words_list = request.stop if request.stop != None else []
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
-        config.stop_words_list = self.stop_word_ids_list + request_stop_words_list
+        config.stop_words_str = self.stop_words_list + request_stop_words_list
+        config.stop_words_list = self.stop_word_ids_list + self.chat_renderer.tokenize_words(request_stop_words_list)
         if request.chat_id != None:
             config.chat_id = request.chat_id
         return config

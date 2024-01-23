@@ -71,19 +71,23 @@ class CustomChatRenderer():
     def add_extra_stop_word_ids(self, extra_stop_word_ids: List[List[int]]):
         self.extra_stop_word_ids_list.extend(extra_stop_word_ids)
 
-    def get_all_extra_stop_word_ids_list(self) -> List[List[int]]:
-        ids_list_from_words = []
-        for word in self.extra_stop_words:
+    def tokenize_words(self, words: List[str]) -> List[List[int]]:
+        ids_list = []
+        for word in words:
             if isinstance(self.tokenizer, PreTrainedTokenizer):
                 token_id = self.tokenizer.convert_tokens_to_ids(word)
                 if isinstance(token_id, int):
-                    ids_list_from_words.append([token_id])
+                    ids_list.append([token_id])
                 elif isinstance(token_id, list):
-                    ids_list_from_words.append(token_id)
+                    ids_list.append(token_id)
                 else:
-                    ids_list_from_words.append(self.tokenizer.encode(word, add_special_tokens=True))
+                    ids_list.append(self.tokenizer.encode(word, add_special_tokens=True))
             else:
-                ids_list_from_words.append(self.tokenizer.encode(word))
+                ids_list.append(self.tokenizer.encode(word))
+        return ids_list
+
+    def get_all_extra_stop_word_ids_list(self) -> List[List[int]]:
+        ids_list_from_words = self.tokenize_words(self.extra_stop_words)
         return self.extra_stop_word_ids_list + ids_list_from_words
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
