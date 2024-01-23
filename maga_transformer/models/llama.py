@@ -62,7 +62,7 @@ class Llama(GPT):
     @staticmethod
     def from_huggingface(config, config_json: Dict[str, Any]):
         model_type = config_json['model_type']
-        if model_type not in ['llama', 'baichuan2', 'baichuan', 'xverse', 'internlm', 'aquila', 'Yi', 'llava']:
+        if model_type not in ['llama', 'baichuan2', 'baichuan', 'xverse', 'internlm', 'aquila', 'Yi', 'llava', 'mistral']:
             raise BaseException(f'model type is not llama: {model_type}')
         config.head_num = config_json['num_attention_heads']
         config.head_num_kv = config_json.get('num_key_value_heads', config.head_num)
@@ -135,5 +135,6 @@ register_model('internlm2', Llama)
 register_model('llama', Llama)
 register_model('xverse', Llama)
 register_model('aquila', Llama)
+register_model('mistral', Llama)
 register_model('baichuan', Baichuan)
 register_model('baichuan2', Baichuan2)
