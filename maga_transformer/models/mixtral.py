@@ -55,7 +55,7 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
         layer_weights.append(WeightInfo(W.ffn_w2,ffn_w2, stack_))
         layer_weights.append(WeightInfo(W.ffn_w3,ffn_w3, stack_))
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=None)
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
 
 class Mixtral(GPT):
     @staticmethod
@@ -71,23 +71,21 @@ class Mixtral(GPT):
             head_num=config_json['num_attention_heads'],
             size_per_head=config_json['hidden_size'] // config_json['num_attention_heads'],
             inter_size=config_json['intermediate_size'],
-            # layer_num = 1,
             layer_num=config_json['num_hidden_layers'],
             max_seq_len=config_json.get('max_sequence_length', 2048),
             vocab_size=config_json['vocab_size'],
             head_num_kv = config_json['num_key_value_heads'],
             activation_type='Silu',
-            use_gated_activation=True,
             norm_type='rmsnorm',
             rotary_embedding_dim=128,
             rotary_embedding_style=1,
             has_post_decoder_layernorm=True,
-            # expert_num = 2,
-            # moe_k = 1,
             rotary_embedding_base = int(config_json.get('rope_theta', 10000)),
             expert_num = config_json['num_local_experts'],
             moe_k = config_json['num_experts_per_tok'],
             moe_layer_index = [i for i in range(config_json['num_hidden_layers'])])
+        config.special_tokens.eos_token_id = 2
+        config.special_tokens.bos_token_id = 1
         return config
 
 register_model('mixtral', Mixtral)

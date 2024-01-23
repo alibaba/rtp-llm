@@ -46,6 +46,8 @@ def identity(ts: List[torch.Tensor], allow_empty=False) -> torch.Tensor:
     return ts[0].contiguous()
 
 def sp_0(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.Tensor]:
+    if (t.dim() == 3):
+        return torch.split(t, t.shape[1] // tp, dim=1)[tp_rank]
     return torch.split(t, t.shape[0] // tp, dim=0)[tp_rank]
 
 def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.Tensor]:
@@ -251,6 +253,7 @@ class W:
         ffn_w3_lora_b: sp_neg1,
         ffn_w2_lora_a: sp_0,
         ffn_w2_lora_b: sp_id,
+        ffn_gate: sp_id,
     }
 
     weights_list = [
