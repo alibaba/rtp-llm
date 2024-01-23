@@ -79,7 +79,6 @@ class ChatGlmV2(GPT):
     def modify_config(config):
         config.special_tokens.eos_token_id = 2
         config.use_attention_linear_bias = False
-        config.use_gated_activation = True
         config.activation_type = "SiGLU"
         config.norm_type = "rmsnorm"
         config.rotary_embedding_dim = 128

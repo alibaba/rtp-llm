@@ -85,7 +85,6 @@ public:
     bool use_attention_linear_bias_  = false;
     bool use_fp32_to_compute_logit_  = false;
     bool add_bias_linear_            = false;
-    bool use_gated_activation_       = false;
 
     std::string tokenizer_path_    = "";
     std::string ckpt_path_         = "";

@@ -44,7 +44,6 @@ class ChatGlm(GPT):
             norm_type='alphanorm',
             rotary_embedding_dim=128,
             rotary_embedding_style=2,
-            use_gated_activation=False,
             add_bias_linear=True,
             layer_num=28,
             max_seq_len=2048,

@@ -180,7 +180,6 @@ class QWenBase(GPT):
     def _common_config(config, ckpt_path: str) -> GptInitModelParameters:
         config.rotary_embedding_dim = 128
         config.rotary_embedding_style = 1
-        config.use_gated_activation = True
         config.activation_type = 'SiGLU'
         config.has_pre_decoder_layernorm = False
         config.has_post_decoder_layernorm = True

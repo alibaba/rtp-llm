@@ -120,7 +120,6 @@ static auto specialTokensTHS =
     DEF_PROPERTY(use_attention_linear_bias, use_attention_linear_bias_)                                                \
     DEF_PROPERTY(use_fp32_to_compute_logit, use_fp32_to_compute_logit_)                                                \
     DEF_PROPERTY(add_bias_linear, add_bias_linear_)                                                                    \
-    DEF_PROPERTY(use_gated_activation, use_gated_activation_)                                                          \
     DEF_PROPERTY(tokenizer_path, tokenizer_path_)                                                                      \
     DEF_PROPERTY(ckpt_path, ckpt_path_)                                                                                \
     DEF_PROPERTY(pre_seq_len, pre_seq_len_)                                                                            \

@@ -20,7 +20,6 @@ class Glm130B(ChatGlm):
             norm_type='layernorm',
             rotary_embedding_dim=128,
             rotary_embedding_style=1,
-            use_gated_activation=True,
             add_bias_linear=True,
             layer_num=70,
             max_seq_len=2048,

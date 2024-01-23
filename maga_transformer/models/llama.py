@@ -34,7 +34,6 @@ class Llama(GPT):
             vocab_size=0,
             ckpt_path=ckpt_path,
             activation_type='SiGLU',
-            use_gated_activation=True,
             norm_type='rmsnorm',
             rotary_embedding_dim=128,
             rotary_embedding_style=1,
