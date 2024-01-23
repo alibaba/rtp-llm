@@ -68,7 +68,7 @@ class ModelFactory:
     @staticmethod
     def from_model_type(model_config: ModelConfig, sp_model_config: Optional[ModelConfig] = None) -> Union[AsyncModel, BaseModel]:
         model = ModelFactory._create_model(model_config)
-        if model_config.async_mode:
+        if model_config.async_mode and model_config.model_type != 'fake_model': # for test
             sp_model = None if sp_model_config is None else ModelFactory._create_model(sp_model_config)
             model = AsyncModel(model, sp_model)
         return model
@@ -113,7 +113,6 @@ class ModelFactory:
 
         logging.info(f"load model from tokenizer_path: {tokenizer_path}, ckpt_path: {ckpt_path}")
         model_type = os.environ["MODEL_TYPE"]
-        async_mode = bool(int(os.environ.get("ASYNC_MODE", "1")))
 
         weight_type: WEIGHT_TYPE = get_weight_type_from_env(os.environ)
         act_type = weight_type if weight_type in [ WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16
@@ -131,7 +130,7 @@ class ModelFactory:
         model_config = ModelConfig(model_type=model_type,
                                    ckpt_path=ckpt_path,
                                    tokenizer_path=tokenizer_path,
-                                   async_mode=async_mode,
+                                   async_mode=True,
                                    weight_type=weight_type,
                                    act_type=act_type,
                                    max_seq_len=max_seq_len,
@@ -141,8 +140,6 @@ class ModelFactory:
         sp_model_config = None
         sp_model_type = os.environ.get("SP_MODEL_TYPE", None)
         if sp_model_type is not None:
-            if not async_mode:
-                raise Exception("SP_CONFIG should only be used in aysnc mode")
             logging.info("use sp model")
             sp_ckpt_path = fetch_remote_file_to_local(os.environ['SP_CHECKPOINT_PATH'])
             logging.info(f"load sp model from ckpt_path: {sp_ckpt_path}")

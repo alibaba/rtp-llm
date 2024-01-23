@@ -105,7 +105,7 @@ class GangTest(unittest.TestCase):
         os.environ['MODEL_TYPE'] = "fake_model"
         os.environ['TOKENIZER_PATH'] = os.path.join(os.getcwd(), "maga_transformer/distribute/test/testdata/tokenizer")
         os.environ['CHECKPOINT_PATH'] = os.path.join(os.getcwd(), "maga_transformer/distribute/test/testdata/cpt")
-        os.environ['ALL_USE_ONE_GPU'] = 'true'
+        os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
         torch_device_count.return_value = 4
         g_parallel_info.reload()
 
@@ -123,12 +123,10 @@ class GangTest(unittest.TestCase):
             for i in range(0, int(os.environ['WORLD_SIZE'])):
                 gang_hb_port = WorkerInfo.gang_hb_port_offset(i)
                 hb_response = requests.post(f"http://localhost:{gang_hb_port}/heartbeat", json={"name": 'fake_name', "ip": 'fake_ip'}, timeout=5)
-                print("raw response: ", hb_response)
                 self.assertEqual(hb_response.json()['initializing'], False)
 
             server_port = WorkerInfo.server_port_offset(0)
             response = requests.post(f"http://localhost:{server_port}", json={"prompt": "hello"}, timeout=5)
-            print("raw response: ", response.text)
 
             self.assertEqual(response.json()['finished'], True)
             self.assertEqual(response.json()['response'], ['fake output'])

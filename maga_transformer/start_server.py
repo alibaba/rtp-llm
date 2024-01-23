@@ -44,7 +44,6 @@ MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 class FastApiServer(object):
-
     def __init__(self):
         if 'LOAD_CKPT_NUM_PROCESS' not in os.environ:
             os.environ['LOAD_CKPT_NUM_PROCESS'] = '0'
@@ -56,7 +55,6 @@ class FastApiServer(object):
         self._openai_endpoint = None
         self._system_reporter = sys_reporter
         self._atomic_count = AtomicCounter()
-        self._async_mode = bool(int(os.environ.get("ASYNC_MODE", "1")))
 
     def start(self):
         self._system_reporter.start()
@@ -88,23 +86,13 @@ class FastApiServer(object):
 
     def _init_controller(self):
         concurrency_with_block = json.loads(os.environ.get('CONCURRENCY_WITH_BLOCK', "False").lower())
-        if g_parallel_info.world_size != 1:
-            if g_parallel_info.world_rank == 0:
-                if self._async_mode:
-                    limit = int(os.environ.get('CONCURRENCY_LIMIT', 32))
-                    logging.info(f"use gang cluster and is master, async set CONCURRENCY_LIMIT to {limit}")
-                else:
-                    logging.info("use gang cluster and is master, set CONCURRENCY_LIMIT to 1")
-                    limit = 1
-                self._controller = ConcurrencyController(limit, block=concurrency_with_block)
-            else:
-                logging.info("use gang cluster and is worker, set CONCURRENCY_LIMIT to 99")
-                self._controller = ConcurrencyController(99, block=concurrency_with_block)
-        elif self._async_mode:
-            self._controller = ConcurrencyController(int(os.environ.get('CONCURRENCY_LIMIT', 32)), block=concurrency_with_block)
-        else:
-            # default to be 1
-            self._controller = ConcurrencyController(1, block=concurrency_with_block)
+        if g_parallel_info.world_rank == 0:
+            limit = int(os.environ.get('CONCURRENCY_LIMIT', 32))
+            logging.info(f"CONCURRENCY_LIMIT to {limit}")
+            self._controller = ConcurrencyController(limit, block=concurrency_with_block)
+        elif g_parallel_info.world_size != 1:
+            logging.info("use gang cluster and is worker, set CONCURRENCY_LIMIT to 99")
+            self._controller = ConcurrencyController(99, block=concurrency_with_block)
 
     # use asyncio.sleep(0) to correctly exit when client closed https://github.com/tiangolo/fastapi/issues/4146
     async def stream_response(
@@ -222,8 +210,6 @@ class FastApiServer(object):
 
         def generate_call():
             assert self._inference_worker is not None
-            if g_parallel_info.is_master and g_parallel_info.world_size > 1 and not self._async_mode:
-                self._gang_server.request_workers(req)
             return self._inference_worker.inference(**req)
 
         res = self._call_generate_with_report(generate_call)
@@ -372,7 +358,6 @@ def main():
     if torch.cuda.device_count() > 1 and g_parallel_info.world_size > 1:
         local_world_size = min(torch.cuda.device_count(), g_parallel_info.world_size)
         os.environ['LOCAL_WORLD_SIZE'] = str(local_world_size)
-        all_use_one_gpu = os.environ.get('ALL_USE_ONE_GPU', 'false') == 'true'
         multiprocessing.set_start_method('spawn')
         procs: List[Process] = []
         cuda_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
@@ -380,10 +365,7 @@ def main():
                 [str(i) for i in range(torch.cuda.device_count())]
         for idx, world_rank in enumerate(range(g_parallel_info.world_rank,
                                                g_parallel_info.world_rank + local_world_size)):
-            if all_use_one_gpu:
-                os.environ['CUDA_VISIBLE_DEVICES'] = cuda_device_list[0]
-            else:
-                os.environ['CUDA_VISIBLE_DEVICES'] = cuda_device_list[idx]
+            os.environ['CUDA_VISIBLE_DEVICES'] = cuda_device_list[idx]
             os.environ['WORLD_RANK'] = str(world_rank)
             proc = multiprocessing.Process(target=local_rank_main)
             proc.start()
