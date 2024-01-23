@@ -2616,6 +2616,52 @@ inline __device__ float convert_to_float(half u)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+#ifdef ENABLE_BF16
+template<>
+inline __device__ float convert_to_float(__nv_bfloat16 u)
+{
+    return static_cast<float>(u);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<>
+inline __device__ float2 convert_to_float(__nv_bfloat162 u)
+{
+    return bf1622float2(u);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<>
+inline __device__ float4 convert_to_float(bf16_4_t u)
+{
+    float4 ret;
+    float2 f2x = bf1622float2(u.x);
+    float2 f2y = bf1622float2(u.y);
+    ret.x      = f2x.x;
+    ret.y      = f2x.y;
+    ret.z      = f2y.x;
+    ret.w      = f2y.y;
+    return ret;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+template<>
+inline __device__ Float8_ convert_to_float(bf16_8_t u)
+{
+    Float8_ f8;
+    f8.x = bf1622float2(u.x);
+    f8.y = bf1622float2(u.y);
+    f8.z = bf1622float2(u.z);
+    f8.w = bf1622float2(u.w);
+    return f8;
+}
+#endif
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 #ifdef ENABLE_FP8
 inline __device__ void convert_from_fp8(uint16_t* v, const __nv_fp8_e4m3 u)
 {
