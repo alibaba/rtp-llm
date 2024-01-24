@@ -6,7 +6,7 @@ from typing import Any, Dict, Union
 
 from maga_transformer.model_factory import ModelFactory
 from maga_transformer.tools.api.hf_model_helper import HF_MODEL_INFO_HELPER, HfModelInfoHelper
-from maga_transformer.tools.api.model_dict import ModelDict
+from maga_transformer.model_factory_register import ModelDict
 from maga_transformer.tools.api.utils import handler_error
 
 from maga_transformer.utils.fuser import fetch_remote_file_to_local
@@ -21,7 +21,7 @@ def parse_hf_model_type(model_link):
         "hf_model_type": GENERAL_HF_MODEL,
         "ft_model_type": ft_model_type
     }
-     
+
 def parse_ft_model_type(model_path):
     # load config.json
     try:
@@ -43,7 +43,7 @@ def _analyze_model_type(model_path):
     else:
         model_path = fetch_remote_file_to_local(model_path)
         res =  parse_ft_model_type(model_path)
-    
+
     return {k: v for k, v in res.items() if v is not None}
 
 
@@ -61,8 +61,7 @@ def analyze_model_type(req: Union[str,Dict[Any, Any]]):
 
     if not model_path:
         return handler_error(Exception.ERROR_INPUT_FORMAT_ERROR, "bad_input")
-        
+
     model_type = _analyze_model_type(model_path)
     response = {"model_type":model_type}
     return JSONResponse(content = response)
-

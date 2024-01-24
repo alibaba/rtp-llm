@@ -287,7 +287,7 @@ class QWen_1B8(QWenBase):
         QWenBase._common_config(config, ckpt_path)
         return config
 
-register_model('qwen', QWen)
+register_model('qwen', QWen, ["QWenLMHeadModel"])
 register_model('qwen_7b', QWen_7B)
 register_model('qwen_13b', QWen_13B)
 register_model('qwen_1b8', QWen_1B8)

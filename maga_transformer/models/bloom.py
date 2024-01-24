@@ -132,4 +132,4 @@ class Bloom(GPT):
         config.use_attention_linear_bias=True
         return config
     
-register_model('bloom', Bloom)
+register_model('bloom', Bloom, ["BloomForCausalLM"])

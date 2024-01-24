@@ -129,11 +129,11 @@ class Baichuan2(Baichuan):
         config.normalize_lm_head_weight = True
         return config
 
-register_model('internlm', Llama)
-register_model('internlm2', Llama)
-register_model('llama', Llama)
-register_model('xverse', Llama)
-register_model('aquila', Llama)
-register_model('mistral', Llama)
-register_model('baichuan', Baichuan)
+register_model('internlm', Llama, ["InternLMForCausalLM"])
+register_model('internlm2', Llama, ["InternLM2ForCausalLM"])
+register_model('llama', Llama, ["LlamaForCausalLM", "YiForCausalLM"])
+register_model('xverse', Llama, ["XverseForCausalLM"])
+register_model('aquila', Llama, ["AquilaModel"])
+register_model('mistral', Llama, ["MistralForCausalLM"])
+register_model('baichuan', Baichuan, ["BaichuanForCausalLM"])
 register_model('baichuan2', Baichuan2)

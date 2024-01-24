@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 from huggingface_hub import HfApi
 from huggingface_hub.hf_api import ModelInfo
 
-from maga_transformer.tools.api.model_dict import ModelDict
+from maga_transformer.model_factory_register import ModelDict
 
 class HfModelInfo:
     def __init__(self, origin_model_info: ModelInfo, model_config_file: Optional[str]):

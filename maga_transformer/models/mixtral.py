@@ -88,4 +88,4 @@ class Mixtral(GPT):
         config.special_tokens.bos_token_id = 1
         return config
 
-register_model('mixtral', Mixtral)
+register_model('mixtral', Mixtral, ['MixtralForCausalLM'])

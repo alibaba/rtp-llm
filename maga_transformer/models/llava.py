@@ -296,4 +296,4 @@ class Llava(Llama, MultiModalMixin):
 
         return llm_size
     
-register_model("llava", Llava)
+register_model("llava", Llava, ["LlavaLlamaForCausalLM"])

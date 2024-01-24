@@ -102,5 +102,5 @@ class ChatGlm(GPT):
             attention_mask[b, input_length:, ...] = 0
         return attention_mask
 
-register_model('chatglm', ChatGlm)
+register_model('chatglm', ChatGlm, [], ["THUDM/chatglm-6b", "THUDM/chatglm-6b-int4", "THUDM/chatglm-6b-int4-qe", "THUDM/chatglm-6b-int8"])
 register_model('chat_glm', ChatGlm)

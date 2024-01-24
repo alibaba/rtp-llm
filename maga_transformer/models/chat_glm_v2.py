@@ -96,5 +96,5 @@ class ChatGlmV2(GPT):
         config = ChatGlmV2.modify_config(config)
         return config
 
-register_model('chatglm2', ChatGlmV2)
+register_model('chatglm2', ChatGlmV2, ["ChatGLMModel"], ["THUDM/chatglm2-6b", "THUDM/chatglm2-6b-int4", "THUDM/chatglm2-6b-32k"])
 register_model('chat_glm_2', ChatGlmV2)

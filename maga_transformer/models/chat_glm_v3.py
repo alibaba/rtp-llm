@@ -30,5 +30,5 @@ class ChatGlmV3(ChatGlmV2):
         config.base_scale = int(config_json.get("rope_ratio", 1))
         return config
 
-register_model('chatglm3', ChatGlmV3)
+register_model('chatglm3', ChatGlmV3, [], ["THUDM/chatglm3-6b", "THUDM/chatglm3-6b-base", "THUDM/chatglm3-6b-32k"])
 register_model('chat_glm_3', ChatGlmV3)

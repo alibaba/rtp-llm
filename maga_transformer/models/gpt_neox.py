@@ -59,4 +59,4 @@ class GPTNeox(GPT):
                 config.dynamic_embedding_max_pos = config_json.get('max_position_embeddings', 2048)
         return config
 
-register_model('gpt_neox', GPTNeox)
+register_model('gpt_neox', GPTNeox, ["GPTNeoXForCausalLM"])

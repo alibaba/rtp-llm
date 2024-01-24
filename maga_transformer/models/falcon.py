@@ -83,4 +83,4 @@ class Falcon(GPT):
         config.rotary_embedding_dim = config.size_per_head
         return config
 
-register_model('falcon', Falcon)
+register_model('falcon', Falcon, ["FalconForCausalLM"])
