@@ -125,9 +125,10 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                               moe_gates_buf_,
                               expert_num_);
         print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_);
+        bool use_ffn3 = ffn_weights->intermediate_weight2.int8_kernel  != nullptr;
         if (int8_mode_ == 0) {
 
-            if (use_gated_activation) {
+            if (use_ffn3) {
 
                 FT_CHECK(ffn_weights->intermediate_weight2.kernel != nullptr);
                 moe_fc_runner_->run_moe_fc(input_tensor,
@@ -186,7 +187,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
             FT_CHECK(ffn_weights->output_weight.int8_kernel != NULL
                      && ffn_weights->output_weight.weight_only_quant_scale != NULL);
             
-            if (use_gated_activation) {
+            if (use_ffn3) {
                 FT_CHECK(ffn_weights->intermediate_weight2.int8_kernel != NULL
                      && ffn_weights->intermediate_weight2.weight_only_quant_scale != NULL);
                 moe_int8_weight_only_fc_runner_->run_moe_fc(
@@ -437,8 +438,7 @@ FfnLayer<T>::FfnLayer(size_t               max_batch_size,
     use_gated_activation_ = activation_type_ == ActivationType::GeGLU ||
                             activation_type_ == ActivationType::GeGluNoneApproximate ||
                             activation_type_ == ActivationType::ReGLU ||
-                            activation_type_ == ActivationType::SiGLU ||
-                            activation_type_ == ActivationType::Silu;
+                            activation_type_ == ActivationType::SiGLU;
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (int8_mode_ == 1) {
         FT_CHECK_WITH_INFO(!(std::is_same<T, float>::value), "Weight only quant not supported for fp32.");
