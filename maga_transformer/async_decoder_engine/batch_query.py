@@ -46,6 +46,7 @@ class QueryStats:
         self.context_length = input_tokens.shape[-1]
         self.generate_config = generate_config
         self.max_new_tokens = self.generate_config.max_new_tokens
+        self.min_new_tokens = self.generate_config.min_new_tokens
         self.adapter_name = adapter_name
         self.error_info_ = ''
         self.stop = False
@@ -157,7 +158,7 @@ class QueryStats:
 
     def need_finish(self):
         return self.finish or self._out_of_max(self.max_seq_len) or \
-            self.has_error() or self.stop or self._invoke_stop_words_criterion()
+            self.has_error() or self.stop or (self.seq_length >= self.min_new_tokens + self.context_length and self._invoke_stop_words_criterion())
 
     def _out_of_max(self, max_seq_len: int) -> bool:
         return self.seq_length >= min(max_seq_len, self.max_new_tokens + self.context_length)

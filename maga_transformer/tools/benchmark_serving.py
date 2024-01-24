@@ -126,7 +126,7 @@ async def send_request(
             "inputs": prompt,
             "parameters": params,
         }
-    elif backend == "ft":
+    elif backend == "maga":
         assert not use_beam_search
         pload = {
             "prompt": prompt,
@@ -195,7 +195,7 @@ def main(args: argparse.Namespace):
     np.random.seed(args.seed)
 
     api_url = f"http://{args.host}:{args.port}/generate"
-    if args.backend == "ft":
+    if args.backend == "maga":
         api_url = f"http://{args.host}:{args.port}"
     if args.backend == "trt":
         # api_url = f"http://{args.host}:{args.port}/v2/models/tensorrt_llm_bls/generate"
@@ -242,8 +242,8 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Benchmark the online serving throughput.")
-    parser.add_argument("--backend", type=str, default="vllm",
-                        choices=["vllm", "tgi", "ft", "trt"])
+    parser.add_argument("--backend", type=str, default="maga",
+                        choices=["vllm", "tgi", "maga", "trt"])
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--dataset", type=str, required=True,

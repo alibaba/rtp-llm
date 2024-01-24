@@ -30,6 +30,7 @@ class QueryManager:
         self.use_cache_ = os.environ.get('USE_BLOCK_CACHE', None) == '1'
         logging.info(f"USE_BLOCK_CACHE: {self.use_cache_}")
         self.reset_ptuning(prefix_params)
+        self.guarante_generate_mem = bool(int(os.environ.get("GUARANTE_GENERATE_MEM", 0))) and not self.ptuning_
         logging.info("block_size after Ptuning: " + str(len(self.cache_manager_.free_blocks_index)))
         self.max_attention_mem = self.config_.max_context_batch_size * self.config_.max_seq_len
 
@@ -83,7 +84,7 @@ class QueryManager:
                     if not isinstance(generate_config.adapter_name, list):
                         raise Exception(f"batch query generate config type error {type(generate_config.adapter_name)}")
                     adapter_name = generate_config.adapter_name[i]
-                query = self._gen_new_request(input_token_ids[i, :int(context_lengths[i])], images[i], tokenizer, generate_config, adapter_name, lora_resource)
+                query = self._gen_new_request(input_token_ids[i, :int(context_lengths[i])], images[i], tokenizer, generate_config, adapter_name, lora_resource, not self.guarante_generate_mem)
 
                 queries.append(query)
         except Exception as e:
@@ -93,7 +94,18 @@ class QueryManager:
         [self.wait_queries_.append(q) for q in queries]
         return queries
 
-    def _gen_new_request(self, inputs: torch.Tensor, images: List[str], tokenizer: Optional[BaseTokenizer], generate_config: GenerateConfig, adapter_name: str, lora_resource: Optional[LoraResource]):
+    def _gen_new_request(self, inputs: torch.Tensor, images: List[str], tokenizer: Optional[BaseTokenizer], generate_config: GenerateConfig, adapter_name: str, lora_resource: Optional[LoraResource], allocate_kv_buffer: bool) -> QueryStats:
+        if not allocate_kv_buffer:
+            return QueryStats(input_tokens=inputs,
+                              tokenizer=tokenizer,
+                              images=images,
+                              max_seq_len=self.config_.max_seq_len,
+                              reuse_length=0,
+                              block_indice=[],
+                              slice_length=0,
+                              generate_config=generate_config,
+                              adapter_name=adapter_name,
+                              lora_resource=lora_resource)
         seq_length: int = inputs.shape[-1]
         # reuse length represent for ptuning length or kvcache reuse length
         block_size = (seq_length - 2 + self.gen_num_per_circle) // self.seq_size_per_block_ + 1
@@ -125,6 +137,24 @@ class QueryManager:
                           adapter_name = adapter_name,
                           lora_resource=lora_resource)
 
+    def check_mem_left(self, query: QueryStats, new_queries: List[QueryStats]):
+        left_block = len(self.cache_manager_.free_blocks_index)
+        left_block -= query.context_length // self.seq_size_per_block_ + 1
+        if left_block < 8:
+            return False
+        left_block -= 8
+        require_lens = [(query.max_new_tokens // self.seq_size_per_block_ + 1, query.context_length + query.max_new_tokens)]
+        for query_status in self.batch_query_.queries + new_queries:
+            if query_status.seq_length <= 0:
+                return False
+            require_lens.append(((query_status.max_new_tokens - query_status.seq_length + query_status.context_length) // self.seq_size_per_block_ + 2, query_status.max_new_tokens + query_status.context_length))
+        require_lens = sorted(require_lens, key=lambda x: x[0])
+        for i, lengths in enumerate(require_lens):
+            if (len(require_lens) - i) * (lengths[0] + 4) > left_block:
+                return False
+            left_block += lengths[1] // self.seq_size_per_block_
+        return True
+
     def has_query(self) -> bool:
         return len(self.batch_query_.queries) > 0 or len(self.wait_queries_) > 0
 
@@ -136,6 +166,8 @@ class QueryManager:
         if len(self.batch_query_.queries) > 0 and self.batch_query_.beam_width != query.beam_width:
             return False
         if len(new_queries) > 0 and new_queries[0].beam_width != query.beam_width:
+            return False
+        if self.guarante_generate_mem and not self.check_mem_left(query, new_queries):
             return False
         return True
 
@@ -151,11 +183,17 @@ class QueryManager:
                 continue
             
             if self.check_query_to_append(query, new_queries):
+                if self.guarante_generate_mem:
+                    new_query = self._gen_new_request(query.input_token_ids, None, None, query.generate_config, None, None, True)
+                    query.reuse_length = new_query.reuse_length
+                    query.block_indice = new_query.block_indice
                 new_queries.append(query)
             else:
                 self.wait_queries_.appendleft(query)
                 break
             # use cache has bug when multi context query
+        if len(self.batch_query_.queries) == 0 and len(self.wait_queries_) > 0:
+            new_queries.append(self.wait_queries_.popleft())
         [query.report_wait_time() for query in new_queries]
         self.batch_query_.add_new_query(new_queries)
         return self.batch_query_
