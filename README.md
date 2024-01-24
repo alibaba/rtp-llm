@@ -88,5 +88,6 @@ Our project is mainly based on [FasterTransformer](https://github.com/NVIDIA/Fas
 ## Contact Us
 #### DingTalk Group
 <img src=picture/dingding.png width="200px">
+
 #### WeChat Group
 <img src=picture/weixin.JPG width="200px">
