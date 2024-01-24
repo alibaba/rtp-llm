@@ -28,6 +28,7 @@ class QueryManager:
         self.wait_queries_: deque[QueryStats] = deque()
         self.lock_ = Lock()
         self.use_cache_ = os.environ.get('USE_BLOCK_CACHE', None) == '1'
+        self.force_batching = os.environ.get('FORCE_BATCHING') == '1' # for perf_test
         logging.info(f"USE_BLOCK_CACHE: {self.use_cache_}")
         self.reset_ptuning(prefix_params)
         self.guarante_generate_mem = bool(int(os.environ.get("GUARANTE_GENERATE_MEM", 0))) and not self.ptuning_
@@ -159,6 +160,8 @@ class QueryManager:
         return len(self.batch_query_.queries) > 0 or len(self.wait_queries_) > 0
 
     def check_query_to_append(self, query: QueryStats, new_queries: List[QueryStats]) -> bool:
+        if self.force_batching:
+            return True
         self.max_context_len = max(query.context_length, self.max_context_len)
         if (len(new_queries) + 1) * self.max_context_len > self.max_attention_mem:
             return False
