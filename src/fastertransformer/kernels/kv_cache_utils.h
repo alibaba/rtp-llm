@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include "src/fastertransformer/utils/cuda_utils.h"
 
 namespace fastertransformer {
 
@@ -138,6 +139,92 @@ struct KVBlockArray {
 
     __host__ __device__ inline int32_t
     getKVLocalIdx(int32_t globalTokenIdx, int32_t headIdx, int32_t dimsPerHead, int32_t channelIdx)
+    {
+        // For K or V, the hidden dimension per head is *not* decomposed. The layout of each block of K or V is:
+        // [numHeads, tokensPerBlock, hiddenSizePerHead].
+        // This member function computes the corresponding linear index.
+        // NOTE: we have remapped K layout as the same of V.
+        return headIdx * mTokensPerBlock * dimsPerHead + getLocalIdx(globalTokenIdx) * dimsPerHead + channelIdx;
+    }
+};
+
+struct KVBlockArrayForContextFMHA
+{
+    // Struct operates on paged kv cache providing
+    // functions for accessing blocks of in K and V caches
+    // and elements inside these blocks
+
+    // Max number of blocks per sequence
+    int32_t mMaxBlocksPerSeq;
+    // Current number of sequences
+    int32_t mMaxSeqs;
+    // Number of tokens. It must be power of 2.
+    int32_t mTokensPerBlock;
+    // Exponent of number of tokens with base 2.
+    // E.g. for mTokensPerBlock 64, mTokensPerBlockLog2 equals to 6
+    int32_t mTokensPerBlockLog2;
+    // Table maps logical block idx to the data pointer of k/v cache block pool
+    // Shape [B, W, 2, M], where 2 is table for K and V,
+    // B is current number of sequences
+    // W is beam width
+    // M is Max number of blocks per sequence
+    // int64_t reinterpred to void* pointing to the KV cache data
+    int64_t* data;
+
+    KVBlockArrayForContextFMHA() {}
+
+    KVBlockArrayForContextFMHA(int32_t batchSize, int32_t maxBlocksPerSeq, int32_t tokensPerBlock, int32_t sizePerToken)
+        : mMaxSeqs(batchSize)
+        , mMaxBlocksPerSeq(maxBlocksPerSeq)
+        , mTokensPerBlock(tokensPerBlock)
+        , data(nullptr)
+    {
+        const float tokensPerBlockSeqLog2 = log2(mTokensPerBlock);
+        FT_CHECK_WITH_INFO(
+            ceil(tokensPerBlockSeqLog2) == floor(tokensPerBlockSeqLog2), "tokensPerBlock must be power of 2");
+        // NOTE: pointer offset arithmetic offset is performed on int32_t (see this.getRowPtr).
+        // If needed, we could do it on uint32_t or even uint64_t, but that might have performance implications
+        FT_CHECK_WITH_INFO(static_cast<int64_t>(mMaxSeqs - 1) * mMaxBlocksPerSeq * 2 + maxBlocksPerSeq
+                <= std::numeric_limits<int32_t>::max(),
+            "kv cache is too large for gpt_attention_plugin");
+        mTokensPerBlockLog2 = static_cast<int>(tokensPerBlockSeqLog2);
+    }
+
+    __host__ __device__ inline void** getRowPtr(KVIdxType kvIdx, int32_t seqIdx)
+    {
+        // Returns pointer to array of pointers to K or V cache for one specific sequence seqIdx.
+        // seqIdx is in range [0; B]
+        return reinterpret_cast<void**>(
+            data + seqIdx * mMaxBlocksPerSeq * 2 + static_cast<int32_t>(kvIdx) * mMaxBlocksPerSeq);
+    }
+
+    __host__ __device__ inline void* getBlockPtr(void** pointer, int32_t tokenIdx)
+    {
+        return pointer[tokenIdx >> mTokensPerBlockLog2];
+    }
+
+    __host__ __device__ inline void* getBlockPtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx)
+    {
+        return getBlockPtr(getRowPtr(kvIdx, seqIdx), tokenIdx);
+    }
+
+    __host__ __device__ inline void* getKBlockPtr(int32_t seqIdx, int32_t tokenIdx)
+    {
+        return getBlockPtr(seqIdx, tokenIdx, KVIdxType::K_IDX);
+    }
+
+    __host__ __device__ inline void* getVBlockPtr(int32_t seqIdx, int32_t tokenIdx)
+    {
+        return getBlockPtr(seqIdx, tokenIdx, KVIdxType::V_IDX);
+    }
+
+    __host__ __device__ inline int32_t getLocalIdx(int32_t globalIdx)
+    {
+        return globalIdx & ((1 << mTokensPerBlockLog2) - 1);
+    }
+
+    __host__ __device__ inline int32_t getKVLocalIdx(
+        int32_t globalTokenIdx, int32_t headIdx, int32_t dimsPerHead, int32_t channelIdx)
     {
         // For K or V, the hidden dimension per head is *not* decomposed. The layout of each block of K or V is:
         // [numHeads, tokensPerBlock, hiddenSizePerHead].
