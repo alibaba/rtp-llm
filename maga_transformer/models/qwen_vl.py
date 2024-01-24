@@ -2,33 +2,26 @@
 import torch
 import os
 import json
-import re
 from typing import List, Any, Tuple, Dict
 
 from transformers import AutoTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.qwen import QWen
-from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo
-from maga_transformer.vision_transformer import ClipVit, ClipVitWeights
+from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo, QwenVLVitWeight
+from maga_transformer.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal_mixin import MultiModalMixin, BaseImageEmbedding
 from maga_transformer.model_factory_register import register_model
 
-class QwenVLClipVitWeight(ClipVitWeights):
-    def __init__(self, vit):
-        self.hf_prefix = "transformer.visual."
-        self.ft_prefix = "self.visual.clip."
-        self.weight_names = self._get_vit_params(vit)
-
 class QwenVLImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
-        self.clip = ClipVit(**config)
-        self.weights = QwenVLClipVitWeight(self.clip)
+        self.vit = QWen_VL_ViT(**config)
+        self.weights = QwenVLVitWeight(self.vit)
     
     def image_embedding(self, images: List[str], device) -> torch.Tensor:
         if len(images) != 0:
-            images = self.clip.encode(images)
+            images = self.vit.encode(images)
             assert images.shape[0] == len(images)
         return images.to(device=device)
 
@@ -103,21 +96,6 @@ class QWen_VL(QWen, MultiModalMixin):
     @staticmethod
     def get_weight_cls():
         return QWenVLWeightInfo
-    
-    def load_vit_weight(self, ctype: str):
-        config = self.config
-        hf_prefix = config.vit_related_params["weights"].hf_prefix
-        ft_prefix = config.vit_related_params["weights"].ft_prefix
-        weight_names = config.vit_related_params["weights"].weight_names
-
-        def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
-            param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(ctype).to('cuda:0')
-
-        for w in weight_names:
-            w_name = ft_prefix + w
-            w_name = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', w_name)
-            param = eval(w_name)
-            _safe_load_from_module(param, hf_prefix + w, ctype)
 
     def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[str]]):
         inputs = inputs.reshape(1, -1)

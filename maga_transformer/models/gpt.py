@@ -177,9 +177,6 @@ class GPT(BaseModel):
     def get_weight_cls() -> ModelDeployWeightInfo:
         raise NotImplementedError
 
-    def load_vit_weight(self, ctype: str):
-        raise NotImplementedError
-
     def update(self, lora_infos: Dict[str, str]):
         with Timer() as timer:
             self.weight.lora_resource.update(lora_infos)

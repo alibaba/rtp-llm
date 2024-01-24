@@ -8,16 +8,17 @@ import torch.nn as nn
 from PIL import Image
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
+from maga_transformer.models.qwen_vl_vit import Resampler
 
 class LlavaImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
-        self.vision_tower = build_vision_tower(config)
+        self.vision_tower = build_vision_tower(config).to(device='cuda:0')
         self.mm_projector, self.proj_layers = build_vision_projector(config)
         self.config = config
     
     def image_embedding(self, images: List[List[str]], device) -> torch.Tensor:
         image_data = []
-        for i in range(len(images)):    
+        for i in range(len(images)):
             now_image_data = []
             for image in images[i]:
                 if image.startswith('/'):
@@ -40,7 +41,7 @@ class LlavaImageEmbedding(BaseImageEmbedding):
     def encode_images(self, images, device):
         if images.shape[0] == 0:
             return images
-        image_features = self.vision_tower(images).to(device=device)
+        image_features = self.vision_tower(images)
         image_features = self.mm_projector(image_features)
         return image_features
 

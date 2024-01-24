@@ -1,5 +1,6 @@
 import json
 import torch
+import re
 from typing import Any, Dict, List, Union, Tuple
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
@@ -54,3 +55,18 @@ class MultiModalMixin:
         elif isinstance(prompt, List):
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "raw request format cannot accept dict prompt")
         return prompt, images
+
+    def load_vit_weight(self, ctype: str):
+        config = self.config
+        ckpt_prefix = config.vit_related_params["weights"].ckpt_prefix
+        ft_prefix = config.vit_related_params["weights"].ft_prefix
+        weight_names = config.vit_related_params["weights"].weight_names
+
+        def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
+            param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(ctype).to('cuda:0')
+
+        for w in weight_names:
+            w_name = ft_prefix + w
+            w_name = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', w_name)
+            param = eval(w_name)
+            _safe_load_from_module(param, ckpt_prefix + w, ctype)

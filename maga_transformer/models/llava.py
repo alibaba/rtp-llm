@@ -19,7 +19,7 @@ from maga_transformer.models.base_model import BaseTokenizer, BaseModel
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.models.llava_vit_encoder import LlavaImageEmbedding
+from maga_transformer.models.llava_vit import LlavaImageEmbedding
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.model_factory_register import register_model
 
@@ -85,6 +85,7 @@ class Llava(Llama, MultiModalMixin):
         self.visual = LlavaImageEmbedding(config.vit_related_params)
         self.nccl_op_ = NcclOp()
         config.vit_related_params["proj_layers"] = self.visual.proj_layers
+        config.vit_related_params["weights"] = LlavaVitWeights(config.vit_related_params)
         Llama.__init__(self, config)
     
     @staticmethod
@@ -95,20 +96,6 @@ class Llava(Llama, MultiModalMixin):
             return prompt, images
         else:
             return prompt + (img_token + "\n") * len(images), images
-
-    def load_vit_weight(self, ctype: str):
-        config = self.config
-        proj_layers = config.vit_related_params["proj_layers"]
-        interval = config.vit_related_params["vit_layer_id_interval"]
-
-        def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
-            param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(ctype).to("cuda:0")
-
-        for i in range(0, proj_layers):
-            w = LlavaVitWeights.vit_proj_w.format(i = i * interval)
-            b = LlavaVitWeights.vit_proj_b.format(i = i * interval)
-            _safe_load_from_module(self.visual.mm_projector[i * interval].weight, w, ctype)
-            _safe_load_from_module(self.visual.mm_projector[i * interval].bias, b, ctype)
 
     @staticmethod
     def _create_config(ckpt_path):
@@ -164,6 +151,7 @@ class Llava(Llama, MultiModalMixin):
 
         config.vit_related_params["mm_hidden_size"] = config_json.get("mm_hidden_size", config_json["hidden_size"])
         config.vit_related_params["vit_layer_id_interval"] = 2
+        config.vit_related_params["num_hidden_layers"] = 12
         config.vit_related_params["vit_special_token_ids"].update({"ignore_token_index": -100, "image_token_index": -200})
         config.vit_related_params["vit_special_tokens"].update({
             "default_image_token": "<image>", 
@@ -176,6 +164,8 @@ class Llava(Llama, MultiModalMixin):
         if img_expand_match:
             patch_size = int(img_expand_match.group(1))
             img_size = int(img_expand_match.group(2))
+            config.vit_related_params["patch_size"] = patch_size
+            config.vit_related_params["image_size"] = img_size
             config.vit_related_params["img_expand_len"] = (img_size // patch_size) ** 2
         config.vit_related_params["vit_tower_path"] = vis_tower_name
 
@@ -284,29 +274,24 @@ class Llava(Llama, MultiModalMixin):
     @staticmethod
     def eval_model_size(config: GptInitModelParameters):
         llm_size = BaseModel.eval_model_size(config)
-        vit_json_path: str = config.vit_related_params["vit_tower_path"] + "/config.json"
-        if os.path.exists(vit_json_path):
-            with open(vit_json_path) as reader:
-                content = reader.read()
-                config_json = json.loads(content)
-                vision_config_dict = config_json["vision_config_dict"]
+        vision_config_dict = config.vit_related_params
 
-                hidden_size = vision_config_dict["hidden_size"]
-                patch_num = vision_config_dict["image_size"] // vision_config_dict["patch_size"]
-                conv_size = patch_num ** 2 * hidden_size * 3
-                pos_emb_size = patch_num ** 2 * hidden_size
-                ln_size = 2 * hidden_size * 2
+        hidden_size = vision_config_dict["hidden_size"]
+        patch_num = vision_config_dict["image_size"] // vision_config_dict["patch_size"]
+        conv_size = patch_num ** 2 * hidden_size * 3
+        pos_emb_size = patch_num ** 2 * hidden_size
+        ln_size = 2 * hidden_size * 2
 
-                clip_encoder_size = vision_config_dict["num_hidden_layers"] * (hidden_size ** 2 * 4 + hidden_size * 2 * 2 + hidden_size * vision_config_dict["intermediate_size"] * 2)
+        clip_encoder_size = vision_config_dict["num_hidden_layers"] * (hidden_size ** 2 * 4 + hidden_size * 2 * 2 + hidden_size * vision_config_dict["intermediate_size"] * 2)
 
-                data_type = vision_config_dict["torch_dtype"]
-                if data_type == "float32":
-                    data_type_size = 4
-                elif data_type == "int8":
-                    data_type_size = 1
-                else:
-                    data_type_size = 2
-                llm_size += (conv_size + pos_emb_size + ln_size + clip_encoder_size) * data_type_size
+        data_type = vision_config_dict["torch_dtype"]
+        if data_type == "float32":
+            data_type_size = 4
+        elif data_type == "int8":
+            data_type_size = 1
+        else:
+            data_type_size = 2
+        llm_size += (conv_size + pos_emb_size + ln_size + clip_encoder_size) * data_type_size
 
         return llm_size
     

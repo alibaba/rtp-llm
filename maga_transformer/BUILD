@@ -70,13 +70,6 @@ py_library(
 )
 
 py_library(
-    name = "vision_transformer",
-    srcs = glob([
-        "vision_transformer/*.py"
-    ])
-)
-
-py_library(
     name = "models",
     srcs = glob([
         "models/*.py",
@@ -94,8 +87,7 @@ py_library(
         ":torchvision",
         ":einops",
         ":utils",
-        ":ops",
-        ":vision_transformer"
+        ":ops"
     ],
 )
 
