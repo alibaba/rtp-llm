@@ -21,7 +21,7 @@
 namespace fastertransformer {
 
 template<typename T>
-struct FfnNormWeight   {
+struct FfnNormWeight {
     const T* gamma = nullptr;
     const T* beta  = nullptr;
 };

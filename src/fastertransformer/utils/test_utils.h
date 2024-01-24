@@ -43,16 +43,14 @@ namespace fastertransformer {
 
 template<typename T>
 struct rel_abs_diff {
-    T operator()(const T& lhs, const T& rhs) const
-    {
+    T operator()(const T& lhs, const T& rhs) const {
         return lhs == 0 ? 0 : static_cast<T>(fabs(lhs - rhs) / fabs(lhs));
     }
 };
 
 template<typename T>
 struct abs_diff {
-    T operator()(const T& lhs, const T& rhs) const
-    {
+    T operator()(const T& lhs, const T& rhs) const {
         return static_cast<T>(fabs(lhs - rhs));
     }
 };

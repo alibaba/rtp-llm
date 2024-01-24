@@ -53,7 +53,7 @@ struct BeamHypotheses {
     int   max_seq_len;
     float length_penalty;
 
-    bool early_stopping         = false;
+    bool early_stopping = false;
 };
 
 template<typename T>

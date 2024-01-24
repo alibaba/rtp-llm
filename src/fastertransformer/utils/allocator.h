@@ -55,8 +55,7 @@ public:
     virtual void         memSet(void* ptr, const int val, const size_t size)                      = 0;
 
     template<typename T>
-    void* reMalloc(T* ptr, size_t size, const bool is_set_zero = false, bool is_host = false)
-    {
+    void* reMalloc(T* ptr, size_t size, const bool is_set_zero = false, bool is_host = false) {
         FT_LOG_DEBUG(__PRETTY_FUNCTION__);
         size              = ((size + 31) / 32) * 32;  // make the buffer align with 32 bytes
         void* void_ptr    = (void*)ptr;
@@ -82,8 +81,7 @@ public:
                 }
                 return void_ptr;
             }
-        }
-        else {
+        } else {
             FT_LOG_DEBUG("Cannot find buffer %p, mallocing new one.", void_ptr);
             return malloc(size, is_set_zero, is_host);
         }
@@ -93,8 +91,7 @@ protected:
     virtual bool        isExist(void* address) const                 = 0;
     virtual ReallocType isReMalloc(void* address, size_t size) const = 0;
 
-    void* getAddress(void* ptr) const
-    {
+    void* getAddress(void* ptr) const {
         return ptr;
     }
 };
@@ -109,27 +106,22 @@ private:
     cudaStream_t                       stream_ = 0;  // initialize as default stream
     std::unordered_map<void*, size_t>* pointer_mapping_;
 
-    bool isExist(void* address) const
-    {
+    bool isExist(void* address) const {
         return pointer_mapping_->count(address) > 0;
     }
-    ReallocType isReMalloc(void* address, size_t size) const
-    {
+    ReallocType isReMalloc(void* address, size_t size) const {
         FT_CHECK(isExist(address));
         if (pointer_mapping_->at(address) < size) {
             return ReallocType::INCREASE;
-        }
-        else if (pointer_mapping_->at(address) == size) {
+        } else if (pointer_mapping_->at(address) == size) {
             return ReallocType::REUSE;
-        }
-        else {
+        } else {
             return ReallocType::DECREASE;
         }
     }
 
 public:
-    Allocator(int device_id): device_id_(device_id)
-    {
+    Allocator(int device_id): device_id_(device_id) {
         FT_LOG_DEBUG(__PRETTY_FUNCTION__);
         pointer_mapping_ = new std::unordered_map<void*, size_t>();
 #if defined(CUDA_MEMORY_POOL_DISABLED)
@@ -164,8 +156,7 @@ public:
 #endif
     }
 
-    virtual ~Allocator()
-    {
+    virtual ~Allocator() {
         FT_LOG_DEBUG(__PRETTY_FUNCTION__);
         while (!pointer_mapping_->empty()) {
             free((void**)(&pointer_mapping_->begin()->first));
@@ -173,18 +164,15 @@ public:
         delete pointer_mapping_;
     }
 
-    void setStream(cudaStream_t stream)
-    {
+    void setStream(cudaStream_t stream) {
         stream_ = stream;
     }
 
-    cudaStream_t returnStream()
-    {
+    cudaStream_t returnStream() {
         return stream_;
     };
 
-    void* malloc(size_t size, const bool is_set_zero = true, bool is_host = false)
-    {
+    void* malloc(size_t size, const bool is_set_zero = true, bool is_host = false) {
         FT_LOG_DEBUG(__PRETTY_FUNCTION__);
         if (size == 0) {
             return nullptr;
@@ -195,8 +183,7 @@ public:
         check_cuda_error(getSetDevice(device_id_, &o_device));
         if (is_host) {
             check_cuda_error(cudaMallocHost(&ptr, (size_t)(ceil(size / 32.)) * 32));
-        }
-        else {
+        } else {
 #if defined(CUDA_MEMORY_POOL_DISABLED)
             check_cuda_error(cudaMalloc(&ptr, (size_t)(ceil(size / 32.)) * 32));
 #else
@@ -214,8 +201,7 @@ public:
         return ptr;
     }
 
-    void free(void** ptr, bool is_host = false) const
-    {
+    void free(void** ptr, bool is_host = false) const {
         FT_LOG_DEBUG(__PRETTY_FUNCTION__);
         void* address = getAddress(*ptr);
         if (*ptr != nullptr) {
@@ -225,8 +211,7 @@ public:
                 check_cuda_error(getSetDevice(device_id_, &o_device));
                 if (is_host) {
                     check_cuda_error(cudaFreeHost(*ptr));
-                }
-                else {
+                } else {
 #if defined(CUDA_MEMORY_POOL_DISABLED)
                     check_cuda_error(cudaFree(*ptr));
 #else
@@ -236,8 +221,7 @@ public:
                 }
                 check_cuda_error(getSetDevice(o_device));
                 pointer_mapping_->erase(address);
-            }
-            else {
+            } else {
                 FT_LOG_WARNING("pointer_mapping_ does not have information of ptr at %p.", address);
             }
         }
@@ -245,8 +229,7 @@ public:
         return;
     }
 
-    void memSet(void* ptr, const int val, const size_t size)
-    {
+    void memSet(void* ptr, const int val, const size_t size) {
         check_cuda_error(cudaMemsetAsync(ptr, val, size, stream_));
     }
 };

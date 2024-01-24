@@ -35,9 +35,11 @@ namespace fastertransformer {
 
 Tensor::Tensor():
     // a none tensor.
-    where(MEMORY_CPU), type(TYPE_INVALID), shape({}), data(nullptr), owned(false)
-{
-}
+    where(MEMORY_CPU),
+    type(TYPE_INVALID),
+    shape({}),
+    data(nullptr),
+    owned(false) {}
 
 Tensor::Tensor(const MemoryType          _where,
                const DataType            _type,
@@ -50,8 +52,7 @@ Tensor::Tensor(const MemoryType          _where,
     data(nullptr),
     allocator(_allocator),
     owned(true),
-    ref_counter(std::make_shared<int>(1))
-{
+    ref_counter(std::make_shared<int>(1)) {
     const size_t allocBytes =
         std::accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>()) * Tensor::getTypeSize(type);
     if (where == MEMORY_GPU) {
@@ -59,32 +60,26 @@ Tensor::Tensor(const MemoryType          _where,
         // check_cuda_error(allocator->reMalloc(data, sizeBytes(), is_set_zero));
         // check_cuda_error(cudaMalloc(&data, sizeBytes()));
         data = allocator->reMalloc(data, allocBytes, is_set_zero);
-    }
-    else {
+    } else {
         data = malloc(allocBytes);
     }
 }
 
 Tensor::Tensor(const MemoryType _where, const DataType _type, const std::vector<size_t> _shape, const void* _data):
-    where(_where), type(_type), shape(_shape), data(const_cast<void*>(_data)), owned(false), ref_counter(nullptr)
-{
-}
+    where(_where), type(_type), shape(_shape), data(const_cast<void*>(_data)), owned(false), ref_counter(nullptr) {}
 
-Tensor::~Tensor()
-{
+Tensor::~Tensor() {
     if (owned && data != nullptr && ref_counter.use_count() == 1) {
         if (where == MEMORY_GPU) {
             // check_cuda_error(cudaFree((void*)data));
             allocator->free((void**)(&data));
-        }
-        else {
+        } else {
             free((void*)data);
         }
     }
 }
 
-bool Tensor::operator==(const Tensor& tensor) const
-{
+bool Tensor::operator==(const Tensor& tensor) const {
     if (where != tensor.where || type != tensor.type || shape != tensor.shape) {
         return false;
     }
@@ -98,19 +93,16 @@ bool Tensor::operator==(const Tensor& tensor) const
         free(data_cpu);
         free(data_cpu2);
         return ret;
-    }
-    else {
+    } else {
         return memcmp(data, tensor.data, sizeBytes()) == 0;
     }
 }
 
-bool Tensor::operator!=(const Tensor& tensor) const
-{
+bool Tensor::operator!=(const Tensor& tensor) const {
     return !(*this == tensor);
 }
 
-void Tensor::parseNpyIntro(FILE*& f_ptr, uint32_t& header_len, uint32_t& start_data)
-{
+void Tensor::parseNpyIntro(FILE*& f_ptr, uint32_t& header_len, uint32_t& start_data) {
     const char magic[]                   = "\x93"
                                            "NUMPY";
     char       magic_test[sizeof(magic)] = "\0";
@@ -129,21 +121,18 @@ void Tensor::parseNpyIntro(FILE*& f_ptr, uint32_t& header_len, uint32_t& start_d
         uint16_t header_len_u16 = 0;
         n_elems                 = fread((void*)&header_len_u16, sizeof(uint16_t), 1, f_ptr);
         header_len              = header_len_u16;
-    }
-    else if (npy_major == 2) {
+    } else if (npy_major == 2) {
         uint32_t header_len_u32 = 0;
         n_elems                 = fread((void*)&header_len_u32, sizeof(uint32_t), 1, f_ptr);
         header_len              = header_len_u32;
-    }
-    else {
+    } else {
         throw std::runtime_error("Unsupported npy version: " + std::to_string(npy_major));
     }
 
     start_data = 8 + 2 * npy_major + header_len;
 }
 
-int Tensor::parseNpyHeader(FILE*& f_ptr, uint32_t header_len, DataType& type, std::vector<size_t>& shape)
-{
+int Tensor::parseNpyHeader(FILE*& f_ptr, uint32_t header_len, DataType& type, std::vector<size_t>& shape) {
     char*  header_c = (char*)malloc(header_len * sizeof(char));
     size_t n_elems  = fread((void*)header_c, sizeof(char), header_len, f_ptr);
     if (n_elems != header_len) {
@@ -184,8 +173,7 @@ int Tensor::parseNpyHeader(FILE*& f_ptr, uint32_t header_len, DataType& type, st
     return 0;
 }
 
-Tensor Tensor::loadNpy(const std::string& npy_file, const MemoryType where)
-{
+Tensor Tensor::loadNpy(const std::string& npy_file, const MemoryType where) {
     DataType            type;
     std::vector<size_t> shape;
 
@@ -215,28 +203,24 @@ Tensor Tensor::loadNpy(const std::string& npy_file, const MemoryType where)
     return std::move(tensor);
 }
 
-size_t Tensor::size() const
-{
+size_t Tensor::size() const {
     if (data == nullptr || shape.size() == 0) {
         return 0;
     }
     return std::accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>());
 }
 
-size_t Tensor::sizeBytes() const
-{
+size_t Tensor::sizeBytes() const {
     return size() * Tensor::getTypeSize(type);
 }
 
-std::string Tensor::whereToString() const
-{
+std::string Tensor::whereToString() const {
     static const std::unordered_map<MemoryType, std::string> mem_to_string{
         {MEMORY_CPU, "CPU"}, {MEMORY_CPU_PINNED, "CPU_PINNED"}, {MEMORY_GPU, "GPU"}};
     return mem_to_string.at(where);
 }
 
-std::string Tensor::toString() const
-{
+std::string Tensor::toString() const {
     std::string memtype_str = whereToString();
 
     static const std::unordered_map<DataType, std::string> type_to_string{
@@ -265,8 +249,7 @@ std::string Tensor::toString() const
                   data);
 }
 
-DataType Tensor::typeFromNumpyDesc(std::string type)
-{
+DataType Tensor::typeFromNumpyDesc(std::string type) {
     static const std::unordered_map<std::string, DataType> type_map{{"?", TYPE_BOOL},
                                                                     {"b", TYPE_BYTES},
                                                                     {"u1", TYPE_UINT8},
@@ -283,8 +266,7 @@ DataType Tensor::typeFromNumpyDesc(std::string type)
     return type_map.at(type);
 }
 
-size_t Tensor::getTypeSize(DataType type)
-{
+size_t Tensor::getTypeSize(DataType type) {
     static const std::unordered_map<DataType, size_t> type_map{{TYPE_BOOL, sizeof(bool)},
                                                                {TYPE_BYTES, sizeof(char)},
                                                                {TYPE_UINT8, sizeof(uint8_t)},
@@ -307,8 +289,7 @@ size_t Tensor::getTypeSize(DataType type)
     return type_map.at(type);
 }
 
-std::string Tensor::getNumpyTypeDesc(DataType type) const
-{
+std::string Tensor::getNumpyTypeDesc(DataType type) const {
     static const std::unordered_map<DataType, std::string> type_map{{TYPE_INVALID, "x"},
                                                                     {TYPE_BOOL, "?"},
                                                                     {TYPE_BYTES, "b"},
@@ -333,8 +314,7 @@ std::string Tensor::getNumpyTypeDesc(DataType type) const
     return type_map.count(type) > 0 ? type_map.at(type) : "x";
 }
 
-void Tensor::saveNpy(const std::string& filename) const
-{
+void Tensor::saveNpy(const std::string& filename) const {
     // Save tensor to NPY 1.0 format (see https://numpy.org/neps/nep-0001-npy-format.html)
     void*  cpu_data     = (void*)data;
     bool   is_data_temp = false;
@@ -385,8 +365,7 @@ void Tensor::saveNpy(const std::string& filename) const
     }
 }
 
-Tensor Tensor::slice(std::vector<size_t> shape, size_t offset) const
-{
+Tensor Tensor::slice(std::vector<size_t> shape, size_t offset) const {
     if (this->data != nullptr) {
         size_t n_elts        = this->size();
         size_t n_sliced_elts = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
@@ -399,44 +378,37 @@ Tensor Tensor::slice(std::vector<size_t> shape, size_t offset) const
     return Tensor(this->where, this->type, shape, this->getPtrWithOffset(offset));
 }
 
-TensorMap::TensorMap(const std::unordered_map<std::string, Tensor>& tensor_map)
-{
+TensorMap::TensorMap(const std::unordered_map<std::string, Tensor>& tensor_map) {
     for (auto& kv : tensor_map) {
         if (isValid(kv.second)) {
             insert(kv.first, kv.second);
-        }
-        else {
+        } else {
             FT_LOG_DEBUG(fmtstr("%s is not a valid tensor, skipping insert into TensorMap", kv.first.c_str()));
         }
     }
 }
 
-TensorMap::TensorMap(const std::vector<Tensor>& tensor_map)
-{
+TensorMap::TensorMap(const std::vector<Tensor>& tensor_map) {
     for (size_t i = 0; i < tensor_map.size(); i++) {
         insert(std::to_string(i), tensor_map[i]);
     }
 }
 
-TensorMap::TensorMap(std::initializer_list<std::pair<std::string, Tensor>> tensor_map)
-{
+TensorMap::TensorMap(std::initializer_list<std::pair<std::string, Tensor>> tensor_map) {
     for (auto& pair : tensor_map) {
         if (isValid(pair.second)) {
             insert(pair.first, pair.second);
-        }
-        else {
+        } else {
             FT_LOG_DEBUG(fmtstr("%s is not a valid tensor, skipping insert into TensorMap", pair.first.c_str()));
         }
     }
 }
 
-TensorMap::~TensorMap()
-{
+TensorMap::~TensorMap() {
     tensor_map_.clear();
 }
 
-std::vector<std::string> TensorMap::keys() const
-{
+std::vector<std::string> TensorMap::keys() const {
     std::vector<std::string> key_names;
     for (auto& kv : tensor_map_) {
         key_names.push_back(kv.first);
@@ -444,8 +416,7 @@ std::vector<std::string> TensorMap::keys() const
     return key_names;
 }
 
-std::string TensorMap::toString() const
-{
+std::string TensorMap::toString() const {
     std::stringstream ss;
     ss << "{";
     std::vector<std::string> key_names = keys();
@@ -459,8 +430,7 @@ std::string TensorMap::toString() const
     return ss.str();
 }
 
-TensorMap TensorMap::fromNpyFolder(const std::string& base_folder)
-{
+TensorMap TensorMap::fromNpyFolder(const std::string& base_folder) {
     DIR* dir_p = opendir(base_folder.c_str());
     FT_CHECK_WITH_INFO(dir_p != nullptr, fmtstr("Could not open folder %s. ", base_folder.c_str()));
     struct dirent* dp;
@@ -479,14 +449,11 @@ TensorMap TensorMap::fromNpyFolder(const std::string& base_folder)
         MemoryType where;
         if (filename.compare(0, pos, "GPU") == 0) {
             where = MEMORY_GPU;
-        }
-        else if (filename.compare(0, pos, "CPU") == 0) {
+        } else if (filename.compare(0, pos, "CPU") == 0) {
             where = MEMORY_CPU;
-        }
-        else if (filename.compare(0, pos, "CPU_PINNED") == 0) {
+        } else if (filename.compare(0, pos, "CPU_PINNED") == 0) {
             where = MEMORY_CPU_PINNED;
-        }
-        else {
+        } else {
             FT_CHECK_WITH_INFO(false, fmtstr("Invalid filename: %s\n", filename.c_str()));
         }
         std::string key = filename.substr(pos + 1, len - pos - 5);
@@ -499,8 +466,7 @@ TensorMap TensorMap::fromNpyFolder(const std::string& base_folder)
     return ret_tensor;
 }
 
-void TensorMap::saveNpy(const std::string& base_folder)
-{
+void TensorMap::saveNpy(const std::string& base_folder) {
     mode_t mode_0755 = S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
     int    ret       = mkdir(base_folder.c_str(), mode_0755);
     FT_CHECK_WITH_INFO(ret == 0 || errno == EEXIST, fmtstr("Could not create folder %s.\n", base_folder.c_str()));

@@ -2,20 +2,20 @@
 
 namespace fastertransformer {
 
-template <typename T>
+template<typename T>
 std::string valueToString(const T* value, const size_t idx) {
     return std::to_string(value[idx]);
 }
 
-template <>
+template<>
 std::string valueToString<__half>(const __half* value, const size_t idx) {
     return std::to_string((float)value[idx]);
 }
 
-template <typename T>
+template<typename T>
 std::string printCudaMemoryToString(const void* ptr, int size) {
     const auto buffer_size = size * sizeof(T);
-    auto* cpu_mem = reinterpret_cast<T*>(malloc(buffer_size));
+    auto*      cpu_mem     = reinterpret_cast<T*>(malloc(buffer_size));
     cudaDeviceSynchronize();
     check_cuda_error(cudaMemcpy(cpu_mem, ptr, buffer_size, cudaMemcpyDeviceToHost));
     std::string result = "[";
@@ -30,7 +30,7 @@ std::string printCudaMemoryToString(const void* ptr, int size) {
     return result;
 }
 
-template <typename T>
+template<typename T>
 std::string printCudaMemoryStrided(const void* ptr, int stride_length, int stride_num, int size_per_stride) {
     std::string result = "";
     for (int i = 0; i < stride_num; ++i) {
@@ -44,6 +44,7 @@ std::string printCudaMemoryStrided(const void* ptr, int stride_length, int strid
 
 template std::string printCudaMemoryToString<__half>(const void* ptr, int size);
 template std::string printCudaMemoryToString<int>(const void* ptr, int size);
-template std::string printCudaMemoryStrided<__half>(const void* ptr, int stride_length, int stride_num, int size_per_stride);
+template std::string
+printCudaMemoryStrided<__half>(const void* ptr, int stride_length, int stride_num, int size_per_stride);
 
-} // namespace fastertransformer
+}  // namespace fastertransformer

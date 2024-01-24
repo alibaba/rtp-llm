@@ -41,16 +41,24 @@ void invokeAddBiasResidual(
     T* output, const T* residual1, const T* residual2, const T* bias, const int m, const int n, cudaStream_t stream);
 
 template<typename T>
-void invokeAddBiasResidual(T* output, const T* residual1, const T* bias, const int m, const int n, cudaStream_t stream)
-{
+void invokeAddBiasResidual(
+    T* output, const T* residual1, const T* bias, const int m, const int n, cudaStream_t stream) {
     invokeAddBiasResidual(output, residual1, (const T*)nullptr, bias, m, n, stream);
 }
 
 template<typename T>
-void invokeAlphaAddBiasResidual(T* output, const T* input, const T* bias, const T alpha, const int m, const int n, cudaStream_t stream);
+void invokeAlphaAddBiasResidual(
+    T* output, const T* input, const T* bias, const T alpha, const int m, const int n, cudaStream_t stream);
 
 template<typename T>
-void invokeAlphaAddBiasResidual(T* output, const T* input, const T* residual, const T* bias, const T alpha, const int m, const int n, cudaStream_t stream);
+void invokeAlphaAddBiasResidual(T*           output,
+                                const T*     input,
+                                const T*     residual,
+                                const T*     bias,
+                                const T      alpha,
+                                const int    m,
+                                const int    n,
+                                cudaStream_t stream);
 
 template<typename T>
 void invokeT5AddResidual(T* output, const T* input, const int m, const int n, cudaStream_t stream);
@@ -62,7 +70,8 @@ template<typename T>
 void invokeT5AddBiasResidual(T* output, const T* input, const T* bias, const int m, const int n, cudaStream_t stream);
 
 template<typename T>
-void invokeT5AddBiasResidual(T* output, const T* input_1, const T* input_2, const T* bias, const int m, const int n, cudaStream_t stream);
+void invokeT5AddBiasResidual(
+    T* output, const T* input_1, const T* input_2, const T* bias, const int m, const int n, cudaStream_t stream);
 
 template<typename T>
 void invokeAddBiasAttentionFfnResidual(T*           block_output,
@@ -83,8 +92,7 @@ void invokeAddBiasAttentionFfnResidual(T*           block_output,
                                        const T*     bias,
                                        const int    m,
                                        const int    n,
-                                       cudaStream_t stream)
-{
+                                       cudaStream_t stream) {
     invokeAddBiasAttentionFfnResidual(block_output, ffn_output, attn_output, block_input, bias, m, n, 1, stream);
 }
 

@@ -95,16 +95,10 @@ template<typename Key_Data_Type_   = float,
 struct Segmented_topk_kernel_params {
     typedef Key_Data_Type_   Key_Data_Type;
     typedef Value_Data_Type_ Value_Data_Type;
-    enum {
-        BLOCK_THREADS = BLOCK_THREADS_
-    };
-    enum {
-        ITEMS_INCREMENT = 32
-    };
+    enum { BLOCK_THREADS = BLOCK_THREADS_ };
+    enum { ITEMS_INCREMENT = 32 };
     // enum { KEYS_PER_LDG = 2 * 4 / sizeof(Key_Data_Type_) };
-    enum {
-        KEYS_PER_LDG = KEYS_PER_LDG_
-    };
+    enum { KEYS_PER_LDG = KEYS_PER_LDG_ };
 };
 
 struct TopKPerSegmentContext {

@@ -55,8 +55,7 @@
 namespace torch_ext {
 
 template<typename T>
-inline T* get_ptr(const torch::Tensor& t)
-{
+inline T* get_ptr(const torch::Tensor& t) {
     return reinterpret_cast<T*>(t.data_ptr());
 }
 

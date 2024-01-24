@@ -58,13 +58,11 @@ typedef enum datatype_enum {
 } DataType;
 
 template<typename T>
-DataType getTensorType()
-{
+DataType getTensorType() {
     using RealT = typename std::remove_cv<T>::type;
     if (std::is_same<RealT, float>::value) {
         return TYPE_FP32;
-    }
-    else if (std::is_same<RealT, half>::value) {
+    } else if (std::is_same<RealT, half>::value) {
         return TYPE_FP16;
     }
 #ifdef ENABLE_BF16
@@ -79,23 +77,17 @@ DataType getTensorType()
 #endif
     else if (std::is_same<RealT, int>::value) {
         return TYPE_INT32;
-    }
-    else if (std::is_same<RealT, int8_t>::value) {
+    } else if (std::is_same<RealT, int8_t>::value) {
         return TYPE_INT8;
-    }
-    else if (std::is_same<RealT, uint>::value) {
+    } else if (std::is_same<RealT, uint>::value) {
         return TYPE_UINT32;
-    }
-    else if (std::is_same<RealT, unsigned long long int>::value || std::is_same<RealT, uint64_t>::value) {
+    } else if (std::is_same<RealT, unsigned long long int>::value || std::is_same<RealT, uint64_t>::value) {
         return TYPE_UINT64;
-    }
-    else if (std::is_same<RealT, bool>::value) {
+    } else if (std::is_same<RealT, bool>::value) {
         return TYPE_BOOL;
-    }
-    else if (std::is_same<RealT, char>::value) {
+    } else if (std::is_same<RealT, char>::value) {
         return TYPE_BYTES;
-    }
-    else {
+    } else {
         return TYPE_INVALID;
     }
 }
@@ -123,10 +115,10 @@ struct Tensor {
 
     ~Tensor();
 
-    Tensor(const Tensor& tensor)            = default;
-    Tensor(Tensor&& tensor)                 = default;
+    Tensor(const Tensor& tensor) = default;
+    Tensor(Tensor&& tensor)      = default;
     Tensor& operator=(const Tensor& tensor) = default;
-    Tensor& operator=(Tensor&& tensor)      = default;
+    Tensor& operator=(Tensor&& tensor) = default;
 
     bool operator==(const Tensor& tensor) const;
     bool operator!=(const Tensor& tensor) const;
@@ -145,8 +137,7 @@ struct Tensor {
     static size_t   getTypeSize(DataType type);
 
     template<typename T>
-    inline T getVal(size_t index) const
-    {
+    inline T getVal(size_t index) const {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
         FT_CHECK(data != nullptr);
         FT_CHECK_WITH_INFO(index < size(), "index is larger than buffer size");
@@ -158,8 +149,7 @@ struct Tensor {
         }
         if (where == MEMORY_CPU) {
             return ((T*)data)[index];
-        }
-        else {
+        } else {
             using ValueType = typename std::remove_const<T>::type;
             ValueType val;
             cudaMemcpy(&val, (ValueType*)data + index, sizeof(ValueType), cudaMemcpyDeviceToHost);
@@ -168,8 +158,7 @@ struct Tensor {
     }
 
     template<typename T>
-    inline T getVal() const
-    {
+    inline T getVal() const {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
         if (getTensorType<T>() != type) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
@@ -180,8 +169,7 @@ struct Tensor {
     }
 
     template<typename T>
-    inline T* getPtr() const
-    {
+    inline T* getPtr() const {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
         if (getTensorType<T>() != type) {
             FT_LOG_DEBUG("getPtr with type %s, but data type is: %s",
@@ -191,21 +179,18 @@ struct Tensor {
         return (T*)data;
     }
 
-    inline void* getPtrWithOffset(size_t offset) const
-    {
+    inline void* getPtrWithOffset(size_t offset) const {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
         if (data == nullptr) {
             return (void*)data;
-        }
-        else {
+        } else {
             FT_CHECK_WITH_INFO(offset < size(), "offset is larger than buffer size");
             return (void*)((char*)data + offset * Tensor::getTypeSize(type));
         }
     }
 
     template<typename T>
-    inline T* getPtrWithOffset(size_t offset) const
-    {
+    inline T* getPtrWithOffset(size_t offset) const {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
         if (getTensorType<T>() != type) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
@@ -214,8 +199,7 @@ struct Tensor {
         }
         if (data == nullptr) {
             return (T*)data;
-        }
-        else {
+        } else {
             FT_CHECK_WITH_INFO(offset < size(),
                                fmtstr("offset (%lu) is larger than buffer size (%lu)", offset, size()));
             return ((T*)data) + offset;
@@ -223,8 +207,7 @@ struct Tensor {
     }
 
     template<typename T>
-    T max() const
-    {
+    T max() const {
         if (getTensorType<T>() != type) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
@@ -246,8 +229,7 @@ struct Tensor {
     }
 
     template<typename T>
-    T min() const
-    {
+    T min() const {
         if (getTensorType<T>() != type) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
@@ -269,8 +251,7 @@ struct Tensor {
     }
 
     template<typename T>
-    T any(T val) const
-    {
+    T any(T val) const {
         if (getTensorType<T>() != type) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
@@ -288,8 +269,7 @@ struct Tensor {
     }
 
     template<typename T>
-    T all(T val) const
-    {
+    T all(T val) const {
         if (getTensorType<T>() != type) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
@@ -306,8 +286,7 @@ struct Tensor {
         return true;
     }
 
-    void updateShape(size_t idx, size_t val)
-    {
+    void updateShape(size_t idx, size_t val) {
         // TODO: find a better way to update the shape
         std::vector<size_t>& shape_ref = const_cast<std::vector<size_t>&>(shape);
         shape_ref[idx]                 = val;
@@ -316,8 +295,7 @@ struct Tensor {
     Tensor slice(std::vector<size_t> shape, size_t offset = 0) const;
 
     template<typename T>
-    std::string dataToString(size_t num_to_print = 0, size_t start = 0) const
-    {
+    std::string dataToString(size_t num_to_print = 0, size_t start = 0) const {
         std::string str = "";
         num_to_print    = num_to_print == 0 ? size() : std::min(num_to_print, size() - start);
         for (size_t i = start; i < num_to_print; ++i) {
@@ -342,8 +320,7 @@ class TensorMap {
 private:
     std::unordered_map<std::string, Tensor> tensor_map_;
 
-    inline bool isValid(const Tensor& tensor)
-    {
+    inline bool isValid(const Tensor& tensor) {
         return tensor.size() > 0 && tensor.data != nullptr;
     }
 
@@ -354,35 +331,30 @@ public:
     TensorMap(std::initializer_list<std::pair<std::string, Tensor>> tensor_map);
     ~TensorMap();
 
-    inline size_t size() const
-    {
+    inline size_t size() const {
         return tensor_map_.size();
     }
 
-    inline bool isExist(const std::string& key) const
-    {
+    inline bool isExist(const std::string& key) const {
         FT_LOG_DEBUG("%s for key: %s", __PRETTY_FUNCTION__, key.c_str());
         return tensor_map_.find(key) != tensor_map_.end();
     }
 
     std::vector<std::string> keys() const;
 
-    inline void insert(const std::string& key, const Tensor& value)
-    {
+    inline void insert(const std::string& key, const Tensor& value) {
         FT_CHECK_WITH_INFO(!isExist(key), fmtstr("Duplicated key %s", key.c_str()));
         FT_CHECK_WITH_INFO(isValid(value), fmtstr("A none tensor or nullptr is not allowed (key is %s)", key.c_str()));
         tensor_map_.insert({key, value});
     }
 
-    inline void insertIfValid(const std::string& key, const Tensor& value)
-    {
+    inline void insertIfValid(const std::string& key, const Tensor& value) {
         if (isValid(value)) {
             insert({key, value});
         }
     }
 
-    inline void insert(std::pair<std::string, Tensor> p)
-    {
+    inline void insert(std::pair<std::string, Tensor> p) {
         tensor_map_.insert(p);
     }
 
@@ -390,8 +362,7 @@ public:
     Tensor at(int tmp)    = delete;
     Tensor at(size_t tmp) = delete;
 
-    inline Tensor& at(const std::string& key)
-    {
+    inline Tensor& at(const std::string& key) {
         FT_LOG_DEBUG("%s for key %s", __PRETTY_FUNCTION__, key.c_str());
         FT_CHECK_WITH_INFO(isExist(key),
                            fmtstr("Cannot find a tensor of name %s in the tensor map (keys: %s)",
@@ -400,8 +371,7 @@ public:
         return tensor_map_.at(key);
     }
 
-    inline Tensor at(const std::string& key) const
-    {
+    inline Tensor at(const std::string& key) const {
         FT_CHECK_WITH_INFO(isExist(key),
                            fmtstr("Cannot find a tensor of name %s in the tensor map (keys: %s)",
                                   key.c_str(),
@@ -409,8 +379,7 @@ public:
         return std::move(tensor_map_.at(key));
     }
 
-    inline Tensor& at(const std::string& key, Tensor& default_tensor)
-    {
+    inline Tensor& at(const std::string& key, Tensor& default_tensor) {
         FT_LOG_DEBUG("%s for key %s", __PRETTY_FUNCTION__, key.c_str());
         if (isExist(key)) {
             return tensor_map_.at(key);
@@ -418,8 +387,7 @@ public:
         return default_tensor;
     }
 
-    inline Tensor at(const std::string& key, Tensor& default_tensor) const
-    {
+    inline Tensor at(const std::string& key, Tensor& default_tensor) const {
         FT_LOG_DEBUG("%s for key %s", __PRETTY_FUNCTION__, key.c_str());
         if (isExist(key)) {
             return tensor_map_.at(key);
@@ -427,8 +395,7 @@ public:
         return default_tensor;
     }
 
-    inline Tensor& at(const std::string& key, Tensor&& default_tensor)
-    {
+    inline Tensor& at(const std::string& key, Tensor&& default_tensor) {
         FT_LOG_DEBUG("%s for key %s", __PRETTY_FUNCTION__, key.c_str());
         if (isExist(key)) {
             return tensor_map_.at(key);
@@ -436,8 +403,7 @@ public:
         return default_tensor;
     }
 
-    inline Tensor at(const std::string& key, Tensor&& default_tensor) const
-    {
+    inline Tensor at(const std::string& key, Tensor&& default_tensor) const {
         if (isExist(key)) {
             return tensor_map_.at(key);
         }
@@ -445,8 +411,7 @@ public:
     }
 
     template<typename T>
-    inline T getVal(const std::string& key) const
-    {
+    inline T getVal(const std::string& key) const {
         FT_CHECK_WITH_INFO(isExist(key),
                            fmtstr("Cannot find a tensor of name %s in the tensor map (keys: %s)",
                                   key.c_str(),
@@ -455,8 +420,7 @@ public:
     }
 
     template<typename T>
-    inline T getVal(const std::string& key, T default_value) const
-    {
+    inline T getVal(const std::string& key, T default_value) const {
         if (isExist(key)) {
             return tensor_map_.at(key).getVal<T>();
         }
@@ -464,8 +428,7 @@ public:
     }
 
     template<typename T>
-    inline T getValWithOffset(const std::string& key, size_t index) const
-    {
+    inline T getValWithOffset(const std::string& key, size_t index) const {
         FT_CHECK_WITH_INFO(isExist(key),
                            fmtstr("Cannot find a tensor of name %s in the tensor map (keys: %s)",
                                   key.c_str(),
@@ -474,8 +437,7 @@ public:
     }
 
     template<typename T>
-    inline T getValWithOffset(const std::string& key, size_t index, T default_value) const
-    {
+    inline T getValWithOffset(const std::string& key, size_t index, T default_value) const {
         if (isExist(key)) {
             return tensor_map_.at(key).getVal<T>(index);
         }
@@ -483,8 +445,7 @@ public:
     }
 
     template<typename T>
-    inline T* getPtr(const std::string& key) const
-    {
+    inline T* getPtr(const std::string& key) const {
         FT_CHECK_WITH_INFO(isExist(key),
                            fmtstr("Cannot find a tensor of name %s in the tensor map (keys: %s)",
                                   key.c_str(),
@@ -493,8 +454,7 @@ public:
     }
 
     template<typename T>
-    inline T* getPtr(const std::string& key, T* default_ptr) const
-    {
+    inline T* getPtr(const std::string& key, T* default_ptr) const {
         if (isExist(key)) {
             return tensor_map_.at(key).getPtr<T>();
         }
@@ -502,8 +462,7 @@ public:
     }
 
     template<typename T>
-    inline T* getPtrWithOffset(const std::string& key, size_t index) const
-    {
+    inline T* getPtrWithOffset(const std::string& key, size_t index) const {
         FT_CHECK_WITH_INFO(isExist(key),
                            fmtstr("Cannot find a tensor of name %s in the tensor map (keys: %s)",
                                   key.c_str(),
@@ -512,26 +471,22 @@ public:
     }
 
     template<typename T>
-    inline T* getPtrWithOffset(const std::string& key, size_t index, T* default_ptr) const
-    {
+    inline T* getPtrWithOffset(const std::string& key, size_t index, T* default_ptr) const {
         if (isExist(key)) {
             return tensor_map_.at(key).getPtrWithOffset<T>(index);
         }
         return default_ptr;
     }
 
-    inline std::unordered_map<std::string, Tensor> getMap() const
-    {
+    inline std::unordered_map<std::string, Tensor> getMap() const {
         return tensor_map_;
     }
 
-    inline std::unordered_map<std::string, Tensor>::iterator begin()
-    {
+    inline std::unordered_map<std::string, Tensor>::iterator begin() {
         return tensor_map_.begin();
     }
 
-    inline std::unordered_map<std::string, Tensor>::iterator end()
-    {
+    inline std::unordered_map<std::string, Tensor>::iterator end() {
         return tensor_map_.end();
     }
 

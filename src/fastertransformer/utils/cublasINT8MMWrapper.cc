@@ -27,9 +27,7 @@ cublasINT8MMWrapper::cublasINT8MMWrapper(cublasLtHandle_t cublaslt_handle,
                                          std::mutex*      mu,
                                          bool             use_ORDER_COL32_2R_4R4):
     cublasMMWrapper(nullptr, cublaslt_handle, stream, cublas_algo_map, mu, nullptr),
-    use_ORDER_COL32_2R_4R4_(use_ORDER_COL32_2R_4R4)
-{
-}
+    use_ORDER_COL32_2R_4R4_(use_ORDER_COL32_2R_4R4) {}
 
 cublasINT8MMWrapper::cublasINT8MMWrapper(cublasHandle_t   cublas_handle,
                                          cublasLtHandle_t cublaslt_handle,
@@ -38,9 +36,7 @@ cublasINT8MMWrapper::cublasINT8MMWrapper(cublasHandle_t   cublas_handle,
                                          std::mutex*      mu,
                                          bool             use_ORDER_COL32_2R_4R4):
     cublasMMWrapper(cublas_handle, cublaslt_handle, stream, cublas_algo_map, mu, nullptr),
-    use_ORDER_COL32_2R_4R4_(use_ORDER_COL32_2R_4R4)
-{
-}
+    use_ORDER_COL32_2R_4R4_(use_ORDER_COL32_2R_4R4) {}
 
 #ifdef SPARSITY_ENABLED
 cublasINT8MMWrapper::cublasINT8MMWrapper(cublasLtHandle_t   cublaslt_handle,
@@ -50,13 +46,10 @@ cublasINT8MMWrapper::cublasINT8MMWrapper(cublasLtHandle_t   cublaslt_handle,
                                          std::mutex*        mu,
                                          bool               use_ORDER_COL32_2R_4R4):
     cublasMMWrapper(nullptr, cublaslt_handle, cusparselt_handle, stream, cublas_algo_map, mu, nullptr),
-    use_ORDER_COL32_2R_4R4_(use_ORDER_COL32_2R_4R4)
-{
-}
+    use_ORDER_COL32_2R_4R4_(use_ORDER_COL32_2R_4R4) {}
 #endif
 
-cublasINT8MMWrapper::~cublasINT8MMWrapper()
-{
+cublasINT8MMWrapper::~cublasINT8MMWrapper() {
     mu_ = nullptr;
 }
 
@@ -73,8 +66,7 @@ cublasINT8MMWrapper::cublasINT8MMWrapper(const cublasINT8MMWrapper& wrapper):
     cublasMMWrapper(
         nullptr, wrapper.cublaslt_handle_, wrapper.stream_, wrapper.cublas_algo_map_, wrapper.mu_, wrapper.allocator_),
 #endif
-    use_ORDER_COL32_2R_4R4_(wrapper.use_ORDER_COL32_2R_4R4_)
-{
+    use_ORDER_COL32_2R_4R4_(wrapper.use_ORDER_COL32_2R_4R4_) {
 }
 
 // for int8 cublasLtMM with algo
@@ -90,8 +82,7 @@ void cublasINT8MMWrapper::Gemm(int*          res,
                                int64_t       strideb,
                                int64_t       stridec,
                                const int8_t* ATransform,
-                               const int8_t* kernel)
-{
+                               const int8_t* kernel) {
     mu_->lock();
     cublasOperation_t opTranspose = CUBLAS_OP_T;
 #if (CUDART_VERSION >= 11000)
@@ -109,8 +100,7 @@ void cublasINT8MMWrapper::Gemm(int*          res,
 #if (CUDART_VERSION >= 11000)
     if (use_ORDER_COL32_2R_4R4_) {
         order_matrixB = CUBLASLT_ORDER_COL32_2R_4R4;
-    }
-    else {
+    } else {
         order_matrixB = CUBLASLT_ORDER_COL4_4R2_8C;
     }
 #else
@@ -121,8 +111,7 @@ void cublasINT8MMWrapper::Gemm(int*          res,
     int ldbTransform;
     if (use_ORDER_COL32_2R_4R4_) {
         ldbTransform = 32 * ((n + 32 - 1) / 32) * 32;
-    }
-    else {
+    } else {
         ldbTransform = 32 * ((n + 8 - 1) / 8) * 8;
     }
     int ldcTransform = 32 * m;
@@ -191,14 +180,12 @@ void cublasINT8MMWrapper::Gemm(int*          res,
         cublasLtMatmulAlgoConfigSetAttribute(
             &algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &(tmp_info.stages), sizeof(tmp_info.stages));
 #endif
-    }
-    else {
+    } else {
         findAlgo = 1;
         int algoId;
         if (use_ORDER_COL32_2R_4R4_) {
             algoId = 7;
-        }
-        else {
+        } else {
             algoId = 6;
         }
         int swizzle         = 0;
@@ -219,8 +206,7 @@ void cublasINT8MMWrapper::Gemm(int*          res,
         int stages;
         if (use_ORDER_COL32_2R_4R4_) {
             stages = 15;
-        }
-        else {
+        } else {
             stages = 13;
         }
         cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &(stages), sizeof(stages));
@@ -266,8 +252,7 @@ void cublasINT8MMWrapper::Gemm(int8_t*       res,
                                int64_t       stridec,
                                const float   alpha,
                                const int8_t* ATransform,
-                               const int8_t* kernel)
-{
+                               const int8_t* kernel) {
     mu_->lock();
     cublasOperation_t opTranspose = CUBLAS_OP_T;
     // int8 gemm does not support CUBLAS_POINTER_MODE_DEVICE
@@ -288,8 +273,7 @@ void cublasINT8MMWrapper::Gemm(int8_t*       res,
 #if (CUDART_VERSION >= 11000)
     if (use_ORDER_COL32_2R_4R4_) {
         order_matrixB = CUBLASLT_ORDER_COL32_2R_4R4;
-    }
-    else {
+    } else {
         order_matrixB = CUBLASLT_ORDER_COL4_4R2_8C;
     }
 #else
@@ -301,8 +285,7 @@ void cublasINT8MMWrapper::Gemm(int8_t*       res,
     int ldbTransform;
     if (use_ORDER_COL32_2R_4R4_) {
         ldbTransform = 32 * ((n + 32 - 1) / 32) * 32;
-    }
-    else {
+    } else {
         ldbTransform = 32 * ((n + 8 - 1) / 8) * 8;
     }
 
@@ -371,14 +354,12 @@ void cublasINT8MMWrapper::Gemm(int8_t*       res,
         cublasLtMatmulAlgoConfigSetAttribute(
             &algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &(tmp_info.stages), sizeof(tmp_info.stages));
 #endif
-    }
-    else {
+    } else {
         findAlgo = 1;
         int algoId;
         if (use_ORDER_COL32_2R_4R4_) {
             algoId = 7;
-        }
-        else {
+        } else {
             algoId = 6;
         }
         int swizzle         = 0;
@@ -399,8 +380,7 @@ void cublasINT8MMWrapper::Gemm(int8_t*       res,
         int stages;
         if (use_ORDER_COL32_2R_4R4_) {
             stages = 15;
-        }
-        else {
+        } else {
             stages = 13;
         }
         cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &(stages), sizeof(stages));
@@ -434,8 +414,7 @@ void cublasINT8MMWrapper::Gemm(int8_t*       res,
 }
 
 template<typename T>
-int cublasINT8MMWrapper::getFusedINT8QKVType(const int k, const int n, const AttentionWeight<T>* attention_weights)
-{
+int cublasINT8MMWrapper::getFusedINT8QKVType(const int k, const int n, const AttentionWeight<T>* attention_weights) {
 
     int           fusedINT8QKV_type = 0;
     const int8_t* Q_weight          = (const int8_t*)(attention_weights->query_weight.kernel);
@@ -453,8 +432,7 @@ int cublasINT8MMWrapper::getFusedINT8QKVType(const int k, const int n, const Att
     return fusedINT8QKV_type;
 }
 
-bool cublasINT8MMWrapper::getUseOrderCol322R4R4()
-{
+bool cublasINT8MMWrapper::getUseOrderCol322R4R4() {
     return use_ORDER_COL32_2R_4R4_;
 }
 
@@ -468,8 +446,7 @@ cublasINT8MMWrapper::getFusedINT8QKVType(const int k, const int n, const Attenti
 // A is sparse weight [m,k], non transposed row major
 // B is activation input [k, n], non transposed col major
 void cublasINT8MMWrapper::SpGemm(
-    const int m, const int n, const int k, const float alpha, const void* A, const void* B, void* C)
-{
+    const int m, const int n, const int k, const float alpha, const void* A, const void* B, void* C) {
     cudaDataType_t                 Atype        = CUDA_R_8I;
     cudaDataType_t                 Btype        = CUDA_R_8I;
     cudaDataType_t                 Ctype        = CUDA_R_8I;
@@ -506,8 +483,7 @@ void cublasINT8MMWrapper::SpGemm(
                                                       &sp_mat_C_desc_map_[mark],
                                                       &sp_mat_C_desc_map_[mark],
                                                       compute_type))
-    }
-    else {
+    } else {
         // initializing MatDesc takes a lot of time
         cusparseLtMatDescriptor_t matA, matB, matC;
         sp_mat_A_desc_map_[mark] = matA;

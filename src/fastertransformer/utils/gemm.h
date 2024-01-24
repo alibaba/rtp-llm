@@ -558,12 +558,9 @@ public:
     explicit GemmInvalidShapeException() = default;
 
     template<typename... Args>
-    explicit GemmInvalidShapeException(const std::string format, const Args&... args): msg_(fmtstr(format, args...))
-    {
-    }
+    explicit GemmInvalidShapeException(const std::string format, const Args&... args): msg_(fmtstr(format, args...)) {}
 
-    const char* what() const throw()
-    {
+    const char* what() const throw() {
         return msg_.c_str();
     }
 };
@@ -576,12 +573,9 @@ public:
     explicit GemmNotSupportedException() = default;
 
     template<typename... Args>
-    explicit GemmNotSupportedException(const std::string format, const Args&... args): msg_(fmtstr(format, args...))
-    {
-    }
+    explicit GemmNotSupportedException(const std::string format, const Args&... args): msg_(fmtstr(format, args...)) {}
 
-    const char* what() const throw()
-    {
+    const char* what() const throw() {
         return msg_.c_str();
     }
 };
@@ -594,12 +588,9 @@ public:
     explicit GemmInvalidException() = default;
 
     template<typename... Args>
-    explicit GemmInvalidException(const std::string format, const Args&... args): msg_(fmtstr(format, args...))
-    {
-    }
+    explicit GemmInvalidException(const std::string format, const Args&... args): msg_(fmtstr(format, args...)) {}
 
-    const char* what() const throw()
-    {
+    const char* what() const throw() {
         return msg_.c_str();
     }
 };

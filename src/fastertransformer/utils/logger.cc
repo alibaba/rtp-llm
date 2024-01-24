@@ -19,14 +19,13 @@
 
 namespace fastertransformer {
 
-Logger::Logger()
-{
+Logger::Logger() {
     char* is_first_rank_only_char = std::getenv("FT_LOG_FIRST_RANK_ONLY");
     bool  is_first_rank_only =
         (is_first_rank_only_char != nullptr && std::string(is_first_rank_only_char) == "ON") ? true : false;
 
     char* env_str = std::getenv("WORLD_RANK");
-    rank = env_str ? std::atoi(env_str) : 0;
+    rank          = env_str ? std::atoi(env_str) : 0;
 
     int device_id;
     cudaGetDevice(&device_id);
@@ -47,8 +46,7 @@ Logger::Logger()
         }
         if (level != name_to_level.end()) {
             setLevel(level->second);
-        }
-        else {
+        } else {
             fprintf(stderr,
                     "[FT][WARNING] Invalid logger level FT_LOG_LEVEL=%s. "
                     "Ignore the environment variable and use a default "

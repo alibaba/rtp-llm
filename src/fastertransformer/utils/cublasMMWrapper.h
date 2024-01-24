@@ -87,8 +87,7 @@ public:
 
     cublasMMWrapper(const cublasMMWrapper& wrapper);
 
-    virtual void cublasVersionCheck()
-    {
+    virtual void cublasVersionCheck() {
         return;
     };
     cublasStatus_t cublasLtMatmulWrapper(cublasLtHandle_t            lightHandle,
@@ -274,12 +273,12 @@ public:
                      const int          ldc,
                      const int          batch_count);
 
-    void batchedGemm(cublasOperation_t transa,
-                     cublasOperation_t transb,
-                     const int         m,
-                     const int         n,
-                     const int         k,
-                     const float       alpha,
+    void batchedGemm(cublasOperation_t  transa,
+                     cublasOperation_t  transb,
+                     const int          m,
+                     const int          n,
+                     const int          k,
+                     const float        alpha,
                      const void* const* A,
                      const int          lda,
                      const void* const* B,

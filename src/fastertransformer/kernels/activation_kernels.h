@@ -59,8 +59,7 @@ void invokeGenericActivation(T*           out,
                              const int    int8_mode,
                              const float* activation_in,
                              const float* activation_out,
-                             cudaStream_t stream)
-{
+                             cudaStream_t stream) {
     invokeGenericActivation<Activation, T, BT>(out,
                                                bias,
                                                gated_weights,
@@ -89,16 +88,14 @@ void invokeAddBiasGeluV2(T*           out,
                          cudaStream_t stream);
 
 template<typename T>
-void invokeAddBias(T* out, T const* bias, const int m, const int n, cudaStream_t stream)
-{
+void invokeAddBias(T* out, T const* bias, const int m, const int n, cudaStream_t stream) {
     invokeGenericActivation<IdentityActivation, T, T>(
         out, bias, nullptr, nullptr, nullptr, nullptr, m, n, 0, nullptr, nullptr, stream);
 }
 
 template<typename T>
 void invokeAddBiasGeluV2(
-    T* out, const T* bias, const int* ia3_tasks, const T* ia3_weights, const int m, const int n, cudaStream_t stream)
-{
+    T* out, const T* bias, const int* ia3_tasks, const T* ia3_weights, const int m, const int n, cudaStream_t stream) {
     invokeAddBiasGeluV2(out, bias, ia3_tasks, ia3_weights, nullptr, 0, m, n, stream);
 }
 

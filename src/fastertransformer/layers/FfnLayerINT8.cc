@@ -22,8 +22,7 @@ namespace fastertransformer {
 template<typename T>
 void FfnLayerINT8<T>::forward(std::vector<fastertransformer::Tensor>*       output_tensors,
                               const std::vector<fastertransformer::Tensor>* input_tensors,
-                              const FfnWeight<T>*                           ffn_weights)
-{
+                              const FfnWeight<T>*                           ffn_weights) {
     // input_tensors: [input (token_num, hidden_dimension)]
     // output_tensors: [output (token_num, hidden_dimension)]
     ScaleList* scale_list = ((const FfnINT8Weight<T>*)ffn_weights)->scale_list_ptr;
@@ -57,8 +56,7 @@ void FfnLayerINT8<T>::forward(std::vector<fastertransformer::Tensor>*       outp
                              0,
                              input_tensor,
                              (int8_t*)(ffn_weights->intermediate_weight.kernel));
-    }
-    else if (int8_mode_ == 2 || int8_mode_ == 3) {
+    } else if (int8_mode_ == 2 || int8_mode_ == 3) {
 #ifdef SPARSITY_ENABLED
         if (sparse_) {
             cublas_wrapper->SpGemm(inter_size_,
@@ -68,8 +66,7 @@ void FfnLayerINT8<T>::forward(std::vector<fastertransformer::Tensor>*       outp
                                    (int8_t*)(ffn_weights->intermediate_weight.sp_kernel),
                                    input_tensor,
                                    (int8_t*)inter_int_buf_);
-        }
-        else {
+        } else {
 #endif
             cublas_wrapper->Gemm((int8_t*)inter_int_buf_,
                                  1,
@@ -105,8 +102,7 @@ void FfnLayerINT8<T>::forward(std::vector<fastertransformer::Tensor>*       outp
                              0,
                              inter_buf_,
                              (int8_t*)(ffn_weights->output_weight.kernel));
-    }
-    else if (int8_mode_ == 2 || int8_mode_ == 3) {
+    } else if (int8_mode_ == 2 || int8_mode_ == 3) {
 #ifdef SPARSITY_ENABLED
         if (sparse_) {
             cublas_wrapper->SpGemm(hidden_units_,
@@ -116,8 +112,7 @@ void FfnLayerINT8<T>::forward(std::vector<fastertransformer::Tensor>*       outp
                                    (int8_t*)(ffn_weights->output_weight.sp_kernel),
                                    inter_buf_,
                                    (int8_t*)output_tensor);
-        }
-        else {
+        } else {
 #endif
             cublas_wrapper->Gemm((int8_t*)output_tensor,
                                  1,
@@ -162,9 +157,7 @@ FfnLayerINT8<T>::FfnLayerINT8(size_t           max_batch_size,
     hidden_units_(head_num * size_per_head),
     inter_size_(inter_size),
     int8_mode_(int8_mode),
-    sparse_(sparse)
-{
-}
+    sparse_(sparse) {}
 
 template<typename T>
 FfnLayerINT8<T>::FfnLayerINT8(FfnLayerINT8<T> const& ffn_layer):
@@ -176,20 +169,16 @@ FfnLayerINT8<T>::FfnLayerINT8(FfnLayerINT8<T> const& ffn_layer):
     hidden_units_(ffn_layer.hidden_units_),
     inter_size_(ffn_layer.inter_size_),
     int8_mode_(ffn_layer.int8_mode_),
-    sparse_(ffn_layer.sparse_)
-{
-}
+    sparse_(ffn_layer.sparse_) {}
 
 template<typename T>
-FfnLayerINT8<T>::~FfnLayerINT8()
-{
+FfnLayerINT8<T>::~FfnLayerINT8() {
     cublas_wrapper_ = nullptr;
     freeBuffer();
 }
 
 template<typename T>
-void FfnLayerINT8<T>::allocateBuffer()
-{
+void FfnLayerINT8<T>::allocateBuffer() {
     if (is_allocate_buffer_ == false) {
         inter_int_buf_ =
             (int32_t*)allocator_->reMalloc(inter_int_buf_, sizeof(int32_t) * max_token_num_ * inter_size_, false);
@@ -199,8 +188,7 @@ void FfnLayerINT8<T>::allocateBuffer()
 }
 
 template<typename T>
-void FfnLayerINT8<T>::freeBuffer()
-{
+void FfnLayerINT8<T>::freeBuffer() {
     if (is_allocate_buffer_ == true) {
         allocator_->free((void**)(&inter_int_buf_));
         allocator_->free((void**)(&inter_buf_));
@@ -209,13 +197,11 @@ void FfnLayerINT8<T>::freeBuffer()
 }
 
 template<typename T>
-bool FfnLayerINT8<T>::isValidTokenNum(size_t token_num)
-{
+bool FfnLayerINT8<T>::isValidTokenNum(size_t token_num) {
     if (max_token_num_ == 0) {
         max_token_num_ = token_num;
         return true;
-    }
-    else {
+    } else {
         return token_num <= max_token_num_;
     }
 }
@@ -245,18 +231,13 @@ GeluFfnLayerINT8<T>::GeluFfnLayerINT8(size_t           max_batch_size,
                     cublas_wrapper,
                     allocator,
                     is_free_buffer_after_forward,
-                    sparse)
-{
-}
+                    sparse) {}
 
 template<typename T>
-GeluFfnLayerINT8<T>::GeluFfnLayerINT8(GeluFfnLayerINT8<T> const& gelu_ffn_layer): FfnLayerINT8<T>(gelu_ffn_layer)
-{
-}
+GeluFfnLayerINT8<T>::GeluFfnLayerINT8(GeluFfnLayerINT8<T> const& gelu_ffn_layer): FfnLayerINT8<T>(gelu_ffn_layer) {}
 
 template<typename T>
-void GeluFfnLayerINT8<T>::invokeAddBiasActivation(const int m, const T* bias, ScaleList* scale_list)
-{
+void GeluFfnLayerINT8<T>::invokeAddBiasActivation(const int m, const T* bias, ScaleList* scale_list) {
     if (int8_mode_ == 1) {
         invokeAddBiasGeluCol32<T>(inter_buf_,
                                   inter_int_buf_,
@@ -267,8 +248,7 @@ void GeluFfnLayerINT8<T>::invokeAddBiasActivation(const int m, const T* bias, Sc
                                   &(scale_list->d_scale_list_[scale_list->p2_offset_ + 4 * hidden_units_]),
                                   &(scale_list->d_scale_list_[44 + 2]),
                                   &(scale_list->d_scale_list_[52 + 3]));
-    }
-    else if (int8_mode_ == 2 || int8_mode_ == 3) {
+    } else if (int8_mode_ == 2 || int8_mode_ == 3) {
 #ifdef SPARSITY_ENABLED
         if (sparse_) {
             invokeAddBiasGeluRow<T>(inter_buf_,
@@ -279,8 +259,7 @@ void GeluFfnLayerINT8<T>::invokeAddBiasActivation(const int m, const T* bias, Sc
                                     stream_,
                                     &(scale_list->d_scale_list_[48 + 1]),
                                     &(scale_list->d_scale_list_[52 + 3]));
-        }
-        else {
+        } else {
 #endif
             invokeAddBiasGeluCol32<T>(inter_buf_,
                                       (const int8_t*)inter_int_buf_,
@@ -319,18 +298,13 @@ ReluFfnLayerINT8<T>::ReluFfnLayerINT8(size_t           max_batch_size,
                     stream,
                     cublas_wrapper,
                     allocator,
-                    is_free_buffer_after_forward)
-{
-}
+                    is_free_buffer_after_forward) {}
 
 template<typename T>
-ReluFfnLayerINT8<T>::ReluFfnLayerINT8(ReluFfnLayerINT8<T> const& relu_ffn_layer): FfnLayerINT8<T>(relu_ffn_layer)
-{
-}
+ReluFfnLayerINT8<T>::ReluFfnLayerINT8(ReluFfnLayerINT8<T> const& relu_ffn_layer): FfnLayerINT8<T>(relu_ffn_layer) {}
 
 template<typename T>
-void ReluFfnLayerINT8<T>::invokeAddBiasActivation(const int m, const T* bias, ScaleList* scale_list)
-{
+void ReluFfnLayerINT8<T>::invokeAddBiasActivation(const int m, const T* bias, ScaleList* scale_list) {
     // TODO
 }
 

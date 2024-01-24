@@ -30,52 +30,43 @@ namespace fastertransformer {
 template<typename T>
 class GPUBuf {
 public:
-    GPUBuf(size_t size, bool random_init = true): size(size), ptr(nullptr)
-    {
+    GPUBuf(size_t size, bool random_init = true): size(size), ptr(nullptr) {
         deviceMalloc(&ptr, size, random_init);
     }
     template<typename T2>
-    GPUBuf(const GPUBuf<T2>& buf_src): size(buf_src.size), ptr(nullptr)
-    {
+    GPUBuf(const GPUBuf<T2>& buf_src): size(buf_src.size), ptr(nullptr) {
         deviceMalloc(&ptr, size, false);
         set(buf_src);
     }
 
     template<typename T2>
-    void set(const GPUBuf<T2>& buf_src)
-    {
+    void set(const GPUBuf<T2>& buf_src) {
         if (std::is_same<T, T2>::value) {
             cudaD2Dcpy(ptr, reinterpret_cast<T*>(buf_src.ptr), size);
-        }
-        else {
+        } else {
             invokeCudaCast(ptr, buf_src.ptr, size, 0);
         }
     }
 
-    void set(const T* h_ptr)
-    {
+    void set(const T* h_ptr) {
         cudaH2Dcpy(ptr, h_ptr, size);
     }
 
-    void to_host(T* h_ptr) const
-    {
+    void to_host(T* h_ptr) const {
         cudaD2Hcpy(h_ptr, ptr, size);
     }
 
-    std::vector<T> to_host_vec() const
-    {
+    std::vector<T> to_host_vec() const {
         std::vector<T> host_vec(size);
         cudaD2Hcpy(host_vec.data(), ptr, size);
         return host_vec;
     }
 
-    void zero()
-    {
+    void zero() {
         deviceMemSetZero(ptr, size);
     }
 
-    ~GPUBuf()
-    {
+    ~GPUBuf() {
         if (ptr != nullptr)
             cudaFree(ptr);
     }

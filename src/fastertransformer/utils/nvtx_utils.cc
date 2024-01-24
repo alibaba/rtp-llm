@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 
+#include "kernel_profiler.h"
 #include <iostream>
 #include <vector>
-#include "kernel_profiler.h"
 
 #include "nvtx_utils.h"
 #ifdef USE_NVTX
@@ -25,48 +25,40 @@
 
 namespace ft_nvtx {
 
-static bool has_read_nvtx_env = false;
-static bool is_enable_ft_nvtx = false;
+static bool                                            has_read_nvtx_env = false;
+static bool                                            is_enable_ft_nvtx = false;
 static std::vector<fastertransformer::KernelProfiler*> profilers;
-static std::string scope;
-static int domain = 0;
+static std::string                                     scope;
+static int                                             domain = 0;
 
-std::string getScope()
-{
+std::string getScope() {
     return scope;
 }
-void addScope(std::string name)
-{
+void addScope(std::string name) {
     scope = scope + name + "/";
     return;
 }
-void setScope(std::string name)
-{
+void setScope(std::string name) {
     scope = name + "/";
     return;
 }
-void resetScope()
-{
+void resetScope() {
     scope = "";
     return;
 }
-void setDeviceDomain(int deviceId)
-{
+void setDeviceDomain(int deviceId) {
     domain = deviceId;
     return;
 }
-void resetDeviceDomain()
-{
+void resetDeviceDomain() {
     domain = 0;
     return;
 }
-int getDeviceDomain()
-{
+int getDeviceDomain() {
     return domain;
 }
 
-bool isEnableNvtx()
-{
+bool isEnableNvtx() {
     if (!has_read_nvtx_env) {
         static char* ft_nvtx_env_char = std::getenv("FT_NVTX");
         is_enable_ft_nvtx = (ft_nvtx_env_char != nullptr && std::string(ft_nvtx_env_char) == "ON") ? true : false;
@@ -75,8 +67,7 @@ bool isEnableNvtx()
     return is_enable_ft_nvtx;
 }
 
-void ftNvtxRangePush(std::string name, cudaStream_t stream)
-{
+void ftNvtxRangePush(std::string name, cudaStream_t stream) {
     std::string                        kernel_name = (getScope() + name).c_str();
     fastertransformer::KernelProfiler* profiler    = new fastertransformer::KernelProfiler(stream, kernel_name);
     profiler->start();
@@ -89,8 +80,7 @@ void ftNvtxRangePush(std::string name, cudaStream_t stream)
 #endif
 }
 
-void ftNvtxRangePop()
-{
+void ftNvtxRangePop() {
     fastertransformer::KernelProfiler* profiler = profilers.back();
     profiler->stop();
     profilers.pop_back();

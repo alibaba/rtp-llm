@@ -19,8 +19,7 @@
 namespace fastertransformer {
 
 template<typename T>
-CustomAllReduceComm<T>::CustomAllReduceComm(size_t rank_size, size_t rank): rank_size_(rank_size), rank_(rank)
-{
+CustomAllReduceComm<T>::CustomAllReduceComm(size_t rank_size, size_t rank): rank_size_(rank_size), rank_(rank) {
     param_.barrier_flag = 0;
     // NOTE: assume All Reduce happens within the node (DGX A100)
     param_.rank       = rank_;
@@ -29,8 +28,7 @@ CustomAllReduceComm<T>::CustomAllReduceComm(size_t rank_size, size_t rank): rank
 }
 
 template<typename T>
-CustomAllReduceComm<T>::~CustomAllReduceComm()
-{
+CustomAllReduceComm<T>::~CustomAllReduceComm() {
     cudaPointerAttributes comm_buffer_attributes, barrier_attributes;
     check_cuda_error(cudaPointerGetAttributes(&comm_buffer_attributes, param_.peer_comm_buffer_ptrs[rank_]));
     check_cuda_error(cudaPointerGetAttributes(&barrier_attributes, param_.peer_barrier_ptrs[rank_]));
@@ -43,8 +41,7 @@ CustomAllReduceComm<T>::~CustomAllReduceComm()
 }
 
 template<typename T>
-void CustomAllReduceComm<T>::customAllReduce(size_t elts, cudaStream_t stream)
-{
+void CustomAllReduceComm<T>::customAllReduce(size_t elts, cudaStream_t stream) {
     param_.elts_total   = elts;
     param_.barrier_flag = FLAG(param_.barrier_flag + 1);
 
@@ -56,8 +53,7 @@ void CustomAllReduceComm<T>::customAllReduce(size_t elts, cudaStream_t stream)
 
 template<typename T>
 void CustomAllReduceComm<T>::allocateAndExchangePeerAccessPointer(
-    std::vector<std::shared_ptr<AbstractCustomComm>>* custom_all_reduce_comms)
-{
+    std::vector<std::shared_ptr<AbstractCustomComm>>* custom_all_reduce_comms) {
     assert(custom_all_reduce_comms->size() == rank_size_);
     assert(rank_ == 0);
     // Enable Peer to Peer Access
@@ -88,8 +84,7 @@ void CustomAllReduceComm<T>::allocateAndExchangePeerAccessPointer(
 }
 
 template<typename T>
-void CustomAllReduceComm<T>::enableP2P(int ngpus)
-{
+void CustomAllReduceComm<T>::enableP2P(int ngpus) {
     int peer_access_available = 0;
     for (int i = 0; i < ngpus; i++) {
         cudaSetDevice(i);
@@ -106,8 +101,7 @@ void CustomAllReduceComm<T>::enableP2P(int ngpus)
 }
 
 template<typename T>
-bool CustomAllReduceComm<T>::swapInternalBuffer(std::vector<Tensor>* tensor_buffer, size_t elts)
-{
+bool CustomAllReduceComm<T>::swapInternalBuffer(std::vector<Tensor>* tensor_buffer, size_t elts) {
     // Check if all reduce elts meet the requirement of custom kernels
     // If meet, then swap the local comm buffer ptr with output tensor data pointer (avoid additional
     // memory movement)
@@ -124,8 +118,7 @@ bool CustomAllReduceComm<T>::swapInternalBuffer(std::vector<Tensor>* tensor_buff
 template<typename T>
 void initCustomAllReduceComm(std::vector<std::shared_ptr<AbstractCustomComm>>* custom_all_reduce_comms,
                              int                                               enable_custom_all_reduce,
-                             size_t                                            rank_size)
-{
+                             size_t                                            rank_size) {
     if (custom_all_reduce_comms == 0) {
         // don't use custom all reduce kernels, fall back to NCCL
         for (size_t i = 0; i < rank_size; i++) {

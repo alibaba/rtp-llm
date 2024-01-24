@@ -17,10 +17,10 @@
 #pragma once
 
 #include <cstdlib>
-#include <map>
-#include <string>
 #include <iomanip>
+#include <map>
 #include <pthread.h>
+#include <string>
 
 #include "src/fastertransformer/utils/string_utils.h"
 
@@ -37,17 +37,15 @@ public:
         ERROR   = 40
     };
 
-    static Logger& getLogger()
-    {
+    static Logger& getLogger() {
         thread_local Logger instance;
         return instance;
     }
-    Logger(Logger const&)         = delete;
+    Logger(Logger const&) = delete;
     void operator=(Logger const&) = delete;
 
     template<typename... Args>
-    void log(const Level level, const std::string format, const Args&... args)
-    {
+    void log(const Level level, const std::string format, const Args&... args) {
         if (level_ <= level) {
             std::string fmt    = getPrefix(level) + format + "\n";
             FILE*       out    = level_ < WARNING ? stdout : stderr;
@@ -57,8 +55,7 @@ public:
     }
 
     template<typename... Args>
-    void log(const Level level, const int rank, const std::string format, const Args&... args)
-    {
+    void log(const Level level, const int rank, const std::string format, const Args&... args) {
         if (level_ <= level) {
             std::string fmt    = getPrefix(level, rank) + format + "\n";
             FILE*       out    = level_ < WARNING ? stdout : stderr;
@@ -67,14 +64,12 @@ public:
         }
     }
 
-    void setLevel(const Level level)
-    {
+    void setLevel(const Level level) {
         level_ = level;
         log(INFO, "Set logger level by %s", getLevelName(level).c_str());
     }
 
-    int getLevel() const
-    {
+    int getLevel() const {
         return level_;
     }
 
@@ -88,37 +83,31 @@ private:
 #else
     const Level DEFAULT_LOG_LEVEL = INFO;
 #endif
-    Level level_ = DEFAULT_LOG_LEVEL;
-    int32_t rank = 0;
+    Level   level_ = DEFAULT_LOG_LEVEL;
+    int32_t rank   = 0;
 
     Logger();
 
-    inline const std::string getLevelName(const Level level)
-    {
+    inline const std::string getLevelName(const Level level) {
         return level_name_.at(level);
     }
 
-    inline const std::string getPrefix(const Level level)
-    {
+    inline const std::string getPrefix(const Level level) {
         return getPrefix(level, rank);
     }
 
-    inline const std::string getTimeStr()
-    {
-        time_t     now = time(0);
-        struct tm* t   = localtime(&now);
-        char       buffer[80];
+    inline const std::string getTimeStr() {
+        time_t            now = time(0);
+        struct tm*        t   = localtime(&now);
+        char              buffer[80];
         std::stringstream ss;
         ss << std::put_time(t, "%y-%m-%d %H:%M:%S");
         return ss.str();
     }
 
-    inline const std::string getPrefix(const Level level, const int rank)
-    {
-        return PREFIX + "[" + getLevelName(level) + "][RANK "
-                      + std::to_string(rank) + "]["
-                      + std::to_string(pthread_self()) + "]["
-                      + getTimeStr() + "] ";
+    inline const std::string getPrefix(const Level level, const int rank) {
+        return PREFIX + "[" + getLevelName(level) + "][RANK " + std::to_string(rank) + "]["
+               + std::to_string(pthread_self()) + "][" + getTimeStr() + "] ";
     }
 };
 

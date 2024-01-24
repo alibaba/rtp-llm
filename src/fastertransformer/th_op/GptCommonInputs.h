@@ -12,7 +12,7 @@ struct GptCommonInputs {
     uint   context_batch_size;
     uint   max_context_seq_length;
     uint   max_generate_seq_length;
-    Tensor position_ids;    
+    Tensor position_ids;
     Tensor attention_mask;
     Tensor linear_bias_slopes;
     Tensor input_lengths;

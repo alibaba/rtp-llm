@@ -46,8 +46,7 @@ typedef struct {
  * input: k/v cache buffers, shape [B, H, L, Dh]
  * output: k/v cache buffers, shape [B, H, Dh/x, L, x], [B, H, L, Dh/x, x], respectively
  */
-bool test_fp8_transpose_4d_batch_major(const test_args_t& test_args)
-{
+bool test_fp8_transpose_4d_batch_major(const test_args_t& test_args) {
     const size_t n_elems_dst =
         test_args.batch_size * test_args.head_num * test_args.max_seq_len * test_args.size_per_head;
     const size_t n_elems_src = test_args.batch_size * test_args.head_num * test_args.seq_len * test_args.size_per_head;
@@ -133,8 +132,7 @@ bool test_fp8_transpose_4d_batch_major(const test_args_t& test_args)
     return !error;
 }
 
-bool test_fp8_add_fused_QKV_bias_transpose(const test_args_t& test_args)
-{
+bool test_fp8_add_fused_QKV_bias_transpose(const test_args_t& test_args) {
     constexpr float MAX_ALLOWED_ERROR = 0.015f;
 
     size_t B       = test_args.batch_size;
@@ -238,8 +236,7 @@ bool test_fp8_add_fused_QKV_bias_transpose(const test_args_t& test_args)
     return !error;
 }
 
-bool test_fp8_masked_softmax(const test_args_t& test_args)
-{
+bool test_fp8_masked_softmax(const test_args_t& test_args) {
     constexpr float MAX_ALLOWED_ERROR = 0.05f;
     const float     coef              = 1.0f;
     const float     in_scaling = 1.0f, out_scaling = 1.0f;
@@ -347,8 +344,7 @@ bool test_fp8_masked_softmax(const test_args_t& test_args)
     return !error;
 }
 
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     if (argc != 7) {
         printf("[ERROR] Usage: %s batch_size head_num max_seq_len"
                " seq_len size_per_head rotary_embedding_dim\n",

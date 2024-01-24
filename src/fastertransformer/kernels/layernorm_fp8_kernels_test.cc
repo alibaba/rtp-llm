@@ -27,8 +27,7 @@
 using namespace fastertransformer;
 
 template<typename T>
-int checkNonZero(T* A, int size)
-{
+int checkNonZero(T* A, int size) {
     T* h_A = (T*)malloc(sizeof(T) * size);
     cudaMemcpy(h_A, A, sizeof(T) * size, cudaMemcpyDeviceToHost);
     int noneZeroNum = 0;
@@ -42,8 +41,7 @@ int checkNonZero(T* A, int size)
 }
 
 template<typename TA, typename TB>
-void checkMat(TA* A, TB* B, int size, char* mark)
-{
+void checkMat(TA* A, TB* B, int size, char* mark) {
     float max_diff = -10000.0f;
     float max_diff_a, max_diff_b;
     TA*   matA       = (TA*)malloc(sizeof(TA) * size);
@@ -87,8 +85,7 @@ void checkMat(TA* A, TB* B, int size, char* mark)
 template<typename T, int quantize_mode>
 void layernorm_fp8_test(const int m, const int n);
 
-bool test_fp8_general_add_bias_residual_pre_layernorm(int m, int n)
-{
+bool test_fp8_general_add_bias_residual_pre_layernorm(int m, int n) {
     const size_t n_elems = m * n;
     bool         error   = false;
 
@@ -292,8 +289,7 @@ bool test_fp8_general_add_bias_residual_pre_layernorm(int m, int n)
     return !error;
 }
 
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     if (argc != 5) {
         printf("[ERROR] layernorm_fp8_test max_m max_n is_fp16 quantize_mode\n");
         printf("e.g., ./bin/layernorm_fp8_test 1 1024 1 0\n");
@@ -308,16 +304,13 @@ int main(int argc, char** argv)
     if (is_fp16) {
         if (quantize_mode == 0) {
             layernorm_fp8_test<half, 0>(max_m, max_n);
-        }
-        else if (quantize_mode == 1) {
+        } else if (quantize_mode == 1) {
             layernorm_fp8_test<half, 1>(max_m, max_n);
         }
-    }
-    else {
+    } else {
         if (quantize_mode == 0) {
             layernorm_fp8_test<float, 0>(max_m, max_n);
-        }
-        else if (quantize_mode == 1) {
+        } else if (quantize_mode == 1) {
             layernorm_fp8_test<float, 1>(max_m, max_n);
         }
     }
@@ -347,8 +340,7 @@ int main(int argc, char** argv)
 }
 
 template<typename T, int quantize_mode>
-void layernorm_fp8_test(const int m, const int n)
-{
+void layernorm_fp8_test(const int m, const int n) {
     struct cudaDeviceProp prop;
     check_cuda_error(cudaGetDeviceProperties(&prop, 0));
     printf("Device %s\n", prop.name);
@@ -411,8 +403,7 @@ void layernorm_fp8_test(const int m, const int n)
                 if (i == 0) {
                     h_input_amax[j]  = h_input_baseline[i * n + j];
                     h_output_amax[j] = h_output_baseline[i * n + j];
-                }
-                else {
+                } else {
                     h_input_amax[j]  = std::max(h_input_amax[j], (float)h_input_baseline[i * n + j]);
                     h_output_amax[j] = std::max(h_output_amax[j], (float)h_output_baseline[i * n + j]);
                 }
@@ -422,8 +413,7 @@ void layernorm_fp8_test(const int m, const int n)
         cudaH2Dcpy(fp8_output_qua_ptr, h_output_amax, n);
         delete h_input_amax;
         delete h_output_amax;
-    }
-    else {
+    } else {
         float h_input_amax  = *std::max_element(h_input_baseline, h_input_baseline + m * n);
         float h_output_amax = *std::max_element(h_output_baseline, h_output_baseline + m * n);
         printf("[INFO] h_input_amax: %f \n", h_input_amax);

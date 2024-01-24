@@ -27,8 +27,7 @@
 
 using namespace fastertransformer;
 
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     if (argc != 3) {
         printf("[ERROR] Usage: bin/matrix_transpose_fp8_kernels_test m n\n");
         printf("e.g., bin/matrix_transpose_fp8_kernels_test 2048 512\n");

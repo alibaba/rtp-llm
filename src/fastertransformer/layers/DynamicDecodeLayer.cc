@@ -27,24 +27,21 @@
 namespace fastertransformer {
 
 template<typename T>
-void DynamicDecodeLayer<T>::allocateBuffer()
-{
+void DynamicDecodeLayer<T>::allocateBuffer() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     h_pinned_finished_sum_ = (int*)allocator_->reMalloc(h_pinned_finished_sum_, sizeof(int), true, true);
     return;
 }
 
 template<typename T>
-void DynamicDecodeLayer<T>::freeBuffer()
-{
+void DynamicDecodeLayer<T>::freeBuffer() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     allocator_->free((void**)(&h_pinned_finished_sum_), true);
     return;
 }
 
 template<typename T>
-void DynamicDecodeLayer<T>::initialize()
-{
+void DynamicDecodeLayer<T>::initialize() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     online_beamsearch_decode_ = new OnlineBeamSearchLayer<T>(0,  // max_batch_size, deprecated
                                                              0,  // local_head_num, deprecated
@@ -106,15 +103,13 @@ DynamicDecodeLayer<T>::DynamicDecodeLayer(size_t           vocab_size,
     BaseLayer(stream, cublas_wrapper, allocator, is_free_buffer_after_forward),
     vocab_size_(vocab_size),
     vocab_size_padded_(vocab_size_padded),
-    cuda_device_prop_(cuda_device_prop)
-{
+    cuda_device_prop_(cuda_device_prop) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     initialize();
 }
 
 template<typename T>
-DynamicDecodeLayer<T>::~DynamicDecodeLayer()
-{
+DynamicDecodeLayer<T>::~DynamicDecodeLayer() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     delete online_beamsearch_decode_;
     delete topk_decode_;
@@ -127,15 +122,13 @@ DynamicDecodeLayer<T>::DynamicDecodeLayer(DynamicDecodeLayer const& dynamic_deco
     BaseLayer(dynamic_decode_layer),
     vocab_size_(dynamic_decode_layer.vocab_size_),
     vocab_size_padded_(dynamic_decode_layer.vocab_size_padded_),
-    cuda_device_prop_(dynamic_decode_layer.cuda_device_prop_)
-{
+    cuda_device_prop_(dynamic_decode_layer.cuda_device_prop_) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     initialize();
 }
 
 template<typename T>
-void DynamicDecodeLayer<T>::setup(const size_t batch_size, const size_t beam_width, TensorMap* runtime_args)
-{
+void DynamicDecodeLayer<T>::setup(const size_t batch_size, const size_t beam_width, TensorMap* runtime_args) {
     /**
      * @brief Set up the dynamic decode layer for given input runtime arguments.
      *
@@ -168,8 +161,7 @@ void DynamicDecodeLayer<T>::setup(const size_t batch_size, const size_t beam_wid
 
 template<typename T>
 void DynamicDecodeLayer<T>::forward(std::unordered_map<std::string, Tensor>*       output_tensors,
-                                    const std::unordered_map<std::string, Tensor>* input_tensors)
-{
+                                    const std::unordered_map<std::string, Tensor>* input_tensors) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     TensorMap input_map(*input_tensors);
     TensorMap output_map(*output_tensors);
@@ -178,8 +170,7 @@ void DynamicDecodeLayer<T>::forward(std::unordered_map<std::string, Tensor>*    
 }
 
 template<typename T>
-void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors)
-{
+void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors) {
     /**
      * @brief
      * input_tensors:
@@ -345,7 +336,7 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
                                                              {dynamic_decode_batch_size * beam_width},
                                                              cum_log_probs.getPtrWithOffset(dynamic_id_offset)}});
             }
-            
+
             if (output_tensors->isExist("beam_hyps")) {
                 dynamic_decode_output_tensors.insert("beam_hyps", output_tensors->at("beam_hyps"));
             }
@@ -367,9 +358,8 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
                                "cum_log_probs should be provided in beam search.");
 
             online_beamsearch_decode_->forward(&dynamic_decode_output_tensors, &dynamic_decode_input_tensors);
-        }  // end of dynamic_ite
-    }
-    else {  // beam_width=1
+        }     // end of dynamic_ite
+    } else {  // beam_width=1
         // In sampling, we have supported batch sampling. So, we always compute all sentences once.
         const size_t local_batch_offset = ite * local_batch_size * beam_width;
 
@@ -413,14 +403,17 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
             Tensor output_log_probs = output_tensors->at("output_log_probs");
             int    max_input_length = input_tensors->at("max_input_length").getVal<int>();
             size_t step_offset      = (step - max_input_length) * batch_size * beam_width;
-            decode_output_tensors.insert({"output_log_probs",
-                                          output_log_probs.slice({local_batch_size * beam_width}, local_batch_offset)});
+            decode_output_tensors.insert(
+                {"output_log_probs", output_log_probs.slice({local_batch_size * beam_width}, local_batch_offset)});
         }
         if (output_tensors->isExist("index_log_probs") && output_tensors->isExist("token_id_for_index_prob")) {
             Tensor index_log_probs = output_tensors->at("index_log_probs");
-            decode_output_tensors.insert({"index_log_probs", index_log_probs.slice({local_batch_size * beam_width}, local_batch_offset)});
+            decode_output_tensors.insert(
+                {"index_log_probs", index_log_probs.slice({local_batch_size * beam_width}, local_batch_offset)});
             Tensor token_id_for_index_prob = output_tensors->at("token_id_for_index_prob");
-            decode_output_tensors.insert({"token_id_for_index_prob", token_id_for_index_prob.slice({local_batch_size * beam_width}, local_batch_offset)});
+            decode_output_tensors.insert(
+                {"token_id_for_index_prob",
+                 token_id_for_index_prob.slice({local_batch_size * beam_width}, local_batch_offset)});
         }
 
         // Run topk / topp decode layers.
@@ -473,8 +466,7 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
 }
 
 template<typename T>
-bool DynamicDecodeLayer<T>::hasDiffRuntimeArgs(TensorMap* input_tensors)
-{
+bool DynamicDecodeLayer<T>::hasDiffRuntimeArgs(TensorMap* input_tensors) {
     for (int i = 0; i < (int)runtime_arg_names_.size(); i++) {
         if (input_tensors->isExist(runtime_arg_names_[i])) {
             auto tensor = input_tensors->at(runtime_arg_names_[i]);

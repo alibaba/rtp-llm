@@ -21,20 +21,20 @@
 namespace fastertransformer {
 
 template<typename T>
-struct AttentionLayerNormWeight   {
+struct AttentionLayerNormWeight {
     const T* gamma = nullptr;
     const T* beta  = nullptr;
 };
 
 template<typename T1, typename T2 = T1>
 struct AttentionWeight {
-    DenseWeight<T1, T2> query_weight;
-    DenseWeight<T1, T2> key_weight;
-    DenseWeight<T1, T2> value_weight;
+    DenseWeight<T1, T2>          query_weight;
+    DenseWeight<T1, T2>          key_weight;
+    DenseWeight<T1, T2>          value_weight;
     AttentionLayerNormWeight<T1> attention_layernorm;
-    DenseWeight<T1, T2> attention_output_weight;
-    DenseWeight<T1, T2> ia3_key_weight;
-    DenseWeight<T1, T2> ia3_value_weight;
+    DenseWeight<T1, T2>          attention_output_weight;
+    DenseWeight<T1, T2>          ia3_key_weight;
+    DenseWeight<T1, T2>          ia3_value_weight;
 };
 
 }  // namespace fastertransformer

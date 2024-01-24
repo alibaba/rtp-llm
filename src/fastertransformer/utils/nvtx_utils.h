@@ -18,26 +18,21 @@
 
 namespace ft_nvtx {
 
-std::string        getScope();
-void               addScope(std::string name);
-void               setScope(std::string name);
-void               resetScope();
-void               setDeviceDomain(int deviceId);
-int                getDeviceDomain();
-void               resetDeviceDomain();
-bool               isEnableNvtx();
+std::string getScope();
+void        addScope(std::string name);
+void        setScope(std::string name);
+void        resetScope();
+void        setDeviceDomain(int deviceId);
+int         getDeviceDomain();
+void        resetDeviceDomain();
+bool        isEnableNvtx();
 
-
-void        ftNvtxRangePush(std::string name, cudaStream_t stream);
-void        ftNvtxRangePop();
+void ftNvtxRangePush(std::string name, cudaStream_t stream);
+void ftNvtxRangePop();
 }  // namespace ft_nvtx
 
 #define PUSH_RANGE(stream, name)                                                                                       \
-    {                                                                                                                  \
-        ft_nvtx::ftNvtxRangePush(name, stream);                                                                        \
-    }
+    { ft_nvtx::ftNvtxRangePush(name, stream); }
 
 #define POP_RANGE                                                                                                      \
-    {                                                                                                                  \
-        ft_nvtx::ftNvtxRangePop();                                                                                     \
-    }
+    { ft_nvtx::ftNvtxRangePop(); }

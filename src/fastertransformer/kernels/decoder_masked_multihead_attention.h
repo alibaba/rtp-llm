@@ -43,8 +43,7 @@ namespace fastertransformer {
 
 /// Round up to next higher power of 2 (return x if it's already a power
 /// of 2).
-inline int pow2roundup(int x)
-{
+inline int pow2roundup(int x) {
     if (x < 0)
         return 0;
     --x;
@@ -129,7 +128,7 @@ struct Multihead_attention_params_base {
     int        position_embeddings_scale = 1;
     int        base_scale                = 1;
 
-// The current timestep. TODO Check that do we only this param in cross attention?
+    // The current timestep. TODO Check that do we only this param in cross attention?
     int timestep = 0;
     // The current timestep of each sentences (support different timestep for different sentences)
 

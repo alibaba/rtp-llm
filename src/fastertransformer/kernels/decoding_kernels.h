@@ -63,8 +63,7 @@ void invokeEmbeddingLookupPosEncodingPadCount(T*           from_tensor,
                                               const int    step,
                                               const int    token_num,
                                               const int    ite,
-                                              cudaStream_t stream)
-{
+                                              cudaStream_t stream) {
     invokeEmbeddingLookupPosEncodingPadCount(from_tensor,
                                              embedding_table,
                                              position_encoding,

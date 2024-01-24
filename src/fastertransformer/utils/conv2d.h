@@ -36,8 +36,7 @@ void conv2d(T*             output,
             const int      out_channels,
             const int      kernel_size,
             const int      stride,
-            cudnnHandle_t& cudnn_handle)
-{
+            cudnnHandle_t& cudnn_handle) {
     cudnnDataType_t dataType;
     cudnnDataType_t computeType = CUDNN_DATA_FLOAT;
     float           alpha       = 1.0f;

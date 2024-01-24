@@ -21,8 +21,7 @@
 
 namespace fastertransformer {
 
-int read_word_list(const std::string& filename, std::vector<int>& file_data)
-{
+int read_word_list(const std::string& filename, std::vector<int>& file_data) {
     std::ifstream word_list_file(filename, std::ios::in);
 
     std::string line_buf;

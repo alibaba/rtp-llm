@@ -37,19 +37,18 @@ private:
     size_t max_token_num_ = 0;
 
     // meta data
-    size_t head_num_ = 0;       // (martinma): this member is not used in this class. Remove it?
+    size_t head_num_      = 0;  // (martinma): this member is not used in this class. Remove it?
     size_t size_per_head_ = 0;  // (martinma): this member is not used in this class. Remove it?
-    size_t expert_num_ = 0;
+    size_t expert_num_    = 0;
 
     // calculated data
     size_t hidden_units_ = 0;
 
-    std::shared_ptr<GemmRunner<T>> gemm_runner_;
+    std::shared_ptr<GemmRunner<T>>                        gemm_runner_;
     std::shared_ptr<CutlassFpAIntBGemmRunner<T, uint8_t>> weight_only_int8_fc_runner_;
 
     std::shared_ptr<CutlassMoeFCRunner<T, T>>       moe_fc_runner_;
     std::shared_ptr<CutlassMoeFCRunner<T, uint8_t>> moe_int8_weight_only_fc_runner_;
-
 
     void allocateBuffer() override;
     void freeBuffer() override;
@@ -65,10 +64,10 @@ protected:
     char*  mixed_gemm_workspace_ = nullptr;
     size_t mixed_gemm_ws_bytes_  = 0;
 
-    size_t inter_size_ = 0;
+    size_t inter_size_         = 0;
     size_t inter_padding_size_ = 0;
 
-    const bool is_sparse_head_ = false;
+    const bool                 is_sparse_head_ = false;
     const std::vector<int64_t> local_layer_inter_size_;
     const std::vector<int64_t> local_layer_inter_padding_size_;
 
@@ -82,7 +81,7 @@ protected:
     bool use_gated_activation_ = false;
 
     float layernorm_eps_ = 0;
-    
+
     ActivationType getActivationType() const {
         return activation_type_;
     };

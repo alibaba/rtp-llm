@@ -120,13 +120,11 @@ template<typename scalar_t, typename vector_t>
 struct assign {
     static __device__ __inline__ void read(vector_t& vec, scalar_t& x){};
 
-    static __device__ __inline__ void read2(vector_t& vec, scalar_t& x, scalar_t& y)
-    {
+    static __device__ __inline__ void read2(vector_t& vec, scalar_t& x, scalar_t& y) {
         if constexpr (is_alignment<scalar_t, vector_t>::value) {
             vec.x = x;
             vec.y = y;
-        }
-        else {
+        } else {
             union {
                 vector_t r;
                 scalar_t t[2];
@@ -137,15 +135,13 @@ struct assign {
         }
     };
 
-    static __device__ __inline__ void read4(vector_t& vec, scalar_t& x, scalar_t& y, scalar_t& z, scalar_t& w)
-    {
+    static __device__ __inline__ void read4(vector_t& vec, scalar_t& x, scalar_t& y, scalar_t& z, scalar_t& w) {
         if constexpr (is_alignment<scalar_t, vector_t>::value) {
             vec.x = x;
             vec.y = y;
             vec.z = z;
             vec.w = w;
-        }
-        else {
+        } else {
             union {
                 vector_t r;
                 scalar_t t[4];
@@ -166,12 +162,10 @@ struct assign {
                                             scalar_t& a,
                                             scalar_t& b,
                                             scalar_t& c,
-                                            scalar_t& d)
-    {
+                                            scalar_t& d) {
         if constexpr (is_alignment<scalar_t, vector_t>::value) {
             return;
-        }
-        else {
+        } else {
             union {
                 vector_t r;
                 scalar_t t[8];
@@ -190,13 +184,11 @@ struct assign {
 
     static __device__ __inline__ void write(vector_t& vec, scalar_t& x){};
 
-    static __device__ __inline__ void write2(vector_t& vec, scalar_t& x, scalar_t& y)
-    {
+    static __device__ __inline__ void write2(vector_t& vec, scalar_t& x, scalar_t& y) {
         if constexpr (is_alignment<scalar_t, vector_t>::value) {
             x = vec.x;
             y = vec.y;
-        }
-        else {
+        } else {
             union {
                 vector_t r;
                 scalar_t t[2];
@@ -207,15 +199,13 @@ struct assign {
         }
     };
 
-    static __device__ __inline__ void write4(vector_t& vec, scalar_t& x, scalar_t& y, scalar_t& z, scalar_t& w)
-    {
+    static __device__ __inline__ void write4(vector_t& vec, scalar_t& x, scalar_t& y, scalar_t& z, scalar_t& w) {
         if constexpr (is_alignment<scalar_t, vector_t>::value) {
             x = vec.x;
             y = vec.y;
             z = vec.z;
             w = vec.w;
-        }
-        else {
+        } else {
             union {
                 vector_t r;
                 scalar_t t[4];
@@ -236,12 +226,10 @@ struct assign {
                                              scalar_t& a,
                                              scalar_t& b,
                                              scalar_t& c,
-                                             scalar_t& d)
-    {
+                                             scalar_t& d) {
         if constexpr (is_alignment<scalar_t, vector_t>::value) {
             return;
-        }
-        else {
+        } else {
             union {
                 vector_t r;
                 scalar_t t[8];
@@ -260,18 +248,15 @@ struct assign {
 };
 
 template<typename vector_t, typename scalar_t>
-__device__ __inline__ void RotaryHalfRead(vector_t& vec, scalar_t* smem, const int idx, int dim)
-{
+__device__ __inline__ void RotaryHalfRead(vector_t& vec, scalar_t* smem, const int idx, int dim) {
     constexpr int size = vector_size<scalar_t, vector_t>::size;
     static_assert(size == 1 || size == 2 || size == 4 || size == 8, "vector size is not valid");
     if constexpr (size == 2) {
         assign<scalar_t, vector_t>::read2(vec, smem[idx], smem[idx + dim]);
-    }
-    else if constexpr (size == 4) {
+    } else if constexpr (size == 4) {
         assign<scalar_t, vector_t>::read4(
             vec, smem[idx * 2], smem[idx * 2 + dim], smem[idx * 2 + 1], smem[idx * 2 + 1 + dim]);
-    }
-    else if constexpr (size == 8) {
+    } else if constexpr (size == 8) {
         assign<scalar_t, vector_t>::read8(vec,
                                           smem[idx * 4],
                                           smem[idx * 4 + dim],
@@ -285,18 +270,15 @@ __device__ __inline__ void RotaryHalfRead(vector_t& vec, scalar_t* smem, const i
 }
 
 template<typename vector_t, typename scalar_t>
-__device__ __inline__ void RotaryHalfWrite(vector_t& vec, scalar_t* smem, const int idx, int dim)
-{
+__device__ __inline__ void RotaryHalfWrite(vector_t& vec, scalar_t* smem, const int idx, int dim) {
     constexpr int size = vector_size<scalar_t, vector_t>::size;
     static_assert(size == 1 || size == 2 || size == 4 || size == 8, "vector size is not valid");
     if constexpr (size == 2) {
         assign<scalar_t, vector_t>::write2(vec, smem[idx], smem[idx + dim]);
-    }
-    else if constexpr (size == 4) {
+    } else if constexpr (size == 4) {
         assign<scalar_t, vector_t>::write4(
             vec, smem[idx * 2], smem[idx * 2 + dim], smem[idx * 2 + 1], smem[idx * 2 + 1 + dim]);
-    }
-    else if constexpr (size == 8) {
+    } else if constexpr (size == 8) {
         assign<scalar_t, vector_t>::write8(vec,
                                            smem[idx * 4],
                                            smem[idx * 4 + dim],
@@ -315,22 +297,19 @@ inline __device__ float2 rotary_embedding_coefficient(const int   zid,
                                                       const int   rot_embed_dim,
                                                       const float t_step,
                                                       const float base                      = 10000.0f,
-                                                      const int   position_embeddings_scale = 1)
-{
+                                                      const int   position_embeddings_scale = 1) {
     const float inv_freq = (t_step / pow(base, zid / (float)rot_embed_dim)) / position_embeddings_scale;
     return {cos(inv_freq), sin(inv_freq)};
 }
 
-inline __device__ float2 rotary_embedding_transform(const float2 v, const float2 coef)
-{
+inline __device__ float2 rotary_embedding_transform(const float2 v, const float2 coef) {
     float2 rot_v;
     rot_v.x = coef.x * v.x - coef.y * v.y;
     rot_v.y = coef.x * v.y + coef.y * v.x;
     return rot_v;
 }
 
-inline __device__ uint32_t rotary_embedding_transform(const uint32_t v, const float2 coef)
-{
+inline __device__ uint32_t rotary_embedding_transform(const uint32_t v, const float2 coef) {
     float2 fv     = half2_to_float2(v);
     float2 rot_fv = rotary_embedding_transform(fv, coef);
     return float2_to_half2(rot_fv);
@@ -348,8 +327,7 @@ inline __device__ uint32_t rotary_embedding_transform(const uint32_t v, const fl
  *
  */
 #ifdef ENABLE_BF16
-inline __device__ __nv_bfloat162 rotary_embedding_transform(const __nv_bfloat162 v, const float2 coef)
-{
+inline __device__ __nv_bfloat162 rotary_embedding_transform(const __nv_bfloat162 v, const float2 coef) {
     float2 fv     = bf1622float2(v);
     float2 rot_fv = rotary_embedding_transform(fv, coef);
     return __floats2bfloat162_rn(rot_fv.x, rot_fv.y);
@@ -357,8 +335,7 @@ inline __device__ __nv_bfloat162 rotary_embedding_transform(const __nv_bfloat162
 #endif
 
 inline __device__ void apply_rotary_embedding(
-    float& q, int zid, int rot_embed_dim, int t_step, float base = 10000.0f, int position_embeddings_scale = 1)
-{
+    float& q, int zid, int rot_embed_dim, int t_step, float base = 10000.0f, int position_embeddings_scale = 1) {
     return;
 }
 
@@ -368,14 +345,12 @@ inline __device__ void apply_rotary_embedding(float& q,
                                               int    rot_embed_dim,
                                               int    t_step,
                                               float  base                      = 10000.0f,
-                                              int    position_embeddings_scale = 1)
-{
+                                              int    position_embeddings_scale = 1) {
     return;
 }
 
 inline __device__ void apply_rotary_embedding(
-    float2& q, int tid, int rot_embed_dim, int t_step, float base = 10000.0f, int position_embeddings_scale = 1)
-{
+    float2& q, int tid, int rot_embed_dim, int t_step, float base = 10000.0f, int position_embeddings_scale = 1) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
@@ -389,8 +364,7 @@ inline __device__ void apply_rotary_embedding(float2& q,
                                               int     rot_embed_dim,
                                               int     t_step,
                                               float   base                      = 10000.0f,
-                                              int     position_embeddings_scale = 1)
-{
+                                              int     position_embeddings_scale = 1) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
@@ -400,8 +374,7 @@ inline __device__ void apply_rotary_embedding(float2& q,
 }
 
 inline __device__ void apply_rotary_embedding(
-    float4& q, int tid, int rot_embed_dim, int t_step, float base = 10000.0f, int position_embeddings_scale = 1)
-{
+    float4& q, int tid, int rot_embed_dim, int t_step, float base = 10000.0f, int position_embeddings_scale = 1) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
@@ -420,8 +393,7 @@ inline __device__ void apply_rotary_embedding(float4&   q,
                                               int       rot_embed_dim,
                                               int       t_step,
                                               float     base                      = 10000.0f,
-                                              const int position_embeddings_scale = 1)
-{
+                                              const int position_embeddings_scale = 1) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
@@ -437,9 +409,12 @@ inline __device__ void apply_rotary_embedding(float4&   q,
     k_.y = rotary_embedding_transform(k_.y, coef1);
 }
 
-inline __device__ void apply_rotary_embedding(
-    uint32_t& q, int tid, int rot_embed_dim, int t_step, float base = 10000.0f, const int position_embeddings_scale = 1)
-{
+inline __device__ void apply_rotary_embedding(uint32_t& q,
+                                              int       tid,
+                                              int       rot_embed_dim,
+                                              int       t_step,
+                                              float     base                      = 10000.0f,
+                                              const int position_embeddings_scale = 1) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
@@ -453,8 +428,7 @@ inline __device__ void apply_rotary_embedding(uint32_t& q,
                                               int       rot_embed_dim,
                                               int       t_step,
                                               float     base                      = 10000.0f,
-                                              const int position_embeddings_scale = 1)
-{
+                                              const int position_embeddings_scale = 1) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
@@ -464,8 +438,7 @@ inline __device__ void apply_rotary_embedding(uint32_t& q,
 }
 
 inline __device__ void apply_rotary_embedding(
-    uint2& q, int tid, int rot_embed_dim, int t_step, float base = 10000.0f, const int position_embeddings_scale = 1)
-{
+    uint2& q, int tid, int rot_embed_dim, int t_step, float base = 10000.0f, const int position_embeddings_scale = 1) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
@@ -482,8 +455,7 @@ inline __device__ void apply_rotary_embedding(uint2&    q,
                                               int       rot_embed_dim,
                                               int       t_step,
                                               float     base                      = 10000.0f,
-                                              const int position_embeddings_scale = 1)
-{
+                                              const int position_embeddings_scale = 1) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
@@ -497,8 +469,7 @@ inline __device__ void apply_rotary_embedding(uint2&    q,
 }
 
 inline __device__ void apply_rotary_embedding(
-    uint4& q, int tid, int rot_embed_dim, int t_step, float base = 10000.0f, const int position_embeddings_scale = 1)
-{
+    uint4& q, int tid, int rot_embed_dim, int t_step, float base = 10000.0f, const int position_embeddings_scale = 1) {
     if (8 * tid >= rot_embed_dim) {
         return;
     }
@@ -521,8 +492,7 @@ inline __device__ void apply_rotary_embedding(uint4&    q,
                                               int       rot_embed_dim,
                                               int       t_step,
                                               float     base                      = 10000.0f,
-                                              const int position_embeddings_scale = 1)
-{
+                                              const int position_embeddings_scale = 1) {
     if (8 * tid >= rot_embed_dim) {
         return;
     }
@@ -549,8 +519,7 @@ inline __device__ void apply_rotary_embedding(__nv_bfloat162& q,
                                               int             rot_embed_dim,
                                               int             t_step,
                                               float           base                      = 10000.0f,
-                                              const int       position_embeddings_scale = 1)
-{
+                                              const int       position_embeddings_scale = 1) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
@@ -564,8 +533,7 @@ inline __device__ void apply_rotary_embedding(__nv_bfloat162& q,
                                               int             rot_embed_dim,
                                               int             t_step,
                                               float           base                      = 10000.0f,
-                                              const int       position_embeddings_scale = 1)
-{
+                                              const int       position_embeddings_scale = 1) {
     if (2 * tid >= rot_embed_dim) {
         return;
     }
@@ -575,12 +543,11 @@ inline __device__ void apply_rotary_embedding(__nv_bfloat162& q,
 }
 
 inline __device__ void apply_rotary_embedding(bf16_4_t& q,
-                                              int             tid,
-                                              int             rot_embed_dim,
-                                              int             t_step,
-                                              float           base                      = 10000.0f,
-                                              const int       position_embeddings_scale = 1)
-{
+                                              int       tid,
+                                              int       rot_embed_dim,
+                                              int       t_step,
+                                              float     base                      = 10000.0f,
+                                              const int position_embeddings_scale = 1) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
@@ -593,12 +560,11 @@ inline __device__ void apply_rotary_embedding(bf16_4_t& q,
 
 inline __device__ void apply_rotary_embedding(bf16_4_t& q,
                                               bf16_4_t& k,
-                                              int             tid,
-                                              int             rot_embed_dim,
-                                              int             t_step,
-                                              float           base                      = 10000.0f,
-                                              const int       position_embeddings_scale = 1)
-{
+                                              int       tid,
+                                              int       rot_embed_dim,
+                                              int       t_step,
+                                              float     base                      = 10000.0f,
+                                              const int position_embeddings_scale = 1) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
@@ -612,12 +578,11 @@ inline __device__ void apply_rotary_embedding(bf16_4_t& q,
 }
 
 inline __device__ void apply_rotary_embedding(bf16_8_t& q,
-                                              int             tid,
-                                              int             rot_embed_dim,
-                                              int             t_step,
-                                              float           base                      = 10000.0f,
-                                              const int       position_embeddings_scale = 1)
-{
+                                              int       tid,
+                                              int       rot_embed_dim,
+                                              int       t_step,
+                                              float     base                      = 10000.0f,
+                                              const int position_embeddings_scale = 1) {
     if (8 * tid >= rot_embed_dim) {
         return;
     }
@@ -636,12 +601,11 @@ inline __device__ void apply_rotary_embedding(bf16_8_t& q,
 
 inline __device__ void apply_rotary_embedding(bf16_8_t& q,
                                               bf16_8_t& k,
-                                              int             tid,
-                                              int             rot_embed_dim,
-                                              int             t_step,
-                                              float           base                      = 10000.0f,
-                                              const int       position_embeddings_scale = 1)
-{
+                                              int       tid,
+                                              int       rot_embed_dim,
+                                              int       t_step,
+                                              float     base                      = 10000.0f,
+                                              const int position_embeddings_scale = 1) {
     if (8 * tid >= rot_embed_dim) {
         return;
     }
@@ -671,15 +635,14 @@ enum class RotaryEmbeddingStyle : int8_t {
     GLM           = 4,
 };
 
-__inline__ __device__ int get_glm_step(const int step, const int mask_id, const int input_len, const int max_input_len)
-{
+__inline__ __device__ int
+get_glm_step(const int step, const int mask_id, const int input_len, const int max_input_len) {
     if (mask_id == -1) {
         if ((step + 1) < max_input_len)
             return step;
         else
             return (step - max_input_len + input_len);
-    }
-    else {
+    } else {
         if ((step + 1) < input_len)
             return step;
         else
@@ -688,15 +651,13 @@ __inline__ __device__ int get_glm_step(const int step, const int mask_id, const 
 }
 
 __inline__ __device__ int
-get_glm_block_step(const int step, const int mask_id, const int input_len, const int max_input_len)
-{
+get_glm_block_step(const int step, const int mask_id, const int input_len, const int max_input_len) {
     if (mask_id == -1) {
         if ((step + 1) < max_input_len)
             return step;
         else
             return (step - max_input_len + input_len);
-    }
-    else {
+    } else {
         if ((step + 1) < input_len)
             return 0;
         else
@@ -712,8 +673,7 @@ class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Base> {
 
 public:
     static __device__ __inline__ void
-    impl(vector_t& x, scalar_t* smem, const int tidx, const int seqidx, const int dim, const int base = 10000)
-    {
+    impl(vector_t& x, scalar_t* smem, const int tidx, const int seqidx, const int dim, const int base = 10000) {
 
         const int  vec_size = vector_size<scalar_t, vector_t>::size;
         const bool work     = (tidx * vec_size < dim);
@@ -743,8 +703,7 @@ public:
                                                const int dim,
                                                const int base                      = 10000,
                                                const int position_embeddings_scale = 1,
-                                               const int base_scale                = 1)
-    {
+                                               const int base_scale                = 1) {
 
         const int  vec_size = vector_size<scalar_t, vector_t>::size;
         const bool work     = (tidx * vec_size < dim);
@@ -767,8 +726,7 @@ public:
                                            const int   seqidx,
                                            const int   dim,
                                            const int   base   = 10000,
-                                           const float scalar = 1.0)
-    {
+                                           const float scalar = 1.0) {
 
         reinterpret_cast<vector_t*>(smem)[tidx] = x;
         __syncthreads();
@@ -787,8 +745,7 @@ template<typename scalar_t, typename vector_t>
 class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar> {
 
     static __device__ inline float get_neox_dynamic_embedding_base(
-        const int base, const int seq_len, const int rot_embed_dim, const float scale, const int max_pos)
-    {
+        const int base, const int seq_len, const int rot_embed_dim, const float scale, const int max_pos) {
         if (max_pos == 0 || seq_len <= max_pos)
             return base * 1.0f;
         else {
@@ -807,8 +764,7 @@ public:
                                            const float scale                     = 1.0,
                                            const int   seq_len                   = 0,
                                            const int   max_pos                   = 2048,
-                                           const int   position_embeddings_scale = 1)
-    {
+                                           const int   position_embeddings_scale = 1) {
 
         const int  vec_size = vector_size<scalar_t, vector_t>::size;
         const bool work     = (tidx * vec_size < dim);
@@ -841,8 +797,7 @@ class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::QWenNTKScalar> {
 
 private:
     static __device__ float
-    get_qwen_dynamic_embedding_base(const int dim, const int base, const int seq_len, const int max_logn_seq_len)
-    {
+    get_qwen_dynamic_embedding_base(const int dim, const int base, const int seq_len, const int max_logn_seq_len) {
         float context_value = logf((float)seq_len / max_logn_seq_len) / logf(2.0) + 1.0;
         float ntk_scalar    = pow(2.0, ceil(context_value)) - 1;
         ntk_scalar          = max(ntk_scalar, 1.0);
@@ -860,8 +815,7 @@ public:
                                            const int   base         = 10000,
                                            const float scalar       = 1.0,
                                            const int   seq_len      = 0,
-                                           const int   max_logn_seq = 2048)
-    {
+                                           const int   max_logn_seq = 2048) {
 
         const int  vec_size = vector_size<scalar_t, vector_t>::size;
         const bool work     = (tidx * vec_size < dim);
@@ -900,8 +854,7 @@ public:
                                            const int blockidx,
                                            const int dim,
                                            const int base        = 10000,
-                                           const int context_len = 0)
-    {
+                                           const int context_len = 0) {
 
         const int  vec_size = vector_size<scalar_t, vector_t>::size;
         const bool work     = (tidx * vec_size < dim);
@@ -916,8 +869,7 @@ public:
             RotaryHalfRead(x, smem, tidx, dim / 4);
             apply_rotary_embedding(x, tidx, dim / 2, seqidx, base);
             RotaryHalfWrite(x, smem, tidx, dim / 4);
-        }
-        else if ((tidx * vec_size >= dim / 2 && tidx * vec_size < dim)) {
+        } else if ((tidx * vec_size >= dim / 2 && tidx * vec_size < dim)) {
             RotaryHalfRead(x, smem + dim / 2, tidx - dim / (2 * vec_size), dim / 4);
             apply_rotary_embedding(x, tidx - dim / (2 * vec_size), dim / 2, blockidx, base);
             RotaryHalfWrite(x, smem + dim / 2, tidx - dim / (2 * vec_size), dim / 4);
@@ -932,7 +884,7 @@ public:
 };
 
 template<typename scalar_t, typename vector_t>
-__device__ inline void context_rope(int      RopeStyle,
+__device__ inline void context_rope(int       RopeStyle,
                                     vector_t& q,
                                     vector_t& k,
                                     scalar_t* smem,
@@ -950,11 +902,10 @@ __device__ inline void context_rope(int      RopeStyle,
                                     bool      PREFIX_PROMPT,
                                     int       prefix_prompt_length,
                                     int       count_length,
-                                    int       logn_length = 0)
-{
+                                    int       logn_length = 0) {
     if (PREFIX_PROMPT && count_length) {
         input_len = input_len + prefix_prompt_length;
-        seqidx = seqidx + prefix_prompt_length;
+        seqidx    = seqidx + prefix_prompt_length;
     }
     if (position_id > 0) {
         seqidx = position_id;
@@ -1042,8 +993,7 @@ __device__ inline void attention_rope(int       RopeStyle,
                                       int       prefix_prompt_length,
                                       int       count_prefix_length,
                                       int       logn_seq_len,
-                                      bool      handle_kv)
-{
+                                      bool      handle_kv) {
 
     if (count_prefix_length) {
         prefix_prompt_length = 0;
@@ -1066,8 +1016,7 @@ __device__ inline void attention_rope(int       RopeStyle,
                     q, smem, tidx, tlength, dim, base, scale, seq_len, max_pos, position_embeddings_scale);
                 Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar>::impl(
                     k, smem, tidx, tlength, dim, base, scale, seq_len, max_pos, position_embeddings_scale);
-            }
-            else {
+            } else {
                 Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar>::impl(
                     q, smem, tidx, timestep, dim, base, scale, seq_len, max_pos, position_embeddings_scale);
             }

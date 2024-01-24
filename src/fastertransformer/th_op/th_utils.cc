@@ -20,8 +20,7 @@ namespace ft = fastertransformer;
 
 namespace torch_ext {
 
-std::vector<size_t> convert_shape(torch::Tensor tensor)
-{
+std::vector<size_t> convert_shape(torch::Tensor tensor) {
     std::vector<size_t> v_shape;
     for (int i = 0; i < tensor.dim(); i++) {
         v_shape.push_back(tensor.size(i));
@@ -30,8 +29,7 @@ std::vector<size_t> convert_shape(torch::Tensor tensor)
 }
 
 template<typename T>
-ft::Tensor convert_tensor(torch::Tensor tensor)
-{
+ft::Tensor convert_tensor(torch::Tensor tensor) {
     ft::MemoryType mtype = tensor.is_cuda() ? ft::MEMORY_GPU : ft::MEMORY_CPU;
     return convert_tensor<T>(tensor, mtype);
 }
@@ -48,8 +46,7 @@ template ft::Tensor convert_tensor<unsigned int>(torch::Tensor tensor);
 template ft::Tensor convert_tensor<bool>(torch::Tensor tensor);
 
 template<typename T>
-ft::Tensor convert_tensor(torch::Tensor tensor, ft::MemoryType memory_type)
-{
+ft::Tensor convert_tensor(torch::Tensor tensor, ft::MemoryType memory_type) {
     return ft::Tensor{memory_type, ft::getTensorType<T>(), convert_shape(tensor), get_ptr<T>(tensor)};
 }
 
@@ -64,8 +61,7 @@ template ft::Tensor convert_tensor<unsigned long long int>(torch::Tensor tensor,
 template ft::Tensor convert_tensor<unsigned int>(torch::Tensor tensor, ft::MemoryType memory_type);
 template ft::Tensor convert_tensor<bool>(torch::Tensor tensor, ft::MemoryType memory_type);
 
-size_t sizeBytes(torch::Tensor tensor)
-{
+size_t sizeBytes(torch::Tensor tensor) {
     return tensor.numel() * torch::elementSize(torch::typeMetaToScalarType(tensor.dtype()));
 }
 

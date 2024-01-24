@@ -74,8 +74,7 @@ public:
     GeluFfnFP8Layer(GeluFfnFP8Layer<T1, T2> const& ffn_layer);
 
     virtual ~GeluFfnFP8Layer() = default;
-    ActivationType getActivationType() override
-    {
+    ActivationType getActivationType() override {
         return ActivationType::Gelu;
     };
 
@@ -109,8 +108,7 @@ public:
     ReluFfnFP8Layer(ReluFfnFP8Layer<T1, T2> const& ffn_layer);
 
     virtual ~ReluFfnFP8Layer() = default;
-    ActivationType getActivationType() override
-    {
+    ActivationType getActivationType() override {
         return ActivationType::Relu;
     };
 

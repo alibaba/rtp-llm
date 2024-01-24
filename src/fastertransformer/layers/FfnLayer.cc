@@ -15,15 +15,14 @@
  */
 
 #include "src/fastertransformer/layers/FfnLayer.h"
+#include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/transpose_int8_kernels.h"
 #include "src/fastertransformer/utils/nvtx_utils.h"
-#include "src/fastertransformer/kernels/layernorm_kernels.h"
 
 namespace fastertransformer {
 
 template<typename T>
-void FfnLayer<T>::preAllocate()
-{
+void FfnLayer<T>::preAllocate() {
     if (max_token_num_ > 0) {
         allocateBuffer(max_token_num_, 1, false);
     }
@@ -32,16 +31,14 @@ void FfnLayer<T>::preAllocate()
 template<typename T>
 void FfnLayer<T>::forward(std::vector<fastertransformer::Tensor>*       output_tensors,
                           const std::vector<fastertransformer::Tensor>* input_tensors,
-                          const FfnWeight<T>*                           ffn_weights)
-{
+                          const FfnWeight<T>*                           ffn_weights) {
     TensorMap input_tensor({{"ffn_input", input_tensors->at(0)}});
     TensorMap output_tensor({{"ffn_output", output_tensors->at(0)}});
     forward(&output_tensor, &input_tensor, ffn_weights);
 }
 
 template<typename T>
-void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, const FfnWeight<T>* ffn_weights)
-{
+void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, const FfnWeight<T>* ffn_weights) {
     // input tensors:
     //      ffn_input [token_num, hidden_dimension],
     //      ia3_tasks [batch_size] (optional)
@@ -70,10 +67,10 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     const int m             = input_tensors->at("ffn_input").shape[0];
     T*        output_tensor = output_tensors->at("ffn_output").getPtr<T>();
     const T*  input_tensor  = input_tensors->at("ffn_input").getPtr<const T>();
-    const int  layer_id     = input_tensors->getVal<int>("layer_id");
+    const int layer_id      = input_tensors->getVal<int>("layer_id");
 
-    const int batch_size    = input_tensors->getVal<int>("batch_size", 1);
-    const int* lora_input_lengths  = input_tensors->getPtr<int>("lora_input_lengths", nullptr);
+    const int  batch_size         = input_tensors->getVal<int>("batch_size", 1);
+    const int* lora_input_lengths = input_tensors->getPtr<int>("lora_input_lengths", nullptr);
     // lora
     const int* lora_ids = input_tensors->getPtr<int>("lora_ids", nullptr);
 
@@ -82,7 +79,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     if (int8_mode_ == 0) {
         use_gated_activation = use_gated_activation_ && ffn_weights->intermediate_weight2.kernel != nullptr;
     } else {
-        use_gated_activation = use_gated_activation_ && ffn_weights->intermediate_weight2.int8_kernel  != nullptr;
+        use_gated_activation = use_gated_activation_ && ffn_weights->intermediate_weight2.int8_kernel != nullptr;
     }
     //  for moe output
     T*   expert_scales    = nullptr;
@@ -125,59 +122,58 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                               moe_gates_buf_,
                               expert_num_);
         print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_);
-        bool use_ffn3 = ffn_weights->intermediate_weight2.int8_kernel  != nullptr;
+        bool use_ffn3 = ffn_weights->intermediate_weight2.int8_kernel != nullptr;
         if (int8_mode_ == 0) {
 
             if (use_ffn3) {
 
                 FT_CHECK(ffn_weights->intermediate_weight2.kernel != nullptr);
                 moe_fc_runner_->run_moe_fc(input_tensor,
-                                       moe_gates_buf_,
-                                       ffn_weights->intermediate_weight.kernel,
-                                       nullptr,
-                                       ffn_weights->intermediate_weight.bias,
-                                       activation_type,
-                                       ffn_weights->output_weight.kernel,
-                                       nullptr,
-                                       ffn_weights->intermediate_weight2.kernel,
-                                       nullptr,
-                                       m,
-                                       hidden_units_,
-                                       inter_size_,
-                                       expert_num_,
-                                       moe_k,
-                                       moe_fc_workspace_,
-                                       output_tensor,
-                                       nullptr,
-                                       m,
-                                       expert_scales,
-                                       permuted_rows,
-                                       permuted_experts,
-                                       stream_);
+                                           moe_gates_buf_,
+                                           ffn_weights->intermediate_weight.kernel,
+                                           nullptr,
+                                           ffn_weights->intermediate_weight.bias,
+                                           activation_type,
+                                           ffn_weights->output_weight.kernel,
+                                           nullptr,
+                                           ffn_weights->intermediate_weight2.kernel,
+                                           nullptr,
+                                           m,
+                                           hidden_units_,
+                                           inter_size_,
+                                           expert_num_,
+                                           moe_k,
+                                           moe_fc_workspace_,
+                                           output_tensor,
+                                           nullptr,
+                                           m,
+                                           expert_scales,
+                                           permuted_rows,
+                                           permuted_experts,
+                                           stream_);
 
             } else {
                 moe_fc_runner_->run_moe_fc(input_tensor,
-                                       moe_gates_buf_,
-                                       ffn_weights->intermediate_weight.kernel,
-                                       nullptr,
-                                       ffn_weights->intermediate_weight.bias,
-                                       activation_type,
-                                       ffn_weights->output_weight.kernel,
-                                       nullptr,
-                                       m,
-                                       hidden_units_,
-                                       inter_size_,
-                                       expert_num_,
-                                       moe_k,
-                                       moe_fc_workspace_,
-                                       output_tensor,
-                                       expert_scales,
-                                       permuted_rows,
-                                       permuted_experts,
-                                       stream_);
+                                           moe_gates_buf_,
+                                           ffn_weights->intermediate_weight.kernel,
+                                           nullptr,
+                                           ffn_weights->intermediate_weight.bias,
+                                           activation_type,
+                                           ffn_weights->output_weight.kernel,
+                                           nullptr,
+                                           m,
+                                           hidden_units_,
+                                           inter_size_,
+                                           expert_num_,
+                                           moe_k,
+                                           moe_fc_workspace_,
+                                           output_tensor,
+                                           expert_scales,
+                                           permuted_rows,
+                                           permuted_experts,
+                                           stream_);
             }
-        }
-        else if (int8_mode_ == 1) {
+        } else if (int8_mode_ == 1) {
             FT_CHECK_WITH_INFO(moe_int8_weight_only_fc_runner_.get() != NULL,
                                "weight only runner was not initialized.");
 
@@ -186,60 +182,58 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
 
             FT_CHECK(ffn_weights->output_weight.int8_kernel != NULL
                      && ffn_weights->output_weight.weight_only_quant_scale != NULL);
-            
+
             if (use_ffn3) {
                 FT_CHECK(ffn_weights->intermediate_weight2.int8_kernel != NULL
-                     && ffn_weights->intermediate_weight2.weight_only_quant_scale != NULL);
+                         && ffn_weights->intermediate_weight2.weight_only_quant_scale != NULL);
                 moe_int8_weight_only_fc_runner_->run_moe_fc(
-                                                input_tensor,
-                                                moe_gates_buf_,
-                                                reinterpret_cast<const uint8_t*>(ffn_weights->intermediate_weight.int8_kernel),
-                                                ffn_weights->intermediate_weight.weight_only_quant_scale,
-                                                ffn_weights->intermediate_weight.bias,
-                                                activation_type,
-                                                reinterpret_cast<const uint8_t*>(ffn_weights->output_weight.int8_kernel),
-                                                ffn_weights->output_weight.weight_only_quant_scale,
-                                                reinterpret_cast<const uint8_t*>(ffn_weights->intermediate_weight2.int8_kernel),
-                                                ffn_weights->intermediate_weight2.weight_only_quant_scale,
-                                                m,
-                                                hidden_units_,
-                                                inter_size_,
-                                                expert_num_,
-                                                moe_k,
-                                                moe_fc_workspace_,
-                                                output_tensor,
-                                                nullptr,
-                                                m,
-                                                expert_scales,
-                                                permuted_rows,
-                                                permuted_experts,
-                                                stream_);
+                    input_tensor,
+                    moe_gates_buf_,
+                    reinterpret_cast<const uint8_t*>(ffn_weights->intermediate_weight.int8_kernel),
+                    ffn_weights->intermediate_weight.weight_only_quant_scale,
+                    ffn_weights->intermediate_weight.bias,
+                    activation_type,
+                    reinterpret_cast<const uint8_t*>(ffn_weights->output_weight.int8_kernel),
+                    ffn_weights->output_weight.weight_only_quant_scale,
+                    reinterpret_cast<const uint8_t*>(ffn_weights->intermediate_weight2.int8_kernel),
+                    ffn_weights->intermediate_weight2.weight_only_quant_scale,
+                    m,
+                    hidden_units_,
+                    inter_size_,
+                    expert_num_,
+                    moe_k,
+                    moe_fc_workspace_,
+                    output_tensor,
+                    nullptr,
+                    m,
+                    expert_scales,
+                    permuted_rows,
+                    permuted_experts,
+                    stream_);
             } else {
                 moe_int8_weight_only_fc_runner_->run_moe_fc(
-                                input_tensor,
-                                moe_gates_buf_,
-                                reinterpret_cast<const uint8_t*>(ffn_weights->intermediate_weight.int8_kernel),
-                                ffn_weights->intermediate_weight.weight_only_quant_scale,
-                                ffn_weights->intermediate_weight.bias,
-                                activation_type,
-                                reinterpret_cast<const uint8_t*>(ffn_weights->output_weight.int8_kernel),
-                                ffn_weights->output_weight.weight_only_quant_scale,
-                                m,
-                                hidden_units_,
-                                inter_size_,
-                                expert_num_,
-                                moe_k,
-                                moe_fc_workspace_,
-                                output_tensor,
-                                expert_scales,
-                                permuted_rows,
-                                permuted_experts,
-                                stream_);
+                    input_tensor,
+                    moe_gates_buf_,
+                    reinterpret_cast<const uint8_t*>(ffn_weights->intermediate_weight.int8_kernel),
+                    ffn_weights->intermediate_weight.weight_only_quant_scale,
+                    ffn_weights->intermediate_weight.bias,
+                    activation_type,
+                    reinterpret_cast<const uint8_t*>(ffn_weights->output_weight.int8_kernel),
+                    ffn_weights->output_weight.weight_only_quant_scale,
+                    m,
+                    hidden_units_,
+                    inter_size_,
+                    expert_num_,
+                    moe_k,
+                    moe_fc_workspace_,
+                    output_tensor,
+                    expert_scales,
+                    permuted_rows,
+                    permuted_experts,
+                    stream_);
             }
 
-            
-        }
-        else {
+        } else {
             FT_CHECK_WITH_INFO(false, "Invalid int8 mode for MoE");
         }
 
@@ -252,9 +246,9 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
         return;
     }
 
-    
     const int64_t inter_size = is_sparse_head_ ? local_layer_inter_size_[layer_id] : inter_size_;
-    const int64_t inter_padding_size = is_sparse_head_ ? local_layer_inter_padding_size_[layer_id]: inter_padding_size_;
+    const int64_t inter_padding_size =
+        is_sparse_head_ ? local_layer_inter_padding_size_[layer_id] : inter_padding_size_;
 
     PUSH_RANGE(stream_, "ffn_gemm_1");
     int m_tmp = input_tensors->at("ffn_input").shape[0];
@@ -262,66 +256,66 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
         m_tmp = (m_tmp / 8 + 1) * 8;
     }
 #ifdef SPARSITY_ENABLED
-    const int m_padded = m_tmp;
-    bool use_sparse_gemm = sparse_ && cublas_wrapper_->isUseSparse(1, inter_size, m, hidden_units_);
+    const int m_padded        = m_tmp;
+    bool      use_sparse_gemm = sparse_ && cublas_wrapper_->isUseSparse(1, inter_size, m, hidden_units_);
 #else
     constexpr bool use_sparse_gemm = false;
-    constexpr int m_padded = 0;
+    constexpr int  m_padded        = 0;
 #endif
 
     const bool fused_gemm_activation = int8_mode_ == 1 && ia3_tasks == nullptr && !use_gated_activation;
     if (fused_gemm_activation) {
         // launch fused GEMM + activation
         weight_only_int8_fc_runner_->gemm_bias_act(
-                    input_tensor,
-                    reinterpret_cast<const uint8_t*>(ffn_weights->intermediate_weight.int8_kernel),
-                    ffn_weights->intermediate_weight.weight_only_quant_scale,
-                    ffn_weights->intermediate_weight.bias,
-                    inter_buf_,
-                    m,
-                    inter_padding_size,
-                    hidden_units_,
-                    activation_type,
-                    mixed_gemm_workspace_,
-                    mixed_gemm_ws_bytes_,
-                    stream_);
+            input_tensor,
+            reinterpret_cast<const uint8_t*>(ffn_weights->intermediate_weight.int8_kernel),
+            ffn_weights->intermediate_weight.weight_only_quant_scale,
+            ffn_weights->intermediate_weight.bias,
+            inter_buf_,
+            m,
+            inter_padding_size,
+            hidden_units_,
+            activation_type,
+            mixed_gemm_workspace_,
+            mixed_gemm_ws_bytes_,
+            stream_);
         sync_check_cuda_error();
     } else {
         // gemm used inter_size, int8 use inter_padding_size
         const int cur_inter_size = int8_mode_ == 1 ? inter_padding_size : inter_size;
-        gemm_runner_->Gemm( batch_size,
-                            lora_input_lengths,
-                            m,
-                            cur_inter_size,
-                            hidden_units_,
-                            input_tensor,
-                            &ffn_weights->intermediate_weight,
-                            inter_buf_,
-                            lora_ids,
-                            int8_mode_,
-                            use_sparse_gemm,
-                            mixed_gemm_workspace_,
-                            mixed_gemm_ws_bytes_,
-                            m_padded);
-    
+        gemm_runner_->Gemm(batch_size,
+                           lora_input_lengths,
+                           m,
+                           cur_inter_size,
+                           hidden_units_,
+                           input_tensor,
+                           &ffn_weights->intermediate_weight,
+                           inter_buf_,
+                           lora_ids,
+                           int8_mode_,
+                           use_sparse_gemm,
+                           mixed_gemm_workspace_,
+                           mixed_gemm_ws_bytes_,
+                           m_padded);
+
         if (use_gated_activation) {
-            gemm_runner_->Gemm( batch_size,
-                                lora_input_lengths,
-                                m,
-                                cur_inter_size,
-                                hidden_units_,
-                                input_tensor,
-                                &ffn_weights->intermediate_weight2,
-                                inter_buf_2_,
-                                lora_ids,
-                                int8_mode_,
-                                use_sparse_gemm,
-                                mixed_gemm_workspace_,
-                                mixed_gemm_ws_bytes_,
-                                m_padded);
+            gemm_runner_->Gemm(batch_size,
+                               lora_input_lengths,
+                               m,
+                               cur_inter_size,
+                               hidden_units_,
+                               input_tensor,
+                               &ffn_weights->intermediate_weight2,
+                               inter_buf_2_,
+                               lora_ids,
+                               int8_mode_,
+                               use_sparse_gemm,
+                               mixed_gemm_workspace_,
+                               mixed_gemm_ws_bytes_,
+                               m_padded);
         }
     }
-    POP_RANGE; // End for NVTX Range: FFN gemm 1
+    POP_RANGE;  // End for NVTX Range: FFN gemm 1
 
     print_bsd(layer_id, "ffn1", inter_buf_, 1, m, inter_padding_size);
     if (use_gated_activation) {
@@ -352,19 +346,18 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
 
     T* inter_buf_normed_output = nullptr;
     if (ffn_weights->dense_layernorm.gamma && ffn_weights->dense_layernorm.beta) {
-        invokeGeneralLayerNormWithPadding(
-                inter_buf_normed_,
-                inter_buf_,
-                ffn_weights->dense_layernorm.gamma,
-                ffn_weights->dense_layernorm.beta,
-                layernorm_eps_,
-                m,
-                inter_size,
-                inter_padding_size,
-                nullptr,
-                nullptr,
-                int8_mode_,
-                stream_);
+        invokeGeneralLayerNormWithPadding(inter_buf_normed_,
+                                          inter_buf_,
+                                          ffn_weights->dense_layernorm.gamma,
+                                          ffn_weights->dense_layernorm.beta,
+                                          layernorm_eps_,
+                                          m,
+                                          inter_size,
+                                          inter_padding_size,
+                                          nullptr,
+                                          nullptr,
+                                          int8_mode_,
+                                          stream_);
 
         inter_buf_normed_output = inter_buf_normed_;
         sync_check_cuda_error();
@@ -375,20 +368,20 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
 
     PUSH_RANGE(stream_, "ffn_gemm_2");
     const int cur_inter_size = int8_mode_ == 1 ? inter_padding_size : inter_size;
-    gemm_runner_->Gemm( batch_size,
-                        lora_input_lengths,
-                        m,
-                        hidden_units_,
-                        cur_inter_size,
-                        inter_buf_normed_output,
-                        &ffn_weights->output_weight,
-                        output_tensor,
-                        lora_ids,
-                        int8_mode_,
-                        use_sparse_gemm,
-                        mixed_gemm_workspace_,
-                        mixed_gemm_ws_bytes_,
-                        m_padded);
+    gemm_runner_->Gemm(batch_size,
+                       lora_input_lengths,
+                       m,
+                       hidden_units_,
+                       cur_inter_size,
+                       inter_buf_normed_output,
+                       &ffn_weights->output_weight,
+                       output_tensor,
+                       lora_ids,
+                       int8_mode_,
+                       use_sparse_gemm,
+                       mixed_gemm_workspace_,
+                       mixed_gemm_ws_bytes_,
+                       m_padded);
 
     print_bsd(layer_id, "ffn out layer", output_tensor, 1, m, hidden_units_);
 
@@ -433,12 +426,10 @@ FfnLayer<T>::FfnLayer(size_t               max_batch_size,
     is_sparse_head_(is_sparse_head),
     int8_mode_(int8_mode),
     activation_type_(activation_type),
-    layernorm_eps_(layernorm_eps)
-{
-    use_gated_activation_ = activation_type_ == ActivationType::GeGLU ||
-                            activation_type_ == ActivationType::GeGluNoneApproximate ||
-                            activation_type_ == ActivationType::ReGLU ||
-                            activation_type_ == ActivationType::SiGLU;
+    layernorm_eps_(layernorm_eps) {
+    use_gated_activation_ = activation_type_ == ActivationType::GeGLU
+                            || activation_type_ == ActivationType::GeGluNoneApproximate
+                            || activation_type_ == ActivationType::ReGLU || activation_type_ == ActivationType::SiGLU;
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (int8_mode_ == 1) {
         FT_CHECK_WITH_INFO(!(std::is_same<T, float>::value), "Weight only quant not supported for fp32.");
@@ -448,7 +439,8 @@ FfnLayer<T>::FfnLayer(size_t               max_batch_size,
     } else if (int8_mode_ == 2) {
         abort();
     }
-    gemm_runner_ = std::make_shared<GemmRunner<T>>(sparse, stream, allocator, cublas_wrapper, weight_only_int8_fc_runner_);
+    gemm_runner_ =
+        std::make_shared<GemmRunner<T>>(sparse, stream, allocator, cublas_wrapper, weight_only_int8_fc_runner_);
     moe_fc_runner_ = std::make_shared<CutlassMoeFCRunner<T, T>>();
 }
 
@@ -477,29 +469,25 @@ FfnLayer<T>::FfnLayer(FfnLayer<T> const& ffn_layer):
     weight_only_int8_fc_runner_(ffn_layer.weight_only_int8_fc_runner_),
     gemm_runner_(ffn_layer.gemm_runner_),
     moe_fc_runner_(ffn_layer.moe_fc_runner_),
-    moe_int8_weight_only_fc_runner_(ffn_layer.moe_int8_weight_only_fc_runner_)
-{
+    moe_int8_weight_only_fc_runner_(ffn_layer.moe_int8_weight_only_fc_runner_) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 }
 
 template<typename T>
-FfnLayer<T>::~FfnLayer()
-{
+FfnLayer<T>::~FfnLayer() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     cublas_wrapper_ = nullptr;
     freeBuffer();
 }
 
 template<typename T>
-void FfnLayer<T>::allocateBuffer()
-{
+void FfnLayer<T>::allocateBuffer() {
     FT_CHECK_WITH_INFO(false,
                        "FfnLayer::allocateBuffer() is deprecated. Use `allocateBuffer(size_t token_num, ...)` instead");
 }
 
 template<typename T>
-void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe)
-{
+void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (use_moe) {
         moe_gates_buf_ =
@@ -507,9 +495,9 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe)
         size_t ws_size_moe = 0;
         if (int8_mode_ == 0) {
             FT_CHECK_WITH_INFO(moe_fc_runner_.get() != NULL, "moe runner was not initialized.");
-            ws_size_moe = moe_fc_runner_->getWorkspaceSize(token_num, hidden_units_, inter_size_, expert_num_, moe_k, use_gated_activation_);
-        }
-        else if (int8_mode_ == 1) {
+            ws_size_moe = moe_fc_runner_->getWorkspaceSize(
+                token_num, hidden_units_, inter_size_, expert_num_, moe_k, use_gated_activation_);
+        } else if (int8_mode_ == 1) {
             FT_CHECK_WITH_INFO(moe_int8_weight_only_fc_runner_.get() != NULL,
                                "weight only moe runner was not initialized.");
             ws_size_moe = moe_int8_weight_only_fc_runner_->getWorkspaceSize(
@@ -519,11 +507,14 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe)
         moe_fc_workspace_ = (char*)allocator_->reMalloc(moe_fc_workspace_, sizeof(char) * ws_size_moe, false);
     } else {
         const auto type_size = int8_mode_ == 2 ? sizeof(int8_t) : sizeof(T);
-        inter_buf_           = (T*)allocator_->reMalloc(inter_buf_, type_size * token_num * inter_padding_size_ + token_num * 4, false);
+        inter_buf_ =
+            (T*)allocator_->reMalloc(inter_buf_, type_size * token_num * inter_padding_size_ + token_num * 4, false);
         if (use_gated_activation_) {
-            inter_buf_2_ = (T*)allocator_->reMalloc(inter_buf_2_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, false);
+            inter_buf_2_ = (T*)allocator_->reMalloc(
+                inter_buf_2_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, false);
         }
-        inter_buf_normed_    = (T*)(allocator_->reMalloc(inter_buf_normed_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, true));
+        inter_buf_normed_ = (T*)(allocator_->reMalloc(
+            inter_buf_normed_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, true));
 
         if (int8_mode_ == 1) {
             FT_CHECK_WITH_INFO(weight_only_int8_fc_runner_.get() != NULL, "weight only runner was not initialized.");
@@ -538,8 +529,7 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe)
 }
 
 template<typename T>
-void FfnLayer<T>::freeBuffer()
-{
+void FfnLayer<T>::freeBuffer() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (is_allocate_buffer_) {
         allocator_->free((void**)(&inter_buf_));
@@ -570,7 +560,7 @@ void FfnLayer<T>::freeBuffer()
                                  ia3_tasks,                                                                            \
                                  ia3_weights,                                                                          \
                                  m,                                                                                    \
-                                 inter_padding_size,                                                                  \
+                                 inter_padding_size,                                                                   \
                                  int8_mode_,                                                                           \
                                  activation_in,                                                                        \
                                  activation_out,                                                                       \
@@ -588,13 +578,13 @@ void FfnLayer<T>::genericActivation(int          layer_id,
                                     const float* activation_in,
                                     const float* activation_out,
                                     const int*   padding_offset,
-                                    const int    seq_len)
-{
+                                    const int    seq_len) {
     if (ia3_tasks != nullptr) {
         FT_CHECK(seq_len > 0);
     }
 
-    const int64_t inter_padding_size = is_sparse_head_ ? local_layer_inter_padding_size_[layer_id]: inter_padding_size_;
+    const int64_t inter_padding_size =
+        is_sparse_head_ ? local_layer_inter_padding_size_[layer_id] : inter_padding_size_;
 
     // dispatch according to actual activation
     switch (getActivationType()) {
@@ -603,8 +593,7 @@ void FfnLayer<T>::genericActivation(int          layer_id,
             if (inter_buf_2_ == nullptr && int8_mode_ <= 1) {
                 invokeAddBiasGeluV2(
                     inter_buf_, bias1, ia3_tasks, ia3_weights, padding_offset, seq_len, m, inter_padding_size, stream_);
-            }
-            else {
+            } else {
                 INVOKE_GENERIC_ACT(GeluActivation);
             }
             break;

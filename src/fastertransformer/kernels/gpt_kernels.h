@@ -74,14 +74,14 @@ void invokeInputIdsEmbeddingLookupPosEncoding(T*                    from_tensor,
                                               cudaStream_t          stream);
 
 template<typename T>
-void invokeEmebeddingLookup(T*                    from_tensor,
-                            const T*              embedding_table,
-                            const T*              pos_table,
-                            const int*            input_ids,
-                            const int*            input_pos,
-                            const int             token_num,
-                            const int             hidden_units,
-                            cudaStream_t          stream);
+void invokeEmebeddingLookup(T*           from_tensor,
+                            const T*     embedding_table,
+                            const T*     pos_table,
+                            const int*   input_ids,
+                            const int*   input_pos,
+                            const int    token_num,
+                            const int    hidden_units,
+                            cudaStream_t stream);
 
 template<typename T>
 void invokeInputIdsEmbeddingLookupPosEncodingSoftPrompt(inputIdsEmbeddingLookupPosEncodingSoftPromptParam<T> param);
@@ -145,13 +145,11 @@ void invokeFindContextDups(int*         shared_contexts,
                            cudaStream_t stream = 0);
 
 template<typename T>
-void handleOptArg(TensorMap* input_tensors, const std::string& arg_name, T* d_ptr, T default_value, size_t size)
-{
+void handleOptArg(TensorMap* input_tensors, const std::string& arg_name, T* d_ptr, T default_value, size_t size) {
     if (input_tensors->isExist(arg_name)) {
         FT_CHECK(input_tensors->at(arg_name).size() == size);
         cudaH2Dcpy(d_ptr, input_tensors->at(arg_name).getPtr<const T>(), size);
-    }
-    else {
+    } else {
         deviceFill(d_ptr, size, default_value);
     }
 }
@@ -208,8 +206,7 @@ inline void invokeUpdatePaddingCount(int*         total_padding_count,
                                      size_t       max_input_length,
                                      size_t       batch_size,
                                      size_t       beam_width,
-                                     cudaStream_t stream = 0)
-{
+                                     cudaStream_t stream = 0) {
     invokeUpdatePaddingCount(
         total_padding_count, input_lengths, (const int*)nullptr, max_input_length, 0, batch_size, beam_width, stream);
 }
@@ -231,8 +228,7 @@ inline void invokeMaskPaddingTokens(bool*        masked_tokens,
                                     const size_t initial_step,
                                     size_t       batch_size,
                                     size_t       beam_width,
-                                    cudaStream_t stream = 0)
-{
+                                    cudaStream_t stream = 0) {
     invokeMaskPaddingTokens(masked_tokens,
                             input_lengths,
                             (const int*)nullptr,
@@ -252,11 +248,8 @@ void invokeSumLengthDimension(float*       out_buf,
                               const size_t hidden_dim,
                               cudaStream_t stream = 0);
 
-void invokeMaxLength(size_t*      h_pinned_max_length,
-                     const int*   lengths,
-                     size_t*      max_length,
-                     const size_t size,
-                     cudaStream_t stream = 0);
+void invokeMaxLength(
+    size_t* h_pinned_max_length, const int* lengths, size_t* max_length, const size_t size, cudaStream_t stream = 0);
 
 // void invokeMinLength(size_t*      h_pinned_min_length,
 //                      const int*   lengths,

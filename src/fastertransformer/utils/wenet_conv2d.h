@@ -40,8 +40,7 @@ void conv2d(T*             output,
             const int      kernel_size,
             const int      stride,
             cudnnHandle_t& cudnn_handle,
-            cudaStream_t   stream)
-{
+            cudaStream_t   stream) {
     cudnnDataType_t dataType;
     cudnnDataType_t computeType = CUDNN_DATA_FLOAT;
     const float     alpha1      = 1.0f;
@@ -49,8 +48,7 @@ void conv2d(T*             output,
     if (std::is_same<T, half>::value) {
         dataType = CUDNN_DATA_HALF;
         // computeType = CUDNN_DATA_HALF;
-    }
-    else {
+    } else {
         dataType = CUDNN_DATA_FLOAT;
     }
 

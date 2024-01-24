@@ -38,43 +38,38 @@ namespace fastertransformer {
 // workspace for cublas gemm : 32MB
 #define CUBLAS_WORKSPACE_SIZE 33554432
 
-typedef struct __align__(4)
-{
+typedef struct __align__(4) {
     half x, y, z, w;
 }
 half4;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-struct __align__(16) Float4_
-{
+struct __align__(16) Float4_ {
     float2 x;
     float2 y;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-struct __align__(32) Float8_
-{
+struct __align__(32) Float8_ {
     float2 x;
     float2 y;
     float2 z;
     float2 w;
 };
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+    ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #ifdef ENABLE_BF16
-struct __align__(8) bf16_4_t
-{
+struct __align__(8) bf16_4_t {
     __nv_bfloat162 x;
     __nv_bfloat162 y;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-struct __align__(16) bf16_8_t
-{
+struct __align__(16) bf16_8_t {
     __nv_bfloat162 x;
     __nv_bfloat162 y;
     __nv_bfloat162 z;
@@ -86,8 +81,7 @@ struct __align__(16) bf16_8_t
 using fp8_2_t = __nv_fp8x2_e4m3;
 using fp8_4_t = __nv_fp8x4_e4m3;
 
-struct __align__(8) fp8_8_t
-{
+struct __align__(8) fp8_8_t {
     __nv_fp8x2_e4m3 x;
     __nv_fp8x2_e4m3 y;
     __nv_fp8x2_e4m3 z;
@@ -122,13 +116,11 @@ enum class OperationType {
 };
 
 /* **************************** debug tools ********************************* */
-static const char* _cudaGetErrorEnum(cudaError_t error)
-{
+static const char* _cudaGetErrorEnum(cudaError_t error) {
     return cudaGetErrorString(error);
 }
 
-static const char* _cudaGetErrorEnum(cublasStatus_t error)
-{
+static const char* _cudaGetErrorEnum(cublasStatus_t error) {
     switch (error) {
         case CUBLAS_STATUS_SUCCESS:
             return "CUBLAS_STATUS_SUCCESS";
@@ -164,11 +156,10 @@ static const char* _cudaGetErrorEnum(cublasStatus_t error)
 }
 
 template<typename T>
-void check(T result, char const* const func, const char* const file, int const line)
-{
+void check(T result, char const* const func, const char* const file, int const line) {
     if (result) {
-        FT_LOG_ERROR(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
-                                 + file + ":" + std::to_string(line) + " \n");
+        FT_LOG_ERROR(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file + ":"
+                     + std::to_string(line) + " \n");
         fflush(stdout);
         throw std::runtime_error(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
                                  + file + ":" + std::to_string(line) + " \n");
@@ -179,8 +170,7 @@ void check(T result, char const* const func, const char* const file, int const l
 #define check_cuda_error(val) check((val), #val, __FILE__, __LINE__)
 #define check_cuda_error_2(val, file, line) check((val), #val, file, line)
 
-inline void syncAndCheck(const char* const file, int const line)
-{
+inline void syncAndCheck(const char* const file, int const line) {
     // When FT_DEBUG_LEVEL=DEBUG, must check error
     static char* level_name = std::getenv("FT_DEBUG_LEVEL");
     if (level_name != nullptr) {
@@ -206,12 +196,11 @@ inline void syncAndCheck(const char* const file, int const line)
 #endif
 }
 
-inline void CheckError(const char* const file, int const line)
-{
+inline void CheckError(const char* const file, int const line) {
     cudaError_t result = cudaGetLastError();
     if (result) {
-        FT_LOG_ERROR(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
-                                 + file + ":" + std::to_string(line) + " \n");
+        FT_LOG_ERROR(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file + ":"
+                     + std::to_string(line) + " \n");
         fflush(stdout);
         abort();
     }
@@ -222,7 +211,7 @@ inline void CheckError(const char* const file, int const line)
 #define final_check_error() CheckError(__FILE__, __LINE__)
 
 inline bool is_sm8x() {
-    static bool IS_SM8X = [](){
+    static bool IS_SM8X = []() {
         int device;
         check_cuda_error(cudaGetDevice(&device));
         cudaDeviceProp deviceProp;
@@ -233,7 +222,7 @@ inline bool is_sm8x() {
 }
 
 inline bool is_sm90() {
-    static bool IS_SM90 = [](){
+    static bool IS_SM90 = []() {
         int device;
         check_cuda_error(cudaGetDevice(&device));
         cudaDeviceProp deviceProp;
@@ -284,14 +273,12 @@ void check_abs_mean_val(const T* result, const int size);
         std::cout << "[FT][CALL] " << __FUNCTION__ << " " << std::endl;                                                \
     } while (0)
 
-[[noreturn]] inline void throwRuntimeError(const char* const file, int const line, std::string const& info = "")
-{
+[[noreturn]] inline void throwRuntimeError(const char* const file, int const line, std::string const& info = "") {
     throw std::runtime_error(std::string("[FT][ERROR] ") + info + " Assertion fail: " + file + ":"
                              + std::to_string(line) + " \n");
 }
 
-inline void myAssert(bool result, const char* const file, int const line, std::string const& info = "")
-{
+inline void myAssert(bool result, const char* const file, int const line, std::string const& info = "") {
     if (!result) {
         throwRuntimeError(file, line, info);
     }
@@ -329,18 +316,15 @@ private:
     cudaStream_t stream_;
 
 public:
-    explicit CudaTimer(cudaStream_t stream = 0)
-    {
+    explicit CudaTimer(cudaStream_t stream = 0) {
         stream_ = stream;
     }
-    void start()
-    {
+    void start() {
         check_cuda_error(cudaEventCreate(&event_start_));
         check_cuda_error(cudaEventCreate(&event_stop_));
         check_cuda_error(cudaEventRecord(event_start_, stream_));
     }
-    float stop()
-    {
+    float stop() {
         float time;
         check_cuda_error(cudaEventRecord(event_stop_, stream_));
         check_cuda_error(cudaEventSynchronize(event_stop_));
@@ -352,15 +336,13 @@ public:
     ~CudaTimer() {}
 };
 
-static double diffTime(timeval start, timeval end)
-{
+static double diffTime(timeval start, timeval end) {
     return (end.tv_sec - start.tv_sec) * 1000 + (end.tv_usec - start.tv_usec) * 0.001;
 }
 
 /* ***************************** common utils ****************************** */
 
-inline void print_mem_usage(std::string time = "after allocation")
-{
+inline void print_mem_usage(std::string time = "after allocation") {
     size_t free_bytes, total_bytes;
     check_cuda_error(cudaMemGetInfo(&free_bytes, &total_bytes));
     float free  = static_cast<float>(free_bytes) / 1024.0 / 1024.0 / 1024.0;
@@ -369,8 +351,7 @@ inline void print_mem_usage(std::string time = "after allocation")
     printf("%-20s: free: %5.2f GB, total: %5.2f GB, used: %5.2f GB\n", time.c_str(), free, total, used);
 }
 
-inline int getSMVersion()
-{
+inline int getSMVersion() {
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));
     int sm_major = 0;
@@ -380,8 +361,7 @@ inline int getSMVersion()
     return sm_major * 10 + sm_minor;
 }
 
-inline int getMaxSharedMemoryPerBlock()
-{
+inline int getMaxSharedMemoryPerBlock() {
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));
     int max_shared_memory_size = 0;
@@ -389,8 +369,7 @@ inline int getMaxSharedMemoryPerBlock()
     return max_shared_memory_size;
 }
 
-inline std::string getDeviceName()
-{
+inline std::string getDeviceName() {
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));
     cudaDeviceProp props;
@@ -398,30 +377,26 @@ inline std::string getDeviceName()
     return std::string(props.name);
 }
 
-inline int div_up(int a, int n)
-{
+inline int div_up(int a, int n) {
     return (a + n - 1) / n;
 }
 
 cudaError_t getSetDevice(int i_device, int* o_device = NULL);
 
-inline int getDevice()
-{
+inline int getDevice() {
     int current_dev_id = 0;
     check_cuda_error(cudaGetDevice(&current_dev_id));
     return current_dev_id;
 }
 
-inline int getDeviceCount()
-{
+inline int getDeviceCount() {
     int count = 0;
     check_cuda_error(cudaGetDeviceCount(&count));
     return count;
 }
 
 template<typename T>
-CublasDataType getCublasDataType()
-{
+CublasDataType getCublasDataType() {
     if (std::is_same<T, half>::value) {
         return HALF_DATATYPE;
     }
@@ -432,16 +407,14 @@ CublasDataType getCublasDataType()
 #endif
     else if (std::is_same<T, float>::value) {
         return FLOAT_DATATYPE;
-    }
-    else {
+    } else {
         FT_CHECK(false);
         return FLOAT_DATATYPE;
     }
 }
 
 template<typename T>
-cudaDataType_t getCudaDataType()
-{
+cudaDataType_t getCudaDataType() {
     if (std::is_same<T, half>::value) {
         return CUDA_R_16F;
     }
@@ -452,8 +425,7 @@ cudaDataType_t getCudaDataType()
 #endif
     else if (std::is_same<T, float>::value) {
         return CUDA_R_32F;
-    }
-    else {
+    } else {
         FT_CHECK(false);
         return CUDA_R_32F;
     }
@@ -677,8 +649,7 @@ inline __device__ float2 operator-(float2 a, float  b) { return make_float2(a.x 
 
 template<typename T1, typename T2>
 void compareTwoTensor(
-    const T1* pred, const T2* ref, const int size, const int print_size = 0, const std::string filename = "")
-{
+    const T1* pred, const T2* ref, const int size, const int print_size = 0, const std::string filename = "") {
     T1* h_pred = new T1[size];
     T2* h_ref  = new T2[size];
     check_cuda_error(cudaMemcpy(h_pred, pred, size * sizeof(T1), cudaMemcpyDeviceToHost));
@@ -733,9 +704,7 @@ void compareTwoTensor(
     delete[] h_ref;
 }
 
-
-static inline size_t pad_to_multiple_of_16(const size_t& input)
-{
+static inline size_t pad_to_multiple_of_16(const size_t& input) {
     static constexpr int ALIGNMENT = 16;
     return ALIGNMENT * ((input + ALIGNMENT - 1) / ALIGNMENT);
 }
@@ -745,8 +714,8 @@ static inline bool shared_mem_sufficient(int smem_size) {
     // Determine SMEM requirements and waive if not satisfied
     //
     cudaDeviceProp properties;
-    int device_idx;
-    cudaError_t result = cudaGetDevice(&device_idx);
+    int            device_idx;
+    cudaError_t    result = cudaGetDevice(&device_idx);
 
     if (result != cudaSuccess) {
         throw std::runtime_error("cudaGetDevice() API call failed.");
@@ -763,7 +732,7 @@ static inline bool shared_mem_sufficient(int smem_size) {
     }
 
     return true;
-  }
+}
 
 static inline bool should_print() {
     static char* level_name = std::getenv("FT_DEBUG_PRINT_LEVEL");
@@ -780,27 +749,74 @@ static inline bool should_print() {
 }
 
 template<typename T>
-void print_bshd(const int layer_id, const char* name, const T* ptr, int batch_size, int seq_len, int num_heads, int hidden_size_per_head, bool is_device_ptr = true);
+void print_bshd(const int   layer_id,
+                const char* name,
+                const T*    ptr,
+                int         batch_size,
+                int         seq_len,
+                int         num_heads,
+                int         hidden_size_per_head,
+                bool        is_device_ptr = true);
 template<typename T>
-void print_bhsd(const int layer_id, const char* name, const T* ptr, int batch_size, int num_heads, int seq_len, int hidden_size_per_head, bool is_device_ptr = true);
+void print_bhsd(const int   layer_id,
+                const char* name,
+                const T*    ptr,
+                int         batch_size,
+                int         num_heads,
+                int         seq_len,
+                int         hidden_size_per_head,
+                bool        is_device_ptr = true);
 template<typename T>
-void print_bhss(const int layer_id, const char *name, const T* ptr, int batch_size, int num_heads, int seq_len, int seq_len2, bool is_device_ptr = true);
+void print_bhss(const int   layer_id,
+                const char* name,
+                const T*    ptr,
+                int         batch_size,
+                int         num_heads,
+                int         seq_len,
+                int         seq_len2,
+                bool        is_device_ptr = true);
 template<typename T>
-void print_bsd(const int layer_id, const char* name, const T* ptr, int batch_size, int seq_len, int hidden_size, int start = 0, int end = 20, bool is_device_ptr = true);
+void print_bsd(const int   layer_id,
+               const char* name,
+               const T*    ptr,
+               int         batch_size,
+               int         seq_len,
+               int         hidden_size,
+               int         start         = 0,
+               int         end           = 20,
+               bool        is_device_ptr = true);
 template<typename T>
-void print_bsd_sum_and_square(const int layer_id, const char* name, const T* ptr, int batch_size, int seq_len, int hidden_size, int start = 0, int end = 20, bool is_device_ptr = true);
+void print_bsd_sum_and_square(const int   layer_id,
+                              const char* name,
+                              const T*    ptr,
+                              int         batch_size,
+                              int         seq_len,
+                              int         hidden_size,
+                              int         start         = 0,
+                              int         end           = 20,
+                              bool        is_device_ptr = true);
 template<typename T>
-void print_kv_cache(const int layer_id, const char* name, const T* ptr, int dim1, int dim2, int dim3, int dim4, int dim5, int dim6, bool print_all = true, bool is_device_ptr = true);
+void print_kv_cache(const int   layer_id,
+                    const char* name,
+                    const T*    ptr,
+                    int         dim1,
+                    int         dim2,
+                    int         dim3,
+                    int         dim4,
+                    int         dim5,
+                    int         dim6,
+                    bool        print_all     = true,
+                    bool        is_device_ptr = true);
 
 template<typename T>
-T getCudaValue(const T *ptr, int index) {
+T getCudaValue(const T* ptr, int index) {
     T tmp;
     check_cuda_error(cudaMemcpy(&tmp, ptr + index, sizeof(T), cudaMemcpyDeviceToHost));
     return tmp;
 }
 
 template<typename T>
-void setCudaValue(T *ptr, int index, T value) {
+void setCudaValue(T* ptr, int index, T value) {
     check_cuda_error(cudaMemcpy(ptr + index, &value, sizeof(T), cudaMemcpyHostToDevice));
 }
 

@@ -20,8 +20,7 @@ namespace fastertransformer {
 
 /* ***************************** GEMM Impl ******************************** */
 
-Gemm::Gemm(IAllocator* allocator, cudaStream_t stream, std::string config_file)
-{
+Gemm::Gemm(IAllocator* allocator, cudaStream_t stream, std::string config_file) {
     allocator_ = allocator;
     stream_    = stream;
     mutex_     = new std::mutex();  // mutex per process
@@ -35,8 +34,7 @@ Gemm::Gemm(IAllocator* allocator, cudaStream_t stream, std::string config_file)
     loadGemmConfig(config_file);
 }
 
-Gemm::~Gemm()
-{
+Gemm::~Gemm() {
     if (allocator_ != nullptr) {
         allocator_->free((void**)(&workspace_));
         allocator_ = nullptr;
@@ -47,8 +45,7 @@ Gemm::~Gemm()
     delete mutex_;
 }
 
-std::string Gemm::toString()
-{
+std::string Gemm::toString() {
     const char* a_type_str       = a_type_ == TYPE_FP16 ? "FP16" : "FP32";
     const char* b_type_str       = b_type_ == TYPE_FP16 ? "FP16" : "FP32";
     const char* c_type_str       = c_type_ == TYPE_FP16 ? "FP16" : "FP32";
@@ -57,8 +54,7 @@ std::string Gemm::toString()
         "Gemm[a_type=%s, b_type=%s, c_type=%s, compute_type=%s]", a_type_str, b_type_str, c_type_str, compute_type_str);
 }
 
-void Gemm::setAllocator(IAllocator* allocator)
-{
+void Gemm::setAllocator(IAllocator* allocator) {
     if (allocator_ != nullptr && workspace_ != nullptr) {
         allocator_->free((void**)(&workspace_));
     }
@@ -68,20 +64,17 @@ void Gemm::setAllocator(IAllocator* allocator)
     }
 }
 
-void Gemm::setCudaStream(cudaStream_t& stream)
-{
+void Gemm::setCudaStream(cudaStream_t& stream) {
     stream_ = stream;
     cublasSetStream(cublas_handle_, stream);
 }
 
-void Gemm::setComputeType(DataType compute_type)
-{
+void Gemm::setComputeType(DataType compute_type) {
     checkDataTypeValidity(compute_type);
     compute_type_ = compute_type;
 }
 
-void Gemm::setTypes(DataType a_type, DataType b_type, DataType c_type, DataType compute_type)
-{
+void Gemm::setTypes(DataType a_type, DataType b_type, DataType c_type, DataType compute_type) {
     checkDataTypeValidity(a_type);
     checkDataTypeValidity(b_type);
     checkDataTypeValidity(c_type);
@@ -92,21 +85,17 @@ void Gemm::setTypes(DataType a_type, DataType b_type, DataType c_type, DataType 
 }
 
 template<typename T>
-void Gemm::setDefaultTypes()
-{
+void Gemm::setDefaultTypes() {
     if (std::is_same<T, float>::value) {
         setTypes(TYPE_FP32, TYPE_FP32, TYPE_FP32, TYPE_FP32);
-    }
-    else if (std::is_same<T, half>::value) {
+    } else if (std::is_same<T, half>::value) {
         setTypes(TYPE_FP16, TYPE_FP16, TYPE_FP16, TYPE_FP16);
-    }
-    else {
+    } else {
         throw GemmNotSupportedException("Gemm supports float or half type.");
     }
 }
 
-void Gemm::loadGemmConfig(std::string config_file)
-{
+void Gemm::loadGemmConfig(std::string config_file) {
     if (cublas_algo_map_ != nullptr) {
         delete cublas_algo_map_;  // unload the previous cublas map.
     }
@@ -122,8 +111,7 @@ void Gemm::gemm(const GemmOp              transa,
                 const DenseWeight<float>& weight,
                 void*                     output,
                 const float               alpha,
-                const float               beta)
-{
+                const float               beta) {
     gemm(transa,
          transb,
          m,
@@ -151,8 +139,7 @@ void Gemm::gemm(const GemmOp             transa,
                 const DenseWeight<half>& weight,
                 void*                    output,
                 const float              alpha,
-                const float              beta)
-{
+                const float              beta) {
     gemm(transa,
          transb,
          m,
@@ -180,8 +167,7 @@ void Gemm::gemm(const GemmOp transa,
                 const void*  B,
                 void*        C,
                 const float  alpha,
-                const float  beta)
-{
+                const float  beta) {
     size_t lda = (transa == GEMM_OP_N) ? k : m;
     size_t ldb = (transb == GEMM_OP_N) ? n : k;
     size_t ldc = n;
@@ -200,8 +186,7 @@ void Gemm::gemm(const GemmOp transa,
                 void*        C,
                 const size_t ldc,
                 const float  alpha,
-                const float  beta)
-{
+                const float  beta) {
     gemm(transa, transb, m, n, k, A, a_type_, lda, B, b_type_, ldb, C, c_type_, ldc, alpha, beta);
 }
 
@@ -220,8 +205,7 @@ void Gemm::gemm(const GemmOp   transa,
                 const DataType Ctype,
                 const size_t   ldc,
                 const float    alpha,
-                const float    beta)
-{
+                const float    beta) {
     FT_LOG_TRACE("Gemm::gemm [m=%ld, n=%ld, k=%ld, lda=%ld, ldb=%ld, ldc=%ld]", m, n, k, lda, ldb, ldc);
 
     // Implementation copied from cublasMMWrapper::Gemm
@@ -298,8 +282,7 @@ void Gemm::gemm(const GemmOp   transa,
         if (findAlgo) {
             if (info.workspaceSize > workspace_size) {
                 findAlgo = 0;
-            }
-            else {
+            } else {
                 cublasLtMatmulAlgoInit(
                     cublaslt_handle_, compute_type, scale_type, a_type, b_type, c_type, c_type, info.algoId, &algo);
                 cublasLtMatmulAlgoConfigSetAttribute(
@@ -341,8 +324,7 @@ void Gemm::gemm(const GemmOp   transa,
         cublasLtMatrixLayoutDestroy(b_desc);
         cublasLtMatrixLayoutDestroy(c_desc);
         sync_check_cuda_error();
-    }
-    else {
+    } else {
         cudaDataType_t compute_type = getCublasDataType(compute_type_);
         int            cublas_algo  = info.algoId;
         check_cuda_error(cublasGemmEx(cublas_handle_,
@@ -379,8 +361,7 @@ void Gemm::batchedGemm(const GemmOp       transa,
                        void* const*       C,
                        const size_t       batch_size,
                        const float        alpha,
-                       const float        beta)
-{
+                       const float        beta) {
     size_t lda = (transa == GEMM_OP_N) ? k : m;
     size_t ldb = (transb == GEMM_OP_N) ? n : k;
     size_t ldc = n;
@@ -400,8 +381,7 @@ void Gemm::batchedGemm(const GemmOp       transa,
                        const size_t       ldc,
                        const size_t       batch_size,
                        const float        alpha,
-                       const float        beta)
-{
+                       const float        beta) {
     batchedGemm(transa, transb, m, n, k, A, a_type_, lda, B, b_type_, ldb, C, c_type_, ldc, batch_size, alpha, beta);
 }
 
@@ -421,8 +401,7 @@ void Gemm::batchedGemm(const GemmOp       transa,
                        const size_t       ldc,
                        const size_t       batch_size,
                        const float        alpha,
-                       const float        beta)
-{
+                       const float        beta) {
     FT_LOG_TRACE(
         "Gemm::batchedGemm [b=%ld m=%ld, n=%ld, k=%ld, lda=%ld, ldb=%ld, ldc=%ld]", batch_size, m, n, k, lda, ldb, ldc);
 
@@ -488,8 +467,7 @@ void Gemm::stridedBatchedGemm(GemmOp       transa,
                               void*        C,
                               const size_t batch_size,
                               const float  alpha,
-                              const float  beta)
-{
+                              const float  beta) {
     size_t  lda     = (transa == GEMM_OP_N) ? k : m;
     size_t  ldb     = (transb == GEMM_OP_N) ? n : k;
     size_t  ldc     = n;
@@ -533,8 +511,7 @@ void Gemm::stridedBatchedGemm(GemmOp        transa,
                               const int64_t strideC,
                               const size_t  batch_size,
                               const float   alpha,
-                              const float   beta)
-{
+                              const float   beta) {
     size_t lda = (transa == GEMM_OP_N) ? k : m;
     size_t ldb = (transb == GEMM_OP_N) ? n : k;
     size_t ldc = n;
@@ -577,8 +554,7 @@ void Gemm::stridedBatchedGemm(GemmOp        transa,
                               const int64_t strideC,
                               const size_t  batch_size,
                               const float   alpha,
-                              const float   beta)
-{
+                              const float   beta) {
     stridedBatchedGemm(transa,
                        transb,
                        m,
@@ -622,8 +598,7 @@ void Gemm::stridedBatchedGemm(GemmOp        transa,
                               const size_t  batch_size,
                               DataType      compute_type,
                               const float   alpha,
-                              const float   beta)
-{
+                              const float   beta) {
     FT_LOG_TRACE("Gemm::stridedBatchedGemm [b=%ld, m=%ld, n=%ld, k=%ld, lda=%ld, ldb=%ld, ldc=%ld]",
                  batch_size,
                  m,
@@ -690,8 +665,7 @@ void Gemm::stridedBatchedGemm(GemmOp        transa,
     mutex_->unlock();
 }
 
-void Gemm::checkDataTypeValidity(const DataType& type)
-{
+void Gemm::checkDataTypeValidity(const DataType& type) {
     if (type != TYPE_FP32 && type != TYPE_FP16) {
         throw GemmNotSupportedException("Gemm supports TYPE_FP16 or TYPE_FP32");
     }
@@ -713,8 +687,7 @@ void Gemm::checkDataTypeValidity(const DataType& type)
 /* ************************* SpGEMM Impl *********************************** */
 #ifdef SPARSITY_ENABLED
 SpGemm::SpGemm(IAllocator* allocator, cudaStream_t stream, std::string config_file, std::string spconfig_file):
-    Gemm(allocator, stream, config_file)
-{
+    Gemm(allocator, stream, config_file) {
     CHECK_CUSPARSE(cusparseLtInit(&cusparselt_handle_));
     // TODO(jaedeokk):
     //   Let's make cublasAlgoMap load gemm/spgemm config separtely,
@@ -727,8 +700,7 @@ SpGemm::SpGemm(IAllocator* allocator, cudaStream_t stream, std::string config_fi
     compute_type_ = TYPE_FP16;
 }
 
-SpGemm::~SpGemm()
-{
+SpGemm::~SpGemm() {
     cusparseLtDestroy(&cusparselt_handle_);
     // Need to destroy matmul description cache.
     for (auto& kv : a_desc_map_) {  // kv = (mark, a_desc)
@@ -742,8 +714,7 @@ SpGemm::~SpGemm()
     }
 }
 
-std::string SpGemm::toString()
-{
+std::string SpGemm::toString() {
     const char* a_type_str       = a_type_ == TYPE_FP16 ? "FP16" : "FP32";
     const char* b_type_str       = b_type_ == TYPE_FP16 ? "FP16" : "FP32";
     const char* c_type_str       = c_type_ == TYPE_FP16 ? "FP16" : "FP32";
@@ -755,23 +726,20 @@ std::string SpGemm::toString()
                   compute_type_str);
 }
 
-void SpGemm::loadGemmConfig(std::string config_file, std::string spconfig_file)
-{
+void SpGemm::loadGemmConfig(std::string config_file, std::string spconfig_file) {
     if (cublas_algo_map_ != nullptr) {
         delete cublas_algo_map_;  // unload algo map.
     }
     cublas_algo_map_ = new cublasAlgoMap(config_file, spconfig_file);
 }
 
-void SpGemm::checkDataTypeValidity(const DataType& type)
-{
+void SpGemm::checkDataTypeValidity(const DataType& type) {
     if (type != TYPE_FP16) {
         throw GemmNotSupportedException("Sparse GEMM only supports FP16 data type now.");
     }
 }
 
-bool SpGemm::useBaseGemm(size_t batch_size, size_t m, size_t n, size_t k)
-{
+bool SpGemm::useBaseGemm(size_t batch_size, size_t m, size_t n, size_t k) {
     return !cublas_algo_map_->isUseSparse(batch_size, m, n, k);
 }
 
@@ -786,8 +754,7 @@ void SpGemm::weightGemmHelper(const GemmOp          transa,
                               const DenseWeight<T>& weight,
                               void*                 output,
                               const float           alpha,
-                              const float           beta)
-{
+                              const float           beta) {
     size_t lda = (transa == GEMM_OP_N) ? k : m;
     size_t ldb = (transb == GEMM_OP_N) ? n : k;
     size_t ldc = n;
@@ -808,8 +775,7 @@ void SpGemm::weightGemmHelper(const GemmOp          transa,
                    ldc,
                    alpha,
                    beta);
-    }
-    else {
+    } else {
         gemm(transa,
              transb,
              m,
@@ -838,8 +804,7 @@ void SpGemm::gemm(const GemmOp              transa,
                   const DenseWeight<float>& weight,
                   void*                     output,
                   const float               alpha,
-                  const float               beta)
-{
+                  const float               beta) {
     weightGemmHelper<float>(transa, transb, m, n, k, input, weight, output, alpha, beta);
 }
 void SpGemm::gemm(const GemmOp             transa,
@@ -851,8 +816,7 @@ void SpGemm::gemm(const GemmOp             transa,
                   const DenseWeight<half>& weight,
                   void*                    output,
                   const float              alpha,
-                  const float              beta)
-{
+                  const float              beta) {
     weightGemmHelper<half>(transa, transb, m, n, k, input, weight, output, alpha, beta);
 }
 
@@ -871,8 +835,7 @@ void SpGemm::gemm(const GemmOp   transa,
                   const DataType Ctype,
                   const size_t   ldc,
                   const float    alpha,
-                  const float    beta)
-{
+                  const float    beta) {
     FT_LOG_TRACE("SpGemm::gemm [m=%ld, n=%ld, k=%ld, lda=%ld, ldb=%ld, ldc=%ld]", m, n, k, lda, ldb, ldc);
     checkDataTypeValidity(Atype);
     checkDataTypeValidity(Btype);
@@ -936,8 +899,7 @@ void SpGemm::gemm(const GemmOp   transa,
                                                       &c_desc_map_[mark],
                                                       &c_desc_map_[mark],
                                                       compute_type));
-    }
-    else {
+    } else {
         // initializing MatDesc takes a lot of time
         cusparseLtMatDescriptor_t a_desc, b_desc, c_desc;
         a_desc_map_[mark] = a_desc;
@@ -992,25 +954,21 @@ void SpGemm::gemm(const GemmOp   transa,
 
 /* ***************************** GEMM utils ****************************** */
 
-std::shared_ptr<Gemm> createGemm(IAllocator* allocator, cudaStream_t stream, bool sparse, bool quantized)
-{
+std::shared_ptr<Gemm> createGemm(IAllocator* allocator, cudaStream_t stream, bool sparse, bool quantized) {
     FT_LOG_TRACE(
         "Create Gemm instance [sparse=%s, quantized=%s]", sparse ? "true" : "false", quantized ? "true" : "false");
     std::shared_ptr<Gemm> gemm;
     if (!sparse) {
         if (!quantized) {
             gemm = std::make_shared<Gemm>(allocator, stream);
-        }
-        else {
+        } else {
             throw GemmNotSupportedException("Int8 Gemm is not supported yet");
         }
-    }
-    else {
+    } else {
 #ifdef SPARSITY_ENABLED
         if (sparse && !quantized) {
             gemm = std::make_shared<SpGemm>(allocator, stream);
-        }
-        else {
+        } else {
             throw GemmNotSupportedException("Int8 Sparse Gemm is not supported yet");
         }
 #else
@@ -1021,8 +979,7 @@ std::shared_ptr<Gemm> createGemm(IAllocator* allocator, cudaStream_t stream, boo
     return gemm;
 }
 
-cudaDataType_t getCublasDataType(DataType dtype)
-{
+cudaDataType_t getCublasDataType(DataType dtype) {
     switch (dtype) {
         case TYPE_FP16:
             return CUDA_R_16F;
@@ -1034,8 +991,7 @@ cudaDataType_t getCublasDataType(DataType dtype)
 }
 
 #if (CUDART_VERSION >= 11000)
-cublasComputeType_t getCublasComputeType(DataType ctype)
-{
+cublasComputeType_t getCublasComputeType(DataType ctype) {
     switch (ctype) {
         case TYPE_FP16:
             return CUBLAS_COMPUTE_16F;
@@ -1046,8 +1002,7 @@ cublasComputeType_t getCublasComputeType(DataType ctype)
     }
 }
 #else
-cudaDataType_t getCublasComputeType(DataType ctype)
-{
+cudaDataType_t getCublasComputeType(DataType ctype) {
     switch (ctype) {
         case TYPE_FP16:
             return CUDA_R_16F;
@@ -1059,8 +1014,7 @@ cudaDataType_t getCublasComputeType(DataType ctype)
 }
 #endif
 
-cublasOperation_t getCublasOperation(GemmOp op)
-{
+cublasOperation_t getCublasOperation(GemmOp op) {
     switch (op) {
         case GEMM_OP_N:
             return CUBLAS_OP_N;
@@ -1071,8 +1025,7 @@ cublasOperation_t getCublasOperation(GemmOp op)
     }
 }
 
-std::string getGemmOpString(const GemmOp& op)
-{
+std::string getGemmOpString(const GemmOp& op) {
     switch (op) {
         case GEMM_OP_T:
             return "T";
@@ -1083,8 +1036,7 @@ std::string getGemmOpString(const GemmOp& op)
 }
 
 #ifdef SPARSITY_ENABLED
-cusparseOperation_t getCusparseOperation(GemmOp op)
-{
+cusparseOperation_t getCusparseOperation(GemmOp op) {
     switch (op) {
         case GEMM_OP_N:
             return CUSPARSE_OPERATION_NON_TRANSPOSE;
@@ -1095,16 +1047,14 @@ cusparseOperation_t getCusparseOperation(GemmOp op)
     }
 }
 
-cusparseComputeType getCusparseComputeType(DataType ctype)
-{
+cusparseComputeType getCusparseComputeType(DataType ctype) {
     if (ctype != TYPE_FP16) {
         throw GemmNotSupportedException("Sparse GEMM supports TYPE_FP16 compute type only.");
     }
     return CUSPARSE_COMPUTE_16F;
 }
 
-void pruneMatrixB(void* data, const cudaStream_t& stream, const size_t k, const size_t n, const GemmOp trans)
-{
+void pruneMatrixB(void* data, const cudaStream_t& stream, const size_t k, const size_t n, const GemmOp trans) {
     FT_LOG_TRACE("Prune matrix B [k=%ld, n=%ld, op=%s]", k, n, getGemmOpString(trans).c_str());
 
     // Due to A/B switching, the matrix B will be used as a matrix A.
@@ -1139,8 +1089,7 @@ size_t compressMatrixB(void**              output,
                        const void*         input,
                        const size_t        k,
                        const size_t        n,
-                       const GemmOp        trans)
-{
+                       const GemmOp        trans) {
     FT_LOG_TRACE("compressMatrix [k=%ld, n=%ld, dtype=FP16]", k, n);
 
     // swap A/B due to column/row major layout mismatch.

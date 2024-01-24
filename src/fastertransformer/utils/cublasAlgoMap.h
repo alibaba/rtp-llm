@@ -63,8 +63,7 @@ struct cublasAlgoConfig_t {
     int            n;
     int            k;
     CublasDataType data_type;
-    bool           operator==(cublasAlgoConfig_t const& config) const
-    {
+    bool           operator==(cublasAlgoConfig_t const& config) const {
         return (batch_count == config.batch_count) && (m == config.m) && (n == config.n) && (k == config.k)
                && (data_type == config.data_type);
     }
@@ -72,8 +71,7 @@ struct cublasAlgoConfig_t {
 
 class cublasAlgoConfig_hasher {
 public:
-    std::size_t operator()(cublasAlgoConfig_t const& config) const
-    {
+    std::size_t operator()(cublasAlgoConfig_t const& config) const {
         return config.batch_count * 98317ull ^ config.m * 49157ull ^ config.n * 24593ull ^ config.k * 196613ull
                ^ static_cast<int>(config.data_type) * 6151ull;
     }

@@ -18,8 +18,8 @@
 
 #include <assert.h>
 
-#include "src/fastertransformer/utils/allocator.h"
 #include "src/fastertransformer/utils/Tensor.h"
+#include "src/fastertransformer/utils/allocator.h"
 #include "src/fastertransformer/utils/cublasMMWrapper.h"
 
 namespace fastertransformer {
@@ -40,13 +40,11 @@ public:
         sparse_(sparse){};
     virtual ~BaseLayer() = default;
 
-    virtual cudaStream_t getStream()
-    {
+    virtual cudaStream_t getStream() {
         return stream_;
     }
 
-    virtual void setStream(cudaStream_t stream)
-    {
+    virtual void setStream(cudaStream_t stream) {
         stream_ = stream;
     }
 

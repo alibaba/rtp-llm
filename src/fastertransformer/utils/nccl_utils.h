@@ -69,16 +69,14 @@ struct NcclParam {
     NcclParam(int rank, int world_size): rank_(rank), world_size_(world_size){};
     NcclParam(NcclParam const& param):
         rank_(param.rank_), world_size_(param.world_size_), nccl_uid_(param.nccl_uid_), nccl_comm_(param.nccl_comm_){};
-    std::string toString()
-    {
+    std::string toString() {
         return fmtstr("NcclParam[rank=%d, world_size=%d, nccl_comm=%p]", rank_, world_size_, nccl_comm_);
     }
 #else
     NcclParam(): rank_(0), world_size_(1){};
     NcclParam(int rank, int world_size): rank_(rank), world_size_(world_size){};
     NcclParam(NcclParam const& param): rank_(param.rank_), world_size_(param.world_size_){};
-    std::string toString()
-    {
+    std::string toString() {
         return fmtstr("NcclParam[rank=%d, world_size=%d]", rank_, world_size_);
     }
 #endif
@@ -110,12 +108,12 @@ void ftNcclGetUniqueId(NcclUid& uid);
 void ftNcclCommInitRank(NcclParam& param, const int rank, const int world_size, const NcclUid uid);
 void ftNcclParamDestroy(NcclParam& param);
 
-void ftNcclInitialize(NcclParam& tensor_para,
-                      NcclParam& pipeline_para,
-                      const int  tensor_para_size,
-                      const int  pipeline_para_size, 
+void ftNcclInitialize(NcclParam&         tensor_para,
+                      NcclParam&         pipeline_para,
+                      const int          tensor_para_size,
+                      const int          pipeline_para_size,
                       const std::string& master_ip,
-                      const int master_port);
+                      const int          master_port);
 
 void ftNcclInitialize(NcclParam& tensor_para,
                       NcclParam& pipeline_para,

@@ -37,32 +37,25 @@ enum class NormType {
     InvalidType
 };
 
-inline LayerNormType getLayerNormType(std::string layernorm_type_str)
-{
+inline LayerNormType getLayerNormType(std::string layernorm_type_str) {
     if (layernorm_type_str == "pre_layernorm") {
         return LayerNormType::pre_layernorm;
-    }
-    else if (layernorm_type_str == "post_layernorm") {
+    } else if (layernorm_type_str == "post_layernorm") {
         return LayerNormType::post_layernorm;
-    }
-    else {
+    } else {
         FT_CHECK_WITH_INFO(false, "Layernorm Type: " + layernorm_type_str + " not supported !");
     }
     return LayerNormType::InvalidType;
 }
 
-inline NormType getNormType(std::string norm_type_str)
-{
+inline NormType getNormType(std::string norm_type_str) {
     if (norm_type_str == "layernorm") {
         return NormType::layernorm;
-    }
-    else if (norm_type_str == "rmsnorm") {
+    } else if (norm_type_str == "rmsnorm") {
         return NormType::rmsnorm;
-    }
-    else if (norm_type_str == "alphanorm") {
+    } else if (norm_type_str == "alphanorm") {
         return NormType::alphanorm;
-    }
-    else {
+    } else {
         FT_CHECK_WITH_INFO(false, "Norm Type: " + norm_type_str + " not supported !");
     }
     return NormType::InvalidType;
@@ -86,16 +79,16 @@ void invokeAddBiasResidualLayerNorm(T*           out,
                                     cudaStream_t stream);
 
 template<typename T>
-void invokeAlphaAddBiasResidualLayerNorm(T* out,
-                                    const T* input,
-                                    const T* residual1,
-                                    const T* bias,
-                                    const T* gamma,
-                                    const T* beta,
-                                    const T alpha,
-                                    const int m,
-                                    const int n,
-                                    cudaStream_t stream);
+void invokeAlphaAddBiasResidualLayerNorm(T*           out,
+                                         const T*     input,
+                                         const T*     residual1,
+                                         const T*     bias,
+                                         const T*     gamma,
+                                         const T*     beta,
+                                         const T      alpha,
+                                         const int    m,
+                                         const int    n,
+                                         cudaStream_t stream);
 
 template<typename T>
 void invokeGeneralAddBiasResidualPreLayerNorm(T*           output,
@@ -134,8 +127,7 @@ void invokeGeneralAddBiasResidualPreLayerNorm(T*           output,
                                               float*       dynamic_scale,
                                               const int    int8_mode,
                                               cudaStream_t stream,
-                                              int          opt_version = 2)
-{
+                                              int          opt_version = 2) {
     invokeGeneralAddBiasResidualPreLayerNorm(output,
                                              norm_output,
                                              input,
@@ -181,26 +173,25 @@ void invokeGeneralLayerNorm(T*           out,
                             float*       scale,
                             const int    int8_mode,
                             cudaStream_t stream,
-                            int          opt_version = 2)
-{
+                            int          opt_version = 2) {
     invokeGeneralLayerNorm(
         out, input, gamma, beta, layernorm_eps, m, n, scale, (float*)nullptr, int8_mode, stream, opt_version);
 }
 
 template<typename T>
 void invokeGeneralLayerNormWithPadding(T*           out,
-                                        const T*     input,
-                                        const T*     gamma,
-                                        const T*     beta,
-                                        const float  layernorm_eps,
-                                        const int    m,
-                                        const int    real_n,
-                                        const int    padding_n,
-                                        float*       scale,
-                                        float*       dynamic_scale,
-                                        const int    int8_mode,
-                                        cudaStream_t stream,
-                                        int          opt_version = 2);
+                                       const T*     input,
+                                       const T*     gamma,
+                                       const T*     beta,
+                                       const float  layernorm_eps,
+                                       const int    m,
+                                       const int    real_n,
+                                       const int    padding_n,
+                                       float*       scale,
+                                       float*       dynamic_scale,
+                                       const int    int8_mode,
+                                       cudaStream_t stream,
+                                       int          opt_version = 2);
 
 template<typename T>
 void invokeGeneralAddResidualT5PreLayerNorm(T*           output,

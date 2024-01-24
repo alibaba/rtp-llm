@@ -79,8 +79,7 @@ template<typename T_OUT, typename T_IN>
 void invokeCudaCast(T_OUT* dst, T_IN const* const src, const size_t size, cudaStream_t stream);
 
 template<typename T, size_t n_dims>
-__inline__ __host__ __device__ size_t dim2flat(const T (&idx)[n_dims], const T (&dims)[n_dims])
-{
+__inline__ __host__ __device__ size_t dim2flat(const T (&idx)[n_dims], const T (&dims)[n_dims]) {
     size_t flat_idx = 0;
     for (size_t i = 0; i < n_dims; i++) {
         flat_idx += idx[i];
@@ -91,8 +90,7 @@ __inline__ __host__ __device__ size_t dim2flat(const T (&idx)[n_dims], const T (
 }
 
 template<typename T1, size_t n_dims, typename T2>
-__inline__ __host__ __device__ void flat2dim(T1 flat_idx, const T2 (&dims)[n_dims], T2 (&idx)[n_dims])
-{
+__inline__ __host__ __device__ void flat2dim(T1 flat_idx, const T2 (&dims)[n_dims], T2 (&idx)[n_dims]) {
     for (int i = n_dims - 1; i >= 0; i--) {
         idx[i] = flat_idx % dims[i];
         flat_idx /= dims[i];
@@ -121,8 +119,7 @@ template<typename T_IN, typename T_OUT>
 void invokeCudaD2DScaleCpyConvert(
     T_OUT* tgt, const T_IN* src, const float* scale, bool invert_scale, const size_t size, cudaStream_t stream = 0);
 
-inline bool checkIfFileExist(const std::string& file_path)
-{
+inline bool checkIfFileExist(const std::string& file_path) {
     std::ifstream in(file_path, std::ios::in | std::ios::binary);
     if (in.is_open()) {
         in.close();

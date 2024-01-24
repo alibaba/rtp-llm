@@ -40,8 +40,7 @@ inline void invokeGetPaddingOffset(size_t*      h_pinned_token_num,
                                    const int*   sequence_length,
                                    const int    batch_size,
                                    const int    max_seq_len,
-                                   cudaStream_t stream)
-{
+                                   cudaStream_t stream) {
     invokeGetPaddingOffsetAndCuSeqLens(
         h_pinned_token_num, h_token_num, tmp_mask_offset, nullptr, sequence_length, batch_size, max_seq_len, stream);
 }

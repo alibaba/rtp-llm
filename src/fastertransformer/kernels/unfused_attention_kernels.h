@@ -138,8 +138,7 @@ void invokeAddFusedQKVBiasTranspose(T*           q_buf,
                                     const int    head_num,
                                     const int    head_num_kv,
                                     const int    size_per_head,
-                                    cudaStream_t stream)
-{
+                                    cudaStream_t stream) {
     invokeAddFusedQKVBiasTranspose(q_buf,
                                    k_buf,
                                    v_buf,

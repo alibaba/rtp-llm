@@ -21,8 +21,7 @@ namespace fastertransformer {
 template<typename T1, typename T2>
 void TensorParallelGeluFfnFP8Layer<T1, T2>::forward(TensorMap*                  output_tensors,
                                                     TensorMap*                  input_tensors,
-                                                    const FfnFP8Weight<T1, T2>* ffn_weights)
-{
+                                                    const FfnFP8Weight<T1, T2>* ffn_weights) {
     GeluFfnFP8Layer<T1, T2>::forward(output_tensors, input_tensors, ffn_weights);
 
     const size_t token_num    = output_tensors->at("output_hidden_state").shape[0];
@@ -51,17 +50,14 @@ TensorParallelGeluFfnFP8Layer<T1, T2>::TensorParallelGeluFfnFP8Layer(size_t     
                             allocator,
                             is_free_buffer_after_forward,
                             is_sparse),
-    tensor_para_(tensor_para)
-{
+    tensor_para_(tensor_para) {
     FT_CHECK(inter_size % tensor_para_.world_size_ == 0);
 }
 
 template<typename T1, typename T2>
 TensorParallelGeluFfnFP8Layer<T1, T2>::TensorParallelGeluFfnFP8Layer(
     TensorParallelGeluFfnFP8Layer<T1, T2> const& ffn_layer):
-    GeluFfnFP8Layer<T1, T2>(ffn_layer), tensor_para_(ffn_layer.tensor_para_)
-{
-}
+    GeluFfnFP8Layer<T1, T2>(ffn_layer), tensor_para_(ffn_layer.tensor_para_) {}
 
 template class TensorParallelGeluFfnFP8Layer<__nv_fp8_e4m3, __nv_bfloat16>;
 

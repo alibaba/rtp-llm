@@ -4,7 +4,6 @@
 #include "src/fastertransformer/cutlass/cutlass_kernels/group_gemm/group_gemm.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_kernels.h"
-#if defined(USE_WEIGHT_ONLY) && USE_WEIGHT_ONLY==1
+#if defined(USE_WEIGHT_ONLY) && USE_WEIGHT_ONLY == 1
 #include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h"
 #endif
-

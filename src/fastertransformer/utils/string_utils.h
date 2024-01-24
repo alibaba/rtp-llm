@@ -24,8 +24,7 @@
 namespace fastertransformer {
 
 template<typename... Args>
-inline std::string fmtstr(const std::string& format, Args... args)
-{
+inline std::string fmtstr(const std::string& format, Args... args) {
     // This function came from a code snippet in stackoverflow under cc-by-1.0
     //   https://stackoverflow.com/questions/2342162/stdstring-formatting-like-sprintf
 
@@ -53,8 +52,7 @@ inline std::string fmtstr(const std::string& format, Args... args)
 }
 
 template<typename T>
-inline std::string vec2str(std::vector<T> vec)
-{
+inline std::string vec2str(std::vector<T> vec) {
     std::stringstream ss;
     ss << "(";
     if (!vec.empty()) {
@@ -68,8 +66,7 @@ inline std::string vec2str(std::vector<T> vec)
 }
 
 template<typename T>
-inline std::string arr2str(T* arr, size_t size)
-{
+inline std::string arr2str(T* arr, size_t size) {
     std::stringstream ss;
     ss << "(";
     for (size_t i = 0; i < size - 1; ++i) {

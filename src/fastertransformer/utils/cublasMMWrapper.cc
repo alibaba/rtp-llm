@@ -33,8 +33,7 @@ cublasMMWrapper::cublasMMWrapper(cublasHandle_t   cublas_handle,
     stream_(stream),
     cublas_algo_map_(cublas_algo_map),
     mu_(mu),
-    allocator_(allocator)
-{
+    allocator_(allocator) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (allocator_ != nullptr) {
         cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE, false);
@@ -55,8 +54,7 @@ cublasMMWrapper::cublasMMWrapper(cublasHandle_t     cublas_handle,
     stream_(stream),
     cublas_algo_map_(cublas_algo_map),
     mu_(mu),
-    allocator_(allocator)
-{
+    allocator_(allocator) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (allocator_ != nullptr) {
         cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE, false);
@@ -64,8 +62,7 @@ cublasMMWrapper::cublasMMWrapper(cublasHandle_t     cublas_handle,
 }
 #endif
 
-cublasMMWrapper::~cublasMMWrapper()
-{
+cublasMMWrapper::~cublasMMWrapper() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     mu_ = nullptr;
     if (allocator_ != nullptr) {
@@ -83,8 +80,7 @@ cublasMMWrapper::cublasMMWrapper(const cublasMMWrapper& wrapper):
     stream_(wrapper.stream_),
     cublas_algo_map_(wrapper.cublas_algo_map_),
     mu_(wrapper.mu_),
-    allocator_(wrapper.allocator_)
-{
+    allocator_(wrapper.allocator_) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (allocator_ != nullptr) {
         cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE, false);
@@ -108,8 +104,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            cudaDataType_t    Ctype,
                            int               ldc,
                            cudaDataType_t    computeType,
-                           cublasGemmAlgo_t  algo)
-{
+                           cublasGemmAlgo_t  algo) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     mu_->lock();
     check_cuda_error(cublasGemmEx(cublas_handle_,
@@ -145,8 +140,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            const void*       B,
                            const int         ldb,
                            void*             C,
-                           const int         ldc)
-{
+                           const int         ldc) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     Gemm(transa, transb, m, n, k, A, lda, B, ldb, C, ldc, 1.0f, 0.0f);
 }
@@ -163,8 +157,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            void*             C,
                            const int         ldc,
                            float             f_alpha,
-                           float             f_beta)
-{
+                           float             f_beta) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     half h_alpha = (half)(f_alpha);
     half h_beta  = (half)(f_beta);
@@ -185,8 +178,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     if (findAlgo) {
         if (info.stages != -1) {
             using_cublasLt = true;
-        }
-        else {
+        } else {
             using_cublasLt = false;
         }
     }
@@ -208,8 +200,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
             computeType = CUDA_R_16F;
 #endif
             scaleType = CUDA_R_16F;
-        }
-        else {
+        } else {
 #if (CUDART_VERSION >= 11000)
             computeType = CUBLAS_COMPUTE_32F;
 #else
@@ -238,8 +229,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
         if (findAlgo) {
             if (info.workspaceSize > workspaceSize) {
                 findAlgo = 0;
-            }
-            else {
+            } else {
                 cublasLtMatmulAlgoInit(
                     cublaslt_handle_, computeType, scaleType, Atype_, Btype_, Ctype_, Ctype_, info.algoId, &algo);
                 cublasLtMatmulAlgoConfigSetAttribute(
@@ -300,8 +290,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
         cublasLtMatrixLayoutDestroy(Bdesc);
         cublasLtMatrixLayoutDestroy(Cdesc);
         sync_check_cuda_error();
-    }
-    else {
+    } else {
         int cublasAlgo = info.algoId;
         check_cuda_error(cublasGemmEx(cublas_handle_,
                                       transa,
@@ -327,24 +316,21 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     mu_->unlock();
 }
 
-void cublasMMWrapper::setFP32GemmConfig()
-{
+void cublasMMWrapper::setFP32GemmConfig() {
     Atype_       = CUDA_R_32F;
     Btype_       = CUDA_R_32F;
     Ctype_       = CUDA_R_32F;
     computeType_ = CUDA_R_32F;
 }
 
-void cublasMMWrapper::setFP16GemmConfig()
-{
+void cublasMMWrapper::setFP16GemmConfig() {
     Atype_       = CUDA_R_16F;
     Btype_       = CUDA_R_16F;
     Ctype_       = CUDA_R_16F;
     computeType_ = CUDA_R_32F;
 }
 
-void cublasMMWrapper::setBF16GemmConfig()
-{
+void cublasMMWrapper::setBF16GemmConfig() {
     Atype_       = CUDA_R_16BF;
     Btype_       = CUDA_R_16BF;
     Ctype_       = CUDA_R_16BF;
@@ -354,20 +340,17 @@ void cublasMMWrapper::setBF16GemmConfig()
 void cublasMMWrapper::setGemmConfig(cudaDataType_t aType,
                                     cudaDataType_t bType,
                                     cudaDataType_t cType,
-                                    cudaDataType_t computeType)
-{
+                                    cudaDataType_t computeType) {
     Atype_       = aType;
     Btype_       = bType;
     Ctype_       = cType;
     computeType_ = computeType;
 }
 
-CublasDataType cublasMMWrapper::getCublasDataType(cudaDataType_t data_type)
-{
+CublasDataType cublasMMWrapper::getCublasDataType(cudaDataType_t data_type) {
     if (data_type == CUDA_R_16F) {
         return HALF_DATATYPE;
-    }
-    else if (data_type == CUDA_R_32F) {
+    } else if (data_type == CUDA_R_32F) {
         return FLOAT_DATATYPE;
     }
 #ifdef ENABLE_BF16
@@ -392,8 +375,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
                            const int         ldb,
                            const void*       bias,
                            void*             C,
-                           const int         ldc)
-{
+                           const int         ldc) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     cudaDataType_t      Atype, Btype, Ctype;
     cublasComputeType_t computeType;
@@ -413,8 +395,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
         scaleType   = CUDA_R_32F;
         alpha       = &alpha_float;
         beta        = &beta_float;
-    }
-    else if (Atype_ == CUDA_R_16BF) {
+    } else if (Atype_ == CUDA_R_16BF) {
         computeType = CUBLAS_COMPUTE_32F_FAST_TF32;
         Atype       = CUDA_R_16BF;
         Btype       = CUDA_R_16BF;
@@ -422,8 +403,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
         scaleType   = CUDA_R_32F;
         alpha       = &alpha_float;
         beta        = &beta_float;
-    }
-    else {
+    } else {
         computeType = CUBLAS_COMPUTE_16F;
         Atype       = CUDA_R_16F;
         Btype       = CUDA_R_16F;
@@ -453,8 +433,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     cublasLtMatmulDescDestroy(operationDesc);
 }
 #endif
-void cublasMMWrapper::setStream(cudaStream_t stream)
-{
+void cublasMMWrapper::setStream(cudaStream_t stream) {
     stream_ = stream;
 }
 
@@ -474,8 +453,7 @@ void cublasMMWrapper::stridedBatchedGemm(cublasOperation_t transa,
                                          const int64_t     strideC,
                                          const int         batch_count,
                                          const float       f_alpha,
-                                         const float       f_beta)
-{
+                                         const float       f_beta) {
     half h_alpha = (half)f_alpha;
     half h_beta  = (half)f_beta;
 
@@ -533,8 +511,7 @@ void cublasMMWrapper::stridedBatchedGemm(cublasOperation_t transa,
                                          const int         ldc,
                                          const int64_t     strideC,
                                          const int         batch_count,
-                                         cudaDataType_t    computeType)
-{
+                                         cudaDataType_t    computeType) {
     half h_alpha = (half)f_alpha;
     half h_beta  = (half)f_beta;
 
@@ -583,8 +560,7 @@ void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
                                   const int          ldb,
                                   void* const*       C,
                                   const int          ldc,
-                                  const int          batch_count)
-{
+                                  const int          batch_count) {
     float f_alpha = static_cast<float>(1.0f);
     float f_beta  = static_cast<float>(0.0f);
 
@@ -620,8 +596,6 @@ void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
     mu_->unlock();
 }
 
-
-
 void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
                                   cublasOperation_t  transb,
                                   const int          m,
@@ -635,8 +609,7 @@ void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
                                   const float        beta,
                                   void* const*       C,
                                   const int          ldc,
-                                  const int          batch_count)
-{
+                                  const int          batch_count) {
     float f_alpha = static_cast<float>(alpha);
     float f_beta  = static_cast<float>(beta);
 
@@ -644,7 +617,7 @@ void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
     half h_beta  = (half)beta;
 
     mu_->lock();
-    int         is_fp16_computeType = computeType_ == CUDA_R_16F ? 1 : 0;
+    int is_fp16_computeType = computeType_ == CUDA_R_16F ? 1 : 0;
 
     const void* r_alpha = is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<void*>(&f_alpha);
     const void* r_beta  = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<void*>(&f_beta);
@@ -673,16 +646,13 @@ void cublasMMWrapper::batchedGemm(cublasOperation_t  transa,
     mu_->unlock();
 }
 
-
-bool cublasMMWrapper::isFuseBatchGemm(const int batch_count, const int m, const int k, const int n)
-{
+bool cublasMMWrapper::isFuseBatchGemm(const int batch_count, const int m, const int k, const int n) {
     CublasDataType data_type = getCublasDataType(Atype_);
 
     if (cublas_algo_map_->isExist(batch_count, m, k, n, data_type) == false
         || cublas_algo_map_->isExist(1, m, k, n, data_type) == false) {
         return false;
-    }
-    else {
+    } else {
         return cublas_algo_map_->getAlgo(batch_count, m, k, n, data_type).exec_time
                < 3 * cublas_algo_map_->getAlgo(1, m, k, n, data_type).exec_time;
     }
@@ -696,8 +666,7 @@ void cublasMMWrapper::SpGemm(cublasOperation_t transa,
                              const int         k,
                              const void*       A,
                              const void*       B,
-                             void*             C)
-{
+                             void*             C) {
     if (Atype_ != CUDA_R_16F || Btype_ != CUDA_R_16F || Ctype_ != CUDA_R_16F) {
         throw std::runtime_error("\n[FT][ERROR] sparse GEMM only supports FP16 data type now.");
     }
@@ -744,8 +713,7 @@ void cublasMMWrapper::SpGemm(cublasOperation_t transa,
                                                       &sp_mat_C_desc_map_[mark],
                                                       &sp_mat_C_desc_map_[mark],
                                                       compute_type))
-    }
-    else {
+    } else {
         // initializing MatDesc takes a lot of time
         cusparseLtMatDescriptor_t matA, matB, matC;
         sp_mat_A_desc_map_[mark] = matA;
@@ -794,8 +762,7 @@ void cublasMMWrapper::SpGemm(cublasOperation_t transa,
     mu_->unlock();
 }
 
-size_t cublasMMWrapper::getSparseMatrixSize(int m, int k)
-{
+size_t cublasMMWrapper::getSparseMatrixSize(int m, int k) {
     // Get a compressed matrix size of shape (m, k) used in cusparselt.
     auto            Atype_     = CUDA_R_16F;
     cusparseOrder_t order      = CUSPARSE_ORDER_COL;
@@ -819,8 +786,7 @@ size_t cublasMMWrapper::getSparseMatrixSize(int m, int k)
     return compressed_size;
 }
 
-void cublasMMWrapper::compressMatrix(const void* input, void* output, const int m, const int k)
-{
+void cublasMMWrapper::compressMatrix(const void* input, void* output, const int m, const int k) {
     cusparseOrder_t           order = CUSPARSE_ORDER_COL;
     cusparseOperation_t       opA   = CUSPARSE_OPERATION_NON_TRANSPOSE;
     cusparseLtMatDescriptor_t matA;
@@ -831,8 +797,7 @@ void cublasMMWrapper::compressMatrix(const void* input, void* output, const int 
     sync_check_cuda_error();
 }
 
-bool cublasMMWrapper::isUseSparse(const int batch_count, const int m, const int n, const int k)
-{
+bool cublasMMWrapper::isUseSparse(const int batch_count, const int m, const int n, const int k) {
     return cublas_algo_map_->isUseSparse(batch_count, m, n, k);
 }
 #endif
@@ -849,8 +814,7 @@ std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findBestAlgo(cublasLtHand
                                                                     cublasLtMatrixLayout_t Cdesc,
                                                                     void*                  D,
                                                                     cublasLtMatrixLayout_t Ddesc,
-                                                                    cudaStream_t           stream)
-{
+                                                                    cudaStream_t           stream) {
 #if (CUBLAS_VERSION) <= 11402
     FT_CHECK_WITH_INFO(false, "CUBLAS version too low.");
     return {false, cublasLtMatmulAlgo_t{}};
@@ -943,8 +907,7 @@ std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findBestAlgo(cublasLtHand
 #endif
 }
 
-cublasMMWrapper::MatrixLayout cublasMMWrapper::createMatrixLayout(cublasLtMatrixLayout_t Mdesc)
-{
+cublasMMWrapper::MatrixLayout cublasMMWrapper::createMatrixLayout(cublasLtMatrixLayout_t Mdesc) {
     size_t       returnSize;
     MatrixLayout m_layout;
 
@@ -975,8 +938,7 @@ cublasStatus_t cublasMMWrapper::cublasLtMatmulWrapper(cublasLtHandle_t          
                                                       const cublasLtMatmulAlgo_t* algo,
                                                       void*                       workspace,
                                                       size_t                      workspaceSizeInBytes,
-                                                      cudaStream_t                stream)
-{
+                                                      cudaStream_t                stream) {
     cache_idx_t cache_idx{
         computeDesc,
         {createMatrixLayout(Adesc), createMatrixLayout(Bdesc), createMatrixLayout(Cdesc), createMatrixLayout(Ddesc)}};
@@ -992,8 +954,7 @@ cublasStatus_t cublasMMWrapper::cublasLtMatmulWrapper(cublasLtHandle_t          
                 algo_value            = result.second;
                 found_algo            = true;
             }
-        }
-        else {
+        } else {
             algo_value = algo_cache[cache_idx];
             found_algo = true;
         }
@@ -1028,8 +989,7 @@ void cublasMMWrapper::_Int8Gemm(const int     m,
                                 const int     ldc,
                                 const void*   alpha,
                                 const int     mode,
-                                const bool    per_column_scaling)
-{
+                                const bool    per_column_scaling) {
     /* mode:
      *  - 0: int8 * int8 -> int32 -> int8
      *  - 1: int8 * int8 -> int32 -> int32
@@ -1077,8 +1037,7 @@ void cublasMMWrapper::_Int8Gemm(const int     m,
     const float float_zero = 0;
     if (mode == 0) {
         beta = per_column_scaling ? &float_zero : NULL;
-    }
-    else {
+    } else {
         alpha = &int_one;
         beta = &int_zero;
     }
@@ -1125,8 +1084,7 @@ void cublasMMWrapper::Int8Gemm(const int     m,
                                int8_t*       C,
                                const int     ldc,
                                const float*  alpha,
-                               const bool    per_column_scaling)
-{
+                               const bool    per_column_scaling) {
     return _Int8Gemm(m, n, k, A, lda, B, ldb, C, ldc, alpha, 0, per_column_scaling);
 }
 
@@ -1138,8 +1096,7 @@ void cublasMMWrapper::Int8Gemm(const int     m,
                                const int8_t* B,
                                const int     ldb,
                                int32_t*      C,
-                               const int     ldc)
-{
+                               const int     ldc) {
     return _Int8Gemm(m, n, k, A, lda, B, ldb, C, ldc, (float*)nullptr, 1, false);
 }
 

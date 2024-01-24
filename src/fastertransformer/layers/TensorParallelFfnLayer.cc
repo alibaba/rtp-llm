@@ -22,22 +22,20 @@ namespace fastertransformer {
 template<typename T>
 void TensorParallelFfnLayer<T>::forward(std::vector<fastertransformer::Tensor>*       output_tensors,
                                         const std::vector<fastertransformer::Tensor>* input_tensors,
-                                        const FfnWeight<T>*                           ffn_weights)
-{
+                                        const FfnWeight<T>*                           ffn_weights) {
     TensorMap input_tensor({{"ffn_input", input_tensors->at(0)}});
     TensorMap output_tensor({{"ffn_output", output_tensors->at(0)}});
     forward(&output_tensor, &input_tensor, ffn_weights);
 }
 
 template<typename T>
-void TensorParallelFfnLayer<T>::forward(Tensor &ffn_output,
-                                        const Tensor &ffn_input,
-                                        int layer_id,
-                                        const Tensor &lora_ids,
-                                        const Tensor &lora_input_lengths,
-                                        int ffn_batch_size_lora,
-                                        const FfnWeight<T>*                           ffn_weights)
-{
+void TensorParallelFfnLayer<T>::forward(Tensor&             ffn_output,
+                                        const Tensor&       ffn_input,
+                                        int                 layer_id,
+                                        const Tensor&       lora_ids,
+                                        const Tensor&       lora_input_lengths,
+                                        int                 ffn_batch_size_lora,
+                                        const FfnWeight<T>* ffn_weights) {
     TensorMap input_tensor({{"ffn_input", ffn_input},
                             {"layer_id", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &layer_id}},
                             {"lora_ids", lora_ids},
@@ -50,8 +48,7 @@ void TensorParallelFfnLayer<T>::forward(Tensor &ffn_output,
 template<typename T>
 void TensorParallelFfnLayer<T>::forward(TensorMap*          output_tensors,
                                         TensorMap*          input_tensors,
-                                        const FfnWeight<T>* ffn_weights)
-{
+                                        const FfnWeight<T>* ffn_weights) {
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     Tensor       out_tensor   = output_tensors->at("ffn_output");
     const size_t token_num    = out_tensor.shape[0];
@@ -72,8 +69,7 @@ void TensorParallelFfnLayer<T>::forward(TensorMap*          output_tensors,
     if (do_all_reduce_ && tensor_para_.world_size_ > 1) {
         if (!use_custom_all_reduce_kernel) {
             ftNcclAllReduceSum(ffn_out, ffn_out, token_num * hidden_units, tensor_para_, FfnLayer<T>::stream_);
-        }
-        else {
+        } else {
             custom_all_reduce_comm_->customAllReduce(token_num * hidden_units, FfnLayer<T>::stream_);
         }
         sync_check_cuda_error();
@@ -125,8 +121,7 @@ TensorParallelFfnLayer<T>::TensorParallelFfnLayer(size_t                        
     tensor_para_(tensor_para),
     custom_all_reduce_comm_(custom_all_reduce_comm),
     enable_custom_all_reduce_(enable_custom_all_reduce),
-    do_all_reduce_(do_all_reduce)
-{
+    do_all_reduce_(do_all_reduce) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     FT_CHECK(inter_size % tensor_para_.world_size_ == 0);
 }
@@ -137,8 +132,7 @@ TensorParallelFfnLayer<T>::TensorParallelFfnLayer(TensorParallelFfnLayer<T> cons
     tensor_para_(ffn_layer.tensor_para_),
     custom_all_reduce_comm_(ffn_layer.custom_all_reduce_comm_),
     enable_custom_all_reduce_(ffn_layer.enable_custom_all_reduce_),
-    do_all_reduce_(ffn_layer.do_all_reduce_)
-{
+    do_all_reduce_(ffn_layer.do_all_reduce_) {
     FfnLayer<T>::layernorm_eps_ = ffn_layer.layernorm_eps_;
 }
 

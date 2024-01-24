@@ -28,18 +28,15 @@ static constexpr IA3_config IA3_NONE                    = static_cast<IA3_config
 static constexpr size_t     IA3_ADAPTER_MAX_NUM_ENCODER = 3;
 static constexpr size_t     IA3_ADAPTER_MAX_NUM_DECODER = 5;
 
-static inline IA3_config operator&(IA3_config x, IA3_config y)
-{
+static inline IA3_config operator&(IA3_config x, IA3_config y) {
     return static_cast<IA3_config>(static_cast<int>(x) & static_cast<int>(y));
 }
 
-static inline IA3_config operator|(IA3_config x, IA3_config y)
-{
+static inline IA3_config operator|(IA3_config x, IA3_config y) {
     return static_cast<IA3_config>(static_cast<int>(x) | static_cast<int>(y));
 }
 
-static inline IA3_config& operator|=(IA3_config& x, IA3_config y)
-{
+static inline IA3_config& operator|=(IA3_config& x, IA3_config y) {
     return x = static_cast<IA3_config>(static_cast<int>(x) | static_cast<int>(y));
 }
 

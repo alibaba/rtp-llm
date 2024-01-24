@@ -19,8 +19,7 @@
 namespace fastertransformer {
 
 cublasAlgoMap::cublasAlgoMap(const std::string filename, const std::string sp_config_filename):
-    config_filename_(filename), sp_config_filename_(sp_config_filename)
-{
+    config_filename_(filename), sp_config_filename_(sp_config_filename) {
     loadGemmConfig();
     loadSpGemmConfig();
 }
@@ -29,23 +28,19 @@ cublasAlgoMap::cublasAlgoMap(const cublasAlgoMap& algo_map):
     algo_map_(algo_map.algo_map_),
     config_filename_(algo_map.config_filename_),
     sp_config_filename_(algo_map.sp_config_filename_),
-    sp_algo_map_(algo_map.sp_algo_map_)
-{
-}
+    sp_algo_map_(algo_map.sp_algo_map_) {}
 
-cublasAlgoMap::~cublasAlgoMap()
-{
+cublasAlgoMap::~cublasAlgoMap() {
     algo_map_.clear();
 }
 
-void cublasAlgoMap::loadGemmConfig()
-{
+void cublasAlgoMap::loadGemmConfig() {
     static bool log_flag = false;
-    FILE* fd;
+    FILE*       fd;
     fd = fopen(config_filename_.c_str(), "r");
     if (fd == NULL) {
         if (!log_flag) {
-            std::cout << "[WARNING] " << config_filename_ << " is not found; using default GEMM algo" << std::endl;    
+            std::cout << "[WARNING] " << config_filename_ << " is not found; using default GEMM algo" << std::endl;
             log_flag = true;
         }
         return;
@@ -98,27 +93,24 @@ void cublasAlgoMap::loadGemmConfig()
             algo_map_[markStr].reductionScheme = reductionScheme;
             algo_map_[markStr].workspaceSize   = workspaceSize;
             algo_map_[markStr].stages          = stages;
-            algo_map_[markStr].exec_time = exec_time;
+            algo_map_[markStr].exec_time       = exec_time;
         }
     }
     fclose(fd);
 }
 
 bool cublasAlgoMap::isExist(
-    const int batch_count, const int m, const int n, const int k, const CublasDataType data_type)
-{
+    const int batch_count, const int m, const int n, const int k, const CublasDataType data_type) {
     cublasAlgoConfig_t mark{batch_count, n, m, k, data_type};
     return algo_map_.find(mark) != algo_map_.end();
 }
 
 cublasLtMatmulAlgo_info
-cublasAlgoMap::getAlgo(const int batch_count, const int m, const int n, const int k, const CublasDataType data_type)
-{
+cublasAlgoMap::getAlgo(const int batch_count, const int m, const int n, const int k, const CublasDataType data_type) {
     cublasAlgoConfig_t mark{batch_count, n, m, k, data_type};
     if (algo_map_.find(mark) != algo_map_.end()) {
         return algo_map_[mark];
-    }
-    else {
+    } else {
         cublasLtMatmulAlgo_info tmp_algo;
         tmp_algo.algoId =
             static_cast<int>(data_type == FLOAT_DATATYPE ? CUBLAS_GEMM_DEFAULT : CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -134,8 +126,7 @@ cublasAlgoMap::getAlgo(const int batch_count, const int m, const int n, const in
     }
 }
 
-void cublasAlgoMap::loadSpGemmConfig()
-{
+void cublasAlgoMap::loadSpGemmConfig() {
     if (sp_config_filename_.empty()) {
         return;
     }
@@ -175,21 +166,18 @@ void cublasAlgoMap::loadSpGemmConfig()
     fclose(fd);
 }
 
-int cublasAlgoMap::getSpAlgo(const int batch_count, const int m, const int n, const int k)
-{
+int cublasAlgoMap::getSpAlgo(const int batch_count, const int m, const int n, const int k) {
     char mark[256];
     sprintf(mark, "%d_%d_%d_%d", batch_count, m, n, k);
     if (sp_algo_map_.find(mark) != sp_algo_map_.end()) {
         return sp_algo_map_[mark];
-    }
-    else {
+    } else {
         // for remove padding, select algo 1 for simplicity
         return 0;
     }
 }
 
-bool cublasAlgoMap::isUseSparse(const int batch_count, const int m, const int n, const int k)
-{
+bool cublasAlgoMap::isUseSparse(const int batch_count, const int m, const int n, const int k) {
     // not available to use cusparselt.
     if (m % 8 != 0 || n % 8 != 0 || k % 8 != 0) {
         return false;
@@ -198,8 +186,7 @@ bool cublasAlgoMap::isUseSparse(const int batch_count, const int m, const int n,
     sprintf(mark, "%d_%d_%d_%d", batch_count, m, n, k);
     if (sp_algo_map_.find(mark) != sp_algo_map_.end()) {
         return sp_algo_map_[mark] != -1;
-    }
-    else {
+    } else {
         // no gemm test case, choose sparse according to sparse flag
         return true;
     }
