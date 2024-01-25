@@ -1,6 +1,5 @@
 #pragma once
 
-#include "src/fastertransformer/utils/debug_utils.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/add_residual_kernels.h"
 

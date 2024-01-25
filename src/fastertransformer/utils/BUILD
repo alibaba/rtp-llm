@@ -155,18 +155,3 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-cc_library(
-    name = "serialize_utils",
-    srcs = [
-        "serialize_utils.cc",
-    ],
-    hdrs = [
-        "serialize_utils.h",
-    ],
-    deps = [
-        "//src/fastertransformer/kernels:kernels_cu",
-    ],
-    copts = copts(),
-    alwayslink = True,
-    visibility = ["//visibility:public"],
-)

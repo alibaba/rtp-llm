@@ -19,7 +19,6 @@
 #include "src/fastertransformer/kernels/bert_preprocess_kernels.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/utils/nvtx_utils.h"
-#include "src/fastertransformer/utils/debug_utils.h"
 #include <thread>
 
 namespace fastertransformer {
