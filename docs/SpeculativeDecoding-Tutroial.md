@@ -3,12 +3,12 @@ rtp-llm框架目前集成了两种投机采样模式，分别是草稿模型和M
 ## Speculative Decoding
 使用草稿模型进行投机采样，需要指定大小模型，具体例子如下:
 
-**注意：投机采样由于q和kv长度不一致，目前无法使用flash attention，需要在运行代码前配置环境变量`export FMHA_ENABLE=OFF`**
+**注意：投机采样由于q和kv长度不一致，目前无法使用flash attention，需要在运行代码前配置环境变量`export ENABLE_FMHA=OFF`**
 ``` python
 from maga_transformer.pipeline import Pipeline
 from maga_transformer.model_factory import ModelFactory, ModelConfig
 
-# gen_num_per_circle控制投机采样时每轮的最大token数 
+# gen_num_per_circle控制投机采样时每轮的最大token数
 # async_mode需要设置true才能生效
 model_config = ModelConfig(
     model_type = "MODEL_TYPE",
@@ -35,7 +35,7 @@ generate_config = {
     "max_new_tokens": 100
 }
 
-for res in pipeline(["hello, what's your name"], generate_config = 
+for res in pipeline(["hello, what's your name"], generate_config =
 generate_config):
     print(res.batch_response)
 pipeline.stop()
@@ -45,7 +45,7 @@ pipeline.stop()
 <img src="pics/sp_decoding_image.png" width = "1000" height = "500" alt="图片名称"/>
 
 ### 服务
-在起服务时，草稿模型需要添加如下几个环境变量，具体可以参考`maga_transformer/model_factory.py:create_from_env()`: 
+在起服务时，草稿模型需要添加如下几个环境变量，具体可以参考`maga_transformer/model_factory.py:create_from_env()`:
 - SP_CHECKPOINT_PATH: 草稿模型的checkpoint路径
 - GEN_NUM_PER_CIRCLE： 每轮最大生成token数
 - SP_WEIGHT_TYPE：草稿模型的量化类型
@@ -59,7 +59,7 @@ pipeline.stop()
     "medusa_choices": Optional[List[List[int]]],
     "top_k": Optional[int],
     "posterior_threshold": Optional[float],
-    "posterior_alpha": Optional[float]    
+    "posterior_alpha": Optional[float]
   }
 }
 ```

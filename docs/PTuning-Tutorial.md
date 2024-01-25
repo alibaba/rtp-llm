@@ -38,7 +38,7 @@ pipeline.stop()
 ]
 ```
 模型在启动时后会运行以下prompt并缓存kvcache在显存中，后续运行中如果指定task_id，就能使用这部分前缀，demo如下:
-**注意：MultiTaskPrompt由于q和kv长度不一致，目前无法使用flash attention，需要在运行代码前配置环境变量`export FMHA_ENABLE=OFF`**
+**注意：MultiTaskPrompt由于q和kv长度不一致，目前无法使用flash attention，需要在运行代码前配置环境变量`export ENABLE_FMHA=OFF`**
 
 ``` python
 import os
@@ -59,7 +59,7 @@ generate_config = {
 }
 
 
-for res in pipeline(["hello, what's your name"], generate_config = 
+for res in pipeline(["hello, what's your name"], generate_config =
 generate_config):
     print(res.batch_response)
 
@@ -70,7 +70,7 @@ generate_config = {
 }
 
 
-for res in pipeline(["hello, what's your name"], generate_config = 
+for res in pipeline(["hello, what's your name"], generate_config =
 generate_config):
     print(res.batch_response)
 
