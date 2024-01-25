@@ -2,13 +2,13 @@ from typing import Dict, List, Any
 import os
 import re
 
+from io import BytesIO
 import torch
 import torch.nn as nn
 
 from PIL import Image
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
-from maga_transformer.models.qwen_vl_vit import Resampler
 
 class LlavaImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
