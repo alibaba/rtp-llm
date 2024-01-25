@@ -18,7 +18,7 @@ bool ParallelAttentionWrapper<T>::CheckUseFMHA() const {
     char* block_cache_env = std::getenv("REUSE_CACHE");
     bool  not_prefix_prompt =
         params_.pre_seq_len_ == 0 && (block_cache_env == nullptr || std::string(block_cache_env) != "1");
-    char* multi_task_prompt_env = std::getenv("MULTI_TASK_PROMPT"); 
+    char* multi_task_prompt_env = std::getenv("MULTI_TASK_PROMPT");
     bool use_medusa = params_.use_medusa_;
     char* sp_model_env = std::getenv("SP_MODEL_TYPE");
 
@@ -45,11 +45,11 @@ bool ParallelAttentionWrapper<T>::CheckUseFMHA() const {
     }
     if (multi_task_prompt_env != nullptr) {
         FT_LOG_WARNING("FMHA not support multi_task_prompt");
-        return false;        
+        return false;
     }
     if (use_medusa) {
         FT_LOG_WARNING("FMHA not support medusa model");
-        return false;        
+        return false;
     }
     return true;
 }
@@ -122,7 +122,7 @@ void ParallelAttentionWrapper<T>::TRTFMHA(const ContextAttentionParams& params, 
     const int local_hidden_units_kv = num_kv_heads * head_size;
     const float q_scaling = q_scaling_;
 
-    const bool mPagedContextFMHA=false; 
+    const bool mPagedContextFMHA=false;
 
     KVBlockArray kv_cache_buffer;
     using BufferDataType = int64_t;
@@ -138,7 +138,7 @@ void ParallelAttentionWrapper<T>::TRTFMHA(const ContextAttentionParams& params, 
         mPagedContextFMHA ? params.batch_size * 2 * tensorrt_llm::kernels::TMA_DESC_SIZE_IN_BYTE * blocks_per_context_sequence : 0;
 
     int* cu_q_seqlens = params.cu_seqlens;
-    int* cu_kv_seqlens = params.cu_seqlens; 
+    int* cu_kv_seqlens = params.cu_seqlens;
     // TODO
     void* paged_kv_tma_desc = nullptr;
 
@@ -499,7 +499,6 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
     const int      max_blocks_per_batch = block_pointers ? input_tensors->at("block_pointers").shape[3] : 0;
     const int      local_head_num       = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
     const int    local_head_num_kv = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
-const bool   has_ia3           = input_tensors->isExist("ia3_tasks");
     KVBlockArray kv_block_array(generate_batch_size, max_blocks_per_batch, params_.seq_size_per_block_, 0);
     kv_block_array.data = const_cast<int64_t*>(block_pointers);
     if (params_.int8_kv_cache_) {
@@ -985,11 +984,11 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     tensorrt_llm::kernels::Data_type data_type;
     if constexpr(std::is_same<T, half>::value){
         data_type = tensorrt_llm::kernels::DATA_TYPE_FP16;
-    } 
+    }
 #ifdef ENABLE_BF16
     if constexpr(std::is_same<T, __nv_bfloat16>::value){
         data_type = tensorrt_llm::kernels::DATA_TYPE_BF16;
-    } 
+    }
 #endif
 
 #if (CUDART_VERSION >= 12000)

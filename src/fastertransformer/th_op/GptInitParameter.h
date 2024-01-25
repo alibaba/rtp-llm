@@ -75,10 +75,6 @@ public:
     int64_t              moe_k_           = 0;
     std::vector<int64_t> moe_layer_index_ = {};
 
-    bool    sparse_             = false;
-    bool    has_adapters_       = false;
-    int64_t adapter_inter_size_ = 0;
-
     bool has_positional_encoding_    = false;
     bool has_pre_decoder_layernorm_  = false;
     bool has_post_decoder_layernorm_ = false;

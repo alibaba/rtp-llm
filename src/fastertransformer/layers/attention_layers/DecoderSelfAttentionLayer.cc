@@ -233,7 +233,6 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
     const int   relative_attention_bias_stride =
         input_tensors->isExist("relative_attention_bias") ? input_tensors->at("relative_attention_bias").shape[3] : 0;
     const T*   linear_bias_slopes = input_tensors->getPtr<T>("linear_bias_slopes", nullptr);
-    const bool has_ia3            = input_tensors->isExist("ia3_tasks");
 
     T* attention_out = output_tensors->getPtr<T>("hidden_features");
     T* key_cache     = output_tensors->getPtr<T>("key_cache");
@@ -343,7 +342,7 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
         kv_cache_buffer,
         stream_);
     sync_check_cuda_error();
-    
+
     // assert(key_cache_tensor.shape.size() == 6);
     // assert(value_cache_tensor.shape.size() == 5);
     // auto& kc_shape = key_cache_tensor.shape;
@@ -382,7 +381,7 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
 
     print_bsd(layer_id, "decoder attn before o", context_buf_input, 1, 1, local_hidden_units_rt);
     print_bsd_sum_and_square(layer_id, "decoder attn before o", context_buf_input, 1, 1, local_hidden_units_rt);
-    
+
     // attention out gemm: [batch_size, local_hidden_units_rt] * [local_hidden_units_rt, hidden_units_]
     gemm_runner_->Gemm( batch_size,
                         lora_input_lengths,
@@ -401,7 +400,7 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
     POP_RANGE;
 
     sync_check_cuda_error();
-    print_bsd(layer_id, "attn output", attention_out, 1, 1, hidden_units_); 
+    print_bsd(layer_id, "attn output", attention_out, 1, 1, hidden_units_);
 
     if (is_free_buffer_after_forward_) {
         freeBuffer();

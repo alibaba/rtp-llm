@@ -111,9 +111,6 @@ static auto specialTokensTHS =
     DEF_PROPERTY(int8_mode, int8_mode_)                                                                                \
     DEF_PROPERTY(weights_data_type, weights_data_type_)                                                                \
     DEF_PROPERTY(data_type, data_type_)                                                                                \
-    DEF_PROPERTY(sparse, sparse_)                                                                                      \
-    DEF_PROPERTY(has_adapters, has_adapters_)                                                                          \
-    DEF_PROPERTY(adapter_inter_size, adapter_inter_size_)                                                              \
     DEF_PROPERTY(has_positional_encoding, has_positional_encoding_)                                                    \
     DEF_PROPERTY(has_pre_decoder_layernorm, has_pre_decoder_layernorm_)                                                \
     DEF_PROPERTY(has_post_decoder_layernorm, has_post_decoder_layernorm_)                                              \
