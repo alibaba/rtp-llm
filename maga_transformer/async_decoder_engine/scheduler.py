@@ -40,7 +40,7 @@ class Scheduler:
 
     def create_config_json(self) -> Dict[str, Any]:
         config_json = {
-            "use_block_cache": self.reuse_cache_,
+            "reuse_cache": self.reuse_cache_,
             "use_ptuning": self.ptuning_ is not None,
             "gen_num_per_circle": self.gen_num_per_circle,
             "block_num": self.cache_config_.block_nums,
@@ -48,11 +48,10 @@ class Scheduler:
         }
         return config_json
 
-    # TODO(xinfei.sxf) use_block_cache 其实应是 reuse_kv_cache。
     def reset_ptuning(self, prefix_params: Optional[PrefixParams]):
         if prefix_params is None:
             self.ptuning_ = None
-            self.reuse_cache_ = os.environ.get('USE_BLOCK_CACHE', None) == '1'
+            self.reuse_cache_ = os.environ.get('REUSE_CACHE', None) == '1'
             return
         if isinstance(prefix_params.prefix_kvcache, dict):
             assert prefix_params.prefix_tensor is not None

@@ -22,7 +22,7 @@
 | `KV_CACHE_MEM_MB` | `str`, optional | kv cache 预留显存大小，单位(MB) |
 | `PRE_ALLOCATE_OP_MEM` | `str`, optional | 是否提前预分配显存,与KV_CACHE_MEM_MB配合使用 |
 | `TP_SPLIT_EMB_AND_LMHEAD` | `str`, optional | TensorParallel时是否切分Emb和LmHead计算(1:打开，0:关闭) |
-| `USE_BLOCK_CACHE` | `str`, optional | query之间复用kvcache |
+| `REUSE_CACHE` | `str`, optional | query之间复用kvcache |
 | `EXTRA_DATA_PATH` | `str`, optional | 除了ckpt/tokenizer,额外需要的数据,比如LLAVA的 VIT数据 |
 
 ## 注意事项

@@ -15,7 +15,7 @@ template<typename T>
 bool ParallelAttentionWrapper<T>::CheckUseFMHA() const {
     char* fmha_env        = std::getenv("ENABLE_FMHA");
     bool  fmha_enable     = (fmha_env == nullptr || std::string(fmha_env) != "OFF");
-    char* block_cache_env = std::getenv("USE_BLOCK_CACHE");
+    char* block_cache_env = std::getenv("REUSE_CACHE");
     bool  not_prefix_prompt =
         params_.pre_seq_len_ == 0 && (block_cache_env == nullptr || std::string(block_cache_env) != "1");
     char* multi_task_prompt_env = std::getenv("MULTI_TASK_PROMPT"); 

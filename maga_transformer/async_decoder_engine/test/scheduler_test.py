@@ -140,7 +140,7 @@ class SchedulerTest(TestCase):
         self.assertEqual(len(queries[1].block_indice), 1)
         self.assertEqual(len(scheduler.running_query_.queries), 2)
 
-    @mock.patch.dict('os.environ', {'USE_BLOCK_CACHE': '1'})
+    @mock.patch.dict('os.environ', {'REUSE_CACHE': '1'})
     def test_reuse(self):
         config, cache_config = self._init_config()
         scheduler = Scheduler(config, cache_config)
@@ -206,7 +206,7 @@ class SchedulerTest(TestCase):
         scheduler.update_batch_query()
         self.assertEqual(queries[0].block_indice, [[1, 2, 3, 5]])
 
-    @mock.patch.dict('os.environ', {'USE_BLOCK_CACHE': '1'})
+    @mock.patch.dict('os.environ', {'REUSE_CACHE': '1'})
     def test_ptuning(self):
         config, cache_config = self._init_config()
         prefix_seq_len = 9
