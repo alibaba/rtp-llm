@@ -13,7 +13,7 @@ from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.structure.raw_query import RawQuery
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
 
-class QueryManager:
+class Scheduler:
     def __init__(self, config: GptInitModelParameters, cache_config: CacheConfig, prefix_params: Optional[PrefixParams] = None, gen_num_per_circle: int = 1, nccl_op: Any = None) -> None:
         self.config_ = config
         self.seq_size_per_block_ = self.config_.seq_size_per_block

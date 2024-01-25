@@ -4,14 +4,14 @@ import numpy as np
 from typing import Any, List, Tuple
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.medusa.medusa_config import MedusaState, MedusaBuffer
-from maga_transformer.async_decoder_engine.query_manager import QueryManager, BatchQuery
+from maga_transformer.async_decoder_engine.scheduler import Scheduler, BatchQuery
 from maga_transformer.async_decoder_engine.base_model_executor import BaseModelExecutor, ModelOps
 from maga_transformer.async_decoder_engine.medusa.utils import generate_candidates, evaluate_posterior
 from maga_transformer.utils.util import to_cuda
 
 class MedusaModelExecutor(BaseModelExecutor):
-    def __init__(self, model_ops: ModelOps, query_manager: QueryManager, medusa_buffer: MedusaBuffer):
-        super().__init__(model_ops, query_manager)
+    def __init__(self, model_ops: ModelOps, scheduler: Scheduler, medusa_buffer: MedusaBuffer):
+        super().__init__(model_ops, scheduler)
         assert self.model_ops.model.lm_head is not None, "model lm_head should not be None"
         assert self.model_ops.model.medusa_head is not None, "model medusa_head should not be None"
         assert model_ops.config.medusa_config is not None, "medusa_config shoule not be None"
@@ -81,7 +81,7 @@ class MedusaModelExecutor(BaseModelExecutor):
 
         tgt_seq_idxs = list(range(prev_length, prev_length + accept_length + 1))
         src_seq_idxs = self.medusa_buffer.retrieve_indices[best_candidate, : accept_length + 1] + prev_length
-        self.query_manager_.cache_manager_.copy_kvcache_from_seq_idxs(block_indice, src_seq_idxs.tolist(), tgt_seq_idxs)
+        self.scheduler_.cache_manager_.copy_kvcache_from_seq_idxs(block_indice, src_seq_idxs.tolist(), tgt_seq_idxs)
 
         return MedusaState(candidates, tree_candidates), new_tokens.squeeze_(0)
 

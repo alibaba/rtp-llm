@@ -1,7 +1,7 @@
 import torch
 import random
 from typing import List, Tuple, Any
-from maga_transformer.async_decoder_engine.query_manager import BatchQuery
+from maga_transformer.async_decoder_engine.scheduler import BatchQuery
 from maga_transformer.async_decoder_engine.base_model_executor import BaseModelExecutor, ModelOps, ExecutorBase
 from maga_transformer.utils.util import to_cpu
 

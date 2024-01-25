@@ -44,7 +44,7 @@ class DecoderEngineTest(TestCase):
             # just ensure every input has result
             for i in range(0, 10):
                 result[i].result()
-            self.assertFalse(pipeline.model.decoder_engine_.query_manager_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
         finally:
             pipeline.model.stop()
 
@@ -55,7 +55,7 @@ class DecoderEngineTest(TestCase):
             gen = pipeline(["hello, what's your name?"], [[]], max_new_tokens=100, timeout_ms=10)
             with self.assertRaisesRegex(Exception, "ms timeout"):
                 results = [result for result in gen]
-            self.assertTrue(pipeline.model.decoder_engine_.query_manager_.has_query())
+            self.assertTrue(pipeline.model.decoder_engine_.scheduler_.has_query())
         finally:
             pipeline.model.stop()
 
@@ -72,7 +72,7 @@ class DecoderEngineTest(TestCase):
             # just ensure every input has result
             for i in range(0, 10):
                 result[i].result()
-            self.assertFalse(pipeline.model.decoder_engine_.query_manager_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
         finally:
             pipeline.model.stop()
 
@@ -92,7 +92,7 @@ class DecoderEngineTest(TestCase):
             # just ensure every input has result
             for i in range(0, 100):
                 result[i].result()
-            self.assertFalse(pipeline.model.decoder_engine_.query_manager_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
         finally:
             pipeline.model.stop()
 
@@ -105,7 +105,7 @@ class DecoderEngineTest(TestCase):
                 gen = pipeline(["你好", "hello, what's your name?"], [[], []])
                 results = [result for result in gen]
             # just ensure every input has result
-            self.assertFalse(pipeline.model.decoder_engine_.query_manager_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
         finally:
             pipeline.model.stop()
 
@@ -120,7 +120,7 @@ class DecoderEngineTest(TestCase):
                 gen = pipeline(["你好", "hello, what's your name?"], [[], []])
                 results = [result for result in gen]
             # just ensure every input has result
-            self.assertFalse(pipeline.model.decoder_engine_.query_manager_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
         finally:
             pipeline.model.stop()
 
@@ -129,11 +129,11 @@ class DecoderEngineTest(TestCase):
         generate.side_effect = Exception("test exception")
         pipeline = self.create_pipeline()
         try:
-            origin_block = len(pipeline.model.decoder_engine_.query_manager_.cache_manager_.free_blocks_index)
+            origin_block = len(pipeline.model.decoder_engine_.scheduler_.cache_manager_.free_blocks_index)
             gen = pipeline(["hello, what's your name?"], [[]], max_new_tokens=10)
             with self.assertRaisesRegex(Exception, "test exception"):
                 results = [result for result in gen]
-            remain_block = len(pipeline.model.decoder_engine_.query_manager_.cache_manager_.free_blocks_index)
+            remain_block = len(pipeline.model.decoder_engine_.scheduler_.cache_manager_.free_blocks_index)
             self.assertEqual(origin_block, remain_block)
         finally:
             pipeline.model.stop()

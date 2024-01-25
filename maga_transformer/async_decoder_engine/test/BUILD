@@ -44,8 +44,8 @@ py_test (
 )
 
 py_test (
-    name = "query_manager_test",
-    srcs = ["query_manager_test.py"],
+    name = "scheduler_test",
+    srcs = ["scheduler_test.py"],
     data = [
         "//maga_transformer/test/model_test/fake_test/testdata:testdata",
     ],

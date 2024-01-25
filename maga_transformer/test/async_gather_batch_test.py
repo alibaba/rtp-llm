@@ -38,7 +38,7 @@ class query_thread(threading.Thread):
             print('thread {i} end'.format(i = self.id))
 
 def report_metric(self, cost_ms: float):
-    if self.query_manager_.wait_query_size() > 1:
+    if self.scheduler_.wait_query_size() > 1:
         self.gathered_batch = True
 
 class async_gather_batch_test(TestCase):

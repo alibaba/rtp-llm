@@ -46,7 +46,7 @@ class AsyncDecoderModelTest(TestCase):
             # just ensure every input has result
             for i in range(0, 10):
                 result[i].result()
-            self.assertFalse(pipeline.model.decoder_engine_.query_manager_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
         finally:
             pipeline.model.decoder_engine_.stop()
 
@@ -56,7 +56,7 @@ class AsyncDecoderModelTest(TestCase):
             gen = pipeline(["hello, what's your name?\nI'm a 20 year old girl from the Netherlands."], [[]])
             with self.assertRaisesRegex(FtRuntimeException, "model max tokens is "):
                 [result for result in gen]
-            self.assertFalse(pipeline.model.decoder_engine_.query_manager_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
         finally:
             pipeline.model.decoder_engine_.stop()
 

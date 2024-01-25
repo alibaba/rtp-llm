@@ -14,7 +14,7 @@ from maga_transformer.async_decoder_engine.engine_creator import create_engine
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.async_decoder_engine.ptuning import get_ptuning_params
-from maga_transformer.async_decoder_engine.raw_query import RawQuery
+from maga_transformer.structure.raw_query import RawQuery
 
 class AsyncModel:
     def __init__(self, model: BaseModel, sp_model: Optional[BaseModel] = None) -> None:
@@ -68,4 +68,3 @@ class AsyncModel:
         except Exception as e:
             logging.error(f'generate error: {e}, Traceback: {traceback.format_exc()}')
             raise e
-

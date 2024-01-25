@@ -12,7 +12,7 @@ from maga_transformer.async_decoder_engine.batch_query import QueryStats
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.models.base_model import GenerateOutput
-from maga_transformer.async_decoder_engine.query_manager import QueryManager
+from maga_transformer.async_decoder_engine.scheduler import Scheduler
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.metrics import GaugeMetrics, kmonitor
@@ -21,9 +21,9 @@ from maga_transformer.structure.raw_query import RawQuery
 from maga_transformer.async_decoder_engine.base_model_executor import ExecutorBase
 
 class DecoderEngine:
-    def __init__(self, executor: ExecutorBase, query_manager: QueryManager, config: GptInitModelParameters) -> None:        
+    def __init__(self, executor: ExecutorBase, scheduler: Scheduler, config: GptInitModelParameters) -> None:        
         self.executor_ = executor
-        self.query_manager_ = query_manager
+        self.scheduler_ = scheduler
         self.config_ = config        
 
         self.need_stop_ = False
@@ -55,7 +55,7 @@ class DecoderEngine:
         )
         
         try:
-            queries = self.query_manager_.put_requests_to_queue(raw_query, self.executor_.base_model_ops.gpt_op.weight.lora_resource)
+            queries = self.scheduler_.put_requests_to_queue(raw_query, self.executor_.base_model_ops.gpt_op.weight.lora_resource)
             counter = self.wait_decode_counter_.get()
             iter_count = 0
             while not all(finished):
@@ -92,7 +92,7 @@ class DecoderEngine:
                     }
                     if finish:
                         # release query first, let other query use
-                        # self.query_manager_.free([query])
+                        # self.scheduler_.free([query])
                         if query.generate_config.return_input_ids:
                             aux_info[i].update({"input_ids": query.input_token_ids.tolist()})
                         finished[i * beam_width: (i + 1) * beam_width] = [True] * beam_width
@@ -100,15 +100,15 @@ class DecoderEngine:
                 yield GenerateOutput(hidden_states, output_tokens,
                        torch.BoolTensor(finished), aux_info, loss, logits)
         finally:
-            self.query_manager_.set_stop(queries)
+            self.scheduler_.set_stop(queries)
 
     def report_metric(self, cost_ms: float):
         kmonitor.report(GaugeMetrics.ASYNC_BATCH_SIZE_METRIC,
-                        self.query_manager_.running_batch_size())
+                        self.scheduler_.running_batch_size())
         kmonitor.report(GaugeMetrics.ASYNC_WAIT_QUERY_SIZE_METRIC,
-                        self.query_manager_.wait_query_size())
+                        self.scheduler_.wait_query_size())
         kmonitor.report(GaugeMetrics.ASYNC_ITERATE_LANTENCY, cost_ms)
-        kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self.query_manager_.block_used_ratio())
+        kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self.scheduler_.block_used_ratio())
 
     # 这个后台任务一直在跑，应该用线程实现，用 Python 自己的线程切换机制。
     # 如果用协程的话对外返回的 decode 协程会因为 async_process 协程一直运行被饿死。
@@ -118,7 +118,7 @@ class DecoderEngine:
             if self.need_stop_:
                 logging.info("need stop flag is true, exit async_process")
                 return
-            if not self.query_manager_.has_query() and g_parallel_info.tp_rank == 0:
+            if not self.scheduler_.has_query() and g_parallel_info.tp_rank == 0:
                 time.sleep(0.001)
                 continue
             batch_query = None
@@ -126,14 +126,14 @@ class DecoderEngine:
                 with Timer() as t:
                     be = time.perf_counter()
                     torch.cuda.nvtx.range_push('pre_input')
-                    batch_query = self.query_manager_.get_batch_request()
+                    batch_query = self.scheduler_.get_batch_request()
                     batch_query.generate()
                     batch_query.tp_sync()
                     torch.cuda.nvtx.range_pop()
                     self.executor_.process(batch_query)
                     torch.cuda.nvtx.range_push('update')
                     if g_parallel_info.tp_rank == 0:
-                        self.query_manager_.update_batch_query()
+                        self.scheduler_.update_batch_query()
                 self.report_metric(t.cost_ms())
                 torch.cuda.nvtx.range_pop()
                 # torch.cuda.synchronize();
@@ -141,7 +141,7 @@ class DecoderEngine:
                 # print('async token time:', (en - be) * 1000)
             except Exception as e:
                 if batch_query:
-                    self.query_manager_.update_all_errors(str(e))
+                    self.scheduler_.update_all_errors(str(e))
                 logging.error(
                     f'process run error: {e}, Traceback: {traceback.format_exc()}'
                 )

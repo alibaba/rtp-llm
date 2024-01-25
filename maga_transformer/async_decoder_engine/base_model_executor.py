@@ -1,19 +1,20 @@
 import os
 import torch
 import logging
+import random
+from enum import Enum
 from typing import List, Optional, Tuple, Union, Any
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import LoRAMap
-from maga_transformer.async_decoder_engine.query_manager import QueryManager, BatchQuery
+from maga_transformer.async_decoder_engine.scheduler import Scheduler, BatchQuery
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.sample_utils import BaseSampler, SamplerSetupParams, SamplingParams
 from maga_transformer.utils.dump_config_utils import dump_engine_to_table
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.ops.gpt_ops.gpt_op import GptOp
 from maga_transformer.distribute.worker_info import g_parallel_info
-import random
-from enum import Enum
 from maga_transformer.utils.util import to_cuda, to_cpu
+
 DEFAULT_NEW_SAMPLER_BATCH_SIZE=128
 
 class ModelType(Enum):
@@ -36,9 +37,9 @@ class ExecutorBase(object):
         raise NotImplementedError()
 
 class BaseModelExecutor(ExecutorBase):
-    def __init__(self, model_ops: ModelOps, query_manager: QueryManager):
+    def __init__(self, model_ops: ModelOps, scheduler: Scheduler):
         self.model_ops = model_ops
-        self.query_manager_ = query_manager
+        self.scheduler_ = scheduler
         dump_engine_to_table(self.create_config_json())
 
     @property
@@ -63,7 +64,7 @@ class BaseModelExecutor(ExecutorBase):
         config_json = {
             "engine_type": type(self).__name__,
         }
-        config_json.update(self.query_manager_.create_config_json())
+        config_json.update(self.scheduler_.create_config_json())
         return config_json
 
     def _unpack_hidden_states(self, batch_query: BatchQuery, hidden_states: torch.Tensor):
@@ -78,9 +79,9 @@ class BaseModelExecutor(ExecutorBase):
         # be1 = time.perf_counter()
         with torch.cuda.nvtx.range('pre_process'):
             input_embeds, attention_mask, position_ids = self._pre_process(batch_query)
-            k_cache, v_cache = self.query_manager_.get_kv_cache_base()
-            k_cache_scale, v_cache_scale = self.query_manager_.get_kv_cache_scale_base()
-            prefix_lengths, count_length, max_prefix_length = self.query_manager_.get_prefix_args(batch_query)
+            k_cache, v_cache = self.scheduler_.get_kv_cache_base()
+            k_cache_scale, v_cache_scale = self.scheduler_.get_kv_cache_scale_base()
+            prefix_lengths, count_length, max_prefix_length = self.scheduler_.get_prefix_args(batch_query)
 
         with torch.cuda.nvtx.range('run_model'):
             hidden_states = self.model_ops.gpt_op.forward(
@@ -196,7 +197,7 @@ class BaseModelExecutor(ExecutorBase):
             block_num = int(query_cache_blocks.count_nonzero().item())
 
             allocation_row_num = batch_query.beam_width - 1
-            new_block_num = self.query_manager_.cache_manager_.malloc(block_num * allocation_row_num)
+            new_block_num = self.scheduler_.cache_manager_.malloc(block_num * allocation_row_num)
             query_new_blocks = torch.Tensor(new_block_num, device=query_cache_blocks.device) \
                 .reshape(allocation_row_num, block_num) \
                 .type_as(query_cache_blocks)
@@ -277,13 +278,13 @@ class BaseModelExecutor(ExecutorBase):
             logits: torch.Tensor,
             hidden_states: torch.Tensor) -> None:
         beam_width = batch_query.beam_width
-        key_cache, value_cache = self.query_manager_.get_kv_cache_base()
+        key_cache, value_cache = self.scheduler_.get_kv_cache_base()
         if beam_width > 1:
             logits = self._prepare_beam_search(batch_query, logits, key_cache, value_cache)
 
         fake_input_lengths = batch_query.seq_lengths_list + batch_query.context_query_context_lengths_list
         total_batch_size = batch_query.total_batch_size
-        # NOTE: beam width of all queries are assured to be the same. See QueryManager::check_query_to_append.
+        # NOTE: beam width of all queries are assured to be the same. See Scheduler::check_query_to_append.
         gen_lengths = [
             fake_input_lengths[i] - batch_query.context_lengths_list[i] + batch_query.max_seq_length - 1 \
                 for i in range(len(fake_input_lengths))
