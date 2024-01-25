@@ -4,13 +4,13 @@ from collections import deque
 from typing import Any, List, Optional, Union, Dict
 import torch
 from threading import Lock
-from maga_transformer.async_decoder_engine.cache_manager import CacheManager, CacheConfig
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.model_weight import LoraResource
-from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.async_decoder_engine.batch_query import BatchQuery, QueryStats
-from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.structure.raw_query import RawQuery
+from maga_transformer.utils.model_weight import LoraResource
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.generate_config import GenerateConfig
+from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
+from maga_transformer.async_decoder_engine.cache_manager import CacheManager, CacheConfig
+from maga_transformer.async_decoder_engine.batch_query import BatchQuery, QueryStats
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
 
 class Scheduler:
@@ -19,6 +19,7 @@ class Scheduler:
         self.seq_size_per_block_ = self.config_.seq_size_per_block
         self.cache_config_ = cache_config
         self.cache_manager_ = CacheManager(cache_config, nccl_op)
+        # TODO(xinfei.sxf) move this config
         self.gen_num_per_circle = gen_num_per_circle
         logging.info(f"model generate length per circle: {self.gen_num_per_circle}")
         self.count_prefix_length = True
