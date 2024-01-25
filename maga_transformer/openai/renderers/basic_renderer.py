@@ -14,7 +14,7 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, \
     RendererParams, StreamResponseObject, RenderedInputs, RendererInfo
-from maga_transformer.tokenizer.tokenizer_base import TokenizerBase, GenerateOutput
+from maga_transformer.models.base_model import TokenizerBase, GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
 

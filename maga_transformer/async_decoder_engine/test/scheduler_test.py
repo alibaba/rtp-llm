@@ -1,3 +1,6 @@
+from unittest import mock
+import torch
+import logging
 from unittest import TestCase, main
 from maga_transformer.async_decoder_engine.scheduler import Scheduler
 from maga_transformer.async_decoder_engine.ptuning import PrefixParams, PrefixType
@@ -5,15 +8,14 @@ from maga_transformer.async_decoder_engine.cache_manager import CacheConfigGener
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.model_weight import LoraResource
-from unittest import mock
-import torch
-import logging
+from maga_transformer.structure.raw_query import RawQuery
+
 
 class MockMemInfo:
     free: int  = 32 * 1024 # byte
     used: int  = 0
 
-@mock.patch('maga_transformer.async_decoder_engine.cache_manager.get_mem_info', MockMemInfo)
+@mock.patch('maga_transformer.config.cache_config.get_mem_info', MockMemInfo)
 class SchedulerTest(TestCase):
     @staticmethod
     def _init_config(head_num_kv: int = 2,
@@ -51,7 +53,7 @@ class SchedulerTest(TestCase):
         images = [[]] * 2
 
         queries = scheduler.put_requests_to_queue(
-            inputs, None, context_lengths, images, generate_config, LoraResource(dict(), None, None, None))
+            RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 5)
         self.assertEqual(scheduler.running_batch_size(), 0)
         self.assertEqual(scheduler.wait_query_size(), 2)        
@@ -102,7 +104,7 @@ class SchedulerTest(TestCase):
 
         with self.assertRaisesRegex(Exception, "failed to malloc 2 blocks, only 1 blocks left"):
             queries = scheduler.put_requests_to_queue(
-                inputs, None, context_lengths, images,generate_config, LoraResource(dict(), None, None, None))
+                RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
 
     def test_extend_lack_mem(self):
@@ -116,7 +118,7 @@ class SchedulerTest(TestCase):
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
         queries = scheduler.put_requests_to_queue(
-            inputs, None, context_lengths, images, generate_config, LoraResource(dict(), None, None, None))
+            RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 0)
         batch_query = self._get_batch_query(scheduler)
         finished = torch.BoolTensor([False, False, False])
@@ -149,7 +151,7 @@ class SchedulerTest(TestCase):
         context_lengths = torch.IntTensor([16])
         images = [[]]
         generate_config: GenerateConfig = GenerateConfig(using_hf_sampling=False, chat_id='aaaa')
-        queries = scheduler.put_requests_to_queue(inputs, None, context_lengths, images, generate_config, LoraResource(dict(), None, None, None))
+        queries = scheduler.put_requests_to_queue(RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(queries[0].block_indice, [[1, 2]])
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 5)
         batch_query = self._get_batch_query(scheduler)
@@ -169,7 +171,7 @@ class SchedulerTest(TestCase):
         self.assertEqual(len(scheduler.batch_query_.queries), 0)
 
         context_lengths = torch.IntTensor([32])
-        queries = scheduler.put_requests_to_queue(inputs, None, context_lengths, images, generate_config, LoraResource(dict(), None, None, None))
+        queries = scheduler.put_requests_to_queue(RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 3)
         self.assertEqual(queries[0].block_indice, [[1, 2, 3, 4]])
         self.assertEqual(queries[0].reuse_length, 16)
@@ -184,7 +186,7 @@ class SchedulerTest(TestCase):
         self.assertEqual(len(scheduler.batch_query_.queries), 0)
 
         context_lengths = torch.IntTensor([24])
-        queries = scheduler.put_requests_to_queue(inputs, None, context_lengths, images, generate_config, LoraResource(dict(), None, None, None))
+        queries = scheduler.put_requests_to_queue(RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 4)
         self.assertEqual(queries[0].block_indice, [[1, 2, 3]])
         self.assertEqual(queries[0].reuse_length, 23)
@@ -223,7 +225,7 @@ class SchedulerTest(TestCase):
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
         queries = scheduler.put_requests_to_queue(
-                inputs, None, context_lengths, images, generate_config, LoraResource(dict(), None, None, None))
+                RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         batch_query = self._get_batch_query(scheduler)
         prefix_lengths, count_length, max_prefix_length = scheduler.get_prefix_args(batch_query)
 

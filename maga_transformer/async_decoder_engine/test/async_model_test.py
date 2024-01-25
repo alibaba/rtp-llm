@@ -13,7 +13,7 @@ class MockMemInfo:
     free: int  = 2 * 1024 * 1024 # byte
     used: int  = 0
 
-@mock.patch('maga_transformer.async_decoder_engine.cache_manager.get_mem_info', MockMemInfo)
+@mock.patch('maga_transformer.config.cache_config.get_mem_info', MockMemInfo)
 @mock.patch.dict('os.environ', {'RESERVER_RUNTIME_MEM_MB': '1'})
 class AsyncDecoderModelTest(TestCase):
     def __init__(self, *args, **kwargs) -> None:

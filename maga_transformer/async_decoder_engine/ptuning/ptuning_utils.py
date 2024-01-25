@@ -3,6 +3,7 @@ import torch
 from typing import List, Any, Dict, Tuple
 from maga_transformer.models.base_model import BaseModel, TokenizerBase
 from maga_transformer.config.generate_config import GenerateConfig
+from maga_transformer.structure.raw_query import RawQuery
 from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixParams, PrefixType
 
 def get_ptuning_params(model: BaseModel, tokenizer: TokenizerBase):
@@ -20,7 +21,8 @@ def prepare_prompt(model: BaseModel, tokenizer: TokenizerBase, multi_task_prompt
     multi_task_prompt_tensor: Dict[int, torch.Tensor] = {}
     multi_task_tensor_id: Dict[int, torch.Tensor] = {}
     def run_context_decoder(input_token_ids: torch.Tensor, input_lengths: torch.Tensor) -> torch.Tensor:
-        generate_context = model.prepare_context(input_token_ids, input_lengths, [], GenerateConfig(max_new_tokens=0))
+        generate_context = model.prepare_context(RawQuery(
+            input_token_ids, input_lengths, [], GenerateConfig(max_new_tokens=0), None))
         ctx_output, k_cache, v_cache, _ = model.context_decoder.forward(
             input_embeds=generate_context.input_embeds,
             attention_mask=generate_context.attention_mask,

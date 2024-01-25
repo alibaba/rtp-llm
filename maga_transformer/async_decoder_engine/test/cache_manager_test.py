@@ -7,7 +7,7 @@ class MockMemInfo:
     free: int  = 16 * 1024 # byte
     used: int  = 0
 
-@mock.patch('maga_transformer.async_decoder_engine.cache_manager.get_mem_info', MockMemInfo)
+@mock.patch('maga_transformer.config.cache_config.get_mem_info', MockMemInfo)
 class CacheManagerTest(TestCase):
     @staticmethod
     def _init_config(head_num_kv: int = 2,

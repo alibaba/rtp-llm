@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from transformers import PreTrainedTokenizer
 
-from maga_transformer.tokenizer.tokenizer_base import TokenizerBase, GenerateOutput
+from maga_transformer.models.base_model import TokenizerBase, GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
     RoleEnum, RendererInfo

@@ -19,6 +19,7 @@ from maga_transformer.openai.renderers.custom_renderer import RendererParams, \
     StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderers.renderer_factory import ChatRendererFactory
 from maga_transformer.config.generate_config import GenerateConfig
+from maga_transformer.structure.raw_query import RawQuery
 
 class OpenaiEndopoint():
     def __init__(self, model: Union[AsyncModel, BaseModel]):
@@ -164,11 +165,13 @@ class OpenaiEndopoint():
         generate_config = self._extract_generation_config(chat_request)
 
         output_generator: AsyncGenerator[GenerateOutput, None] = self.model.generate_stream(
-            input_id_tensor,
-            self.tokenizer,
-            input_length_tensor,
-            input_images,
-            generate_config
+            RawQuery(
+                input_id_tensor,
+                input_length_tensor,
+                input_images,
+                generate_config,
+                self.tokenizer
+            )
         )
 
         debug_info = self._get_debug_info(rendered_input) if chat_request.debug_info else None
