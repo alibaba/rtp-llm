@@ -386,14 +386,12 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         PUSH_RANGE(stream_, "remove padding");
         invokeGetPaddingOffsetAndCuSeqLens(
             h_pinned_token_num_ptr_,
-            &context_h_token_num,
             padding_offset_,
             cu_seqlens_,
             context_lengths_ + batch_size,
             context_batch_size,
             max_context_seq_length,
             stream_);
-        FT_CHECK(context_h_token_num == h_token_num - batch_size);
         POP_RANGE;
     }
     PUSH_RANGE(stream_, "context_generation");

@@ -68,6 +68,19 @@ void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
     sync_check_cuda_error();
 }
 
+void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
+                                        int*         tmp_mask_offset,
+                                        int*         cu_seqlens,
+                                        const int*   sequence_lengths,
+                                        const int    batch_size,
+                                        const int    max_seq_len,
+                                        cudaStream_t stream)
+{
+    getPaddingOffsetAndCuSeqLensKernel<<<1, 1, 0, stream>>>(
+        h_pinned_token_num, tmp_mask_offset, cu_seqlens, sequence_lengths, batch_size, max_seq_len);
+    sync_check_cuda_error();
+}
+
 template<typename T>
 __global__ void buildEncoderAttentionMaskKernel(T* attention_mask, const int* sequence_lengths, const int max_seq_len)
 {
