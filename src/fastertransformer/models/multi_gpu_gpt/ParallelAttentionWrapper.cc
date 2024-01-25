@@ -1004,6 +1004,9 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     }
 #endif
     use_open_source_fmha_ = UseOpenSourceFMHA();
+    if (use_open_source_fmha_){
+        FT_LOG_INFO("use open source fmha");
+    }
 }
 
 template<typename T>

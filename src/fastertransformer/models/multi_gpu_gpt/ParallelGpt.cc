@@ -392,6 +392,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             context_batch_size,
             max_context_seq_length,
             stream_);
+        FT_CHECK_WITH_INFO(context_h_token_num>0, "input should not be empty");
         POP_RANGE;
     }
     PUSH_RANGE(stream_, "context_generation");
