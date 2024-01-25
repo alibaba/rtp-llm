@@ -100,6 +100,13 @@ py_library(
 )
 
 py_library(
+    name = "structure",
+    srcs = glob([
+        "structure/*.py",
+    ])
+)
+
+py_library(
     name = "async_model",
     srcs = glob([
         "async_decoder_engine/**/*.py",
@@ -107,7 +114,8 @@ py_library(
     deps = [
         ":utils",
         ":ops",
-        ":config"
+        ":config",
+        ":structure",
     ],
 )
 
@@ -122,6 +130,7 @@ py_library(
         ":utils",
         ":ops",
         ":config",
+        ":structure",
     ],
 )
 
@@ -161,6 +170,7 @@ py_library(
         ":pipeline",
         ":models",
         ":config",
+        ":structure",
         ":plugins",
         ":async_model",
         ":openai_api",

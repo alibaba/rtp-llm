@@ -15,10 +15,11 @@ from maga_transformer.utils.sample_utils import HuggingfaceSampler, FtSampler, B
 from maga_transformer.utils.stop_utils import create_stop_criteria_list
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.config.generate_config import GenerateConfig
+from maga_transformer.config.generate_config import GenerateConfig, RequestFormat
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.config.generate_config import RequestFormat
 from maga_transformer.utils.model_weight import LoRAMap
+from maga_transformer.structure.raw_query import RawQuery
+from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
@@ -38,25 +39,6 @@ def debug_print_hidden(name, t):
     for b_idx in range(t.shape[0]):
         for s_idx in range(t.shape[1]):
             print(b_idx, s_idx, t[b_idx,s_idx,:8])
-
-class BaseTokenizer(object):
-    def encode(self, inputs: Union[str, List[Dict[str, str]]]) -> List[int]:
-        raise NotImplementedError()
-
-    def decode(self, outputs: List[int]) -> str:
-        raise NotImplementedError()
-
-    @property
-    def chat_template(self) -> Optional[str]:
-        return None
-
-    @property
-    def default_chat_template(self) -> Optional[str]:
-        return None
-
-    @property
-    def additional_special_tokens(self) -> Optional[List[str]]:
-        return None
 
 class GenerateOutput(NamedTuple):
     hidden_states: Union[torch.Tensor, List[torch.Tensor]]
@@ -173,7 +155,7 @@ class BaseModel(object):
         self.medusa_head: Optional[torch.nn.ModuleList] = None
 
         self.prefix_tokens: Optional[torch.Tensor] = None
-        self.tokenizer: Optional[BaseTokenizer] = None
+        self.tokenizer: Optional[TokenizerBase] = None
         self.max_input_buffer_len: int = 0
 
         self.default_generate_config: Dict[str, Any] = {}
@@ -208,47 +190,43 @@ class BaseModel(object):
         return t.unsqueeze(1).repeat([1, beam_width] + [1] * len(shape[1:])).reshape([-1] + shape[1:]).contiguous()
 
     @torch.no_grad()
-    def prepare_context(self, # type: ignore
-                 input_token_ids: torch.Tensor,
-                 input_lengths: Optional[torch.Tensor],
-                 images: List[List[str]],
-                 generate_config: GenerateConfig)  -> GenerateContext:
+    def prepare_context(self, raw_query: RawQuery)  -> GenerateContext:
         all_start_time = time.time()
         assert self.config is not None, "Config should not be None"
         assert self.decoder is not None, "Decoder should not be None"
         assert self.context_decoder is not None, "Context Decoder should not be None"
         assert self.weight is not None, 'Please call load() first to initialize weights.'
 
-        input_token_ids = input_token_ids.type(torch.int32).to(self.device)
-        input_embeds = self._do_pipeline_multimodal_embed(input_token_ids, images)
+        raw_query.input_token_ids = raw_query.input_token_ids.type(torch.int32).to(self.device)
+        input_embeds = self._do_pipeline_multimodal_embed(raw_query.input_token_ids, raw_query.images)
 
-        inputs_np = input_token_ids.cpu().numpy()
+        inputs_np = raw_query.input_token_ids.cpu().numpy()
         batch_size = len(inputs_np)
 
-        eos_token_id = generate_config.eos_token_id if generate_config.eos_token_id is not None \
+        eos_token_id = raw_query.generate_config.eos_token_id if raw_query.generate_config.eos_token_id is not None \
             else self.config.special_tokens.eos_token_id
         assert eos_token_id is not None, 'eos_token-id must be specified in generation.'
-        generate_config.eos_token_id = eos_token_id
-        sampler = self.create_sampler(generate_config)
+        raw_query.generate_config.eos_token_id = eos_token_id
+        sampler = self.create_sampler(raw_query.generate_config)
 
         max_new_tokens = FT_DEFAULT_MAX_NEW_TOKENS
-        if generate_config.max_new_tokens != None:
-            max_new_tokens = generate_config.max_new_tokens
+        if raw_query.generate_config.max_new_tokens != None:
+            max_new_tokens = raw_query.generate_config.max_new_tokens
 
-        if input_lengths is None:
-            input_lengths = torch.IntTensor([len(v[v != eos_token_id]) for v in inputs_np])
+        if raw_query.input_lengths is None:
+            raw_query.input_lengths = torch.IntTensor([len(v[v != eos_token_id]) for v in inputs_np])
 
-        input_lengths = input_lengths.type(torch.int32).to(self.device)
+        raw_query.input_lengths = raw_query.input_lengths.type(torch.int32).to(self.device)
 
-        max_input_length = input_token_ids.shape[-1]
+        max_input_length = raw_query.input_token_ids.shape[-1]
         if self.max_input_buffer_len < max_input_length * batch_size:
             if self.max_input_buffer_len != 0:
                 torch.cuda.empty_cache()
             self.max_input_buffer_len = max_input_length * batch_size
 
         # Setup decoder_op prior to calling the forward function.
-        sampler.setup(SamplerSetupParams(batch_size, eos_token_id, max_input_length, input_token_ids))
-        beam_width = generate_config.num_beams
+        sampler.setup(SamplerSetupParams(batch_size, eos_token_id, max_input_length, raw_query.input_token_ids))
+        beam_width = raw_query.generate_config.num_beams
 
         pre_seq_len = 0
         if getattr(self.config, "pre_seq_len", None) is not None:
@@ -261,22 +239,22 @@ class BaseModel(object):
         device = self.device
 
         # Prepare input and output arguments.
-        pad_lengths = max_input_length - input_lengths
+        pad_lengths = max_input_length - raw_query.input_lengths
         # Since tril() doesn't support bf16 dtype, we create of bool type and then cast it to dtype.
-        attention_mask = self.create_context_decoder_mask(input_lengths, max_input_length)
+        attention_mask = self.create_context_decoder_mask(raw_query.input_lengths, max_input_length)
         # concat attention_mask
         if self.config.pre_seq_len is not None and self.config.pre_seq_len > 0:
             prefix_mask = torch.ones((batch_size, max_input_length, self.config.pre_seq_len), dtype=torch.bool, device=self.device)
             attention_mask = torch.concat([prefix_mask, attention_mask], dim=-1)
 
-        finished = torch.zeros_like(input_lengths).bool()
+        finished = torch.zeros_like(raw_query.input_lengths).bool()
         # sequence_lengths = (max_input_length - 1) * torch.ones_like(input_lengths)
-        sequence_lengths = input_lengths.clone() - 1
+        sequence_lengths = raw_query.input_lengths.clone() - 1
 
         # Contiguous buffer for each decode_op step, it will be transposed tensor for the final output.
         output_token_ids: torch.Tensor = torch.ones(
             (max_seq_length, batch_size), dtype=torch.int32, device=device) * eos_token_id
-        output_token_ids[:max_input_length, ...] = input_token_ids.T
+        output_token_ids[:max_input_length, ...] = raw_query.input_token_ids.T
 
         position_ids = torch.arange(0, max_input_length, dtype=torch.int, device=device) \
                             .unsqueeze(0).view(-1, max_input_length)
@@ -308,11 +286,11 @@ class BaseModel(object):
          # lora
         lora_names = []
         lora_ids = []
-        if generate_config.adapter_name is not None:
-            if isinstance(generate_config.adapter_name, str):
-                lora_names = [generate_config.adapter_name]
+        if raw_query.generate_config.adapter_name is not None:
+            if isinstance(raw_query.generate_config.adapter_name, str):
+                lora_names = [raw_query.generate_config.adapter_name]
             else:
-                lora_names = generate_config.adapter_name
+                lora_names = raw_query.generate_config.adapter_name
         if len(lora_names) != 0:
             for lora_name in lora_names:
                 lora_ids.append(self.weight.lora_resource.get_id(lora_name))
@@ -326,7 +304,7 @@ class BaseModel(object):
         if beam_width > 1:
             input_embeds = self.dup_dim0_for_beam_search(input_embeds, beam_width)
             attention_mask = self.dup_dim0_for_beam_search(attention_mask, beam_width)
-            input_lengths = self.dup_dim0_for_beam_search(input_lengths, beam_width)
+            raw_query.input_lengths = self.dup_dim0_for_beam_search(raw_query.input_lengths, beam_width)
             pad_lengths = self.dup_dim0_for_beam_search(pad_lengths, beam_width)
             sequence_lengths = self.dup_dim0_for_beam_search(sequence_lengths, beam_width)
             finished = self.dup_dim0_for_beam_search(finished, beam_width)
@@ -337,8 +315,10 @@ class BaseModel(object):
                 (2, batch_size, beam_width, memory_length), dtype=torch.int32, device=device)
             cum_log_probs = torch.zeros(batch_size * beam_width, device=device)
 
-        return GenerateContext(input_token_ids, input_embeds, attention_mask, pad_lengths, input_lengths, memory_length, sampler,
-                                batch_size, beam_width, max_input_length, finished, sequence_lengths, gen_length, cum_log_probs,
+        return GenerateContext(raw_query.input_token_ids, input_embeds, attention_mask, pad_lengths,
+                                raw_query.input_lengths, memory_length, sampler,
+                                batch_size, beam_width, max_input_length, finished, 
+                                sequence_lengths, gen_length, cum_log_probs,
                                 extra_args, all_start_time, cache_indirection, output_token_ids)
 
     @torch.no_grad()
@@ -381,26 +361,16 @@ class BaseModel(object):
                 self.weight.lora_resource.read_release(name)
 
     @torch.no_grad()
-    async def generate_stream(self, # type: ignore
-                 input_token_ids: torch.Tensor,
-                 tokenizer: BaseTokenizer,
-                 input_lengths: Optional[torch.Tensor],
-                 images: List[List[str]],
-                 generate_config: GenerateConfig) -> AsyncGenerator[GenerateOutput, None]:
-        self.acquire_resource(generate_config)
+    async def generate_stream(self, raw_query: RawQuery) -> AsyncGenerator[GenerateOutput, None]:
+        self.acquire_resource(raw_query.generate_config)
         try:
-            for element in self.generate_stream_wrapper(input_token_ids, tokenizer, input_lengths, images, generate_config):
+            for element in self.generate_stream_wrapper(raw_query):
                 yield element
         finally:
-            self.release_resource(generate_config)
+            self.release_resource(raw_query.generate_config)
 
     @torch.no_grad()
-    def generate_stream_wrapper(self, # type: ignore
-                 input_token_ids: torch.Tensor,
-                 tokenizer: BaseTokenizer,
-                 input_lengths: Optional[torch.Tensor],
-                 images: List[Any],
-                 generate_config: GenerateConfig):
+    def generate_stream_wrapper(self, raw_query: RawQuery):
         """
 
         # Args.
@@ -411,7 +381,7 @@ class BaseModel(object):
         # Returns
             Iterator[GenerateOutput]
         """
-        generate_context = self.prepare_context(input_token_ids, input_lengths, images, generate_config)
+        generate_context = self.prepare_context(raw_query)
 
         context_decoder_output, k_cache, v_cache, hidden_states = self.context_decoder.forward(
             input_embeds=generate_context.input_embeds,
@@ -422,8 +392,8 @@ class BaseModel(object):
 
         loss = None
         logits = None
-        if generate_config.calculate_loss:
-            loss = self.generate_loss(generate_context, context_decoder_output, generate_config.calculate_loss)
+        if raw_query.generate_config.calculate_loss:
+            loss = self.generate_loss(generate_context, context_decoder_output, raw_query.generate_config.calculate_loss)
             batch_size = generate_context.batch_size
             yield GenerateOutput(hidden_states,
                                  generate_context.output_token_ids.view(-1, generate_context.batch_size,
@@ -461,6 +431,7 @@ class BaseModel(object):
                     masked_tokens=None,
                     **generate_context.extra_args)
 
+            # TODO(xinfei.sxf) create_stop_criteria_list 不要多次调用啊。
             finished, sequence_lengths = self._do_pipline_last_sample(
                 generate_context.sampler,
                 step,
@@ -475,7 +446,7 @@ class BaseModel(object):
                 k_cache,
                 v_cache,
                 generate_context.cum_log_probs,
-                create_stop_criteria_list(generate_config.stop_words_list, generate_config.stop_words_str, tokenizer)
+                create_stop_criteria_list(raw_query.generate_config.stop_words_list, raw_query.generate_config.stop_words_str, self.tokenizer)
             )
             aux_info = None
             if generate_context.cum_log_probs != None:
@@ -484,7 +455,7 @@ class BaseModel(object):
                                 generate_context.batch_size, generate_context.beam_width).tolist()
                 ]
 
-            if generate_config.return_logits:
+            if raw_query.generate_config.return_logits:
                 logits = self._get_logits(hidden_states)
 
             yield GenerateOutput(hidden_states.view(generate_context.batch_size, generate_context.beam_width, -1),

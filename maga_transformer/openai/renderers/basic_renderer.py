@@ -14,7 +14,7 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, \
     RendererParams, StreamResponseObject, RenderedInputs, RendererInfo
-from maga_transformer.models.base_model import BaseTokenizer, GenerateOutput
+from maga_transformer.tokenizer.tokenizer_base import TokenizerBase, GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
 
@@ -39,7 +39,7 @@ class PromptWithImages:
 # Besides that, other template elements is compatible with `PreTrainedTokenizer.apply_chat_template`.
 class BasicRenderer(CustomChatRenderer):
     def __init__(self,
-                 tokenizer: Union[PreTrainedTokenizer, BaseTokenizer],
+                 tokenizer: Union[PreTrainedTokenizer, TokenizerBase],
                  renderer_params: RendererParams,
     ):
         super().__init__(tokenizer, renderer_params)

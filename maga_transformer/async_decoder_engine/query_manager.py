@@ -9,9 +9,9 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery, QueryStats
-from maga_transformer.models.base_model import BaseTokenizer
+from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
+from maga_transformer.structure.raw_query import RawQuery
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
-
 
 class QueryManager:
     def __init__(self, config: GptInitModelParameters, cache_config: CacheConfig, prefix_params: Optional[PrefixParams] = None, gen_num_per_circle: int = 1, nccl_op: Any = None) -> None:
@@ -70,22 +70,19 @@ class QueryManager:
         prefix_lengths = torch.IntTensor(batch_query.reuse_lengths_list)
         return prefix_lengths, count_length, max_prefix_length
 
-    def put_requests_to_queue(self,
-                              input_token_ids: torch.Tensor,
-                              tokenizer: Optional[BaseTokenizer],
-                              context_lengths: torch.Tensor,
-                              images: List[List[str]],
-                              generate_config: GenerateConfig,
-                              lora_resource: Optional[LoraResource]):
+    # TODO(xinfei.sxf) fix this
+    def put_requests_to_queue(self, raw_query: RawQuery, lora_resource: Optional[LoraResource]):
         queries: List[QueryStats] = []
         try:
-            for i in range(input_token_ids.shape[0]):
+            for i in range(raw_query.input_token_ids.shape[0]):
                 adapter_name = ""
-                if generate_config.adapter_name:
-                    if not isinstance(generate_config.adapter_name, list):
-                        raise Exception(f"batch query generate config type error {type(generate_config.adapter_name)}")
-                    adapter_name = generate_config.adapter_name[i]
-                query = self._gen_new_request(input_token_ids[i, :int(context_lengths[i])], images[i], tokenizer, generate_config, adapter_name, lora_resource, not self.guarante_generate_mem)
+                if raw_query.generate_config.adapter_name:
+                    if not isinstance(raw_query.generate_config.adapter_name, list):
+                        raise Exception(f"batch query generate config type error {type(raw_query.generate_config.adapter_name)}")
+                    adapter_name = raw_query.generate_config.adapter_name[i]
+                query = self._gen_new_request(raw_query.input_token_ids[i, :int(raw_query.input_lengths[i])],
+                                              raw_query.images[i], raw_query.tokenizer, raw_query.generate_config,
+                                              adapter_name, lora_resource, not self.guarante_generate_mem)
 
                 queries.append(query)
         except Exception as e:
@@ -95,7 +92,9 @@ class QueryManager:
         [self.wait_queries_.append(q) for q in queries]
         return queries
 
-    def _gen_new_request(self, inputs: torch.Tensor, images: List[str], tokenizer: Optional[BaseTokenizer], generate_config: GenerateConfig, adapter_name: str, lora_resource: Optional[LoraResource], allocate_kv_buffer: bool) -> QueryStats:
+    def _gen_new_request(self, inputs: torch.Tensor, images: List[str], tokenizer: Optional[TokenizerBase],
+                         generate_config: GenerateConfig, adapter_name: str,
+                         lora_resource: Optional[LoraResource], allocate_kv_buffer: bool) -> QueryStats:
         if not allocate_kv_buffer:
             return QueryStats(input_tokens=inputs,
                               tokenizer=tokenizer,

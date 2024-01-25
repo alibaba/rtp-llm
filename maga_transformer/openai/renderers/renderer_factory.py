@@ -12,7 +12,7 @@ from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderers.llama_template_renderer import LlamaTemplateRenderer
 from maga_transformer.openai.renderers.fast_chat_renderer import FastChatRenderer
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
-from maga_transformer.models.base_model import BaseTokenizer
+from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 
 class ChatRendererFactory():
     def __init__(self):
@@ -20,7 +20,7 @@ class ChatRendererFactory():
 
     @staticmethod
     def try_get_imported_renderer(
-        tokenizer: Union[PreTrainedTokenizer, BaseTokenizer],
+        tokenizer: Union[PreTrainedTokenizer, TokenizerBase],
         params: RendererParams,
     ) -> Optional[CustomChatRenderer]:
         if not isinstance(tokenizer, PreTrainedTokenizer):
@@ -43,7 +43,7 @@ class ChatRendererFactory():
 
     @staticmethod
     def get_renderer(
-        tokenizer: Union[PreTrainedTokenizer, BaseTokenizer],
+        tokenizer: Union[PreTrainedTokenizer, TokenizerBase],
         params: RendererParams,
     ) -> CustomChatRenderer:
         # renderer priority: multi modal renderers
@@ -57,7 +57,7 @@ class ChatRendererFactory():
             assert (isinstance(tokenizer, PreTrainedTokenizer))
             return QwenVLRenderer(tokenizer, params)
         elif params.model_type == "llava":
-            assert (isinstance(tokenizer, BaseTokenizer))
+            assert (isinstance(tokenizer, TokenizerBase))
             return LlavaRenderer(tokenizer, params)
 
         model_template_type = os.environ.get("MODEL_TEMPLATE_TYPE", None)

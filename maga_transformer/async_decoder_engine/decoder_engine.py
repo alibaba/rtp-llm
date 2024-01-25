@@ -6,16 +6,18 @@ import threading
 import traceback
 import asyncio
 from enum import Enum
-from typing import Iterator, List, Optional, Tuple, Union, Any, Dict
+from typing import Iterator, List, Optional, Tuple, Union, Any, Dict, AsyncGenerator
 from maga_transformer.utils.util import get_mem_info, AtomicCounter
 from maga_transformer.async_decoder_engine.batch_query import QueryStats
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.base_model import BaseTokenizer
+from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
+from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.async_decoder_engine.query_manager import QueryManager
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.metrics import GaugeMetrics, kmonitor
 from maga_transformer.utils.time_util import Timer
+from maga_transformer.structure.raw_query import RawQuery
 from maga_transformer.async_decoder_engine.base_model_executor import ExecutorBase
 
 class DecoderEngine:
@@ -24,35 +26,25 @@ class DecoderEngine:
         self.query_manager_ = query_manager
         self.config_ = config        
 
-        self.stop_flag_ = False
-        self.has_quit_process_flag_ = False
-        self.p = threading.Thread(target=self.async_process, daemon=True)
-        self.p.start()
+        self.need_stop_ = False
+        self.thread = threading.Thread(target=self.async_process, daemon=True)
+        self.thread.start()
         self.wait_decode_counter_ = AtomicCounter()
 
         logging.info(f'last mem info:{get_mem_info().used} {get_mem_info().free}')
 
     def stop(self):
         logging.info("decoder engine begin stop")
-        self.stop_flag_ = True
-        self.p.join()
+        self.need_stop_ = True
+        self.thread.join()
         logging.info("decoder engine stop done")
 
-    async def decoder(
-        self, 
-        input_token_ids: torch.Tensor,
-        tokenizer:  BaseTokenizer,
-        input_lengths: Optional[torch.Tensor],
-        images: List[List[str]],
-        generate_config: GenerateConfig
-    ) -> Iterator[Tuple[
-            List[Union[None, torch.Tensor]], torch.Tensor, torch.Tensor, List[Dict[Any, Any]], torch.Tensor, 
-            Optional[Union[torch.Tensor, List[torch.Tensor]]]
-        ]]:
+    async def decoder(self, raw_query: RawQuery) -> AsyncGenerator[GenerateOutput, None]:
         begin_time = time.time()
+        
         queries: List[QueryStats] = []
-        batch_size: int = input_token_ids.shape[0]
-        beam_width = generate_config.num_beams
+        batch_size: int = raw_query.input_token_ids.shape[0]
+        beam_width: int = raw_query.generate_config.num_beams
         finished: List[bool] = [False] * batch_size * beam_width
         aux_info: List[Dict[Any, Any]] = [{} for _ in range(batch_size)]
         loss: List[Union[None, torch.Tensor]] = [None] * batch_size
@@ -61,12 +53,13 @@ class DecoderEngine:
             (batch_size, beam_width, self.config_.max_seq_len),
             dtype=torch.int32
         )
+        
         try:
-            queries = self.query_manager_.put_requests_to_queue(input_token_ids, tokenizer, input_lengths, images, generate_config, self.executor_.base_model_ops.gpt_op.weight.lora_resource)
+            queries = self.query_manager_.put_requests_to_queue(raw_query, self.executor_.base_model_ops.gpt_op.weight.lora_resource)
             counter = self.wait_decode_counter_.get()
             iter_count = 0
             while not all(finished):
-                if generate_config.timeout_ms > 0 and (time.time() - begin_time) * 1000 > generate_config.timeout_ms:
+                if raw_query.generate_config.timeout_ms > 0 and (time.time() - begin_time) * 1000 > raw_query.generate_config.timeout_ms:
                     raise Exception(f"{(time.time() - begin_time) * 1000} ms timeout")
                 while True:
                     new_counter = self.wait_decode_counter_.get()
@@ -104,7 +97,7 @@ class DecoderEngine:
                             aux_info[i].update({"input_ids": query.input_token_ids.tolist()})
                         finished[i * beam_width: (i + 1) * beam_width] = [True] * beam_width
                         continue
-                yield (hidden_states, output_tokens,
+                yield GenerateOutput(hidden_states, output_tokens,
                        torch.BoolTensor(finished), aux_info, loss, logits)
         finally:
             self.query_manager_.set_stop(queries)
@@ -122,9 +115,8 @@ class DecoderEngine:
     @torch.inference_mode()
     def async_process(self):
         while True:
-            if self.stop_flag_:
-                logging.info("stop flag is true, exit async_process")
-                self.has_quit_process_flag_ = True
+            if self.need_stop_:
+                logging.info("need stop flag is true, exit async_process")
                 return
             if not self.query_manager_.has_query() and g_parallel_info.tp_rank == 0:
                 time.sleep(0.001)

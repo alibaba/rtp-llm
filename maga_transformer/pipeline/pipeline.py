@@ -13,13 +13,13 @@ from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.utils.ft_plugin import plguin_loader, \
     ModifyResponseCallable, DecodeCallable, EncodeCallable, \
     StopGenerateCallable, ModifyPromptCallable,  MultiModalModifyPromptCallable
-from maga_transformer.models.base_model import BaseModel, BaseTokenizer, GenerateOutput, GenerateResponse
+from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateOutput, GenerateResponse
 from maga_transformer.model_factory import ModelFactory, AsyncModel
 from maga_transformer.pipeline.chatapi_format import encode_chatapi
+from maga_transformer.structure.raw_query import RawQuery
 from maga_transformer.utils.word_util import get_stop_word_slice_list
 from maga_transformer.utils.tokenizer_utils import DecodingState, IncrementDecodingUtils
 from transformers import PreTrainedTokenizerBase
-
 
 class DefaultFunc(object):
     @staticmethod
@@ -39,7 +39,7 @@ class DefaultFunc(object):
         return False
 
     @staticmethod
-    def process_encode_func(prompt: str, generate_config: Dict[str, Any], special_tokens: Any, tokenizer: BaseTokenizer, **kwargs: Any) -> List[int]:
+    def process_encode_func(prompt: str, generate_config: Dict[str, Any], special_tokens: Any, tokenizer: TokenizerBase, **kwargs: Any) -> List[int]:
         if len(prompt) == 0:
             raise FtRuntimeException(ExceptionType.EMPTY_PROMPT_ERROR, "prompt should have at least one token!")
         if generate_config['request_format'] == RequestFormat.CHAT_API:
@@ -49,7 +49,7 @@ class DefaultFunc(object):
         return tokenizer.encode(prompt)
 
     @staticmethod
-    def tokenids_decode_func(input_length: int, tokens: List[int], tokenizer: Union[BaseTokenizer, PreTrainedTokenizerBase],
+    def tokenids_decode_func(input_length: int, tokens: List[int], tokenizer: Union[TokenizerBase, PreTrainedTokenizerBase],
                              decoding_state: Optional[DecodingState] = None, return_incremental: bool = False, **kwargs: Any) -> str:
         if decoding_state is None:
             return tokenizer.decode(tokens[input_length: ])
@@ -72,7 +72,7 @@ class Pipeline(object):
     process_decode_func: DecodeCallable
     stop_generate_func:  StopGenerateCallable
 
-    def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[BaseTokenizer]):
+    def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[TokenizerBase]):
         self.model = model
         self.tokenizer = tokenizer
         self._special_tokens: int = self.model.config.special_tokens
@@ -179,7 +179,7 @@ class Pipeline(object):
     # static for ut
     @staticmethod
     def get_stop_words_list(special_tokens,
-                            tokenizer: BaseTokenizer,
+                            tokenizer: TokenizerBase,
                             stop_words_list: List[List[int]],
                             stop_words_str: List[str]):
         stop_words_list = stop_words_list + special_tokens.stop_words_list
@@ -205,7 +205,7 @@ class Pipeline(object):
         config.check_data_type()
         return config
 
-    def _get_stop_word_strs(self, tokenizer: BaseTokenizer, generate_config: GenerateConfig) -> List[str]:
+    def _get_stop_word_strs(self, tokenizer: TokenizerBase, generate_config: GenerateConfig) -> List[str]:
         return generate_config.stop_words_str + [self.process_decode_func(0, ids, tokenizer=self.tokenizer) for ids in generate_config.stop_words_list]
 
     @torch.inference_mode()
@@ -236,7 +236,10 @@ class Pipeline(object):
         for input_length in input_lengths_list:
             kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, input_length)
         kmonitor.report(GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
-        return self.generate_stream(input_token_ids, input_lengths, images, generate_config, **kwargs)
+        
+        raw_query = RawQuery(input_token_ids, input_lengths, images, generate_config, self.tokenizer)
+        
+        return self.generate_stream(raw_query, **kwargs)
 
     def pipeline(self,
                  prompts: List[str],
@@ -280,25 +283,24 @@ class Pipeline(object):
             backgroud_thread.join()
 
     @torch.inference_mode()
-    async def generate_stream(self, input_token_ids: torch.Tensor,
-                              input_lengths: torch.Tensor,
-                              images: List[List[str]],
-                              generate_config: GenerateConfig,
+    async def generate_stream(self, raw_query: RawQuery,
                               **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
 
-        stop_word_strs = self._get_stop_word_strs(self.tokenizer, generate_config)
+        # TODO(xinfei.sxf) stop words etc 直接带入raw query中去
+        stop_word_strs = self._get_stop_word_strs(self.tokenizer, raw_query.generate_config)
         stop_word_str_slices = get_stop_word_slice_list(stop_word_strs)
 
-        batch_stream = self.model.generate_stream(input_token_ids, self.tokenizer, input_lengths, images, generate_config)
+        batch_stream = self.model.generate_stream(raw_query)
 
         iter_count = 0
         last_finished: Optional[List[bool]] = None
         generate_output = None
-        decoding_state = [DecodingState() for _ in range(len(input_lengths))] if generate_config.num_beams == 1 else None
+        decoding_state = [DecodingState() for _ in range(len(raw_query.input_lengths))] if raw_query.generate_config.num_beams == 1 else None
         async for generate_output in batch_stream:
             begin_time = current_time_ms()
-            generated_batch_result, output_lens = self.decode_tokens(generate_output, input_lengths,
-                                                        generate_config, stop_word_strs, stop_word_str_slices, decoding_state, **kwargs)
+            generated_batch_result, output_lens = self.decode_tokens(generate_output, raw_query.input_lengths,
+                                                        raw_query.generate_config, stop_word_strs,
+                                                        stop_word_str_slices, decoding_state, **kwargs)
             # modify response with custom format
             batch_size = generate_output.output_ids.shape[0]
             beam_width = generate_output.output_ids.shape[1]
@@ -308,7 +310,7 @@ class Pipeline(object):
             if beam_width == 1:
                 generated_batch_result = [
                     self.modify_response_func(response, hidden_states=hidden_states,
-                                              generate_config=generate_config.model_dump(),
+                                              generate_config=raw_query.generate_config.model_dump(),
                                               **kwargs)
                     for hidden_states, response in zip(hidden_states, generated_batch_result)
                 ]

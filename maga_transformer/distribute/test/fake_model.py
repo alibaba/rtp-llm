@@ -2,11 +2,12 @@ import torch
 from typing import Any, List, Optional, Iterator
 
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.models.base_model import BaseTokenizer, BaseModel, GenerateOutput
+from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
+from maga_transformer.models.base_model import BaseModel, GenerateOutput
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
 
-class FakeTokenizer(BaseTokenizer):
+class FakeTokenizer(TokenizerBase):
     def encode(self, inputs: List[str]) -> List[int]:
         return [1,2,3,4]
 

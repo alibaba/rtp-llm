@@ -1,11 +1,11 @@
 import gc
 import torch
 from typing import List, Any, Dict, Tuple
-from maga_transformer.models.base_model import BaseModel, BaseTokenizer
+from maga_transformer.models.base_model import BaseModel, TokenizerBase
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixParams, PrefixType
 
-def get_ptuning_params(model: BaseModel, tokenizer: BaseTokenizer):
+def get_ptuning_params(model: BaseModel, tokenizer: TokenizerBase):
     if model.prefix_encoder is not None:
         assert model.prefix_tokens is not None
         prefix_prompt = model.prefix_encoder(model.prefix_tokens.cuda().unsqueeze(0)).squeeze(0)
@@ -16,7 +16,7 @@ def get_ptuning_params(model: BaseModel, tokenizer: BaseTokenizer):
     else:
         return None
 
-def prepare_prompt(model: BaseModel, tokenizer: BaseTokenizer, multi_task_prompt: List[Dict[str, Any]]) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
+def prepare_prompt(model: BaseModel, tokenizer: TokenizerBase, multi_task_prompt: List[Dict[str, Any]]) -> Tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor]]:
     multi_task_prompt_tensor: Dict[int, torch.Tensor] = {}
     multi_task_tensor_id: Dict[int, torch.Tensor] = {}
     def run_context_decoder(input_token_ids: torch.Tensor, input_lengths: torch.Tensor) -> torch.Tensor:
