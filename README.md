@@ -85,6 +85,30 @@ Our project is mainly based on [FasterTransformer](https://github.com/NVIDIA/Fas
 ### LLM + Multimodal
 * LLAVA (liuhaotian/llava-v1.5-13b, liuhaotian/llava-v1.5-7b)
 * Qwen-VL (Qwen/Qwen-VL)
+## Performance
+### Service Performance
+```bash
+# prepare test data
+wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+
+# launch start server, please use GUARANTE_GENERATE_MEM to avoid lack of memory when generate
+export TOKENIZER_PATH=/path/to/tokenizer
+export CHECKPOINT_PATH=/path/to/model
+export FT_SERVER_TEST=1
+export GUARANTE_GENERATE_MEM=1
+python3 -m maga_transformer.start_server
+
+# benchmark service
+python3 benchmark_serving.py --dataset /path/ShareGPT_V3_unfiltered_cleaned_split.json --tokenizer /path/to/tokenizer --num-prompts 10000 --trust-remote-code --backend maga --max-batch-size 64
+
+```
+
+The performance comparison results:
+#### A10
+<img src=picture/A10_perf_data.png width="200px">
+
+more test data are on the way!
+
 ## Contact Us
 #### DingTalk Group
 <img src=picture/dingding.png width="200px">

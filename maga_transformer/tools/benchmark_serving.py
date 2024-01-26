@@ -126,7 +126,7 @@ async def send_request(
             "inputs": prompt,
             "parameters": params,
         }
-    elif backend == "maga":
+    elif backend == "rtp-llm":
         assert not use_beam_search
         pload = {
             "prompt": prompt,
@@ -162,6 +162,8 @@ async def send_request(
                 # Re-send the request if it failed.
                 if "error" not in output and "error_code" not in output:
                     break
+                else:
+                    print("error:", output)
         pbar.update(1)        
         request_end_time = time.perf_counter()
         request_latency = request_end_time - request_start_time
@@ -195,7 +197,7 @@ def main(args: argparse.Namespace):
     np.random.seed(args.seed)
 
     api_url = f"http://{args.host}:{args.port}/generate"
-    if args.backend == "maga":
+    if args.backend == "rtp-llm":
         api_url = f"http://{args.host}:{args.port}"
     if args.backend == "trt":
         # api_url = f"http://{args.host}:{args.port}/v2/models/tensorrt_llm_bls/generate"
@@ -242,8 +244,8 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Benchmark the online serving throughput.")
-    parser.add_argument("--backend", type=str, default="maga",
-                        choices=["vllm", "tgi", "maga", "trt"])
+    parser.add_argument("--backend", type=str, default="rtp-llm",
+                        choices=["vllm", "tgi", "rtp-llm", "trt"])
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--dataset", type=str, required=True,
@@ -261,7 +263,7 @@ if __name__ == "__main__":
                              "then all the requests are sent at time 0. "
                              "Otherwise, we use Poisson process to synthesize "
                              "the request arrival times.")
-    parser.add_argument("--max-batch-size", type=int, default=32)
+    parser.add_argument("--max-batch-size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument('--trust-remote-code', action='store_true',
                         help='trust remote code from huggingface')

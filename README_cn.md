@@ -102,6 +102,29 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * LLAVA (liuhaotian/llava-v1.5-13b, liuhaotian/llava-v1.5-7b)
 * Qwen-VL (Qwen/Qwen-VL)
 
+## 性能
+### 服务性能
+```bash
+# 准备测试数据
+wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+
+# 起服务, 使用环境变量GUARANTE_GENERATE_MEM来保留足够的memory让query生成，避免缺少gpu mem报错,
+export TOKENIZER_PATH=/path/to/tokenizer
+export CHECKPOINT_PATH=/path/to/model
+export FT_SERVER_TEST=1
+export GUARANTE_GENERATE_MEM=1
+python3 -m maga_transformer.start_server
+
+# 压测服务性能
+python3 rtp-llm/maga_transformer/tools/benchmark_serving.py --dataset /path/ShareGPT_V3_unfiltered_cleaned_split.json --tokenizer /path/to/tokenizer --num-prompts 10000 --trust-remote-code --backend rtp-llm --max-batch-size 64
+```
+
+性能对比数据:
+#### A10
+<img src=picture/A10_perf_data.png width="200px">
+
+更多的测试数据还在测试中
+
 ## 联系我们
 #### 钉钉群
 <img src=picture/dingding.png width="200px">
