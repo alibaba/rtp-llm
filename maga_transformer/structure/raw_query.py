@@ -35,8 +35,9 @@ class RawQuery:
             raise Exception(f"raw query generate config's adapter_name type error {type(self.generate_config.adapter_name)}")
     
     def validate(self, index):
-        assert index < self.batch_size(), f"index {index} is out of range"
+        assert index < self.batch_size, f"index {index} is out of range"
     
+    @property
     def batch_size(self) -> int:
         return self.input_token_ids.shape[0]
     

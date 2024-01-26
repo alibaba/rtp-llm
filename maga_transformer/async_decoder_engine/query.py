@@ -53,6 +53,7 @@ class QueryStats:
         self.running_ = False
         self.finish = False
         self.slice_length = slice_length
+        self.iter_count = 0
 
         self.lock = Lock()
         self.seq_length: int = self.context_length
@@ -137,6 +138,8 @@ class QueryStats:
         with self.lock:
             return self.output_token_ids_[:, self.slice_length: self.seq_length]
 
+    def increase_iter(self):
+        self.iter_count += 1
 
     def update(self, hidden_states: torch.Tensor, logits: torch.Tensor,
                token: torch.Tensor, cum_log_probs: torch.Tensor

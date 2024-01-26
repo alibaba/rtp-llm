@@ -20,6 +20,16 @@ from maga_transformer.utils.time_util import Timer
 from maga_transformer.structure.raw_query import RawQuery
 from maga_transformer.async_decoder_engine.base_model_executor import ExecutorBase
 
+class QueryResponse:
+    def __init__(self, batch_size, beam_width, eos_token_id, max_seq_len):
+        self.hidden_states: List[torch.Tensor] = []
+        self.output_tokens = eos_token_id * torch.ones(
+            (batch_size, beam_width, max_seq_len), dtype=torch.int32)
+        self.finished: List[bool] = [False] * batch_size * beam_width
+        self.aux_info: List[Dict[Any, Any]] = [{} for _ in range(batch_size)]
+        self.loss: List[Union[None, torch.Tensor]] = [None] * batch_size
+        self.logits: List[torch.Tensor] = []
+        
 class DecoderEngine:
     def __init__(self, executor: ExecutorBase, scheduler: Scheduler, config: GptInitModelParameters) -> None:        
         self.executor_ = executor
@@ -39,66 +49,61 @@ class DecoderEngine:
         self.thread.join()
         logging.info("decoder engine stop done")
 
-    async def decoder(self, raw_query: RawQuery) -> AsyncGenerator[GenerateOutput, None]:
-        begin_time = time.time()
+    def process_query_response(self, queries: List[QueryStats], current_response) -> GenerateOutput:
+        beam_width = queries[0].generate_config.num_beams
         
+        current_response.hidden_states = []
+        current_response.logits = []
+        current_time = time.time()
+        
+        for i, query in enumerate(queries):
+            if query.error_info:
+                raise Exception(query.error_info)
+            current_response.hidden_states.append(query.hidden_states)
+            if query.generate_config.return_logits:
+                current_response.logits.append(query.logits)
+            if current_response.finished[i * beam_width]:
+                continue
+            token_ids = query.sliced_output_token_ids
+            finish = query.finish
+            current_response.output_tokens[i, :, :token_ids[0].numel()] = token_ids
+            current_response.loss[i] = query.loss
+            current_response.aux_info[i] = {
+                "cost_time": current_time - query.begin_time,
+                "iter_count": query.iter_count,
+                "input_len": query.context_length,
+                "output_len": query.seq_length - query.context_length,
+                "cum_log_probs": query.cum_log_probs.tolist(),
+            }
+            if finish:
+                if query.generate_config.return_input_ids:
+                    current_response.aux_info[i].update({"input_ids": query.input_token_ids.tolist()})
+                current_response.finished[i * beam_width: (i + 1) * beam_width] = [True] * beam_width
+
+    async def decoder(self, raw_query: RawQuery) -> AsyncGenerator[GenerateOutput, None]:
+        current_response = QueryResponse(raw_query.batch_size, raw_query.generate_config.num_beams,
+                                         self.config_.special_tokens.eos_token_id, self.config_.max_seq_len)
+        begin_time = time.time()
         queries: List[QueryStats] = []
-        batch_size: int = raw_query.batch_size()
-        beam_width: int = raw_query.generate_config.num_beams
-        finished: List[bool] = [False] * batch_size * beam_width
-        aux_info: List[Dict[Any, Any]] = [{} for _ in range(batch_size)]
-        loss: List[Union[None, torch.Tensor]] = [None] * batch_size
-        logits: List[Optional[torch.Tensor]] = [None] * batch_size
-        output_tokens = self.config_.special_tokens.eos_token_id * torch.ones(
-            (batch_size, beam_width, self.config_.max_seq_len),
-            dtype=torch.int32
-        )
         
         try:
             queries = self.scheduler_.enqueue(raw_query, self.executor_.base_model_ops.gpt_op.weight.lora_resource)
             counter = self.wait_decode_counter_.get()
-            iter_count = 0
-            while not all(finished):
+            while not all(current_response.finished):
                 if raw_query.generate_config.timeout_ms > 0 and (time.time() - begin_time) * 1000 > raw_query.generate_config.timeout_ms:
                     raise Exception(f"{(time.time() - begin_time) * 1000} ms timeout")
+                
                 while True:
                     new_counter = self.wait_decode_counter_.get()
                     if new_counter != counter:
                         counter = new_counter
                         break
                     await asyncio.sleep(0.001)
-                iter_count += 1
-                current_time = time.time()
-                hidden_states = []
-                logits = []
-                for i, query in enumerate(queries):
-                    if query.error_info:
-                        raise Exception(query.error_info)
-                    hidden_states.append(query.hidden_states)
-                    if query.generate_config.return_logits:
-                        logits.append(query.logits)
-                    if finished[i * beam_width]:
-                        continue
-                    token_ids = query.sliced_output_token_ids
-                    finish = query.finish
-                    output_tokens[i, :, :token_ids[0].numel()] = token_ids
-                    loss[i] = query.loss
-                    aux_info[i] = {
-                        "cost_time": current_time - begin_time,
-                        "iter_count": iter_count,
-                        "input_len": query.context_length,
-                        "output_len": query.seq_length - query.context_length,
-                        "cum_log_probs": query.cum_log_probs.tolist(),
-                    }
-                    if finish:
-                        # release query first, let other query use
-                        # self.scheduler_.free([query])
-                        if query.generate_config.return_input_ids:
-                            aux_info[i].update({"input_ids": query.input_token_ids.tolist()})
-                        finished[i * beam_width: (i + 1) * beam_width] = [True] * beam_width
-                        continue
-                yield GenerateOutput(hidden_states, output_tokens,
-                       torch.BoolTensor(finished), aux_info, loss, logits)
+                    
+                self.process_query_response(queries, current_response)
+                yield GenerateOutput(current_response.hidden_states, current_response.output_tokens,
+                       torch.BoolTensor(current_response.finished), current_response.aux_info,
+                       current_response.loss, current_response.logits)
         finally:
             self.scheduler_.set_stop(queries)
 

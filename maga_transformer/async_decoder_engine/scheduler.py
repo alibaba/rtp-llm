@@ -80,7 +80,7 @@ class Scheduler:
     def enqueue(self, raw_query: RawQuery, lora_resource: Optional[LoraResource]):
         queries: List[QueryStats] = []
         try:
-            for i in range(raw_query.batch_size()):
+            for i in range(raw_query.batch_size):
                 query = self._gen_new_request(raw_query.get_tokens_id(i),
                                               raw_query.images[i], raw_query.tokenizer, raw_query.generate_config,
                                               raw_query.get_adapter_name(i), lora_resource)
@@ -223,6 +223,7 @@ class Scheduler:
 
         for i, query in enumerate(self.running_query_.queries[:]):
             query.report_first_token_rt()
+            query.increase_iter()
             start_idx = i * beam_width
             end_idx = (i + 1) * beam_width
             query_update_length = update_length[i]
