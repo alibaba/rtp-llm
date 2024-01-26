@@ -55,7 +55,7 @@ class DecoderEngineTest(TestCase):
             gen = pipeline(["hello, what's your name?"], [[]], max_new_tokens=100, timeout_ms=10)
             with self.assertRaisesRegex(Exception, "ms timeout"):
                 results = [result for result in gen]
-            self.assertTrue(pipeline.model.decoder_engine_.scheduler_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
         finally:
             pipeline.model.stop()
 

@@ -180,6 +180,10 @@ class Scheduler:
             query = self.wait_queries_.popleft()
             if query.stop:
                 query.set_error("query has been canceled")
+                self._release_query_resource(query)
+                continue
+            if query.has_timeout():
+                self._release_query_resource(query)
                 continue
             
             if self.check_query_to_append(query, new_queries):

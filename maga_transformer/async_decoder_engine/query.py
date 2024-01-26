@@ -66,6 +66,7 @@ class QueryStats:
         self.cum_log_probs = torch.zeros([self.beam_width], dtype=torch.float32)
         self.medusa_state = None
         self.begin_time = current_time_ms()
+        self.has_reported_metric = False
         self.stop_criteria_list: List[StoppingCriteria] = \
             create_stop_criteria_list(generate_config.stop_words_list,
                                       generate_config.stop_words_str,
@@ -90,6 +91,13 @@ class QueryStats:
     def has_error(self):
         return True if self.error_info_ else False
 
+    def has_timeout(self) -> bool:
+        if self.generate_config.timeout_ms > 0 and self.generate_config.timeout_ms < current_time_ms() - self.begin_time:
+            self.set_error(f"query has been running {current_time_ms() - self.begin_time} ms timeout")
+            return True
+        else:
+            return False
+
     @property
     def error_info(self):
         return self.error_info_
@@ -112,14 +120,17 @@ class QueryStats:
         kmonitor.report(GaugeMetrics.ASYNC_WAIT_WAIT_TIME_METRIC, current_time_ms() - self.begin_time)
 
     def report_first_token_rt(self):
-        if self.begin_time:
+        if not self.has_reported_metric:
             kmonitor.report(GaugeMetrics.FT_FIRST_TOKEN_RT_METRIC, current_time_ms() - self.begin_time)
-            self.begin_time = 0
+            self.has_reported_metric = True
 
     @property
     def output_token_ids(self):
         with self.lock:
             return self.output_token_ids_[:, :self.seq_length]
+
+    def set_reuse_length(self, reuse_length: int):
+        self.reuse_length = reuse_length
 
     @property
     def sliced_output_token_ids(self):
@@ -146,7 +157,7 @@ class QueryStats:
     def pop_block_indice(self):
         with self.lock:
             block_indice = self.block_indice
-            self.block_indice = []
+            self.block_indice = [[]]
             return block_indice
 
     def _invoke_stop_words_criterion(self):
@@ -157,7 +168,7 @@ class QueryStats:
         return False
 
     def need_finish(self):
-        return self.finish or self._out_of_max(self.max_seq_len) or \
+        return self.finish or self._out_of_max(self.max_seq_len) or self.has_timeout() or \
             self.has_error() or self.stop or (self.seq_length >= self.min_new_tokens + self.context_length and self._invoke_stop_words_criterion())
 
     def _out_of_max(self, max_seq_len: int) -> bool:
