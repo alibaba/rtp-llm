@@ -52,7 +52,7 @@ class SchedulerTest(TestCase):
             using_hf_sampling=False)
         images = [[]] * 2
 
-        queries = scheduler.put_requests_to_queue(
+        queries = scheduler.enqueue(
             RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 5)
         self.assertEqual(scheduler.running_batch_size(), 0)
@@ -103,7 +103,7 @@ class SchedulerTest(TestCase):
         images = [[]] * 3
 
         with self.assertRaisesRegex(Exception, "failed to malloc 2 blocks, only 1 blocks left"):
-            queries = scheduler.put_requests_to_queue(
+            queries = scheduler.enqueue(
                 RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
 
@@ -117,7 +117,7 @@ class SchedulerTest(TestCase):
         images = [[]] * 3
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
-        queries = scheduler.put_requests_to_queue(
+        queries = scheduler.enqueue(
             RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 0)
         batch_query = self._get_batch_query(scheduler)
@@ -151,7 +151,7 @@ class SchedulerTest(TestCase):
         context_lengths = torch.IntTensor([16])
         images = [[]]
         generate_config: GenerateConfig = GenerateConfig(using_hf_sampling=False, chat_id='aaaa')
-        queries = scheduler.put_requests_to_queue(RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
+        queries = scheduler.enqueue(RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(queries[0].block_indice, [[1, 2]])
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 5)
         batch_query = self._get_batch_query(scheduler)
@@ -171,7 +171,7 @@ class SchedulerTest(TestCase):
         self.assertEqual(len(scheduler.running_query_.queries), 0)
 
         context_lengths = torch.IntTensor([32])
-        queries = scheduler.put_requests_to_queue(RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
+        queries = scheduler.enqueue(RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 3)
         self.assertEqual(queries[0].block_indice, [[1, 2, 3, 4]])
         self.assertEqual(queries[0].reuse_length, 16)
@@ -186,7 +186,7 @@ class SchedulerTest(TestCase):
         self.assertEqual(len(scheduler.running_query_.queries), 0)
 
         context_lengths = torch.IntTensor([24])
-        queries = scheduler.put_requests_to_queue(RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
+        queries = scheduler.enqueue(RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 4)
         self.assertEqual(queries[0].block_indice, [[1, 2, 3]])
         self.assertEqual(queries[0].reuse_length, 23)
@@ -224,7 +224,7 @@ class SchedulerTest(TestCase):
         images = [[]] * 2
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
-        queries = scheduler.put_requests_to_queue(
+        queries = scheduler.enqueue(
                 RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         batch_query = self._get_batch_query(scheduler)
         prefix_lengths, count_length, max_prefix_length = scheduler.get_prefix_args(batch_query)

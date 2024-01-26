@@ -92,6 +92,7 @@ class Ptuning:
 
 class MultiTaskPtuning:
     def __init__(self, config: GptInitModelParameters, cache_manage: CacheManager, prefix_prompts: Dict[int, torch.Tensor], prefix_type: PrefixType, prefix_tensors: Dict[int, torch.Tensor]):
+        #TODO(xinfei.sxf) 这句对吗？
         assert prefix_type in [PrefixType.PromptTuning, PrefixType]
         self.cache_manage_ = cache_manage
         self.ptunings_ = {id: Ptuning(config, cache_manage, prompt, prefix_tensors[id], prefix_type) for id, prompt in prefix_prompts.items()}

@@ -55,7 +55,7 @@ class DecoderEngine:
         )
         
         try:
-            queries = self.scheduler_.put_requests_to_queue(raw_query, self.executor_.base_model_ops.gpt_op.weight.lora_resource)
+            queries = self.scheduler_.enqueue(raw_query, self.executor_.base_model_ops.gpt_op.weight.lora_resource)
             counter = self.wait_decode_counter_.get()
             iter_count = 0
             while not all(finished):

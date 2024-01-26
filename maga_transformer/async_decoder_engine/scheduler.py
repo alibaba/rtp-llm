@@ -34,6 +34,7 @@ class Scheduler:
         self.reset_ptuning(prefix_params)
         logging.info(f"reuse_cache: {self.reuse_cache_}")
         
+        #TODO(xinfei.sxf) 含义不太明确
         self.guarante_generate_mem = bool(int(os.environ.get("GUARANTE_GENERATE_MEM", 0))) and not self.ptuning_
         logging.info("block_size after Ptuning: " + str(len(self.cache_manager_.free_blocks_index)))
         self.max_attention_mem = self.config_.max_context_batch_size * self.config_.max_seq_len
@@ -53,6 +54,8 @@ class Scheduler:
             self.ptuning_ = None
             self.reuse_cache_ = os.environ.get('REUSE_CACHE', None) == '1'
             return
+        
+        self.reuse_cache_ = False
         if isinstance(prefix_params.prefix_kvcache, dict):
             assert prefix_params.prefix_tensor is not None
             self.ptuning_ = MultiTaskPtuning(self.config_, self.cache_manager_,
@@ -60,8 +63,7 @@ class Scheduler:
         else:
             assert isinstance(prefix_params.prefix_kvcache, torch.Tensor)
             self.ptuning_ = Ptuning(self.config_, self.cache_manager_, prefix_params.prefix_kvcache, torch.zeros([0]), prefix_params.prefix_type)
-        self.reuse_cache_ = False
-
+            
     def get_prefix_args(self, batch_query: BatchQuery) -> Union[torch.IntTensor, torch.BoolTensor, torch.IntTensor]:
         if self.ptuning_:
             count_length = torch.BoolTensor([self.ptuning_.count_length()])
@@ -73,20 +75,13 @@ class Scheduler:
         prefix_lengths = torch.IntTensor(batch_query.reuse_lengths_list)
         return prefix_lengths, count_length, max_prefix_length
 
-    # TODO(xinfei.sxf) fix this
-    def put_requests_to_queue(self, raw_query: RawQuery, lora_resource: Optional[LoraResource]):
+    def enqueue(self, raw_query: RawQuery, lora_resource: Optional[LoraResource]):
         queries: List[QueryStats] = []
         try:
-            for i in range(raw_query.input_token_ids.shape[0]):
-                adapter_name = ""
-                if raw_query.generate_config.adapter_name:
-                    if not isinstance(raw_query.generate_config.adapter_name, list):
-                        raise Exception(f"batch query generate config type error {type(raw_query.generate_config.adapter_name)}")
-                    adapter_name = raw_query.generate_config.adapter_name[i]
-                query = self._gen_new_request(raw_query.input_token_ids[i, :int(raw_query.input_lengths[i])],
+            for i in range(raw_query.query_count()):
+                query = self._gen_new_request(raw_query.get_tokens_id(i),
                                               raw_query.images[i], raw_query.tokenizer, raw_query.generate_config,
-                                              adapter_name, lora_resource, not self.guarante_generate_mem)
-
+                                              raw_query.get_adapter_name(i), lora_resource, not self.guarante_generate_mem)
                 queries.append(query)
         except Exception as e:
             [q.set_error(str(e)) for q in queries]

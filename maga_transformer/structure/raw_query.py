@@ -28,3 +28,25 @@ class RawQuery:
         self.images = images
         self.generate_config = generate_config
         self.tokenizer = tokenizer
+        self.check()
+    
+    def check(self):
+        if self.generate_config.adapter_name and not isinstance(self.generate_config.adapter_name, list):
+            raise Exception(f"raw query generate config's adapter_name type error {type(self.generate_config.adapter_name)}")
+    
+    def validate(self, index):
+        assert index < self.query_count(), f"index {index} is out of range"
+    
+    def query_count(self) -> int:
+        return self.input_token_ids.shape[0]
+    
+    def get_tokens_id(self, index) -> torch.Tensor:
+        self.validate(index)
+        return self.input_token_ids[index, :int(self.input_lengths[index])]
+    
+    def get_adapter_name(self, index) -> torch.Tensor:
+        self.validate(index)
+        adapter_name = ""
+        if self.generate_config.adapter_name:
+            adapter_name = self.generate_config.adapter_name[index]
+        return adapter_name
