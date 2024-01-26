@@ -47,6 +47,7 @@ cc_test(
     deps = [
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/layers:layers",
+        "//src/fastertransformer/utils:torch_utils",
         "@com_google_googletest//:gtest"
     ],
     copts = cuda_copts(),
