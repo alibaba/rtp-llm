@@ -1,8 +1,9 @@
 from typing import Dict, List, Any
 import os
 import re
-
 from io import BytesIO
+import requests
+
 import torch
 import torch.nn as nn
 
@@ -13,7 +14,7 @@ from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
 class LlavaImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
         self.vision_tower = build_vision_tower(config).to(device='cuda:0')
-        self.mm_projector, self.proj_layers = build_vision_projector(config)
+        self.mm_projector = build_vision_projector(config)
         self.config = config
     
     def image_embedding(self, images: List[List[str]], device) -> torch.Tensor:
@@ -143,7 +144,7 @@ def build_vision_projector(config, delay_load=False, **kwargs):
     projector_type = config.get('mm_projector_type', 'linear')
 
     if projector_type == 'linear':
-        return torch.nn.Linear(config['mm_hidden_size'], config['hidden_size'], device='cuda:0'), 1
+        return torch.nn.Linear(config['mm_hidden_size'], config['hidden_size'], device='cuda:0')
 
     mlp_gelu_match = re.match(r'^mlp(\d+)x_gelu$', projector_type)
     if mlp_gelu_match:
@@ -152,10 +153,10 @@ def build_vision_projector(config, delay_load=False, **kwargs):
         for _ in range(1, mlp_depth):
             modules.append(torch.nn.GELU())
             modules.append(torch.nn.Linear(config['hidden_size'], config['hidden_size'], device='cuda:0'))
-        return torch.nn.Sequential(*modules), mlp_depth
+        return torch.nn.Sequential(*modules)
 
     if projector_type == 'identity':
-        return IdentityMap(), 0
+        return IdentityMap()
 
     raise ValueError(f'Unknown projector type: {projector_type}')
 

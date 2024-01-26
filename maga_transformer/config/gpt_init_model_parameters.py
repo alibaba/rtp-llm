@@ -70,6 +70,13 @@ class SparseConfig(DataClassBase):
             return False
         return True
 
+class VitParameters:
+    # config includes origin vit config in ckpt/config.json
+    config: Dict[str, Any] = {}
+    vit_special_token_ids: Dict[str, Any] = {}
+    vit_special_tokens: Dict[str, Any] = {}
+    vit_weights = None
+
 class GptInitModelParameters:
     __slots__ = {
         'gpt_init_params',
@@ -109,10 +116,7 @@ class GptInitModelParameters:
         self.src_quantization_bit = 0
         self.tp_split_emb_and_lm_head = True
         self.medusa_config = None
-        self.vit_related_params: Dict[str, Any] = {
-            "vit_special_token_ids": {},
-            "vit_special_tokens": {}
-        }
+        self.vit_related_params: VitParameters = VitParameters()
         for k, v in kwargs.items():
             setattr(self, k, v)
 

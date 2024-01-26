@@ -17,7 +17,6 @@ from maga_transformer.model_factory_register import register_model
 class QwenVLImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
         self.vit = QWen_VL_ViT(**config)
-        self.weights = QwenVLVitWeight(self.vit)
     
     def image_embedding(self, images: List[str], device) -> torch.Tensor:
         if len(images) != 0:
@@ -27,8 +26,8 @@ class QwenVLImageEmbedding(BaseImageEmbedding):
 
 class QWen_VL(QWen, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        self.visual = QwenVLImageEmbedding(config.vit_related_params)
-        config.vit_related_params["weights"] = self.visual.weights
+        self.visual = QwenVLImageEmbedding(config.vit_related_params.config)
+        config.vit_related_params.vit_weights = QwenVLVitWeight(vit=self.visual.vit)
 
         QWen.__init__(self, config)
 
@@ -83,12 +82,12 @@ class QWen_VL(QWen, MultiModalMixin):
             config_json = json.loads(content)
 
         vit_config = config_json['visual']
-        config.vit_related_params.update(vit_config)
-        config.vit_related_params["vit_special_token_ids"].update({
+        config.vit_related_params.config.update(vit_config)
+        config.vit_related_params.vit_special_token_ids.update({
             'image_start_id': vit_config['image_start_id'],
             'image_end_id': vit_config['image_start_id'] + 1,
             'image_pad_id': vit_config['image_start_id'] + 2})
-        config.vit_related_params["vit_special_tokens"].update({'default_image_token': '<img/>'})
+        config.vit_related_params.vit_special_tokens.update({'default_image_token': '<img/>'})
     
     def load_tokenizer(self):
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
@@ -106,9 +105,9 @@ class QWen_VL(QWen, MultiModalMixin):
     
     # QWen_VL tokenizer encode image urls into tokens, so that multimodal_embedding don't need images as input
     def multimodal_embedding(self, input_ids: torch.Tensor):
-        img_start_id: int = self.config.vit_related_params['vit_special_token_ids']['image_start_id']
-        img_end_id: int = self.config.vit_related_params['vit_special_token_ids']['image_end_id']
-        img_pad_id: int = self.config.vit_related_params['vit_special_token_ids']['image_pad_id']
+        img_start_id: int = self.config.vit_related_params.vit_special_token_ids['image_start_id']
+        img_end_id: int = self.config.vit_related_params.vit_special_token_ids['image_end_id']
+        img_pad_id: int = self.config.vit_related_params.vit_special_token_ids['image_pad_id']
         bos_pos = torch.where(input_ids == img_start_id)
         eos_pos = torch.where(input_ids == img_end_id)
         assert (bos_pos[0] == eos_pos[0]).all()
@@ -136,11 +135,12 @@ class QWen_VL(QWen, MultiModalMixin):
     def eval_model_size(config: GptInitModelParameters):
         llm_size = BaseModel.eval_model_size(config)
         
-        embed_dim = config.vit_related_params["output_dim"]
-        width = config.vit_related_params["width"]
-        layers = config.vit_related_params["layers"]
-        patch_size = config.vit_related_params["patch_size"]
-        mlp_ratio = config.vit_related_params["mlp_ratio"]
+        vit_config = config.vit_related_params.config
+        embed_dim = vit_config["output_dim"]
+        width = vit_config["width"]
+        layers = vit_config["layers"]
+        patch_size = vit_config["patch_size"]
+        mlp_ratio = vit_config["mlp_ratio"]
         mlp_width = int(mlp_ratio * width)
         data_width = 4
         

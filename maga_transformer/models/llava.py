@@ -1,11 +1,7 @@
 import os
-import time
-import logging
 import json
-import functools
 import torch
 import re
-import requests
 
 from typing import List, Any, Dict, Tuple, Union
 from PIL import Image
@@ -13,11 +9,11 @@ from io import BytesIO
 from transformers.models.llama.tokenization_llama import LlamaTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.llava_weight import LlavaWeightInfo, LlavaVitWeights
+from maga_transformer.models.llava_weight import LlavaWeightInfo
 from maga_transformer.models.llama import Llama
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
-from maga_transformer.models.base_model import BaseModel, GenerateOutput
-from maga_transformer.models.multimodal_mixin import MultiModalMixin
+from maga_transformer.models.base_model import BaseModel
+from maga_transformer.models.multimodal_mixin import MultiModalMixin, BaseVitWeights
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.llava_vit import LlavaImageEmbedding
@@ -83,10 +79,9 @@ class LlavaTokenizer(TokenizerBase):
 
 class Llava(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        self.visual = LlavaImageEmbedding(config.vit_related_params)
+        self.visual = LlavaImageEmbedding(config.vit_related_params.config)
         self.nccl_op_ = NcclOp()
-        config.vit_related_params["proj_layers"] = self.visual.proj_layers
-        config.vit_related_params["weights"] = LlavaVitWeights(config.vit_related_params)
+        config.vit_related_params.vit_weights = BaseVitWeights(mm_projector=self.visual.mm_projector)
         Llama.__init__(self, config)
     
     @staticmethod
@@ -148,13 +143,11 @@ class Llava(Llama, MultiModalMixin):
         ]
 
         for param_name, default_value in vit_related_params_list:
-            config.vit_related_params[param_name] = config_json.get(param_name, default_value)
+            config.vit_related_params.config[param_name] = config_json.get(param_name, default_value)
 
-        config.vit_related_params["mm_hidden_size"] = config_json.get("mm_hidden_size", config_json["hidden_size"])
-        config.vit_related_params["vit_layer_id_interval"] = 2
-        config.vit_related_params["num_hidden_layers"] = 12
-        config.vit_related_params["vit_special_token_ids"].update({"ignore_token_index": -100, "image_token_index": -200})
-        config.vit_related_params["vit_special_tokens"].update({
+        config.vit_related_params.config["mm_hidden_size"] = config_json.get("mm_hidden_size", config_json["hidden_size"])
+        config.vit_related_params.vit_special_token_ids.update({"ignore_token_index": -100, "image_token_index": -200})
+        config.vit_related_params.vit_special_tokens.update({
             "default_image_token": "<image>", 
             "default_im_start_token": "<im_start>", 
             "default_im_end_token": "<im_end>"
@@ -165,18 +158,18 @@ class Llava(Llama, MultiModalMixin):
         if img_expand_match:
             patch_size = int(img_expand_match.group(1))
             img_size = int(img_expand_match.group(2))
-            config.vit_related_params["patch_size"] = patch_size
-            config.vit_related_params["image_size"] = img_size
-            config.vit_related_params["img_expand_len"] = (img_size // patch_size) ** 2
-        config.vit_related_params["vit_tower_path"] = vis_tower_name
+            config.vit_related_params.config["patch_size"] = patch_size
+            config.vit_related_params.config["image_size"] = img_size
+            config.vit_related_params.config["img_expand_len"] = (img_size // patch_size) ** 2
+        config.vit_related_params.config["vit_tower_path"] = vis_tower_name
 
     def load_tokenizer(self):
         self.tokenizer = LlavaTokenizer(self.config.tokenizer_path, 
-                                        self.config.vit_related_params["mm_use_im_patch_token"], 
-                                        self.config.vit_related_params["mm_use_im_start_end"], 
-                                        self.config.vit_related_params["img_expand_len"], 
-                                        self.config.vit_related_params["vit_special_token_ids"],
-                                        self.config.vit_related_params["vit_special_tokens"])
+                                        self.config.vit_related_params.config["mm_use_im_patch_token"], 
+                                        self.config.vit_related_params.config["mm_use_im_start_end"], 
+                                        self.config.vit_related_params.config["img_expand_len"], 
+                                        self.config.vit_related_params.vit_special_token_ids,
+                                        self.config.vit_related_params.vit_special_tokens)
 
     def encode_images(self, images):
         if images.shape[0] == 0:
@@ -203,8 +196,8 @@ class Llava(Llama, MultiModalMixin):
     def multimodal_embedding(
         self, input_ids: torch.Tensor, images: List[List[str]]
     ):
-        image_token_index = self.config.vit_related_params["vit_special_token_ids"]["image_token_index"]
-        ignore_token_index = self.config.vit_related_params["vit_special_token_ids"]["ignore_token_index"]
+        image_token_index = self.config.vit_related_params.vit_special_token_ids["image_token_index"]
+        ignore_token_index = self.config.vit_related_params.vit_special_token_ids["ignore_token_index"]
 
         assert isinstance(images, list) and isinstance(images[0], list)
 
@@ -216,8 +209,8 @@ class Llava(Llama, MultiModalMixin):
 
         new_input_embeds = []
 
-        tune_mm_mlp_adapter = self.config.vit_related_params["tune_mm_mlp_adapter"]
-        mm_use_im_start_end = self.config.vit_related_params["mm_use_im_start_end"]
+        tune_mm_mlp_adapter = self.config.vit_related_params.config["tune_mm_mlp_adapter"]
+        mm_use_im_start_end = self.config.vit_related_params.config["mm_use_im_start_end"]
         append_extra_tokens = tune_mm_mlp_adapter and mm_use_im_start_end
 
         for batch_idx, cur_input_ids in enumerate(input_ids):
@@ -275,7 +268,7 @@ class Llava(Llama, MultiModalMixin):
     @staticmethod
     def eval_model_size(config: GptInitModelParameters):
         llm_size = BaseModel.eval_model_size(config)
-        vision_config_dict = config.vit_related_params
+        vision_config_dict = config.vit_related_params.config
 
         hidden_size = vision_config_dict["hidden_size"]
         patch_num = vision_config_dict["image_size"] // vision_config_dict["patch_size"]

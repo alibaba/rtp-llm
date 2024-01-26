@@ -1,14 +1,47 @@
 import json
 import torch
 import re
-from typing import Any, Dict, List, Union, Tuple
+from typing import Any, Dict, List, Union, Tuple, Optional
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import RequestFormat
+from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 class BaseImageEmbedding:
     def image_embedding(self, images, device) -> torch.Tensor:
         raise NotImplementedError()
+
+class BaseVitWeights:
+    def __init__(self, **kwargs: Dict[str, Any]):
+        self.weight_names: List[str] = []
+        self._get_vit_params(**kwargs)
+    
+    @property
+    def ckpt_prefix(self) -> str:
+        return "model."
+    
+    @property
+    def ft_prefix(self) -> str:
+        return "self.visual."
+    
+    def _get_vit_params(self, **kwargs: Dict[str, Any]):
+        for vit_name, vit in kwargs.items():
+            self.weight_names.extend([vit_name + '.' + w for w in vit.state_dict().keys()])
+
+class BaseMultiModalWeightInfo:
+    def __init__(self, config: GptInitModelParameters):
+        self.vit_weights: Optional[BaseVitWeights] = config.vit_related_params.vit_weights
+
+    def _get_vit_info(self, llm_weights: ModelDeployWeightInfo):
+        if self.vit_weights is not None:
+            weight_names = self.vit_weights.weight_names
+            ckpt_prefix = self.vit_weights.ckpt_prefix
+
+            for w in weight_names:
+                w_name = ckpt_prefix + w
+                llm_weights.weights.append(WeightInfo(w_name, [CkptWeightInfo(w_name, identity)], identity))
+                llm_weights.tp_strategy[w_name] = sp_id
 
 class MultiModalMixin:
     visual: BaseImageEmbedding
@@ -57,10 +90,10 @@ class MultiModalMixin:
         return prompt, images
 
     def load_vit_weight(self, ctype: str):
-        config = self.config
-        ckpt_prefix = config.vit_related_params["weights"].ckpt_prefix
-        ft_prefix = config.vit_related_params["weights"].ft_prefix
-        weight_names = config.vit_related_params["weights"].weight_names
+        vit_weight = self.config.vit_related_params.vit_weights
+        ckpt_prefix = vit_weight.ckpt_prefix
+        ft_prefix = vit_weight.ft_prefix
+        weight_names = vit_weight.weight_names
 
         def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
             param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(ctype).to('cuda:0')

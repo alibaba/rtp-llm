@@ -76,7 +76,7 @@ class Pipeline(object):
         self.model = model
         self.tokenizer = tokenizer
         self._special_tokens: int = self.model.config.special_tokens
-        self._img_token: str = self.model.config.vit_related_params["vit_special_tokens"].get('default_image_token', '')
+        self._img_token: str = self.model.config.vit_related_params.vit_special_tokens.get('default_image_token', '')
         self.has_init_decode_stop_words: bool = False
         self._init_pipeline_func()
 
