@@ -76,6 +76,13 @@ class OpenaiEndopoint():
         config.stop_words_list = self.stop_word_ids_list + self.chat_renderer.tokenize_words(request_stop_words_list)
         if request.chat_id != None:
             config.chat_id = request.chat_id
+        if request.seed != None:
+            config.random_seed = request.seed
+        extra_configs = request.extra_configs
+        if extra_configs:
+            config.top_k = extra_configs.top_k or config.top_k
+            config.repetition_penalty = extra_configs.repitition_penalty or config.repetition_penalty
+            config.max_new_tokens = extra_configs.max_new_tokens or config.max_new_tokens
         return config
 
     async def _complete_non_stream_response(
