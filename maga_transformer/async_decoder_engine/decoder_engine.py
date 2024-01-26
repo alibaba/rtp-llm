@@ -38,7 +38,7 @@ class DecoderEngine:
 
         self.need_stop_ = False
         self.wait_decode_counter_ = AtomicCounter()
-        self.thread = threading.Thread(target=self.async_process, daemon=True)
+        self.thread = threading.Thread(target=self.run_engine, daemon=True)
         self.thread.start()
 
         logging.info(f'last mem info:{get_mem_info().used} {get_mem_info().free}')
@@ -116,20 +116,22 @@ class DecoderEngine:
         kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self.scheduler_.block_used_ratio())
 
     # 这个后台任务一直在跑，应该用线程实现，用 Python 自己的线程切换机制。
-    # 如果用协程的话对外返回的 decode 协程会因为 async_process 协程一直运行被饿死。
+    # 如果用协程的话对外返回的 decode 协程会因为 step 协程一直运行被饿死。
     @torch.inference_mode()
-    def async_process(self):
+    def run_engine(self):
         while True:
             if self.need_stop_:
-                logging.info("need stop flag is true, exit async_process")
+                logging.info("need stop flag is true, exit run_engine")
                 return
             if not self.scheduler_.has_query() and g_parallel_info.tp_rank == 0:
                 time.sleep(0.001)
                 continue
+            
             batch_query = None
             try:
                 with Timer() as t:
                     be = time.perf_counter()
+                    
                     torch.cuda.nvtx.range_push('pre_input')
                     batch_query = self.scheduler_.schedule()
                     if batch_query.total_batch_size == 0 and g_parallel_info.tp_rank == 0:
@@ -139,12 +141,16 @@ class DecoderEngine:
                     batch_query.generate()
                     batch_query.tp_sync()
                     torch.cuda.nvtx.range_pop()
+                    
                     self.executor_.process(batch_query)
+                    
                     torch.cuda.nvtx.range_push('update')
                     if g_parallel_info.tp_rank == 0:
                         self.scheduler_.update_batch_query()
+                    torch.cuda.nvtx.range_pop()
+                    
                 self.report_metric(t.cost_ms())
-                torch.cuda.nvtx.range_pop()
+                
                 # torch.cuda.synchronize();
                 # en = time.perf_counter()
                 # print('async token time:', (en - be) * 1000)
