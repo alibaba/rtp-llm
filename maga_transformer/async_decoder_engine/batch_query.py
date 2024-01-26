@@ -232,7 +232,7 @@ class BatchQuery:
                 output_token_ids[batch_idx, :query.seq_length] = query.output_token_ids[0]
                 self.seq_lengths_list.extend([query.seq_length])
                 self.reuse_lengths_list.append(QueryHelper.context_prefix_length(query))
-                self.context_lengths_list.append(QueryHelper.context_input_length(self.count_prefix_length, query))
+                self.context_lengths_list.append(query.seq_length - query.reuse_length * int(self.count_prefix_length))
             if query.adapter_name is not None:
                 lora_names += [query.adapter_name]
                 lora_ids += [query.lora_resource.get_id(query.adapter_name)]
@@ -324,11 +324,3 @@ class QueryHelper(object):
             return 0
         else:
             return query.reuse_length
-
-    @staticmethod
-    def context_input_length(count_prefix_length: bool, query: QueryStats) -> int:
-        if not count_prefix_length:
-            context_input_token_num = query.context_length
-        else:
-            context_input_token_num =  query.context_length - query.reuse_length
-        return context_input_token_num

@@ -127,6 +127,10 @@ class DecoderEngine:
                     be = time.perf_counter()
                     torch.cuda.nvtx.range_push('pre_input')
                     batch_query = self.scheduler_.get_batch_request()
+                    if batch_query.total_batch_size == 0:
+                        self.wait_decode_counter_.increment()
+                        torch.cuda.nvtx.range_pop()
+                        continue
                     batch_query.generate()
                     batch_query.tp_sync()
                     torch.cuda.nvtx.range_pop()

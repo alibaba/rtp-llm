@@ -3,6 +3,7 @@ import logging
 from collections import deque
 from typing import Any, List, Optional, Union, Dict
 import torch
+import traceback
 from threading import Lock
 from maga_transformer.structure.raw_query import RawQuery
 from maga_transformer.utils.model_weight import LoraResource
@@ -35,7 +36,8 @@ class Scheduler:
         logging.info(f"reuse_cache: {self.reuse_cache_}")
         
         #TODO(xinfei.sxf) 含义不太明确
-        self.guarante_generate_mem = bool(int(os.environ.get("GUARANTE_GENERATE_MEM", 0))) and not self.ptuning_
+        self.guarante_generate_mem = bool(int(os.environ.get("GUARANTE_GENERATE_MEM", 0)))
+        self.generate_reserve_blocks = int(os.environ.get("GENERATE_RESERVE_BLOCKS", 3))
         logging.info("block_size after Ptuning: " + str(len(self.cache_manager_.free_blocks_index)))
         self.max_attention_mem = self.config_.max_context_batch_size * self.config_.max_seq_len
 
@@ -85,59 +87,57 @@ class Scheduler:
                 queries.append(query)
         except Exception as e:
             [q.set_error(str(e)) for q in queries]
-            [self._release_query_resource(q) for q in queries]
             raise e
         [self.wait_queries_.append(q) for q in queries]
         return queries
 
     def _gen_new_request(self, inputs: torch.Tensor, images: List[str], tokenizer: Optional[TokenizerBase],
                          generate_config: GenerateConfig, adapter_name: str,
-                         lora_resource: Optional[LoraResource], allocate_kv_buffer: bool) -> QueryStats:
-        if not allocate_kv_buffer:
-            return QueryStats(input_tokens=inputs,
-                              tokenizer=tokenizer,
-                              images=images,
-                              max_seq_len=self.config_.max_seq_len,
-                              reuse_length=0,
-                              block_indice=[],
-                              slice_length=0,
-                              generate_config=generate_config,
-                              adapter_name=adapter_name,
-                              lora_resource=lora_resource)
-        seq_length: int = inputs.shape[-1]
-        # reuse length represent for ptuning length or kvcache reuse length
-        block_size = (seq_length - 2 + self.gen_num_per_circle) // self.seq_size_per_block_ + 1
-        block_indice = []
+                         lora_resource: Optional[LoraResource]) -> QueryStats:
         slice_length = 0
-        try:
-            if self.ptuning_:
-                block_indice, reuse_length = self.ptuning_.get_block_indice(block_size, generate_config)
-                prefix_type, prefix_tensors = self.ptuning_.get_prefix_params(generate_config)
-                slice_length = len(prefix_tensors)
-                inputs = torch.concat([prefix_tensors, inputs], dim=0)
-            elif self.reuse_cache_:
-                block_indice, reuse_length = self.cache_manager_.malloc_with_cache(block_size, inputs.numpy().tolist(), generate_config.chat_id)
-            else:
-                block_indice = self.cache_manager_.malloc(block_size)
-                reuse_length = 0
-            # query.length is acutal length for decoder, query.input_length for context_decoder
-        except Exception as e:
-            self.cache_manager_.free(block_indice)
-            raise e
+        if self.ptuning_:
+            _, prefix_tensors = self.ptuning_.get_prefix_params(generate_config)
+            slice_length = len(prefix_tensors)
+            inputs = torch.concat([prefix_tensors, inputs], dim=0)
         return QueryStats(input_tokens=inputs,
                           tokenizer=tokenizer,
                           images=images,
                           max_seq_len=self.config_.max_seq_len,
-                          reuse_length=reuse_length,
-                          block_indice=block_indice,
+                          reuse_length=0,
+                          block_indice=[],
                           slice_length=slice_length,
                           generate_config=generate_config,
-                          adapter_name = adapter_name,
+                          adapter_name=adapter_name,
                           lora_resource=lora_resource)
+
+    def _allocate_kv_cache(self, query: QueryStats):
+        # reuse length represent for ptuning length or kvcache reuse length
+        block_size = (query.seq_length - query.slice_length - 2 + self.gen_num_per_circle) // self.seq_size_per_block_ + 1
+        block_indice = []
+        reuse_length = 0
+        try:
+            if self.ptuning_:
+                block_indice, reuse_length = self.ptuning_.get_block_indice(block_size, query.generate_config)
+            elif self.reuse_cache_:
+                block_indice, reuse_length = self.cache_manager_.malloc_with_cache(block_size, query.input_token_ids.numpy().tolist(), query.generate_config.chat_id)
+            else:
+                block_indice = self.cache_manager_.malloc(block_size)
+                reuse_length = 0
+            query.add_block_index([block_indice])
+            query.set_reuse_length(reuse_length)
+            # query.length is acutal length for decoder, query.input_length for context_decoder
+        except Exception as e:
+            logging.error(f"allocate kv cache error {str(e)} {traceback.format_exc()}")
+            self.cache_manager_.free(block_indice)
+            raise e
+
+    def check_mem_left_v2(self, query: QueryStats, new_queries: List[QueryStats]):
+        batch_size = len(self.running_query_.queries) + len(new_queries)
+        return len(self.cache_manager_.free_blocks_index) > batch_size * self.generate_reserve_blocks + query.seq_length // self.seq_size_per_block_
 
     def check_mem_left(self, query: QueryStats, new_queries: List[QueryStats]):
         left_block = len(self.cache_manager_.free_blocks_index)
-        left_block -= query.context_length // self.seq_size_per_block_ + 1
+        left_block -= query.seq_length // self.seq_size_per_block_ + 1
         if left_block < 8:
             return False
         left_block -= 8
@@ -159,7 +159,9 @@ class Scheduler:
     def check_query_to_append(self, query: QueryStats, new_queries: List[QueryStats]) -> bool:
         if self.force_batching:
             return True
-        self.max_context_len = max(query.context_length, self.max_context_len)
+        if len(self.running_query_.queries) == 0 and len(new_queries) == 0:
+            return True
+        self.max_context_len = max(query.seq_length, self.max_context_len)
         if (len(new_queries) + 1) * self.max_context_len > self.max_attention_mem:
             return False
         # For ease of implementing beam search, all queries in a batch must have same beam width.
@@ -167,7 +169,7 @@ class Scheduler:
             return False
         if len(new_queries) > 0 and new_queries[0].beam_width != query.beam_width:
             return False
-        if self.guarante_generate_mem and not self.check_mem_left(query, new_queries):
+        if self.guarante_generate_mem and not self.check_mem_left_v2(query, new_queries):
             return False
         return True
 
@@ -185,19 +187,17 @@ class Scheduler:
             if query.has_timeout():
                 self._release_query_resource(query)
                 continue
-            
             if self.check_query_to_append(query, new_queries):
-                if self.guarante_generate_mem:
-                    new_query = self._gen_new_request(query.input_token_ids, None, None, query.generate_config, None, None, True)
-                    query.reuse_length = new_query.reuse_length
-                    query.block_indice = new_query.block_indice
+                try:
+                    self._allocate_kv_cache(query)
+                except Exception as e:
+                    query.set_error(str(e))
+                    self._release_query_resource(query)
+                    continue
                 new_queries.append(query)
             else:
                 self.wait_queries_.appendleft(query)
                 break
-            # use cache has bug when multi context query
-        if len(self.running_query_.queries) == 0 and len(self.wait_queries_) > 0:
-            new_queries.append(self.wait_queries_.popleft())
         [query.report_wait_time() for query in new_queries]
         self.running_query_.add_new_query(new_queries)
         return self.running_query_
@@ -253,6 +253,14 @@ class Scheduler:
             if query.finish:
                 self._release_query_resource(query)
                 self.running_query_.queries.remove(query)
+        while self.guarante_generate_mem and len(self.cache_manager_.free_blocks_index) < len(self.running_query_.queries):
+            query = self.running_query_.queries[-1]
+            self._free_block_cache(query)
+            if query.generate_config.num_beams > 1:
+                query.seq_length = query.context_length
+            self.wait_queries_.appendleft(query)
+            self.running_query_.queries.remove(query)
+            logging.info(f"lack mem running query back to wait and context_length:{query.context_length} seq_length:{query.seq_length}")
 
     def _calc_malloc_size(self, query: QueryStats):
         next_length = query.seq_length + self.gen_num_per_circle - 1
@@ -264,6 +272,10 @@ class Scheduler:
 
     def _release_query_resource(self, query: QueryStats):
         query.release()
+        self._free_block_cache(query)
+
+    def _free_block_cache(self, query: QueryStats):
+        query.set_reuse_length(0)
         block_indice = query.pop_block_indice()
         if not block_indice:
             return
@@ -283,7 +295,6 @@ class Scheduler:
 
     def get_kv_cache_base(self):
         return self.cache_manager_.get_kv_cache_base()
-
 
     def get_kv_cache_scale_base(self):
         return self.cache_manager_.get_kv_cache_scale_base()
