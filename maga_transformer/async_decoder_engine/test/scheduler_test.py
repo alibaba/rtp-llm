@@ -37,7 +37,7 @@ class SchedulerTest(TestCase):
         return config, cache_config
     
     def _get_batch_query(self, scheduler: Scheduler):    
-        batch_query = scheduler.get_batch_request()
+        batch_query = scheduler.schedule()
         batch_query.generate()
         return batch_query
 

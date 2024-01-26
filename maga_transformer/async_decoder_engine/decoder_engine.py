@@ -43,7 +43,7 @@ class DecoderEngine:
         begin_time = time.time()
         
         queries: List[QueryStats] = []
-        batch_size: int = raw_query.input_token_ids.shape[0]
+        batch_size: int = raw_query.batch_size()
         beam_width: int = raw_query.generate_config.num_beams
         finished: List[bool] = [False] * batch_size * beam_width
         aux_info: List[Dict[Any, Any]] = [{} for _ in range(batch_size)]
@@ -126,7 +126,7 @@ class DecoderEngine:
                 with Timer() as t:
                     be = time.perf_counter()
                     torch.cuda.nvtx.range_push('pre_input')
-                    batch_query = self.scheduler_.get_batch_request()
+                    batch_query = self.scheduler_.schedule()
                     if batch_query.total_batch_size == 0 and g_parallel_info.tp_rank == 0:
                         self.wait_decode_counter_.increment()
                         torch.cuda.nvtx.range_pop()

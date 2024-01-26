@@ -80,7 +80,7 @@ class Scheduler:
     def enqueue(self, raw_query: RawQuery, lora_resource: Optional[LoraResource]):
         queries: List[QueryStats] = []
         try:
-            for i in range(raw_query.query_count()):
+            for i in range(raw_query.batch_size()):
                 query = self._gen_new_request(raw_query.get_tokens_id(i),
                                               raw_query.images[i], raw_query.tokenizer, raw_query.generate_config,
                                               raw_query.get_adapter_name(i), lora_resource)
@@ -175,7 +175,7 @@ class Scheduler:
         return True
 
     # NOTE: This function is executed in single-thread environment.
-    def get_batch_request(self) -> BatchQuery:
+    def schedule(self) -> BatchQuery:
         new_queries: List[QueryStats] = []
         # attention buf is special
         self.max_context_len = 0
