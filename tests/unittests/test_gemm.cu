@@ -8,6 +8,7 @@
 
 #include "src/fastertransformer/layers/DenseWeight.h"
 #include "src/fastertransformer/utils/allocator.h"
+#include "src/fastertransformer/utils/allocator_impl.h"
 #include "src/fastertransformer/utils/cublasMMWrapper.h"
 #include "src/fastertransformer/utils/cuda_utils.h"
 #include "src/fastertransformer/utils/gemm.h"

@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "src/fastertransformer/utils/allocator.h"
+#include "src/fastertransformer/utils/allocator_impl.h"
 #include "src/fastertransformer/utils/memory_utils.h"
 #include "src/fastertransformer/utils/Tensor.h"
 #include "src/fastertransformer/utils/logger.h"
