@@ -27,9 +27,9 @@ class DecoderEngine:
         self.config_ = config        
 
         self.need_stop_ = False
+        self.wait_decode_counter_ = AtomicCounter()
         self.thread = threading.Thread(target=self.async_process, daemon=True)
         self.thread.start()
-        self.wait_decode_counter_ = AtomicCounter()
 
         logging.info(f'last mem info:{get_mem_info().used} {get_mem_info().free}')
 
@@ -127,7 +127,7 @@ class DecoderEngine:
                     be = time.perf_counter()
                     torch.cuda.nvtx.range_push('pre_input')
                     batch_query = self.scheduler_.get_batch_request()
-                    if batch_query.total_batch_size == 0:
+                    if batch_query.total_batch_size == 0 and g_parallel_info.tp_rank == 0:
                         self.wait_decode_counter_.increment()
                         torch.cuda.nvtx.range_pop()
                         continue
