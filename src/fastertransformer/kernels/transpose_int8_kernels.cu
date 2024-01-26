@@ -501,12 +501,12 @@ __global__ void transpose_int8_tensor(int8_t* arr_t, const int8_t* arr, size_t d
 void invokeTransposeInt8Tensor(const Tensor& x_t, const Tensor& x, cudaStream_t stream)
 {
     dim3 block_dim(32, 16);
-    dim3 grid_dim((x.shape[1] + block_dim.x - 1) / block_dim.x, (x.shape[0] + block_dim.y - 1) / block_dim.y);
+    dim3 grid_dim((x.shape()[1] + block_dim.x - 1) / block_dim.x, (x.shape()[0] + block_dim.y - 1) / block_dim.y);
 
     const size_t shmem_size = block_dim.x * block_dim.y * sizeof(int8_t);
 
     transpose_int8_tensor<<<grid_dim, block_dim, shmem_size, stream>>>(
-        x_t.getPtr<int8_t>(), x.getPtr<int8_t>(), x.shape[0], x.shape[1]);
+        x_t.getPtr<int8_t>(), x.getPtr<int8_t>(), x.shape()[0], x.shape()[1]);
 }
 
 }  // namespace fastertransformer

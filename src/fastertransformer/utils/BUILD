@@ -1,6 +1,33 @@
 load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts",)
 
 cc_library(
+    name = "allocator",
+    hdrs = [
+        "allocator.h",
+        "allocator_impl.h"
+    ],
+)
+
+cc_library(
+    name = "tensor",
+    srcs = [
+        "Tensor.cc",
+    ],
+    hdrs = [
+        "Tensor.h",
+    ],
+    deps = [
+        "//3rdparty:cub",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+        ":utils_for_3rdparty",
+        ":allocator",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "utils_for_3rdparty",
     srcs = [
         "cuda_utils.cc",
@@ -55,7 +82,9 @@ cc_library(
         "*.h",
         "*.cuh",
     ], exclude = [
+        "allocator.h",
         "allocator_impl.h",
+        "Tensor.h",
         "cublasFP8MMWrapper.h",
         "nccl_utils.h",
         "nccl_utils_torch.h",
@@ -63,6 +92,8 @@ cc_library(
         "memory_utils.h",
     ]),
     deps = [
+        ":allocator",
+        ":tensor",
         "//3rdparty:cub",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
@@ -77,6 +108,7 @@ cc_library(
     srcs = glob([
         "*.cc",
     ], exclude=[
+        "Tensor.cc",
         "logger.cc",
         "cuda_utils.cc",
         "custom_ar_comm.cc",
@@ -116,12 +148,8 @@ cc_library(
 
 cc_library(
     name = "torch_utils",
-    srcs = [
-    ],
-    hdrs = [
-        "allocator_impl.h",
-    ],
     deps = [
+        ":allocator",
         ":nccl_utils",
         ":utils",
         "@local_config_cuda//cuda:cuda",

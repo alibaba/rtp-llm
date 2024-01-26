@@ -41,8 +41,8 @@ void SelfAttentionFP8Layer<T1, T2>::forward(TensorMap*                        ou
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     FT_CHECK(input_tensors->size() >= 2);
-    const int request_batch_size = input_tensors->at("attention_mask").shape[0];
-    const int request_seq_len    = input_tensors->at("attention_mask").shape[2];
+    const int request_batch_size = input_tensors->at("attention_mask").shape()[0];
+    const int request_seq_len    = input_tensors->at("attention_mask").shape()[2];
     allocateBuffer(request_batch_size, request_seq_len);
 
     T1*        attention_out   = output_tensors->at("output_hidden_state").getPtr<T1>();
@@ -57,7 +57,7 @@ void SelfAttentionFP8Layer<T1, T2>::forward(TensorMap*                        ou
                                             input_tensors->at("relative_attention_bias").getPtr<T1>() :
                                             nullptr;
 
-    const int           m                      = input_tensors->at("input_hidden_state").shape[0];
+    const int           m                      = input_tensors->at("input_hidden_state").shape()[0];
     int                 k                      = d_model_;
     int                 n                      = hidden_units_;
     const int           request_seq_len_padded = (request_seq_len + 15) / 16 * 16;

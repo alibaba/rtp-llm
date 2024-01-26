@@ -29,10 +29,10 @@ void FfnLayerINT8<T>::forward(std::vector<fastertransformer::Tensor>*       outp
 
     cublasINT8MMWrapper* cublas_wrapper = (cublasINT8MMWrapper*)cublas_wrapper_;
 
-    FT_CHECK(isValidTokenNum(input_tensors->at(0).shape[0]));
+    FT_CHECK(isValidTokenNum(input_tensors->at(0).shape()[0]));
     allocateBuffer();
 
-    const int m = static_cast<int>(input_tensors->at(0).shape[0]);
+    const int m = static_cast<int>(input_tensors->at(0).shape()[0]);
 #ifdef SPARSITY_ENABLED
     int m_tmp = m;
     if (m_tmp % 16 != 0) {

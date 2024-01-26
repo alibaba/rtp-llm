@@ -284,8 +284,8 @@ void TopPSamplingLayer<T>::runSampling(TensorMap* output_tensors, TensorMap* inp
     FT_CHECK(input_tensors->size() >= 4);
     FT_CHECK(output_tensors->size() >= 1);
 
-    const int batch_size       = output_tensors->at("output_ids").shape[1];
-    const int local_batch_size = input_tensors->at("logits").shape[0];
+    const int batch_size       = output_tensors->at("output_ids").shape()[1];
+    const int local_batch_size = input_tensors->at("logits").shape()[0];
     const int step             = input_tensors->at("step").getVal<int>();
     const int ite              = input_tensors->at("ite").getVal<int>();
 

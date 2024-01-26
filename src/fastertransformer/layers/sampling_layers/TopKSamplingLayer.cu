@@ -212,8 +212,8 @@ void TopKSamplingLayer<T>::runSampling(TensorMap* output_tensors, TensorMap* inp
     FT_CHECK(input_tensors->size() >= 4);
     FT_CHECK(output_tensors->size() >= 1);
 
-    const int batch_size       = output_tensors->at("output_ids").shape[1];
-    const int local_batch_size = input_tensors->at("logits").shape[0];
+    const int batch_size       = output_tensors->at("output_ids").shape()[1];
+    const int local_batch_size = input_tensors->at("logits").shape()[0];
     const int ite              = input_tensors->at("ite").getVal<int>();
     const int step             = input_tensors->at("step").getVal<int>();
 
@@ -234,10 +234,10 @@ void TopKSamplingLayer<T>::runSampling(TensorMap* output_tensors, TensorMap* inp
         output_tensors->isExist("cum_log_probs") ? output_tensors->at("cum_log_probs").getPtr<float>() : nullptr;
     float* output_log_probs =
         output_tensors->isExist("output_log_probs") ? output_tensors->at("output_log_probs").getPtr<float>() : nullptr;
-    float* index_log_probs = 
+    float* index_log_probs =
         output_tensors->isExist("index_log_probs") ? output_tensors->at("index_log_probs").getPtr<float>() : nullptr;
-    int* token_id_for_index_prob = 
-        output_tensors->isExist("token_id_for_index_prob") ? output_tensors->at("token_id_for_index_prob").getPtr<int>() : nullptr;    
+    int* token_id_for_index_prob =
+        output_tensors->isExist("token_id_for_index_prob") ? output_tensors->at("token_id_for_index_prob").getPtr<int>() : nullptr;
 
     invokeBatchTopKSampling(
         sampling_workspace_,
@@ -247,7 +247,7 @@ void TopKSamplingLayer<T>::runSampling(TensorMap* output_tensors, TensorMap* inp
         output_tensors->at("sequence_length", Tensor{MEMORY_GPU, TYPE_INVALID, {}, nullptr}).getPtr<int>(),
         output_tensors->at("finished", Tensor{MEMORY_GPU, TYPE_INVALID, {}, nullptr}).getPtr<bool>(),
         cum_log_probs,
-        output_log_probs,    
+        output_log_probs,
         index_log_probs,
         token_id_for_index_prob,
         curandstate_buf_ + ite * local_batch_size,

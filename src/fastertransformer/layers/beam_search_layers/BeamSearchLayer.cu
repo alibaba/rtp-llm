@@ -197,11 +197,11 @@ void BeamSearchLayer<T>::invokeSoftMax(TensorMap* output_tensors, TensorMap* inp
     FT_CHECK(input_tensors->size() >= 7);
     FT_CHECK(output_tensors->size() >= 6);
 
-    const int   batch_size       = output_tensors->at("output_ids").shape[1];
-    const int   beam_width       = output_tensors->at("output_ids").shape[2];
+    const int   batch_size       = output_tensors->at("output_ids").shape()[1];
+    const int   beam_width       = output_tensors->at("output_ids").shape()[2];
     const int   step             = input_tensors->at("step").getVal<int>();
     const int   ite              = input_tensors->at("ite").getVal<int>();
-    const int   local_batch_size = input_tensors->at("logits").shape[0];
+    const int   local_batch_size = input_tensors->at("logits").shape()[0];
     const float diversity_rate   = input_tensors->isExist("beam_search_diversity_rate") ?
                                        input_tensors->at("beam_search_diversity_rate").getVal<float>() :
                                        0.0f;
@@ -226,8 +226,8 @@ void BeamSearchLayer<T>::invokeSoftMax(TensorMap* output_tensors, TensorMap* inp
         beam_hyps.step                 = step;
         beam_hyps.ite                  = ite;
         beam_hyps.local_batch_size     = local_batch_size;
-        beam_hyps.batch_size           = output_tensors->at("output_ids").shape[1];
-        beam_hyps.max_seq_len          = output_tensors->at("output_ids").shape[0];
+        beam_hyps.batch_size           = output_tensors->at("output_ids").shape()[1];
+        beam_hyps.max_seq_len          = output_tensors->at("output_ids").shape()[0];
         beam_hyps.output_ids_src       = output_tensors->at("output_ids").getPtr<int>();
         beam_hyps.parent_ids_src       = output_tensors->at("parent_ids").getPtr<int>();
         beam_hyps.sequence_lengths_src = output_tensors->at("sequence_length").getPtr<int>();

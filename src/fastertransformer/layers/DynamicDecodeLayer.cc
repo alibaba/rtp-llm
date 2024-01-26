@@ -219,29 +219,29 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     const int ite  = (int)input_tensors->at("ite").getVal<uint>();
     const int step = input_tensors->at("step").getVal<int>();
-    FT_CHECK(input_tensors->at("logits").shape.size() == 3);
+    FT_CHECK(input_tensors->at("logits").shape().size() == 3);
 
-    const size_t batch_size       = input_tensors->at("logits").shape[0];
-    const size_t beam_width       = input_tensors->at("logits").shape[1];
+    const size_t batch_size       = input_tensors->at("logits").shape()[0];
+    const size_t beam_width       = input_tensors->at("logits").shape()[1];
     const size_t local_batch_size = (size_t)input_tensors->at("local_batch_size").getVal<int>();
 
     if (input_tensors->isExist("bad_words_list")) {
         const auto& bad_words     = input_tensors->at("bad_words_list");
         const int*  bad_words_ptr = bad_words.getPtr<const int>();
-        FT_CHECK_WITH_INFO(bad_words.shape.size() == 2 || bad_words.shape.size() == 3,
+        FT_CHECK_WITH_INFO(bad_words.shape().size() == 2 || bad_words.shape().size() == 3,
                            "Bad words dimension must be 2 or 3.");
 
-        const bool is_matrix = bad_words.shape.size() == 2;
-        if (bad_words.shape.size() == 3) {
-            FT_CHECK_WITH_INFO(bad_words.shape[0] == batch_size,
+        const bool is_matrix = bad_words.shape().size() == 2;
+        if (bad_words.shape().size() == 3) {
+            FT_CHECK_WITH_INFO(bad_words.shape()[0] == batch_size,
                                fmtstr("Shape of dim 0 of bad words is invalid. It must be equal to batch size."
                                       " However, it is %d and the batch size is %d.",
-                                      bad_words.shape[0],
+                                      bad_words.shape()[0],
                                       batch_size));
         }
 
-        const bool   shared_bad_words = is_matrix || bad_words.shape[0] == 1;
-        const size_t bad_words_len    = bad_words.shape[is_matrix ? 1 : 2];
+        const bool   shared_bad_words = is_matrix || bad_words.shape()[0] == 1;
+        const size_t bad_words_len    = bad_words.shape()[is_matrix ? 1 : 2];
         // Add check on batch size of bad words
         const int id_offset                      = ite * local_batch_size;
         const int decode_vocab_size_units_offset = id_offset * vocab_size_padded_;
@@ -282,15 +282,15 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
 
             TensorMap dynamic_decode_input_tensors(
                 {{"logits",
-                  Tensor{logits.where,
-                         logits.type,
-                         {dynamic_decode_batch_size, logits.shape[1], logits.shape[2]},
+                  Tensor{logits.where(),
+                         logits.type(),
+                         {dynamic_decode_batch_size, logits.shape()[1], logits.shape()[2]},
                          logits.getPtrWithOffset(dynamic_decode_vocab_size_units_offset)}},
                  {"step", input_tensors->at("step")},
                  {"max_input_length", input_tensors->at("max_input_length")},
                  {"end_id",
-                  Tensor{end_id.where,
-                         end_id.type,
+                  Tensor{end_id.where(),
+                         end_id.type(),
                          {dynamic_decode_batch_size},
                          end_id.getPtrWithOffset(dynamic_ite * dynamic_decode_batch_size)}},
                  {"ite", Tensor{MEMORY_CPU, TYPE_UINT32, {1}, &dynamic_ite}}});
@@ -302,7 +302,7 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
                 Tensor input_lengths = input_tensors->at("input_lengths");
                 dynamic_decode_input_tensors.insert(
                     {"input_lengths",
-                     input_lengths.slice({dynamic_decode_batch_size, input_lengths.shape[1]}, dynamic_id_offset)});
+                     input_lengths.slice({dynamic_decode_batch_size, input_lengths.shape()[1]}, dynamic_id_offset)});
             }
             for (auto t = input_tensors->begin(); t != input_tensors->end(); ++t) {
                 if (t->first.find("random_seed") == std::string::npos) {
@@ -315,24 +315,24 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
             if (output_tensors->isExist("sequence_length")) {
                 Tensor sequence_length = output_tensors->at("sequence_length");
                 dynamic_decode_output_tensors.insert({"sequence_length",
-                                                      Tensor{sequence_length.where,
-                                                             sequence_length.type,
+                                                      Tensor{sequence_length.where(),
+                                                             sequence_length.type(),
                                                              {dynamic_decode_batch_size * beam_width},
                                                              sequence_length.getPtrWithOffset(dynamic_id_offset)}});
             }
             if (output_tensors->isExist("finished")) {
                 Tensor finished = output_tensors->at("finished");
                 dynamic_decode_output_tensors.insert({"finished",
-                                                      Tensor{finished.where,
-                                                             finished.type,
+                                                      Tensor{finished.where(),
+                                                             finished.type(),
                                                              {dynamic_decode_batch_size * beam_width},
                                                              finished.getPtrWithOffset(dynamic_id_offset)}});
             }
             if (output_tensors->isExist("cum_log_probs")) {
                 Tensor cum_log_probs = output_tensors->at("cum_log_probs");
                 dynamic_decode_output_tensors.insert({"cum_log_probs",
-                                                      Tensor{cum_log_probs.where,
-                                                             cum_log_probs.type,
+                                                      Tensor{cum_log_probs.where(),
+                                                             cum_log_probs.type(),
                                                              {dynamic_decode_batch_size * beam_width},
                                                              cum_log_probs.getPtrWithOffset(dynamic_id_offset)}});
             }
@@ -368,7 +368,7 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
 
         TensorMap decode_input_tensors(
             {{"logits",
-              logits.slice({local_batch_size, beam_width, logits.shape[2]}, local_batch_offset * logits.shape[2])},
+              logits.slice({local_batch_size, beam_width, logits.shape()[2]}, local_batch_offset * logits.shape()[2])},
              {"step", input_tensors->at("step")},
              {"max_input_length", input_tensors->at("max_input_length")},
              {"end_id", end_id.slice({local_batch_size}, ite * local_batch_size)},
@@ -430,7 +430,7 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
 
     if (input_tensors->isExist("stop_words_list")) {
         const size_t id_offset         = ite * local_batch_size * beam_width;
-        const size_t stop_words_length = input_tensors->at("stop_words_list").shape[2];
+        const size_t stop_words_length = input_tensors->at("stop_words_list").shape()[2];
 
         const int* parent_ids_ptr = nullptr;
         if (beam_width > 1) {
@@ -470,10 +470,10 @@ bool DynamicDecodeLayer<T>::hasDiffRuntimeArgs(TensorMap* input_tensors) {
     for (int i = 0; i < (int)runtime_arg_names_.size(); i++) {
         if (input_tensors->isExist(runtime_arg_names_[i])) {
             auto tensor = input_tensors->at(runtime_arg_names_[i]);
-            FT_CHECK(tensor.shape.size() == 1);
-            for (int j = 1; j < (int)tensor.shape[0]; j++) {
-                const void* data = tensor.data;
-                switch (tensor.type) {
+            FT_CHECK(tensor.shape().size() == 1);
+            for (int j = 1; j < (int)tensor.shape()[0]; j++) {
+                const void* data = tensor.data();
+                switch (tensor.type()) {
                     case TYPE_FP32:
                         if (((const float*)data)[0] != ((const float*)data)[j]) {
                             return true;

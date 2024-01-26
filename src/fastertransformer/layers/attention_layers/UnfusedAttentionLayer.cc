@@ -37,8 +37,8 @@ void UnfusedAttentionLayer<T>::forward(TensorMap*                output_tensors,
     // If padding_offset.data is nullptr, then not remove padding
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    const size_t request_batch_size = input_tensors->at("attention_mask").shape[0];
-    const size_t request_seq_len    = input_tensors->at("attention_mask").shape[2];
+    const size_t request_batch_size = input_tensors->at("attention_mask").shape()[0];
+    const size_t request_seq_len    = input_tensors->at("attention_mask").shape()[2];
     const bool   output_attentions  = output_tensors->isExist("attentions");
     allocateBuffer(request_batch_size, request_seq_len);
 
@@ -52,7 +52,7 @@ void UnfusedAttentionLayer<T>::forward(TensorMap*                output_tensors,
 
     bool use_relative_position_bias = relative_attention_bias != nullptr ? true : false;
 
-    const int m = input_tensors->at("input_query").shape[0];
+    const int m = input_tensors->at("input_query").shape()[0];
     int       k = d_model_;
     int       n = hidden_units_;
 #ifdef SPARSITY_ENABLED

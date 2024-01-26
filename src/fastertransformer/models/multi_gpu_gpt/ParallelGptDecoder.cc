@@ -78,9 +78,9 @@ void ParallelGptDecoder<T>::initialize()
                              gpt_init_parameter_.layernorm_eps_,
                              custom_all_reduce_comm_,
                              enable_custom_all_reduce_));
-    
-    norm_wrapper_.reset(new NormWrapper<T>(gpt_init_parameter_.layernorm_type_, 
-                                           gpt_init_parameter_.norm_type_, 
+
+    norm_wrapper_.reset(new NormWrapper<T>(gpt_init_parameter_.layernorm_type_,
+                                           gpt_init_parameter_.norm_type_,
                                            T(sqrt(2 * gpt_init_parameter_.num_layers_))));
 }
 
@@ -260,7 +260,7 @@ void ParallelGptDecoder<T>::forward(std::unordered_map<std::string, Tensor>*    
     FT_CHECK(output_tensors->count("key_cache"));
     FT_CHECK(output_tensors->count("value_cache"));
 
-    const size_t local_batch_size = input_tensors->at("decoder_input").shape[0];
+    const size_t local_batch_size = input_tensors->at("decoder_input").shape()[0];
     const size_t hidden_units = gpt_init_parameter_.size_per_head_ * gpt_init_parameter_.head_num_;
     bool reuse_buf = !gpt_init_parameter_.use_norm_input_residual_;
     bool pre_attn_ln = gpt_decoder_layer_weight->at(0)->pre_attn_layernorm_weights.gamma;
@@ -275,11 +275,11 @@ void ParallelGptDecoder<T>::forward(std::unordered_map<std::string, Tensor>*    
 
     // The resize of the key cache buffer by
     //   (local_batch_size, local_head_num, size_per_head // x, max_seq_len, x) where x is constant.
-    std::vector<size_t> self_k_cache_size(k_cache.shape.begin() + 2, k_cache.shape.end());
+    std::vector<size_t> self_k_cache_size(k_cache.shape().begin() + 2, k_cache.shape().end());
     self_k_cache_size.insert(self_k_cache_size.begin(), local_batch_size);
 
     // The resize of the value cache buffer by (local_batch_size, local_head_num, max_seq_len, size_per_head).
-    std::vector<size_t> self_v_cache_size(v_cache.shape.begin() + 2, v_cache.shape.end());
+    std::vector<size_t> self_v_cache_size(v_cache.shape().begin() + 2, v_cache.shape().end());
     self_v_cache_size.insert(self_v_cache_size.begin(), local_batch_size);
 
     const auto activation_in_type  = gpt_init_parameter_.int8_mode_ == 2 ? TYPE_INT8 : data_type;
@@ -389,13 +389,13 @@ void ParallelGptDecoder<T>::forward(std::unordered_map<std::string, Tensor>*    
                     "max_prefix_prompt_length", input_tensors->at("max_prefix_prompt_length")
             );
         }
-        
+
         size_t cache_offset = l - getFirstLayerParallelId();
-        for (auto t = k_cache.shape.begin() + 1; t != k_cache.shape.end(); ++t) {
+        for (auto t = k_cache.shape().begin() + 1; t != k_cache.shape().end(); ++t) {
             cache_offset *= *t;
         };
         size_t ite_cache_offset = ite * local_batch_size;
-        for (auto t = k_cache.shape.begin() + 2; t != k_cache.shape.end(); ++t) {
+        for (auto t = k_cache.shape().begin() + 2; t != k_cache.shape().end(); ++t) {
             ite_cache_offset *= *t;
         }
         cache_offset += ite_cache_offset;

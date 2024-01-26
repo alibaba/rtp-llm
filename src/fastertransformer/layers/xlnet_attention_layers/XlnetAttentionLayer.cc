@@ -23,22 +23,22 @@ void XlnetAttentionLayer<T>::forward(std::vector<fastertransformer::Tensor>*    
                                      const std::vector<fastertransformer::Tensor>* input_tensors,
                                      const XlnetAttentionWeight<T>*                attention_weights)
 {
-    const size_t request_batch_size = input_tensors->at(0).shape[0];
-    const size_t request_seq_len    = input_tensors->at(0).shape[1];
+    const size_t request_batch_size = input_tensors->at(0).shape()[0];
+    const size_t request_seq_len    = input_tensors->at(0).shape()[1];
 
-    FT_CHECK(isValidBatchSize(input_tensors->at(1).shape[0]));
-    FT_CHECK(isValidSeqLen(input_tensors->at(1).shape[2]));
+    FT_CHECK(isValidBatchSize(input_tensors->at(1).shape()[0]));
+    FT_CHECK(isValidSeqLen(input_tensors->at(1).shape()[2]));
 
     FT_CHECK(input_tensors->size() == 4);
-    FT_CHECK(input_tensors->at(0).shape.size() == 3);
-    FT_CHECK(input_tensors->at(1).shape.size() == 3);
-    FT_CHECK(input_tensors->at(2).shape.size() == 3);
-    FT_CHECK(input_tensors->at(3).shape.size() == 2);
+    FT_CHECK(input_tensors->at(0).shape().size() == 3);
+    FT_CHECK(input_tensors->at(1).shape().size() == 3);
+    FT_CHECK(input_tensors->at(2).shape().size() == 3);
+    FT_CHECK(input_tensors->at(3).shape().size() == 2);
 
-    FT_CHECK(input_tensors->at(1).shape[0] == request_batch_size);
-    FT_CHECK(input_tensors->at(2).shape[0] == request_batch_size);
-    FT_CHECK(input_tensors->at(1).shape[1] == request_seq_len);
-    FT_CHECK(input_tensors->at(2).shape[1] == request_seq_len);
+    FT_CHECK(input_tensors->at(1).shape()[0] == request_batch_size);
+    FT_CHECK(input_tensors->at(2).shape()[0] == request_batch_size);
+    FT_CHECK(input_tensors->at(1).shape()[1] == request_seq_len);
+    FT_CHECK(input_tensors->at(2).shape()[1] == request_seq_len);
 
     T* out_tensor     = output_tensors->at(0).getPtr<T>();
     T* in_tensor      = input_tensors->at(0).getPtr<T>();

@@ -54,9 +54,9 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
     //      key_cache [batch, local_head_num, size_per_head // x, max_seq_len, x]
     //      value_cache [batch, local_head_num, max_seq_len, size_per_head]
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
-    FT_CHECK(output_tensors->at("key_cache").shape.size() == 4);
-    FT_CHECK(output_tensors->at("value_cache").shape.size() == 4
-             || output_tensors->at("value_cache").shape.size() == 3);
+    FT_CHECK(output_tensors->at("key_cache").shape().size() == 4);
+    FT_CHECK(output_tensors->at("value_cache").shape().size() == 4
+             || output_tensors->at("value_cache").shape().size() == 3);
 
     const AttentionType attention_type = input_tensors->getVal<AttentionType>("attention_type");
     FT_CHECK_WITH_INFO(attention_type != AttentionType::FUSED_PADDED_MHA,
@@ -73,12 +73,12 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
                                             const AttentionWeight<T>* attention_weights)
 {
     // FT_CHECK(local_head_num_kv_ == 1);
-    const int request_batch_size = input_tensors->at("attention_mask").shape[0];
-    const int request_seq_len    = input_tensors->at("attention_mask").shape[2];
+    const int request_batch_size = input_tensors->at("attention_mask").shape()[0];
+    const int request_seq_len    = input_tensors->at("attention_mask").shape()[2];
     const int* input_lengths     = input_tensors->getPtr<int>("input_lengths");
     const int* lora_input_lengths = input_tensors->getPtr<int>("lora_input_lengths", nullptr);
     const int max_prompt_length =
-        input_tensors->at("attention_mask").shape[3] - input_tensors->at("attention_mask").shape[2];
+        input_tensors->at("attention_mask").shape()[3] - input_tensors->at("attention_mask").shape()[2];
     const int  layer_id                = input_tensors->getVal<int>("layer_id");
     const T**  d_prefix_prompt_batch   = input_tensors->getPtr<const T*>("d_prefix_prompt_batch", nullptr);
     const int* d_prefix_prompt_lengths = input_tensors->getPtr<int>("d_prefix_prompt_lengths", nullptr);
@@ -104,7 +104,7 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
 
     const bool is_final = input_tensors->at("is_final_layer").getVal<bool>();
 
-    const int m = input_tensors->at("input_query").shape[0];
+    const int m = input_tensors->at("input_query").shape()[0];
 
     const int local_hidden_units_rt = (is_sparse_head_ ? local_layer_head_num_[layer_id]: local_head_num_) * size_per_head_;
     const int local_hidden_units_kv_rt = (is_sparse_head_ ? local_layer_head_num_kv_[layer_id]: local_head_num_kv_) * size_per_head_;
@@ -116,7 +116,7 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
 
 
     PUSH_RANGE(stream_, "qkv_gemm");
-    
+
 #ifdef SPARSITY_ENABLED
     const int m_padded   = 8 * div_up(m, 8);
     bool      use_sparse = sparse_ && cublas_wrapper_->isUseSparse(1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt, m_padded, hidden_units_);
@@ -151,10 +151,10 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
               k_start, k_start + 4);
     print_bsd(layer_id, "v", qkv_buf_, request_batch_size, request_seq_len, local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
               v_start, v_start + 4);
-    const int max_seq_len = (int)(output_tensors->at("key_cache").shape[2]);  // max output seq length
+    const int max_seq_len = (int)(output_tensors->at("key_cache").shape()[2]);  // max output seq length
     int max_blocks_per_batch = 0;
     if (block_index_map) {
-        max_blocks_per_batch = (int)(input_tensors->at("block_index_map").shape[1]);
+        max_blocks_per_batch = (int)(input_tensors->at("block_index_map").shape()[1]);
     }
 
     sync_check_cuda_error();
@@ -177,7 +177,7 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
         // q_buf_2_, k_buf_2_ and v_buf_2_ are continuous
         cudaMemsetAsync(
             q_buf_2_, 0, request_batch_size * (request_seq_len + max_prompt_length) * (local_hidden_units_rt + 2 * local_hidden_units_kv_rt) * sizeof(T), stream_);
-    }   
+    }
     invokeAddFusedQKVBiasTranspose(q_buf_2_,
                                    k_buf_2_,
                                    v_buf_2_,
@@ -212,7 +212,7 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
     print_bhsd(layer_id, "v bias rotary", v_buf_2_, request_batch_size, local_head_num_kv, request_seq_len + max_prompt_length, size_per_head_);
 
     sync_check_cuda_error();
-    KVLinearBuffer kv_cache_buffer(request_batch_size, 1, output_tensors->at("key_cache").shape[2], local_head_num_kv_ * size_per_head_ * sizeof(T));
+    KVLinearBuffer kv_cache_buffer(request_batch_size, 1, output_tensors->at("key_cache").shape()[2], local_head_num_kv_ * size_per_head_ * sizeof(T));
     kv_cache_buffer.k_data = reinterpret_cast<int8_t*>(output_tensors->getPtr<T>("key_cache"));
     kv_cache_buffer.v_data = reinterpret_cast<int8_t*>(output_tensors->getPtr<T>("value_cache"));
     const KvCacheDataType cache_type = KvCacheDataType::BASE;
@@ -296,7 +296,7 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
             param.qk_scale           = qk_scale;
             param.linear_bias_slopes = const_cast<T*>(linear_bias_slopes);  // (head_num,), optional
             invokeMaskedSoftmax(param, stream_);
-            
+
             print_bhss(layer_id, "softmax", qk_buf_, request_batch_size, local_head_num, max_seq_len, attention_seq_len_2);
             sync_check_cuda_error();
             POP_RANGE;
@@ -439,7 +439,7 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
                         mixed_gemm_workspace_,
                         mixed_gemm_ws_bytes_,
                         m_padded);
-    
+
     POP_RANGE;
 
     if (is_free_buffer_after_forward_ == true) {

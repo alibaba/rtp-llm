@@ -886,7 +886,7 @@ void DecoderCrossAttentionLayer<T>::forward(TensorMap*                output_ten
     //      value_mem_cache [batch_size, head_num, mem_max_seq_len, size_per_head]
     //      cross_attentions [batch_size, head_num, max_decoder_seq_len, mem_max_seq_len] optional float*
     FT_LOG_DEBUG("%s", __PRETTY_FUNCTION__);
-    allocateBuffer(input_tensors->at("input_query").shape[0], input_tensors->at("encoder_output").shape[1]);
+    allocateBuffer(input_tensors->at("input_query").shape()[0], input_tensors->at("encoder_output").shape()[1]);
 
     const T*    attention_input        = input_tensors->getPtr<T>("input_query");
     Tensor      encoder_output_tensor  = input_tensors->at("encoder_output");
@@ -900,10 +900,10 @@ void DecoderCrossAttentionLayer<T>::forward(TensorMap*                output_ten
     T* value_mem_cache = output_tensors->getPtr<T>("value_cache");
 
     const bool output_cross_attentions = output_tensors->isExist("cross_attentions");
-    const int  max_decoder_seq_len     = output_cross_attentions ? output_tensors->at("cross_attentions").shape[2] : 0;
+    const int  max_decoder_seq_len     = output_cross_attentions ? output_tensors->at("cross_attentions").shape()[2] : 0;
 
-    const int batch_size      = input_tensors->at("input_query").shape[0];
-    const int mem_max_seq_len = encoder_output_tensor.shape[1];
+    const int batch_size      = input_tensors->at("input_query").shape()[0];
+    const int mem_max_seq_len = encoder_output_tensor.shape()[1];
     cublas_wrapper_->Gemm(CUBLAS_OP_N,
                           CUBLAS_OP_N,
                           hidden_units_,  // n
@@ -922,11 +922,11 @@ void DecoderCrossAttentionLayer<T>::forward(TensorMap*                output_ten
                                   CUBLAS_OP_N,
                                   hidden_units_,
                                   batch_size * mem_max_seq_len,
-                                  encoder_output_tensor.shape[2],
+                                  encoder_output_tensor.shape()[2],
                                   attention_weights->key_weight.kernel,
                                   hidden_units_,
                                   encoder_output_tensor.getPtr<T>(),
-                                  encoder_output_tensor.shape[2],
+                                  encoder_output_tensor.shape()[2],
                                   mem_cache_buf_,
                                   hidden_units_);
             transpose_4d_batch_major_memory_kernelLauncher<T>(
@@ -937,11 +937,11 @@ void DecoderCrossAttentionLayer<T>::forward(TensorMap*                output_ten
                                   CUBLAS_OP_N,
                                   hidden_units_,
                                   batch_size * mem_max_seq_len,
-                                  encoder_output_tensor.shape[2],
+                                  encoder_output_tensor.shape()[2],
                                   attention_weights->value_weight.kernel,
                                   hidden_units_,
                                   encoder_output_tensor.getPtr<T>(),
-                                  encoder_output_tensor.shape[2],
+                                  encoder_output_tensor.shape()[2],
                                   mem_cache_buf_,
                                   hidden_units_);
             transpose_4d_batch_major_memory_kernelLauncher<T>(value_mem_cache,
@@ -959,11 +959,11 @@ void DecoderCrossAttentionLayer<T>::forward(TensorMap*                output_ten
                                   CUBLAS_OP_N,
                                   hidden_units_,
                                   batch_size * mem_max_seq_len,
-                                  encoder_output_tensor.shape[2],
+                                  encoder_output_tensor.shape()[2],
                                   attention_weights->key_weight.kernel,
                                   hidden_units_,
                                   encoder_output_tensor.getPtr<T>(),
-                                  encoder_output_tensor.shape[2],
+                                  encoder_output_tensor.shape()[2],
                                   key_mem_cache,
                                   hidden_units_);
 
@@ -971,11 +971,11 @@ void DecoderCrossAttentionLayer<T>::forward(TensorMap*                output_ten
                                   CUBLAS_OP_N,
                                   hidden_units_,
                                   batch_size * mem_max_seq_len,
-                                  encoder_output_tensor.shape[2],
+                                  encoder_output_tensor.shape()[2],
                                   attention_weights->value_weight.kernel,
                                   hidden_units_,
                                   encoder_output_tensor.getPtr<T>(),
-                                  encoder_output_tensor.shape[2],
+                                  encoder_output_tensor.shape()[2],
                                   value_mem_cache,
                                   hidden_units_);
         }

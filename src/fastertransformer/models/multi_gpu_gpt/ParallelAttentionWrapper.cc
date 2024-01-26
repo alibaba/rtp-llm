@@ -337,9 +337,9 @@ void ParallelAttentionWrapper<T>::forward(TensorMap*                output_tenso
     //      key_cache [batch, local_head_num, size_per_head // x, max_seq_len, x]
     //      value_cache [batch, local_head_num, max_seq_len, size_per_head]
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
-    FT_CHECK(output_tensors->at("key_cache").shape.size() == 4);
-    FT_CHECK(output_tensors->at("value_cache").shape.size() == 4
-             || output_tensors->at("value_cache").shape.size() == 3);
+    FT_CHECK(output_tensors->at("key_cache").shape().size() == 4);
+    FT_CHECK(output_tensors->at("value_cache").shape().size() == 4
+             || output_tensors->at("value_cache").shape().size() == 3);
 
     Attention(output_tensors, input_tensors, attention_weights);
 
@@ -490,13 +490,13 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
     const int  layer_id                = input_tensors->getVal<int>("layer_id");
     const int  generate_batch_size     = input_tensors->getVal<int>("generate_batch_size");
     const int* cache_indir             = input_tensors->getPtr<int>("cache_indirection", nullptr);
-    const int  beam_width              = cache_indir ? input_tensors->at("cache_indirection").shape[1] : 1;
+    const int  beam_width              = cache_indir ? input_tensors->at("cache_indirection").shape()[1] : 1;
     const T*   relative_attention_bias = input_tensors->getPtr<T>("relative_attention_bias", nullptr);
     const int  relative_attention_bias_stride =
-        relative_attention_bias ? input_tensors->at("relative_attention_bias").shape[3] : 0;
+        relative_attention_bias ? input_tensors->at("relative_attention_bias").shape()[3] : 0;
     const int64_t* block_pointers       = input_tensors->getPtr<int64_t>("block_pointers", nullptr);
     const int64_t* block_scale_pointers = input_tensors->getPtr<int64_t>("block_scale_pointers", nullptr);
-    const int      max_blocks_per_batch = block_pointers ? input_tensors->at("block_pointers").shape[3] : 0;
+    const int      max_blocks_per_batch = block_pointers ? input_tensors->at("block_pointers").shape()[3] : 0;
     const int      local_head_num       = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
     const int    local_head_num_kv = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
     KVBlockArray kv_block_array(generate_batch_size, max_blocks_per_batch, params_.seq_size_per_block_, 0);
@@ -558,11 +558,11 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                                    const AttentionWeight<T>* attention_weights)
 {
     const int  generate_batch_size      = input_tensors->getVal<int>("generate_batch_size");
-    const int  h_token_num              = input_tensors->at("input_query").shape[0];
+    const int  h_token_num              = input_tensors->at("input_query").shape()[0];
     const int  context_h_token_num      = h_token_num - generate_batch_size;
     const int  layer_id                 = input_tensors->getVal<int>("layer_id");
-    const int  context_batch_size       = input_tensors->at("attention_mask").shape[0];
-    const int  context_seq_len          = input_tensors->at("attention_mask").shape[2];
+    const int  context_batch_size       = input_tensors->at("attention_mask").shape()[0];
+    const int  context_seq_len          = input_tensors->at("attention_mask").shape()[2];
     const int  min_prefix_length        = input_tensors->getVal<int>("min_prefix_length", 0);
     const T**  d_prefix_prompt_batch    = input_tensors->getPtr<const T*>("d_prefix_prompt_batch", nullptr);
     const int* d_prefix_prompt_lengths_ = input_tensors->getPtr<int>("d_prefix_prompt_lengths", nullptr);
@@ -577,7 +577,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     int64_t* block_pointers_       = input_tensors->getPtr<int64_t>("block_pointers", nullptr);
     int64_t* host_block_pointers_  = input_tensors->getPtr<int64_t>("host_block_pointers", nullptr);
     const int64_t* block_scale_pointers_ = input_tensors->getPtr<int64_t>("block_scale_pointers", nullptr);
-    const int      max_blocks_per_batch  = block_pointers_ ? input_tensors->at("block_pointers").shape[3] : 0;
+    const int      max_blocks_per_batch  = block_pointers_ ? input_tensors->at("block_pointers").shape()[3] : 0;
     const int64_t* block_pointers =
         block_pointers_ ? block_pointers_ + generate_batch_size * 2 * max_blocks_per_batch : block_pointers_;
     const int64_t* block_scale_pointers = block_scale_pointers_ ?
@@ -585,7 +585,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                               block_scale_pointers_;
 
     const int max_prompt_length =
-        input_tensors->at("attention_mask").shape[3] - input_tensors->at("attention_mask").shape[2];
+        input_tensors->at("attention_mask").shape()[3] - input_tensors->at("attention_mask").shape()[2];
     const bool count_prefix_length  = input_tensors->getVal<bool>("count_prefix_length", false);
     const int* input_lengths        = input_tensors->getPtr<int>("input_lengths");
 
@@ -915,15 +915,15 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
     int                 max_context_seq_len = 0;
     int                 max_context_seq_len_with_prefix = 0;
     const int           layer_id            = input_tensors->getVal<int>("layer_id");
-    const int           h_token_num         = input_tensors->at("input_query").shape[0];
+    const int           h_token_num         = input_tensors->at("input_query").shape()[0];
     // lora
     int* lora_ids = input_tensors->getPtr<int>("lora_ids", nullptr);
     int batch_size = context_batch_size + generate_batch_size;
     const int* lora_input_lengths = input_tensors->getPtr<int>("lora_input_lengths", nullptr);
 
     if (context_batch_size) {
-        max_context_seq_len_with_prefix = input_tensors->at("attention_mask").shape[3];
-        max_context_seq_len             = input_tensors->at("attention_mask").shape[2];
+        max_context_seq_len_with_prefix = input_tensors->at("attention_mask").shape()[3];
+        max_context_seq_len             = input_tensors->at("attention_mask").shape()[2];
     }
     PUSH_RANGE(stream_, "attention_buffer_alloc");
     allocateBuffer(h_token_num, context_batch_size, generate_batch_size, max_context_seq_len, max_context_seq_len_with_prefix, !(use_open_source_fmha_||use_trt_fmha_), multi_block_mode_);

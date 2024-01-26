@@ -139,11 +139,11 @@ void LinearAdapterLayer<T>::forward(Tensor* output, const Tensor* input, const L
     auto* const input_data  = input->getPtr<T>();
     auto* const gamma       = adapter_weight->layer_norm_weight.gamma;
     auto* const beta        = adapter_weight->layer_norm_weight.beta;
-    auto const  m           = input->shape[0];
-    auto const  n           = input->shape[1];
+    auto const  m           = input->shape()[0];
+    auto const  n           = input->shape()[1];
     FT_CHECK(n == hidden_size_);
-    FT_CHECK(output->shape[0] == m);
-    FT_CHECK(output->shape[1] == n);
+    FT_CHECK(output->shape()[0] == m);
+    FT_CHECK(output->shape()[1] == n);
     allocateBuffer(m);
 
     Tensor    adapter_tensor{MemoryType::MEMORY_GPU, getTensorType<T>(), {m, n}, adapter_buf_};

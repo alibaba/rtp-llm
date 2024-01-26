@@ -51,8 +51,8 @@ void TensorParallelFfnLayer<T>::forward(TensorMap*          output_tensors,
                                         const FfnWeight<T>* ffn_weights) {
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     Tensor       out_tensor   = output_tensors->at("ffn_output");
-    const size_t token_num    = out_tensor.shape[0];
-    const size_t hidden_units = out_tensor.shape[1];
+    const size_t token_num    = out_tensor.shape()[0];
+    const size_t hidden_units = out_tensor.shape()[1];
 
     std::vector<Tensor> swap_tensors = {out_tensor};
 

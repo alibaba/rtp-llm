@@ -39,8 +39,8 @@ void UnfusedAttentionLayerINT8<T>::forward(TensorMap*                output_tens
     const ScaleList*     scale_list     = ((const AttentionINT8Weight<T>*)attention_weights)->scale_list_ptr;
     cublasINT8MMWrapper* cublas_wrapper = (cublasINT8MMWrapper*)cublas_wrapper_;
 
-    FT_CHECK(isValidBatchSize(input_tensors->at("attention_mask").shape[0]));
-    FT_CHECK(isValidSeqLen(input_tensors->at("attention_mask").shape[2]));
+    FT_CHECK(isValidBatchSize(input_tensors->at("attention_mask").shape()[0]));
+    FT_CHECK(isValidSeqLen(input_tensors->at("attention_mask").shape()[2]));
     allocateBuffer();
 
     int32_t*      attention_out  = output_tensors->getPtr<int32_t>("hidden_features");
@@ -48,9 +48,9 @@ void UnfusedAttentionLayerINT8<T>::forward(TensorMap*                output_tens
     const T*      attention_mask = input_tensors->getPtr<T>("attention_mask");
     const int*    padding_offset = input_tensors->getPtr<int>("padding_offset", nullptr);
 
-    const int request_batch_size = input_tensors->at("attention_mask").shape[0];
-    const int request_seq_len    = input_tensors->at("attention_mask").shape[2];
-    const int m                  = input_tensors->at("input_query").shape[0];
+    const int request_batch_size = input_tensors->at("attention_mask").shape()[0];
+    const int request_seq_len    = input_tensors->at("attention_mask").shape()[2];
+    const int m                  = input_tensors->at("input_query").shape()[0];
     const int k                  = hidden_units_;
     const int n                  = hidden_units_;
     int       m_tmp              = m;

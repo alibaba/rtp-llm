@@ -1595,7 +1595,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
             }
         }
     }
-    
+
     const int position_id = position_ids == nullptr ? -1 : position_ids[token_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx];
     context_rope(rotary_embedding_style,
@@ -2840,10 +2840,10 @@ __global__ void transpose_attentions(
 template<typename T>
 void invokeTransposeAttentions(Tensor& attentions_out, const Tensor& attentions_in, cudaStream_t stream)
 {
-    const size_t batch_size = attentions_in.shape[0];
-    const size_t num_heads  = attentions_in.shape[1];
-    const size_t seq_len    = attentions_in.shape[2];
-    const size_t num_layers = attentions_out.shape[1];
+    const size_t batch_size = attentions_in.shape()[0];
+    const size_t num_heads  = attentions_in.shape()[1];
+    const size_t seq_len    = attentions_in.shape()[2];
+    const size_t num_layers = attentions_out.shape()[1];
 
     const dim3 gridSize(batch_size, num_heads);
     const dim3 blockSize(512);

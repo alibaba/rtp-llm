@@ -99,11 +99,11 @@ typedef enum memorytype_enum {
 } MemoryType;
 
 struct Tensor {
-    MemoryType          where;
-    DataType            type;
-    std::vector<size_t> shape;
-    void*               data      = nullptr;
-    IAllocator*         allocator = nullptr;
+    MemoryType          where_;
+    DataType            type_;
+    std::vector<size_t> shape_;
+    void*               data_      = nullptr;
+    IAllocator*         allocator_ = nullptr;
 
     Tensor();
     Tensor(const MemoryType          _where,
@@ -111,7 +111,10 @@ struct Tensor {
            const std::vector<size_t> _shape,
            IAllocator*               _allocator,
            const bool                is_set_zero);
-    Tensor(const MemoryType _where, const DataType _type, const std::vector<size_t> _shape, const void* _data);
+    Tensor(const MemoryType _where,
+           const DataType _type,
+           const std::vector<size_t> _shape,
+           const void* _data);
 
     ~Tensor();
 
@@ -119,6 +122,12 @@ struct Tensor {
     Tensor(Tensor&& tensor)      = default;
     Tensor& operator=(const Tensor& tensor) = default;
     Tensor& operator=(Tensor&& tensor) = default;
+
+    MemoryType                 where() const;
+    DataType                   type() const;
+    const std::vector<size_t>& shape() const;
+    void*                      data() const;
+    IAllocator*                allocator() const;
 
     bool operator==(const Tensor& tensor) const;
     bool operator!=(const Tensor& tensor) const;
@@ -139,20 +148,20 @@ struct Tensor {
     template<typename T>
     inline T getVal(size_t index) const {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
-        FT_CHECK(data != nullptr);
+        FT_CHECK(data_ != nullptr);
         FT_CHECK_WITH_INFO(index < size(), "index is larger than buffer size");
 
-        if (getTensorType<T>() != type) {
+        if (getTensorType<T>() != type_) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
-                         getNumpyTypeDesc(type).c_str());
+                         getNumpyTypeDesc(type_).c_str());
         }
-        if (where == MEMORY_CPU) {
-            return ((T*)data)[index];
+        if (where_ == MEMORY_CPU) {
+            return ((T*)data())[index];
         } else {
             using ValueType = typename std::remove_const<T>::type;
             ValueType val;
-            cudaMemcpy(&val, (ValueType*)data + index, sizeof(ValueType), cudaMemcpyDeviceToHost);
+            cudaMemcpy(&val, (ValueType*)data_ + index, sizeof(ValueType), cudaMemcpyDeviceToHost);
             return val;
         }
     }
@@ -160,10 +169,10 @@ struct Tensor {
     template<typename T>
     inline T getVal() const {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
-        if (getTensorType<T>() != type) {
+        if (getTensorType<T>() != type_) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
-                         getNumpyTypeDesc(type).c_str());
+                         getNumpyTypeDesc(type_).c_str());
         }
         return getVal<T>(0);
     }
@@ -171,50 +180,53 @@ struct Tensor {
     template<typename T>
     inline T* getPtr() const {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
-        if (getTensorType<T>() != type) {
+        if (getTensorType<T>() != type_) {
             FT_LOG_DEBUG("getPtr with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
-                         getNumpyTypeDesc(type).c_str());
+                         getNumpyTypeDesc(type_).c_str());
         }
-        return (T*)data;
+        return (T*)data_;
     }
 
     inline void* getPtrWithOffset(size_t offset) const {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
-        if (data == nullptr) {
-            return (void*)data;
+        if (data_ == nullptr) {
+            return (void*)data_;
         } else {
-            FT_CHECK_WITH_INFO(offset < size(), "offset is larger than buffer size");
-            return (void*)((char*)data + offset * Tensor::getTypeSize(type));
+            FT_CHECK_WITH_INFO(
+                offset < size(),
+                "offset " + std::to_string(offset) + " is larger than buffer size" + std::to_string(size())
+            );
+            return (void*)((char*)data_ + offset * Tensor::getTypeSize(type_));
         }
     }
 
     template<typename T>
     inline T* getPtrWithOffset(size_t offset) const {
         FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
-        if (getTensorType<T>() != type) {
+        if (getTensorType<T>() != type()) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
-                         getNumpyTypeDesc(type).c_str());
+                         getNumpyTypeDesc(type()).c_str());
         }
-        if (data == nullptr) {
-            return (T*)data;
+        if (data() == nullptr) {
+            return (T*)data();
         } else {
             FT_CHECK_WITH_INFO(offset < size(),
                                fmtstr("offset (%lu) is larger than buffer size (%lu)", offset, size()));
-            return ((T*)data) + offset;
+            return ((T*)data()) + offset;
         }
     }
 
     template<typename T>
     T max() const {
-        if (getTensorType<T>() != type) {
+        if (getTensorType<T>() != type()) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
-                         getNumpyTypeDesc(type).c_str());
+                         getNumpyTypeDesc(type()).c_str());
         }
-        FT_CHECK_WITH_INFO(shape.size() > 0 && data != nullptr, "Should be a non-empty tensor.");
-        FT_CHECK_WITH_INFO(where == MEMORY_CPU || where == MEMORY_CPU_PINNED,
+        FT_CHECK_WITH_INFO(shape().size() > 0 && data() != nullptr, "Should be a non-empty tensor.");
+        FT_CHECK_WITH_INFO(where_ == MEMORY_CPU || where_ == MEMORY_CPU_PINNED,
                            "max() supports MEMORY_CPU or MEMORY_CPU_PINNED tensor.");
         size_t max_idx = 0;
         T      max_val = getVal<T>(max_idx);
@@ -230,13 +242,13 @@ struct Tensor {
 
     template<typename T>
     T min() const {
-        if (getTensorType<T>() != type) {
+        if (getTensorType<T>() != type()) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
-                         getNumpyTypeDesc(type).c_str());
+                         getNumpyTypeDesc(type()).c_str());
         }
-        FT_CHECK_WITH_INFO(shape.size() > 0 && data != nullptr, "Should be a non-empty tensor.");
-        FT_CHECK_WITH_INFO(where == MEMORY_CPU || where == MEMORY_CPU_PINNED,
+        FT_CHECK_WITH_INFO(shape().size() > 0 && data() != nullptr, "Should be a non-empty tensor.");
+        FT_CHECK_WITH_INFO(where_ == MEMORY_CPU || where_ == MEMORY_CPU_PINNED,
                            "min() supports MEMORY_CPU or MEMORY_CPU_PINNED tensor.");
         size_t min_idx = 0;
         T      min_val = getVal<T>(min_idx);
@@ -252,13 +264,13 @@ struct Tensor {
 
     template<typename T>
     T any(T val) const {
-        if (getTensorType<T>() != type) {
+        if (getTensorType<T>() != type()) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
-                         getNumpyTypeDesc(type).c_str());
+                         getNumpyTypeDesc(type()).c_str());
         }
-        FT_CHECK_WITH_INFO(shape.size() > 0 && data != nullptr, "Should be a non-empty tensor.");
-        FT_CHECK_WITH_INFO(where == MEMORY_CPU || where == MEMORY_CPU_PINNED,
+        FT_CHECK_WITH_INFO(shape().size() > 0 && data() != nullptr, "Should be a non-empty tensor.");
+        FT_CHECK_WITH_INFO(where_ == MEMORY_CPU || where_ == MEMORY_CPU_PINNED,
                            "any() supports MEMORY_CPU or MEMORY_CPU_PINNED tensor.");
         for (size_t i = 0; i < size(); ++i) {
             if (getVal<T>(i) == val) {
@@ -270,13 +282,13 @@ struct Tensor {
 
     template<typename T>
     T all(T val) const {
-        if (getTensorType<T>() != type) {
+        if (getTensorType<T>() != type()) {
             FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
                          getNumpyTypeDesc(getTensorType<T>()).c_str(),
-                         getNumpyTypeDesc(type).c_str());
+                         getNumpyTypeDesc(type()).c_str());
         }
-        FT_CHECK_WITH_INFO(shape.size() > 0 && data != nullptr, "Should be a non-empty tensor.");
-        FT_CHECK_WITH_INFO(where == MEMORY_CPU || where == MEMORY_CPU_PINNED,
+        FT_CHECK_WITH_INFO(shape().size() > 0 && data() != nullptr, "Should be a non-empty tensor.");
+        FT_CHECK_WITH_INFO(where_ == MEMORY_CPU || where_ == MEMORY_CPU_PINNED,
                            "all() supports MEMORY_CPU or MEMORY_CPU_PINNED tensor.");
         for (size_t i = 0; i < size(); ++i) {
             if (getVal<T>(i) != val) {
@@ -288,7 +300,7 @@ struct Tensor {
 
     void updateShape(size_t idx, size_t val) {
         // TODO: find a better way to update the shape
-        std::vector<size_t>& shape_ref = const_cast<std::vector<size_t>&>(shape);
+        std::vector<size_t>& shape_ref = const_cast<std::vector<size_t>&>(shape_);
         shape_ref[idx]                 = val;
     }
 
@@ -312,8 +324,8 @@ private:
     static int  parseNpyHeader(FILE*& f_ptr, uint32_t header_len, DataType& type, std::vector<size_t>& shape);
 
 private:
-    bool                 owned;
-    std::shared_ptr<int> ref_counter;
+    bool                 owned_;
+    std::shared_ptr<int> ref_counter_;
 };
 
 class TensorMap {
@@ -321,7 +333,7 @@ private:
     std::unordered_map<std::string, Tensor> tensor_map_;
 
     inline bool isValid(const Tensor& tensor) {
-        return tensor.size() > 0 && tensor.data != nullptr;
+        return tensor.size() > 0 && tensor.data_ != nullptr;
     }
 
 public:

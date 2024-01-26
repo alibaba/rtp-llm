@@ -209,13 +209,13 @@ void BaseBeamSearchLayer<T>::forward(TensorMap* output_tensors, TensorMap* input
 
     FT_CHECK(input_tensors->size() >= 7);
     FT_CHECK(output_tensors->size() >= 5);
-    const int batch_size = output_tensors->at("output_ids").shape[1];
-    const int beam_width = output_tensors->at("output_ids").shape[2];
+    const int batch_size = output_tensors->at("output_ids").shape()[1];
+    const int beam_width = output_tensors->at("output_ids").shape()[2];
     allocateBuffer(batch_size, beam_width);
 
     const int step             = input_tensors->at("step").getVal<int>();
     const int ite              = input_tensors->at("ite").getVal<int>();
-    const int local_batch_size = input_tensors->at("logits").shape[0];
+    const int local_batch_size = input_tensors->at("logits").shape()[0];
 
     const float temperature    = input_tensors->getVal<float>("temperature", 1.0f);
     const T*    embedding_bias = input_tensors->getPtr<const T>("embedding_bias", nullptr);
@@ -262,7 +262,7 @@ void BaseBeamSearchLayer<T>::forward(TensorMap* output_tensors, TensorMap* input
     invokeSoftMax(output_tensors, input_tensors);
 
     if (beam_width > 1) {
-        const int max_seq_len = output_tensors->at("output_ids").shape[0];
+        const int max_seq_len = output_tensors->at("output_ids").shape()[0];
 
         update_indir_cache_kernelLauncher(
             output_tensors->at("tgt_cache_indirection").getPtr<int>(),

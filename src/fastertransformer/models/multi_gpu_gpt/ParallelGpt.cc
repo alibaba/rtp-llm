@@ -117,7 +117,7 @@ void ParallelGpt<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num,
         allocator_->reMalloc(expert_for_source_row_, sizeof(int) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num), false));
     fc2_result_ = reinterpret_cast<T*>(
         allocator_->malloc(sizeof(T) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num * hidden_units), false));
-    
+
     is_allocate_buffer_ = true;
 }
 
@@ -236,12 +236,12 @@ void ParallelGpt<T>::convert_to_block_pointers(TensorMap* output_tensors,
     Tensor k_cache         = output_tensors->at("key_cache");
     Tensor v_cache         = output_tensors->at("value_cache");
     size_t kv_cache_offset = 1;
-    for (auto t = k_cache.shape.begin() + 1; t != k_cache.shape.end(); ++t) {
+    for (auto t = k_cache.shape().begin() + 1; t != k_cache.shape().end(); ++t) {
         kv_cache_offset *= *t;
     };
 
     Tensor block_index_map      = input_tensors->at("block_index_map");
-    uint   max_blocks_per_batch = (uint)(input_tensors->at("block_index_map").shape[1]);
+    uint   max_blocks_per_batch = (uint)(input_tensors->at("block_index_map").shape()[1]);
     int*   block_index          = block_index_map.getPtr<int>();
     block_pointers_vector_.clear();
     block_scale_pointers_vector_.clear();
@@ -253,7 +253,7 @@ void ParallelGpt<T>::convert_to_block_pointers(TensorMap* output_tensors,
         block_scale_pointers_vector_.resize(params_.num_layers_ * total_batch_size * max_blocks_per_batch * 2);
     }
 
-    const size_t index_offset = kv_cache_offset / k_cache.shape[1] * size_of_type;
+    const size_t index_offset = kv_cache_offset / k_cache.shape()[1] * size_of_type;
     for (uint l = 0; l < params_.num_layers_; l++) {
         const size_t cache_offset  = (l - getFirstLayerParallelId()) * kv_cache_offset;
         char*        layer_k_cache = reinterpret_cast<char*>(k_cache.getPtrWithOffset(cache_offset));
@@ -273,7 +273,7 @@ void ParallelGpt<T>::convert_to_block_pointers(TensorMap* output_tensors,
         for (uint l = 0; l < params_.num_layers_; l++) {
             const size_t cache_offset        = (l - getFirstLayerParallelId()) * kv_cache_offset;
             const size_t scale_cache_offset  = cache_offset / params_.size_per_head_;
-            const size_t scale_index_offset  = kv_cache_offset / params_.size_per_head_ / k_cache.shape[1];
+            const size_t scale_index_offset  = kv_cache_offset / params_.size_per_head_ / k_cache.shape()[1];
             float*       layer_k_scale_cache = k_cache_scale.getPtrWithOffset<float>(scale_cache_offset);
             float*       layer_v_scale_cache = v_cache_scale.getPtrWithOffset<float>(scale_cache_offset);
             const size_t stride = total_batch_size * 2 * max_blocks_per_batch;
@@ -319,13 +319,13 @@ void ParallelGpt<T>::forward(TensorMap*                                         
 
     Tensor decoder_input_tensor = input_tensors->at("decoder_input");
     size_t hidden_units         = params_.size_per_head_ * params_.head_num_;
-    FT_CHECK(decoder_input_tensor.shape[1] == hidden_units);
-    const size_t total_batch_size = input_tensors->at("input_lengths").shape[0];
+    FT_CHECK(decoder_input_tensor.shape()[1] == hidden_units);
+    const size_t total_batch_size = input_tensors->at("input_lengths").shape()[0];
     size_t       batch_size       = 0;
     if (input_tensors->isExist("sequence_lengths")) {
-        batch_size = input_tensors->at("sequence_lengths").shape[0];
+        batch_size = input_tensors->at("sequence_lengths").shape()[0];
     }
-    const size_t   h_token_num = decoder_input_tensor.shape[0];
+    const size_t   h_token_num = decoder_input_tensor.shape()[0];
     const DataType data_type   = getTensorType<T>();
 
     PUSH_RANGE(stream_, "buffer allocation");
@@ -342,7 +342,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     size_t step             = 0;
     if (context_batch_size) {
         max_context_seq_length = *std::max_element(input_lengths + batch_size, input_lengths + total_batch_size);
-        FT_CHECK(input_tensors->at("attention_mask").shape[0] == context_batch_size);
+        FT_CHECK(input_tensors->at("attention_mask").shape()[0] == context_batch_size);
     }
     if (batch_size) {
         int* sequence_lengths = input_tensors->getPtr<int>("sequence_lengths");
@@ -371,16 +371,16 @@ void ParallelGpt<T>::forward(TensorMap*                                         
 
     // The resize of the key cache buffer by
     //   (local_batch_size, local_head_num, params_.size_per_head_ // x, max_seq_len, x) where x is constant.
-    std::vector<size_t> self_k_cache_size(k_cache.shape.begin() + 1, k_cache.shape.end());
+    std::vector<size_t> self_k_cache_size(k_cache.shape().begin() + 1, k_cache.shape().end());
 
     // The resize of the value cache buffer by
     //   (local_batch_size, local_head_num, max_seq_len, params_.size_per_head_).
-    std::vector<size_t> self_v_cache_size(v_cache.shape.begin() + 1, v_cache.shape.end());
+    std::vector<size_t> self_v_cache_size(v_cache.shape().begin() + 1, v_cache.shape().end());
     size_t              kv_cache_offset = 1;
-    for (auto t = k_cache.shape.begin() + 1; t != k_cache.shape.end(); ++t) {
+    for (auto t = k_cache.shape().begin() + 1; t != k_cache.shape().end(); ++t) {
         kv_cache_offset *= *t;
     };
-    uint   max_blocks_per_batch = (uint)(input_tensors->at("block_index_map").shape[1]);
+    uint   max_blocks_per_batch = (uint)(input_tensors->at("block_index_map").shape()[1]);
     size_t context_h_token_num = h_token_num - batch_size;
     if (context_batch_size) {
         PUSH_RANGE(stream_, "remove padding");
@@ -493,7 +493,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                 "attention_mask",
                 Tensor{MEMORY_GPU,
                        data_type,
-                       {context_batch_size, 1, attention_tensor.shape[1], attention_tensor.shape[2]},
+                       {context_batch_size, 1, attention_tensor.shape()[1], attention_tensor.shape()[2]},
                        attention_ptr});
             attention_input_tensors.insert("padding_offset",
                                            Tensor{MEMORY_GPU, TYPE_INT32, {context_h_token_num}, padding_offset_});

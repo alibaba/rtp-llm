@@ -217,10 +217,10 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     FT_CHECK(input_tensors->isExist("sequence_lengths"));
-    // FT_CHECK(output_tensors->at("key_cache").shape.size() == 5 || output_tensors->at("key_cache").shape.size() == 3);
-    // FT_CHECK(output_tensors->at("value_cache").shape.size() == 4
-    //          || output_tensors->at("value_cache").shape.size() == 3);
-    allocateBuffer(input_tensors->at("input_query").shape[0]);
+    // FT_CHECK(output_tensors->at("key_cache").shape().size() == 5 || output_tensors->at("key_cache").shape().size() == 3);
+    // FT_CHECK(output_tensors->at("value_cache").shape().size() == 4
+    //          || output_tensors->at("value_cache").shape().size() == 3);
+    allocateBuffer(input_tensors->at("input_query").shape()[0]);
 
     const T*    attention_input         = input_tensors->getPtr<T>("input_query");
     const int*  sequence_lengths        = input_tensors->getPtr<int>("sequence_lengths");
@@ -231,7 +231,7 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
     const int   layer_id                = input_tensors->getVal<int>("layer_id");
     const T*    relative_attention_bias = input_tensors->getPtr<T>("relative_attention_bias", nullptr);
     const int   relative_attention_bias_stride =
-        input_tensors->isExist("relative_attention_bias") ? input_tensors->at("relative_attention_bias").shape[3] : 0;
+        input_tensors->isExist("relative_attention_bias") ? input_tensors->at("relative_attention_bias").shape()[3] : 0;
     const T*   linear_bias_slopes = input_tensors->getPtr<T>("linear_bias_slopes", nullptr);
 
     T* attention_out = output_tensors->getPtr<T>("hidden_features");
@@ -240,9 +240,9 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
     auto& key_cache_tensor   = output_tensors->at("key_cache");
     auto& value_cache_tensor = output_tensors->at("value_cache");
 
-    const int batch_size     = input_tensors->at("input_query").shape[0];
-    const int beam_width     = cache_indir != nullptr ? input_tensors->at("cache_indirection").shape[1] : 1;
-    const int memory_max_len = output_tensors->at("key_cache").shape[2];
+    const int batch_size     = input_tensors->at("input_query").shape()[0];
+    const int beam_width     = cache_indir != nullptr ? input_tensors->at("cache_indirection").shape()[1] : 1;
+    const int memory_max_len = output_tensors->at("key_cache").shape()[2];
     const int* d_prefix_prompt_lengths  = input_tensors->getPtr<int>("d_prefix_prompt_lengths", nullptr);
     const int  max_prefix_prompt_length = input_tensors->getVal<int>("max_prefix_prompt_length", 0);
     const bool count_prefix_length      = input_tensors->getVal<bool>("count_prefix_length", false);
@@ -258,7 +258,7 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
 
     int max_blocks_per_batch = 0;
     if (block_index_map) {
-        max_blocks_per_batch = input_tensors->at("block_index_map").shape[1];
+        max_blocks_per_batch = input_tensors->at("block_index_map").shape()[1];
     }
     const int m_padded = 8 * div_up(batch_size, 8);
 #ifdef SPARSITY_ENABLED
@@ -343,12 +343,12 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
         stream_);
     sync_check_cuda_error();
 
-    // assert(key_cache_tensor.shape.size() == 6);
-    // assert(value_cache_tensor.shape.size() == 5);
-    // auto& kc_shape = key_cache_tensor.shape;
+    // assert(key_cache_tensor.shape().size() == 6);
+    // assert(value_cache_tensor.shape().size() == 5);
+    // auto& kc_shape = key_cache_tensor.shape();
     // print_kv_cache(layer_id, "key_cache", key_cache, kc_shape[0],
     //     kc_shape[1], kc_shape[2], kc_shape[3], kc_shape[4], kc_shape[5]);
-    // auto& vc_shape = value_cache_tensor.shape;
+    // auto& vc_shape = value_cache_tensor.shape();
     // print_kv_cache(layer_id, "value_cache", value_cache, 1, vc_shape[0],
     //     vc_shape[1], vc_shape[2], vc_shape[3], vc_shape[4]);
 

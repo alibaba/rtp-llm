@@ -63,8 +63,8 @@ void LongformerAttentionLayer<T>::forward(std::vector<Tensor>* output_tensors, c
 {
     allocateBuffer();
 
-    const int batch_size = input_tensors->at(0).shape[0];
-    const int seq_len    = input_tensors->at(0).shape[2];
+    const int batch_size = input_tensors->at(0).shape()[0];
+    const int seq_len    = input_tensors->at(0).shape()[2];
     FT_CHECK(seq_len % local_attn_window_size_ == 0);
     FT_CHECK(size_per_head_ == 64);
 
@@ -75,18 +75,18 @@ void LongformerAttentionLayer<T>::forward(std::vector<Tensor>* output_tensors, c
     const int local_attn_head_tail_gemm_strides_count = batch_size * head_num_;
     const int local_attn_middle_gemm_strides_count    = (seq_len / local_attn_window_size_) - 2;
 
-    const void* q                 = input_tensors->at(0).data;
-    const void* k                 = input_tensors->at(1).data;
-    const void* v                 = input_tensors->at(2).data;
-    const void* qg                = input_tensors->at(3).data;
-    const void* kg                = input_tensors->at(4).data;
-    const void* vg                = input_tensors->at(5).data;
+    const void* q                 = input_tensors->at(0).data();
+    const void* k                 = input_tensors->at(1).data();
+    const void* v                 = input_tensors->at(2).data();
+    const void* qg                = input_tensors->at(3).data();
+    const void* kg                = input_tensors->at(4).data();
+    const void* vg                = input_tensors->at(5).data();
     const void* local_attn_mask   = input_tensors->at(6).getPtr<const T>();
     const void* global_attn_mask  = input_tensors->at(7).getPtr<const T>();
     const int*  global_idx        = input_tensors->at(8).getPtr<const int>();
     const int*  global_token_nums = input_tensors->at(9).getPtr<const int>();
 
-    void* output = (void*)output_tensors->at(0).data;
+    void* output = (void*)output_tensors->at(0).data();
 
     int global_token_nums_cpu[batch_size];
 

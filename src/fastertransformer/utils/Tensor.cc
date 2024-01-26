@@ -35,66 +35,91 @@ namespace fastertransformer {
 
 Tensor::Tensor():
     // a none tensor.
-    where(MEMORY_CPU),
-    type(TYPE_INVALID),
-    shape({}),
-    data(nullptr),
-    owned(false) {}
+    where_(MEMORY_CPU),
+    type_(TYPE_INVALID),
+    shape_({}),
+    data_(nullptr),
+    owned_(false) {}
 
 Tensor::Tensor(const MemoryType          _where,
                const DataType            _type,
                const std::vector<size_t> _shape,
                IAllocator*               _allocator,
                const bool                is_set_zero):
-    where(_where),
-    type(_type),
-    shape(_shape),
-    data(nullptr),
-    allocator(_allocator),
-    owned(true),
-    ref_counter(std::make_shared<int>(1)) {
+    where_(_where),
+    type_(_type),
+    shape_(_shape),
+    data_(nullptr),
+    allocator_(_allocator),
+    owned_(true),
+    ref_counter_(std::make_shared<int>(1)) {
     const size_t allocBytes =
-        std::accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>()) * Tensor::getTypeSize(type);
-    if (where == MEMORY_GPU) {
+        std::accumulate(shape_.begin(), shape_.end(), (size_t)1, std::multiplies<size_t>()) * Tensor::getTypeSize(type_);
+    if (where_ == MEMORY_GPU) {
         // TODO(wangyin.yx): Self owned tensor should use Allocator::<AllocatorType::CUDA> to allocate memory.
         // check_cuda_error(allocator->reMalloc(data, sizeBytes(), is_set_zero));
         // check_cuda_error(cudaMalloc(&data, sizeBytes()));
-        data = allocator->reMalloc(data, allocBytes, is_set_zero);
+        data_ = allocator_->reMalloc(data_, allocBytes, is_set_zero);
     } else {
-        data = malloc(allocBytes);
+        data_ = malloc(allocBytes);
     }
 }
 
 Tensor::Tensor(const MemoryType _where, const DataType _type, const std::vector<size_t> _shape, const void* _data):
-    where(_where), type(_type), shape(_shape), data(const_cast<void*>(_data)), owned(false), ref_counter(nullptr) {}
+    where_(_where),
+    type_(_type),
+    shape_(_shape),
+    data_(const_cast<void*>(_data)),
+    owned_(false),
+    ref_counter_(nullptr) {}
 
 Tensor::~Tensor() {
-    if (owned && data != nullptr && ref_counter.use_count() == 1) {
-        if (where == MEMORY_GPU) {
+    if (owned_ && data_ != nullptr && ref_counter_.use_count() == 1) {
+        if (where_ == MEMORY_GPU) {
             // check_cuda_error(cudaFree((void*)data));
-            allocator->free((void**)(&data));
+            allocator_->free((void**)(&data_));
         } else {
-            free((void*)data);
+            free((void*)data_);
         }
     }
 }
 
+MemoryType Tensor::where() const {
+    return where_;
+}
+
+DataType Tensor::type() const {
+    return type_;
+}
+
+const std::vector<size_t>& Tensor::shape() const {
+    return shape_;
+}
+
+void* Tensor::data() const {
+    return data_;
+}
+
+IAllocator* Tensor::allocator() const {
+    return allocator_;
+}
+
 bool Tensor::operator==(const Tensor& tensor) const {
-    if (where != tensor.where || type != tensor.type || shape != tensor.shape) {
+    if (where() != tensor.where() || type() != tensor.type() || shape() != tensor.shape()) {
         return false;
     }
 
-    if (where == MEMORY_GPU) {
+    if (where() == MEMORY_GPU) {
         void* data_cpu = malloc(sizeBytes());
-        cudaMemcpy(data_cpu, data, sizeBytes(), cudaMemcpyDeviceToHost);
+        cudaMemcpy(data_cpu, data(), sizeBytes(), cudaMemcpyDeviceToHost);
         void* data_cpu2 = malloc(sizeBytes());
-        cudaMemcpy(data_cpu2, tensor.data, sizeBytes(), cudaMemcpyDeviceToHost);
+        cudaMemcpy(data_cpu2, tensor.data(), sizeBytes(), cudaMemcpyDeviceToHost);
         bool ret = memcmp(data_cpu, data_cpu2, sizeBytes()) == 0;
         free(data_cpu);
         free(data_cpu2);
         return ret;
     } else {
-        return memcmp(data, tensor.data, sizeBytes()) == 0;
+        return memcmp(data(), tensor.data(), sizeBytes()) == 0;
     }
 }
 
@@ -188,14 +213,14 @@ Tensor Tensor::loadNpy(const std::string& npy_file, const MemoryType where) {
     auto tensor = Tensor(where, type, shape, (void*)nullptr);
 
     const size_t size     = tensor.size();
-    void*        data_cpu = (where == MEMORY_CPU) ? const_cast<void*>(tensor.data) : malloc(tensor.sizeBytes());
+    void*        data_cpu = (where == MEMORY_CPU) ? const_cast<void*>(tensor.data()) : malloc(tensor.sizeBytes());
     void*        data     = data_cpu;
 
     size_t n_elems = fread(data_cpu, Tensor::getTypeSize(type), size, f_ptr);
     FT_CHECK_WITH_INFO(n_elems == size, "reading tensor failed");
 
     if (where == MEMORY_GPU) {
-        cudaMemcpy(const_cast<void*>(tensor.data), data_cpu, tensor.sizeBytes(), cudaMemcpyHostToDevice);
+        cudaMemcpy(const_cast<void*>(tensor.data()), data_cpu, tensor.sizeBytes(), cudaMemcpyHostToDevice);
         free(data_cpu);
     }
 
@@ -204,20 +229,20 @@ Tensor Tensor::loadNpy(const std::string& npy_file, const MemoryType where) {
 }
 
 size_t Tensor::size() const {
-    if (data == nullptr || shape.size() == 0) {
+    if (data_ == nullptr || shape_.size() == 0) {
         return 0;
     }
-    return std::accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>());
+    return std::accumulate(shape_.begin(), shape_.end(), (size_t)1, std::multiplies<size_t>());
 }
 
 size_t Tensor::sizeBytes() const {
-    return size() * Tensor::getTypeSize(type);
+    return size() * Tensor::getTypeSize(type());
 }
 
 std::string Tensor::whereToString() const {
     static const std::unordered_map<MemoryType, std::string> mem_to_string{
         {MEMORY_CPU, "CPU"}, {MEMORY_CPU_PINNED, "CPU_PINNED"}, {MEMORY_GPU, "GPU"}};
-    return mem_to_string.at(where);
+    return mem_to_string.at(where());
 }
 
 std::string Tensor::toString() const {
@@ -244,9 +269,9 @@ std::string Tensor::toString() const {
     };
     return fmtstr("Tensor[where=%s, type=%s, shape=%s, data=%p]",
                   memtype_str.c_str(),
-                  type_to_string.at(type).c_str(),
-                  vec2str(shape).c_str(),
-                  data);
+                  type_to_string.at(type()).c_str(),
+                  vec2str(shape()).c_str(),
+                  data());
 }
 
 DataType Tensor::typeFromNumpyDesc(std::string type) {
@@ -316,14 +341,14 @@ std::string Tensor::getNumpyTypeDesc(DataType type) const {
 
 void Tensor::saveNpy(const std::string& filename) const {
     // Save tensor to NPY 1.0 format (see https://numpy.org/neps/nep-0001-npy-format.html)
-    void*  cpu_data     = (void*)data;
+    void*  cpu_data     = (void*)data();
     bool   is_data_temp = false;
     size_t tensor_size  = size();
-    if (where == MemoryType::MEMORY_GPU) {
-        cpu_data     = malloc(tensor_size * Tensor::getTypeSize(type));
+    if (where() == MemoryType::MEMORY_GPU) {
+        cpu_data     = malloc(tensor_size * Tensor::getTypeSize(type()));
         is_data_temp = true;
         cudaDeviceSynchronize();
-        cudaMemcpy(cpu_data, data, tensor_size * Tensor::getTypeSize(type), cudaMemcpyDeviceToHost);
+        cudaMemcpy(cpu_data, data_, tensor_size * Tensor::getTypeSize(type()), cudaMemcpyDeviceToHost);
     }
 
     const char    magic[]   = "\x93"
@@ -332,10 +357,10 @@ void Tensor::saveNpy(const std::string& filename) const {
     const uint8_t npy_minor = 0;
 
     std::stringstream header_stream;
-    header_stream << "{'descr': '" << getNumpyTypeDesc(type) << "', 'fortran_order': False, 'shape': (";
-    for (size_t i = 0; i < shape.size(); ++i) {
-        header_stream << shape[i];
-        if (i + 1 < shape.size() || shape.size() == 1) {
+    header_stream << "{'descr': '" << getNumpyTypeDesc(type()) << "', 'fortran_order': False, 'shape': (";
+    for (size_t i = 0; i < shape().size(); ++i) {
+        header_stream << shape()[i];
+        if (i + 1 < shape().size() || shape().size() == 1) {
             header_stream << ", ";
         }
     }
@@ -356,7 +381,7 @@ void Tensor::saveNpy(const std::string& filename) const {
     fwrite(&npy_minor, sizeof(uint8_t), 1, f_ptr);
     fwrite(&header_len, sizeof(uint16_t), 1, f_ptr);
     fwrite(header.c_str(), sizeof(char), header_len, f_ptr);
-    fwrite(cpu_data, Tensor::getTypeSize(type), tensor_size, f_ptr);
+    fwrite(cpu_data, Tensor::getTypeSize(type()), tensor_size, f_ptr);
 
     fclose(f_ptr);
 
@@ -366,7 +391,7 @@ void Tensor::saveNpy(const std::string& filename) const {
 }
 
 Tensor Tensor::slice(std::vector<size_t> shape, size_t offset) const {
-    if (this->data != nullptr) {
+    if (this->data() != nullptr) {
         size_t n_elts        = this->size();
         size_t n_sliced_elts = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
         FT_CHECK_WITH_INFO(
@@ -375,7 +400,7 @@ Tensor Tensor::slice(std::vector<size_t> shape, size_t offset) const {
                    n_sliced_elts + offset,
                    n_elts));
     }
-    return Tensor(this->where, this->type, shape, this->getPtrWithOffset(offset));
+    return Tensor(this->where(), this->type(), shape, this->getPtrWithOffset(offset));
 }
 
 TensorMap::TensorMap(const std::unordered_map<std::string, Tensor>& tensor_map) {

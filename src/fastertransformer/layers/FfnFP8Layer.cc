@@ -35,8 +35,8 @@ void FfnFP8Layer<T1, T2>::forward(TensorMap*                  output_tensors,
     FT_CHECK(input_tensors->size() == 1);
     FT_CHECK(output_tensors->size() == 1);
 
-    const int m                  = input_tensors->at("input_hidden_state").shape[0];
-    const int d_model            = input_tensors->at("input_hidden_state").shape[1];
+    const int m                  = input_tensors->at("input_hidden_state").shape()[0];
+    const int d_model            = input_tensors->at("input_hidden_state").shape()[1];
     const T1* input_hidden_state = input_tensors->at("input_hidden_state").getPtr<T1>();
     Tensor    output_tensor      = output_tensors->at("output_hidden_state");
     allocateBuffer(m);
@@ -256,7 +256,7 @@ void FfnFP8Layer<T1, T2>::forward(TensorMap*                  output_tensors,
         if (fp8_mode_ == 1) {
             const float alpha = 1.0f;
             const float beta  = 0.0f;
-            if (output_tensor.type == TYPE_BF16) {
+            if (output_tensor.type() == TYPE_BF16) {
                 reinterpret_cast<cublasFP8MMWrapper*>(cublas_wrapper_)
                     ->Gemm(output_tensor.getPtr<T2>(),
                            (int)1,
@@ -273,7 +273,7 @@ void FfnFP8Layer<T1, T2>::forward(TensorMap*                  output_tensors,
                            ffn_weights->output_weight.input_scale,
                            ffn_weights->identity_scale,
                            stream_);
-            } else if (output_tensor.type == TYPE_FP8_E4M3) {
+            } else if (output_tensor.type() == TYPE_FP8_E4M3) {
                 const float alpha = 1.0f;
                 const float beta  = 0.0f;
                 reinterpret_cast<cublasFP8MMWrapper*>(cublas_wrapper_)
@@ -297,7 +297,7 @@ void FfnFP8Layer<T1, T2>::forward(TensorMap*                  output_tensors,
                 FT_CHECK(false);
             }
         } else if (fp8_mode_ == 2) {
-            if (output_tensor.type == TYPE_BF16) {
+            if (output_tensor.type() == TYPE_BF16) {
                 const float alpha = 1.0f;
                 const float beta  = 0.0f;
                 reinterpret_cast<cublasFP8MMWrapper*>(cublas_wrapper_)
@@ -316,7 +316,7 @@ void FfnFP8Layer<T1, T2>::forward(TensorMap*                  output_tensors,
                            ffn_weights->output_weight.input_scale,
                            ffn_weights->output_weight.weight_scale,
                            stream_);
-            } else if (output_tensor.type == TYPE_FP8_E4M3) {
+            } else if (output_tensor.type() == TYPE_FP8_E4M3) {
                 // It looks like conv1x1Gemm does not bring better performance for this gemm
                 // because the k dimension of this gemm is large
                 // #ifdef USE_QGMMA

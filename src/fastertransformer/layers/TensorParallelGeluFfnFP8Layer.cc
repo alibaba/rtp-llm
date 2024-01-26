@@ -24,8 +24,8 @@ void TensorParallelGeluFfnFP8Layer<T1, T2>::forward(TensorMap*                  
                                                     const FfnFP8Weight<T1, T2>* ffn_weights) {
     GeluFfnFP8Layer<T1, T2>::forward(output_tensors, input_tensors, ffn_weights);
 
-    const size_t token_num    = output_tensors->at("output_hidden_state").shape[0];
-    const size_t hidden_units = output_tensors->at("output_hidden_state").shape[1];
+    const size_t token_num    = output_tensors->at("output_hidden_state").shape()[0];
+    const size_t hidden_units = output_tensors->at("output_hidden_state").shape()[1];
 
     T2* ffn_out = output_tensors->at("output_hidden_state").getPtr<T2>();
     if (tensor_para_.world_size_ > 1) {

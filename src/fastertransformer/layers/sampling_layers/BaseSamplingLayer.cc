@@ -131,20 +131,20 @@ void BaseSamplingLayer<T>::setup(const size_t batch_size, const size_t beam_widt
     Tensor runtime_top_k = runtime_args->isExist("runtime_top_k") ? runtime_args->at("runtime_top_k") : Tensor();
     Tensor runtime_top_p = runtime_args->isExist("runtime_top_p") ? runtime_args->at("runtime_top_p") : Tensor();
     if (last_max_batch_size_ < batch_size) {
-        allocateBuffer(batch_size, runtime_top_k, runtime_top_p);   
+        allocateBuffer(batch_size, runtime_top_k, runtime_top_p);
         last_max_batch_size_ = batch_size;
-    }        
+    }
 
     // If runtime argument has single random seed, using this random seed to initialize the random table of all
     // sentences. If the argument has [batch_size] random seeds, initializing the random table by different random seeds
     // respectively. If no random seed, initialize the random table of all sentences by 0 directly.
     if (runtime_args->isExist("random_seed")) {
         Tensor random_seeds = runtime_args->at("random_seed");
-        FT_CHECK_WITH_INFO(random_seeds.shape.size() == 1
+        FT_CHECK_WITH_INFO(random_seeds.shape().size() == 1
                                && (random_seeds.size() == 1 || random_seeds.size() == batch_size),
-                           fmtstr("random_seeds must be of shape [1] or [batch_size(%ld)], got random_seeds.shape=%s",
+                           fmtstr("random_seeds must be of shape() [1] or [batch_size(%ld)], got random_seeds.shape()=%s",
                                   batch_size,
-                                  vec2str(random_seeds.shape).c_str()));
+                                  vec2str(random_seeds.shape()).c_str()));
         if (random_seeds.size() == 1) {
             invokeCurandInitialize(curandstate_buf_, batch_size, random_seeds.getVal<unsigned long long>(), stream_);
             sync_check_cuda_error();
@@ -283,8 +283,8 @@ void BaseSamplingLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_t
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     FT_CHECK(input_tensors->size() >= 4);
     FT_CHECK(output_tensors->size() >= 1);
-    const int batch_size       = output_tensors->at("output_ids").shape[1];
-    const int local_batch_size = input_tensors->at("logits").shape[0];
+    const int batch_size       = output_tensors->at("output_ids").shape()[1];
+    const int local_batch_size = input_tensors->at("logits").shape()[0];
     const int step             = input_tensors->at("step").getVal<int>();
     const int ite              = input_tensors->at("ite").getVal<int>();
     const int max_input_length = input_tensors->at("max_input_length").getVal<int>();

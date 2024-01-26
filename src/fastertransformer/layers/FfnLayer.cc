@@ -62,12 +62,12 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
         moe_k   = input_tensors->at("moe_k").getVal<size_t>();
     }
 
-    bool use_ffn3 = ffn_weights->intermediate_weight2.int8_kernel != nullptr || 
+    bool use_ffn3 = ffn_weights->intermediate_weight2.int8_kernel != nullptr ||
                     ffn_weights->intermediate_weight2.kernel != nullptr;
 
-    allocateBuffer(input_tensors->at("ffn_input").shape[0], moe_k, use_moe, use_ffn3);
+    allocateBuffer(input_tensors->at("ffn_input").shape()[0], moe_k, use_moe, use_ffn3);
 
-    const int m             = input_tensors->at("ffn_input").shape[0];
+    const int m             = input_tensors->at("ffn_input").shape()[0];
     T*        output_tensor = output_tensors->at("ffn_output").getPtr<T>();
     const T*  input_tensor  = input_tensors->at("ffn_input").getPtr<const T>();
     const int layer_id      = input_tensors->getVal<int>("layer_id");
@@ -125,7 +125,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                               moe_gates_buf_,
                               expert_num_);
         print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_);
-        
+
         if (int8_mode_ == 0) {
 
             if (use_ffn3) {
@@ -254,7 +254,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
         is_sparse_head_ ? local_layer_inter_padding_size_[layer_id] : inter_padding_size_;
 
     PUSH_RANGE(stream_, "ffn_gemm_1");
-    int m_tmp = input_tensors->at("ffn_input").shape[0];
+    int m_tmp = input_tensors->at("ffn_input").shape()[0];
     if (m_tmp % 8 != 0) {
         m_tmp = (m_tmp / 8 + 1) * 8;
     }

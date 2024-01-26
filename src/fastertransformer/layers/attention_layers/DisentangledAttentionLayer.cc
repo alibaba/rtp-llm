@@ -36,8 +36,8 @@ void DisentangledAttentionLayer<T>::forward(TensorMap*                output_ten
     // If padding_offset.data is nullptr, then not remove padding
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    const size_t request_batch_size = input_tensors->at("attention_mask").shape[0];
-    const size_t request_seq_len    = input_tensors->at("attention_mask").shape[2];
+    const size_t request_batch_size = input_tensors->at("attention_mask").shape()[0];
+    const size_t request_seq_len    = input_tensors->at("attention_mask").shape()[2];
     const bool   output_attentions  = output_tensors->isExist("attentions");
     allocateBuffer(request_batch_size, request_seq_len);
 
@@ -47,7 +47,7 @@ void DisentangledAttentionLayer<T>::forward(TensorMap*                output_ten
     const T*   relative_embeddings = input_tensors->getPtr<T>("relative_embeddings");
     const int* padding_offset      = input_tensors->getPtr<int>("padding_offset", nullptr);
 
-    const int m = input_tensors->at("input_query").shape[0];  // total_valid_tokens
+    const int m = input_tensors->at("input_query").shape()[0];  // total_valid_tokens
     int       k = d_model_;                                   // hidden size
     int       n = hidden_units_;                              // num_heads * head_size
     int       s = attention_span_;                            // relative attention span ("k" in original paper)

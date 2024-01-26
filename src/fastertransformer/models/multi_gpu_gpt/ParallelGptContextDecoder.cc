@@ -82,8 +82,8 @@ void ParallelGptContextDecoder<T>::initialize()
                              custom_all_reduce_comm_,
                              enable_custom_all_reduce_));
 
-    norm_wrapper_.reset(new NormWrapper<T>(gpt_init_parameter_.layernorm_type_, 
-                                           gpt_init_parameter_.norm_type_, 
+    norm_wrapper_.reset(new NormWrapper<T>(gpt_init_parameter_.layernorm_type_,
+                                           gpt_init_parameter_.norm_type_,
                                            T(sqrt(2 * gpt_init_parameter_.num_layers_))));
 }
 
@@ -304,17 +304,17 @@ void ParallelGptContextDecoder<T>::forward(
 
     size_t hidden_units = gpt_init_parameter_.size_per_head_ * gpt_init_parameter_.head_num_;
     Tensor decoder_input_tensor = input_tensors->at("decoder_input");
-    FT_CHECK(decoder_input_tensor.shape[2] == hidden_units);
+    FT_CHECK(decoder_input_tensor.shape()[2] == hidden_units);
 
     // Request batch size
-    const size_t request_batch_size = decoder_input_tensor.shape[0];
+    const size_t request_batch_size = decoder_input_tensor.shape()[0];
     // Maybe compacted batch size.
     const size_t batch_size =
-        use_shared_contexts ? input_tensors->at("compact_idx").shape[0] : decoder_input_tensor.shape[0];
+        use_shared_contexts ? input_tensors->at("compact_idx").shape()[0] : decoder_input_tensor.shape()[0];
     // Request input length
-    const size_t seq_len = decoder_input_tensor.shape[1];
+    const size_t seq_len = decoder_input_tensor.shape()[1];
     // The maximum length of generation.
-    const size_t max_seq_len = output_tensors->at("value_cache").shape[3];
+    const size_t max_seq_len = output_tensors->at("value_cache").shape()[3];
 
     const DataType data_type = getTensorType<T>();
 
@@ -322,8 +322,8 @@ void ParallelGptContextDecoder<T>::forward(
 
     if (input_tensors->isExist("d_prefix_prompt_lengths")) {
         auto attention_mask_tensor = input_tensors->at("attention_mask");
-        int seq_len = attention_mask_tensor.shape[1];
-        int total_len = attention_mask_tensor.shape[2];
+        int seq_len = attention_mask_tensor.shape()[1];
+        int total_len = attention_mask_tensor.shape()[2];
         max_prefix_prompt_length = total_len - seq_len;
     }
 
@@ -361,12 +361,12 @@ void ParallelGptContextDecoder<T>::forward(
 
     // The resize of the key cache buffer by
     //   (local_batch_size, local_head_num, size_per_head // x, max_seq_len, x) where x is constant.
-    std::vector<size_t> self_k_cache_size(k_cache.shape.begin() + 2, k_cache.shape.end());
+    std::vector<size_t> self_k_cache_size(k_cache.shape().begin() + 2, k_cache.shape().end());
     self_k_cache_size.insert(self_k_cache_size.begin(), local_batch_size);
 
     // The resize of the value cache buffer by
     //   (local_batch_size, local_head_num, max_seq_len, size_per_head).
-    std::vector<size_t> self_v_cache_size(v_cache.shape.begin() + 2, v_cache.shape.end());
+    std::vector<size_t> self_v_cache_size(v_cache.shape().begin() + 2, v_cache.shape().end());
     self_v_cache_size.insert(self_v_cache_size.begin(), local_batch_size);
 
     if (use_shared_contexts) {
@@ -409,7 +409,7 @@ void ParallelGptContextDecoder<T>::forward(
                 PUSH_RANGE(stream_, "remove_padding");
                 const T* base_input =
                     (use_shared_contexts ? compact_decoder_features_ : decoder_input_tensor.getPtr<T>());
-            
+
                 invokeRemovePadding(decoder_layer_output_,
                                     base_input + ite * local_batch_size * seq_len * hidden_units,
                                     padding_offset_,
@@ -468,7 +468,7 @@ void ParallelGptContextDecoder<T>::forward(
             if (gpt_init_parameter_.layernorm_type_ == LayerNormType::pre_layernorm) {
                 print_bsd(l, "pre ln", decoder_normed_input_, request_batch_size, seq_len, hidden_units);
             }
-            
+
             if (pre_attn_ln) {
                     norm_wrapper_->preAttentionLayerNorm(attn_normed_input_,
                                                          decoder_input,
@@ -549,11 +549,11 @@ void ParallelGptContextDecoder<T>::forward(
             //     local_head_num_kv = gpt_init_parameter_.head_num_kv_ / tensor_para_.world_size_;
             // }
             size_t cache_layer_offset = l - getFirstLayerParallelId();
-            for (auto t = k_cache.shape.begin() + 1; t != k_cache.shape.end(); ++t) {
+            for (auto t = k_cache.shape().begin() + 1; t != k_cache.shape().end(); ++t) {
                 cache_layer_offset *= *t;
             };
             size_t ite_cache_offset = ite * local_batch_size;
-            for (auto t = k_cache.shape.begin() + 2; t != k_cache.shape.end(); ++t) {
+            for (auto t = k_cache.shape().begin() + 2; t != k_cache.shape().end(); ++t) {
                 ite_cache_offset *= *t;
             }
             size_t cache_offset = cache_layer_offset + ite_cache_offset;
@@ -595,7 +595,7 @@ void ParallelGptContextDecoder<T>::forward(
                                       v_cache_layer_,
                                       input_tensors->at("batch_to_compact_idx").getPtr<int>(),
                                       request_batch_size,  // batch_size (uncompact)
-                                      v_cache.shape[2],    // local_head_num
+                                      v_cache.shape()[2],    // local_head_num
                                       max_seq_len,
                                       seq_len,
                                       gpt_init_parameter_.size_per_head_,
