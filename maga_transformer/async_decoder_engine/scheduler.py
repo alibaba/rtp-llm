@@ -83,7 +83,7 @@ class Scheduler:
             for i in range(raw_query.query_count()):
                 query = self._gen_new_request(raw_query.get_tokens_id(i),
                                               raw_query.images[i], raw_query.tokenizer, raw_query.generate_config,
-                                              raw_query.get_adapter_name(i), lora_resource, not self.guarante_generate_mem)
+                                              raw_query.get_adapter_name(i), lora_resource)
                 queries.append(query)
         except Exception as e:
             [q.set_error(str(e)) for q in queries]

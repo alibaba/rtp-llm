@@ -102,7 +102,7 @@ class SchedulerTest(TestCase):
             using_hf_sampling=False)
         images = [[]]
 
-        queries = scheduler.put_requests_to_queue(
+        queries = scheduler.enqueue(
             RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         scheduler.get_batch_request()
         self.assertEqual(queries[0].error_info, "failed to malloc 8 blocks, only 7 blocks left")
