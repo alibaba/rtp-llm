@@ -108,11 +108,16 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 # 准备测试数据
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 
-# 起服务, 使用环境变量GUARANTE_GENERATE_MEM来保留足够的memory让query生成，避免缺少gpu mem报错,
+# 起服务
+# 使用环境变量GUARANTE_GENERATE_MEM来保留足够的memory让query生成，避免缺少gpu mem报错
+# WEIGHT_TYPE可以指定weights量化类型，可选int8, fp16, bf16, fp32
+# INT8_KV_CACHE 指定是否用int8 存储kv cache, 默认fp16
 export TOKENIZER_PATH=/path/to/tokenizer
 export CHECKPOINT_PATH=/path/to/model
 export FT_SERVER_TEST=1
 export GUARANTE_GENERATE_MEM=1
+export WEIGHT_TYPE=fp16
+export INT8_KV_CACHE=0
 python3 -m maga_transformer.start_server
 
 # 压测服务性能
