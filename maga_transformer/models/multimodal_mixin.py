@@ -13,9 +13,9 @@ class BaseImageEmbedding:
         raise NotImplementedError()
 
 class BaseVitWeights:
-    def __init__(self, **kwargs: Dict[str, Any]):
+    def __init__(self, vit_part: Dict[str, Any], with_prefix: bool = False):
         self.weight_names: List[str] = []
-        self._get_vit_params(**kwargs)
+        self._get_vit_params(vit_part, with_prefix)
     
     @property
     def ckpt_prefix(self) -> str:
@@ -25,9 +25,13 @@ class BaseVitWeights:
     def ft_prefix(self) -> str:
         return "self.visual."
     
-    def _get_vit_params(self, **kwargs: Dict[str, Any]):
-        for vit_name, vit in kwargs.items():
-            self.weight_names.extend([vit_name + '.' + w for w in vit.state_dict().keys()])
+    def _get_vit_params(self, vit_part: Dict[str, Any], with_prefix: bool = False):
+        if len(vit_part) >= 2 or with_prefix:
+            for vit_name, vit in vit_part.items():
+                self.weight_names.extend([vit_name + '.' + w for w in vit.state_dict().keys()])
+        else:
+            for _, vit in vit_part.items():
+                self.weight_names.extend(list(vit.state_dict().keys()))
 
 class BaseMultiModalWeightInfo:
     def __init__(self, config: GptInitModelParameters):

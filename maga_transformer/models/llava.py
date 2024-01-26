@@ -81,7 +81,7 @@ class Llava(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         self.visual = LlavaImageEmbedding(config.vit_related_params.config)
         self.nccl_op_ = NcclOp()
-        config.vit_related_params.vit_weights = BaseVitWeights(mm_projector=self.visual.mm_projector)
+        config.vit_related_params.vit_weights = BaseVitWeights({"mm_projector": self.visual.mm_projector}, True)
         Llama.__init__(self, config)
     
     @staticmethod

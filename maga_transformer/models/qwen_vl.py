@@ -27,7 +27,7 @@ class QwenVLImageEmbedding(BaseImageEmbedding):
 class QWen_VL(QWen, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         self.visual = QwenVLImageEmbedding(config.vit_related_params.config)
-        config.vit_related_params.vit_weights = QwenVLVitWeight(vit=self.visual.vit)
+        config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.visual.vit})
 
         QWen.__init__(self, config)
 
