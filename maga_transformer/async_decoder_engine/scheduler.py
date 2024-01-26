@@ -87,6 +87,7 @@ class Scheduler:
                 queries.append(query)
         except Exception as e:
             [q.set_error(str(e)) for q in queries]
+            [self._release_query_resource(q) for q in queries]
             raise e
         [self.wait_queries_.append(q) for q in queries]
         return queries
