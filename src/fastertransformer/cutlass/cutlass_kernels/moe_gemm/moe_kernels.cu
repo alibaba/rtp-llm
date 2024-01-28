@@ -591,7 +591,7 @@ CutlassMoeFCRunner<T, WeightType, Enable>::CutlassMoeFCRunner()
 
 template<typename T, typename WeightType, typename Enable>
 size_t CutlassMoeFCRunner<T, WeightType, Enable>::getWorkspaceSize(
-    const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k, bool use_gated_activation)
+    const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k, bool use_ffn3)
 {
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -613,27 +613,58 @@ size_t CutlassMoeFCRunner<T, WeightType, Enable>::getWorkspaceSize(
     total_ws_bytes += padded_experts * sizeof(int64_t);        // Hold total_rows_before_expert_
     total_ws_bytes += num_softmax_outs * sizeof(T);
     const int bytes_for_fc1_result = interbuf_size * sizeof(T);
-    const int sorter_ws_size_bytes = pad_to_multiple_of_16(sorter_.getWorkspaceSize(num_rows));
+    const int bytes_for_fc3_result = interbuf_size * sizeof(T);
+    const int sorter_ws_size_bytes = pad_to_multiple_of_16(sorter_.getWorkspaceSize(num_rows * k));
     sorter_.update_num_experts(num_experts);
 
     int bytes_for_intermediate_and_sorting = bytes_for_fc1_result;
-    if (sorter_ws_size_bytes > bytes_for_fc1_result) {
-        int remaining_bytes = pad_to_multiple_of_16(sorter_ws_size_bytes - bytes_for_fc1_result);
-        bytes_for_intermediate_and_sorting += remaining_bytes;
+    
+    if (use_ffn3) {
+        if (sorter_ws_size_bytes > bytes_for_fc1_result * 2) {
+            int remaining_bytes = pad_to_multiple_of_16(sorter_ws_size_bytes - bytes_for_fc1_result * 2);
+            bytes_for_intermediate_and_sorting += remaining_bytes;
+        }
+        bytes_for_intermediate_and_sorting += bytes_for_fc3_result; // inter_buf (fc3)
+    } else {
+        if (sorter_ws_size_bytes > bytes_for_fc1_result) {
+            int remaining_bytes = pad_to_multiple_of_16(sorter_ws_size_bytes - bytes_for_fc1_result * 2);
+            bytes_for_intermediate_and_sorting += remaining_bytes;
+        }
     }
 
-    total_ws_bytes += bytes_for_intermediate_and_sorting;  // intermediate (fc1) output + cub sorting workspace
-
-    if (use_gated_activation) {
-        size_t glu_inter_size = interbuf_size * sizeof(T) * 2;
-        total_ws_bytes += glu_inter_size;
-    }
+    total_ws_bytes += bytes_for_intermediate_and_sorting;  // intermediate (fc1) output + (fc3) output + cub sorting workspace
     return total_ws_bytes;
 }
 
+/*
+
+moe kernel memory usage
+
+|^^^^^^^^^^^^^^^^|^^^^^^^^^^^^^^^^^^|^^^^^^^^^^^^^^^|^^^^^^^^^^^^^^^^^^^^^^^^^^|
+| permuted_rows  | permuted_experts | permuted_data | total_rows_before_expert |
+|                |                  |               |                          |
+| [k, token_num] |  [k, token_num]  | [k*token_num, |  [expert_nums]           |
+|                |                  |  hidden_size] |                          |
+|                |                  |               |                          |
+|________________|__________________|_______________|__________________________|
+
+
+|^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^|^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^|
+|           fc1_result           |          fc3_result  (optional)        |
+|                                |                                        |
+|     [k, token_num, inter_size] |        [k, token_num, inter_size]      |
+|^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^|^^^^^^^^^^^^^|
+|                              sort                                       | sort expend |
+|^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^|^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^|^^^^^^^^^^^^^|
+|     softmax_output (optional)  |                                        |
+|    [k, token_num, inter_size]  |                                        |
+|________________________________|________________________________________|
+
+*/
+
 template<typename T, typename WeightType, typename Enable>
 void CutlassMoeFCRunner<T, WeightType, Enable>::configure_ws_ptrs(
-    char* ws_ptr, const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k, bool use_gated_activation)
+    char* ws_ptr, const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k, bool use_ffn3)
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     const int buf_size       = pad_to_multiple_of_16(k * num_rows * hidden_size);
@@ -651,7 +682,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::configure_ws_ptrs(
 
     fc1_result_ = (T*)(total_rows_before_expert_ + padded_experts);
 
-    if (use_gated_activation) {
+    if (use_ffn3) {
         inter_result_ = (T*)(fc1_result_ + interbuf_size);
     } else {
         inter_result_ = nullptr;
@@ -659,11 +690,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::configure_ws_ptrs(
 
     const bool is_pow_2 = (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);
     if (!is_pow_2 || num_experts > 256) {
-        if (use_gated_activation) {
-            softmax_out_ = (T*)(inter_result_ + interbuf_size);
-        } else {
-            softmax_out_ = (T*)(fc1_result_ + interbuf_size);
-        }
+        softmax_out_ = (T*)(fc1_result_ + interbuf_size);
     }
     else {
         softmax_out_ = nullptr;
@@ -728,10 +755,10 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
         }
     }
 
-    bool use_gated_activation = (fc3_expert_weights != nullptr);
+    bool use_ffn3 = (fc3_expert_weights != nullptr);
     
 
-    configure_ws_ptrs(workspace_ptr, num_rows, hidden_size, inter_size, num_experts, k, use_gated_activation);
+    configure_ws_ptrs(workspace_ptr, num_rows, hidden_size, inter_size, num_experts, k, use_ffn3);
     topk_gating_softmax_kernelLauncher<T>(gating_output,
                                           finished,
                                           expert_scales,
@@ -809,7 +836,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::run_moe_fc(const T*          inp
 
     print_bsd(0, "moe fn1", fc1_result_, k, num_rows, inter_size);
 
-    if (use_gated_activation) {
+    if (use_ffn3) {
         
         moe_gemm_runner_.moe_gemm(permuted_data_,
                                     fc3_expert_weights,

@@ -124,7 +124,7 @@ public:
     CutlassMoeFCRunner();
 
     size_t getWorkspaceSize(
-        const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k, bool use_gated_activation);
+        const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k, bool use_ffn3);
 
     void run_moe_fc(const T*          input_activations,
                     const T*          gating_output,
@@ -205,7 +205,7 @@ private:
                            const int inter_size,
                            const int num_experts,
                            const int k,
-                           bool use_gated_activation);
+                           bool use_ffn3);
 
 private:
     CubKeyValueSorter            sorter_;
@@ -231,7 +231,7 @@ public:
     CutlassMoeFCRunner() = default;
 
     size_t getWorkspaceSize(
-        const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k, bool use_gated_activation)
+        const int num_rows, const int hidden_size, const int inter_size, const int num_experts, const int k, bool use_ffn3)
     {
         return 0;
     }

@@ -62,7 +62,10 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
         moe_k   = input_tensors->at("moe_k").getVal<size_t>();
     }
 
-    allocateBuffer(input_tensors->at("ffn_input").shape[0], moe_k, use_moe);
+    bool use_ffn3 = ffn_weights->intermediate_weight2.int8_kernel != nullptr || 
+                    ffn_weights->intermediate_weight2.kernel != nullptr;
+
+    allocateBuffer(input_tensors->at("ffn_input").shape[0], moe_k, use_moe, use_ffn3);
 
     const int m             = input_tensors->at("ffn_input").shape[0];
     T*        output_tensor = output_tensors->at("ffn_output").getPtr<T>();
@@ -122,7 +125,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                               moe_gates_buf_,
                               expert_num_);
         print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_);
-        bool use_ffn3 = ffn_weights->intermediate_weight2.int8_kernel != nullptr;
+        
         if (int8_mode_ == 0) {
 
             if (use_ffn3) {
@@ -487,7 +490,7 @@ void FfnLayer<T>::allocateBuffer() {
 }
 
 template<typename T>
-void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe) {
+void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe, bool use_ffn3) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (use_moe) {
         moe_gates_buf_ =
@@ -496,12 +499,12 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe) {
         if (int8_mode_ == 0) {
             FT_CHECK_WITH_INFO(moe_fc_runner_.get() != NULL, "moe runner was not initialized.");
             ws_size_moe = moe_fc_runner_->getWorkspaceSize(
-                token_num, hidden_units_, inter_size_, expert_num_, moe_k, use_gated_activation_);
+                token_num, hidden_units_, inter_size_, expert_num_, moe_k, use_ffn3);
         } else if (int8_mode_ == 1) {
             FT_CHECK_WITH_INFO(moe_int8_weight_only_fc_runner_.get() != NULL,
                                "weight only moe runner was not initialized.");
             ws_size_moe = moe_int8_weight_only_fc_runner_->getWorkspaceSize(
-                token_num, hidden_units_, inter_size_, expert_num_, moe_k, use_gated_activation_);
+                token_num, hidden_units_, inter_size_, expert_num_, moe_k, use_ffn3);
         }
 
         moe_fc_workspace_ = (char*)allocator_->reMalloc(moe_fc_workspace_, sizeof(char) * ws_size_moe, false);
