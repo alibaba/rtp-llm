@@ -18,6 +18,20 @@ def merge_qkv_hf(ts: List[torch.Tensor]):
 def stack_(ts: List[torch.Tensor]):
     return torch.stack(ts, dim=0)
 
+def merge_qkv_lora_A(ts: torch.Tensor):
+    q, k, v = ts
+    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    return qkv_weight
+
+def merge_qkv_lora_B(ts: List[torch.Tensor]):
+    q, k, v = ts
+    t_q = torch.zeros_like(q)
+    t_k = torch.zeros_like(k)
+    t_v = torch.zeros_like(v)
+    return torch.cat((torch.cat((q,   t_q, t_q), dim=1),
+                      torch.cat((t_k, k,   t_k), dim=1),
+                      torch.cat((t_v, t_v, v  ), dim=1))).T.contiguous()
+
 class MixtralWeightInfo(ModelDeployWeightInfo):
     def _get_weight_info(self):
         weights = [
@@ -55,7 +69,45 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
         layer_weights.append(WeightInfo(W.ffn_w2,ffn_w2, stack_))
         layer_weights.append(WeightInfo(W.ffn_w3,ffn_w3, stack_))
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+
+        lora_base_name = "base_model.model.{}.{}.weight"
+        lora_weights = []
+        
+        for lora_name in ['lora_A', 'lora_B']:
+            ffn_w1_lora = []
+            ffn_w2_lora = []
+            ffn_w3_lora = []
+            for num_experts in range(self.expert_num_):
+                ffn_w1_lora.append(CkptWeightInfo(
+                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w1', lora_name), transpose))
+                ffn_w2_lora.append(CkptWeightInfo(
+                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w2', lora_name), transpose))
+                ffn_w3_lora.append(CkptWeightInfo(
+                    lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w3', lora_name), transpose))
+            
+            lora_weights.append(WeightInfo(W.ffn_w1 + "." + lora_name, ffn_w1_lora, stack_))
+            lora_weights.append(WeightInfo(W.ffn_w2 + "." + lora_name, ffn_w2_lora, stack_))
+            lora_weights.append(WeightInfo(W.ffn_w3 + "." + lora_name, ffn_w3_lora, stack_))
+
+            lora_weights.append(
+                WeightInfo(W.ffn_gate + "." + lora_name, [CkptWeightInfo(lora_base_name.format('model.layers.{i}.block_sparse_moe.gate', lora_name), concat_1)], transpose))
+
+            lora_weights.append(
+                WeightInfo(W.attn_o_w + "." + lora_name, [CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.o_proj', lora_name), concat_1)], transpose))
+
+        lora_weights.append(WeightInfo(W.attn_qkv_w + "." + 'lora_A',
+                        [CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.q_proj', 'lora_A'), identity),
+                         CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.k_proj', 'lora_A'), identity),
+                         CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.v_proj', 'lora_A'), identity)],
+                         functools.partial(merge_qkv_lora_A)))
+
+        lora_weights.append(WeightInfo(W.attn_qkv_w + "." + 'lora_B',
+                        [CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.q_proj', 'lora_B'), identity),
+                         CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.k_proj', 'lora_B'), identity),
+                         CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.v_proj', 'lora_B'), identity)],
+                         functools.partial(merge_qkv_lora_B)))
+
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy, lora_weights=lora_weights)
 
 class Mixtral(GPT):
     @staticmethod

@@ -184,10 +184,14 @@ class ModelWeightsLoader:
 
         scale = self._database.get_lora_config(lora_name).get_scale()
         # "addmm_impl_cpu_" not implemented for 'Half'
-        if len(lora_b_tensor.shape) == 3:
+        if lora_b_tensor.dim() == 3 and lora_a_tensor.dim() == 2:
             lora_b_tensor = lora_b_tensor.reshape(lora_b_tensor.shape[0], lora_b_tensor.shape[1] * lora_b_tensor.shape[2])
-
-        merge_tensor = (lora_a_tensor.type(torch.float32) @ lora_b_tensor.type(torch.float32) * scale).type(tensor.dtype).to(tensor.device)
+            merge_tensor = (lora_a_tensor.type(torch.float32) @ lora_b_tensor.type(torch.float32) * scale).type(tensor.dtype).to(tensor.device)
+        # moe
+        elif lora_b_tensor.dim() == 3 and lora_a_tensor.dim() == 3:
+            merge_tensor = torch.bmm(lora_a_tensor.type(torch.float32), lora_b_tensor.type(torch.float32) * scale).type(tensor.dtype).to(tensor.device)
+        else:
+            merge_tensor = (lora_a_tensor.type(torch.float32) @ lora_b_tensor.type(torch.float32) * scale).type(tensor.dtype).to(tensor.device)
 
         shape = tensor.shape
         tensor = tensor.reshape(tensor.nelement()) + merge_tensor.reshape(tensor.nelement())
