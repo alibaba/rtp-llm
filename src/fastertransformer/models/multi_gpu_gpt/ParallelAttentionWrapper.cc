@@ -73,8 +73,8 @@ bool ParallelAttentionWrapper<T>::UseOpenSourceFMHA() const {
 template<typename T>
 bool ParallelAttentionWrapper<T>::UseTRTFMHA() const {
     bool use_trt_fmha = CheckUseFMHA();
-    if (!(is_sm70() || is_sm8x() || is_sm90())){
-        FT_LOG_WARNING("FMHA is disabled for pre-ampere except volta");
+    if (!(is_sm8x() || is_sm90())){
+        FT_LOG_WARNING("FMHA is disabled for pre-ampere");
         use_trt_fmha = false;
     }
     if (params_.is_sparse_head_){
