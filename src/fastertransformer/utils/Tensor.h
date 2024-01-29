@@ -17,14 +17,10 @@
 #pragma once
 
 #include "src/fastertransformer/utils/allocator.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
 #include "src/fastertransformer/utils/string_utils.h"
+#include "src/fastertransformer/utils/assert_utils.h"
 
 #include "stdlib.h"
-#include <cuda_fp16.h>
-#include <cuda_runtime_api.h>
 #include <dirent.h>
 #include <numeric>
 #include <stdlib.h>
@@ -58,39 +54,7 @@ typedef enum datatype_enum {
 } DataType;
 
 template<typename T>
-DataType getTensorType() {
-    using RealT = typename std::remove_cv<T>::type;
-    if (std::is_same<RealT, float>::value) {
-        return TYPE_FP32;
-    } else if (std::is_same<RealT, half>::value) {
-        return TYPE_FP16;
-    }
-#ifdef ENABLE_BF16
-    else if (std::is_same<RealT, __nv_bfloat16>::value) {
-        return TYPE_BF16;
-    }
-#endif
-#ifdef ENABLE_FP8
-    else if (std::is_same<RealT, __nv_fp8_e4m3>::value) {
-        return TYPE_FP8_E4M3;
-    }
-#endif
-    else if (std::is_same<RealT, int>::value) {
-        return TYPE_INT32;
-    } else if (std::is_same<RealT, int8_t>::value) {
-        return TYPE_INT8;
-    } else if (std::is_same<RealT, uint>::value) {
-        return TYPE_UINT32;
-    } else if (std::is_same<RealT, unsigned long long int>::value || std::is_same<RealT, uint64_t>::value) {
-        return TYPE_UINT64;
-    } else if (std::is_same<RealT, bool>::value) {
-        return TYPE_BOOL;
-    } else if (std::is_same<RealT, char>::value) {
-        return TYPE_BYTES;
-    } else {
-        return TYPE_INVALID;
-    }
-}
+DataType getTensorType();
 
 typedef enum memorytype_enum {
     MEMORY_CPU,
@@ -99,22 +63,14 @@ typedef enum memorytype_enum {
 } MemoryType;
 
 struct Tensor {
-    MemoryType          where_;
-    DataType            type_;
-    std::vector<size_t> shape_;
-    void*               data_      = nullptr;
-    IAllocator*         allocator_ = nullptr;
-
+public:
     Tensor();
-    Tensor(const MemoryType          _where,
-           const DataType            _type,
-           const std::vector<size_t> _shape,
-           IAllocator*               _allocator,
+    Tensor(const MemoryType          where,
+           const DataType            type,
+           const std::vector<size_t> shape,
+           IAllocator*               allocator,
            const bool                is_set_zero);
-    Tensor(const MemoryType _where,
-           const DataType _type,
-           const std::vector<size_t> _shape,
-           const void* _data);
+    Tensor(const MemoryType where, const DataType type, const std::vector<size_t> shape, const void* data);
 
     ~Tensor();
 
@@ -128,9 +84,6 @@ struct Tensor {
     const std::vector<size_t>& shape() const;
     void*                      data() const;
     IAllocator*                allocator() const;
-
-    bool operator==(const Tensor& tensor) const;
-    bool operator!=(const Tensor& tensor) const;
 
     size_t size() const;
     size_t sizeBytes() const;
@@ -146,25 +99,7 @@ struct Tensor {
     static size_t   getTypeSize(DataType type);
 
     template<typename T>
-    inline T getVal(size_t index) const {
-        FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
-        FT_CHECK(data_ != nullptr);
-        FT_CHECK_WITH_INFO(index < size(), "index is larger than buffer size");
-
-        if (getTensorType<T>() != type_) {
-            FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
-                         getNumpyTypeDesc(getTensorType<T>()).c_str(),
-                         getNumpyTypeDesc(type_).c_str());
-        }
-        if (where_ == MEMORY_CPU) {
-            return ((T*)data())[index];
-        } else {
-            using ValueType = typename std::remove_const<T>::type;
-            ValueType val;
-            cudaMemcpy(&val, (ValueType*)data_ + index, sizeof(ValueType), cudaMemcpyDeviceToHost);
-            return val;
-        }
-    }
+    inline T getVal(size_t index) const;
 
     template<typename T>
     inline T getVal() const {
@@ -193,10 +128,9 @@ struct Tensor {
         if (data_ == nullptr) {
             return (void*)data_;
         } else {
-            FT_CHECK_WITH_INFO(
-                offset < size(),
-                "offset " + std::to_string(offset) + " is larger than buffer size" + std::to_string(size())
-            );
+            FT_CHECK_WITH_INFO(offset < size(),
+                               "offset " + std::to_string(offset) + " is larger than buffer size"
+                                   + std::to_string(size()));
             return (void*)((char*)data_ + offset * Tensor::getTypeSize(type_));
         }
     }
@@ -298,12 +232,6 @@ struct Tensor {
         return true;
     }
 
-    void updateShape(size_t idx, size_t val) {
-        // TODO: find a better way to update the shape
-        std::vector<size_t>& shape_ref = const_cast<std::vector<size_t>&>(shape_);
-        shape_ref[idx]                 = val;
-    }
-
     Tensor slice(std::vector<size_t> shape, size_t offset = 0) const;
 
     template<typename T>
@@ -324,6 +252,12 @@ private:
     static int  parseNpyHeader(FILE*& f_ptr, uint32_t header_len, DataType& type, std::vector<size_t>& shape);
 
 private:
+    MemoryType          where_;
+    DataType            type_;
+    std::vector<size_t> shape_;
+    void*               data_      = nullptr;
+    IAllocator*         allocator_ = nullptr;
+
     bool                 owned_;
     std::shared_ptr<int> ref_counter_;
 };
@@ -333,7 +267,7 @@ private:
     std::unordered_map<std::string, Tensor> tensor_map_;
 
     inline bool isValid(const Tensor& tensor) {
-        return tensor.size() > 0 && tensor.data_ != nullptr;
+        return tensor.size() > 0 && tensor.data() != nullptr;
     }
 
 public:

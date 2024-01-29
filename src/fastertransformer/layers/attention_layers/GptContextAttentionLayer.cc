@@ -58,7 +58,9 @@ void GptContextAttentionLayer<T>::forward(TensorMap*                output_tenso
     FT_CHECK(output_tensors->at("value_cache").shape().size() == 4
              || output_tensors->at("value_cache").shape().size() == 3);
 
-    const AttentionType attention_type = input_tensors->getVal<AttentionType>("attention_type");
+    const AttentionType attention_type =
+        static_cast<AttentionType>(
+            input_tensors->getVal<std::underlying_type<AttentionType>::type>("attention_type"));
     FT_CHECK_WITH_INFO(attention_type != AttentionType::FUSED_PADDED_MHA,
                        "Gpt Context FUSED_PADDED_MHA is not supported !");
 
@@ -95,7 +97,9 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
     T* attention_input = input_tensors->at("input_query").getPtr<T>();
     T* attention_mask  = input_tensors->at("attention_mask").getPtr<T>();
 
-    const AttentionType attention_type = input_tensors->getVal<AttentionType>("attention_type");
+    const AttentionType attention_type =
+        static_cast<AttentionType>(
+            input_tensors->getVal<std::underlying_type<AttentionType>::type>("attention_type"));
 
     PUSH_RANGE(stream_, "attention_buffer_alloc");
     allocateBuffer(request_batch_size, request_seq_len, request_seq_len + max_prompt_length, attention_type != AttentionType::FUSED_MHA);

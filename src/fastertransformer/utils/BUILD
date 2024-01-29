@@ -9,19 +9,40 @@ cc_library(
 )
 
 cc_library(
-    name = "tensor",
+    name = "basic_utils",
     srcs = [
-        "Tensor.cc",
+        "logger.cc",
     ],
+    hdrs = [
+        "logger.h",
+        "string_utils.h",
+        "assert_utils.h",
+    ]
+)
+
+cc_library(
+    name = "tensor_hdr",
     hdrs = [
         "Tensor.h",
     ],
     deps = [
+        ":allocator",
+        ":basic_utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "tensor",
+    srcs = [
+        "Tensor.cc",
+    ],
+    deps = [
+        ":tensor_hdr",
         "//3rdparty:cub",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
         ":utils_for_3rdparty",
-        ":allocator",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -31,16 +52,14 @@ cc_library(
     name = "utils_for_3rdparty",
     srcs = [
         "cuda_utils.cc",
-        "logger.cc",
     ],
     hdrs = [
         "cuda_bf16_wrapper.h",
         "cuda_utils.h",
         "cuda_fp8_utils.h",
-        "logger.h",
-        "string_utils.h",
     ],
     deps = [
+        ":basic_utils",
         "//3rdparty:ini_reader",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",

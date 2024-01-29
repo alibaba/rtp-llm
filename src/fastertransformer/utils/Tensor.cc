@@ -41,20 +41,20 @@ Tensor::Tensor():
     data_(nullptr),
     owned_(false) {}
 
-Tensor::Tensor(const MemoryType          _where,
-               const DataType            _type,
-               const std::vector<size_t> _shape,
-               IAllocator*               _allocator,
+Tensor::Tensor(const MemoryType          where,
+               const DataType            type,
+               const std::vector<size_t> shape,
+               IAllocator*               allocator,
                const bool                is_set_zero):
-    where_(_where),
-    type_(_type),
-    shape_(_shape),
+    where_(where),
+    type_(type),
+    shape_(shape),
     data_(nullptr),
-    allocator_(_allocator),
+    allocator_(allocator),
     owned_(true),
     ref_counter_(std::make_shared<int>(1)) {
-    const size_t allocBytes =
-        std::accumulate(shape_.begin(), shape_.end(), (size_t)1, std::multiplies<size_t>()) * Tensor::getTypeSize(type_);
+    const size_t allocBytes = std::accumulate(shape_.begin(), shape_.end(), (size_t)1, std::multiplies<size_t>())
+                              * Tensor::getTypeSize(type_);
     if (where_ == MEMORY_GPU) {
         // TODO(wangyin.yx): Self owned tensor should use Allocator::<AllocatorType::CUDA> to allocate memory.
         // check_cuda_error(allocator->reMalloc(data, sizeBytes(), is_set_zero));
@@ -65,11 +65,11 @@ Tensor::Tensor(const MemoryType          _where,
     }
 }
 
-Tensor::Tensor(const MemoryType _where, const DataType _type, const std::vector<size_t> _shape, const void* _data):
-    where_(_where),
-    type_(_type),
-    shape_(_shape),
-    data_(const_cast<void*>(_data)),
+Tensor::Tensor(const MemoryType where, const DataType type, const std::vector<size_t> shape, const void* data):
+    where_(where),
+    type_(type),
+    shape_(shape),
+    data_(const_cast<void*>(data)),
     owned_(false),
     ref_counter_(nullptr) {}
 
@@ -104,28 +104,92 @@ IAllocator* Tensor::allocator() const {
     return allocator_;
 }
 
-bool Tensor::operator==(const Tensor& tensor) const {
-    if (where() != tensor.where() || type() != tensor.type() || shape() != tensor.shape()) {
-        return false;
-    }
+// TODO(wangyin): move this implementation to DeviceOps.
+template<typename T>
+inline T Tensor::getVal(size_t index) const {
+    FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
+    FT_CHECK(data_ != nullptr);
+    FT_CHECK_WITH_INFO(index < size(), "index is larger than buffer size");
 
-    if (where() == MEMORY_GPU) {
-        void* data_cpu = malloc(sizeBytes());
-        cudaMemcpy(data_cpu, data(), sizeBytes(), cudaMemcpyDeviceToHost);
-        void* data_cpu2 = malloc(sizeBytes());
-        cudaMemcpy(data_cpu2, tensor.data(), sizeBytes(), cudaMemcpyDeviceToHost);
-        bool ret = memcmp(data_cpu, data_cpu2, sizeBytes()) == 0;
-        free(data_cpu);
-        free(data_cpu2);
-        return ret;
+    if (getTensorType<T>() != type_) {
+        FT_LOG_DEBUG("getVal with type %s, but data type is: %s",
+                        getNumpyTypeDesc(getTensorType<T>()).c_str(),
+                        getNumpyTypeDesc(type_).c_str());
+    }
+    if (where_ == MEMORY_CPU) {
+        return ((T*)data())[index];
     } else {
-        return memcmp(data(), tensor.data(), sizeBytes()) == 0;
+        using ValueType = typename std::remove_const<T>::type;
+        ValueType val;
+        cudaMemcpy(&val, (ValueType*)data_ + index, sizeof(ValueType), cudaMemcpyDeviceToHost);
+        return val;
     }
 }
 
-bool Tensor::operator!=(const Tensor& tensor) const {
-    return !(*this == tensor);
+template<typename T>
+DataType getTensorType() {
+    using RealT = typename std::remove_cv<T>::type;
+    if (std::is_same<RealT, float>::value) {
+        return TYPE_FP32;
+    } else if (std::is_same<RealT, half>::value) {
+        return TYPE_FP16;
+    }
+#ifdef ENABLE_BF16
+    else if (std::is_same<RealT, __nv_bfloat16>::value) {
+        return TYPE_BF16;
+    }
+#endif
+#ifdef ENABLE_FP8
+    else if (std::is_same<RealT, __nv_fp8_e4m3>::value) {
+        return TYPE_FP8_E4M3;
+    }
+#endif
+    else if (std::is_same<RealT, int>::value) {
+        return TYPE_INT32;
+    } else if (std::is_same<RealT, int8_t>::value) {
+        return TYPE_INT8;
+    } else if (std::is_same<RealT, uint>::value) {
+        return TYPE_UINT32;
+    } else if (std::is_same<RealT, unsigned long long int>::value || std::is_same<RealT, uint64_t>::value) {
+        return TYPE_UINT64;
+    } else if (std::is_same<RealT, bool>::value) {
+        return TYPE_BOOL;
+    } else if (std::is_same<RealT, char>::value) {
+        return TYPE_BYTES;
+    } else {
+        return TYPE_INVALID;
+    }
 }
+
+#define DECLARE_TEMPLATE_METHODS_WITH_TYPE(T) \
+    template T Tensor::getVal<T>(size_t index) const; \
+    template const T Tensor::getVal<const T>(size_t index) const; \
+    template DataType getTensorType<T>(); \
+    template DataType getTensorType<const T*>(); \
+    template DataType getTensorType<const T>();
+
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(float)
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(half)
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(char)
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(int8_t)
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(int)
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(uint)
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(uint64_t)
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(long)
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(unsigned long long int)
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(bool)
+// DECLARE_TEMPLATE_METHODS_WITH_TYPE(void)
+#ifdef ENABLE_BF16
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(__nv_bfloat16)
+#endif
+#ifdef ENABLE_FP8
+DECLARE_TEMPLATE_METHODS_WITH_TYPE(__nv_fp8_e4m3)
+#endif
+
+#undef DECLARE_TEMPLATE_METHODS_WITH_TYPE
+
+template DataType getTensorType<void>();
+
 
 void Tensor::parseNpyIntro(FILE*& f_ptr, uint32_t& header_len, uint32_t& start_data) {
     const char magic[]                   = "\x93"

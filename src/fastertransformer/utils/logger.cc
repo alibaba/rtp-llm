@@ -15,7 +15,6 @@
  */
 
 #include "src/fastertransformer/utils/logger.h"
-#include <cuda_runtime.h>
 
 namespace fastertransformer {
 
@@ -26,9 +25,6 @@ Logger::Logger() {
 
     char* env_str = std::getenv("WORLD_RANK");
     rank          = env_str ? std::atoi(env_str) : 0;
-
-    int device_id;
-    cudaGetDevice(&device_id);
 
     char* level_name = std::getenv("FT_LOG_LEVEL");
     if (level_name != nullptr) {
@@ -41,7 +37,7 @@ Logger::Logger() {
         };
         auto level = name_to_level.find(level_name);
         // If FT_LOG_FIRST_RANK_ONLY=ON, set LOG LEVEL of other device to ERROR
-        if (is_first_rank_only && device_id != 0) {
+        if (is_first_rank_only && rank != 0) {
             level = name_to_level.find("ERROR");
         }
         if (level != name_to_level.end()) {
