@@ -37,10 +37,12 @@ def merge_qkv_lora_A(ts: torch.Tensor):
 
 def merge_qkv_lora_B(ts: List[torch.Tensor]):
     q, k, v = ts
-    t = torch.zeros_like(q)
-    return torch.cat((torch.cat((q, t, t), dim=1),
-                      torch.cat((t, k, t), dim=1),
-                      torch.cat((t, t, v), dim=1))).T.contiguous()
+    t_q = torch.zeros_like(q)
+    t_k = torch.zeros_like(k)
+    t_v = torch.zeros_like(v)
+    return torch.cat((torch.cat((q,   t_q, t_q), dim=1),
+                      torch.cat((t_k, k,   t_k), dim=1),
+                      torch.cat((t_v, t_v, v  ), dim=1))).T.contiguous()
 
 def qkv_rerange(ts, hidden_size, head_num_kv, head_num):
     num_key_value_groups = int(head_num // head_num_kv)
