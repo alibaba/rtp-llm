@@ -102,7 +102,7 @@ template<typename T>
 void normal(curandGenerator_t curng, Tensor& tensor, float mean = 0.0f, float stddev = 1.0f)
 {
     if (tensor.size() > 0) {
-        FT_CHECK(tensor.type == getTensorType<T>());
+        FT_CHECK(tensor.type() == getTensorType<T>());
         normal(curng, tensor.getPtr<T>(), tensor.size(), mean, stddev);
     }
 }

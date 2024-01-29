@@ -218,10 +218,10 @@ protected:
     template<typename T>
     ft::Tensor toHost(ft::Tensor& device_tensor)
     {
-        if (device_tensor.data == nullptr) {
+        if (device_tensor.data() == nullptr) {
             return ft::Tensor();
         }
-        ft::Tensor host_tensor = createTensor(ft::MEMORY_CPU, device_tensor.type, device_tensor.shape);
+        ft::Tensor host_tensor = createTensor(ft::MEMORY_CPU, device_tensor.type(), device_tensor.shape());
         ft::cudaAutoCpy(host_tensor.getPtr<T>(), device_tensor.getPtr<T>(), host_tensor.size(), stream);
         cudaStreamSynchronize(stream);
         return host_tensor;
@@ -230,10 +230,10 @@ protected:
     template<typename T>
     ft::Tensor toDevice(ft::Tensor& host_tensor)
     {
-        if (host_tensor.data == nullptr) {
+        if (host_tensor.data() == nullptr) {
             return ft::Tensor();
         }
-        ft::Tensor device_tensor = createTensor(ft::MEMORY_GPU, host_tensor.type, host_tensor.shape);
+        ft::Tensor device_tensor = createTensor(ft::MEMORY_GPU, host_tensor.type(), host_tensor.shape());
         ft::cudaAutoCpy(device_tensor.getPtr<T>(), host_tensor.getPtr<T>(), host_tensor.size(), stream);
         return device_tensor;
     };

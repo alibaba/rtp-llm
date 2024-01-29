@@ -92,7 +92,7 @@ public:
 
     void setInvalidValues()
     {
-        size_t type_size = tensor->type == TYPE_FP32 ? sizeof(float) : sizeof(half);
+        size_t type_size = tensor->type() == TYPE_FP32 ? sizeof(float) : sizeof(half);
         size_t tensor_size = type_size * tensor->size();
         // Fill by a random number to guarantee invalid values
         check_cuda_error(cudaMemset(data, 0xdc, tensor_size));

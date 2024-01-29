@@ -10,12 +10,12 @@ using namespace fastertransformer;
 
 namespace {
 
-#define EXPECT_EQUAL_TENSORS(t1, t2)       \
-    do {                                   \
-        EXPECT_TRUE(t1.where == t2.where); \
-        EXPECT_TRUE(t1.type == t2.type);   \
-        EXPECT_TRUE(t1.shape == t2.shape); \
-        EXPECT_TRUE(t1.data == t2.data);   \
+#define EXPECT_EQUAL_TENSORS(t1, t2)           \
+    do {                                       \
+        EXPECT_TRUE(t1.where() == t2.where()); \
+        EXPECT_TRUE(t1.type() == t2.type());   \
+        EXPECT_TRUE(t1.shape() == t2.shape()); \
+        EXPECT_TRUE(t1.data() == t2.data());   \
     } while(false)
 
 TEST(TensorMapTest, HasKeyCorrectness) {
