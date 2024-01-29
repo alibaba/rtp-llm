@@ -153,6 +153,21 @@ def trans_lora_qkv(ts: List[torch.Tensor], head_num: int, head_size: int):
     r = ts[0].shape[1]
     return ts[0].T.reshape(r, head_num, split, head_size).permute(0, 2, 1, 3).reshape(r, split, head_num * head_size).contiguous()
 
+def merge_qkv_lora_A(ts: torch.Tensor):
+    q, k, v = ts
+    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    return qkv_weight
+
+def merge_qkv_lora_B(ts: List[torch.Tensor]):
+    q, k, v = ts
+    t_q = torch.zeros_like(q)
+    t_k = torch.zeros_like(k)
+    t_v = torch.zeros_like(v)
+    return torch.cat((torch.cat((q,   t_q, t_q), dim=1),
+                      torch.cat((t_k, k,   t_k), dim=1),
+                      torch.cat((t_v, t_v, v  ), dim=1))).T.contiguous()
+
+
 class W:
     # global
     embedding = 'embedding'
