@@ -104,7 +104,7 @@ class SchedulerTest(TestCase):
 
         queries = scheduler.enqueue(
             RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
-        scheduler.get_batch_request()
+        scheduler.schedule()
         self.assertEqual(queries[0].error_info, "failed to malloc 8 blocks, only 7 blocks left")
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
 

@@ -2,11 +2,11 @@ import torch
 import random
 from typing import List, Tuple, Any
 from maga_transformer.async_decoder_engine.scheduler import BatchQuery
-from maga_transformer.async_decoder_engine.base_model_executor import BaseModelExecutor, ModelOps, ExecutorBase
+from maga_transformer.async_decoder_engine.normal_model_executor import NormalModelExecutor, ModelOps, ExecutorBase
 from maga_transformer.utils.util import to_cpu
 
 class SpModelExecutor(ExecutorBase):
-    def __init__(self, validate_executor: BaseModelExecutor, sp_executor: BaseModelExecutor, gen_num: int):
+    def __init__(self, validate_executor: NormalModelExecutor, sp_executor: NormalModelExecutor, gen_num: int):
         self.validate_executor = validate_executor
         self.sp_executor = sp_executor
         self.gen_num = gen_num

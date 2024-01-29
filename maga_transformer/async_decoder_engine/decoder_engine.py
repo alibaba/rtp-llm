@@ -18,7 +18,7 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.metrics import GaugeMetrics, kmonitor
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.structure.raw_query import RawQuery
-from maga_transformer.async_decoder_engine.base_model_executor import ExecutorBase
+from maga_transformer.async_decoder_engine.normal_model_executor import ExecutorBase
 
 class QueryResponse:
     def __init__(self, batch_size, beam_width, eos_token_id, max_seq_len):
@@ -116,7 +116,7 @@ class DecoderEngine:
         kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self.scheduler_.block_used_ratio())
 
     # 这个后台任务一直在跑，应该用线程实现，用 Python 自己的线程切换机制。
-    # 如果用协程的话对外返回的 decode 协程会因为 step 协程一直运行被饿死。
+    # 如果用协程的话对外返回的 decode 协程会因为 run_engine 协程一直运行被饿死。
     @torch.inference_mode()
     def run_engine(self):
         while True:

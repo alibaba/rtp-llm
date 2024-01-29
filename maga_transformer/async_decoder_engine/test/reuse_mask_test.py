@@ -2,7 +2,7 @@ import torch
 from typing import Any, List
 from unittest import TestCase, main
 
-from maga_transformer.async_decoder_engine.base_model_executor import BaseModelExecutor
+from maga_transformer.async_decoder_engine.normal_model_executor import NormalModelExecutor
 
 class ReuseMaskTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -24,7 +24,7 @@ class ReuseMaskTest(TestCase):
         input_lengths = [3]
         reuse_lengths = [5]
         full_attn_mask = self._create_fake_attention_mask(input_lengths)
-        final_mask = BaseModelExecutor.append_reuse_mask(full_attn_mask, input_lengths, reuse_lengths)
+        final_mask = NormalModelExecutor.append_reuse_mask(full_attn_mask, input_lengths, reuse_lengths)
         self.assertEqual(final_mask.shape[1], 3)
         self.assertEqual(final_mask.shape[2], 8)
         self.assertEqual(final_mask.tolist(),
@@ -36,7 +36,7 @@ class ReuseMaskTest(TestCase):
         input_lengths = [5, 2]
         reuse_lengths = [0, 5]
         full_attn_mask = self._create_fake_attention_mask(input_lengths)
-        final_mask = BaseModelExecutor.append_reuse_mask(full_attn_mask, input_lengths, reuse_lengths)
+        final_mask = NormalModelExecutor.append_reuse_mask(full_attn_mask, input_lengths, reuse_lengths)
         self.assertEqual(final_mask.shape[1], 5)
         self.assertEqual(final_mask.shape[2], 10)
         self.assertEqual(final_mask.tolist(), 

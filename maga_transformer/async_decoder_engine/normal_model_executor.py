@@ -36,7 +36,7 @@ class ExecutorBase(object):
     def process(self, batch_query: BatchQuery) -> None:
         raise NotImplementedError()
 
-class BaseModelExecutor(ExecutorBase):
+class NormalModelExecutor(ExecutorBase):
     def __init__(self, model_ops: ModelOps, scheduler: Scheduler):
         self.model_ops = model_ops
         self.scheduler_ = scheduler

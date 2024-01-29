@@ -5,11 +5,11 @@ from typing import Any, List, Tuple
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.medusa.medusa_config import MedusaState, MedusaBuffer
 from maga_transformer.async_decoder_engine.scheduler import Scheduler, BatchQuery
-from maga_transformer.async_decoder_engine.base_model_executor import BaseModelExecutor, ModelOps
+from maga_transformer.async_decoder_engine.normal_model_executor import NormalModelExecutor, ModelOps
 from maga_transformer.async_decoder_engine.medusa.utils import generate_candidates, evaluate_posterior
 from maga_transformer.utils.util import to_cuda
 
-class MedusaModelExecutor(BaseModelExecutor):
+class MedusaModelExecutor(NormalModelExecutor):
     def __init__(self, model_ops: ModelOps, scheduler: Scheduler, medusa_buffer: MedusaBuffer):
         super().__init__(model_ops, scheduler)
         assert self.model_ops.model.lm_head is not None, "model lm_head should not be None"
