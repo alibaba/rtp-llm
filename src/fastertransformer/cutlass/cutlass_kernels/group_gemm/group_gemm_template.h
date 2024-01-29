@@ -9,12 +9,14 @@
 
 #include "cutlass/util/device_memory.h"
 
+#include "cutlass_extensions/gemm/kernel/group_gemm_traits.h"
+
 #include "src/fastertransformer/cutlass/cutlass_kernels/group_gemm/group_gemm.h"
 #include "src/fastertransformer/utils/cuda_utils.h"
 namespace fastertransformer {
 
 
-template <int M1, int N1, int K1, int M2, int N2, int K2, typename cutlassType>
+template <int M1, int N1, int K1, int M2, int N2, int K2, typename cutlassType, typename arch>
 void groupedGemm_(cutlassType** A, cutlassType** B, cutlassType** C,
                   const int* m, const int* n, const int* k, 
                   const float alpha, const float beta,
@@ -33,20 +35,21 @@ void groupedGemm_(cutlassType** A, cutlassType** B, cutlassType** C,
     const int kAlignmentA = 8;
     const int kAlignmentB = 8;
 
+    using GroupGemmArchTraits = cutlass::gemm::kernel::GroupGemmArchTraits<arch>;
 
     using GemmKernel = typename cutlass::gemm::kernel::DefaultGemmGrouped<ElementA, LayoutA,
         cutlass::ComplexTransform::kNone, kAlignmentA, ElementB, LayoutB, cutlass::ComplexTransform::kNone, kAlignmentB,
         ElementOutput, LayoutC, ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
         cutlass::gemm::GemmShape<128, 128, 32>,
         cutlass::gemm::GemmShape<64, 64, 32>,
-        cutlass::gemm::GemmShape<16, 8, 16>,
+        typename GroupGemmArchTraits::InstructionShape,
         cutlass::epilogue::thread::LinearCombination<ElementOutput, 128 / cutlass::sizeof_bits<ElementOutput>::value,
             ElementAccumulator, ElementAccumulator>,
         // NOTE: Threadblock swizzling is currently not supported by CUTLASS's grouped kernels.
         // This parameter is passed in at present to match the APIs of other kernels. The parameter
         // is unused within the kernel.
         cutlass::gemm::threadblock::GemmBatchedIdentityThreadblockSwizzle,
-        4, // kStages
+        GroupGemmArchTraits::Stages, // kStages
         cutlass::gemm::kernel::GroupScheduleMode::kDeviceOnly>::GemmKernel;
 
     using Gemm = cutlass::gemm::device::GemmGrouped<GemmKernel>;
@@ -134,16 +137,45 @@ void groupedGemm_(cutlassType** A, cutlassType** B, cutlassType** C,
 
 
 template<typename T>
+CutlassGroupGemmRunner<T>::CutlassGroupGemmRunner()
+{
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    int device{-1};
+    check_cuda_error(cudaGetDevice(&device));
+    sm_ = getSMVersion();
+    check_cuda_error(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
+}
+
+
+template<typename T>
 void CutlassGroupGemmRunner<T>::gemm(T** A, T** B, T** C,
                                      const int* m, const int* n, const int* k,
                                      const float alpha, const float beta,
                                      const int count, cudaStream_t stream) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if constexpr(std::is_same<T, half>::value) {
-        groupedGemm_<16, 32, 64, 16, 32, 64, cutlass::half_t>((cutlass::half_t**)A, 
-                                                              (cutlass::half_t**)B,
-                                                              (cutlass::half_t**)C, m, n, k, 
-                                                              alpha, beta, count, stream);
+        if (sm_ >= 70 && sm_ < 75) {
+            groupedGemm_<16, 32, 64, 16, 32, 64, cutlass::half_t, cutlass::arch::Sm70>(
+                (cutlass::half_t**)A, 
+                (cutlass::half_t**)B,
+                (cutlass::half_t**)C, m, n, k, 
+                alpha, beta, count, stream);
+        }  else if (sm_ >= 75 && sm_ < 80) {
+            groupedGemm_<16, 32, 64, 16, 32, 64, cutlass::half_t, cutlass::arch::Sm75>(
+                (cutlass::half_t**)A, 
+                (cutlass::half_t**)B,
+                (cutlass::half_t**)C, m, n, k, 
+                alpha, beta, count, stream);
+        } else if (sm_ >= 80 && sm_ < 90) {
+            groupedGemm_<16, 32, 64, 16, 32, 64, cutlass::half_t, cutlass::arch::Sm80>(
+                (cutlass::half_t**)A, 
+                (cutlass::half_t**)B,
+                (cutlass::half_t**)C, m, n, k, 
+                alpha, beta, count, stream);
+        } else {
+            throw std::runtime_error("[FT Error][GroupGemm][GEMM Dispatch] Arch unsupported for Group GEMM");
+    }
+        
     }
     
 }

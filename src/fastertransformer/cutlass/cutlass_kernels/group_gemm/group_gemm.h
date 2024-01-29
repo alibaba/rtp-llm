@@ -16,7 +16,7 @@ namespace fastertransformer {
 template<typename T>
 class CutlassGroupGemmRunner {
 public:
-    CutlassGroupGemmRunner() = default;
+    CutlassGroupGemmRunner();
     ~CutlassGroupGemmRunner() = default;
 
     void gemm(T**                           A,
@@ -29,6 +29,11 @@ public:
               const float                   beta,
               const int                     count,
               cudaStream_t                  stream);
+
+private:
+    int sm_;
+    int multi_processor_count_;
+
 };
 
 }  // namespace fastertransformer
