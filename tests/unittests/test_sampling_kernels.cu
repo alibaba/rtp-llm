@@ -14,10 +14,10 @@
 #include "src/fastertransformer/kernels/sampling_topp_kernels.h"
 #include "src/fastertransformer/layers/DynamicDecodeLayer.h"
 #include "src/fastertransformer/layers/sampling_layers/TopKSamplingLayer.h"
-#include "src/fastertransformer/utils/Tensor.h"
-#include "src/fastertransformer/utils/cublasMMWrapper.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 
 #include "tests/unittests/gtest_utils.h"
 

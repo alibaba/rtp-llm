@@ -16,7 +16,7 @@
 
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLayerWeight.h"
 #include "src/fastertransformer/kernels/transpose_int8_kernels.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 
 namespace fastertransformer {
 
@@ -279,198 +279,198 @@ ParallelGptDecoderLayerWeight<T>::operator=(const ParallelGptDecoderLayerWeight&
     return *this;
 }
 
-template<typename T>
-void ParallelGptDecoderLayerWeight<T>::loadModel(std::string dir_path, FtCudaDataType model_file_type)
-{
-    FT_CHECK(is_maintain_buffer == true);
+// template<typename T>
+// void ParallelGptDecoderLayerWeight<T>::loadModel(std::string dir_path, FtCudaDataType model_file_type)
+// {
+//     FT_CHECK(is_maintain_buffer == true);
 
-    loadWeightFromBin<T>(weights_ptr[0], {hidden_units_}, dir_path + ".input_layernorm.bias.bin", model_file_type);
-    loadWeightFromBin<T>(weights_ptr[1], {hidden_units_}, dir_path + ".input_layernorm.weight.bin", model_file_type);
-    loadWeightFromBin<T>(weights_ptr[3],
-                         {3, hidden_units_ / tensor_para_size_},
-                         dir_path + ".attention.query_key_value.bias." + std::to_string(tensor_para_rank_) + ".bin",
-                         model_file_type);
-    loadWeightFromBin<T>(weights_ptr[5], {hidden_units_}, dir_path + ".attention.dense.bias.bin", model_file_type);
-    loadWeightFromBin<T>(
-        weights_ptr[6], {hidden_units_}, dir_path + ".post_attention_layernorm.bias.bin", model_file_type);
-    loadWeightFromBin<T>(
-        weights_ptr[7], {hidden_units_}, dir_path + ".post_attention_layernorm.weight.bin", model_file_type);
-    loadWeightFromBin<T>(weights_ptr[9],
-                         {inter_size_ / tensor_para_size_},
-                         dir_path + ".mlp.dense_h_to_4h.bias." + std::to_string(tensor_para_rank_) + ".bin",
-                         model_file_type);
-    loadWeightFromBin<T>(weights_ptr[11], {hidden_units_}, dir_path + ".mlp.dense_4h_to_h.bias.bin", model_file_type);
+//     loadWeightFromBin<T>(weights_ptr[0], {hidden_units_}, dir_path + ".input_layernorm.bias.bin", model_file_type);
+//     loadWeightFromBin<T>(weights_ptr[1], {hidden_units_}, dir_path + ".input_layernorm.weight.bin", model_file_type);
+//     loadWeightFromBin<T>(weights_ptr[3],
+//                          {3, hidden_units_ / tensor_para_size_},
+//                          dir_path + ".attention.query_key_value.bias." + std::to_string(tensor_para_rank_) + ".bin",
+//                          model_file_type);
+//     loadWeightFromBin<T>(weights_ptr[5], {hidden_units_}, dir_path + ".attention.dense.bias.bin", model_file_type);
+//     loadWeightFromBin<T>(
+//         weights_ptr[6], {hidden_units_}, dir_path + ".post_attention_layernorm.bias.bin", model_file_type);
+//     loadWeightFromBin<T>(
+//         weights_ptr[7], {hidden_units_}, dir_path + ".post_attention_layernorm.weight.bin", model_file_type);
+//     loadWeightFromBin<T>(weights_ptr[9],
+//                          {inter_size_ / tensor_para_size_},
+//                          dir_path + ".mlp.dense_h_to_4h.bias." + std::to_string(tensor_para_rank_) + ".bin",
+//                          model_file_type);
+//     loadWeightFromBin<T>(weights_ptr[11], {hidden_units_}, dir_path + ".mlp.dense_4h_to_h.bias.bin", model_file_type);
 
-    if (gpt_variant_params_.has_adapters) {
-        loadWeightFromBin<T>(weights_ptr[13],
-                             {gpt_variant_params_.adapter_inter_size / tensor_para_size_},
-                             dir_path + ".after_attention_adapter.dense_h_to_4h.bias."
-                                 + std::to_string(tensor_para_rank_) + ".bin",
-                             model_file_type);
+//     if (gpt_variant_params_.has_adapters) {
+//         loadWeightFromBin<T>(weights_ptr[13],
+//                              {gpt_variant_params_.adapter_inter_size / tensor_para_size_},
+//                              dir_path + ".after_attention_adapter.dense_h_to_4h.bias."
+//                                  + std::to_string(tensor_para_rank_) + ".bin",
+//                              model_file_type);
 
-        loadWeightFromBin<T>(weights_ptr[15],
-                             {hidden_units_},
-                             dir_path + ".after_attention_adapter.dense_4h_to_h.bias.bin",
-                             model_file_type);
+//         loadWeightFromBin<T>(weights_ptr[15],
+//                              {hidden_units_},
+//                              dir_path + ".after_attention_adapter.dense_4h_to_h.bias.bin",
+//                              model_file_type);
 
-        loadWeightFromBin<T>(weights_ptr[17],
-                             {gpt_variant_params_.adapter_inter_size / tensor_para_size_},
-                             dir_path + ".after_ffn_adapter.dense_h_to_4h.bias." + std::to_string(tensor_para_rank_)
-                                 + ".bin",
-                             model_file_type);
+//         loadWeightFromBin<T>(weights_ptr[17],
+//                              {gpt_variant_params_.adapter_inter_size / tensor_para_size_},
+//                              dir_path + ".after_ffn_adapter.dense_h_to_4h.bias." + std::to_string(tensor_para_rank_)
+//                                  + ".bin",
+//                              model_file_type);
 
-        loadWeightFromBin<T>(
-            weights_ptr[19], {hidden_units_}, dir_path + ".after_ffn_adapter.dense_4h_to_h.bias.bin", model_file_type);
-    }
+//         loadWeightFromBin<T>(
+//             weights_ptr[19], {hidden_units_}, dir_path + ".after_ffn_adapter.dense_4h_to_h.bias.bin", model_file_type);
+//     }
 
-    // Load weights for GPT
-    if (int8_mode_ == 0) {
-        loadWeightFromBin<T>(weights_ptr[2],
-                             {hidden_units_, (hidden_units_ + 2 * size_per_head_ * head_num_kv_) / tensor_para_size_},
-                             dir_path + ".attention.query_key_value.weight." + std::to_string(tensor_para_rank_)
-                                 + ".bin",
-                             model_file_type);
+//     // Load weights for GPT
+//     if (int8_mode_ == 0) {
+//         loadWeightFromBin<T>(weights_ptr[2],
+//                              {hidden_units_, (hidden_units_ + 2 * size_per_head_ * head_num_kv_) / tensor_para_size_},
+//                              dir_path + ".attention.query_key_value.weight." + std::to_string(tensor_para_rank_)
+//                                  + ".bin",
+//                              model_file_type);
 
-        loadWeightFromBin<T>(weights_ptr[4],
-                             {hidden_units_ / tensor_para_size_, hidden_units_},
-                             dir_path + ".attention.dense.weight." + std::to_string(tensor_para_rank_) + ".bin",
-                             model_file_type);
+//         loadWeightFromBin<T>(weights_ptr[4],
+//                              {hidden_units_ / tensor_para_size_, hidden_units_},
+//                              dir_path + ".attention.dense.weight." + std::to_string(tensor_para_rank_) + ".bin",
+//                              model_file_type);
 
-        loadWeightFromBin<T>(weights_ptr[8],
-                             {hidden_units_, inter_size_ / tensor_para_size_},
-                             dir_path + ".mlp.dense_h_to_4h.weight." + std::to_string(tensor_para_rank_) + ".bin",
-                             model_file_type);
+//         loadWeightFromBin<T>(weights_ptr[8],
+//                              {hidden_units_, inter_size_ / tensor_para_size_},
+//                              dir_path + ".mlp.dense_h_to_4h.weight." + std::to_string(tensor_para_rank_) + ".bin",
+//                              model_file_type);
 
-        loadWeightFromBin<T>(weights_ptr[10],
-                             {inter_size_ / tensor_para_size_, hidden_units_},
-                             dir_path + ".mlp.dense_4h_to_h.weight." + std::to_string(tensor_para_rank_) + ".bin",
-                             model_file_type);
+//         loadWeightFromBin<T>(weights_ptr[10],
+//                              {inter_size_ / tensor_para_size_, hidden_units_},
+//                              dir_path + ".mlp.dense_4h_to_h.weight." + std::to_string(tensor_para_rank_) + ".bin",
+//                              model_file_type);
 
-        // Load adapter weights if required.
-        if (gpt_variant_params_.has_adapters) {
-            loadWeightFromBin<T>(weights_ptr[12],
-                                 {hidden_units_, gpt_variant_params_.adapter_inter_size / tensor_para_size_},
-                                 dir_path + ".after_attention_adapter.dense_h_to_4h.weight."
-                                     + std::to_string(tensor_para_rank_) + ".bin",
-                                 model_file_type);
+//         // Load adapter weights if required.
+//         if (gpt_variant_params_.has_adapters) {
+//             loadWeightFromBin<T>(weights_ptr[12],
+//                                  {hidden_units_, gpt_variant_params_.adapter_inter_size / tensor_para_size_},
+//                                  dir_path + ".after_attention_adapter.dense_h_to_4h.weight."
+//                                      + std::to_string(tensor_para_rank_) + ".bin",
+//                                  model_file_type);
 
-            loadWeightFromBin<T>(weights_ptr[14],
-                                 {gpt_variant_params_.adapter_inter_size / tensor_para_size_, hidden_units_},
-                                 dir_path + ".after_attention_adapter.dense_4h_to_h.weight."
-                                     + std::to_string(tensor_para_rank_) + ".bin",
-                                 model_file_type);
+//             loadWeightFromBin<T>(weights_ptr[14],
+//                                  {gpt_variant_params_.adapter_inter_size / tensor_para_size_, hidden_units_},
+//                                  dir_path + ".after_attention_adapter.dense_4h_to_h.weight."
+//                                      + std::to_string(tensor_para_rank_) + ".bin",
+//                                  model_file_type);
 
-            loadWeightFromBin<T>(weights_ptr[16],
-                                 {hidden_units_, gpt_variant_params_.adapter_inter_size / tensor_para_size_},
-                                 dir_path + ".after_ffn_adapter.dense_h_to_4h.weight."
-                                     + std::to_string(tensor_para_rank_) + ".bin",
-                                 model_file_type);
+//             loadWeightFromBin<T>(weights_ptr[16],
+//                                  {hidden_units_, gpt_variant_params_.adapter_inter_size / tensor_para_size_},
+//                                  dir_path + ".after_ffn_adapter.dense_h_to_4h.weight."
+//                                      + std::to_string(tensor_para_rank_) + ".bin",
+//                                  model_file_type);
 
-            loadWeightFromBin<T>(weights_ptr[18],
-                                 {gpt_variant_params_.adapter_inter_size / tensor_para_size_, hidden_units_},
-                                 dir_path + ".after_ffn_adapter.dense_4h_to_h.weight."
-                                     + std::to_string(tensor_para_rank_) + ".bin",
-                                 model_file_type);
-        }
-    }
-    else if (int8_mode_ == 1) {
-        loadWeightFromBinAndQuantizeForWeightOnly<T>(int8_weights_ptr[0],
-                                                     weight_only_scale_ptr[0],
-                                                     {hidden_units_, (hidden_units_ + 2 * size_per_head_ * head_num_kv_) / tensor_para_size_},
-                                                     dir_path + ".attention.query_key_value.weight."
-                                                         + std::to_string(tensor_para_rank_) + ".bin",
-                                                     model_file_type);
+//             loadWeightFromBin<T>(weights_ptr[18],
+//                                  {gpt_variant_params_.adapter_inter_size / tensor_para_size_, hidden_units_},
+//                                  dir_path + ".after_ffn_adapter.dense_4h_to_h.weight."
+//                                      + std::to_string(tensor_para_rank_) + ".bin",
+//                                  model_file_type);
+//         }
+//     }
+//     else if (int8_mode_ == 1) {
+//         loadWeightFromBinAndQuantizeForWeightOnly<T>(int8_weights_ptr[0],
+//                                                      weight_only_scale_ptr[0],
+//                                                      {hidden_units_, (hidden_units_ + 2 * size_per_head_ * head_num_kv_) / tensor_para_size_},
+//                                                      dir_path + ".attention.query_key_value.weight."
+//                                                          + std::to_string(tensor_para_rank_) + ".bin",
+//                                                      model_file_type);
 
-        loadWeightFromBinAndQuantizeForWeightOnly<T>(int8_weights_ptr[1],
-                                                     weight_only_scale_ptr[1],
-                                                     {hidden_units_ / tensor_para_size_, hidden_units_},
-                                                     dir_path + ".attention.dense.weight."
-                                                         + std::to_string(tensor_para_rank_) + ".bin",
-                                                     model_file_type);
+//         loadWeightFromBinAndQuantizeForWeightOnly<T>(int8_weights_ptr[1],
+//                                                      weight_only_scale_ptr[1],
+//                                                      {hidden_units_ / tensor_para_size_, hidden_units_},
+//                                                      dir_path + ".attention.dense.weight."
+//                                                          + std::to_string(tensor_para_rank_) + ".bin",
+//                                                      model_file_type);
 
-        loadWeightFromBinAndQuantizeForWeightOnly<T>(int8_weights_ptr[2],
-                                                     weight_only_scale_ptr[2],
-                                                     {hidden_units_, inter_size_ / tensor_para_size_},
-                                                     dir_path + ".mlp.dense_h_to_4h.weight."
-                                                         + std::to_string(tensor_para_rank_) + ".bin",
-                                                     model_file_type);
+//         loadWeightFromBinAndQuantizeForWeightOnly<T>(int8_weights_ptr[2],
+//                                                      weight_only_scale_ptr[2],
+//                                                      {hidden_units_, inter_size_ / tensor_para_size_},
+//                                                      dir_path + ".mlp.dense_h_to_4h.weight."
+//                                                          + std::to_string(tensor_para_rank_) + ".bin",
+//                                                      model_file_type);
 
-        loadWeightFromBinAndQuantizeForWeightOnly<T>(int8_weights_ptr[3],
-                                                     weight_only_scale_ptr[3],
-                                                     {inter_size_ / tensor_para_size_, hidden_units_},
-                                                     dir_path + ".mlp.dense_4h_to_h.weight."
-                                                         + std::to_string(tensor_para_rank_) + ".bin",
-                                                     model_file_type);
+//         loadWeightFromBinAndQuantizeForWeightOnly<T>(int8_weights_ptr[3],
+//                                                      weight_only_scale_ptr[3],
+//                                                      {inter_size_ / tensor_para_size_, hidden_units_},
+//                                                      dir_path + ".mlp.dense_4h_to_h.weight."
+//                                                          + std::to_string(tensor_para_rank_) + ".bin",
+//                                                      model_file_type);
 
-        // Load adapter weights if required.
-        if (gpt_variant_params_.has_adapters) {
-            loadWeightFromBinAndQuantizeForWeightOnly<T>(
-                int8_weights_ptr[4],
-                weight_only_scale_ptr[4],
-                {hidden_units_, gpt_variant_params_.adapter_inter_size / tensor_para_size_},
-                dir_path + ".after_attention_adapter.dense_h_to_4h.weight." + std::to_string(tensor_para_rank_)
-                    + ".bin",
-                model_file_type);
+//         // Load adapter weights if required.
+//         if (gpt_variant_params_.has_adapters) {
+//             loadWeightFromBinAndQuantizeForWeightOnly<T>(
+//                 int8_weights_ptr[4],
+//                 weight_only_scale_ptr[4],
+//                 {hidden_units_, gpt_variant_params_.adapter_inter_size / tensor_para_size_},
+//                 dir_path + ".after_attention_adapter.dense_h_to_4h.weight." + std::to_string(tensor_para_rank_)
+//                     + ".bin",
+//                 model_file_type);
 
-            loadWeightFromBinAndQuantizeForWeightOnly<T>(
-                int8_weights_ptr[5],
-                weight_only_scale_ptr[5],
-                {gpt_variant_params_.adapter_inter_size / tensor_para_size_, hidden_units_},
-                dir_path + ".after_attention_adapter.dense_4h_to_h.weight." + std::to_string(tensor_para_rank_)
-                    + ".bin",
-                model_file_type);
+//             loadWeightFromBinAndQuantizeForWeightOnly<T>(
+//                 int8_weights_ptr[5],
+//                 weight_only_scale_ptr[5],
+//                 {gpt_variant_params_.adapter_inter_size / tensor_para_size_, hidden_units_},
+//                 dir_path + ".after_attention_adapter.dense_4h_to_h.weight." + std::to_string(tensor_para_rank_)
+//                     + ".bin",
+//                 model_file_type);
 
-            loadWeightFromBinAndQuantizeForWeightOnly<T>(
-                int8_weights_ptr[6],
-                weight_only_scale_ptr[6],
-                {hidden_units_, gpt_variant_params_.adapter_inter_size / tensor_para_size_},
-                dir_path + ".after_ffn_adapter.dense_h_to_4h.weight." + std::to_string(tensor_para_rank_) + ".bin",
-                model_file_type);
+//             loadWeightFromBinAndQuantizeForWeightOnly<T>(
+//                 int8_weights_ptr[6],
+//                 weight_only_scale_ptr[6],
+//                 {hidden_units_, gpt_variant_params_.adapter_inter_size / tensor_para_size_},
+//                 dir_path + ".after_ffn_adapter.dense_h_to_4h.weight." + std::to_string(tensor_para_rank_) + ".bin",
+//                 model_file_type);
 
-            loadWeightFromBinAndQuantizeForWeightOnly<T>(
-                int8_weights_ptr[7],
-                weight_only_scale_ptr[7],
-                {gpt_variant_params_.adapter_inter_size / tensor_para_size_, hidden_units_},
-                dir_path + ".after_ffn_adapter.dense_4h_to_h.weight." + std::to_string(tensor_para_rank_) + ".bin",
-                model_file_type);
-        }
-    }
-    else if (int8_mode_ == 2) {
-        const auto                     tp_rank = std::to_string(tensor_para_rank_);
-        const std::vector<std::string> weight_list{
-            "attention.query_key_value", "attention.dense", "mlp.dense_h_to_4h", "mlp.dense_4h_to_h"};
-        const std::vector<std::vector<size_t>> shape_list{{hidden_units_, (hidden_units_ + 2 * size_per_head_ * head_num_kv_) / tensor_para_size_},
-                                                          {hidden_units_ / tensor_para_size_, hidden_units_},
-                                                          {hidden_units_, inter_size_ / tensor_para_size_},
-                                                          {inter_size_ / tensor_para_size_, hidden_units_}};
-        for (size_t i = 0; i < weight_list.size(); i++) {
-            loadWeightFromBin<int8_t>(int8_weights_ptr[i],
-                                      shape_list[i],
-                                      dir_path + "." + weight_list[i] + ".weight.int8." + tp_rank + ".bin",
-                                      FtCudaDataType::INT8);
+//             loadWeightFromBinAndQuantizeForWeightOnly<T>(
+//                 int8_weights_ptr[7],
+//                 weight_only_scale_ptr[7],
+//                 {gpt_variant_params_.adapter_inter_size / tensor_para_size_, hidden_units_},
+//                 dir_path + ".after_ffn_adapter.dense_4h_to_h.weight." + std::to_string(tensor_para_rank_) + ".bin",
+//                 model_file_type);
+//         }
+//     }
+//     else if (int8_mode_ == 2) {
+//         const auto                     tp_rank = std::to_string(tensor_para_rank_);
+//         const std::vector<std::string> weight_list{
+//             "attention.query_key_value", "attention.dense", "mlp.dense_h_to_4h", "mlp.dense_4h_to_h"};
+//         const std::vector<std::vector<size_t>> shape_list{{hidden_units_, (hidden_units_ + 2 * size_per_head_ * head_num_kv_) / tensor_para_size_},
+//                                                           {hidden_units_ / tensor_para_size_, hidden_units_},
+//                                                           {hidden_units_, inter_size_ / tensor_para_size_},
+//                                                           {inter_size_ / tensor_para_size_, hidden_units_}};
+//         for (size_t i = 0; i < weight_list.size(); i++) {
+//             loadWeightFromBin<int8_t>(int8_weights_ptr[i],
+//                                       shape_list[i],
+//                                       dir_path + "." + weight_list[i] + ".weight.int8." + tp_rank + ".bin",
+//                                       FtCudaDataType::INT8);
 
-            const std::pair<std::vector<std::vector<float*>*>, std::vector<std::string>> arg_pair{
-                {&scale_ptr, &scale_inter_ptr, &scale_out_ptr}, {"scale", "scale_inter", "scale_out"}};
-            for (size_t j = 0; j < arg_pair.first.size(); j++) {
-                size_t num_elems = 1;
-                // attention.qkv scale_inter has 3 weights for Q, K and V
-                // attention.qkv scale_out has 3 weights for Q, K and V, duplicated along hidden_units dim
-                if (i == 0 && j == 1) {
-                    num_elems = (hidden_units_ + 2 * size_per_head_ * head_num_kv_) / tensor_para_size_;
-                }
-                else if (i == 0 && j == 2) {
-                    num_elems = 3;
-                }
+//             const std::pair<std::vector<std::vector<float*>*>, std::vector<std::string>> arg_pair{
+//                 {&scale_ptr, &scale_inter_ptr, &scale_out_ptr}, {"scale", "scale_inter", "scale_out"}};
+//             for (size_t j = 0; j < arg_pair.first.size(); j++) {
+//                 size_t num_elems = 1;
+//                 // attention.qkv scale_inter has 3 weights for Q, K and V
+//                 // attention.qkv scale_out has 3 weights for Q, K and V, duplicated along hidden_units dim
+//                 if (i == 0 && j == 1) {
+//                     num_elems = (hidden_units_ + 2 * size_per_head_ * head_num_kv_) / tensor_para_size_;
+//                 }
+//                 else if (i == 0 && j == 2) {
+//                     num_elems = 3;
+//                 }
 
-                loadWeightFromBin<float>((*arg_pair.first[j])[i],
-                                         {num_elems},
-                                         dir_path + "." + weight_list[i] + "." + arg_pair.second[j] + ".bin",
-                                         FtCudaDataType::FP32);
-            }
-        }
-        transposeWeight();
-    }
-}
+//                 loadWeightFromBin<float>((*arg_pair.first[j])[i],
+//                                          {num_elems},
+//                                          dir_path + "." + weight_list[i] + "." + arg_pair.second[j] + ".bin",
+//                                          FtCudaDataType::FP32);
+//             }
+//         }
+//         transposeWeight();
+//     }
+// }
 
 template<typename T>
 void ParallelGptDecoderLayerWeight<T>::setWeightPtr()

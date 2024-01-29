@@ -17,7 +17,7 @@
 #include "int8_utils.cuh"
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/softmax_int8_kernels.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 namespace fastertransformer {
 

@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
+
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
-#include "src/fastertransformer/utils/cuda_type_utils.cuh"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 
 namespace fastertransformer {
 

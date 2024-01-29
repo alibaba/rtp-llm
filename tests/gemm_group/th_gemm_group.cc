@@ -8,7 +8,7 @@
 
 #include "src/fastertransformer/cutlass/cutlass_kernels/group_gemm/group_gemm.h"
 #include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 #include "cutlass/numeric_types.h"
 

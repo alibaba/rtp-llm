@@ -1,9 +1,9 @@
 #pragma once
 
-#include "src/fastertransformer/utils/allocator.h"
+#include "src/fastertransformer/cuda/allocator.h"
 
 #ifdef TORCH_CUDA
-#include "cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #include <cuda_runtime.h>
 #include "torch/extension.h"
 #include <memory>

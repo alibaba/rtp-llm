@@ -15,7 +15,7 @@
  */
 
 #pragma once
-#include "src/fastertransformer/utils/Tensor.h"
+#include "src/fastertransformer/cuda/Tensor.h"
 #include "src/fastertransformer/utils/allocator_impl.h"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"

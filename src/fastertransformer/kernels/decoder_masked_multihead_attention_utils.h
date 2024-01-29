@@ -17,8 +17,8 @@
 #pragma once
 
 #include "src/fastertransformer/kernels/gpt_kernels.h"
-#include "src/fastertransformer/utils/cuda_type_utils.cuh"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #include <stdint.h>
 
 #ifdef ENABLE_BF16

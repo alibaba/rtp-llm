@@ -25,7 +25,7 @@
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/sampling_topp_kernels.h"
 #include "src/fastertransformer/kernels/sampling_penalty_kernels.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 constexpr int   ENABLE_SINGLE_PASS_TOP_P = 0;
 constexpr float SINGLE_PASS_THRESHOLD    = 0.9;

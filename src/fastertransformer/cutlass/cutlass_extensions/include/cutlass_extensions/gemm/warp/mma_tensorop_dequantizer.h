@@ -52,7 +52,7 @@
 #include "cutlass/functional.h"
 #include "cutlass/platform/platform.h"
 
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
+
 
 ////////////////////////////////////////////////////////////////////////////////
 

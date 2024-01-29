@@ -3,7 +3,7 @@
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/layers/TensorParallelFfnLayer.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelAttentionWrapper.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include <algorithm>
 
 namespace fastertransformer {

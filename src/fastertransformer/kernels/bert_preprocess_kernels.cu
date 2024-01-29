@@ -15,9 +15,9 @@
  */
 
 #include "bert_preprocess_kernels.h"
-#include "src/fastertransformer/utils/cuda_bf16_fallbacks.cuh"
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
-#include "src/fastertransformer/utils/cuda_type_utils.cuh"
+#include "src/fastertransformer/cuda/cuda_bf16_fallbacks.cuh"
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 
 namespace fastertransformer {
 

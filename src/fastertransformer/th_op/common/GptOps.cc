@@ -16,7 +16,7 @@
 
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 
 namespace torch_ext {
 namespace ft = fastertransformer;

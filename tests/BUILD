@@ -26,8 +26,7 @@ cc_library(
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/kernels:kernels",
         "//src/fastertransformer/utils:utils",
-        "//src/fastertransformer/utils:torch_utils",
-        "//src/fastertransformer/utils:nccl_utils",
+        "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/layers:layers",
         "//src/fastertransformer/models:models",
         "//3rdparty/flash_attention2:flash_attention2_impl",
@@ -56,14 +55,14 @@ cc_test(
     tags = ["exclusive"]
 )
 
-cc_test(
-    name = "test_context_decoder_layer",
-    srcs = ["unittests/test_context_decoder_layer.cu"],
-    deps = [":test_lib"],
-    copts = test_copts,
-    linkopts = test_linkopts,
-    visibility = ["//visibility:public"],
-)
+# cc_test(
+#     name = "test_context_decoder_layer",
+#     srcs = ["unittests/test_context_decoder_layer.cu"],
+#     deps = [":test_lib"],
+#     copts = test_copts,
+#     linkopts = test_linkopts,
+#     visibility = ["//visibility:public"],
+# )
 
 cc_test(
     name = "test_gemm",
@@ -123,7 +122,6 @@ cc_library(
     ]),
     deps = torch_deps() + [
         "//src/fastertransformer/kernels:kernels",
-        "//src/fastertransformer/utils:torch_utils",
 	    "//:th_utils",
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
     ],

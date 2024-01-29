@@ -2,7 +2,7 @@
 #include <random>
 
 #include "src/fastertransformer/kernels/gpt_kernels.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 
 #include "unittest_utils.h"
 

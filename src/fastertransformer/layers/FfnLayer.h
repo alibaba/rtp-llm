@@ -23,8 +23,8 @@
 #include "src/fastertransformer/layers/FfnWeight.h"
 #include "src/fastertransformer/layers/GemmRunner.h"
 #include "src/fastertransformer/utils/activation_types.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 #include <stdint.h>
 #include <vector>
 

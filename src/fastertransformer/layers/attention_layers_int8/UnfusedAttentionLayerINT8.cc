@@ -18,7 +18,7 @@
 #include "src/fastertransformer/kernels/softmax_int8_kernels.h"
 #include "src/fastertransformer/kernels/transpose_int8_kernels.h"
 #include "src/fastertransformer/kernels/unfused_attention_int8_kernels.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 
 namespace fastertransformer {
 
@@ -67,7 +67,9 @@ void UnfusedAttentionLayerINT8<T>::forward(TensorMap*                output_tens
         exit(-1);
     }
 
-    const int fusedINT8QKV_type = cublas_wrapper->getFusedINT8QKVType(k, n, attention_weights);
+    const int fusedINT8QKV_type = cublas_wrapper->getFusedINT8QKVType(k, n, attention_weights->query_weight.kernel,
+                                                                        attention_weights->key_weight.kernel,
+                                                                        attention_weights->value_weight.kernel);
     if (int8_mode_ == 1) {
         // K_int_buf_ V_int_buf_ should point to correct buffer according to m
         K_int_buf_ = (int*)Q_int_buf_ + m * head_num_ * size_per_head_;

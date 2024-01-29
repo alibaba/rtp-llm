@@ -15,7 +15,7 @@
  */
 
 #include "src/fastertransformer/kernels/matrix_transpose_kernels.h"
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 
 namespace fastertransformer {
 

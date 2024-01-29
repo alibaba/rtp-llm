@@ -6,7 +6,7 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime_api.h>
 
-#include "cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #include <iostream>
 #include <vector>
 namespace {

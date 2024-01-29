@@ -20,7 +20,7 @@
 #include "src/fastertransformer/layers/attention_layers/BaseAttentionLayer.h"
 #include "src/fastertransformer/layers/attention_layers_int8/AttentionINT8Weight.h"
 #include "src/fastertransformer/utils/ScaleList.h"
-#include "src/fastertransformer/utils/cublasINT8MMWrapper.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
 
 namespace fastertransformer {
 

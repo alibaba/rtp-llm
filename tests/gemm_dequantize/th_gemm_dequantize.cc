@@ -24,7 +24,7 @@
 
 #include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
 #include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
+
 #include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/enabled.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h"
 

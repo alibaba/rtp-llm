@@ -28,7 +28,6 @@
 #include <cuda_runtime.h>
 
 #include "fused_multihead_attention_common.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
 #include "tmaDescriptor.h"
 
 namespace tensorrt_llm

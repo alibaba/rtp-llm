@@ -20,7 +20,7 @@
 #include <stdint.h>
 
 #include "add_bias_transpose_kernels.h"
-#include "src/fastertransformer/utils/cuda_type_utils.cuh"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 
 namespace fastertransformer {
 

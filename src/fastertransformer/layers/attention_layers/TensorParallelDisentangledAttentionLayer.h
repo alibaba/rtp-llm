@@ -17,8 +17,8 @@
 #pragma once
 
 #include "src/fastertransformer/layers/attention_layers/DisentangledAttentionLayer.h"
-#include "src/fastertransformer/utils/custom_ar_comm.h"
-#include "src/fastertransformer/utils/nccl_utils.h"
+#include "src/fastertransformer/cuda/custom_ar_comm.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 
 namespace fastertransformer {
 

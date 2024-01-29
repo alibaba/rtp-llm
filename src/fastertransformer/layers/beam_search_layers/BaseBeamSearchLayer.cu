@@ -16,7 +16,7 @@
 
 #include "src/fastertransformer/kernels/beam_search_penalty_kernels.h"
 #include "src/fastertransformer/layers/beam_search_layers/BaseBeamSearchLayer.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 namespace fastertransformer {
 

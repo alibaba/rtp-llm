@@ -3,8 +3,7 @@
 
 #pragma once
 
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #include <cstdint>
 #include <cstdlib>
 #include <cublasLt.h>

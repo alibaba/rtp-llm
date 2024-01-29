@@ -17,7 +17,7 @@
 #pragma once
 
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #include <assert.h>
 #include <cuda_runtime.h>
 #include <stdint.h>

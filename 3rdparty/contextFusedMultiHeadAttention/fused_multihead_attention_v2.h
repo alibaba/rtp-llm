@@ -19,7 +19,6 @@
 #include "cuda_runtime_api.h"
 #include "fused_multihead_attention_common.h"
 #include "pagedKVCubin/fmha_cubin.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
 #include "3rdparty/common/cudaDriverWrapper.h"
 #include "tmaDescriptor.h"
 #include <assert.h>

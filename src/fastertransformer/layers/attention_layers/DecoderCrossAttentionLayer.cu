@@ -26,7 +26,7 @@
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h"
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/layers/attention_layers/DecoderCrossAttentionLayer.h"
-#include "src/fastertransformer/utils/cuda_type_utils.cuh"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 
 namespace fastertransformer {

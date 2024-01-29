@@ -17,7 +17,7 @@
 #pragma once
 
 #include "cutlass_extensions/ft_gemm_configs.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 namespace fastertransformer {
 

@@ -18,8 +18,8 @@
 
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
+
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
 #include <stdint.h>

@@ -23,8 +23,8 @@
 #include "src/fastertransformer/layers/BaseLayer.h"
 #include "src/fastertransformer/layers/FfnLayer.h"
 #include "src/fastertransformer/layers/adapter_layers/LinearAdapterWeight.h"
-#include "src/fastertransformer/utils/custom_ar_comm.h"
-#include "src/fastertransformer/utils/nccl_utils.h"
+#include "src/fastertransformer/cuda/custom_ar_comm.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 
 namespace fastertransformer {
 

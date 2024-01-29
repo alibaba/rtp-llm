@@ -17,7 +17,7 @@
 #pragma once
 #include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/common.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/utility.h"
-#include "src/fastertransformer/utils/cuda_type_utils.cuh"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 
 
 namespace fastertransformer {

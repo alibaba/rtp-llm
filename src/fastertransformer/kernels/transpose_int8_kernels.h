@@ -17,7 +17,7 @@
 #pragma once
 
 #include "int8_utils.cuh"
-#include "src/fastertransformer/utils/Tensor.h"
+#include "src/fastertransformer/cuda/Tensor.h"
 #include <assert.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>

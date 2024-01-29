@@ -297,68 +297,90 @@ void ParallelGptWeight<T>::mallocWeights()
     is_maintain_buffer = true;
 }
 
-template<typename T>
-void ParallelGptWeight<T>::loadModel(std::string dir_path)
-{
-    FtCudaDataType model_file_type = getModelFileType(dir_path + "/config.ini", "gpt");
-    FT_CHECK(is_maintain_buffer == true);
-    if (gpt_variant_params_.has_positional_encoding) {
-        loadWeightFromBin<T>(
-            weights_ptr[0], {max_seq_len_, hidden_units_}, dir_path + "/model.wpe.bin", model_file_type);
-    }
-    loadWeightFromBin<T>(weights_ptr[1], {vocab_size_ * hidden_units_}, dir_path + "/model.wte.bin", model_file_type);
-    if (gpt_variant_params_.has_pre_decoder_layernorm) {
-        loadWeightFromBin<T>(
-            weights_ptr[2], {hidden_units_}, dir_path + "/model.pre_decoder_layernorm.weight.bin", model_file_type);
-        loadWeightFromBin<T>(
-            weights_ptr[3], {hidden_units_}, dir_path + "/model.pre_decoder_layernorm.bias.bin", model_file_type);
-    }
-    if (gpt_variant_params_.has_post_decoder_layernorm) {
-        loadWeightFromBin<T>(
-            weights_ptr[4], {hidden_units_}, dir_path + "/model.final_layernorm.bias.bin", model_file_type);
-        loadWeightFromBin<T>(
-            weights_ptr[5], {hidden_units_}, dir_path + "/model.final_layernorm.weight.bin", model_file_type);
-    }
-    if (checkIfFileExist(dir_path + "/model.lm_head.weight.bin")) {
-        shared_embed_ = false;
-        loadWeightFromBin<T>(
-            weights_ptr[6], {vocab_size_ * hidden_units_}, dir_path + "/model.lm_head.weight.bin", model_file_type);
-    }
-    else {
-        shared_embed_ = true;
-        loadWeightFromBin<T>(
-            weights_ptr[6], {vocab_size_ * hidden_units_}, dir_path + "/model.wte.bin", model_file_type);
-    }
+// FtCudaDataType getModelFileType(std::string ini_file, std::string section_name) {
+//     FtCudaDataType model_file_type;
+//     INIReader      reader = INIReader(ini_file);
+//     if (reader.ParseError() < 0) {
+//         FT_LOG_WARNING("Can't load %s. Use FP32 as default", ini_file.c_str());
+//         model_file_type = FtCudaDataType::FP32;
+//     } else {
+//         std::string weight_data_type_str = std::string(reader.Get(section_name, "weight_data_type"));
+//         if (weight_data_type_str.find("fp32") != std::string::npos) {
+//             model_file_type = FtCudaDataType::FP32;
+//         } else if (weight_data_type_str.find("fp16") != std::string::npos) {
+//             model_file_type = FtCudaDataType::FP16;
+//         } else if (weight_data_type_str.find("bf16") != std::string::npos) {
+//             model_file_type = FtCudaDataType::BF16;
+//         } else {
+//             FT_LOG_WARNING("Invalid type %s. Use FP32 as default", weight_data_type_str.c_str());
+//             model_file_type = FtCudaDataType::FP32;
+//         }
+//     }
+//     return model_file_type;
+// }
 
-    // prompt table: load weights from bin
-    if (malloc_load_prompt_weights_) {
-        for (auto const& prompt : prompt_learning_pair_) {
-            std::string task_name      = prompt.first;
-            int         task_name_id   = prompt.second.first;
-            int         prompt_length  = prompt.second.second;
-            size_t      task_weight_id = num_base_weights + (size_t)task_name_id;
+// template<typename T>
+// void ParallelGptWeight<T>::loadModel(std::string dir_path)
+// {
+//     FtCudaDataType model_file_type = getModelFileType(dir_path + "/config.ini", "gpt");
+//     FT_CHECK(is_maintain_buffer == true);
+//     if (gpt_variant_params_.has_positional_encoding) {
+//         loadWeightFromBin<T>(
+//             weights_ptr[0], {max_seq_len_, hidden_units_}, dir_path + "/model.wpe.bin", model_file_type);
+//     }
+//     loadWeightFromBin<T>(weights_ptr[1], {vocab_size_ * hidden_units_}, dir_path + "/model.wte.bin", model_file_type);
+//     if (gpt_variant_params_.has_pre_decoder_layernorm) {
+//         loadWeightFromBin<T>(
+//             weights_ptr[2], {hidden_units_}, dir_path + "/model.pre_decoder_layernorm.weight.bin", model_file_type);
+//         loadWeightFromBin<T>(
+//             weights_ptr[3], {hidden_units_}, dir_path + "/model.pre_decoder_layernorm.bias.bin", model_file_type);
+//     }
+//     if (gpt_variant_params_.has_post_decoder_layernorm) {
+//         loadWeightFromBin<T>(
+//             weights_ptr[4], {hidden_units_}, dir_path + "/model.final_layernorm.bias.bin", model_file_type);
+//         loadWeightFromBin<T>(
+//             weights_ptr[5], {hidden_units_}, dir_path + "/model.final_layernorm.weight.bin", model_file_type);
+//     }
+//     if (checkIfFileExist(dir_path + "/model.lm_head.weight.bin")) {
+//         shared_embed_ = false;
+//         loadWeightFromBin<T>(
+//             weights_ptr[6], {vocab_size_ * hidden_units_}, dir_path + "/model.lm_head.weight.bin", model_file_type);
+//     }
+//     else {
+//         shared_embed_ = true;
+//         loadWeightFromBin<T>(
+//             weights_ptr[6], {vocab_size_ * hidden_units_}, dir_path + "/model.wte.bin", model_file_type);
+//     }
 
-            std::string prompt_weight_path_name = (prompt_learning_type_ == PromptLearningType::p_prompt_tuning) ?
-                                                      (dir_path + "/model.prompt_table." + task_name + ".weight.bin") :
-                                                      (dir_path + "/model.prefix_prompt." + task_name + ".weight."
-                                                       + std::to_string(tensor_para_rank_) + ".bin");
+//     // prompt table: load weights from bin
+//     if (malloc_load_prompt_weights_) {
+//         for (auto const& prompt : prompt_learning_pair_) {
+//             std::string task_name      = prompt.first;
+//             int         task_name_id   = prompt.second.first;
+//             int         prompt_length  = prompt.second.second;
+//             size_t      task_weight_id = num_base_weights + (size_t)task_name_id;
 
-            if (prompt_length > 0) {
-                loadWeightFromBin<T>(weights_ptr[task_weight_id],
-                                     {prompt_length * prompt_token_weight_size_},
-                                     prompt_weight_path_name,
-                                     model_file_type);
-            }
-        }
-    }
-    setWeightPtr();
+//             std::string prompt_weight_path_name = (prompt_learning_type_ == PromptLearningType::p_prompt_tuning) ?
+//                                                       (dir_path + "/model.prompt_table." + task_name + ".weight.bin") :
+//                                                       (dir_path + "/model.prefix_prompt." + task_name + ".weight."
+//                                                        + std::to_string(tensor_para_rank_) + ".bin");
 
-    for (size_t l = 0; l < num_layer_; l++) {
-        if (isValidLayerParallelId(l)) {
-            decoder_layer_weights[l]->loadModel(dir_path + "/model.layers." + std::to_string(l), model_file_type);
-        }
-    }
-}
+//             if (prompt_length > 0) {
+//                 loadWeightFromBin<T>(weights_ptr[task_weight_id],
+//                                      {prompt_length * prompt_token_weight_size_},
+//                                      prompt_weight_path_name,
+//                                      model_file_type);
+//             }
+//         }
+//     }
+//     setWeightPtr();
+
+//     for (size_t l = 0; l < num_layer_; l++) {
+//         if (isValidLayerParallelId(l)) {
+//             decoder_layer_weights[l]->loadModel(dir_path + "/model.layers." + std::to_string(l), model_file_type);
+//         }
+//     }
+// }
 
 template<typename T>
 bool ParallelGptWeight<T>::isValidLayerParallelId(uint l)

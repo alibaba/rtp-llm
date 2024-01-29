@@ -16,7 +16,7 @@
  */
 
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoder.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 
 namespace fastertransformer {
 

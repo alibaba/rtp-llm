@@ -16,7 +16,7 @@
 
 #include "src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptContextDecoderOp.h"
 #include "src/fastertransformer/th_op/multi_gpu_gpt/Base.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 namespace th = torch;
 namespace ft = fastertransformer;

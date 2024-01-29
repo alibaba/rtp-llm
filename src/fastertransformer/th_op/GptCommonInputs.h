@@ -1,7 +1,7 @@
 #pragma once
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/utils/Tensor.h"
+#include "src/fastertransformer/cuda/Tensor.h"
 
 // namespace th = torch;
 

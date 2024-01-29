@@ -15,7 +15,7 @@
  */
 
 #include "src/fastertransformer/utils/gemm_test/gpt_gemm_func.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 
 namespace ft = fastertransformer;
 

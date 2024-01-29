@@ -17,6 +17,7 @@ cc_library(
         "//3rdparty/flash_attention2:flash_attention2_header",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_header",
         "//src/fastertransformer/layers:layers",
+        "//src/fastertransformer/cuda:cuda",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -32,7 +33,7 @@ cc_binary(
     ],
     deps = [
         "//src/fastertransformer/kernels:kernels",
-        "//src/fastertransformer/utils:gemm_test_utils",
+        "//src/fastertransformer/cuda:gemm_test_utils",
     ],
     copts = copts(),
     linkopts = [

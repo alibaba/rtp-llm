@@ -15,7 +15,7 @@
  */
 #pragma once
 
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #include <cuda_runtime.h>
 #include <stdint.h>
 

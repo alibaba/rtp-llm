@@ -1,5 +1,5 @@
 #include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/utils/nccl_utils.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 
 namespace ft = fastertransformer;
 namespace th = torch;

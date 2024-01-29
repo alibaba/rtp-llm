@@ -11,10 +11,10 @@
 #include "src/fastertransformer/models/multi_gpu_gpt/NormWrapper.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLayerWeight.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
-#include "src/fastertransformer/utils/Tensor.h"
-#include "src/fastertransformer/utils/allocator.h"
-#include "src/fastertransformer/utils/cublasMMWrapper.h"
-#include "src/fastertransformer/utils/custom_ar_comm.h"
+#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/cuda/allocator.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
+#include "src/fastertransformer/cuda/custom_ar_comm.h"
 
 namespace fastertransformer {
 

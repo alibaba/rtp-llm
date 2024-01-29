@@ -1,4 +1,4 @@
-#include "cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 template<typename T_OUT, typename T_IN>
 void __global__ cudaCastKernel(T_OUT* out, T_IN const * const in, const uint32_t size)

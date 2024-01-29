@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "src/fastertransformer/utils/cuda_type_utils.cuh"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "xlnet_preprocess_kernels.h"
 
 namespace fastertransformer {

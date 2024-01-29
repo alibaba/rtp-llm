@@ -16,7 +16,7 @@ cc_library(
     deps = [
         "//src/fastertransformer/cutlass:cutlass_interface",
         "//src/fastertransformer/utils:utils",
-        "//src/fastertransformer/utils:nccl_utils",
+        "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/kernels:kernels",
         "//3rdparty:cuda_driver",
         "@local_config_cuda//cuda:cuda",

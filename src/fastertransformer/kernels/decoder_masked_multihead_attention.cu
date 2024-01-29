@@ -16,7 +16,7 @@
 
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include <assert.h>
 #include <float.h>
 #include <type_traits>

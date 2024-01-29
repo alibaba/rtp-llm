@@ -22,7 +22,6 @@ cc_binary(
     deps = [
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/utils:utils",
-        "//src/fastertransformer/utils:utils_for_3rdparty",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -47,7 +46,7 @@ cc_test(
     deps = [
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/layers:layers",
-        "//src/fastertransformer/utils:torch_utils",
+        "//src/fastertransformer/utils:utils",
         "@com_google_googletest//:gtest"
     ],
     copts = cuda_copts(),

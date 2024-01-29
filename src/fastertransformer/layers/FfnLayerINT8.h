@@ -20,10 +20,10 @@
 #include "src/fastertransformer/kernels/activation_int8_kernels.h"
 #include "src/fastertransformer/layers/BaseLayer.h"
 #include "src/fastertransformer/utils/ScaleList.h"
-#include "src/fastertransformer/utils/Tensor.h"
-#include "src/fastertransformer/utils/allocator.h"
-#include "src/fastertransformer/utils/cublasINT8MMWrapper.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/cuda/allocator.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 #include <vector>
 
 namespace fastertransformer {

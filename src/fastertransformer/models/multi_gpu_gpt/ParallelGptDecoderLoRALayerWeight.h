@@ -5,7 +5,7 @@
 #include "src/fastertransformer/layers/FfnLayer.h"
 #include "src/fastertransformer/layers/FfnWeight.h"
 #include "src/fastertransformer/layers/attention_layers/AttentionWeight.h"
-#include "src/fastertransformer/utils/cublasMMWrapper.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
 #include "src/fastertransformer/utils/LoRAWeight.h"
 namespace fastertransformer {
 template<typename T>

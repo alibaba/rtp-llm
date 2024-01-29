@@ -23,7 +23,7 @@
 
 #include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
+
 
 #include "cutlass/numeric_types.h"
 

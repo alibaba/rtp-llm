@@ -15,7 +15,7 @@
  */
 
 #include "src/fastertransformer/kernels/xlnet_attention_kernels.h"
-#include "src/fastertransformer/utils/cuda_type_utils.cuh"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 namespace fastertransformer {
 template<typename T>
 int numPerThread()

@@ -15,7 +15,7 @@
  */
 
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_heuristic.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
+
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"

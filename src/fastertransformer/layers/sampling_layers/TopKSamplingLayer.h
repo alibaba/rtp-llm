@@ -18,7 +18,7 @@
 #pragma once
 
 #include "src/fastertransformer/layers/sampling_layers/BaseSamplingLayer.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 
 namespace fastertransformer {
 

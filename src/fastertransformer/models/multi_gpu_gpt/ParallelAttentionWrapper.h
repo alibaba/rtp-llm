@@ -7,7 +7,7 @@
 #include "src/fastertransformer/layers/GemmRunner.h"
 #include "src/fastertransformer/layers/attention_layers/BaseAttentionLayer.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
-#include "src/fastertransformer/utils/nccl_utils.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 
 namespace fastertransformer {
 

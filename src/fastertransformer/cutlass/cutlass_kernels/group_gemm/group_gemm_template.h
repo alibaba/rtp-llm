@@ -12,7 +12,7 @@
 #include "cutlass_extensions/gemm/kernel/group_gemm_traits.h"
 
 #include "src/fastertransformer/cutlass/cutlass_kernels/group_gemm/group_gemm.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 namespace fastertransformer {
 
 

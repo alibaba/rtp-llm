@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 #pragma once
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #include <assert.h>
 #include <cmath>
 #include <cuda_fp16.h>

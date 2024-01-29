@@ -16,8 +16,8 @@
 
 #include "src/fastertransformer/kernels/activation_fp8_kernels.h"
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h"
-#include "src/fastertransformer/utils/cuda_bf16_fallbacks.cuh"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_bf16_fallbacks.cuh"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 namespace fastertransformer {
 

@@ -15,7 +15,7 @@
  */
 
 #pragma once
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #include "cutlass_extensions/gemm/kernel/mixed_gemm_B_layout.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/common.h"
 

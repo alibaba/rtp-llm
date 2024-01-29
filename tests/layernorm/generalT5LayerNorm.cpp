@@ -1,7 +1,7 @@
 #include "src/fastertransformer/kernels/rmsnormKernels.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
-#include "src/fastertransformer/utils/cuda_type_utils.cuh"
+
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
 #include <ATen/cuda/CUDAContext.h>

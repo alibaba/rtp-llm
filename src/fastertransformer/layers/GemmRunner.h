@@ -4,8 +4,8 @@
 #include "src/fastertransformer/layers/FfnWeight.h"
 #include "src/fastertransformer/layers/attention_layers/AttentionWeight.h"
 #include "src/fastertransformer/utils/LoRAWeight.h"
-#include "src/fastertransformer/utils/cublasMMWrapper.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include <string>
 
 namespace fastertransformer {

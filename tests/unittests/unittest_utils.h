@@ -26,8 +26,8 @@
 #include <string>      // string
 #include <vector>      // vector
 
-#include "src/fastertransformer/utils/cuda_utils.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/utils/string_utils.h"
 
 #define PRINT_LIMIT 16

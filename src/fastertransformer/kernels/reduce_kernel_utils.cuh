@@ -22,12 +22,12 @@
 #include <cooperative_groups.h>
 #endif
 #include <cuda_fp16.h>
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
+
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <float.h>
 #include <type_traits>
-#include "src/fastertransformer/utils/cuda_type_utils.cuh"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 
 namespace cg = cooperative_groups;
 

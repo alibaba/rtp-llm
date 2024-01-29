@@ -16,7 +16,7 @@
 
 #pragma once
 #include <cuda_runtime_api.h>
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 

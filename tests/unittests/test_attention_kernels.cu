@@ -18,9 +18,9 @@
 #include "src/fastertransformer/kernels/gen_relative_pos_bias.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
-#include "src/fastertransformer/utils/memory_utils.h"
-#include "src/fastertransformer/utils/nccl_utils.h"
-#include "src/fastertransformer/utils/Tensor.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
+#include "src/fastertransformer/cuda/Tensor.h"
 
 #include <curand.h>
 #include <sstream>

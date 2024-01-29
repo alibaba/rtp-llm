@@ -16,13 +16,14 @@
  */
 
 #include <float.h>
+#include <algorithm>
 
 #include "src/fastertransformer/kernels/sampling_topk_kernels.h"
 #include "src/fastertransformer/kernels/sampling_topp_kernels.h"
 #include "src/fastertransformer/kernels/sampling_penalty_kernels.h"
 #include "src/fastertransformer/layers/sampling_layers/TopKSamplingLayer.h"
 #include "src/fastertransformer/utils/logger.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 
 namespace fastertransformer {
 

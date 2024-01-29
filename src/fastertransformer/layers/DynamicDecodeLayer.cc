@@ -22,7 +22,7 @@
 #include "src/fastertransformer/layers/beam_search_layers/OnlineBeamSearchLayer.h"
 #include "src/fastertransformer/layers/sampling_layers/TopKSamplingLayer.h"
 #include "src/fastertransformer/layers/sampling_layers/TopPSamplingLayer.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 
 namespace fastertransformer {
 

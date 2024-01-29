@@ -3,7 +3,7 @@
 // #include "3rdparty/swarm-review-30931053/cudart/cuda_fp8.h"
 #include <cuda_fp8.h>
 #include <iostream>
-#include "cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 //=====================================================================================================================
 

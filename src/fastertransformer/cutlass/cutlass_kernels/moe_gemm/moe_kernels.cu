@@ -32,7 +32,7 @@
 #pragma GCC diagnostic pop
 
 #include "moe_kernels.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/utils/activation_types.h"
 
 #ifndef CUDART_VERSION

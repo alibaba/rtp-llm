@@ -23,6 +23,9 @@ cc_library(
         "moe_kernels.h",
     ]),
     deps = [
+        "//src/fastertransformer/cuda:memory_utils",
+        "//src/fastertransformer/cuda:nvtx",
+        "//src/fastertransformer/cuda:cuda_utils",
         "//src/fastertransformer/utils:utils",
         "//3rdparty:cub",
         "@local_config_cuda//cuda:cuda",

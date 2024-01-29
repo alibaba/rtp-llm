@@ -21,14 +21,10 @@
 
 #include "matrix_vector_multiplication.h"
 #include "reduce_kernel_utils.cuh"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
-#include "src/fastertransformer/utils/cuda_type_utils.cuh"
+
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 
 namespace fastertransformer {
-
-typedef struct half4 {
-    half x, y, z, w;
-} half4;
 
 #ifdef ENABLE_BF16
 typedef struct bf164 {

@@ -16,7 +16,7 @@
 #pragma once
 
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include "src/fastertransformer/utils/Tensor.h"
+#include "src/fastertransformer/cuda/Tensor.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 
 namespace fastertransformer {

@@ -15,7 +15,7 @@
  */
 
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_preprocessors.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
+
 
 #include "cutlass_extensions/gemm/kernel/mixed_gemm_B_layout.h"
 

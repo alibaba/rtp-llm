@@ -19,7 +19,6 @@ cc_library(
         "common/*.h",
     ]),    
     deps = [
-        "//src/fastertransformer/utils:utils_for_3rdparty",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],

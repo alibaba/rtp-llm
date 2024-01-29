@@ -3,8 +3,8 @@
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 #include <type_traits>
 #include <cassert>

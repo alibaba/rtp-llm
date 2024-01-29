@@ -17,7 +17,7 @@
 #include "src/fastertransformer/layers/FfnFP8Layer.h"
 #include "src/fastertransformer/kernels/activation_fp8_kernels.h"
 #include "src/fastertransformer/utils/cublasFP8MMWrapper.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 
 namespace fastertransformer {
 

@@ -25,7 +25,7 @@ cc_library(
     	":th_op_hdrs",
         "//src/fastertransformer/layers:layers",
         "//src/fastertransformer/models:models",
-        "//src/fastertransformer/utils:torch_utils",
+        "//src/fastertransformer/utils:utils",
     ],
     copts = copts(),
     alwayslink = True,
@@ -57,7 +57,7 @@ cc_library(
         "src/fastertransformer/th_op/GptCommonInputs.h",
     ],
     deps = [
-        "//src/fastertransformer/utils:torch_utils",
+        "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/kernels:kernels",
     ],

@@ -10,7 +10,7 @@
 
 #include "src/fastertransformer/kernels/online_softmax_beamsearch/online_softmax_beamsearch_kernels.h"
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 
 namespace fastertransformer {

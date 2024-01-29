@@ -17,8 +17,8 @@
 #pragma once
 
 #include "src/fastertransformer/layers/FfnFP8Layer.h"
-#include "src/fastertransformer/utils/cuda_fp8_utils.h"
-#include "src/fastertransformer/utils/nccl_utils.h"
+#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 
 namespace fastertransformer {
 

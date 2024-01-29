@@ -18,9 +18,9 @@
 
 #include <assert.h>
 
-#include "src/fastertransformer/utils/Tensor.h"
-#include "src/fastertransformer/utils/allocator.h"
-#include "src/fastertransformer/utils/cublasMMWrapper.h"
+#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/cuda/allocator.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
 
 namespace fastertransformer {
 

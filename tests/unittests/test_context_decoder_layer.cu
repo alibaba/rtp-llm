@@ -7,14 +7,14 @@
 #include <vector>
 
 #include "src/fastertransformer/layers/DenseWeight.h"
-#include "src/fastertransformer/utils/allocator.h"
-#include "src/fastertransformer/utils/cublasMMWrapper.h"
-#include "src/fastertransformer/utils/cuda_utils.h"
-#include "src/fastertransformer/utils/gemm.h"
+#include "src/fastertransformer/cuda/allocator.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/cuda/gemm.h"
 #include "src/fastertransformer/utils/logger.h"
-#include "src/fastertransformer/utils/memory_utils.h"
-#include "src/fastertransformer/utils/Tensor.h"
-#include "src/fastertransformer/utils/nvtx_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
+#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include "src/fastertransformer/utils/allocator_impl.h"
 
 #include "src/fastertransformer/kernels/gpt_kernels.h"

@@ -20,7 +20,7 @@
 
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoder.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLayerWeight.h"
-#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/utils/prompt_learning.h"
 
 namespace fastertransformer {
@@ -47,7 +47,7 @@ struct ParallelGptWeight {
     ~ParallelGptWeight();
     ParallelGptWeight(const ParallelGptWeight& other);
     ParallelGptWeight& operator=(const ParallelGptWeight& other);
-    void               loadModel(std::string dir_path);
+    // void               loadModel(std::string dir_path);
     void               resizeLayer(const int num_layer, const int int8_mode = 0);
 #ifdef SPARSITY_ENABLED
     void compress_weights(cublasMMWrapper& cublas_wrapper);

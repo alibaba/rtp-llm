@@ -22,7 +22,7 @@
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
 #include <iostream>
-#include "src/fastertransformer/utils/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 namespace fastertransformer {
 namespace kernels {

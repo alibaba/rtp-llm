@@ -23,7 +23,7 @@
 #include "src/fastertransformer/layers/FfnLayer.h"
 #include "src/fastertransformer/layers/FfnWeight.h"
 #include "src/fastertransformer/layers/attention_layers/AttentionWeight.h"
-#include "src/fastertransformer/utils/cublasMMWrapper.h"
+#include "src/fastertransformer/cuda/cublas/cublas.h"
 
 namespace fastertransformer {
 
@@ -62,7 +62,7 @@ public:
     ~ParallelGptDecoderLayerWeight();
     ParallelGptDecoderLayerWeight(const ParallelGptDecoderLayerWeight& other);
     ParallelGptDecoderLayerWeight& operator=(const ParallelGptDecoderLayerWeight& other);
-    void                           loadModel(std::string dir_path, FtCudaDataType model_file_type);
+    // void                           loadModel(std::string dir_path, FtCudaDataType model_file_type);
 #ifdef SPARSITY_ENABLED
     void compress_weights(cublasMMWrapper& cublas_wrapper, int hidden_dim);
 #endif

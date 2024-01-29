@@ -18,8 +18,8 @@
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLoRALayerWeight.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/th_op/th_utils.h"
-#include "src/fastertransformer/utils/cuda_bf16_wrapper.h"
-#include "src/fastertransformer/utils/nccl_utils.h"
+
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 
 namespace ft = fastertransformer;
