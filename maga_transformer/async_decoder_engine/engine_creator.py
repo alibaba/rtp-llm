@@ -17,8 +17,6 @@ from maga_transformer.async_decoder_engine.medusa.medusa_model_executor import M
 from maga_transformer.async_decoder_engine.medusa.utils import generate_medusa_buffers
 from maga_transformer.async_decoder_engine.decoder_engine import DecoderEngine
 
-from enum import Enum
-
 class ExecutorType(Enum):
     Normal = "normal"
     Speculative = "speculative"

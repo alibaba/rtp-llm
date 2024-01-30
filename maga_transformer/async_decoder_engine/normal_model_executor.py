@@ -51,6 +51,7 @@ class NormalModelExecutor(ExecutorBase):
         return to_cuda(torch.tensor(t, dtype=dtype)) if t is not None else None
 
     def process(self, batch_query: BatchQuery) -> None:
+        self._reconstruct_sampler(batch_query)
         all_hidden_states = self._process(batch_query)
         hidden_states = self._unpack_hidden_states(batch_query, all_hidden_states)
         self._calculate_loss(batch_query, all_hidden_states)
@@ -62,21 +63,20 @@ class NormalModelExecutor(ExecutorBase):
 
     def create_config_json(self):
         config_json = {
-            "engine_type": type(self).__name__,
+            "executor_type": type(self).__name__,
         }
         config_json.update(self.scheduler_.create_config_json())
         return config_json
 
     def _unpack_hidden_states(self, batch_query: BatchQuery, hidden_states: torch.Tensor):
-        index_lst = list(range(0, batch_query.generate_batch_size * batch_query.beam_width))
+        index_list = list(range(0, batch_query.generate_batch_size * batch_query.beam_width))
         offset = batch_query.generate_batch_size * batch_query.beam_width - 1
         for i in range(0, batch_query.context_batch_size):
             offset = offset + batch_query.context_query_context_lengths_list[i]
-            index_lst.append(offset)
-        return hidden_states.index_select(0, torch.tensor(index_lst, device="cuda:0"))
+            index_list.append(offset)
+        return hidden_states.index_select(0, torch.tensor(index_list, device="cuda:0"))
 
     def _process(self, batch_query: BatchQuery) -> torch.Tensor:
-        # be1 = time.perf_counter()
         with torch.cuda.nvtx.range('pre_process'):
             input_embeds, attention_mask, position_ids = self._pre_process(batch_query)
             k_cache, v_cache = self.scheduler_.get_kv_cache_base()
@@ -106,7 +106,7 @@ class NormalModelExecutor(ExecutorBase):
     def _create_position_ids_for_rotary(self, batch_query: BatchQuery) -> Optional[torch.Tensor]:
         if self.model_ops.model.position_encoding is None:
             return None
-            # generate query
+        # generate query
         position_ids = [i - 1 for i in batch_query.seq_lengths_list]
         # context query
         for i in range(batch_query.generate_batch_size, batch_query.total_batch_size):            
@@ -234,9 +234,18 @@ class NormalModelExecutor(ExecutorBase):
             hidden_states = self.model_ops.model.post_decoder_layernorm(hidden_states)
         assert self.model_ops.model.lm_head is not None
         logits = self.model_ops.model.lm_head(hidden_states).float()
+        
+        if 'CHECK_LOGITS_NAN' in os.environ:
+            logits_cpu = to_cpu(logits.view(-1))
+            if any(torch.isnan(logits_cpu).numpy().tolist()):
+                raise Exception(f'logits has nan: {logits_cpu}')
+        
         return logits
 
-    def _reset_sampler(self, batch_query: BatchQuery) -> None:
+    def _reconstruct_sampler(self, batch_query: BatchQuery) -> None:
+        if self.model_ops.generate_config.is_same(batch_query.merge_generate_config):
+            return
+        
         new_config = batch_query.merge_generate_config
         new_config.random_seed = [random.randint(0, 1000000000) for _ in range(batch_query.total_batch_size)]
         self.model_ops.generate_config = new_config
@@ -252,6 +261,7 @@ class NormalModelExecutor(ExecutorBase):
             if query.generate_config.calculate_loss and query.loss == None:
                 all_logits = self._post_transformer_nn(all_hidden_states)
                 break
+            
         start_idx = 0
         for i, query in enumerate(batch_query.queries[:]):
             if not query.generate_config.calculate_loss:
@@ -269,21 +279,17 @@ class NormalModelExecutor(ExecutorBase):
                 query.loss = loss_mean
             elif query.generate_config.calculate_loss == 2:
                 query.loss = loss
-            else:
-                raise Exception("calculate_loss in generate_config can only be 0, 1 or 2")
 
     def _post_process(
             self,
             batch_query: BatchQuery,
             logits: torch.Tensor,
             hidden_states: torch.Tensor) -> None:
-        beam_width = batch_query.beam_width
         key_cache, value_cache = self.scheduler_.get_kv_cache_base()
-        if beam_width > 1:
+        if batch_query.beam_width > 1:
             logits = self._prepare_beam_search(batch_query, logits, key_cache, value_cache)
 
         fake_input_lengths = batch_query.seq_lengths_list + batch_query.context_query_context_lengths_list
-        total_batch_size = batch_query.total_batch_size
         # NOTE: beam width of all queries are assured to be the same. See Scheduler::check_query_to_append.
         gen_lengths = [
             fake_input_lengths[i] - batch_query.context_lengths_list[i] + batch_query.max_seq_length - 1 \
@@ -291,49 +297,38 @@ class NormalModelExecutor(ExecutorBase):
         ]
         input_lengths = self._to_cuda_tensor(fake_input_lengths)
         sequence_lengths = self._to_cuda_tensor(gen_lengths)
-        assert sequence_lengths is not None
-        assert input_lengths is not None
-
         # TODO: These tensors are allocated on each iteration. Try allocate them once for each query.
-        finished = torch.zeros((total_batch_size * beam_width), device="cuda:0").bool()
-        if not self.model_ops.generate_config.is_same(batch_query.merge_generate_config):
-            self._reset_sampler(batch_query)
-
+        finished = torch.zeros((batch_query.total_batch_size * batch_query.beam_width), device="cuda:0").bool()
         # shape(max_length + gen_num, batch_size)
         token_ids = to_cuda(batch_query.output_token_ids.permute(1, 0).contiguous())
+        
         cum_log_probs = torch.concat(
             [query.cum_log_probs for query in batch_query.queries], dim=0
         ).to("cuda:0")
-
         output_log_probs = torch.zeros((batch_query.total_batch_size), dtype=torch.float, device='cuda:0')
-
         index_log_prob = None
         if batch_query.record_index_prob is not None:
             index_log_prob = torch.zeros((batch_query.total_batch_size), dtype=torch.float, device='cuda:0')
-
-        if 'CHECK_LOGITS_NAN' in os.environ:
-            logits_cpu = to_cpu(logits.view(-1))
-            if any(torch.isnan(logits_cpu).numpy().tolist()):
-                raise Exception(f'logits has nan: {logits_cpu}')
+            
         self.model_ops.sampler.do_sampling(SamplingParams(
             batch_query.max_token_len,
-            total_batch_size,
-            beam_width,
+            batch_query.total_batch_size,
+            batch_query.beam_width,
             batch_query.max_token_len,
             token_ids,
-            logits.view(total_batch_size, beam_width, -1),
+            logits.view(batch_query.total_batch_size, batch_query.beam_width, -1),
             finished,
             input_lengths,
             sequence_lengths,
             key_cache,
             value_cache,
-            cum_log_probs, # cum_log_probs,
+            cum_log_probs,
             batch_query.cache_block_indice,
             output_log_probs,
             index_log_prob,
             batch_query.record_index_prob,
         ))
-            # print(f"cum_log_probs: {cum_log_probs}")
+
         output_token_ids = token_ids.permute(1, 0)
         # TODO(wangyin): reshape
         batch_query.record_update_tensors(finished,
