@@ -15,6 +15,7 @@ from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, Prom
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
     ContentPart, ContentPartTypeEnum
+from maga_transformer.openai.renderer_factory_register import register_renderer
 
 class QwenVLRenderer(CustomChatRenderer):
     def __init__(self, tokenizer: PreTrainedTokenizer, renderer_params: RendererParams):
@@ -31,16 +32,18 @@ class QwenVLRenderer(CustomChatRenderer):
                 prompt += f"<|im_start|>{message.role}\n{message.content}<|im_end|>\n"
             elif isinstance(message.content, list):
                 prompt += f"<|im_start|>{message.role}\n"
+                text_prompt: str = ""
+                image_prompt: str = ""
                 for content_part in message.content:
                     if content_part.type == ContentPartTypeEnum.text:
                         assert (isinstance(content_part.text, str))
-                        prompt += content_part.text
+                        text_prompt += content_part.text
                     elif content_part.type == ContentPartTypeEnum.image_url:
                         assert (content_part.image_url != None)
                         url = content_part.image_url.url
                         images.append(url)
-                        prompt += f"Picture {len(images)}: <img>{url}</img>\n"
-                prompt += "<|im_end|>\n"
+                        image_prompt += f"Picture {len(images)}: <img>{url}</img>\n"
+                prompt += image_prompt + text_prompt + "<|im_end|>\n"
         prompt += "<|im_start|>assistant\n"
         return PromptWithImages(prompt=prompt, image_urls=images)
 
@@ -49,3 +52,5 @@ class QwenVLRenderer(CustomChatRenderer):
         prompt_and_images = self._render_messages(messages)
         input_ids = self.tokenizer.encode(prompt_and_images.prompt)
         return RenderedInputs(input_ids=input_ids, input_images=prompt_and_images.image_urls)
+
+register_renderer('qwen_vl', QwenVLRenderer)

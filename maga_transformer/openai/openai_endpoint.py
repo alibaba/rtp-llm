@@ -17,7 +17,7 @@ from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessa
     DebugInfo
 from maga_transformer.openai.renderers.custom_renderer import RendererParams, \
     StreamResponseObject, RenderedInputs
-from maga_transformer.openai.renderers.renderer_factory import ChatRendererFactory
+from maga_transformer.openai.renderer_factory import ChatRendererFactory
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.structure.raw_query import RawQuery
 

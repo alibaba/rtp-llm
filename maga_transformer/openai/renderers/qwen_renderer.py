@@ -17,6 +17,7 @@ from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
+from maga_transformer.openai.renderer_factory_register import register_renderer
 
 TOOL_DESC = """{name_for_model}: Call this tool to interact with the {name_for_human} API. What is the {name_for_human} API useful for? {description_for_model} Parameters: {parameters}"""
 
@@ -416,3 +417,8 @@ class QwenRenderer(CustomChatRenderer):
                 completion_tokens=output_token_length
             )
         )
+
+register_renderer('qwen', QwenRenderer)
+register_renderer('qwen_7b', QwenRenderer)
+register_renderer('qwen_13b', QwenRenderer)
+register_renderer('qwen_1b8', QwenRenderer)

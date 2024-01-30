@@ -10,9 +10,9 @@ from maga_transformer.models.llava import LlavaTokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, RoleEnum, \
     ChatCompletionRequest, GPTFunctionDefinition, ContentPart, ContentPartTypeEnum, RendererInfo
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
-from maga_transformer.openai.renderers.renderer_factory import ChatRendererFactory, RendererParams, \
-    CustomChatRenderer, FastChatRenderer, LlamaTemplateRenderer, QwenRenderer
-from maga_transformer.openai.renderers.qwen_vl_renderer import QwenVLRenderer
+from maga_transformer.openai.renderer_factory import ChatRendererFactory, RendererParams, \
+    CustomChatRenderer, FastChatRenderer, LlamaTemplateRenderer
+from maga_transformer.openai.renderers.qwen_renderer import QwenRenderer
 
 class ChatapiTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):

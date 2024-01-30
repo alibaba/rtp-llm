@@ -18,6 +18,7 @@ from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, Prom
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
     ContentPart, ContentPartTypeEnum
+from maga_transformer.openai.renderer_factory_register import register_renderer
 
 class SeparatorStyle(Enum):
     SINGLE = auto()
@@ -102,3 +103,5 @@ class LlavaRenderer(CustomChatRenderer):
         prompt_and_images = self._render_messages(messages)
         input_ids = self.tokenizer.encode(prompt_and_images.prompt)
         return RenderedInputs(input_ids=input_ids, input_images=prompt_and_images.image_urls)
+
+register_renderer('llava', LlavaRenderer)

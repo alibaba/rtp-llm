@@ -1,18 +1,17 @@
 import os
 import logging
+import copy
 from typing import Optional, List, Dict, Any, Union, Callable
 
 from transformers import PreTrainedTokenizer
 
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
-from maga_transformer.openai.renderers.qwen_renderer import QwenRenderer
-from maga_transformer.openai.renderers.qwen_vl_renderer import QwenVLRenderer
-from maga_transformer.openai.renderers.llava_renderer import LlavaRenderer
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderers.llama_template_renderer import LlamaTemplateRenderer
 from maga_transformer.openai.renderers.fast_chat_renderer import FastChatRenderer
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
+from maga_transformer.openai.renderer_factory_register import _renderer_factory
 
 class ChatRendererFactory():
     def __init__(self):
@@ -46,25 +45,18 @@ class ChatRendererFactory():
         tokenizer: Union[PreTrainedTokenizer, TokenizerBase],
         params: RendererParams,
     ) -> CustomChatRenderer:
-        # renderer priority: multi modal renderers
-        #                    > `MODEL_TEMPLATE_TYPE` env for llama template or fastchat conversation
+        # renderer priority:  `MODEL_TEMPLATE_TYPE` env for llama template or fastchat conversation
         #                    > tokenizer.chat_template
         #                    > model customized renderer (e.g. Qwen, which implemented function call)
         #                    > try get template from `MODEL_TYPE`
         #                    > transformers default chat template
 
-        if params.model_type == "qwen_vl":
-            assert (isinstance(tokenizer, PreTrainedTokenizer))
-            return QwenVLRenderer(tokenizer, params)
-        elif params.model_type == "llava":
-            assert (isinstance(tokenizer, TokenizerBase))
-            return LlavaRenderer(tokenizer, params)
-
         model_template_type = os.environ.get("MODEL_TEMPLATE_TYPE", None)
         if model_template_type:
-            params.model_type = model_template_type
+            new_params = copy.deepcopy(params)
+            new_params.model_type = model_template_type
             logging.info(f"try get renderer from MODEL_TEMPLATE_TYPE: {model_template_type}")
-            renderer = ChatRendererFactory.try_get_imported_renderer(tokenizer, params)
+            renderer = ChatRendererFactory.try_get_imported_renderer(tokenizer, new_params)
             if renderer:
                 return renderer
             else:
@@ -77,9 +69,10 @@ class ChatRendererFactory():
         except AttributeError:
             # tokenizer may has no chat_template property
             pass
-
-        if isinstance(tokenizer, QWenTokenizer):
-            return QwenRenderer(tokenizer, params)
+        
+        global _renderer_factory
+        if params.model_type in _renderer_factory:
+            return _renderer_factory[params.model_type](tokenizer, params)
 
         imported_template_renderer = ChatRendererFactory.try_get_imported_renderer(tokenizer, params)
         if imported_template_renderer:
