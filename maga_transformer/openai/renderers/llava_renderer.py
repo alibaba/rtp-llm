@@ -61,14 +61,14 @@ class Conversation:
 
 conv_llava_v0 = Conversation(
     system_content="A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions.",
-    roles={RoleEnum.user: "Human", RoleEnum.assistant: "Assistant"},
+    roles={RoleEnum.user: "Human", RoleEnum.assistant: "Assistant", RoleEnum.system: "System"},
     sep_style=SeparatorStyle.SINGLE,
     seps=["###"]
 )
 
 conv_llava_v1 = Conversation(
     system_content="A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions.",
-    roles={RoleEnum.user: "USER", RoleEnum.assistant: "ASSISTANT"},
+    roles={RoleEnum.user: "USER", RoleEnum.assistant: "ASSISTANT", RoleEnum.system: "SYSTEM"},
     sep_style=SeparatorStyle.TWO,
     seps=[" ", "</s>"]
 )
