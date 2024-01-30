@@ -15,7 +15,7 @@
  */
 
 #include "src/fastertransformer/cuda/cuda_utils.h"
-#include "src/fastertransformer/cuda/allocator.h"
+#include "src/fastertransformer/core/allocator.h"
 #include "cublasAlgoMap.h"
 #include <cublasLt.h>
 #include <cublas_v2.h>

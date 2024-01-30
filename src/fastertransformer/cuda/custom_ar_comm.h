@@ -22,7 +22,7 @@
 #include <stdlib.h>
 
 #include "src/fastertransformer/kernels/custom_ar_kernels.h"
-#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/utils/logger.h"
 

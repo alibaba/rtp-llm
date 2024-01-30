@@ -20,7 +20,7 @@
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
-#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/core/Tensor.h"
 
 #include <curand.h>
 #include <sstream>

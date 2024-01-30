@@ -6,16 +6,15 @@
 #include <tuple>
 #include <vector>
 
-#include "src/fastertransformer/layers/DenseWeight.h"
-#include "src/fastertransformer/cuda/allocator.h"
+#include "src/fastertransformer/utils/DenseWeight.h"
+#include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/cuda/cublas/cublas.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/gemm.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
-#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
-#include "src/fastertransformer/utils/allocator_impl.h"
 
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGpt.h"

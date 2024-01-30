@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "src/fastertransformer/cuda/Tensor.h"
+#include "Tensor.h"
 
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/utils/string_utils.h"

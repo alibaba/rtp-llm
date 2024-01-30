@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "DenseWeight.h"
+#include "src/fastertransformer/utils/DenseWeight.h"
 
 namespace fastertransformer {
 

@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "src/fastertransformer/cuda/allocator.h"
+#include "allocator.h"
 #include "src/fastertransformer/utils/string_utils.h"
 #include "src/fastertransformer/utils/assert_utils.h"
 

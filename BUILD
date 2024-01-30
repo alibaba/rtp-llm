@@ -23,6 +23,7 @@ cc_library(
     ]),
     deps = [
     	":th_op_hdrs",
+        "//src/fastertransformer/core:allocator_torch",
         "//src/fastertransformer/layers:layers",
         "//src/fastertransformer/models:models",
         "//src/fastertransformer/utils:utils",
@@ -57,6 +58,7 @@ cc_library(
         "src/fastertransformer/th_op/GptCommonInputs.h",
     ],
     deps = [
+        "//src/fastertransformer/core:allocator_torch",
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/kernels:kernels",

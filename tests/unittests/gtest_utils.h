@@ -8,10 +8,12 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
-#include "src/fastertransformer/cuda/allocator.h"
-#include "src/fastertransformer/utils/allocator_impl.h"
+#include "src/fastertransformer/core/Tensor.h"
+#include "src/fastertransformer/core/allocator.h"
+
 #include "src/fastertransformer/cuda/memory_utils.h"
-#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/core/Tensor.h"
+#include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/utils/logger.h"
 
 namespace ft = fastertransformer;

@@ -7,7 +7,7 @@
 
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
-#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/kernels/transpose_int8_kernels.h"
 
 #include <algorithm>

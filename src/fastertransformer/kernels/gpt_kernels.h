@@ -20,7 +20,7 @@
 #include <cuda_runtime.h>
 #include <unordered_map>
 
-#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
 
 namespace fastertransformer {

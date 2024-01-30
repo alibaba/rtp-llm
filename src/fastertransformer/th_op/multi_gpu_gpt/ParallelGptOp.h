@@ -4,7 +4,7 @@
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
-#include "src/fastertransformer/cuda/allocator.h"
+#include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 
 namespace ft = fastertransformer;

@@ -6,9 +6,9 @@
 #include <tuple>
 #include <vector>
 
-#include "src/fastertransformer/layers/DenseWeight.h"
-#include "src/fastertransformer/cuda/allocator.h"
-#include "src/fastertransformer/utils/allocator_impl.h"
+#include "src/fastertransformer/utils/DenseWeight.h"
+#include "src/fastertransformer/core/allocator.h"
+
 #include "src/fastertransformer/cuda/cublas/cublas.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/gemm.h"

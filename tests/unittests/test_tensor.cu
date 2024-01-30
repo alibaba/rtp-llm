@@ -4,7 +4,7 @@
 
 #include <gtest/gtest.h>
 
-#include "src/fastertransformer/cuda/Tensor.h"
+#include "src/fastertransformer/core/Tensor.h"
 
 using namespace fastertransformer;
 

@@ -28,8 +28,8 @@
 // TODO: Need to remove the dependency of the layer module.
 //   e.g. refactor Weight class to some base module.
 #include "src/fastertransformer/utils/DenseWeight.h"
-#include "src/fastertransformer/cuda/Tensor.h"
-#include "src/fastertransformer/cuda/allocator.h"
+#include "src/fastertransformer/core/Tensor.h"
+#include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/cuda/cublas/cublas.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/utils/logger.h"

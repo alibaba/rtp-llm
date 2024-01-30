@@ -17,6 +17,7 @@ cc_library(
     ],
     deps = [
         ":cuda_utils",
+        "//src/fastertransformer/core:allocator",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -79,6 +80,8 @@ cc_library(
         "//src/fastertransformer/cutlass:cutlass_interface",
         ":cuda_utils",
         "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/core:Tensor",
+        "//src/fastertransformer/core:allocator",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
@@ -111,14 +114,9 @@ cc_library(
     name = "cuda_utils",
     srcs = [
         "cuda_utils.cc",
-        "Tensor.cc",
-        
     ],
     hdrs = [
         "cuda_utils.h",
-        "allocator.h",
-        "Tensor.h",
-        
     ],
     deps = [
         ":cuda_utils_cu",

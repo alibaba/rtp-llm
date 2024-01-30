@@ -18,8 +18,7 @@
 
 #include <assert.h>
 
-#include "src/fastertransformer/cuda/Tensor.h"
-#include "src/fastertransformer/cuda/allocator.h"
+#include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/cuda/cublas/cublas.h"
 
 namespace fastertransformer {
