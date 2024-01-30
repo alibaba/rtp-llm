@@ -124,9 +124,9 @@ class DecoderEngineTest(TestCase):
         finally:
             pipeline.model.stop()
 
-    @mock.patch('maga_transformer.async_decoder_engine.batch_query.BatchQuery.generate')
-    def test_free_query_when_generate_batch_query_error(self, generate) -> None:
-        generate.side_effect = Exception("test exception")
+    @mock.patch('maga_transformer.async_decoder_engine.batch_query.BatchQuery.generate_model_input')
+    def test_free_query_when_generate_batch_query_error(self, generate_model_input) -> None:
+        generate_model_input.side_effect = Exception("test exception")
         pipeline = self.create_pipeline()
         try:
             origin_block = len(pipeline.model.decoder_engine_.scheduler_.cache_manager_.free_blocks_index)

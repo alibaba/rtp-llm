@@ -6,7 +6,8 @@ from enum import Enum
 from typing import List, Optional, Tuple, Union, Any
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import LoRAMap
-from maga_transformer.async_decoder_engine.scheduler import Scheduler, BatchQuery
+from maga_transformer.async_decoder_engine.scheduler import Scheduler
+from maga_transformer.async_decoder_engine.batch_query import BatchQuery, ModelOutput
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.sample_utils import BaseSampler, SamplerSetupParams, SamplingParams
 from maga_transformer.utils.dump_config_utils import dump_engine_to_table
@@ -51,7 +52,6 @@ class NormalModelExecutor(ExecutorBase):
         return to_cuda(torch.tensor(t, dtype=dtype)) if t is not None else None
 
     def process(self, batch_query: BatchQuery) -> None:
-        self._reconstruct_sampler(batch_query)
         all_hidden_states = self._process(batch_query)
         hidden_states = self._unpack_hidden_states(batch_query, all_hidden_states)
         self._calculate_loss(batch_query, all_hidden_states)
@@ -79,9 +79,9 @@ class NormalModelExecutor(ExecutorBase):
     def _process(self, batch_query: BatchQuery) -> torch.Tensor:
         with torch.cuda.nvtx.range('pre_process'):
             input_embeds, attention_mask, position_ids = self._pre_process(batch_query)
-            k_cache, v_cache = self.scheduler_.get_kv_cache_base()
-            k_cache_scale, v_cache_scale = self.scheduler_.get_kv_cache_scale_base()
-            prefix_lengths, count_length, max_prefix_length = self.scheduler_.get_prefix_args(batch_query)
+            k_cache, v_cache = self.scheduler_.cache_manager_.get_kv_cache_base()
+            k_cache_scale, v_cache_scale = self.scheduler_.cache_manager_.get_kv_cache_scale_base()
+            prefix_lengths, count_length, max_prefix_length = self.scheduler_.query_resource_manager.get_prefix_args(batch_query)
 
         with torch.cuda.nvtx.range('run_model'):
             hidden_states = self.model_ops.gpt_op.forward(
@@ -285,7 +285,7 @@ class NormalModelExecutor(ExecutorBase):
             batch_query: BatchQuery,
             logits: torch.Tensor,
             hidden_states: torch.Tensor) -> None:
-        key_cache, value_cache = self.scheduler_.get_kv_cache_base()
+        key_cache, value_cache = self.scheduler_.cache_manager_.get_kv_cache_base()
         if batch_query.beam_width > 1:
             logits = self._prepare_beam_search(batch_query, logits, key_cache, value_cache)
 
@@ -299,6 +299,8 @@ class NormalModelExecutor(ExecutorBase):
         sequence_lengths = self._to_cuda_tensor(gen_lengths)
         # TODO: These tensors are allocated on each iteration. Try allocate them once for each query.
         finished = torch.zeros((batch_query.total_batch_size * batch_query.beam_width), device="cuda:0").bool()
+        self._reconstruct_sampler(batch_query)
+        
         # shape(max_length + gen_num, batch_size)
         token_ids = to_cuda(batch_query.output_token_ids.permute(1, 0).contiguous())
         
@@ -331,12 +333,12 @@ class NormalModelExecutor(ExecutorBase):
 
         output_token_ids = token_ids.permute(1, 0)
         # TODO(wangyin): reshape
-        batch_query.record_update_tensors(finished,
+        batch_query.update_model_output(ModelOutput(finished,
                                           [1] * batch_query.total_batch_size,
                                           hidden_states,
                                           logits,
                                           cum_log_probs,
                                           output_token_ids,
                                           output_log_probs,
-                                          index_log_prob)
+                                          index_log_prob))
 

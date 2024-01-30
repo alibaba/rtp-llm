@@ -5,6 +5,7 @@ from unittest import TestCase, main
 from maga_transformer.async_decoder_engine.scheduler import Scheduler
 from maga_transformer.async_decoder_engine.ptuning import PrefixParams, PrefixType
 from maga_transformer.async_decoder_engine.cache_manager import CacheConfigGenerator
+from maga_transformer.async_decoder_engine.batch_query import ModelOutput
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.model_weight import LoraResource
@@ -38,8 +39,13 @@ class SchedulerTest(TestCase):
     
     def _get_batch_query(self, scheduler: Scheduler):    
         batch_query = scheduler.schedule()
-        batch_query.generate()
+        batch_query.generate_model_input()
         return batch_query
+
+    def _set_query_output(self, running_query, finished, hidden_states, logits,
+                          update_length, updated_token_ids, cum_log_probs):
+        running_query.model_output = ModelOutput(finished, update_length, hidden_states, logits,
+                cum_log_probs, updated_token_ids, None, None, None)
 
     def test_simple(self):
         config, cache_config = self._init_config()
@@ -63,14 +69,14 @@ class SchedulerTest(TestCase):
         finished = torch.BoolTensor([False, True])
         new_tokens = [[1,2,3,4,5,6,7,8,4], [4,5,0,0,0,0,0,0,6]]
         hidden_states = torch.zeros((2, 32), dtype=torch.float32)
-        logits = torch.zeros((2, 32), dtype=torch.float32)
-        scheduler.running_query_.finished = finished
-        scheduler.running_query_.hidden_states = hidden_states
-        scheduler.running_query_.logits = logits
-        scheduler.running_query_.update_length = [1, 1]
-        scheduler.running_query_.updated_token_ids = torch.IntTensor(new_tokens)
-        scheduler.running_query_.cum_log_probs = torch.Tensor([0.0, 0.0, 0.0])
-        scheduler.update_batch_query()
+        logits = torch.zeros((2, 32), dtype=torch.float32)      
+        update_length = [1, 1]  
+        updated_token_ids = torch.IntTensor(new_tokens)
+        cum_log_probs = torch.Tensor([0.0, 0.0, 0.0])    
+        scheduler.running_query_.model_output = ModelOutput(finished, update_length, hidden_states, logits,
+                cum_log_probs, updated_token_ids, None, None, None)
+        
+        scheduler.prepare_for_next_step()
         self.assertEqual(queries[0].finish, False)
         self.assertEqual(queries[0].block_indice, [[1,3]])
         self.assertEqual(queries[0].error_info, '')
@@ -86,7 +92,7 @@ class SchedulerTest(TestCase):
         batch_query = self._get_batch_query(scheduler)
         self.assertEqual(scheduler.running_batch_size(), 1)
         self.assertEqual(scheduler.wait_query_size(), 0)
-        [scheduler._release_query_resource(x) for x in queries]
+        [scheduler.query_resource_manager.release_query_resource(x) for x in queries]
         self.assertEqual(queries[0].block_indice, [[]])
         self.assertEqual(queries[1].block_indice, [[]])
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
@@ -127,14 +133,16 @@ class SchedulerTest(TestCase):
         new_tokens = [[1]*32 + [4], [1]*32 + [6], [1]*32 + [4]]
         hidden_states = torch.zeros((3, 32), dtype=torch.float32)
         logits = torch.zeros((3, 32), dtype=torch.float32)
-        scheduler.running_query_.finished = finished
-        scheduler.running_query_.hidden_states = hidden_states
-        scheduler.running_query_.logits = logits
-        scheduler.running_query_.update_length = [1, 1, 1]
-        scheduler.running_query_.updated_token_ids = torch.IntTensor(new_tokens)
-        scheduler.running_query_.cum_log_probs = torch.Tensor([0.0, 0.0, 0.0])
-        scheduler.update_batch_query()
+        update_length = [1, 1, 1]
+        updated_token_ids = torch.IntTensor(new_tokens)
+        cum_log_probs = torch.Tensor([0.0, 0.0, 0.0])
+        
+        scheduler.running_query_.model_output = ModelOutput(finished, update_length, hidden_states, logits,
+                cum_log_probs, updated_token_ids, None, None, None)
+        
+        scheduler.prepare_for_next_step()
         self.assertEqual(queries[0].error_info, 'LACK_MEM')
+        self.assertEqual(queries[1].error_info, '')
         self.assertEqual(queries[2].error_info, '')
         self.assertEqual(queries[0].finish, True)
         self.assertEqual(queries[1].finish, False)
@@ -146,7 +154,7 @@ class SchedulerTest(TestCase):
     def test_reuse(self):
         config, cache_config = self._init_config()
         scheduler = Scheduler(config, cache_config)
-        self.assertTrue(scheduler.reuse_cache_)
+        self.assertTrue(scheduler.query_resource_manager.reuse_cache_)
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
         self.assertFalse(scheduler.has_query())
         inputs = torch.IntTensor([list(range(64))] * 1)
@@ -161,13 +169,14 @@ class SchedulerTest(TestCase):
         new_tokens = [list(range(64)) + [6]]
         hidden_states = torch.zeros((1, 32), dtype=torch.float32)
         logits = torch.zeros((1, 32), dtype=torch.float32)
-        scheduler.running_query_.finished = finished
-        scheduler.running_query_.hidden_states = hidden_states
-        scheduler.running_query_.logits = logits
-        scheduler.running_query_.update_length = [1]
-        scheduler.running_query_.updated_token_ids = torch.IntTensor(new_tokens)
-        scheduler.running_query_.cum_log_probs = torch.Tensor([0.0, 0.0, 0.0])
-        scheduler.update_batch_query()        
+        update_length = [1]
+        updated_token_ids = torch.IntTensor(new_tokens)
+        cum_log_probs = torch.Tensor([0.0, 0.0, 0.0])
+        
+        scheduler.running_query_.model_output = ModelOutput(finished, update_length, hidden_states, logits,
+                cum_log_probs, updated_token_ids, None, None, None)
+        
+        scheduler.prepare_for_next_step()        
         self.assertEqual(queries[0].block_indice, [[]])
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 5)
         self.assertEqual(len(scheduler.running_query_.queries), 0)
@@ -178,13 +187,14 @@ class SchedulerTest(TestCase):
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 3)
         self.assertEqual(queries[0].block_indice, [[1, 2, 3, 4]])
         self.assertEqual(queries[0].reuse_length, 16)
-        scheduler.running_query_.finished = finished
-        scheduler.running_query_.hidden_states = hidden_states
-        scheduler.running_query_.logits = logits
-        scheduler.running_query_.update_length = [1]
-        scheduler.running_query_.updated_token_ids = torch.IntTensor(new_tokens)
-        scheduler.running_query_.cum_log_probs = torch.Tensor([0.0, 0.0, 0.0])
-        scheduler.update_batch_query()
+        update_length = [1]
+        updated_token_ids = torch.IntTensor(new_tokens)
+        cum_log_probs = torch.Tensor([0.0, 0.0, 0.0])
+        
+        scheduler.running_query_.model_output = ModelOutput(finished, update_length, hidden_states, logits,
+                cum_log_probs, updated_token_ids, None, None, None)
+        
+        scheduler.prepare_for_next_step()
         self.assertEqual(len(scheduler.running_query_.queries), 0)
 
         context_lengths = torch.IntTensor([24])
@@ -193,19 +203,20 @@ class SchedulerTest(TestCase):
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 4)
         self.assertEqual(queries[0].block_indice, [[1, 2, 3]])
         self.assertEqual(queries[0].reuse_length, 23)
-        prefix_lengths, count_length, max_prefix_length = scheduler.get_prefix_args(batch_query)
+        prefix_lengths, count_length, max_prefix_length = scheduler.query_resource_manager.get_prefix_args(batch_query)
         self.assertEqual(prefix_lengths.numpy().tolist(), [23])
         self.assertEqual(count_length.numpy().tolist(), [True])
         self.assertEqual(max_prefix_length.numpy().tolist(), [0])
 
         finished = torch.BoolTensor([False])
-        scheduler.running_query_.finished = finished
-        scheduler.running_query_.hidden_states = hidden_states
-        scheduler.running_query_.logits = logits
-        scheduler.running_query_.update_length = [1]
-        scheduler.running_query_.updated_token_ids = torch.IntTensor(new_tokens)
-        scheduler.running_query_.cum_log_probs = torch.Tensor([0.0, 0.0, 0.0])
-        scheduler.update_batch_query()
+        update_length = [1]
+        updated_token_ids = torch.IntTensor(new_tokens)
+        cum_log_probs = torch.Tensor([0.0, 0.0, 0.0])
+        
+        scheduler.running_query_.model_output = ModelOutput(finished, update_length, hidden_states, logits,
+                cum_log_probs, updated_token_ids, None, None, None)
+        
+        scheduler.prepare_for_next_step()
         self.assertEqual(queries[0].block_indice, [[1, 2, 3, 5]])
 
     @mock.patch.dict('os.environ', {'REUSE_CACHE': '1'})
@@ -216,9 +227,9 @@ class SchedulerTest(TestCase):
         prefix_param = PrefixParams(prefix_prompt, PrefixType.PTuningV2, None)
         scheduler = Scheduler(config, cache_config, prefix_param)
         self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 5)
-        self.assertFalse(scheduler.reuse_cache_)
-        self.assertEqual(scheduler.ptuning_.prefix_block_indice, [1])
-        self.assertEqual(scheduler.ptuning_.prefix_additional_block, 2)
+        self.assertFalse(scheduler.query_resource_manager.reuse_cache_)
+        self.assertEqual(scheduler.query_resource_manager.ptuning_.prefix_block_indice, [1])
+        self.assertEqual(scheduler.query_resource_manager.ptuning_.prefix_additional_block, 2)
 
         self.assertFalse(scheduler.has_query())
         inputs = torch.IntTensor([list(range(64))] * 2)
@@ -229,7 +240,7 @@ class SchedulerTest(TestCase):
         queries = scheduler.enqueue(
                 RawQuery(inputs, context_lengths, images, generate_config, None), LoraResource(dict(), None, None, None))
         batch_query = self._get_batch_query(scheduler)
-        prefix_lengths, count_length, max_prefix_length = scheduler.get_prefix_args(batch_query)
+        prefix_lengths, count_length, max_prefix_length = scheduler.query_resource_manager.get_prefix_args(batch_query)
 
         self.assertEqual(prefix_lengths.numpy().tolist(), [9, 9])
         self.assertEqual(count_length.numpy().tolist(), [False])

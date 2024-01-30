@@ -62,6 +62,31 @@ class GenerateConfig(BaseModel):
             if hasattr(self, key):
                 setattr(self, key, value)
 
+    # generate config for sample
+    # TODO: do not gen generate config, gen sample config
+    @staticmethod
+    def merge_generate_config(configs: List['GenerateConfig']):
+        top_k: List[int] = []
+        top_p: List[float] = []
+        min_new_tokens: List[int] = []
+        repetition_penalty: List[float] = []
+        for config in configs:
+            top_k.append(config.top_k)
+            top_p.append(config.top_p)
+            min_new_tokens.append(config.min_new_tokens)
+            repetition_penalty.append(config.repetition_penalty)
+
+        res = GenerateConfig(
+            top_k=top_k,
+            top_p=top_p,
+            min_new_tokens=min_new_tokens,
+            repetition_penalty=repetition_penalty,
+            eos_token_id=configs[0].eos_token_id,
+            num_beams=configs[0].num_beams,
+        )
+        res.gen_hash_value()
+        return res
+
     def check_data_type(self):
         try:
             assert isinstance(self.top_k, int) or \
@@ -74,3 +99,7 @@ class GenerateConfig(BaseModel):
              (isinstance(self.repetition_penalty, list) and all([isinstance(i, (int, float)) for i in self.repetition_penalty]))
         except:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "wrong data type in generate config")
+        
+        calculate_loss_list = [0, 1, 2]
+        assert self.calculate_loss in calculate_loss_list, \
+                f"calculate_loss in generate_config can only be in {calculate_loss_list}, but it's {self.calculate_loss}"

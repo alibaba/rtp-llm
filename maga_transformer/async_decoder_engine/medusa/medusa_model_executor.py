@@ -4,7 +4,8 @@ import numpy as np
 from typing import Any, List, Tuple
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.medusa.medusa_config import MedusaState, MedusaBuffer
-from maga_transformer.async_decoder_engine.scheduler import Scheduler, BatchQuery
+from maga_transformer.async_decoder_engine.scheduler import Scheduler
+from maga_transformer.async_decoder_engine.batch_query import BatchQuery, ModelOutput
 from maga_transformer.async_decoder_engine.normal_model_executor import NormalModelExecutor, ModelOps
 from maga_transformer.async_decoder_engine.medusa.utils import generate_candidates, evaluate_posterior
 from maga_transformer.utils.util import to_cuda
@@ -149,7 +150,7 @@ class MedusaModelExecutor(NormalModelExecutor):
         update_lens = [len(x) for x in accept_tokens_list]
         for i, output_token_id in enumerate(batch_query.output_token_ids):
             output_token_id[batch_query.max_token_len : batch_query.max_token_len+update_lens[i]] = accept_tokens_list[i]
-        batch_query.record_update_tensors(torch.tensor(finished_list, dtype=torch.bool),
+        batch_query.update_model_output(ModelOutput(torch.tensor(finished_list, dtype=torch.bool),
                                           update_lens,
                                           torch.zeros([batch_query.total_batch_size]),
                                           torch.zeros([batch_query.total_batch_size]),
@@ -157,4 +158,4 @@ class MedusaModelExecutor(NormalModelExecutor):
                                           batch_query.output_token_ids,
                                           None,
                                           None,
-                                          medusa_states_list)
+                                          medusa_states_list))

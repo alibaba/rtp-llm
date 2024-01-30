@@ -179,3 +179,15 @@ class QueryStats:
 
     def __repr__(self) -> str:
         return self.__str__()
+
+class QueryHelper(object):
+    @staticmethod
+    def context_prefix_length(query: QueryStats) -> int:
+        return query.reuse_length
+
+    @staticmethod
+    def decoder_prefix_length(count_prefix_length: bool, query: QueryStats) -> int:
+        if count_prefix_length:
+            return 0
+        else:
+            return query.reuse_length

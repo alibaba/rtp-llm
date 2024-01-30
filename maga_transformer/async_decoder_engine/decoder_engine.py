@@ -113,7 +113,7 @@ class DecoderEngine:
         kmonitor.report(GaugeMetrics.ASYNC_WAIT_QUERY_SIZE_METRIC,
                         self.scheduler_.wait_query_size())
         kmonitor.report(GaugeMetrics.ASYNC_ITERATE_LANTENCY, cost_ms)
-        kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self.scheduler_.block_used_ratio())
+        kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self.scheduler_.cache_manager_.block_used_ratio())
 
     # 这个后台任务一直在跑，应该用线程实现，用 Python 自己的线程切换机制。
     # 如果用协程的话对外返回的 decode 协程会因为 run_engine 协程一直运行被饿死。
@@ -138,7 +138,7 @@ class DecoderEngine:
                         self.wait_decode_counter_.increment()
                         torch.cuda.nvtx.range_pop()
                         continue
-                    batch_query.generate()
+                    batch_query.generate_model_input()
                     batch_query.tp_sync()
                     torch.cuda.nvtx.range_pop()
                     
@@ -146,7 +146,7 @@ class DecoderEngine:
                     
                     torch.cuda.nvtx.range_push('update')
                     if g_parallel_info.tp_rank == 0:
-                        self.scheduler_.update_batch_query()
+                        self.scheduler_.prepare_for_next_step()
                     torch.cuda.nvtx.range_pop()
                     
                 self.report_metric(t.cost_ms())

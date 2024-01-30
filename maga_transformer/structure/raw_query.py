@@ -14,6 +14,21 @@ images:          multimodal param for image
 generate_config: config for sampling
 '''
 
+class SingleRawQuery:
+    def __init__(
+            self,
+            input_token_ids: torch.Tensor,
+            images: List[str],
+            adapter_name: str,
+            generate_config: GenerateConfig,
+            tokenizer:  TokenizerBase
+    ) -> None:
+        self.input_token_ids = input_token_ids
+        self.images = images
+        self.adapter_name = adapter_name
+        self.generate_config = generate_config
+        self.tokenizer = tokenizer
+
 class RawQuery:
     def __init__(
             self,

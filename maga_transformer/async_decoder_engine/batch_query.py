@@ -10,11 +10,27 @@ from maga_transformer.config.generate_config import GenerateConfig
 from transformers.generation.stopping_criteria import StoppingCriteria
 from maga_transformer.utils.stop_utils import create_stop_criteria_list
 from maga_transformer.async_decoder_engine.ptuning import PrefixType
-from maga_transformer.async_decoder_engine.query import QueryStats
+from maga_transformer.async_decoder_engine.query import QueryStats, QueryHelper
 from maga_transformer.utils.util import to_cuda, to_cpu
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
+
+class ModelOutput:
+    def __init__(self, finished: torch.Tensor, update_length: List[int], hidden_states: torch.Tensor, logits: torch.Tensor,
+                cum_log_probs: torch.Tensor, updated_token_ids: torch.Tensor,
+                output_log_probs: Optional[torch.Tensor] = None,
+                output_index_prob: Optional[torch.Tensor] = None,
+                medusa_states: Optional[List[Any]] = None):
+        self.finished: Optional[torch.Tensor] = finished
+        self.update_length: List[int] = update_length
+        self.hidden_states: Optional[torch.Tensor] = hidden_states
+        self.logits: Optional[torch.Tensor] = logits
+        self.cum_log_probs: Optional[torch.Tensor] = cum_log_probs
+        self.updated_token_ids: Optional[torch.Tensor] = updated_token_ids
+        self.output_log_probs: Optional[torch.Tensor] = output_log_probs
+        self.output_index_prob: Optional[torch.Tensor] = output_index_prob
+        self.medusa_states: Optional[List[Any]] = medusa_states
 
 class BatchQuery:
     def __init__(self, count_prefix_length:bool, gen_num_per_circle: int, nccl_op: Any) -> None:
@@ -40,16 +56,7 @@ class BatchQuery:
         self.lora_names: List[int] = []
         self.lora_ids: List[int] = []
 
-        # output
-        self.update_length: List[int] = []
-        self.finished: Optional[torch.Tensor] = None
-        self.hidden_states: Optional[torch.Tensor] = None
-        self.logits: Optional[torch.Tensor] = None
-        self.cum_log_probs: Optional[torch.Tensor] = None
-        self.updated_token_ids: Optional[torch.Tensor] = None
-        self.output_log_probs: Optional[torch.Tensor] = None
-        self.output_index_prob: Optional[torch.Tensor] = None
-        self.medusa_state: Optional[List[Any]] = None
+        self.model_output = ModelOutput(None, None, None, None, None, None, None, None, None)
 
     def deepcopy(self) -> 'BatchQuery':
         new_batch_query = BatchQuery(self.count_prefix_length, self.gen_num_per_circle, self.nccl_op_)
@@ -66,7 +73,7 @@ class BatchQuery:
         new_batch_query.context_lengths_list = copy.deepcopy(self.context_lengths_list)
         new_batch_query.lora_names = copy.deepcopy(self.lora_names)
         new_batch_query.lora_ids = copy.deepcopy(self.lora_ids)
-        new_batch_query.update_length = self.update_length
+        new_batch_query.model_output.update_length = self.model_output.update_length
         return new_batch_query
 
     def __str__(self):
@@ -141,10 +148,6 @@ class BatchQuery:
     def total_batch_size(self):
         return self.generate_batch_size + self.context_batch_size
 
-    def update_all_errors(self, err: str):
-        for q in self.queries:
-            q.set_error(err)
-
     def has_context_query(self):
         return self.context_batch_size > 0
 
@@ -196,7 +199,7 @@ class BatchQuery:
         self.context_batch_size = len(new_queries)
         self.queries += new_queries
 
-    def generate(self):
+    def generate_model_input(self):
         if g_parallel_info.tp_rank > 0:
             return
         total_batch_size = len(self.queries)
@@ -242,12 +245,16 @@ class BatchQuery:
         self.output_token_ids = torch.IntTensor(output_token_ids)
         self.images = images
         self.cache_block_indice = torch.IntTensor(cache_block_indice)
-        self.merge_generate_config = self.union_generate_config(self.generate_configs)
+        self.merge_generate_config = GenerateConfig.merge_generate_config(self.generate_configs)
         self.lora_names = lora_names
         self.lora_ids = lora_ids
         if len(self.lora_ids) == 0:
             self.lora_ids = [-1]
         self.check()
+
+    def update_all_errors(self, err: str):
+        for q in self.queries:
+            q.set_error(err)
 
     def clear(self):
         self.generate_batch_size: int = 0
@@ -262,65 +269,47 @@ class BatchQuery:
         self.output_token_ids = None
         self.record_index_prob = None
 
-    def record_update_tensors(self, finished: torch.Tensor, update_length: List[int], hidden_states: torch.Tensor, logits: torch.Tensor,
-                              cum_log_probs: torch.Tensor, updated_token_ids: torch.Tensor,
-                              output_log_probs: Optional[torch.Tensor] = None,
-                              output_index_prob: Optional[torch.Tensor] = None,
-                              medusa_states: Optional[List[Any]] = None) -> None:
-        self.finished = to_cpu(finished)
-        self.hidden_states = hidden_states
-        self.logits = logits
-        self.cum_log_probs = to_cpu(cum_log_probs)
-        self.updated_token_ids = to_cpu(updated_token_ids)
-        self.update_length = update_length
-
-        # not to cpu
-        self.medusa_state = medusa_states
-        self.output_log_probs = output_log_probs
-        self.output_index_prob = output_index_prob
-
     @property
     def max_token_len(self):
         return max(self.max_seq_length, self.max_context_length)
 
     def slice_output_token(self, start: int, end: int, gen_len: int) -> torch.Tensor:
-        assert self.updated_token_ids is not None
+        assert self.model_output.updated_token_ids is not None
         max_token_len = max(self.max_seq_length, self.max_context_length)
-        return self.updated_token_ids[start: end, max_token_len: max_token_len + gen_len].contiguous()
+        return self.model_output.updated_token_ids[start: end, max_token_len: max_token_len + gen_len].contiguous()
 
-    # generate config for sample
-    # TODO: do not gen generate config, gen sample config
-    @staticmethod
-    def union_generate_config(configs: List['GenerateConfig']):
-        top_k: List[int] = []
-        top_p: List[float] = []
-        min_new_tokens: List[int] = []
-        repetition_penalty: List[float] = []
-        for config in configs:
-            top_k.append(config.top_k)
-            top_p.append(config.top_p)
-            min_new_tokens.append(config.min_new_tokens)
-            repetition_penalty.append(config.repetition_penalty)
+    def update_model_output(self, model_output: ModelOutput) -> None:
+        self.model_output = model_output
+        # to cpu
+        self.model_output.finished = to_cpu(model_output.finished)
+        self.model_output.cum_log_probs = to_cpu(model_output.cum_log_probs)
+        self.model_output.updated_token_ids = to_cpu(model_output.updated_token_ids)
+        
+    def update_query_output(self):        
+        assert (self.model_output.finished != None and self.model_output.hidden_states != None and \
+            self.model_output.updated_token_ids != None and self.model_output.cum_log_probs != None)
+        finished = self.model_output.finished.numpy().tolist()
 
-        res = GenerateConfig(
-            top_k=top_k,
-            top_p=top_p,
-            min_new_tokens=min_new_tokens,
-            repetition_penalty=repetition_penalty,
-            eos_token_id=configs[0].eos_token_id,
-            num_beams=configs[0].num_beams,
-        )
-        res.gen_hash_value()
-        return res
-
-class QueryHelper(object):
-    @staticmethod
-    def context_prefix_length(query: QueryStats) -> int:
-        return query.reuse_length
-
-    @staticmethod
-    def decoder_prefix_length(count_prefix_length: bool, query: QueryStats) -> int:
-        if count_prefix_length:
-            return 0
-        else:
-            return query.reuse_length
+        for i, query in enumerate(self.queries[:]):
+            query.report_first_token_rt()
+            query.increase_iter()
+            start_idx = i * self.beam_width
+            end_idx = (i + 1) * self.beam_width
+            query_update_length = self.model_output.update_length[i]
+            query.medusa_state = None if self.model_output.medusa_states is None else self.model_output.medusa_states[i]
+            assert query_update_length <= self.gen_num_per_circle, "query update length bigger than gen length"
+            if self.beam_width > 1:
+                query.output_token_ids_[:, :query.seq_length + self.gen_num_per_circle] = \
+                    self.model_output.updated_token_ids[start_idx: end_idx, :query.seq_length + self.gen_num_per_circle]
+            new_tokens = self.slice_output_token(start_idx, end_idx, query_update_length).reshape(-1, self.beam_width)
+            for token in new_tokens:
+                query.update(
+                    self.model_output.hidden_states[start_idx: end_idx],
+                    self.model_output.logits[start_idx: end_idx],
+                    token,
+                    self.model_output.cum_log_probs[start_idx: end_idx],
+                )
+                if query.need_finish():
+                    break
+            if finished[start_idx] or query.need_finish():
+                query.finish = True
