@@ -47,6 +47,7 @@ cc_test(
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/layers:layers",
         "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/core:allocator_cuda",
         "@com_google_googletest//:gtest"
     ],
     copts = cuda_copts(),

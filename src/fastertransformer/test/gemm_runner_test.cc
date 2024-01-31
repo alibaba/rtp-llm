@@ -1,6 +1,6 @@
 #include "src/fastertransformer/layers/GemmRunner.h"
 #include "src/fastertransformer/core/Tensor.h"
-#include "src/fastertransformer/core/allocator.h"
+#include "src/fastertransformer/core/allocator_cuda.h"
 
 #include "src/fastertransformer/cuda/cublas/cublas.h"
 #include <gtest/gtest-message.h>
