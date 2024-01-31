@@ -15,7 +15,7 @@ from typing import AsyncGenerator, List, Tuple
 
 import aiohttp
 import numpy as np
-from transformers import PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase, AutoTokenizer
 
 # (prompt len, output len, latency)
 REQUEST_LATENCY: List[Tuple[int, int, float]] = []
@@ -203,7 +203,7 @@ def main(args: argparse.Namespace):
         # api_url = f"http://{args.host}:{args.port}/v2/models/tensorrt_llm_bls/generate"
         api_url = f"http://{args.host}:{args.port}/v2/models/ensemble/generate"
     # tokenizer = get_tokenizer(args.tokenizer, trust_remote_code=args.trust_remote_code)
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=trust_remote_code, use_fast=False)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=args.trust_remote_code, use_fast=False)
     input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
 
     benchmark_start_time = time.perf_counter()
@@ -263,7 +263,8 @@ if __name__ == "__main__":
                              "then all the requests are sent at time 0. "
                              "Otherwise, we use Poisson process to synthesize "
                              "the request arrival times.")
-    parser.add_argument("--max-batch-size", type=int, default=64)
+    parser.add_argument("--max-batch-size", type=int, default=64,
+                        help="limit max num requests send at the same time")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument('--trust-remote-code', action='store_true',
                         help='trust remote code from huggingface')

@@ -61,6 +61,8 @@ Refer to the detailed documentation below for model configuration parameters, et
 * [Using as a Python Library](docs/HF.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)
+* [Benchmark&Performance](benchmark/README.md)
+
 ## Acknowledgments
 Our project is mainly based on [FasterTransformer](https://github.com/NVIDIA/FasterTransformer), and on this basis, we have integrated some kernel implementations from [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM). FasterTransformer and TensorRT-LLM have provided us with reliable performance guarantees. [Flash-Attention2](https://github.com/Dao-AILab/flash-attention) and [cutlass](https://github.com/NVIDIA/cutlass) have also provided a lot of help in our continuous performance optimization process. Our continuous batching and increment decoding draw on the implementation of [vllm](https://github.com/vllm-project/vllm); sampling draws on [transformers](https://github.com/huggingface/transformers), with speculative sampling integrating [Medusa](https://github.com/FasterDecoding/Medusa)'s implementation, and the multimodal part integrating implementations from [llava](https://github.com/haotian-liu/LLaVA) and [qwen-vl](https://github.com/QwenLM/Qwen-VL). We thank these projects for their inspiration and help.
 ## External Application Scenarios (Continuously Updated)
@@ -85,33 +87,6 @@ Our project is mainly based on [FasterTransformer](https://github.com/NVIDIA/Fas
 ### LLM + Multimodal
 * LLAVA (liuhaotian/llava-v1.5-13b, liuhaotian/llava-v1.5-7b)
 * Qwen-VL (Qwen/Qwen-VL)
-## Performance
-### Service Performance
-```bash
-# prepare test data
-wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-
-# launch start server
-# please use GUARANTE_GENERATE_MEM to avoid lack of memory when generate
-# WEIGHT_TYPE can choose int8, fp16, bf16, fp32
-# INT8_KV_CACHE mean use int8 store kv cache, default fp16
-export TOKENIZER_PATH=/path/to/tokenizer
-export CHECKPOINT_PATH=/path/to/model
-export FT_SERVER_TEST=1
-export GUARANTE_GENERATE_MEM=1
-export WEIGHT_TYPE=fp16
-export INT8_KV_CACHE=0
-python3 -m maga_transformer.start_server
-
-# benchmark service
-python3 benchmark_serving.py --dataset /path/ShareGPT_V3_unfiltered_cleaned_split.json --tokenizer /path/to/tokenizer --num-prompts 10000 --trust-remote-code --backend maga --max-batch-size 64
-```
-
-The performance comparison results:
-#### A10
-<img src=picture/A10_perf_data.png width="200px">
-
-more test data are on the way!
 
 ## Contact Us
 #### DingTalk Group
