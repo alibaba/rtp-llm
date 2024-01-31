@@ -1,27 +1,8 @@
-/*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.  All rights reserved.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-/**
- * Memory Allocator
- **/
-
 #pragma once
 
 #include <unordered_map>
 #include <vector>
-#include "allocator.h"
+#include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/utils/logger.h"
 
 namespace fastertransformer {
@@ -57,108 +38,6 @@ void* IAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero, bool 
         FT_LOG_DEBUG("Cannot find buffer %p, mallocing new one.", void_ptr);
         return malloc(size, is_set_zero, is_host);
     }
-}
-
-// cuda allocator
-
-Allocator<AllocatorType::CUDA>::Allocator(int device_id): device_id_(device_id) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    pointer_mapping_ = new std::unordered_map<void*, size_t>();
-#if defined(CUDA_MEMORY_POOL_DISABLED)
-    FT_LOG_WARNING(
-        "Async cudaMalloc/Free is not supported before CUDA 11.2. Using Sync cudaMalloc/Free."
-        "Note this may lead to hang with NCCL kernels launched in parallel; if so, try NCCL_LAUNCH_MODE=GROUP");
-#else
-    int device_count = 1;
-    check_cuda_error(cudaGetDeviceCount(&device_count));
-    cudaMemPool_t mempool;
-    check_cuda_error(cudaDeviceGetDefaultMemPool(&mempool, device_id));
-    cudaMemAccessDesc desc                  = {};
-    int               peer_access_available = 0;
-    for (int i = 0; i < device_count; i++) {
-        if (i == device_id) {
-            continue;
-        }
-        check_cuda_error(cudaDeviceCanAccessPeer(&peer_access_available, device_id, i));
-        if (!peer_access_available) {
-            FT_LOG_WARNING("Device " + std::to_string(device_id) + " peer access Device " + std::to_string(i)
-                            + " is not available.");
-            continue;
-        }
-        desc.location.type = cudaMemLocationTypeDevice;
-        desc.location.id   = i;
-        desc.flags         = cudaMemAccessFlagsProtReadWrite;
-        check_cuda_error(cudaMemPoolSetAccess(mempool, &desc, 1));
-    }
-    // set memory pool threshold to avoid shrinking the pool
-    uint64_t setVal = UINT64_MAX;
-    check_cuda_error(cudaMemPoolSetAttribute(mempool, cudaMemPoolAttrReleaseThreshold, &setVal));
-#endif
-}
-
-Allocator<AllocatorType::CUDA>::~Allocator() {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    while (!pointer_mapping_->empty()) {
-        free((void**)(&pointer_mapping_->begin()->first));
-    }
-    delete pointer_mapping_;
-}
-
-void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero, bool is_host) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    if (size == 0) {
-        return nullptr;
-    }
-    void* ptr      = nullptr;
-    int   o_device = 0;
-
-    check_cuda_error(getSetDevice(device_id_, &o_device));
-    if (is_host) {
-        check_cuda_error(cudaMallocHost(&ptr, (size_t)(ceil(size / 32.)) * 32));
-    } else {
-#if defined(CUDA_MEMORY_POOL_DISABLED)
-        check_cuda_error(cudaMalloc(&ptr, (size_t)(ceil(size / 32.)) * 32));
-#else
-        check_cuda_error(cudaMallocAsync(&ptr, (size_t)(ceil(size / 32.)) * 32, stream_));
-#endif
-    }
-    if (is_set_zero) {
-        check_cuda_error(cudaMemsetAsync(ptr, 0, (size_t)(ceil(size / 32.)) * 32, stream_));
-    }
-    check_cuda_error(getSetDevice(o_device));
-    FT_LOG_DEBUG("malloc buffer %p with size %ld", ptr, size);
-
-    pointer_mapping_->insert({getAddress(ptr), size});
-
-    return ptr;
-}
-
-void Allocator<AllocatorType::CUDA>::free(void** ptr, bool is_host) const {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    void* address = getAddress(*ptr);
-    if (*ptr != nullptr) {
-        int o_device = 0;
-        if (pointer_mapping_->count(address)) {
-            FT_LOG_DEBUG("Free buffer %p", address);
-            check_cuda_error(getSetDevice(device_id_, &o_device));
-            if (is_host) {
-                check_cuda_error(cudaFreeHost(*ptr));
-            } else {
-#if defined(CUDA_MEMORY_POOL_DISABLED)
-                check_cuda_error(cudaFree(*ptr));
-#else
-                check_cuda_error(cudaFreeAsync(*ptr, stream_));
-                cudaStreamSynchronize(stream_);
-#endif
-            }
-            check_cuda_error(getSetDevice(o_device));
-            pointer_mapping_->erase(address);
-        } else {
-            FT_LOG_WARNING("pointer_mapping_ does not have information of ptr at %p.", address);
-        }
-    }
-    *ptr = nullptr;
-    return;
 }
 
 }  // namespace fastertransformer

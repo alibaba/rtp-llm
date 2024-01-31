@@ -10,7 +10,24 @@ cc_library(
     ],
     copts = copts(),
     deps = [
-        "//src/fastertransformer/cuda:cuda_utils"
+        "//src/fastertransformer/utils:logger"
+    ],
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "allocator_cuda",
+    srcs = [
+        "allocator_cuda.cc"
+    ],
+    hdrs = [
+        "allocator_cuda.h"
+    ],
+    copts = cuda_copts(),
+    deps = [
+        ":allocator",
+        "//src/fastertransformer/cuda:cuda_utils",
     ],
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -26,8 +43,7 @@ cc_library(
     ],
     copts = copts(),
     deps = torch_deps() + [
-        ":allocator",
-        "//src/fastertransformer/cuda:cuda_utils"
+        ":allocator_cuda",
     ],
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -51,7 +67,8 @@ cc_library(
         "Tensor.cc",
     ]),
     deps = [
-        ":tensor_hdr"
+        ":tensor_hdr",
+        "//src/fastertransformer/cuda:cuda_utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
