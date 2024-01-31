@@ -1,7 +1,7 @@
 load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
- 
+
 ################################ cpp test ################################
- 
+
 test_copts = [
     "-fno-access-control",
 ] + cuda_copts() + copts()
@@ -33,6 +33,7 @@ cc_library(
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
         "@com_google_googletest//:gtest",
     ],
+    visibility = ["//visibility:public"],
     alwayslink = True,
 )
 
@@ -84,7 +85,7 @@ cc_test(
 
 cc_test(
     name = "test_int8",
-    srcs = ["unittests/test_int8.cu", "unittests/test_logprob_kernels.cu", 
+    srcs = ["unittests/test_int8.cu", "unittests/test_logprob_kernels.cu",
             "unittests/test_penalty_kernels.cu",
             "unittests/test_tensor.cu"],
     deps = [":test_lib"],
@@ -96,7 +97,7 @@ cc_test(
 # TODO(xinfei.sxf) fix those case, assert failed
 # cc_test(
 #     name = "test_sample",
-#     srcs = ["unittests/test_sampling.cu", "unittests/test_sampling_layer.cu", 
+#     srcs = ["unittests/test_sampling.cu", "unittests/test_sampling_layer.cu",
 #             "unittests/test_sampling_kernels.cu"],
 #     deps = [":test_lib"],
 #     copts = test_copts,
@@ -127,7 +128,7 @@ cc_library(
     ],
     copts = cuda_copts(),
     alwayslink = True,
-) 
+)
 
 cc_binary(
     name = "test_ops",
