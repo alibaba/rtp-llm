@@ -9,6 +9,7 @@ class AccMetrics(Enum):
     CONFLICT_QPS_METRIC = "py_rtp_framework_concurrency_exception_qps"    
     ITER_QPS_METRIC = "py_rtp_response_iterate_qps"    
     UPDATE_QPS_METRIC = "py_rtp_update_qps_metric"
+    FALLBACK_QPS_METRIC = "py_rtp_fallback_qps_metric"
     ERROR_UPDATE_QPS_METRIC = "py_rtp_error_update_target_qps"
 
 class GaugeMetrics(Enum):

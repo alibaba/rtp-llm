@@ -14,6 +14,7 @@ from maga_transformer.async_decoder_engine.cache_manager import CacheManager, Ca
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery, QueryStats
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
 from maga_transformer.async_decoder_engine.query_resource_manager import QueryResourceManager
+from maga_transformer.metrics import kmonitor, AccMetrics
 
 class Scheduler:
     def __init__(self, config: GptInitModelParameters, cache_config: CacheConfig,
@@ -147,12 +148,13 @@ class Scheduler:
     def fallback(self):
         while self.guarante_generate_mem and len(self.cache_manager_.free_blocks_index) < len(self.running_query_.queries):
             query = self.running_query_.queries[-1]
-            self._free_block_cache(query)
+            self.query_resource_manager._free_block_cache(query)
             if query.generate_config.num_beams > 1:
                 query.seq_length = query.context_length
             self.wait_queries_.appendleft(query)
             self.running_query_.queries.remove(query)
             logging.info(f"lack mem running query back to wait and context_length:{query.context_length} seq_length:{query.seq_length}")
+            kmonitor.report(AccMetrics.FALLBACK_QPS_METRIC, 1)
 
     def prepare_for_next_step(self):        
         self.running_query_.update_query_output()

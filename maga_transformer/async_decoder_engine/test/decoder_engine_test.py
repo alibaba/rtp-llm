@@ -8,7 +8,7 @@ from maga_transformer.pipeline.pipeline import Pipeline
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 class MockMemInfo:
-    free: int  = 24 * 1024 * 1024 # byte
+    free: int  = 12 * 1024 * 1024 # byte
     used: int  = 0
 
 @mock.patch('maga_transformer.config.cache_config.get_mem_info', MockMemInfo)
@@ -22,10 +22,11 @@ class DecoderEngineTest(TestCase):
 
     def create_pipeline(self):
         self.fake_model_loader = FakeModelLoader(model_type='llama',
-                                             tokenizer_path=self.tokenizer_path,
-                                             ckpt_path=self.ckpt_path,
-                                             weight_type=WEIGHT_TYPE.FP16,
-                                             async_mode=True)
+                                                 tokenizer_path=self.tokenizer_path,
+                                                 ckpt_path=self.ckpt_path,
+                                                 weight_type=WEIGHT_TYPE.FP16,
+                                                 async_mode=True,
+                                                 max_seq_len=2048)
         model: AsyncModel = self.fake_model_loader.load_model()
         pipeline = Pipeline(model, model.tokenizer)
         return pipeline
@@ -77,20 +78,36 @@ class DecoderEngineTest(TestCase):
             pipeline.model.stop()
 
     def test_stress(self) -> None:
+        os.environ['GUARANTE_GENERATE_MEM'] = "1"
         pipeline = self.create_pipeline()
         try:
-            t = ThreadPoolExecutor(100)
+            t = ThreadPoolExecutor(32)
             def func():
-                try:
-                    gen = pipeline(["hello, what's your name?", "please write a story about dog"], [[], []],max_new_tokens=64)
-                    results = [result for result in gen]
-                except:
-                    pass
+                gen = pipeline(["hello, what's your name?", "please write a story about dog"], [[], []],max_new_tokens=32)
+                results = [result for result in gen]
             result = []
-            for i in range(0, 100):
+            for i in range(0, 64):
                 result.append(t.submit(func))
             # just ensure every input has result
-            for i in range(0, 100):
+            for i in range(0, 64):
+                result[i].result()
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
+        finally:
+            pipeline.model.stop()
+
+    def test_guarante_generate(self) -> None:
+        os.environ['GUARANTE_GENERATE_MEM'] = "1"
+        pipeline = self.create_pipeline()
+        try:
+            t = ThreadPoolExecutor(16)
+            def func():
+                gen = pipeline([" ".join(["hello, what's your name?"] * 200), " ".join(["please write a story about dog"] * 200)], [[], []],max_new_tokens=64)
+                results = [result for result in gen]
+            result = []
+            for i in range(0, 32):
+                result.append(t.submit(func))
+            # just ensure every input has result
+            for i in range(0, 32):
                 result[i].result()
             self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
         finally:
