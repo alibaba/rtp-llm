@@ -274,6 +274,7 @@ class QwenRenderer(CustomChatRenderer):
             k = response.rfind("\nObservation:")
             func_name = response[i + len("\nAction:") : j].strip()
             func_args = response[j + len("\nAction Input:") : k].strip()
+        logging.info(f"parsed function from response: [{response}]: {func_name}, {func_args}")
         if func_name:
             return DeltaMessage(
                 content=response[:i],
@@ -343,8 +344,8 @@ class QwenRenderer(CustomChatRenderer):
                 continue
 
             if (output_length > responded_length + len('\nAction:')):
-                delta_string = output_string[responded_length : output_length - len('Action:')]
-                responded_string = output_string[: output_length - len('Action:')]
+                delta_string = output_string[responded_length : output_length - len('\nAction:')]
+                responded_string = output_string[: output_length - len('\nAction:')]
                 responded_length = len(responded_string)
 
                 yield StreamResponseObject(
@@ -364,7 +365,7 @@ class QwenRenderer(CustomChatRenderer):
         if (generating_function_call):
             function_message = self._parse_function_response(output_string[responded_length:])
             if (function_message == None):
-                logging.warn(f"output [{output_string}] failed to parse function call. "
+                logging.warn(f"output [{output_string}] failed to parse function from [{responded_length}]. "
                                 "regarded as normal output.")
             else:
                 finish_reason = FinisheReason.function_call
