@@ -1,4 +1,5 @@
 # 读取Huggingface模型
+
 huggingface模型支持从通过模型名从远程下载模型，代码如下：(如果无法访问huggingface需要配置环境变量`HF_ENDPOINT`)
 ``` python
 from maga_transformer.pipeline import Pipeline

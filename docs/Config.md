@@ -8,7 +8,6 @@
 | `MODEL_TYPE` | `str`, required | 模型类型 |
 | `MAX_SEQ_LEN` | `str`, optional | 输入+输出最大长度 |
 | `WEIGHT_TYPE` | `str`, optional | 模型加载使用的weight 类型:FP16/INT8 |
-| `ASYNC_MODE` | `str`, optional | 异步模式（1:打开，0:关闭），支持dynamic batching、paged (token) attention等优化 |
 | `CONCURRENCY_LIMIT` | `str`, optional | 模型最大并发数 |
 
 
@@ -36,7 +35,6 @@
 | `model_type` | `str, default=''` | 模型类型 |
 | `ckpt_path` | `str, default=''` | 模型路径 |
 | `tokenizer_path` | `str, default=''` | tokenizer路径 |
-| `async_mode` | `bool, default=False`| 是否开启异步凑批模型 |
 | `weight_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | 模型weights量化类型 |
 | `act_type` | `WEIGHT_TYPE, default=WEIGHT_TYPE.FP16` | 模型weights存储类型 |
 | `max_seq_len` | `bool, default=0` | beam search的个数 |

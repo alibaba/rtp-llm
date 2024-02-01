@@ -2,6 +2,14 @@
 
 rtp-llm 支持 openai chat 格式的接口调用，可以作为 openai 接口服务的无缝 drop-in 。
 
+启动
+```bash
+export TOKENIZER_PATH=/path/to/tokenizer
+export CHECKPOINT_PATH=/path/to/model
+export FT_SERVER_TEST=1
+python3 -m maga_transformer.start_server
+```
+
 在 server 启动后，我们提供了一个 openai client 兼容的 chat 接口。使用示例如下：
 
 ``` python
@@ -143,28 +151,3 @@ print(f"2 function response: {json.dumps(response, indent=4, ensure_ascii=False)
 ```
 
 当前 function call 功能当前仅支持 qwen 系列模型，其他模型待扩展。
-
-# 其他客户端的接入方法
-
-首先，以服务方式运行rtp-llm
-
-``` bash
-export MODEL_TYPE=model_type
-export TOKENIZER_PATH=/path/to/tokenizer
-export CHECKPOINT_PATH=/path/to/model
-export START_PORT=port
-
-python3 -m maga_transformer.start_server
-```
-
-在客户端对应位置填写API URL：`{server_ip}:{port}`即可
-
-以RWKV-Runner为例：
-
-* 在API URL填写服务ip和端口(默认8088)
-<img src="pics/rwkv_runner_main_image.jpg" width = "1000" height = "500"/>
-
-* 之后可以直接使用chat功能，其本质上是调用`/v1/chat/completion`接口
-<img src="pics/rwkv_runner_chat_image.jpg" width = "1000" height = "500"/>
-
-* 其余接口(续写、作曲等)尚未适配，无法使用

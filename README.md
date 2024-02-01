@@ -1,34 +1,44 @@
 [English](README.md) [中文](README_cn.md)
 
 ## About
-* rtp-llm is an LLM inference acceleration engine developed by Alibaba's big model prediction team. rtp-llm is widely used within Alibaba and supports the large model inference operations of various departments, including Taobao, Tmall, Cainiao, Amap, Ele.me, AE, Lazada, and others.
-* rtp-llm offers high-performance, low-cost, and user-friendly inference services, helping customers and developers tailor inference services suitable for their own businesses, thus boosting business growth.
-* rtp-llm is a subproject of the [havenask](https://github.com/alibaba/havenask) project.
+* rtp-llm is a Large Language Model (LLM) inference acceleration engine developed by Alibaba's Foundation Model Inference Team. It is widely used within Alibaba Group, supporting LLM service across multiple business units including Taobao, Tmall, Idlefish, Cainiao, Amap, Ele.me, AE, and Lazada.
+* The rtp-llm project is a sub-project of the [havenask](https://github.com/alibaba/havenask) .
+
 ## Features
+### Production Proven
+Applied in numerous LLM scenarios, such as:
+* Taobao Wenwen
+* Alibaba's international AI platform, [Aidge](https://aidc-ai.com/)
+* [OpenSearch LLM Smart Q&A Edition](https://www.aliyun.com/activity/bigdata/opensearch/llmsearch)
+* [Large Language Model based Long-tail Query Rewriting in Taobao Search](https://arxiv.org/abs/2311.03758)
+
 ### High Performance
-* Utilizes high-performance cuda kernels.
-* The framework has finely optimized the overhead of dynamic batching.
-* Supports paged attention and kv cache quantization.
-* Supports flash attention2.
-* Supports weight only INT8 quantization with automatic quantization at load time.
-* Specially optimized for the V100.
-### Extremely Flexible and Easy to Use
-* Seamlessly interfaces with popular HuggingFace models, supporting multiple weight formats without the need for additional conversion processes.
-* Supports deployment of multiple LoRA services with a single model instance.
-* Supports multimodal inputs (mixed image and text).
-* Supports multi-machine/multi-card tensor parallelism.
-* Supports loading P-tuning models.
-### Advanced Inference Acceleration Methods
-* Supports loading of irregular models after pruning.
-* Supports multi-round dialogue context Cache.
-* Supports Speculative Decoding acceleration.
-* Supports Medusa acceleration.
+* Utilizes high-performance CUDA kernels, including PagedAttention, FlashAttention, FlashDecoding, etc.
+* Implements WeightOnly INT8 Quantization with automatic quantization at load time
+* Adaptive KVCache Quantization
+* Detailed optimization of dynamic batching overhead at the framework level
+* Specially optimized for the V100 GPU
+
+### Flexibility and Ease of Use
+* Seamless integration with the HuggingFace models, supporting multiple weight formats such as SafeTensors, Pytorch, and Megatron
+* Deploys multiple LoRA services with a single model instance
+* Handles multimodal inputs (combining images and text)
+* Enables multi-machine/multi-GPU tensor parallelism
+* Supports P-tuning models
+
+### Advanced Acceleration Techniques
+* Loads pruned irregular models
+* Contextual Prefix Cache for multi-turn dialogues
+* System Prompt Cache
+* Speculative Decoding
+* Medusa for advanced parallelization strategies
+
 ## How to Use
 ### Requirements
 * Operating System: Linux
 * Python: 3.10
-* NVIDIA GPU: Compute Capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
-### Installation and Startup
+* NVIDIA GPU: Compute Capability 7.0 or higher (e.g., RTX20xx, RTX30xx, RTX40xx, V100, T4, A10/A30/A100, L4, H100, etc.)
+### Startup example
 ```bash
 # Install rtp-llm
 cd rtp-llm
@@ -36,30 +46,25 @@ cd rtp-llm
 pip3 install -r ./open_source/deps/requirements_torch_gpu.txt 
 # Use the corresponding whl from the release version, here's an example for the cuda11 version 0.1.0, for the cuda12 whl package please check the release page.
 pip3 install maga_transformer-0.0.1+cuda118-cp310-cp310-manylinux1_x86_64.whl
-# Modify the model path in test.py, and start the program directly
-python3 example/test.py
-# Or start the http service
-# rtp-llm uses fastapi to build high-performance model services and uses asynchronous programming to minimize CPU thread pressure interference with efficient GPU operation
-export TOKENIZER_PATH=/path/to/tokenizer
-export CHECKPOINT_PATH=/path/to/model
-export FT_SERVER_TEST=1
-python3 -m maga_transformer.start_server
+# start http service
+TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model FT_SERVER_TEST=1 python3 -m maga_transformer.start_server
 # request to server
 curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 ```
-Refer to the detailed documentation below for model configuration parameters, etc.
+
 ## Documentation
+* [Serving Example](docs/OpenAI-Tutorial.md)
+* [RWKV-Runner Example](docs/RWKV-Runner.md)
+* [Python Library Example](docs/HF.md)
 * [Configuration Parameters](docs/Config.md)
 * [Source Code Build](docs/Build.md)
 * [Request Format](docs/Request.md)
-* [OpenAI Interface](docs/OpenAI-Tutorial.md)
+* [Multi GPU Inference](docs/MultiGPU.md)
 * [LoRA](docs/LoRA-Tutorial.md)
 * [PTuning](docs/PTuning-Tutorial.md)
 * [Multimodal](docs/Multimodal-Tutorial.md)
 * [Structured Pruning](docs/Sparse-Tutorial.md)
 * [Speculative Sampling](docs/SpeculativeDecoding-Tutorial.md)
-* [Using as a Python Library](docs/HF.md)
-* [Multi GPU Inference](docs/MultiGPU.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)
 * [Benchmark&Performance](benchmark/README.md)
