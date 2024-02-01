@@ -8,10 +8,13 @@
 
 namespace fastertransformer{
 
-
-class ICudaAllocator: public IAllocator {
+class ICudaAllocator: virtual public IAllocator {
 public:
     ICudaAllocator() {}
+
+    MemoryType memoryType() const override {
+        return MEMORY_GPU;
+    }
 
     void setStream(cudaStream_t stream) {
         stream_ = stream;
@@ -25,9 +28,8 @@ protected:
     cudaStream_t                       stream_ = 0;  // initialize as default stream
 };
 
-
 template<>
-class Allocator<AllocatorType::CUDA>: public ICudaAllocator {
+class Allocator<AllocatorType::CUDA>: public ICudaAllocator, public TypedAllocator<AllocatorType::CUDA> {
 private:
     const int                          device_id_;
     std::unordered_map<void*, size_t>* pointer_mapping_;
@@ -48,13 +50,10 @@ private:
 
 public:
     Allocator(int device_id);
-
     virtual ~Allocator();
 
     void* malloc(size_t size, const bool is_set_zero = true, bool is_host = false);
-
     void free(void** ptr, bool is_host = false) const;
-
     void memSet(void* ptr, const int val, const size_t size) {
         check_cuda_error(cudaMemsetAsync(ptr, val, size, stream_));
     }

@@ -8,7 +8,7 @@
 namespace fastertransformer {
 
 template<>
-class Allocator<AllocatorType::TH>: public ICudaAllocator {
+class Allocator<AllocatorType::TH>: public ICudaAllocator, public TypedAllocator<AllocatorType::TH> {
     std::unordered_map<void*, torch::Tensor>* pointer_mapping_;
 
     bool isExist(void* address) const {

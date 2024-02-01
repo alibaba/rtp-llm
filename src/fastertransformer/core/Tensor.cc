@@ -41,12 +41,11 @@ Tensor::Tensor():
     data_(nullptr),
     owned_(false) {}
 
-Tensor::Tensor(const MemoryType          where,
+Tensor::Tensor(IAllocator*               allocator,
                const DataType            type,
                const std::vector<size_t> shape,
-               IAllocator*               allocator,
                const bool                is_set_zero):
-    where_(where),
+    where_(allocator->memoryType()),
     type_(type),
     shape_(shape),
     data_(nullptr),

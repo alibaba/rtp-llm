@@ -18,9 +18,18 @@ enum class ReallocType {
     DECREASE,
 };
 
+typedef enum memorytype_enum {
+    MEMORY_CPU,
+    MEMORY_CPU_PINNED,
+    MEMORY_GPU
+} MemoryType;
+
 class IAllocator {
 public:
     virtual ~IAllocator(){};
+
+    virtual AllocatorType type() const = 0;
+    virtual MemoryType    memoryType() const = 0;
 
     virtual void* malloc(size_t size, const bool is_set_zero = true, bool is_host = false) = 0;
     virtual void  free(void** ptr, bool is_host = false) const                             = 0;
@@ -38,6 +47,14 @@ protected:
 };
 
 template<AllocatorType AllocType_>
-class Allocator;
+class TypedAllocator : virtual public IAllocator {
+public:
+    AllocatorType type() const override {
+        return AllocType_;
+    }
+};
+
+template<AllocatorType AllocType_>
+class Allocator : public TypedAllocator<AllocType_> {};
 
 }  // namespace fastertransformer

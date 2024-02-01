@@ -56,20 +56,13 @@ typedef enum datatype_enum {
 template<typename T>
 DataType getTensorType();
 
-typedef enum memorytype_enum {
-    MEMORY_CPU,
-    MEMORY_CPU_PINNED,
-    MEMORY_GPU
-} MemoryType;
-
 struct Tensor {
 public:
     Tensor();
-    Tensor(const MemoryType          where,
+    Tensor(IAllocator*               allocator,
            const DataType            type,
            const std::vector<size_t> shape,
-           IAllocator*               allocator,
-           const bool                is_set_zero);
+           const bool                is_set_zero = false);
     Tensor(const MemoryType where, const DataType type, const std::vector<size_t> shape, const void* data);
 
     ~Tensor();
