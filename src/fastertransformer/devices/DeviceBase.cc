@@ -6,9 +6,5 @@ namespace fastertransformer {
 
 DeviceBase::DeviceBase() {}
 
-IAllocator* DeviceBase::getAllocator() {
-    return allocator_.get();
-}
-
 }; // namespace fastertransformer
 

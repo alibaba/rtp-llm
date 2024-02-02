@@ -22,6 +22,8 @@ struct DenseWeights {
 struct LoraWeights {
     Tensor A;
     Tensor B;
+    std::optional<Tensor> A_scale;
+    std::optional<Tensor> B_scale;
 };
 
 typedef std::unordered_map<std::string, LoraWeights> LoraWeightsMap;

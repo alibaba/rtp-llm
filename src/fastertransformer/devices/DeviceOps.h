@@ -18,6 +18,11 @@ public:
     virtual void contextAttention(AttentionModuleParams& params)     = 0;
     virtual void decoderSelfAttention(AttentionModuleParams& params) = 0;
 
+    // allocating buffer memory for ops
+    // buffers are allocated before the attn/ffn ops are called,
+    // and passed into the ops as parameters
+    virtual void allocateBuffers(AllocateBufferParams& params) = 0;
+
     // Top level model ops
     virtual void attentionLayer(AttentionLayerParams& params) = 0;
     virtual void ffnLayer(FfnLayerParams& params)             = 0;

@@ -18,7 +18,7 @@ test_linkopts = [
 ]
 
 test_deps = [
-    "//src/fastertransformer/devices:cuda_impl",
+    "//src/fastertransformer/devices:device_factory",
     "//tests:test_lib",
 ] + torch_deps()
 

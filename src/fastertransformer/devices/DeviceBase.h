@@ -9,7 +9,8 @@ public:
     DeviceBase();
 
     virtual std::string type() const = 0;
-    IAllocator*         getAllocator();
+    virtual IAllocator* getAllocator() = 0;
+    virtual IAllocator* getHostAllocator() = 0;
 
 private:
     DeviceBase(const DeviceBase&) = delete;
@@ -17,8 +18,6 @@ private:
     DeviceBase(DeviceBase&&)                 = delete;
     DeviceBase& operator=(DeviceBase&&) = delete;
 
-protected:
-    std::unique_ptr<IAllocator> allocator_;
 };
 
 };  // namespace fastertransformer

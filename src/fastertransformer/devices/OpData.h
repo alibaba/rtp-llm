@@ -31,9 +31,9 @@ enum class ActivationType {
 struct LayernormParams {
     const NormType norm_type;
     const Tensor&  input;
-    const Tensor&  residual1;
-    const Tensor&  residual2;
-    const Tensor&  bias;
+    const std::optional<Tensor>  residual1;
+    const std::optional<Tensor>  residual2;
+    const std::optional<Tensor>  bias;
     const Tensor&  gamma;
     const Tensor&  beta;
     const float    eps;
@@ -65,8 +65,8 @@ struct GemmParams {
     // const float alpha;
     // const float beta;
 
-    TransposeOperation transA;
-    TransposeOperation transB;
+    TransposeOperation transA = TransposeOperation::NONE;
+    TransposeOperation transB = TransposeOperation::NONE;
 
     // const int lda;
     // const int ldb;
@@ -97,8 +97,8 @@ struct AttentionCommonInputs {
     const std::optional<bool>         count_prefix_length;
     const std::optional<uint32_t>     max_prefix_length;
 
-    const Tensor& lora_ids;
-    const Tensor& lora_input_lengths;
+    const std::optional<Tensor> lora_ids;
+    const std::optional<Tensor> lora_input_lengths;
 };
 
 // TODO(wangyin): figure out these styles and doc them.
@@ -108,6 +108,11 @@ enum class PositionEmbeddingStyle {
     NTKScalar     = 2,
     DynamicNTKS   = 3,
     GLM           = 4,
+};
+
+struct AllocateBufferParams {
+    std::unique_ptr<OpBuffer>& attentionBuffer;
+    std::unique_ptr<OpBuffer>& ffnBuffer;
 };
 
 struct AttentionConfigs {
@@ -129,7 +134,8 @@ struct AttentionModuleParams {
 
     const AttentionConfigs&      configs;
     const AttentionLayerWeights& weights;
-    AttentionBuffers&            buffers;
+
+    std::unique_ptr<OpBuffer>&   buffers;
 
     uint32_t batch_size;
     uint32_t max_seq_length;
@@ -142,7 +148,7 @@ struct AttentionLayerParams {
     Tensor&       output;
 
     const AttentionLayerWeights& weights;
-    AttentionBuffers&            buffers;
+    std::unique_ptr<OpBuffer>&   buffers;
 
     const uint32_t generate_batch_size;
     const uint32_t max_generate_seq_length;
@@ -154,15 +160,15 @@ struct AttentionLayerParams {
 
 struct FfnLayerParams {
     const Tensor& input;
-    const Tensor& output;
+    Tensor& output;
 
-    const FfnLayerWeights& weights;
-    FfnBuffers&            buffers;
+    const FfnLayerWeights&       weights;
+    std::unique_ptr<OpBuffer>&   buffers;
 
     const ActivationType activation_type;
 
-    const Tensor& lora_ids;
-    const Tensor& lora_input_lengths;
+    const std::optional<Tensor> lora_ids;
+    const std::optional<Tensor> lora_input_lengths;
 };
 
 struct SamplerParams {

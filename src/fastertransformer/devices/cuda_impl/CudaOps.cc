@@ -20,6 +20,10 @@ void CudaDevice::decoderSelfAttention(AttentionModuleParams& params) {
 
 }
 
+void CudaDevice::allocateBuffers(AllocateBufferParams& params) {
+
+}
+
 void CudaDevice::attentionLayer(AttentionLayerParams& params) {
 
 }

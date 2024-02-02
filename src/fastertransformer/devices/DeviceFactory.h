@@ -5,14 +5,13 @@
 namespace fastertransformer {
 
 enum class DeviceType {
-    CPU  = 0,
-    CUDA = 1,
+    Cpu  = 0,
+    Cuda = 1,
 };
 
 class DeviceFactory {
 public:
     static DeviceBase* getDevice(DeviceType type);
-    static DeviceBase* getCpuDevice();
 };
 
 } // namespace fastertransformer

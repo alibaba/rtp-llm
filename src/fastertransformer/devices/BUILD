@@ -63,7 +63,7 @@ cc_library(
     ]),
     deps = [
         ":cpu_impl",
-        ":cuda_device_impl",
+        ":cuda_impl",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

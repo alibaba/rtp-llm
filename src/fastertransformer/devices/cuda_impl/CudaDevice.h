@@ -12,12 +12,15 @@ public:
     ~CudaDevice();
 
 public:
-    int getDeviceId() const { return device_id_; }
     std::string type() const override { return "cuda"; }
+    IAllocator* getAllocator() override { return allocator_.get(); }
+    IAllocator* getHostAllocator() override { return host_allocator_.get(); }
+    int getDeviceId() const { return device_id_; }
 
 public: // Ops method
     void layernorm(LayernormParams& params);
     void gemm(GemmParams& params);
+    void allocateBuffers(AllocateBufferParams& params);
     void contextAttention(AttentionModuleParams& params);
     void decoderSelfAttention(AttentionModuleParams& params);
     void attentionLayer(AttentionLayerParams& params);
@@ -28,6 +31,8 @@ public: // Ops method
     void allReduceSum(AllReduceParams& params);
 
 private:
+    std::unique_ptr<IAllocator> allocator_;
+    std::unique_ptr<IAllocator> host_allocator_;
     int device_id_;
     cudaStream_t stream_;
     cublasHandle_t cublas_handle_;

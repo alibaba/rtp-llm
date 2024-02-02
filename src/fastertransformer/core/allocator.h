@@ -24,6 +24,8 @@ typedef enum memorytype_enum {
     MEMORY_GPU
 } MemoryType;
 
+// TODO(wangyin): refactor Allocator implementation, remove `is_host` parameter
+// Each allocator should only allocate memory on one device.
 class IAllocator {
 public:
     virtual ~IAllocator(){};
