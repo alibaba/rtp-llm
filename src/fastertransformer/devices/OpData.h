@@ -81,9 +81,8 @@ struct GemmParams {
 };
 
 struct AttentionCommonInputs {
-
     Tensor& kv_cache_blocks;
-    Tensor& kv_cache_scales;
+    const std::optional<const Tensor> kv_cache_scales;
 
     const Tensor& input_lengths;
     const Tensor& sequence_lengths;
