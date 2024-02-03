@@ -4,6 +4,7 @@ import logging
 import numpy as np
 from typing import Any, List, Optional
 from threading import Lock
+from pydantic import BaseModel
 from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
@@ -14,6 +15,21 @@ from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 from maga_transformer.utils.util import to_cuda, to_cpu
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
+
+
+class ModelOutput(BaseModel):
+    finished: Optional[torch.Tensor] = None
+    update_length: List[int] = []
+    update_token_ids: Optional[torch.Tensor] = None
+    hidden_states: Optional[torch.Tensor] = None
+    logits: Optional[torch.Tensor] = None
+    cum_log_probs: Optional[torch.Tensor] = None
+    output_log_probs: Optional[torch.Tensor] = None
+    output_index_prob: Optional[torch.Tensor] = None
+    medusa_states: Optional[List[Any]] = None
+
+    class Config:
+        arbitrary_types_allowed = True
 
 
 class BatchQuery:
@@ -40,16 +56,7 @@ class BatchQuery:
         self.record_index_prob: Optional[torch.Tensor] = None
         self.lora_ids: List[int] = []
 
-        # output
-        self.update_length: List[int] = []
-        self.finished: Optional[torch.Tensor] = None
-        self.hidden_states: Optional[torch.Tensor] = None
-        self.logits: Optional[torch.Tensor] = None
-        self.cum_log_probs: Optional[torch.Tensor] = None
-        self.updated_token_ids: Optional[torch.Tensor] = None
-        self.output_log_probs: Optional[torch.Tensor] = None
-        self.output_index_prob: Optional[torch.Tensor] = None
-        self.medusa_state: Optional[List[Any]] = None
+        self.model_output = ModelOutput()
 
     def __str__(self):
         return f'generate_batch_size: {self.generate_batch_size}, \
@@ -74,7 +81,7 @@ class BatchQuery:
         new_batch_query.reuse_lengths_list = copy.deepcopy(self.reuse_lengths_list)
         new_batch_query.context_lengths_list = copy.deepcopy(self.context_lengths_list)
         new_batch_query.lora_ids = copy.deepcopy(self.lora_ids)
-        new_batch_query.update_length = self.update_length
+        new_batch_query.model_output.update_length = self.model_output.update_length
         return new_batch_query
 
     def tp_sync(self):
@@ -268,31 +275,40 @@ class BatchQuery:
         self.output_token_ids = None
         self.record_index_prob = None
 
-    def record_update_tensors(self, finished: torch.Tensor, update_length: List[int], hidden_states: torch.Tensor, logits: torch.Tensor,
-                              cum_log_probs: torch.Tensor, updated_token_ids: torch.Tensor,
-                              output_log_probs: Optional[torch.Tensor] = None,
-                              output_index_prob: Optional[torch.Tensor] = None,
-                              medusa_states: Optional[List[Any]] = None) -> None:
-        self.finished = to_cpu(finished)
-        self.hidden_states = hidden_states
-        self.logits = logits
-        self.cum_log_probs = to_cpu(cum_log_probs)
-        self.updated_token_ids = to_cpu(updated_token_ids)
-        self.update_length = update_length
-
-        # not to cpu
-        self.medusa_state = medusa_states
-        self.output_log_probs = output_log_probs
-        self.output_index_prob = output_index_prob
+    def update_output(self, model_output):
+        self.model_output = model_output
 
     @property
     def max_token_len(self):
         return max(self.max_seq_length, self.max_context_length)
 
     def slice_output_token(self, start: int, end: int, gen_len: int) -> torch.Tensor:
-        assert self.updated_token_ids is not None
+        assert self.model_output.update_token_ids is not None
         max_token_len = max(self.max_seq_length, self.max_context_length)
-        return self.updated_token_ids[start: end, max_token_len: max_token_len + gen_len].contiguous()
+        return self.model_output.update_token_ids[start: end, max_token_len: max_token_len + gen_len].contiguous()
+
+    def update_streams(self):
+        def try_get(list, idx1, idx2):
+            return list[idx1:idx2] if list is not None else None
+
+        finished = self.model_output.finished.tolist()
+        for i, stream in enumerate(self.streams):
+            start_idx = i * self.num_beams
+            end_idx = (i + 1) * self.num_beams
+            update_length = self.model_output.update_length[i]
+            stream.medusa_state = self.model_output.medusa_states[i] if self.model_output.medusa_states else None
+            assert update_length <= self.gen_num_per_circle, "query update length bigger than gen length"
+            new_tokens = self.slice_output_token(
+                start_idx, end_idx, update_length).reshape(self.num_beams, -1)
+            stream.update(new_tokens,
+                          finished[start_idx],
+                          try_get(self.model_output.hidden_states, start_idx, end_idx),
+                          try_get(self.model_output.logits, start_idx, end_idx),
+                          try_get(self.model_output.cum_log_probs, start_idx, end_idx))
+            stream.check_timeout()
+            if stream.finished or stream.stopped:
+                self.remove_stream(stream)
+                stream.release_resource()
 
     # generate config for sample
     # TODO: do not gen generate config, gen sample config

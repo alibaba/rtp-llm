@@ -94,38 +94,8 @@ class Scheduler:
         self.batch_query.add_new_stream(new_streams)
         return self.batch_query
 
-    def update_batch_query(self):
-        assert (self.batch_query.finished != None and \
-            self.batch_query.hidden_states != None and \
-            self.batch_query.updated_token_ids != None and \
-            self.batch_query.cum_log_probs != None)
-        finished = self.batch_query.finished.tolist()
-        hidden_states = self.batch_query.hidden_states
-        logits = self.batch_query.logits
-        updated_tokens = self.batch_query.updated_token_ids
-        cum_log_probs = self.batch_query.cum_log_probs
-        num_beams = self.batch_query.num_beams
-        gen_num = self.gen_num_per_circle
-        update_length = self.batch_query.update_length
-        medusa_state = self.batch_query.medusa_state
-
-        for i, stream in enumerate(self.batch_query.streams):
-            start_idx = i * num_beams
-            end_idx = (i + 1) * num_beams
-            query_update_length = update_length[i]
-            stream.medusa_state = None if medusa_state is None else medusa_state[i]
-            assert query_update_length <= gen_num, "query update length bigger than gen length"
-            new_tokens = self.batch_query.slice_output_token(
-                start_idx, end_idx, query_update_length).reshape(num_beams, -1)
-            stream.update(new_tokens,
-                          finished[start_idx],
-                          hidden_states[start_idx: end_idx],
-                          logits[start_idx: end_idx],
-                          cum_log_probs[start_idx: end_idx])
-            stream.check_timeout()
-            if stream.finished or stream.stopped:
-                self.batch_query.remove_stream(stream)
-
+    def prepare_next_step(self):
+        self.batch_query.update_streams()
         self._maybe_preempt_kvcache()
         self._stream_cache_manager.incr_kvcache(self.batch_query.streams)
 
@@ -140,6 +110,7 @@ class Scheduler:
             self._waiting_streams.appendleft(stream)
             self.batch_query.remove_stream(stream)
             logging.info(f"lack mem running query back to wait and input_length:{stream.input_length} seq_length:{stream.seq_length}")
+
     def update_all_errors(self, err: str):
         self.batch_query.update_all_errors(err)
 

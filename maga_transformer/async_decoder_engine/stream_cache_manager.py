@@ -62,7 +62,8 @@ class StreamCacheManager:
         if self.ptuning_:
             block_indice, reuse_length = self.ptuning_.get_block_indice(block_size, stream.generate_config)
         elif self.reuse_cache_:
-            block_indice, reuse_length = self.cache_manager_.malloc_with_cache(block_size, stream.input_token_ids.numpy().tolist(), stream.chat_id)
+            block_indice, reuse_length = self.cache_manager_.malloc_with_cache(
+                block_size, stream.complete_token_ids[0].numpy().tolist(), stream.generate_config.chat_id)
         else:
             block_indice = self.cache_manager_.malloc(block_size)
             reuse_length = 0
@@ -76,10 +77,10 @@ class StreamCacheManager:
             try:
                 block_index = [self.cache_manager_.malloc(malloc_size)
                                for _ in range(stream.generate_config.num_beams)]
+                stream.add_block_index(block_index)
             except Exception as e:
                 stream.set_stop('LACK_MEM')
                 logging.warning(f"lack of mem, finished. err: {str(e)}")
-            stream.add_block_index(block_index)
 
     def enough_kvcache(self, streams):
         malloc_sizes = self._collect_malloc_sizes(streams)
@@ -108,9 +109,9 @@ class StreamCacheManager:
         if self.ptuning_:
             prefix_block_size = self.ptuning_.calc_prefix_block_size(stream.generate_config)
             self.cache_manager_.free([indice[prefix_block_size:] for indice in block_indice])
-        elif self.reuse_cache_ and not stream.has_error():
+        elif self.reuse_cache_ and not stream.stopped:
             self.cache_manager_.free_with_cache(
-                block_indice, stream.output_token_ids[0].numpy().tolist(), stream.chat_id
+                block_indice, stream.complete_token_ids[0].numpy().tolist(), stream.generate_config.chat_id
             )
         else:
             self.cache_manager_.free(block_indice)

@@ -33,7 +33,7 @@ class GenerateStream(BaseModel):
     _resource_dtors: List = []
     medusa_state: Any = None
 
-    def __init__(self, input, max_seq_len):
+    def __init__(self, input, max_seq_len=2048):
         super().__init__()
         self._input = input
         self._max_seq_len = max_seq_len
@@ -57,6 +57,7 @@ class GenerateStream(BaseModel):
     def release_resource(self):
         for dtor in self._resource_dtors:
             dtor()
+        self._resource_dtors.clear()
 
     def update_ptuning(self, prefix_tensors):
         self._input.update_ptuning(prefix_tensors)
@@ -106,6 +107,7 @@ class GenerateStream(BaseModel):
         with self._lock:
             self._status.status = Status.STOPPED
             self._status.error_info = err
+        self.release_resource()
 
     def set_running(self):
         with self._lock:
@@ -151,9 +153,9 @@ class GenerateStream(BaseModel):
     def update(self,
                new_tokens: torch.Tensor,
                finished: bool,
-               hidden_states: torch.Tensor,
-               logits: torch.Tensor,
-               cum_log_probs: torch.Tensor):
+               hidden_states: Optional[torch.Tensor],
+               logits: Optional[torch.Tensor],
+               cum_log_probs: Optional[torch.Tensor]):
         with self._lock:
             if self._output.aux_info.iter_count == 0:
                 self._report_first_token_rt()

@@ -129,7 +129,7 @@ class DecoderEngine:
 
                     torch.cuda.nvtx.range_push('update')
                     if g_parallel_info.tp_rank == 0:
-                        self.scheduler_.update_batch_query()
+                        self.scheduler_.prepare_next_step()
                     torch.cuda.nvtx.range_pop()
 
                 self.report_metric(t.cost_ms())

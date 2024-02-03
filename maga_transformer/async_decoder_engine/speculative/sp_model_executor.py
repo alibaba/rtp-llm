@@ -3,7 +3,7 @@ import random
 from typing import List, Tuple, Any
 from maga_transformer.utils.util import to_cpu
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.async_decoder_engine.batch_query import BatchQuery
+from maga_transformer.async_decoder_engine.batch_query import BatchQuery, ModelOutput
 from maga_transformer.async_decoder_engine.normal_model_executor import NormalModelExecutor, ModelOps, ExecutorBase
 
 class SpModelExecutor(ExecutorBase):
@@ -22,7 +22,13 @@ class SpModelExecutor(ExecutorBase):
         with torch.cuda.nvtx.range("speculative validate"):
             finished, hidden_states, logits, dynamic_decoder_tokens, update_length = self._speculative_validate(batch_query, cum_probs, output_tokens)
             batch_query.output_token_ids[:,batch_query.max_token_len : batch_query.max_token_len+self.gen_num] = dynamic_decoder_tokens
-        batch_query.record_update_tensors(finished, update_length, hidden_states, logits, torch.zeros([batch_query.total_batch_size]), batch_query.output_token_ids, None, None)
+        batch_query.update_output(ModelOutput(
+            finished=finished,
+            update_length=update_length,
+            hidden_states=hidden_states,
+            logits=logits,
+            cum_log_probs=torch.zeros([batch_query.total_batch_size]),
+            update_token_ids= batch_query.output_token_ids))
 
     def _speculative_update(self, batch_query: BatchQuery, new_tokens: torch.Tensor):
         if batch_query.context_batch_size > 0:
@@ -55,10 +61,10 @@ class SpModelExecutor(ExecutorBase):
         # init context decoder
         for _ in range(self.gen_num):
             self.sp_executor.process(gen_batch_query)
-            assert gen_batch_query.output_log_probs is not None
-            assert gen_batch_query.updated_token_ids is not None
-            log_prob_list.append(gen_batch_query.output_log_probs)
-            output_tokens = gen_batch_query.updated_token_ids
+            assert gen_batch_query.model_output.output_log_probs is not None
+            assert gen_batch_query.model_output.update_token_ids is not None
+            log_prob_list.append(gen_batch_query.model_output.output_log_probs)
+            output_tokens = gen_batch_query.model_output.update_token_ids
             new_tokens = output_tokens[:, gen_batch_query.max_token_len]
             output_token_list.append(new_tokens)
             self._speculative_update(gen_batch_query, new_tokens)
@@ -119,7 +125,7 @@ class SpModelExecutor(ExecutorBase):
         validate_logits = self.validate_executor._post_transformer_nn(validate_hiddens)
         self.validate_executor._post_process(fake_batch_query, validate_logits, validate_hiddens)
         next_tokens = fake_batch_query.slice_output_token(0, fake_batch_query.total_batch_size + 1, 1)
-        index_probs = fake_batch_query.output_index_prob
+        index_probs = fake_batch_query.model_output.output_index_prob
 
         res: List[List[int]] = [[] for i in range(batch_query.total_batch_size)]
         end = [False] * batch_query.total_batch_size
@@ -145,7 +151,7 @@ class SpModelExecutor(ExecutorBase):
         gen_length: List[int] = []
         for i, single_res in enumerate(res):
             gen_result[i][:len(single_res)] = torch.tensor(single_res, dtype=torch.int, device='cpu')
-            gen_length.append(len(single_res))        
+            gen_length.append(len(single_res))
         return finished, torch.empty([batch_query.total_batch_size, 0]), torch.empty([batch_query.total_batch_size, 0]), gen_result, gen_length
 
     def _speculative_validate(self, batch_query: BatchQuery, cum_probs: List[torch.Tensor], output_token_list: List[torch.Tensor]):
