@@ -32,7 +32,7 @@ class SliceStopWordListTest(TestCase):
         outs = self.pipeline(["hello"], [[]], stop_words_list=[[29879, 596]])
         outs = [out for out in outs]
         out_str = [response.batch_response[0] for response in outs]
-        self.assertEqual(out_str, ['', 'what', "what'", "what'", "what'"])
+        self.assertEqual(out_str, [',', ', what', ", what'", ", what'", ", what'"])
         
 if __name__ == '__main__':
     main()

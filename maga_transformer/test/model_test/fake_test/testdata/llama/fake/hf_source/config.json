@@ -2,8 +2,8 @@
     "architectures": [
         "LLaMAForCausalLM"
     ],
-    "bos_token_id": 0,
-    "eos_token_id": 1,
+    "bos_token_id": 1,
+    "eos_token_id": 2,
     "hidden_act": "silu",
     "hidden_size":  256,
     "intermediate_size": 640,
