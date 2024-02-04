@@ -1,4 +1,4 @@
-#include "src/fastertransformer/layers/GemmRunner.h"
+#include "src/fastertransformer/layers/LoraGemm.h"
 #include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/core/allocator_cuda.h"
 
@@ -8,7 +8,7 @@
 #include <gtest/gtest.h>
 
 using namespace fastertransformer;
-class GemmRunnerTest: public ::testing::Test {
+class LoraGemmTest: public ::testing::Test {
 public:
     using num_t = half;
 
@@ -34,7 +34,7 @@ public:
 
     Allocator<AllocatorType::CUDA>* allocator      = nullptr;
     cublasMMWrapper*                cublas_wrapper = nullptr;
-    GemmRunner<num_t>*              gemm_runner    = nullptr;
+    LoraGemm<num_t>*              gemm_runner    = nullptr;
     static constexpr int            B              = 2;
     static constexpr int            M              = 3;
     static constexpr int            K              = 4;
@@ -85,7 +85,7 @@ public:
     int h_null_input_lengths[B]      = {1, 1};
     int h_different_input_lengths[B] = {1, 5};
 };
-void GemmRunnerTest::SetUp() {
+void LoraGemmTest::SetUp() {
     cublasCreate(&cublasHandle);
     cublasLtCreate(&cublasltHandle);
     cudaStreamCreate(&stream);
@@ -94,9 +94,9 @@ void GemmRunnerTest::SetUp() {
     allocator->setStream(stream);
     cublas_wrapper = new cublasMMWrapper(cublasHandle, cublasltHandle, stream, &map, &mu, allocator);
     cublas_wrapper->setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);
-    gemm_runner = new GemmRunner<num_t>(false, stream, allocator, cublas_wrapper, nullptr);
+    gemm_runner = new LoraGemm<num_t>(stream, allocator, cublas_wrapper);
 }
-void GemmRunnerTest::TearDown() {
+void LoraGemmTest::TearDown() {
     delete gemm_runner;
     delete cublas_wrapper;
     delete allocator;
@@ -104,14 +104,14 @@ void GemmRunnerTest::TearDown() {
     cublasLtDestroy(cublasltHandle);
     cudaStreamDestroy(stream);
 }
-void GemmRunnerTest::checkSize(int b, int m, int k, int r, int n) {
+void LoraGemmTest::checkSize(int b, int m, int k, int r, int n) {
     ASSERT_LE(b, B);
     ASSERT_LE(m, M);
     ASSERT_LE(k, K);
     ASSERT_LE(r, R);
     ASSERT_LE(n, N);
 }
-void GemmRunnerTest::checkAlmostEqual(num_t* a, num_t* b, int n, float percent) {
+void LoraGemmTest::checkAlmostEqual(num_t* a, num_t* b, int n, float percent) {
     for (int i = 0; i < n; i++) {
         float l     = static_cast<float>(a[i]);
         float r     = static_cast<float>(b[i]);
@@ -119,7 +119,7 @@ void GemmRunnerTest::checkAlmostEqual(num_t* a, num_t* b, int n, float percent) 
         ASSERT_LT(error, percent);
     }
 }
-void GemmRunnerTest::singleApplyLoRATest(
+void LoraGemmTest::singleApplyLoRATest(
     int b, int m, int k, int r, int n, num_t* expected_output, int* lora_ids, int lora_num) {
     checkSize(b, m, k, r, n);
     // device
@@ -162,7 +162,7 @@ void GemmRunnerTest::singleApplyLoRATest(
     delete[] lora_a_array;
     delete[] lora_b_array;
 }
-TEST_F(GemmRunnerTest, ApplyLoRASimpleTest) {
+TEST_F(LoraGemmTest, ApplyLoRASimpleTest) {
     constexpr int b                          = 1;
     constexpr int m                          = 3;
     constexpr int k                          = 4;
@@ -188,7 +188,7 @@ TEST_F(GemmRunnerTest, ApplyLoRASimpleTest) {
     int lora_ids[b] = {0};
     singleApplyLoRATest(b, m, k, r, n, expected_output, lora_ids, b);
 }
-TEST_F(GemmRunnerTest, ApplyLoRASimpleBatchTest) {
+TEST_F(LoraGemmTest, ApplyLoRASimpleBatchTest) {
     constexpr int b                          = 2;
     constexpr int m                          = 3;
     constexpr int k                          = 4;
@@ -202,7 +202,7 @@ TEST_F(GemmRunnerTest, ApplyLoRASimpleBatchTest) {
     int lora_ids[b] = {0, 1};
     singleApplyLoRATest(b, m, k, r, n, expected_output, lora_ids, b);
 }
-TEST_F(GemmRunnerTest, ApplyLoRAHasNoLoRABatchTest) {
+TEST_F(LoraGemmTest, ApplyLoRAHasNoLoRABatchTest) {
     constexpr int b                          = 2;
     constexpr int m                          = 3;
     constexpr int k                          = 4;
@@ -216,7 +216,7 @@ TEST_F(GemmRunnerTest, ApplyLoRAHasNoLoRABatchTest) {
     int lora_ids[b] = {-1, 1};
     singleApplyLoRATest(b, m, k, r, n, expected_output, lora_ids, b);
 }
-TEST_F(GemmRunnerTest, ApplyLoRASameLoRABatchTest) {
+TEST_F(LoraGemmTest, ApplyLoRASameLoRABatchTest) {
     constexpr int b                          = 2;
     constexpr int m                          = 3;
     constexpr int k                          = 4;
@@ -230,7 +230,7 @@ TEST_F(GemmRunnerTest, ApplyLoRASameLoRABatchTest) {
     int lora_ids[b] = {1, 1};
     singleApplyLoRATest(b, m, k, r, n, expected_output, lora_ids, b);
 }
-TEST_F(GemmRunnerTest, ApplyLoRASimpleWithoutLoRATest) {
+TEST_F(LoraGemmTest, ApplyLoRASimpleWithoutLoRATest) {
     constexpr int b                          = 1;
     constexpr int m                          = 3;
     constexpr int k                          = 4;
@@ -256,7 +256,7 @@ TEST_F(GemmRunnerTest, ApplyLoRASimpleWithoutLoRATest) {
     int lora_ids[b] = {-1};
     singleApplyLoRATest(b, m, k, r, n, expected_output, lora_ids, b);
 }
-TEST_F(GemmRunnerTest, ApplyLoRAWithoutLoRABatchTest) {
+TEST_F(LoraGemmTest, ApplyLoRAWithoutLoRABatchTest) {
     constexpr int b                          = 2;
     constexpr int m                          = 3;
     constexpr int k                          = 4;
@@ -271,7 +271,7 @@ TEST_F(GemmRunnerTest, ApplyLoRAWithoutLoRABatchTest) {
     singleApplyLoRATest(b, m, k, r, n, expected_output, lora_ids, b);
 }
 
-void GemmRunnerTest::ApplyNullInputLengthsLoRATest(
+void LoraGemmTest::ApplyNullInputLengthsLoRATest(
     int b, int m, int k, int r, int n, num_t* expected_output, int* lora_ids, int lora_num) {
     ASSERT_LE(b, B);
     ASSERT_LE(m, 1);
@@ -319,7 +319,7 @@ void GemmRunnerTest::ApplyNullInputLengthsLoRATest(
     delete[] lora_b_array;
 }
 
-TEST_F(GemmRunnerTest, ApplyWithoutLoRAWithNoLengthBatchTest) {
+TEST_F(LoraGemmTest, ApplyWithoutLoRAWithNoLengthBatchTest) {
     constexpr int b                          = 2;
     constexpr int m                          = 1;
     constexpr int k                          = 4;
@@ -331,7 +331,7 @@ TEST_F(GemmRunnerTest, ApplyWithoutLoRAWithNoLengthBatchTest) {
     ApplyNullInputLengthsLoRATest(b, m, k, r, n, expected_output, lora_ids, b);
 }
 
-TEST_F(GemmRunnerTest, ApplySameLoRAWithNoLengthBatchTest) {
+TEST_F(LoraGemmTest, ApplySameLoRAWithNoLengthBatchTest) {
     constexpr int b                          = 2;
     constexpr int m                          = 1;
     constexpr int k                          = 4;
@@ -343,7 +343,7 @@ TEST_F(GemmRunnerTest, ApplySameLoRAWithNoLengthBatchTest) {
     ApplyNullInputLengthsLoRATest(b, m, k, r, n, expected_output, lora_ids, b);
 }
 
-void GemmRunnerTest::ApplyDifferentInputLengthsLoRATest(
+void LoraGemmTest::ApplyDifferentInputLengthsLoRATest(
     int b, int m, int k, int r, int n, num_t* expected_output, int* lora_ids, int lora_num) {
     checkSize(b, m, k, r, n);
     // device
@@ -387,7 +387,7 @@ void GemmRunnerTest::ApplyDifferentInputLengthsLoRATest(
     delete[] lora_b_array;
 }
 
-TEST_F(GemmRunnerTest, DifferentLengthBatchTest) {
+TEST_F(LoraGemmTest, DifferentLengthBatchTest) {
     constexpr int b                          = 2;
     constexpr int m                          = 3;
     constexpr int k                          = 4;
@@ -402,7 +402,7 @@ TEST_F(GemmRunnerTest, DifferentLengthBatchTest) {
     ApplyDifferentInputLengthsLoRATest(b, m, k, r, n, expected_output, lora_ids, b);
 }
 
-TEST_F(GemmRunnerTest, DifferentLengthDifferentLoraBatchTest) {
+TEST_F(LoraGemmTest, DifferentLengthDifferentLoraBatchTest) {
     constexpr int b                          = 2;
     constexpr int m                          = 3;
     constexpr int k                          = 4;

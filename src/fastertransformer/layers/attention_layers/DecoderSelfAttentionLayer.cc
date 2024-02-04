@@ -141,7 +141,7 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t               max
         FT_LOG_ERROR("int8_mode == 2 not support");
         abort();
     }
-    gemm_runner_ = std::make_shared<GemmRunner<T>>(sparse, stream, allocator, cublas_wrapper, weight_only_int8_fc_runner_);
+    gemm_runner_ = std::make_shared<GemmRunner<T>>(sparse, stream, cublas_wrapper, weight_only_int8_fc_runner_);
 }
 
 template<typename T>
@@ -269,20 +269,29 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
 
     PUSH_RANGE(stream_, "qkv_gemm");
     // QKV gemm: [batch_size, hidden_units] * [hidden_units, qkv_dim] -> [batch_size, qkv_dim]
-    gemm_runner_->Gemm( batch_size,
-                        lora_input_lengths,
-                        batch_size,
-                        local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
-                        d_model_,
-                        attention_input,
-                        &attention_weights->query_weight,
-                        qkv_buf_,
-                        lora_ids,
-                        int8_mode_,
-                        use_sparse_gemm,
-                        mixed_gemm_workspace_,
-                        mixed_gemm_ws_bytes_,
-                        m_padded);
+    gemm_runner_->Gemm(batch_size,
+                       local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
+                       d_model_,
+                       attention_input,
+                       &attention_weights->query_weight,
+                       qkv_buf_,
+                       int8_mode_,
+                       use_sparse_gemm,
+                       mixed_gemm_workspace_,
+                       mixed_gemm_ws_bytes_,
+                       m_padded);
+    
+    // lora
+
+    lora_gemm_->applyLoRA(batch_size,
+                          batch_size,
+                          lora_input_lengths,
+                          d_model_,
+                          local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
+                          lora_ids,
+                          attention_weights->query_weight.lora_weights,
+                          attention_input,
+                          qkv_buf_);
 
     int k_start = local_hidden_units_rt;
     int v_start = local_hidden_units_rt + local_hidden_units_kv_rt;
@@ -384,19 +393,28 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
 
     // attention out gemm: [batch_size, local_hidden_units_rt] * [local_hidden_units_rt, hidden_units_]
     gemm_runner_->Gemm( batch_size,
-                        lora_input_lengths,
-                        batch_size,
                         d_model_,
                         local_hidden_units_rt,
                         context_buf_input,
                         &attention_weights->attention_output_weight,
                         attention_out,
-                        lora_ids,
                         int8_mode_,
                         use_sparse_gemm,
                         mixed_gemm_workspace_,
                         mixed_gemm_ws_bytes_,
                         m_padded);
+    
+    // lora
+    lora_gemm_->applyLoRA(batch_size,
+                          batch_size,
+                          lora_input_lengths,
+                          local_hidden_units_rt,
+                          d_model_,
+                          lora_ids,
+                          attention_weights->attention_output_weight.lora_weights,
+                          context_buf_input,
+                          attention_out);
+
     POP_RANGE;
 
     sync_check_cuda_error();

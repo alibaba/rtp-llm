@@ -18,6 +18,7 @@
 
 #include "src/fastertransformer/kernels/matrix_vector_multiplication.h"
 #include "src/fastertransformer/layers/GemmRunner.h"
+#include "src/fastertransformer/layers/LoraGemm.h"
 #include "src/fastertransformer/layers/attention_layers/BaseAttentionLayer.h"
 
 namespace fastertransformer {
@@ -56,6 +57,7 @@ private:
 
     std::shared_ptr<CutlassFpAIntBGemmRunner<T, uint8_t>> weight_only_int8_fc_runner_;
     std::shared_ptr<GemmRunner<T>>                        gemm_runner_;
+    std::shared_ptr<LoraGemm<T>>                          lora_gemm_;
 
     void allocateBuffer() override;
     void freeBuffer() override;

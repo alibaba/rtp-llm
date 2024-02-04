@@ -5,6 +5,7 @@
 #include "3rdparty/flash_attention2/flash.h"
 #include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/layers/GemmRunner.h"
+#include "src/fastertransformer/layers/LoraGemm.h"
 #include "src/fastertransformer/layers/attention_layers/BaseAttentionLayer.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
@@ -24,6 +25,7 @@ private:
     bool                                                  is_qk_buf_float_;
     std::shared_ptr<CutlassFpAIntBGemmRunner<T, uint8_t>> weight_only_int8_fc_runner_;
     std::shared_ptr<GemmRunner<T>>                        gemm_runner_;
+    std::shared_ptr<LoraGemm<T>>                          lora_gemm_;
 
     bool multi_block_mode_ = false;
     // for sparse

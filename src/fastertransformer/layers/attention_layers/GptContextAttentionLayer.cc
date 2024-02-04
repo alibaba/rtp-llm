@@ -130,20 +130,29 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
 #endif
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
-    gemm_runner_->Gemm( request_batch_size,
-                        lora_input_lengths,
-                        m,
+    gemm_runner_->Gemm( m,
                         local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
                         hidden_units_,
                         attention_input,
                         &attention_weights->query_weight,
                         qkv_buf_,
-                        lora_ids,
                         int8_mode_,
                         use_sparse,
                         mixed_gemm_workspace_,
                         mixed_gemm_ws_bytes_,
                         m_padded);
+    
+    // lora
+    lora_gemm_->applyLoRA(m,
+                          request_batch_size,
+                          lora_input_lengths,
+                          hidden_units_,
+                          local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
+                          lora_ids,
+                          attention_weights->query_weight.lora_weights,
+                          attention_input,
+                          qkv_buf_);
+
     POP_RANGE;
 
     int k_start = local_hidden_units_rt;
@@ -429,20 +438,28 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
 #endif
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
-    gemm_runner_->Gemm( request_batch_size,
-                        lora_input_lengths,
-                        m,
+    gemm_runner_->Gemm( m,
                         hidden_units_,
                         local_hidden_units_rt,
                         qkv_buf_3_input,
                         &attention_weights->attention_output_weight,
                         attention_out,
-                        lora_ids,
                         int8_mode_,
                         use_sparse,
                         mixed_gemm_workspace_,
                         mixed_gemm_ws_bytes_,
                         m_padded);
+    
+    // lora
+    lora_gemm_->applyLoRA(m,
+                          request_batch_size,
+                          lora_input_lengths,
+                          local_hidden_units_rt,
+                          hidden_units_,
+                          lora_ids,
+                          attention_weights->attention_output_weight.lora_weights,
+                          qkv_buf_3_input,
+                          attention_out);
 
     POP_RANGE;
 
@@ -504,7 +521,8 @@ GptContextAttentionLayer<T>::GptContextAttentionLayer(size_t               max_b
     logn_seq_len_(logn_seq_len),
     is_qk_buf_float_(is_qk_buf_float),
     weight_only_int8_fc_runner_(int8_mode == 1 ? std::make_shared<CutlassFpAIntBGemmRunner<T, uint8_t>>() : nullptr),
-    gemm_runner_(std::make_shared<GemmRunner<T>>(sparse, stream, allocator, cublas_wrapper, weight_only_int8_fc_runner_)),
+    gemm_runner_(std::make_shared<GemmRunner<T>>(sparse, stream, cublas_wrapper, weight_only_int8_fc_runner_)),
+    lora_gemm_(std::make_shared<LoraGemm<T>>(stream, allocator, cublas_wrapper)),
     is_sparse_head_(is_sparse_head),
     int8_mode_(int8_mode)
 {
@@ -544,6 +562,7 @@ GptContextAttentionLayer<T>::GptContextAttentionLayer(GptContextAttentionLayer<T
     is_qk_buf_float_(attention_layer.is_qk_buf_float_),
     weight_only_int8_fc_runner_(attention_layer.weight_only_int8_fc_runner_),
     gemm_runner_(attention_layer.gemm_runner_),
+    lora_gemm_(attention_layer.lora_gemm_),
     is_sparse_head_(attention_layer.is_sparse_head_),
     int8_mode_(attention_layer.int8_mode_)
 {

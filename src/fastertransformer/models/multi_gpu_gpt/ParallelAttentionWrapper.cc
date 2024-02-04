@@ -400,20 +400,28 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
 #endif
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
-    gemm_runner_->Gemm(batch_size,
-                       lora_input_lengths,
-                       h_token_num,
+    gemm_runner_->Gemm(h_token_num,
                        hidden_units_,
                        local_hidden_units_rt,
                        qkv_buf_3_input,
                        &attention_weights->attention_output_weight,
                        attention_out,
-                       lora_ids, // lora_ids
                        params_.int8_mode_,
                        use_sparse,
                        mixed_gemm_workspace_,
                        mixed_gemm_ws_bytes_,
                        m_padded);
+    
+    // lora
+    lora_gemm_->applyLoRA(h_token_num,
+                          batch_size,
+                          lora_input_lengths,
+                          local_hidden_units_rt,
+                          hidden_units_,
+                          lora_ids,
+                          attention_weights->attention_output_weight.lora_weights,
+                          qkv_buf_3_input,
+                          attention_out);
 
     POP_RANGE;
     print_bsd(layer_id, "attn out", attention_out, 1, h_token_num, local_hidden_units_);
@@ -445,20 +453,29 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
 #endif
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
-    gemm_runner_->Gemm(batch_size,
-                       lora_input_lengths,
-                       h_token_num,
+    gemm_runner_->Gemm(h_token_num,
                        local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
                        hidden_units_,
                        attention_input,
                        &attention_weights->query_weight,
                        qkv_buf_,
-                       lora_ids, // lora_ids
                        params_.int8_mode_,
                        use_sparse,
                        mixed_gemm_workspace_,
                        mixed_gemm_ws_bytes_,
                        m_padded);
+    
+    // lora
+
+    lora_gemm_->applyLoRA(h_token_num,
+                          batch_size,
+                          lora_input_lengths,
+                          hidden_units_,
+                          local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
+                          lora_ids,
+                          attention_weights->query_weight.lora_weights,
+                          attention_input,
+                          qkv_buf_);
 
     int k_start = local_hidden_units_rt;
     int v_start = local_hidden_units_rt + local_hidden_units_kv_rt;
@@ -967,7 +984,10 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     weight_only_int8_fc_runner_(
         gpt_init_parameter.int8_mode_ == 1 ? std::make_shared<CutlassFpAIntBGemmRunner<T, uint8_t>>() : nullptr),
     gemm_runner_(
-        std::make_shared<GemmRunner<T>>(sparse, stream, allocator, cublas_wrapper, weight_only_int8_fc_runner_)),
+        std::make_shared<GemmRunner<T>>(sparse, stream, cublas_wrapper, weight_only_int8_fc_runner_)),
+    lora_gemm_(
+        std::make_shared<LoraGemm<T>>(stream, allocator, cublas_wrapper)
+    ),
     local_layer_head_num_(getLocalParameter(gpt_init_parameter.layer_head_num_, tensor_para.world_size_)),
     local_layer_head_num_kv_(getLocalParameter(gpt_init_parameter.layer_head_num_kv_, tensor_para.world_size_)),
     q_scaling_(1.0f),

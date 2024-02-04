@@ -39,9 +39,9 @@ cc_library(
 )
 
 cc_test(
-    name = "gemm_runner_test",
+    name = "lora_gemm_test",
     srcs = [
-        "gemm_runner_test.cc",
+        "lora_gemm_test.cc",
     ],
     deps = [
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",

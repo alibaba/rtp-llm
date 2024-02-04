@@ -22,6 +22,7 @@
 #include "src/fastertransformer/layers/BaseLayer.h"
 #include "src/fastertransformer/layers/FfnWeight.h"
 #include "src/fastertransformer/layers/GemmRunner.h"
+#include "src/fastertransformer/layers/LoraGemm.h"
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
@@ -45,6 +46,7 @@ private:
     size_t hidden_units_ = 0;
 
     std::shared_ptr<GemmRunner<T>>                        gemm_runner_;
+    std::shared_ptr<LoraGemm<T>>                          lora_gemm_;
     std::shared_ptr<CutlassFpAIntBGemmRunner<T, uint8_t>> weight_only_int8_fc_runner_;
 
     std::shared_ptr<CutlassMoeFCRunner<T, T>>       moe_fc_runner_;

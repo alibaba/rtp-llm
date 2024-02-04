@@ -286,36 +286,54 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     } else {
         // gemm used inter_size, int8 use inter_padding_size
         const int cur_inter_size = int8_mode_ == 1 ? inter_padding_size : inter_size;
-        gemm_runner_->Gemm(batch_size,
-                           lora_input_lengths,
-                           m,
+        gemm_runner_->Gemm(m,
                            cur_inter_size,
                            hidden_units_,
                            input_tensor,
                            &ffn_weights->intermediate_weight,
                            inter_buf_,
-                           lora_ids,
                            int8_mode_,
                            use_sparse_gemm,
                            mixed_gemm_workspace_,
                            mixed_gemm_ws_bytes_,
                            m_padded);
+        // lora
+
+        lora_gemm_->applyLoRA(m,
+                              batch_size,
+                              lora_input_lengths,
+                              hidden_units_,
+                              cur_inter_size,
+                              lora_ids,
+                              ffn_weights->intermediate_weight.lora_weights,
+                              input_tensor,
+                              inter_buf_);
 
         if (use_gated_activation) {
-            gemm_runner_->Gemm(batch_size,
-                               lora_input_lengths,
-                               m,
+            gemm_runner_->Gemm(m,
                                cur_inter_size,
                                hidden_units_,
                                input_tensor,
                                &ffn_weights->intermediate_weight2,
                                inter_buf_2_,
-                               lora_ids,
                                int8_mode_,
                                use_sparse_gemm,
                                mixed_gemm_workspace_,
                                mixed_gemm_ws_bytes_,
                                m_padded);
+            
+            // lora
+
+            lora_gemm_->applyLoRA(m,
+                                batch_size,
+                                lora_input_lengths,
+                                hidden_units_,
+                                cur_inter_size,
+                                lora_ids,
+                                ffn_weights->intermediate_weight2.lora_weights,
+                                input_tensor,
+                                inter_buf_2_);
+
         }
     }
     POP_RANGE;  // End for NVTX Range: FFN gemm 1
@@ -371,20 +389,29 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
 
     PUSH_RANGE(stream_, "ffn_gemm_2");
     const int cur_inter_size = int8_mode_ == 1 ? inter_padding_size : inter_size;
-    gemm_runner_->Gemm(batch_size,
-                       lora_input_lengths,
-                       m,
+    gemm_runner_->Gemm(m,
                        hidden_units_,
                        cur_inter_size,
                        inter_buf_normed_output,
                        &ffn_weights->output_weight,
                        output_tensor,
-                       lora_ids,
                        int8_mode_,
                        use_sparse_gemm,
                        mixed_gemm_workspace_,
                        mixed_gemm_ws_bytes_,
                        m_padded);
+
+    // lora
+
+    lora_gemm_->applyLoRA(m,
+                          batch_size,
+                          lora_input_lengths,
+                          cur_inter_size,
+                          hidden_units_,
+                          lora_ids,
+                          ffn_weights->output_weight.lora_weights,
+                          inter_buf_normed_output,
+                          output_tensor);
 
     print_bsd(layer_id, "ffn out layer", output_tensor, 1, m, hidden_units_);
 
@@ -443,7 +470,8 @@ FfnLayer<T>::FfnLayer(size_t               max_batch_size,
         abort();
     }
     gemm_runner_ =
-        std::make_shared<GemmRunner<T>>(sparse, stream, allocator, cublas_wrapper, weight_only_int8_fc_runner_);
+        std::make_shared<GemmRunner<T>>(sparse, stream, cublas_wrapper, weight_only_int8_fc_runner_);
+    lora_gemm_ = std::make_shared<LoraGemm<T>>(stream, allocator, cublas_wrapper);
     moe_fc_runner_ = std::make_shared<CutlassMoeFCRunner<T, T>>();
 }
 
@@ -471,6 +499,7 @@ FfnLayer<T>::FfnLayer(FfnLayer<T> const& ffn_layer):
     use_gated_activation_(ffn_layer.use_gated_activation_),
     weight_only_int8_fc_runner_(ffn_layer.weight_only_int8_fc_runner_),
     gemm_runner_(ffn_layer.gemm_runner_),
+    lora_gemm_(ffn_layer.lora_gemm_),
     moe_fc_runner_(ffn_layer.moe_fc_runner_),
     moe_int8_weight_only_fc_runner_(ffn_layer.moe_int8_weight_only_fc_runner_) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
