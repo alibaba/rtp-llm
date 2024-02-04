@@ -20,18 +20,6 @@ kv cache的管理粒度为block级别。block的结构定义和实现由硬件�
 硬件还需要提供一个接口获取当前模型和系统的config下一个kv cache block的size，框架会统一分配和管理block，
 在请求时根据seq长度将所需的kv cache block一并传入op中。
 
-## Buffer 机制
-但是每种硬件需要的buffer又不完全相同，实现的粒度也不完全相同。
-
-因此我们设计如下的buffer复用机制：
-硬件层对每个实现的op提供buffer描述接口，框架会调用该接口获取需要的buffer描述，并完成分配，其中包括复用描述。
-在描述中，一组不可复用的buffer放在一个BufferGroup中，而一个Group除了持有buffer外，
-还持有多个可以复用的SubGroup（即SubGroup中的buffer可以来自于同一块内存地址），
-最终形成一个树状buffer结构。
-
-在一次Model计算开始之前，框架会先根据模型信息和Query信息请求一次buffer描述，
-并调用allocator按照描述的结构分配buffer，然后传给相应的计算逻辑。
-
 ## 内存复用
 llm中各个模块的计算逻辑是顺序进行，所以计算用到的同一块buffer可以在layer间复用。
 在layer内部，细粒度实现之间（如连续的多个矩阵乘），也可能希望复用同一块buffer。

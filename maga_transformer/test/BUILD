@@ -72,6 +72,20 @@ py_test(
 )
 
 py_test(
+    name = "openai_response_test",
+    srcs = [
+        "openai_response_test.py",
+    ],
+    deps = [
+        "//maga_transformer:sdk",
+        "//maga_transformer:testlib",
+    ],
+    data = [
+        "//maga_transformer/test/model_test/fake_test/testdata:testdata",
+    ],
+)
+
+py_test(
     name = "server_test",
     srcs = [
         "server_test.py",

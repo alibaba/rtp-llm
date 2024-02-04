@@ -6,5 +6,13 @@ namespace fastertransformer {
 
 DeviceBase::DeviceBase() {}
 
+void DeviceBase::init() {
+    buffer_manager_.reset(new BufferManager(getAllocator(), getHostAllocator()));
+}
+
+Tensor DeviceBase::allocateBuffer(const BufferParams& params, const BufferHints& hints) {
+    return buffer_manager_->allocate(params, hints);
+}
+
 }; // namespace fastertransformer
 

@@ -10,8 +10,6 @@ public:
     void SetUp() override {
         FtTestBase::SetUp();
         device_ = DeviceFactory::getDevice(DeviceType::Cuda);
-        allocator_ = device_->getAllocator();
-        cpu_allocator_ = device_->getHostAllocator();
     }
     void TearDown() override {
         FtTestBase::TearDown();
@@ -19,15 +17,13 @@ public:
 
 protected:
     DeviceBase* device_;
-    IAllocator* allocator_;
-    IAllocator* cpu_allocator_;
 };
 
 TEST_F(CudaOpsTest, testGemmOp) {
-    Tensor A(allocator_, DataType::TYPE_FP16, {2, 4});
-    Tensor B(allocator_, DataType::TYPE_FP16, {4, 3});
-    Tensor C(allocator_, DataType::TYPE_FP16, {2, 3});
-    Tensor workspace;
+    auto A = device_->allocateBuffer({DataType::TYPE_FP16, {2, 4}}, {});
+    auto B = device_->allocateBuffer({DataType::TYPE_FP16, {4, 3}}, {});
+    auto C = device_->allocateBuffer({DataType::TYPE_FP16, {2, 3}}, {});
+    auto workspace = device_->allocateBuffer({DataType::TYPE_FP16, {100}}, {});
 
     GemmParams params {
         A, B, C,

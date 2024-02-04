@@ -10,6 +10,7 @@ namespace fastertransformer {
         static DeviceBase* type##_device = nullptr; \
         if (type##_device == nullptr) { \
             type##_device = new type##Device(); \
+            type##_device->init(); \
         } \
         return type##_device; \
     }
