@@ -12,7 +12,6 @@ void CpuDevice::layernorm(LayernormParams& params) {}
 void CpuDevice::gemm(GemmParams& params) {}
 void CpuDevice::contextAttention(AttentionModuleParams& params) {}
 void CpuDevice::decoderSelfAttention(AttentionModuleParams& params) {}
-void CpuDevice::allocateBuffers(AllocateBufferParams& params) {}
 void CpuDevice::attentionLayer(AttentionLayerParams& params) {}
 void CpuDevice::ffnLayer(FfnLayerParams& params) {}
 void CpuDevice::sampleTopP(SamplerParams& params) {}

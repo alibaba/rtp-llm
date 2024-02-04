@@ -19,7 +19,6 @@ public:
     void gemm(GemmParams& params);
     void contextAttention(AttentionModuleParams& params);
     void decoderSelfAttention(AttentionModuleParams& params);
-    void allocateBuffers(AllocateBufferParams& params);
     void attentionLayer(AttentionLayerParams& params);
     void ffnLayer(FfnLayerParams& params);
     void sampleTopP(SamplerParams& params);

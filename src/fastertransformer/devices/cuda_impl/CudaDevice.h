@@ -17,10 +17,9 @@ public:
     IAllocator* getHostAllocator() override { return host_allocator_.get(); }
     int getDeviceId() const { return device_id_; }
 
-public: // Ops method
+public:
     void layernorm(LayernormParams& params);
     void gemm(GemmParams& params);
-    void allocateBuffers(AllocateBufferParams& params);
     void contextAttention(AttentionModuleParams& params);
     void decoderSelfAttention(AttentionModuleParams& params);
     void attentionLayer(AttentionLayerParams& params);

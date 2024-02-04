@@ -1,6 +1,5 @@
 #pragma once
 
-#include "src/fastertransformer/devices/Buffers.h"
 #include "src/fastertransformer/devices/Weights.h"
 #include "src/fastertransformer/core/Tensor.h"
 
@@ -109,11 +108,6 @@ enum class PositionEmbeddingStyle {
     GLM           = 4,
 };
 
-struct AllocateBufferParams {
-    std::unique_ptr<OpBuffer>& attentionBuffer;
-    std::unique_ptr<OpBuffer>& ffnBuffer;
-};
-
 struct AttentionConfigs {
     PositionEmbeddingStyle position_embedding_style;
     int64_t rotary_embedding_dim      = 0;
@@ -134,8 +128,6 @@ struct AttentionModuleParams {
     const AttentionConfigs&      configs;
     const AttentionLayerWeights& weights;
 
-    std::unique_ptr<OpBuffer>&   buffers;
-
     uint32_t batch_size;
     uint32_t max_seq_length;
 
@@ -147,7 +139,6 @@ struct AttentionLayerParams {
     Tensor&       output;
 
     const AttentionLayerWeights& weights;
-    std::unique_ptr<OpBuffer>&   buffers;
 
     const uint32_t generate_batch_size;
     const uint32_t max_generate_seq_length;
@@ -162,7 +153,6 @@ struct FfnLayerParams {
     Tensor& output;
 
     const FfnLayerWeights&       weights;
-    std::unique_ptr<OpBuffer>&   buffers;
 
     const ActivationType activation_type;
 
