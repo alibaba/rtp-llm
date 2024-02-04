@@ -59,6 +59,7 @@ Refer to the detailed documentation below for model configuration parameters, et
 * [Structured Pruning](docs/Sparse-Tutorial.md)
 * [Speculative Sampling](docs/SpeculativeDecoding-Tutorial.md)
 * [Using as a Python Library](docs/HF.md)
+* [Multi GPU Inference](docs/MultiGPU.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)
 * [Benchmark&Performance](benchmark/README.md)

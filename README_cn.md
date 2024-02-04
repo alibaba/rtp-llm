@@ -70,6 +70,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [结构化剪枝](docs/Sparse-Tutorial.md)
 * [投机采样](docs/SpeculativeDecoding-Tutroial.md)
 * [作为 Python 库引用](docs/HF.md)
+* [多卡推理](docs/MultiGPU.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)
 * [Benchmark&Performance](benchmark/README.md)
