@@ -1,4 +1,4 @@
-import os
+
 from maga_transformer.pipeline.pipeline import DefaultFunc
 from maga_transformer.utils.tokenizer_utils import DecodingState, IncrementDecodingUtils
 
@@ -17,7 +17,7 @@ class DefaultPluginTest(TestCase):
         res = []
         for i in range(1, len(output_ids) + 1):
             ids = output_ids[:i]
-            res.append(DefaultFunc.tokenids_decode_func(0, ids, tokenizer, state, True))
+            res.append(DefaultFunc.tokenids_decode_func(ids, tokenizer, state, True))
         self.assertEqual(res, ['5', ' 9', ' 11', ' 13', ' 15', ' 17', ' 19', ' 21'])
 
 

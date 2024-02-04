@@ -16,7 +16,7 @@ from maga_transformer.utils.ft_plugin import plguin_loader, \
 from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateOutput, GenerateResponse
 from maga_transformer.model_factory import ModelFactory, AsyncModel
 from maga_transformer.pipeline.chatapi_format import encode_chatapi
-from maga_transformer.structure.raw_query import RawQuery
+from maga_transformer.async_decoder_engine.generate_stream import GenerateInput
 from maga_transformer.utils.word_util import get_stop_word_slice_list
 from maga_transformer.utils.tokenizer_utils import DecodingState, IncrementDecodingUtils
 from transformers import PreTrainedTokenizerBase
@@ -49,16 +49,16 @@ class DefaultFunc(object):
         return tokenizer.encode(prompt)
 
     @staticmethod
-    def tokenids_decode_func(input_length: int, tokens: List[int], tokenizer: Union[TokenizerBase, PreTrainedTokenizerBase],
+    def tokenids_decode_func(tokens: List[int], tokenizer: Union[TokenizerBase, PreTrainedTokenizerBase],
                              decoding_state: Optional[DecodingState] = None, return_incremental: bool = False, **kwargs: Any) -> str:
         if decoding_state is None:
-            return tokenizer.decode(tokens[input_length: ])
+            return tokenizer.decode(tokens)
 
         if isinstance(tokenizer, PreTrainedTokenizerBase):
-            new_text = IncrementDecodingUtils.detokenize_incrementally(tokenizer, tokens[input_length: ], decoding_state)
+            new_text = IncrementDecodingUtils.detokenize_incrementally(tokenizer, tokens, decoding_state)
             decoding_state.all_text += new_text
         else:
-            all_text = tokenizer.decode(tokens[input_length: ])
+            all_text = tokenizer.decode(tokens)
             new_text = all_text[len(decoding_state.all_text): ]
             decoding_state.all_text = all_text
 
@@ -116,65 +116,37 @@ class Pipeline(object):
         out_token_ids = [tokens[tokens != self._special_tokens.eos_token_id].tolist() for tokens in out_token_ids]
         return [torch.IntTensor(x) for x in out_token_ids]
 
-    def encode_tokens(self, prompts: List[str], generate_config: GenerateConfig, **kwargs: Any) -> Tuple[torch.Tensor, torch.Tensor]:
-        tokens_list = [self.process_encode_func(prompt,
-                                                generate_config=generate_config.model_dump(),
-                                                tokenizer=self.tokenizer,
-                                                special_tokens=self._special_tokens,
-                                                **kwargs)
-                       for prompt in prompts]
-        token_tensors = [torch.IntTensor(tokens) for tokens in tokens_list]
-
-        input_lengths: List[int] = []
-        for tensor in token_tensors:
-            input_lengths.append(tensor.nelement())
-
-        input_length = torch.IntTensor(input_lengths)
-        input_token_ids = pad_sequence(token_tensors, batch_first=True, padding_value=self._special_tokens.eos_token_id)
-        return input_token_ids, input_length
-
-    def _slice_response_with_stop_words(self, response: Any, stop_word_strs: List[str]):
-        if not isinstance(response, str):
-            return response
+    def _slice_response_with_stop_words(self, response: str, stop_word_strs: List[str]):
         for stop_word in stop_word_strs:
             if stop_word and response.endswith(stop_word):
                 response = response[:(-len(stop_word))]
         return response
 
-    def decode_tokens(self, generate_output: GenerateOutput, input_lengths: torch.Tensor,
+    def decode_tokens(self,
+                      generate_output: GenerateOutput,
                       generate_config: GenerateConfig,
                       stop_word_str_list: List[str],
                       stop_word_str_slice_list: List[str],
-                      decoding_state: Optional[List[DecodingState]],
+                      decoding_state: Optional[DecodingState],
                       **kwargs: Any) -> Tuple[List[Any], List[List[int]]]:
-        generate_texts: List[str] = []
-        output_lens: List[List[int]] = []
-        # TODO: fix beam width
-        for index, input_length in enumerate(input_lengths):
-            tokens = generate_output.output_ids[index]
-            tokens = tokens.cpu()
-            tokens = self.remove_padding_eos(tokens)
-            token_finished = generate_output.finished[index]
-            state = decoding_state[index] if decoding_state is not None else None
-            output_lens.append([(t.nelement() - int(input_length)) for t in tokens])
-            responses = [self.process_decode_func(input_length,
-                                                  tokens.tolist(),
-                                                  generate_config=generate_config.model_dump(),
-                                                  tokenizer=self.tokenizer,
-                                                  decoding_state=state,
-                                                  return_incremental=generate_config.return_incremental,
-                                                  **kwargs) \
-                        for tokens in tokens]
-            # custom stop logic, update origin finsihed tensor
-            token_finished = self.stop_generate_func(responses[0], **kwargs) or bool(token_finished)
-            generate_output.finished[index] = token_finished
-            if generate_config.print_stop_words == False:
-                if not token_finished and not generate_config.return_incremental:
-                    responses = [self._slice_response_with_stop_words(response, stop_word_str_slice_list) for response in responses]
-                else:
-                    responses = [self._slice_response_with_stop_words(response, stop_word_str_list) for response in responses]
-            generate_texts.extend(responses)
-        return generate_texts, output_lens
+        tokens = generate_output.output_ids.cpu()
+        tokens = self.remove_padding_eos(tokens)
+        output_lens = [t.nelement() for t in tokens]
+        texts = [self.process_decode_func(tokens.tolist(),
+                                          generate_config=generate_config.model_dump(),
+                                          tokenizer=self.tokenizer,
+                                          decoding_state=decoding_state,
+                                          return_incremental=generate_config.return_incremental,
+                                          **kwargs) \
+                 for tokens in tokens]
+        # custom stop logic, update origin finsihed tensor
+        generate_output.finished = self.stop_generate_func(texts[0], **kwargs) or generate_output.finished
+        if not generate_config.print_stop_words:
+            if not generate_output.finished and not generate_config.return_incremental:
+                texts = [self._slice_response_with_stop_words(text, stop_word_str_slice_list) for text in texts]
+            else:
+                texts = [self._slice_response_with_stop_words(text, stop_word_str_list) for text in texts]
+        return texts, output_lens
 
     # static for ut
     @staticmethod
@@ -199,58 +171,22 @@ class Pipeline(object):
         # 这里假设外部传进来的stop_word_list和stop_word_str都不包含batch维度
         config.stop_words_list += special_tokens.stop_words_list
         config.stop_words_str += special_tokens.stop_words_str
-        adapter_name = generate_config.get("adapter_name", None)
-        if adapter_name and isinstance(adapter_name, str):
-            config.adapter_name = [adapter_name]
         config.check_data_type()
         return config
 
     def _get_stop_word_strs(self, tokenizer: TokenizerBase, generate_config: GenerateConfig) -> List[str]:
-        return generate_config.stop_words_str + [self.process_decode_func(0, ids, tokenizer=self.tokenizer) for ids in generate_config.stop_words_list]
-
-    @torch.inference_mode()
-    def pipeline_async( # type: ignore
-        self,
-        prompts: List[str],
-        images: Optional[List[List[str]]] = None,
-        **kwargs: Any
-    ) -> AsyncGenerator[GenerateResponse, None]:
-        begin_time = current_time_ms()
-        # align images and prompts
-        if images is None or len(images) == 0:
-            images = [[]] * len(prompts)
-        generate_config_json = kwargs.pop("generate_config", {})
-        generate_config = self.create_generate_config(generate_config_json, self.model.config.special_tokens, **kwargs)
-        # for delete stop word from output
-        prompts = [self.modify_prompt_func(prompts[i], generate_config=generate_config.model_dump(), image=images[i], **kwargs) for i in range(len(prompts))]
-
-        if self.model.is_multimodal:
-            modified_results = [self.multimodal_modify_prompt_func(prompts[i], images=images[i], img_token=self._img_token, generate_config=generate_config.model_dump(), **kwargs) for i in range(len(prompts))]
-            prompts, images = zip(*modified_results)
-            prompts, images = list(prompts), list(images)
-
-        input_token_ids, input_lengths = self.encode_tokens(prompts, generate_config, **kwargs)
-        input_lengths_list: List[int] = input_lengths.tolist()
-        kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.num_beams)
-        kmonitor.report(GaugeMetrics.QUERY_BATCH_SIZE_METRIC, len(input_lengths_list) * generate_config.num_beams)
-        for input_length in input_lengths_list:
-            kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, input_length)
-        kmonitor.report(GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
-        
-        raw_query = RawQuery(input_token_ids, input_lengths, images, generate_config, self.tokenizer)
-        
-        return self.generate_stream(raw_query, **kwargs)
+        return generate_config.stop_words_str + [self.process_decode_func(ids, tokenizer=self.tokenizer) for ids in generate_config.stop_words_list]
 
     def pipeline(self,
-                 prompts: List[str],
-                 images: Optional[List[List[str]]] = None,
+                 prompt: str,
+                 images: Optional[List[str]] = None,
                  **kwargs: Any) -> Iterator[GenerateResponse]:
         q = queue.Queue()
 
         async def generator():
             res = None
             try:
-                res = self.pipeline_async(prompts, images, **kwargs)
+                res = self.pipeline_async(prompt, images, **kwargs)
                 async for x in res:
                     q.put(x)
                 q.put(None)
@@ -283,48 +219,68 @@ class Pipeline(object):
             backgroud_thread.join()
 
     @torch.inference_mode()
-    async def generate_stream(self, raw_query: RawQuery,
-                              **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
+    def pipeline_async( # type: ignore
+        self,
+        prompt: str,
+        images: Optional[List[str]] = None,
+        **kwargs: Any
+    ) -> AsyncGenerator[GenerateResponse, None]:
+        begin_time = current_time_ms()
+        # align images and prompts
+        if images is None or len(images) == 0:
+            images = []
+        generate_config_json = kwargs.pop("generate_config", {})
+        generate_config = self.create_generate_config(generate_config_json, self.model.config.special_tokens, **kwargs)
+        # for delete stop word from output
+        prompt = self.modify_prompt_func(prompt, generate_config=generate_config.model_dump(), images=images, **kwargs)
 
+        if self.model.is_multimodal:
+            prompt, images = self.multimodal_modify_prompt_func(prompt, images=images, img_token=self._img_token, generate_config=generate_config.model_dump(), **kwargs)
+
+        token_ids = self.process_encode_func(prompt,
+                                             generate_config=generate_config.model_dump(),
+                                             tokenizer=self.tokenizer,
+                                             special_tokens=self._special_tokens,
+                                             **kwargs)
+
+        kmonitor.report(GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
+        kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.num_beams)
+        kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
+
+        token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
+        input = GenerateInput(token_ids=token_ids,
+                              images=images,
+                              generate_config=generate_config,
+                              tokenizer=self.tokenizer)
+        return self.generate_stream(input, **kwargs)
+
+    @torch.inference_mode()
+    async def generate_stream(self, input: GenerateInput, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         # TODO(xinfei.sxf) stop words etc 直接带入raw query中去
-        stop_word_strs = self._get_stop_word_strs(self.tokenizer, raw_query.generate_config)
+        stop_word_strs = self._get_stop_word_strs(self.tokenizer, input.generate_config)
         stop_word_str_slices = get_stop_word_slice_list(stop_word_strs)
 
-        batch_stream = self.model.generate_stream(raw_query)
+        stream = self.model.generate_stream(input)
 
-        iter_count = 0
-        last_finished: Optional[List[bool]] = None
-        generate_output = None
-        decoding_state = [DecodingState() for _ in range(len(raw_query.input_lengths))] if raw_query.generate_config.num_beams == 1 else None
-        async for generate_output in batch_stream:
+        decoding_state = DecodingState() if input.generate_config.num_beams == 1 else None
+        async for generate_output in stream:
             begin_time = current_time_ms()
-            generated_batch_result, output_lens = self.decode_tokens(generate_output, raw_query.input_lengths,
-                                                        raw_query.generate_config, stop_word_strs,
-                                                        stop_word_str_slices, decoding_state, **kwargs)
-            # modify response with custom format
-            batch_size = generate_output.output_ids.shape[0]
-            beam_width = generate_output.output_ids.shape[1]
+            generate_texts, output_lens = self.decode_tokens(
+                generate_output,
+                input.generate_config,
+                stop_word_strs, stop_word_str_slices, decoding_state, **kwargs)
+            num_beams = input.generate_config.num_beams
             hidden_states = generate_output.hidden_states
             if isinstance(hidden_states, torch.Tensor):
-                hidden_states = hidden_states.view(batch_size * beam_width, -1)
-            if beam_width == 1:
-                generated_batch_result = [
-                    self.modify_response_func(response, hidden_states=hidden_states,
-                                              generate_config=raw_query.generate_config.model_dump(),
-                                              **kwargs)
-                    for hidden_states, response in zip(hidden_states, generated_batch_result)
-                ]
-            finished: List[List[bool]] = generate_output.finished.reshape([batch_size, beam_width]).tolist()
-            iter_count = iter_count + 1
-            batch_finished = [all(finished[idx]) for idx in range(batch_size)]
-            if last_finished:
-                 for idx in range(batch_size):
-                    if batch_finished[idx] and not last_finished[idx]:
-                        kmonitor.report(GaugeMetrics.FT_ITERATE_COUNT_METRIC, iter_count)
-                        for l in output_lens[idx]:
-                            kmonitor.report(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, l)
-            last_finished = batch_finished
+                hidden_states = hidden_states.view(num_beams, -1)
+            if num_beams == 1:
+                generate_texts[0] = self.modify_response_func(
+                    generate_texts[0], hidden_states=hidden_states,
+                    generate_config=input.generate_config.model_dump(),
+                    **kwargs)
+            if generate_output.finished:
+                kmonitor.report(GaugeMetrics.FT_ITERATE_COUNT_METRIC, generate_output.aux_info.iter_count)
+                for l in output_lens:
+                    kmonitor.report(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, l)
             kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
-            yield GenerateResponse(generate_output, generated_batch_result)
-            if all(batch_finished):
-                break
+            yield GenerateResponse(generate_output=generate_output, generate_texts=generate_texts)

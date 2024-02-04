@@ -127,9 +127,9 @@ class GangTest(unittest.TestCase):
 
             server_port = WorkerInfo.server_port_offset(0)
             response = requests.post(f"http://localhost:{server_port}", json={"prompt": "hello"}, timeout=5)
-
+            logging.info(f"{response.json()}")
             self.assertEqual(response.json()['finished'], True)
-            self.assertEqual(response.json()['response'], ['fake output'])
+            self.assertEqual(response.json()['response'], 'fake output')
             logging.info("Start test terminate gang worker")
 
             # test gang heartbeat loss will cause other process terminate

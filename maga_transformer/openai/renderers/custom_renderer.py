@@ -117,7 +117,7 @@ class CustomChatRenderer():
                 )
 
             index += 1
-            output_ids = self._clean_output_ids(input_token_length, output.output_ids)
+            output_ids = self._clean_output_ids(output.output_ids)
             output_token_length = len(output_ids)
             finish_reason = self._check_finish_reason(output_ids)
             output_ids = self._remove_stop_word_ids(output_ids)
@@ -182,10 +182,10 @@ class CustomChatRenderer():
                     break
         return output_ids
 
-    def _clean_output_ids(self, input_length: int, output_ids_tensor: torch.Tensor) -> list[int]:
+    def _clean_output_ids(self, output_ids_tensor: torch.Tensor) -> list[int]:
         output_ids_tensor = output_ids_tensor.cpu().reshape([-1])
         # TODO(wangyin): This slicing shouldn't be done here.
         # model should return output length, ids should be sliced with output length.
-        output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()[input_length:]
+        output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()
         return output_ids
 

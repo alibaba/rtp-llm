@@ -88,8 +88,9 @@ class ChatGlm(GPT):
     
 
     # override
-    def create_context_decoder_mask(self, input_lengths: torch.Tensor, max_input_length: int):
+    def create_context_decoder_mask(self, input_lengths: torch.Tensor):
         batch_size = len(input_lengths)
+        max_input_length = max(input_lengths)
         context_lengths = [int(x) - 1 for x in input_lengths]
         attention_mask = torch.ones(
             (max_input_length, max_input_length), dtype=torch.bool, device=self.device)\

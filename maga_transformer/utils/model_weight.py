@@ -682,7 +682,6 @@ class LoraPathException(Exception):
         super().__init__(*args)
 
 class LoraResource():
-
     def __init__(self, lora_infos: Dict[str, str] = dict(), database: Optional[CkptDatabase] = None,
                  weights_info: Optional[WeightInfo] = None,
                  lora_map: Optional[LoRAMap] = None):

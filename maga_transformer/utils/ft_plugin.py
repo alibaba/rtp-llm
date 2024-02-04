@@ -18,7 +18,7 @@ class EncodeCallable(Protocol):
         ...
 
 class DecodeCallable(Protocol):
-    def __call__(self, input_length: int, tokens: List[int], **kwargs: Any) -> str:
+    def __call__(self, tokens: List[int], **kwargs: Any) -> str:
         ...
 
 class ModifyResponseCallable(Protocol):

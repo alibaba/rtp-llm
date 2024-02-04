@@ -294,7 +294,6 @@ class QwenRenderer(CustomChatRenderer):
         output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()
         finish_reason = self._check_finish_reason(output_ids) if finished else None
 
-        output_ids = output_ids[input_length:]
         output_length = len(output_ids)
         output_ids = self._remove_stop_word_ids(output_ids)
         output_str = self.tokenizer.decode(output_ids)

@@ -21,7 +21,6 @@ class FakeModelTest(ModelTestBase):
         return fake_model_loader.load_model()
 
 def single_fake_test(name: str, fake_name: str, model_config: Dict[str, Any], async_mode: bool, test_loss: bool):
-    print(f">>>>>>>> [test {name}] with async_mode: ", async_mode)
     model_test = FakeModelTest("runTest",
                                 model_config["model_type"],
                                 model_config["tokenizer_path"],

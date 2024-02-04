@@ -38,25 +38,24 @@ class AsyncDecoderModelTest(TestCase):
         try:
             t = ThreadPoolExecutor(10)
             def func():
-                gen = pipeline(["hello, what's your name?"], [[]], max_new_tokens=10)
-                results = [result for result in gen]
+                [_ for _ in pipeline("hello, what's your name?", max_new_tokens=10)]
             result = []
             for i in range(0, 10):
                 result.append(t.submit(func))
             # just ensure every input has result
             for i in range(0, 10):
                 result[i].result()
-            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             pipeline.model.decoder_engine_.stop()
 
     def test_max_new_tokens_error(self) -> None:
         pipeline = self.create_pipeline(10)
         try:
-            gen = pipeline(["hello, what's your name?\nI'm a 20 year old girl from the Netherlands."], [[]])
+            gen = pipeline("hello, what's your name?\nI'm a 20 year old girl from the Netherlands.")
             with self.assertRaisesRegex(FtRuntimeException, "model max tokens is "):
-                [result for result in gen]
-            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
+                [_ for _ in gen]
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             pipeline.model.decoder_engine_.stop()
 

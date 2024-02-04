@@ -7,14 +7,13 @@ from transformers import PreTrainedTokenizer
 from maga_transformer.utils.util import get_mem_info
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
-from maga_transformer.models.base_model import BaseModel, TokenizerBase
+from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateInput
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.decoder_engine import DecoderEngine
 from maga_transformer.async_decoder_engine.engine_creator import create_engine
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.async_decoder_engine.ptuning import get_ptuning_params
-from maga_transformer.structure.raw_query import RawQuery
 
 class AsyncModel:
     def __init__(self, model: BaseModel, sp_model: Optional[BaseModel] = None) -> None:
@@ -44,26 +43,17 @@ class AsyncModel:
 
     def update(self, lora_infos: Dict[str, str]):
         with Timer() as timer:
-            self.decoder_engine_.executor_.model_ops.gpt_op.weight.lora_resource.update(lora_infos)                        
+            self.decoder_engine_.executor_.model_ops.gpt_op.weight.lora_resource.update(lora_infos)
         logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
     @torch.no_grad()
-    async def generate_stream(self, raw_query: RawQuery) -> AsyncGenerator[GenerateOutput, None]:
+    async def generate_stream(self, input: GenerateInput) -> AsyncGenerator[GenerateOutput, None]:
         if g_parallel_info.tp_size > 1 and g_parallel_info.tp_rank > 0:
             return
-        max_new_tokens = min(self.config.max_seq_len - raw_query.input_token_ids.shape[1], raw_query.generate_config.max_new_tokens)
-        if raw_query.input_token_ids.shape[1] <= 0:
-            raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
-                    f"model tokens can not be empty, request length is {raw_query.input_token_ids.shape[1]}")
-        if max_new_tokens <= 0:
-           raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
-                    f"model max tokens is {self.config.max_seq_len}, request length is {raw_query.input_token_ids.shape[1]}, max_new_tokens is {max_new_tokens}")
-        inputs_np = raw_query.input_token_ids.cpu().numpy()
-        if raw_query.input_lengths is None:
-            raw_query.input_lengths = torch.IntTensor([len(v[v != self.config.special_tokens.eos_token_id]) for v in inputs_np])
+        stream = None
         try:
-            batch_stream = self.decoder_engine_.decoder(raw_query)
-            async for output in batch_stream:
+            stream = self.decoder_engine_.decoder(input)
+            async for output in stream:
                 yield output
         except Exception as e:
             logging.error(f'generate error: {e}, Traceback: {traceback.format_exc()}')

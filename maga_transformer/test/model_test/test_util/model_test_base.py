@@ -159,21 +159,14 @@ class ModelTestBase(TestCase):
             "calculate_loss": True
         }
 
-        test_input = ["hello?", "what's your name"]
-        responses = [response for response in pipeline.pipeline(test_input, [[], []], generate_config=generate_config)]
-        batch_loss = torch.Tensor(responses[0].generate_output.loss)
-        # torch.save(batch_loss, expect_result_file)
-        expect_result = torch.load(expect_result_file)
-        self.assertTrue(all(self.flat(self.close(expect_result, batch_loss).tolist())))
-
-        test_input = ["hello?"]
-        responses = [response for response in pipeline.pipeline(test_input, [[], []], generate_config=generate_config)]
-        batch_loss = torch.Tensor(responses[0].generate_output.loss)
+        test_input = "hello?"
+        response = pipeline.pipeline(test_input, [[], []], generate_config=generate_config)
+        batch_loss = torch.Tensor(response.generate_output.loss)
         self.assertTrue(all(self.flat(self.close(expect_result[0], batch_loss).tolist())))
 
-        test_input = ["what's your name"]
-        responses = [response for response in pipeline.pipeline(test_input, [[], []], generate_config=generate_config)]
-        batch_loss = torch.Tensor(responses[0].generate_output.loss)
+        test_input = "what's your name"
+        response = pipeline.pipeline(test_input, [[], []], generate_config=generate_config)
+        batch_loss = torch.Tensor(response.generate_output.loss)
         self.assertTrue(all(self.flat(self.close(expect_result[1], batch_loss).tolist())))
 
     def _load_model(self):

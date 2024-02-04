@@ -28,145 +28,55 @@ class InferenceWorker():
         self.model = ModelFactory.create_from_env()
         self.pipeline = Pipeline(self.model, self.model.tokenizer)
         logging.info("Load model done.")
-    
+
     def inference(self, **kwargs: Any):
-        num_return_sequences  = self._format_request(kwargs)
-        input_texts, input_images, batch_inference = self._get_input(kwargs)
-        return self._yield_generate(input_texts, input_images, num_return_sequences, batch_inference, **kwargs)
+        num_return_sequences = self._format_request(kwargs)
+        input_texts, input_images, generate_configs, batch_infer = self._get_input(kwargs, num_return_sequences)
+        kwargs.pop('generate_config')
+        if len(input_texts) > 1 or batch_infer:
+            generators = [self._yield_generate(text, images, generate_config=generate_config, **kwargs)
+                          for text, images, generate_config in zip(input_texts, input_images, generate_configs)]
+            incremental = generate_configs[0].get('return_incremental', False)
+            return self._batch_async_generators(incremental, num_return_sequences, generators, batch_infer)
+        else:
+            return self._yield_generate(input_texts[0], input_images[0],
+                                        generate_config=generate_configs[0], **kwargs)
 
     def stop(self) -> None:
         if isinstance(self.model, AsyncModel):
             logging.info("stoping InferenceWorker")
             self.model.stop()
 
-    def _reshape_response(self, responses: List[str], finished: List[bool], num_return_sequences: int) -> Tuple[List[List[str]], List[bool]]:
-        new_responses: List[List[str]] = []
-        new_finished: List[bool] = []
-        batch_size = len(responses) // num_return_sequences
-        for i in range(0, batch_size):
-            single_res: List[str] = []
-            single_finished: List[bool] = []
-            for j in range(0, num_return_sequences):
-                single_res.append(responses[i * num_return_sequences + j])
-                single_finished.append(finished[i * num_return_sequences + j])
-            new_responses.append(single_res)
-            new_finished.append(all(single_finished))
-        return new_responses, new_finished
-
     def _format_response(self, gen_responses: GenerateResponse,
-                        batch_response: bool, num_return_sequences: Optional[int],
-                        last_response: bool = False, return_hidden_states: bool = False,
-                        calculate_loss: int = 0, return_logits: bool = False) -> Dict[str, Any]:
-        responses = gen_responses.batch_response
-        finished = gen_responses.generate_output.finished.tolist()
-        batch_size = gen_responses.generate_output.output_ids.shape[0]
-        beam_width = gen_responses.generate_output.output_ids.shape[1]
+                         return_hidden_states: bool = False,
+                         calculate_loss: int = 0,
+                         return_logits: bool = False) -> Dict[str, Any]:
+        generate_texts = gen_responses.generate_texts
+        finished = gen_responses.generate_output.finished
+        beam_width = gen_responses.generate_output.output_ids.shape[0]
         aux_info = gen_responses.generate_output.aux_info
         hidden_states = gen_responses.generate_output.hidden_states
         loss = gen_responses.generate_output.loss
         logits = gen_responses.generate_output.logits
 
-        if last_response:
-            finished = [True] * len(finished)
-        if num_return_sequences:
-            responses, finished = self._reshape_response(responses, finished, num_return_sequences)
-            if aux_info:
-                aux_info = [aux_info[i: i + num_return_sequences] for i in range(0, len(aux_info), num_return_sequences)]
         if beam_width > 1:
-            assert(len(responses) == batch_size * beam_width)
-            assert(aux_info != None)
-            assert(len(aux_info) == batch_size)
-            initial_responses = []
-            initial_finished = []
-            for i in range(0, batch_size):
-                current_beams = responses[i * beam_width: (i + 1) * beam_width]
-                initial_responses.append(current_beams[0])
-                initial_finished.append(finished[i * beam_width])
-                aux_info[i]["beam_responses"] = current_beams
-            responses = initial_responses
-            finished = initial_finished
+            aux_info.beam_responses = generate_texts
 
-        if aux_info is not None:
-            assert(len(aux_info) == len(responses))
-        else:
-            aux_info = [{} for _ in range(len(responses))]
-
+        response = {
+            "response": generate_texts[0],
+            "finished": finished,
+            "aux_info": aux_info.model_dump(mode='json'),
+        }
         if return_hidden_states:
-            assert(len(hidden_states) == len(responses))
-            if isinstance(hidden_states, list):
-                hidden_states = [_.tolist() if isinstance(_, torch.Tensor) else [] for _ in hidden_states]
-            else:
-                hidden_states = hidden_states.tolist()
-
+            response["hidden_states"] = hidden_states.tolist()
         if calculate_loss:
-            assert(len(loss) == len(responses))
-            if isinstance(loss, list):
-                loss = [_.tolist() if isinstance(_, torch.Tensor) else [] for _ in loss]
-            else:
-                loss = loss.tolist()
-
+            response['loss'] = lost.tolist()
         if return_logits:
-            assert(len(logits) == len(responses))
-            if isinstance(logits, list):
-                logits = [_.tolist() if isinstance(_, torch.Tensor) else [] for _ in logits]
-            else:
-                logits = logits.tolist()
-
-        if batch_response:
-            response = {
-                "response_batch": [
-                    {
-                        "response": response,
-                        "finished": finish,
-                        "aux_info": aux
-                    }
-                    for response, finish, aux in zip(responses, finished, aux_info)
-                ]
-            }
-            if return_hidden_states:
-                decimals = aux_info[0].get("decimals", None)
-                if decimals:
-                    for index in range(len(response["response_batch"])):
-                        response["response_batch"][index]["hidden_states"] = ','.join('{:.{}f}'.format(e, decimals) for e in hidden_states[index])
-                else:
-                    for index in range(len(response["response_batch"])):
-                        response["response_batch"][index]["hidden_states"] = hidden_states[index]
-            if calculate_loss:
-                for index in range(len(response["response_batch"])):
-                    response["response_batch"][index]["loss"] = loss[index]
-            if return_logits:
-                for index in range(len(response["response_batch"])):
-                    response["response_batch"][index]["logits"] = logits[index]
-
-        else:
-            response = {
-                "response": responses[0],
-                "finished": all(finished),
-                "aux_info": aux_info[0]
-            }
-            if return_hidden_states:
-                response["hidden_states"] = hidden_states[0]
-
-            if calculate_loss:
-                response["loss"] = loss[0]
-
-            if return_logits:
-                response["logits"] = logits[0]
+            response['logits'] = logits.tolist()
 
         return response
 
-    async def _yield_generate(self, texts: List[str], images: List[List[str]], num_return_sequences: Optional[int], batch_response: bool, **kwargs: Any):
-        if num_return_sequences:
-            new_texts: List[str] = []
-            for text in texts:
-                new_texts.extend([text] * num_return_sequences)
-            new_images: List[str] = []
-            for image in images:
-                new_images.extend([image] * num_return_sequences)
-        else:
-            new_texts = texts
-            new_images = images
-
+    async def _yield_generate(self, text: str, images: List[str], **kwargs: Any):
         calculate_loss = 0
         return_hidden_states = False
         return_logits = False
@@ -181,12 +91,9 @@ class InferenceWorker():
             generate_config["return_logits"] = return_logits
             generate_config["return_input_ids"] = output_input_ids
 
-        stream = self.pipeline.pipeline_async(prompts=new_texts, images=new_images, **kwargs)
-        generate_response = None
+        stream = self.pipeline.pipeline_async(prompt=text, images=images, **kwargs)
         async for generate_response in stream:
-            yield self._format_response(generate_response, batch_response, num_return_sequences, False, return_hidden_states, calculate_loss, return_logits)
-        assert generate_response is not None
-        yield self._format_response(generate_response, batch_response, num_return_sequences, True, return_hidden_states, calculate_loss, return_logits)
+            yield self._format_response(generate_response, return_hidden_states, calculate_loss, return_logits)
 
     def _format_chat_api_messages(self, kwargs: Any) -> None:
         if 'messages' in kwargs:
@@ -240,20 +147,21 @@ class InferenceWorker():
         if 'gen_length' in kwargs:
             kwargs['max_new_tokens'] = kwargs.pop('gen_length')
         self._format_chat_api_messages(kwargs)
-        num_return_sequences = kwargs.pop('num_return_sequences', None)
+        num_return_sequences = int(kwargs.pop('num_return_sequences', 1))
         return num_return_sequences
 
-    def _get_input(self, kwargs: Dict[str,Any]) -> Tuple[List[Any], List[Any], bool]:
+    def _get_input(self, kwargs: Dict[str,Any], num_return_sequences) -> Tuple[List[Any], List[Any], bool]:
         input_texts: Optional[Union[List[str], List[List[Dict[str, str]]]]] = None
         input_images: Optional[Union[List[str], List[List[str]]]] = None
         images = kwargs.pop('images', None)
-        adapter_name = kwargs['generate_config'].get("adapter_name", None)
+        generate_config = kwargs['generate_config']
+        adapter_name = generate_config.get("adapter_name", None)
         if images is not None and not isinstance(images, list):
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "input images should be list")
-        batch_inference = False
+        batch_infer = False
         if "prompt_batch" in kwargs:
+            batch_infer = True
             input_texts = kwargs.pop('prompt_batch')
-            batch_inference = True
             if not isinstance(input_texts, list):
                 raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "prompt batch input should be list")
             if images is not None:
@@ -264,11 +172,6 @@ class InferenceWorker():
                 input_images = images
             else:
                 input_images = [[]] * len(input_texts)
-            # check adapter_name size is same with prompt
-            if adapter_name != None:
-                if (isinstance(adapter_name, str) and len(input_texts) != 1) or \
-                    (isinstance(adapter_name, list) and  len(input_texts) != len(adapter_name)):
-                    raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "adapter_name is not alignment")
         else:
             prompt: Union[str, List[str], List[Dict[str, str]]] = kwargs.pop('prompt')
             if isinstance(prompt, str):
@@ -284,14 +187,26 @@ class InferenceWorker():
                 input_images = [images]
             else:
                 input_images = images
-            # check adapter_name size is same with prompt
-            if adapter_name != None :
-                if (isinstance(adapter_name, str) and len(input_texts) != 1) or \
-                    (isinstance(adapter_name, list) and  len(adapter_name) != 1):
-                    FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "adapter_name is not alignment")
         if input_texts is None:
             raise FtRuntimeException(ExceptionType.NO_PROMPT_ERROR, "not input prompt")
-        return input_texts, input_images, batch_inference
+
+            # check adapter_name size is same with prompt
+        generate_configs = [generate_config] * len(input_texts)
+        if adapter_name != None:
+            if (isinstance(adapter_name, str) and len(input_texts) != 1) or \
+               (isinstance(adapter_name, list) and  len(input_texts) != len(adapter_name)):
+                raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "adapter_name is not alignment")
+            for i in range(len(input_texts)):
+                generate_configs[i] = copy.copy(generate_configs[i])
+                generate_configs[i]['adapter_name'] = adapter_name[i] if isinstance(adapter_name, list) else adapter_name
+
+        def repeat_elements(lst, n):
+            return [e for e in lst for _ in range(n)]
+        if num_return_sequences:
+            input_texts = repeat_elements(input_texts, num_return_sequences)
+            input_images = repeat_elements(input_images, num_return_sequences)
+            generate_configs = repeat_elements(generate_configs, num_return_sequences)
+        return input_texts, input_images, generate_configs, batch_infer
 
     def is_streaming(self, req: Dict[str, Any]):
         return req.get(
@@ -299,9 +214,44 @@ class InferenceWorker():
             req.get('generation_config',
                     req.get('generate_config', {})
                     ).get('yield_generator', False))
-    
+
     def update(self, version_info: VersionInfo):
         lora_infos = dict()
         if version_info.peft_info != None:
             lora_infos = version_info.peft_info.get("lora_info", {})
         return self.model.update(lora_infos)
+
+
+    @staticmethod
+    async def _batch_async_generators(incremental, num_return_sequences, generators, batch_infer):
+        iterators = [gen.__aiter__() for gen in generators]
+        done_idxs = set()
+        batch_state = [None] * len(iterators)
+        while True:
+            for idx, itr in enumerate(iterators):
+                try:
+                    batch_state[idx] = await itr.__anext__()
+                except StopAsyncIteration:
+                    done_idxs.add(idx)
+                if idx in done_idxs:
+                    if batch_state[idx] is None:
+                        batch_state[idx] = {"response": '', 'finished':True, 'aux_info':{}}
+                    if incremental:
+                        batch_state[idx]['response'] = ''
+            if len(done_idxs) == len(iterators):
+                break
+            if num_return_sequences is not None:
+                batch_size = int(len(batch_state) / num_return_sequences)
+            batch = batch_state
+            if num_return_sequences > 1:
+                new_batch = []
+                for batch_idx in range(batch_size):
+                    seqs = batch_state[batch_idx * num_return_sequences:(batch_idx + 1) * num_return_sequences]
+                    new_batch.append({"response": [seq['response'] for seq in seqs],
+                                      'finished': [seq['finished'] for seq in seqs],
+                                      'aux_info':[seq['aux_info'] for seq in seqs]})
+                batch = new_batch
+            if batch_infer:
+                yield {'response_batch':batch}
+            else:
+                yield batch[0]

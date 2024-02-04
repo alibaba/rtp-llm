@@ -36,7 +36,7 @@ class DecoderEngineTest(TestCase):
         try:
             t = ThreadPoolExecutor(10)
             def func():
-                gen = pipeline(["hello, what's your name?"], [[]], max_new_tokens=10)
+                gen = pipeline("hello, what's your name?", max_new_tokens=10)
                 results = [result for result in gen]
 
             result = []
@@ -45,35 +45,17 @@ class DecoderEngineTest(TestCase):
             # just ensure every input has result
             for i in range(0, 10):
                 result[i].result()
-            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             pipeline.model.stop()
 
     def test_timeout(self) -> None:
         pipeline = self.create_pipeline()
         try:
-            t = ThreadPoolExecutor(10)
-            gen = pipeline(["hello, what's your name?"], [[]], max_new_tokens=100, timeout_ms=10)
+            gen = pipeline("what's your name?", max_new_tokens=100, timeout_ms=10)
             with self.assertRaisesRegex(Exception, "ms timeout"):
                 results = [result for result in gen]
-            # self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
-        finally:
-            pipeline.model.stop()
-
-    def test_batch(self) -> None:
-        pipeline = self.create_pipeline()
-        try:
-            t = ThreadPoolExecutor(10)
-            def func():
-                gen = pipeline(["hello, what's your name?", "please write a story about dog", "hi", "what"], [[], [], [], []], max_new_tokens=10)
-                results = [result for result in gen]
-            result = []
-            for i in range(0, 10):
-                result.append(t.submit(func))
-            # just ensure every input has result
-            for i in range(0, 10):
-                result[i].result()
-            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             pipeline.model.stop()
 
@@ -83,15 +65,14 @@ class DecoderEngineTest(TestCase):
         try:
             t = ThreadPoolExecutor(32)
             def func():
-                gen = pipeline(["hello, what's your name?", "please write a story about dog"], [[], []],max_new_tokens=32)
-                results = [result for result in gen]
+                [_ for _ in pipeline("please write a story about dog", max_new_tokens=32)]
             result = []
             for i in range(0, 64):
                 result.append(t.submit(func))
             # just ensure every input has result
             for i in range(0, 64):
                 result[i].result()
-            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             pipeline.model.stop()
 
@@ -99,17 +80,16 @@ class DecoderEngineTest(TestCase):
         os.environ['GUARANTE_GENERATE_MEM'] = "1"
         pipeline = self.create_pipeline()
         try:
-            t = ThreadPoolExecutor(16)
+            t = ThreadPoolExecutor(32)
             def func():
-                gen = pipeline([" ".join(["hello, what's your name?"] * 200), " ".join(["please write a story about dog"] * 200)], [[], []],max_new_tokens=64)
-                results = [result for result in gen]
+                [_ for _ in pipeline(" ".join("hello, what's your name?" * 80), max_new_tokens=64)]
             result = []
             for i in range(0, 32):
                 result.append(t.submit(func))
             # just ensure every input has result
             for i in range(0, 32):
                 result[i].result()
-            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             pipeline.model.stop()
 
@@ -119,10 +99,9 @@ class DecoderEngineTest(TestCase):
         try:
             create_context_decder_mask.side_effect = Exception("test exception")
             with self.assertRaisesRegex(Exception, "test exception"):
-                gen = pipeline(["你好", "hello, what's your name?"], [[], []])
-                results = [result for result in gen]
+                [_ for _ in pipeline("hello, what's your name?")]
             # just ensure every input has result
-            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             pipeline.model.stop()
 
@@ -134,10 +113,10 @@ class DecoderEngineTest(TestCase):
             malloc.side_effect = Exception("test exception")
             malloc_with_cache.side_effect = Exception("test exception")
             with self.assertRaisesRegex(Exception, "test exception"):
-                gen = pipeline(["你好", "hello, what's your name?"], [[], []])
+                gen = pipeline("hello, what's your name?")
                 results = [result for result in gen]
             # just ensure every input has result
-            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.has_query())
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             pipeline.model.stop()
 
@@ -147,7 +126,7 @@ class DecoderEngineTest(TestCase):
         pipeline = self.create_pipeline()
         try:
             origin_block = len(pipeline.model.decoder_engine_.scheduler_.cache_manager_.free_blocks_index)
-            gen = pipeline(["hello, what's your name?"], [[]], max_new_tokens=10)
+            gen = pipeline("hello, what's your name?")
             with self.assertRaisesRegex(Exception, "test exception"):
                 results = [result for result in gen]
             remain_block = len(pipeline.model.decoder_engine_.scheduler_.cache_manager_.free_blocks_index)

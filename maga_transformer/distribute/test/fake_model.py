@@ -6,14 +6,13 @@ from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.models.base_model import BaseModel, GenerateOutput
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.structure.raw_query import RawQuery
 
 class FakeTokenizer(TokenizerBase):
     def encode(self, inputs: List[str]) -> List[int]:
         return [1,2,3,4]
 
     def decode(self, tokens: List[int]) -> str:
-        return ["fake output"]
+        return "fake output"
 
 class FakeConfig(object):
     def __init__(self):
@@ -40,8 +39,7 @@ class FakeModel(BaseModel):
         return cls(config)
 
     @torch.no_grad()
-    async def generate_stream(self, raw_query: RawQuery) -> AsyncGenerator[GenerateOutput, None]:
-        
-        yield GenerateOutput(torch.Tensor([[1,2,3,4]]), torch.Tensor([[1]]), torch.Tensor([True]))
+    async def generate_stream(self, input) -> AsyncGenerator[GenerateOutput, None]:
+        yield GenerateOutput(output_ids=torch.Tensor([[1,2,3,4]]), finished=True)
 
 register_model("fake_model", FakeModel)

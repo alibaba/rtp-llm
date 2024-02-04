@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from transformers import PreTrainedTokenizer
 from transformers.generation.stopping_criteria import StoppingCriteria
 
-from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateOutput, GenerateResponse
+from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateOutput, GenerateResponse, GenerateInput
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessage, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, UsageInfo, \
@@ -19,7 +19,6 @@ from maga_transformer.openai.renderers.custom_renderer import RendererParams, \
     StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderer_factory import ChatRendererFactory
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.structure.raw_query import RawQuery
 
 class OpenaiEndopoint():
     def __init__(self, model: Union[AsyncModel, BaseModel]):
@@ -167,17 +166,15 @@ class OpenaiEndopoint():
         input_length = len(input_ids)
 
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
-        input_length_tensor = torch.Tensor([input_length]).int()
-        input_images = [rendered_input.input_images]
+        input_images = rendered_input.input_images
         generate_config = self._extract_generation_config(chat_request)
 
         output_generator: AsyncGenerator[GenerateOutput, None] = self.model.generate_stream(
-            RawQuery(
-                input_id_tensor,
-                input_length_tensor,
-                input_images,
-                generate_config,
-                self.tokenizer
+            GenerateInput(
+                token_ids=input_id_tensor,
+                images=input_images,
+                generate_config=generate_config,
+                tokenizer=self.tokenizer
             )
         )
 

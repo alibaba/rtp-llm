@@ -5,7 +5,7 @@ from typing import Any, List, Tuple
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.medusa.medusa_config import MedusaState, MedusaBuffer
 from maga_transformer.async_decoder_engine.scheduler import Scheduler
-from maga_transformer.async_decoder_engine.batch_query import BatchQuery, ModelOutput
+from maga_transformer.async_decoder_engine.batch_query import BatchQuery
 from maga_transformer.async_decoder_engine.normal_model_executor import NormalModelExecutor, ModelOps
 from maga_transformer.async_decoder_engine.medusa.utils import generate_candidates, evaluate_posterior
 from maga_transformer.utils.util import to_cuda
@@ -23,30 +23,30 @@ class MedusaModelExecutor(NormalModelExecutor):
         medusa_query = BatchQuery(batch_query.count_prefix_length, batch_query.gen_num_per_circle, batch_query.nccl_op_)
         medusa_query.context_batch_size = batch_query.total_batch_size
         medusa_query.cache_block_indice = batch_query.cache_block_indice
-        medusa_query.queries = batch_query.queries
-        medusa_query.lora_names = copy.deepcopy(batch_query.lora_names)
+        medusa_query.context_streams = batch_query.context_streams
+        medusa_query.decode_streams = batch_query.decode_streams
         medusa_query.lora_ids = copy.deepcopy(batch_query.lora_ids)
 
         validate_token_length = self.medusa_buffer.medusa_attn_mask.size(0)
-        max_medusa_length = max([q.seq_length for q in batch_query.queries]) + validate_token_length
+        max_medusa_length = max([q.seq_length for q in batch_query.streams]) + validate_token_length
 
         output_token_ids = torch.zeros(
             [batch_query.total_batch_size, max_medusa_length],
             dtype=torch.int32
         )
 
-        for i, query in enumerate(batch_query.queries):
+        for i, stream in enumerate(batch_query.streams):
             # means not first into model
             if i < batch_query.generate_batch_size:
-                medusa_state: MedusaState = query.medusa_state
+                medusa_state: MedusaState = stream.medusa_state
                 medusa_query.context_lengths_list.append(validate_token_length)
-                medusa_query.reuse_lengths_list.append(query.seq_length)
+                medusa_query.reuse_lengths_list.append(stream.seq_length)
                 # TODO 这部分应该是能被batch优化掉的 后面改
-                output_token_ids[i][query.seq_length: validate_token_length + query.seq_length] = medusa_state.tree_candidates[0].cpu()
+                output_token_ids[i][stream.seq_length: validate_token_length + stream.seq_length] = medusa_state.tree_candidates[0].cpu()
             else:
                 medusa_query.reuse_lengths_list.append(0)
-                medusa_query.context_lengths_list.append(query.context_length)
-                output_token_ids[i, :query.seq_length] = query.output_token_ids[0]
+                medusa_query.context_lengths_list.append(stream.input_length)
+                output_token_ids[i, :stream.seq_length] = stream.complete_token_ids[0]
             medusa_query.generate_configs.append(None)
         medusa_query.output_token_ids = output_token_ids
         medusa_query.check()
@@ -106,12 +106,12 @@ class MedusaModelExecutor(NormalModelExecutor):
                 accept_tokens_list.append(torch.empty([0]))
                 finished_list.append(False)
             else:
-                medusa_state, accept_tokens = self._tree_validate(batch_query.queries[i].block_indice[0],
+                medusa_state, accept_tokens = self._tree_validate(batch_query.streams[i].block_indice[0],
                                                                   batch_query.reuse_lengths_list[i],
-                                                                  batch_query.queries[i].generate_config,
+                                                                  batch_query.streams[i].generate_config,
                                                                   logits[bias: bias + batch_query.context_lengths_list[i]].unsqueeze(0),
                                                                   medusa_logits[:, bias: bias + batch_query.context_lengths_list[i], :].unsqueeze(1),
-                                                                  batch_query.queries[i].medusa_state)
+                                                                  batch_query.streams[i].medusa_state)
                 medusa_states_list.append(medusa_state)
                 accept_tokens_list.append(accept_tokens)
                 finished_list.append(self.model_ops.config.special_tokens.eos_token_id in accept_tokens)
@@ -150,7 +150,7 @@ class MedusaModelExecutor(NormalModelExecutor):
         update_lens = [len(x) for x in accept_tokens_list]
         for i, output_token_id in enumerate(batch_query.output_token_ids):
             output_token_id[batch_query.max_token_len : batch_query.max_token_len+update_lens[i]] = accept_tokens_list[i]
-        batch_query.update_model_output(ModelOutput(torch.tensor(finished_list, dtype=torch.bool),
+        batch_query.record_update_tensors(torch.tensor(finished_list, dtype=torch.bool),
                                           update_lens,
                                           torch.zeros([batch_query.total_batch_size]),
                                           torch.zeros([batch_query.total_batch_size]),
@@ -158,4 +158,4 @@ class MedusaModelExecutor(NormalModelExecutor):
                                           batch_query.output_token_ids,
                                           None,
                                           None,
-                                          medusa_states_list))
+                                          medusa_states_list)

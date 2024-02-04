@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple, Union, Any
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import LoRAMap
 from maga_transformer.async_decoder_engine.scheduler import Scheduler
-from maga_transformer.async_decoder_engine.batch_query import BatchQuery, ModelOutput
+from maga_transformer.async_decoder_engine.batch_query import BatchQuery
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.sample_utils import BaseSampler, SamplerSetupParams, SamplingParams
 from maga_transformer.utils.dump_config_utils import dump_engine_to_table
@@ -69,8 +69,8 @@ class NormalModelExecutor(ExecutorBase):
         return config_json
 
     def _unpack_hidden_states(self, batch_query: BatchQuery, hidden_states: torch.Tensor):
-        index_list = list(range(0, batch_query.generate_batch_size * batch_query.beam_width))
-        offset = batch_query.generate_batch_size * batch_query.beam_width - 1
+        index_list = list(range(0, batch_query.generate_batch_size * batch_query.num_beams))
+        offset = batch_query.generate_batch_size * batch_query.num_beams - 1
         for i in range(0, batch_query.context_batch_size):
             offset = offset + batch_query.context_query_context_lengths_list[i]
             index_list.append(offset)
@@ -81,7 +81,7 @@ class NormalModelExecutor(ExecutorBase):
             input_embeds, attention_mask, position_ids = self._pre_process(batch_query)
             k_cache, v_cache = self.scheduler_.cache_manager_.get_kv_cache_base()
             k_cache_scale, v_cache_scale = self.scheduler_.cache_manager_.get_kv_cache_scale_base()
-            prefix_lengths, count_length, max_prefix_length = self.scheduler_.query_resource_manager.get_prefix_args(batch_query)
+            prefix_lengths, count_length, max_prefix_length = self.scheduler_._stream_cache_manager.get_prefix_args(batch_query)
 
         with torch.cuda.nvtx.range('run_model'):
             hidden_states = self.model_ops.gpt_op.forward(
@@ -169,8 +169,7 @@ class NormalModelExecutor(ExecutorBase):
     def _create_context_attention_mask(self, batch_query: BatchQuery):
         if batch_query.has_context_query():
             attention_mask = self.model_ops.model.create_context_decoder_mask(
-                batch_query.context_query_context_lengths_list,
-                max(batch_query.context_query_context_lengths_list))
+                batch_query.context_query_context_lengths_list)
             attention_mask = self.append_reuse_mask(
                 attention_mask, batch_query.context_query_context_lengths_list, batch_query.context_query_reuse_lengths_list)
             return attention_mask
@@ -179,10 +178,10 @@ class NormalModelExecutor(ExecutorBase):
     def _extend_tensor_for_new_beams(self, tensor: torch.Tensor, batch_query: BatchQuery) -> torch.Tensor:
         original_shape = tensor.shape
         assert (original_shape[0] == batch_query.decoder_batch_size)
-        start_idx = batch_query.generate_batch_size * batch_query.beam_width
+        start_idx = batch_query.generate_batch_size * batch_query.num_beams
         end_idx = start_idx + batch_query.context_batch_size
         extended_tensor = self.model_ops.model.dup_dim0_for_beam_search(
-            tensor[start_idx: end_idx], batch_query.beam_width
+            tensor[start_idx: end_idx], batch_query.num_beams
         )
         tensor = torch.concat([tensor[:start_idx], extended_tensor], dim=0)
         return tensor
@@ -190,13 +189,13 @@ class NormalModelExecutor(ExecutorBase):
     def _prepare_kv_cache_for_beams(self, batch_query: BatchQuery,
                                     key_cache: torch.Tensor, value_cache: torch.Tensor
     ) -> None:
-        generate_block_rows = batch_query.generate_batch_size * batch_query.beam_width
+        generate_block_rows = batch_query.generate_batch_size * batch_query.num_beams
         new_blocks: List[torch.Tensor] = [batch_query.cache_block_indice[:generate_block_rows]]
         for idx in range(batch_query.context_batch_size):
             query_cache_blocks = batch_query.cache_block_indice[generate_block_rows + idx]
             block_num = int(query_cache_blocks.count_nonzero().item())
 
-            allocation_row_num = batch_query.beam_width - 1
+            allocation_row_num = batch_query.num_beams - 1
             new_block_num = self.scheduler_.cache_manager_.malloc(block_num * allocation_row_num)
             query_new_blocks = torch.Tensor(new_block_num, device=query_cache_blocks.device) \
                 .reshape(allocation_row_num, block_num) \
@@ -214,9 +213,8 @@ class NormalModelExecutor(ExecutorBase):
                 value_cache[:, target_blocks] = value_cache[:, src_blocks]
 
             query_new_blocks = torch.concat([query_cache_blocks.unsqueeze(0), query_new_blocks], dim=0)
-            batch_query.queries[batch_query.generate_batch_size + idx].block_indice = \
-                query_new_blocks[:,:block_num].tolist() # type: ignore
-
+            batch_query.context_streams[idx].set_kvcache(query_new_blocks[:,:block_num].tolist(),
+                                                         batch_query.context_streams[idx].reuse_length)
             new_blocks.extend([query_new_blocks])
 
         batch_query.cache_block_indice = torch.concat(new_blocks, dim=0)
@@ -257,28 +255,30 @@ class NormalModelExecutor(ExecutorBase):
 
     def _calculate_loss(self,
             batch_query: BatchQuery, all_hidden_states: torch.Tensor):
-        for query in batch_query.queries:
-            if query.generate_config.calculate_loss and query.loss == None:
+        for stream in batch_query.streams:
+            if stream.generate_config.calculate_loss and query.loss == None:
                 all_logits = self._post_transformer_nn(all_hidden_states)
                 break
             
         start_idx = 0
-        for i, query in enumerate(batch_query.queries[:]):
-            if not query.generate_config.calculate_loss:
+        for i, stream in enumerate(batch_query.streams):
+            if not stream.generate_config.calculate_loss:
                 continue
             if query.loss != None:
                 continue
-            shift_labels = query.output_token_ids_[0, 1:query.context_length].type(torch.int64).contiguous()
-            shift_logits = all_logits[start_idx : start_idx + query.context_length - 1, ].contiguous()
-            start_idx += query.context_length
+            shift_labels = stream.complete_token_ids[0, 1:stream.context_length].type(torch.int64).contiguous()
+            shift_logits = all_logits[start_idx : start_idx + stream.context_length - 1, ].contiguous()
+            start_idx += stream.context_length
             loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
             loss = loss_fct(shift_logits.to("cuda:0"), shift_labels.to("cuda:0"))
-            if query.generate_config.calculate_loss == 1:
-                loss_mean = loss.sum(dim=0) / (query.context_length - 1)
+            if stream.generate_config.calculate_loss == 1:
+                loss_mean = loss.sum(dim=0) / (stream.context_length - 1)
                 loss_mean = loss_mean.exp()
-                query.loss = loss_mean
-            elif query.generate_config.calculate_loss == 2:
-                query.loss = loss
+                stream.set_loss(loss_mean)
+            elif stream.generate_config.calculate_loss == 2:
+                stream.set_loss(loss)
+            else:
+                raise Exception("calculate_loss in generate_config can only be 0, 1 or 2")
 
     def _post_process(
             self,
@@ -286,7 +286,7 @@ class NormalModelExecutor(ExecutorBase):
             logits: torch.Tensor,
             hidden_states: torch.Tensor) -> None:
         key_cache, value_cache = self.scheduler_.cache_manager_.get_kv_cache_base()
-        if batch_query.beam_width > 1:
+        if batch_query.num_beams > 1:
             logits = self._prepare_beam_search(batch_query, logits, key_cache, value_cache)
 
         fake_input_lengths = batch_query.seq_lengths_list + batch_query.context_query_context_lengths_list
@@ -298,14 +298,14 @@ class NormalModelExecutor(ExecutorBase):
         input_lengths = self._to_cuda_tensor(fake_input_lengths)
         sequence_lengths = self._to_cuda_tensor(gen_lengths)
         # TODO: These tensors are allocated on each iteration. Try allocate them once for each query.
-        finished = torch.zeros((batch_query.total_batch_size * batch_query.beam_width), device="cuda:0").bool()
+
+        finished = torch.zeros((batch_query.total_batch_size * batch_query.num_beams), device="cuda:0").bool()
         self._reconstruct_sampler(batch_query)
-        
-        # shape(max_length + gen_num, batch_size)
+
         token_ids = to_cuda(batch_query.output_token_ids.permute(1, 0).contiguous())
         
         cum_log_probs = torch.concat(
-            [query.cum_log_probs for query in batch_query.queries], dim=0
+            [stream.cum_log_probs for stream in batch_query.streams], dim=0
         ).to("cuda:0")
         output_log_probs = torch.zeros((batch_query.total_batch_size), dtype=torch.float, device='cuda:0')
         index_log_prob = None
@@ -315,10 +315,10 @@ class NormalModelExecutor(ExecutorBase):
         self.model_ops.sampler.do_sampling(SamplingParams(
             batch_query.max_token_len,
             batch_query.total_batch_size,
-            batch_query.beam_width,
+            batch_query.num_beams,
             batch_query.max_token_len,
             token_ids,
-            logits.view(batch_query.total_batch_size, batch_query.beam_width, -1),
+            logits.view(batch_query.total_batch_size, batch_query.num_beams, -1),
             finished,
             input_lengths,
             sequence_lengths,
@@ -332,13 +332,11 @@ class NormalModelExecutor(ExecutorBase):
         ))
 
         output_token_ids = token_ids.permute(1, 0)
-        # TODO(wangyin): reshape
-        batch_query.update_model_output(ModelOutput(finished,
+        batch_query.record_update_tensors(finished,
                                           [1] * batch_query.total_batch_size,
                                           hidden_states,
                                           logits,
                                           cum_log_probs,
                                           output_token_ids,
                                           output_log_probs,
-                                          index_log_prob))
-
+                                          index_log_prob)

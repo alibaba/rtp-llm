@@ -12,6 +12,7 @@ class RequestFormat:
 class GenerateConfig(BaseModel):
     max_new_tokens: int = 1000
     num_beams: int = 1
+    num_return_sequences: int = 1
     top_k: Union[List[int], int] = 0
     top_p: Union[List[float], float] = 0.95
     temperature: Union[List[float], float] = 1.0
@@ -43,7 +44,7 @@ class GenerateConfig(BaseModel):
     custom_prop: str = "{}"
 
     # lora
-    adapter_name: Optional[Union[str,List[str]]] = None
+    adapter_name: Optional[Union[str, List[str]]] = None
 
     def gen_hash_value(self):
         cp = copy.copy(self)
