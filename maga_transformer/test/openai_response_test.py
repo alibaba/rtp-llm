@@ -1,6 +1,7 @@
 import os
 import json
 import torch
+import logging
 from unittest import TestCase, main, IsolatedAsyncioTestCase
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 from transformers import AutoTokenizer, PreTrainedTokenizer
@@ -19,8 +20,9 @@ async def fake_output_generator(
 ) -> AsyncGenerator[GenerateOutput, None]:
     for i in range(0, len(output_ids)):
         output_tensor = torch.full((1, max_seq_len), eos_id, dtype=torch.int)
-        output_tensor[0, :len(output_ids[:i])] = torch.tensor(output_ids[:i], dtype=torch.int)
+        output_tensor[0, :len(output_ids[:i + 1])] = torch.tensor(output_ids[:i + 1], dtype=torch.int)
         finished = torch.full((1,), (i == (len(output_ids) - 1)), dtype=torch.bool)
+        logging.info(f"i={i}, finished={finished}")
         yield GenerateOutput(
             hidden_states=None,
             output_ids=output_tensor,
@@ -53,7 +55,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         self.model.tokenizer = tokenizer
         self.endpoint = OpenaiEndopoint(self.model)
-        test_ids = [198, 84169, 25, 49434, 239, 73670, 37029, 633, 11080, 69364, 5333, 8997, 2512, 25, 633, 11080, 69364, 198, 2512, 5571, 25, 5212, 2527, 788, 330, 113074, 11, 10236, 122, 236, 28404, 497, 330, 3843, 788, 330, 69, 47910, 16707, 37763]
+        test_ids = [198, 84169, 25, 49434, 239, 73670, 37029, 633, 11080, 69364, 5333, 8997, 2512, 25, 633, 11080, 69364, 198, 2512, 5571, 25, 5212, 2527, 788, 330, 113074, 11, 10236, 122, 236, 28404, 497, 330, 3843, 788, 330, 69, 47910, 16707]
         render_params = RendererParams(
             model_type="qwen",
             max_seq_len=1024,
@@ -80,6 +82,28 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             },
             "finish_reason": "function_call"
         })
+
+    async def test_finish_reason(self):
+        os.environ["MODEL_TYPE"] = "qwen"
+        tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
+        self.model.tokenizer = tokenizer
+        self.endpoint = OpenaiEndopoint(self.model)
+        test_ids = [198, 84169, 25, 49434, 239, 73670, 37029]
+        render_params = RendererParams(
+            model_type="qwen",
+            max_seq_len=MAX_SEQ_LEN,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        request = ChatCompletionRequest(messages=[])
+        id_generator = fake_output_generator(test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0)
+        input_length = 1018
+        stream_generator = chat_renderer.render_response_stream(id_generator, request, input_length)
+        response = await self.endpoint._complete_non_stream_response(stream_generator, None)
+        print(response)
+        assert(response.choices[0].finish_reason)
+        self.assertEqual(FinisheReason.length, response.choices[0].finish_reason)
 
 if __name__ == '__main__':
     main()

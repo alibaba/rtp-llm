@@ -292,7 +292,7 @@ class QwenRenderer(CustomChatRenderer):
         # TODO(wangyin): This slicing shouldn't be done here.
         # model should return output length, ids should be sliced with output length.
         output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()
-        finish_reason = self._check_finish_reason(output_ids) if finished else None
+        finish_reason = self._check_finish_reason(output_ids, input_length) if finished else None
 
         output_length = len(output_ids)
         output_ids = self._remove_stop_word_ids(output_ids)
@@ -329,7 +329,8 @@ class QwenRenderer(CustomChatRenderer):
                     )]
                 )
 
-            processed_output = self._process_output_ids_tensor(input_token_length, output.output_ids)
+            processed_output = self._process_output_ids_tensor(
+                input_token_length, output.output_ids, output.finished)
             output_string = processed_output.output_str.strip()
             output_length = len(processed_output.output_str)
             finish_reason = processed_output.finish_reason
