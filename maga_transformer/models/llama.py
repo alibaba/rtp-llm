@@ -81,6 +81,10 @@ class Llama(GPT):
             else:
                 raise Exception(f"unsupport rope_scaling {config_json['rope_scaling']}")
         config.special_tokens.eos_token_id = config_json['eos_token_id']
+        use_logn_attn = config_json.get("use_logn_attn")
+        if (use_logn_attn):
+            config.use_logn_attn = True
+            config.logn_seq_len = config_json.get("seq_length")
 
     @staticmethod
     def from_params(config: GptInitModelParameters, params_json: Dict[str, Any]):
