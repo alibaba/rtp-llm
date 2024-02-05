@@ -167,7 +167,7 @@ class CustomChatRenderer():
     def _check_finish_reason(self, token_ids: List[int]) -> Optional[FinisheReason]:
         if len(token_ids) >= self.max_seq_len:
             return FinisheReason.length
-        if token_ids[-1] == self.eos_token_id:
+        if token_ids and token_ids[-1] == self.eos_token_id:
             return FinisheReason.stop
         for stop_word_ids in self.stop_word_ids_list:
             if (len(token_ids) >= len(stop_word_ids)) and (token_ids[-len(stop_word_ids):] == stop_word_ids):
