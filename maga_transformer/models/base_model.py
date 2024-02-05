@@ -72,13 +72,13 @@ class AuxInfo(BaseModel):
     output_len: int = 0
     cum_log_probs: List[float] = Field(default_factory=list)
     beam_responses: List[str] = None
-        
+
 class GenerateOutput(BaseModel):
     hidden_states: Optional[torch.Tensor] = None
     output_ids: torch.Tensor = None
     finished: bool = False
     aux_info: AuxInfo = Field(default_factory=AuxInfo)
-    loss: torch.Tensor = None
+    loss: Optional[torch.Tensor] = None
     logits: Optional[torch.Tensor] = None
 
     class Config:
