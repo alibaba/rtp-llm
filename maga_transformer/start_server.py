@@ -175,27 +175,24 @@ class FastApiServer(object):
             self, generate_call: Callable[[], AsyncGenerator[StreamObjectType, None]]
     ) -> AsyncGenerator[StreamObjectType, None]:
         assert self._inference_worker is not None
-        try:
-            with Timer() as t:
-                last_iterate_time = current_time_ms()
-                first_token = True
-                iter_count = 0
-                response_generator = generate_call()
-                async for x in response_generator:
-                    end_time = current_time_ms()
-                    if first_token:
-                        first_token = False
-                        kmonitor.report(GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC, end_time - last_iterate_time)
-                    else:
-                        kmonitor.report(GaugeMetrics.RESPONSE_ITER_RT_METRIC, end_time - last_iterate_time)
-                    kmonitor.report(AccMetrics.ITER_QPS_METRIC, 1)
-                    last_iterate_time = end_time
-                    iter_count += 1
-                    yield x
-            kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
-            kmonitor.report(GaugeMetrics.LANTENCY_METRIC, t.cost_ms())
-        finally:
-            self._controller.decrement()
+        with Timer() as t:
+            last_iterate_time = current_time_ms()
+            first_token = True
+            iter_count = 0
+            response_generator = generate_call()
+            async for x in response_generator:
+                end_time = current_time_ms()
+                if first_token:
+                    first_token = False
+                    kmonitor.report(GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC, end_time - last_iterate_time)
+                else:
+                    kmonitor.report(GaugeMetrics.RESPONSE_ITER_RT_METRIC, end_time - last_iterate_time)
+                kmonitor.report(AccMetrics.ITER_QPS_METRIC, 1)
+                last_iterate_time = end_time
+                iter_count += 1
+                yield x
+        kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
+        kmonitor.report(GaugeMetrics.LANTENCY_METRIC, t.cost_ms())
 
     async def _infer_impl(self, req: Union[str,Dict[Any, Any]], id: int):
         assert self._inference_worker is not None
@@ -212,7 +209,11 @@ class FastApiServer(object):
             assert self._inference_worker is not None
             return self._inference_worker.inference(**req)
 
-        res = self._call_generate_with_report(generate_call)
+        try:
+            res = self._call_generate_with_report(generate_call)
+        finally:
+            self._controller.decrement()
+        
         if is_streaming:
             return StreamingResponse(self.stream_response(req, res, id), media_type="text/event-stream")
         last_element = None
