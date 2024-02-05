@@ -109,4 +109,4 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 <img src=picture/dingding.png width="200px">
 
 #### 微信群
-<img src=picture/weixin.JPG width="200px">
+<img src=picture/weixin.png width="200px">

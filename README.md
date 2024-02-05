@@ -94,4 +94,4 @@ Our project is mainly based on [FasterTransformer](https://github.com/NVIDIA/Fas
 <img src=picture/dingding.png width="200px">
 
 #### WeChat Group
-<img src=picture/weixin.JPG width="200px">
+<img src=picture/weixin.png width="200px">
