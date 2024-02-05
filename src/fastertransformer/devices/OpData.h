@@ -61,22 +61,8 @@ struct GemmParams {
     const std::optional<const Tensor> A_scale;
     const std::optional<const Tensor> B_Scale;
 
-    // const float alpha;
-    // const float beta;
-
     TransposeOperation transA = TransposeOperation::NONE;
     TransposeOperation transB = TransposeOperation::NONE;
-
-    // const int lda;
-    // const int ldb;
-    // const int ldc;
-
-    // const int64_t strideA;
-    // const int64_t strideB;
-    // const int64_t strideC;
-
-    Tensor& workspace;
-    // TODO: maybe add activation-fused gemm interface.
 };
 
 struct AttentionCommonInputs {
