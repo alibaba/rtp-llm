@@ -9,7 +9,7 @@ from .glm_130b import Glm130B
 from .bloom import Bloom
 from .chat_glm_v2 import ChatGlmV2
 from .chat_glm_v3 import ChatGlmV3
-from .qwen import QWen_7B, QWen_13B, QWen_1B8
+from .qwen import QWen_7B, QWen_13B, QWen_1B8, QWen2
 from .falcon import Falcon
 from .mpt import Mpt
 from .phi import Phi
