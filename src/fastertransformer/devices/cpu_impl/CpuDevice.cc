@@ -10,6 +10,7 @@ CpuDevice::~CpuDevice() {
 
 void CpuDevice::layernorm(LayernormParams& params) {}
 void CpuDevice::gemm(GemmParams& params) {}
+void CpuDevice::groupedGemm(GroupedGemmParams& params) {}
 void CpuDevice::contextAttention(AttentionModuleParams& params) {}
 void CpuDevice::decoderSelfAttention(AttentionModuleParams& params) {}
 void CpuDevice::attentionLayer(AttentionLayerParams& params) {}

@@ -12,6 +12,10 @@ void CudaDevice::gemm(GemmParams& params) {
 
 }
 
+void CudaDevice::groupedGemm(GroupedGemmParams& params) {
+
+}
+
 void CudaDevice::contextAttention(AttentionModuleParams& params) {
 
 }

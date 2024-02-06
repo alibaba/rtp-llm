@@ -52,17 +52,52 @@ enum class TransposeOperation {
     CONJUGATE_TRANSPOSE = 2,
 };
 
-// C = A * B
+// D = alpha * op(A) * op(B) + beta * C
+// shapes of A, B, C, D have two options: [m, k], [k, n], [m, n], [m, n]
+// or [bs, m, k], [bs, k, n], [bs, m, n], [bs, m, n] where bs is batch_size
+// NOTE: caller needs to preallocate C
 struct GemmParams {
-    const Tensor& A;  // expected shape: [m, k]
-    const Tensor& B;  // expected shape: [k, n]
-    Tensor&       C;  // expected shape: [m, n]
+    GemmParams(const Tensor& A, const Tensor& B, Tensor& C)
+    : A(A), B(B), C(C), D(C) {}
+    GemmParams(const Tensor& A, const Tensor& B, const Tensor& C, Tensor& D)
+    : A(A), B(B), C(C), D(D) {}
 
-    const std::optional<const Tensor> A_scale;
-    const std::optional<const Tensor> B_Scale;
+    const Tensor& A;
+    const Tensor& B;
+    const Tensor& C;
+    Tensor&       D;
 
-    TransposeOperation transA = TransposeOperation::NONE;
-    TransposeOperation transB = TransposeOperation::NONE;
+    const std::optional<const Tensor> A_scale = std::nullopt;
+    const std::optional<const Tensor> B_Scale = std::nullopt;
+    const std::optional<const Tensor> C_scale = std::nullopt;
+
+    const TransposeOperation transA = TransposeOperation::NONE;
+    const TransposeOperation transB = TransposeOperation::NONE;
+
+    const float alpha = 1.0f;
+    const float beta  = 0.0f;
+    const std::optional<DataType> computation_type = std::nullopt;
+};
+
+// D = alpha * op(A) * op(B) + beta * C
+// shapes of each A, B, C, D needs to be [m, k], [k, n], [m, n], [m, n]
+struct GroupedGemmParams {
+    GroupedGemmParams(
+        const std::vector<Tensor>& A,
+        const std::vector<Tensor>& B,
+        std::vector<Tensor>& C
+    ) : A(A), B(B), C(C), D(C) {}
+    GroupedGemmParams(
+        const std::vector<Tensor>& A,
+        const std::vector<Tensor>& B,
+        const std::vector<Tensor>& C,
+        std::vector<Tensor>&       D
+    ) : A(A), B(B), C(C), D(D) {}
+
+    const std::vector<Tensor>& A;
+    const std::vector<Tensor>& B;
+    const std::vector<Tensor>& C;
+    std::vector<Tensor>&       D;
 };
 
 struct AttentionCommonInputs {

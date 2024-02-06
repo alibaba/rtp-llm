@@ -17,6 +17,7 @@ public:
 public:
     void layernorm(LayernormParams& params);
     void gemm(GemmParams& params);
+    void groupedGemm(GroupedGemmParams& params);
     void contextAttention(AttentionModuleParams& params);
     void decoderSelfAttention(AttentionModuleParams& params);
     void attentionLayer(AttentionLayerParams& params);

@@ -24,11 +24,7 @@ TEST_F(CudaOpsTest, testGemmOp) {
     auto B = device_->allocateBuffer({DataType::TYPE_FP16, {4, 3}}, {});
     auto C = device_->allocateBuffer({DataType::TYPE_FP16, {2, 3}}, {});
 
-    GemmParams params {
-        A, B, C,
-        nullopt, nullopt,
-        TransposeOperation::NONE, TransposeOperation::NONE
-    };
+    GemmParams params {A, B, C};
     device_->gemm(params);
 }
 

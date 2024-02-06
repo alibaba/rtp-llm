@@ -15,8 +15,9 @@ public:
     virtual size_t getKvCacheBlockSize(const ModelInfo& model) const ;
 
     // basic ops
-    virtual void layernorm(LayernormParams& params) = 0;
-    virtual void gemm(GemmParams& params)           = 0;
+    virtual void layernorm(LayernormParams& params)        = 0;
+    virtual void gemm(GemmParams& params)                  = 0;
+    virtual void groupedGemm(GroupedGemmParams& params)    = 0;
 
     // dedicated attention ops
     virtual void contextAttention(AttentionModuleParams& params)     = 0;
