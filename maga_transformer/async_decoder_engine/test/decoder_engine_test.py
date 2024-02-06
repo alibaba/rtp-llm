@@ -125,11 +125,11 @@ class DecoderEngineTest(TestCase):
         generate_model_input.side_effect = Exception("test exception")
         pipeline = self.create_pipeline()
         try:
-            origin_block = len(pipeline.model.decoder_engine_.scheduler_.cache_manager_.free_blocks_index)
+            origin_block = len(pipeline.model.decoder_engine_.scheduler_._stream_cache_manager.cache_manager_.free_blocks_index)
             gen = pipeline("hello, what's your name?")
             with self.assertRaisesRegex(Exception, "test exception"):
                 results = [result for result in gen]
-            remain_block = len(pipeline.model.decoder_engine_.scheduler_.cache_manager_.free_blocks_index)
+            remain_block = len(pipeline.model.decoder_engine_.scheduler_._stream_cache_manager.cache_manager_.free_blocks_index)
             self.assertEqual(origin_block, remain_block)
         finally:
             pipeline.model.stop()

@@ -9,8 +9,9 @@ from pydantic import BaseModel, Field, PrivateAttr
 
 from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.utils.stop_utils import create_stop_criteria_list
-from maga_transformer.models.base_model import GenerateInput, GenerateOutput
 from maga_transformer.metrics import kmonitor, GaugeMetrics
+from maga_transformer.models.base_model import GenerateInput, GenerateOutput
+from maga_transformer.async_decoder_engine.ptuning.ptuning import PtuningInfo
 
 class Status(Enum):
     WAITING = 0
@@ -49,6 +50,7 @@ class GenerateStream(BaseModel):
             self._input.generate_config.stop_words_list,
             self._input.generate_config.stop_words_str,
             self._input.tokenizer)
+        self._ptuning_info = PtuningInfo()
         self._lock = Lock()
 
     def add_resource_dtor(self, dtor):
@@ -59,10 +61,16 @@ class GenerateStream(BaseModel):
             dtor()
         self._resource_dtors.clear()
 
-    def update_ptuning(self, prefix_tensors):
-        self._input.update_ptuning(prefix_tensors)
-        self._seq_length = self.input_length
-        self._complete_token_ids[0, :self._seq_length] = self._input.token_ids
+    def update_ptuning(self, ptuning_info):
+        self._ptuning_info = ptuning_info
+        if ptuning_info.prefix_tensors is not None:
+            self._input.update_ptuning(ptuning_info.prefix_tensors)
+            self._seq_length = self.input_length
+            self._complete_token_ids[0, :self._seq_length] = self._input.token_ids
+
+    @property
+    def ptuning_info(self):
+        return self._ptuning_info
 
     @property
     def cum_log_probs(self):

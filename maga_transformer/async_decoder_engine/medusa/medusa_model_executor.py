@@ -4,15 +4,14 @@ import numpy as np
 from typing import Any, List, Tuple
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.medusa.medusa_config import MedusaState, MedusaBuffer
-from maga_transformer.async_decoder_engine.scheduler import Scheduler
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery, ModelOutput
 from maga_transformer.async_decoder_engine.normal_model_executor import NormalModelExecutor, ModelOps
 from maga_transformer.async_decoder_engine.medusa.utils import generate_candidates, evaluate_posterior
 from maga_transformer.utils.util import to_cuda
 
 class MedusaModelExecutor(NormalModelExecutor):
-    def __init__(self, model_ops: ModelOps, scheduler: Scheduler, medusa_buffer: MedusaBuffer):
-        super().__init__(model_ops, scheduler)
+    def __init__(self, model_ops: ModelOps, cache_manager, medusa_buffer: MedusaBuffer):
+        super().__init__(model_ops, cache_manager)
         assert self.model_ops.model.lm_head is not None, "model lm_head should not be None"
         assert self.model_ops.model.medusa_head is not None, "model medusa_head should not be None"
         assert model_ops.config.medusa_config is not None, "medusa_config shoule not be None"
@@ -20,7 +19,7 @@ class MedusaModelExecutor(NormalModelExecutor):
         self.medusa_buffer = medusa_buffer
 
     def _create_batch_query(self, batch_query: BatchQuery) -> BatchQuery:
-        medusa_query = BatchQuery(batch_query.count_prefix_length, batch_query.gen_num_per_circle, batch_query.nccl_op_)
+        medusa_query = BatchQuery(batch_query.gen_num_per_circle, batch_query.nccl_op_)
         medusa_query.context_batch_size = batch_query.total_batch_size
         medusa_query.cache_block_indice = batch_query.cache_block_indice
         medusa_query.context_streams = batch_query.context_streams
@@ -82,7 +81,7 @@ class MedusaModelExecutor(NormalModelExecutor):
 
         tgt_seq_idxs = list(range(prev_length, prev_length + accept_length + 1))
         src_seq_idxs = self.medusa_buffer.retrieve_indices[best_candidate, : accept_length + 1] + prev_length
-        self.scheduler_.cache_manager_.copy_kvcache_from_seq_idxs(block_indice, src_seq_idxs.tolist(), tgt_seq_idxs)
+        self.cache_manager_.copy_kvcache_from_seq_idxs(block_indice, src_seq_idxs.tolist(), tgt_seq_idxs)
 
         return MedusaState(candidates, tree_candidates), new_tokens.squeeze_(0)
 

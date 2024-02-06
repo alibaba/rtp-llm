@@ -5,8 +5,9 @@ from unittest import TestCase, main
 from maga_transformer.async_decoder_engine.scheduler import Scheduler
 from maga_transformer.async_decoder_engine.batch_query import ModelOutput
 from maga_transformer.async_decoder_engine.ptuning import PrefixParams, PrefixType
-from maga_transformer.async_decoder_engine.cache_manager import CacheConfigGenerator
+from maga_transformer.async_decoder_engine.cache_manager import CacheConfigGenerator, CacheManager
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
+from maga_transformer.async_decoder_engine.stream_cache_manager import StreamCacheManager
 from maga_transformer.models.base_model import GenerateInput
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
@@ -47,10 +48,14 @@ class SchedulerTest(TestCase):
         batch_query.generate_model_input()
         return batch_query
 
+    @mock.patch.dict('os.environ', {'GENERATE_RESERVE_BLOCKS': '0'})
     def test_simple(self):
         config, cache_config = self._init_config()
-        scheduler = Scheduler(config, cache_config)
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
+        cache_manager = CacheManager(cache_config, None)
+        stream_cache_manager = StreamCacheManager(
+            config, None, cache_manager, 1)
+        scheduler = Scheduler(config, stream_cache_manager)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 7)
         self.assertFalse(scheduler.have_streams())
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
@@ -63,7 +68,7 @@ class SchedulerTest(TestCase):
             generate_config=generate_config))
         scheduler.enqueue(stream2)
         batch_query = self._get_batch_query(scheduler)
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 5)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 5)
         self.assertEqual(scheduler.running_batch_size(), 2)
         self.assertEqual(scheduler.wait_stream_size(), 0)
         self.assertEqual(scheduler.running_batch_size(), 2)
@@ -86,35 +91,41 @@ class SchedulerTest(TestCase):
         self.assertEqual(stream2.block_indice, [[]])
         self.assertEqual(stream2.output.output_ids.numpy().tolist(), [[6]])
 
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 5)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 5)
         batch_query = self._get_batch_query(scheduler)
         self.assertEqual(scheduler.running_batch_size(), 1)
         self.assertEqual(scheduler.wait_stream_size(), 0)
         [s.release_resource() for s in [stream1, stream2]]
         self.assertEqual(stream1.block_indice, [[]])
         self.assertEqual(stream2.block_indice, [[]])
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 7)
 
     def test_put_lack_mem(self):
         config, cache_config = self._init_config()
-        scheduler = Scheduler(config, cache_config)
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
+        cache_manager = CacheManager(cache_config, None)
+        stream_cache_manager = StreamCacheManager(
+            config, None, cache_manager, 1)
+        scheduler = Scheduler(config, stream_cache_manager)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 7)
         self.assertFalse(scheduler.have_streams())
         inputs = torch.IntTensor([list(range(64))])
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
-        images = [[]]
-
         stream = GenerateStream(GenerateInput(token_ids=inputs, generate_config=generate_config))
         scheduler.enqueue(stream)
         scheduler.schedule()
-        self.assertEqual(stream.stop_reason, "failed to malloc 8 blocks, only 7 blocks left")
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
+        self.assertEqual(stream.stop_reason, '')
+        self.assertEqual(len(scheduler._waiting_streams), 1)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 7)
 
+    @mock.patch.dict('os.environ', {'GENERATE_RESERVE_BLOCKS': '0'})
     def test_extend_lack_mem(self):
         config, cache_config = self._init_config()
-        scheduler = Scheduler(config, cache_config)
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
+        cache_manager = CacheManager(cache_config, None)
+        stream_cache_manager = StreamCacheManager(
+            config, None, cache_manager, 1)
+        scheduler = Scheduler(config, stream_cache_manager)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 7)
         self.assertFalse(scheduler.have_streams())
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
@@ -125,9 +136,9 @@ class SchedulerTest(TestCase):
         ]
         for stream in streams:
             scheduler.enqueue(stream)
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 7)
         batch_query = self._get_batch_query(scheduler)
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 0)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 0)
         finished = torch.BoolTensor([False, False, False])
         update_length = [1, 1, 1]
         update_token_ids = torch.IntTensor([[1]*32 + [4], [1]*32 + [6], [1]*32 + [4]])
@@ -136,28 +147,33 @@ class SchedulerTest(TestCase):
             finished=finished, update_length=update_length, update_token_ids=update_token_ids)
 
         scheduler.prepare_next_step()
-        self.assertEqual(streams[0].stop_reason, 'LACK_MEM')
+        self.assertEqual(streams[0].stop_reason, '')
         self.assertEqual(streams[1].stop_reason, '')
         self.assertEqual(streams[2].stop_reason, '')
-        self.assertEqual(streams[0].stopped, True)
+        self.assertEqual(streams[0].stopped, False)
         self.assertEqual(streams[1].stopped, False)
         self.assertEqual(streams[2].stopped, False)
         self.assertEqual(len(streams[1].block_indice), 1)
-        self.assertEqual(len(scheduler.batch_query.streams), 3)
+        self.assertEqual(len(scheduler.batch_query.streams), 2)
+        self.assertEqual(len(scheduler._waiting_streams), 1)
 
-    @mock.patch.dict('os.environ', {'REUSE_CACHE': '1'})
+    @mock.patch.dict('os.environ', {'REUSE_CACHE': '1', 'GENERATE_RESERVE_BLOCKS': '0'})
     def test_reuse(self):
+        logging.info('test_reuse')
         config, cache_config = self._init_config()
-        scheduler = Scheduler(config, cache_config)
+        cache_manager = CacheManager(cache_config, None)
+        stream_cache_manager = StreamCacheManager(
+            config, None, cache_manager, 1)
+        scheduler = Scheduler(config, stream_cache_manager)
         self.assertTrue(scheduler._stream_cache_manager.reuse_cache_)
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 7)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 7)
         self.assertFalse(scheduler.have_streams())
         generate_config: GenerateConfig = GenerateConfig(using_hf_sampling=False, chat_id='aaaa')
         stream = GenerateStream(GenerateInput(token_ids=torch.tensor(list(range(16))), generate_config=generate_config))
         scheduler.enqueue(stream)
         batch_query = self._get_batch_query(scheduler)
         self.assertEqual(stream.block_indice, [[1, 2]])
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 5)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 5)
         finished = torch.BoolTensor([True])
         update_length = [1]
         update_token_ids = torch.IntTensor([list(range(64)) + [6]])
@@ -168,14 +184,14 @@ class SchedulerTest(TestCase):
         scheduler.prepare_next_step()
         stream.release_resource()
         self.assertEqual(stream.block_indice, [[]])
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 5)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 5)
         self.assertEqual(len(scheduler.batch_query.streams), 0)
 
         stream = GenerateStream(GenerateInput(token_ids=torch.tensor(list(range(32))), generate_config=generate_config))
         scheduler.enqueue(stream)
 
         batch_query = self._get_batch_query(scheduler)
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 3)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 3)
         self.assertEqual(stream.block_indice, [[1, 2, 3, 4]])
         self.assertEqual(stream.reuse_length, 16)
         update_length = [1]
@@ -189,10 +205,10 @@ class SchedulerTest(TestCase):
         stream = GenerateStream(GenerateInput(token_ids=torch.tensor(list(range(24))), generate_config=generate_config))
         scheduler.enqueue(stream)
         batch_query = self._get_batch_query(scheduler)
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 4)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 4)
         self.assertEqual(stream.block_indice, [[1, 2, 3]])
         self.assertEqual(stream.reuse_length, 23)
-        prefix_lengths, count_length, max_prefix_length = scheduler._stream_cache_manager.get_prefix_args(batch_query)
+        prefix_lengths, count_length, max_prefix_length = batch_query.get_prefix_args()
         self.assertEqual(prefix_lengths.numpy().tolist(), [23])
         self.assertEqual(count_length.numpy().tolist(), [True])
         self.assertEqual(max_prefix_length.numpy().tolist(), [0])
@@ -206,14 +222,17 @@ class SchedulerTest(TestCase):
         scheduler.prepare_next_step()
         self.assertEqual(stream.block_indice, [[1, 2, 3, 5]])
 
-    @mock.patch.dict('os.environ', {'REUSE_CACHE': '1'})
+    @mock.patch.dict('os.environ', {'REUSE_CACHE': '1', 'GENERATE_RESERVE_BLOCKS': '0'})
     def test_ptuning(self):
         config, cache_config = self._init_config()
         prefix_seq_len = 9
         prefix_prompt = torch.zeros((config.layer_num * 2, config.head_num_kv, prefix_seq_len, config.size_per_head), dtype=torch.float16, device="cuda:0")
         prefix_param = PrefixParams(prefix_prompt, PrefixType.PTuningV2, None)
-        scheduler = Scheduler(config, cache_config, prefix_param)
-        self.assertEqual(len(scheduler.cache_manager_.free_blocks_index), 5)
+        cache_manager = CacheManager(cache_config, None)
+        stream_cache_manager = StreamCacheManager(
+            config, prefix_param, cache_manager, 1)
+        scheduler = Scheduler(config, stream_cache_manager, 1)
+        self.assertEqual(len(scheduler._stream_cache_manager.cache_manager_.free_blocks_index), 5)
         self.assertFalse(scheduler._stream_cache_manager.reuse_cache_)
         self.assertEqual(scheduler._stream_cache_manager.ptuning_.prefix_block_indice, [1])
         self.assertEqual(scheduler._stream_cache_manager.ptuning_.prefix_additional_block, 2)
@@ -222,11 +241,11 @@ class SchedulerTest(TestCase):
         inputs = torch.tensor(list(range(8)))
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
-        stream = GenerateStream(GenerateInput(token_ids=inputs, generate_config=generate_config))
+        stream = GenerateStream(GenerateInput(
+            token_ids=inputs, generate_config=generate_config))
         scheduler.enqueue(stream)
         batch_query = self._get_batch_query(scheduler)
-        prefix_lengths, count_length, max_prefix_length = scheduler._stream_cache_manager.get_prefix_args(batch_query)
-
+        prefix_lengths, count_length, max_prefix_length = batch_query.get_prefix_args()
         self.assertEqual(prefix_lengths.numpy().tolist(), [9])
         self.assertEqual(count_length.numpy().tolist(), [False])
         self.assertEqual(max_prefix_length.numpy().tolist(), [0])

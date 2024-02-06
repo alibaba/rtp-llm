@@ -4,7 +4,8 @@ from typing import Iterator, List, Optional, Tuple, Union, Any, Dict
 from maga_transformer.utils.util import get_mem_info
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.scheduler import Scheduler
-from maga_transformer.async_decoder_engine.cache_manager import CacheConfigGenerator
+from maga_transformer.async_decoder_engine.cache_manager import CacheConfigGenerator, CacheManager, CacheConfig
+from maga_transformer.async_decoder_engine.stream_cache_manager import StreamCacheManager
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.base_model import BaseModel
@@ -44,28 +45,33 @@ def create_engine(model: BaseModel, config: GptInitModelParameters, ptuning_args
         raise Exception(f"unsupported executor type: {executor_type}")
 
 def _create_normal_engine(model: BaseModel, config: GptInitModelParameters, ptuning_args: Optional[PrefixParams]) -> DecoderEngine:
-    model_ops = _create_ops(ModelType.Normal, model, config)    
+    model_ops = _create_ops(ModelType.Normal, model, config)
     logging.info(f'ft op mem info: used: {get_mem_info().used} free: {get_mem_info().free}')
     nccl_op = NcclOp()
+    gen_num_per_circle = 1
     cache_config = CacheConfigGenerator.create_config(config)
-    scheduler = Scheduler(config, cache_config, ptuning_args, 1, nccl_op)
-    executor = NormalModelExecutor(model_ops, scheduler)
+    cache_manager = CacheManager(cache_config, nccl_op)
+    stream_cache_manager = StreamCacheManager(config, ptuning_args, cache_manager, gen_num_per_circle)
+    scheduler = Scheduler(config, stream_cache_manager, gen_num_per_circle, nccl_op)
+    executor = NormalModelExecutor(model_ops, cache_manager)
     model.weight.lora_resource.ft_op = [model_ops.gpt_op]
     return DecoderEngine(executor, scheduler, config)
 
 def _create_sp_engine(model: BaseModel, config: GptInitModelParameters, sp_model: BaseModel, sp_config: GptInitModelParameters) -> DecoderEngine:
-    model_ops = _create_ops(ModelType.Normal, model, config)    
+    model_ops = _create_ops(ModelType.Normal, model, config)
     sp_model_ops = _create_ops(ModelType.Speculative, sp_model, sp_config)
     assert model.prefix_encoder is None and sp_model.prefix_encoder is None, "speculative not support prefix yet"
     nccl_op = NcclOp()
     cache_config, sp_cache_config = CacheConfigGenerator.create_sp_config(config, sp_config)
-    scheduler = Scheduler(config, cache_config, None, sp_config.gen_num_per_circle, nccl_op)
-    validate_executor = NormalModelExecutor(model_ops, scheduler)
-    
-    sp_scheduler = Scheduler(sp_config, sp_cache_config, None, sp_config.gen_num_per_circle, nccl_op)
-    sp_excutor = NormalModelExecutor(sp_model_ops, sp_scheduler)
-    
-    executor = SpModelExecutor(validate_executor, sp_excutor, sp_config.gen_num_per_circle)    
+    cache_manager = CacheManager(cache_config, nccl_op)
+    stream_cache_manager = StreamCacheManager(config, None, cache_manager, sp_config.gen_num_per_circle)
+    scheduler = Scheduler(config, stream_cache_manager, sp_config.gen_num_per_circle, nccl_op)
+    validate_executor = NormalModelExecutor(model_ops, cache_manager)
+
+    sp_cache_manager = CacheManager(sp_cache_config, nccl_op)
+    sp_excutor = NormalModelExecutor(sp_model_ops, sp_cache_manager)
+
+    executor = SpModelExecutor(validate_executor, sp_excutor, sp_config.gen_num_per_circle)
     return DecoderEngine(executor, scheduler, config)
 
 def _create_medusa_engine(model: BaseModel, config: GptInitModelParameters, **kwargs: Any) -> DecoderEngine:
@@ -78,8 +84,10 @@ def _create_medusa_engine(model: BaseModel, config: GptInitModelParameters, **kw
     logging.info(f'ft op mem info: used: {get_mem_info().used} free: {get_mem_info().free}')
     nccl_op = NcclOp()
     cache_config = CacheConfigGenerator.create_config(config)
-    scheduler = Scheduler(config, cache_config, None, gen_num_per_circle, nccl_op)
-    executor = MedusaModelExecutor(model_ops, scheduler, medusa_buffer)
+    cache_manager = CacheManager(cache_config, nccl_op)
+    stream_cache_manager = StreamCacheManager(config, None, cache_manager, gen_num_per_circle)
+    scheduler = Scheduler(config, stream_cache_manager, gen_num_per_circle, nccl_op)
+    executor = MedusaModelExecutor(model_ops, cache_manager, medusa_buffer)
     return DecoderEngine(executor, scheduler, config)
 
 def _create_ops(type: ModelType, model: BaseModel, config: GptInitModelParameters) -> ModelOps:

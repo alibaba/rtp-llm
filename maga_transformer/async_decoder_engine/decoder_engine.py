@@ -97,7 +97,6 @@ class DecoderEngine:
         kmonitor.report(GaugeMetrics.ASYNC_WAIT_QUERY_SIZE_METRIC,
                         self.scheduler_.wait_stream_size())
         kmonitor.report(GaugeMetrics.ASYNC_ITERATE_LANTENCY, cost_ms)
-        kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self.scheduler_.cache_manager_.block_used_ratio())
 
     # 这个后台任务一直在跑，应该用线程实现，用 Python 自己的线程切换机制。
     # 如果用协程的话对外返回的 decode 协程会因为 run_engine 协程一直运行被饿死。

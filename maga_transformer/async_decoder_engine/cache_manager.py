@@ -1,6 +1,8 @@
 import torch
+import atexit
+import time
 import logging
-from threading import Lock
+from threading import Lock, Thread
 from typing import List, Set, Tuple, NamedTuple, Any, Optional
 
 from maga_transformer.utils.lru_dict import LruDict
@@ -40,6 +42,7 @@ class CacheManager:
         self.block_nums = block_nums
         self.lock = Lock()
         self.block_cache = BlockCache()
+        self.start()
 
     def __free(self, indices: List[List[int]]) -> None:
         for indice in indices:
@@ -132,8 +135,24 @@ class CacheManager:
     def is_lack_mem(self) -> bool:
         return len(self.free_blocks_index) > 0
 
-    def block_used_ratio(self):
+    def _block_used_ratio(self):
         return 100 * (1 - (len(self.free_blocks_index) + self.block_cache.total_block) / self.block_nums)
+
+    def start(self):
+        self._running = True
+        self._thread = Thread(target=self._report_metrics, daemon=True)
+        self._thread.start()
+        atexit.register(self.stop)
+
+    def stop(self):
+        self._running = False
+        self._thread.join()  # 等待线程终止
+
+    def _report_metrics(self):
+        while self._running:
+            kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self._block_used_ratio())
+            time.sleep(1)
+
 
 class SingleBlock(NamedTuple):
     input_id_list: List[int] = []

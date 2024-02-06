@@ -2,6 +2,8 @@ import torch
 import logging
 from enum import Enum
 from typing import List, Dict, Tuple, NamedTuple, Union, Optional
+from pydantic import BaseModel
+
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.async_decoder_engine.cache_manager import CacheManager
@@ -18,7 +20,26 @@ class PrefixParams(NamedTuple):
     prefix_type: PrefixType
     prefix_tensor: Optional[Dict[int, torch.Tensor]]
 
-class Ptuning:
+class PtuningInfo(BaseModel):
+    ptuning: bool = False
+    count_length: bool = True
+    count_prefix_length: bool = True
+    prefix_tensors: Optional[torch.Tensor] = None
+
+    class Config:
+        arbitrary_types_allowed = True
+
+class PtuningBase:
+    def get_ptuning_info(self, generate_config):
+        _, prefix_tensors = self.get_prefix_params(
+            generate_config)
+        return PtuningInfo(
+            ptuning=True,
+            count_length=self.prefix_type == PrefixType.PromptTuning,
+            count_prefix_length=self.prefix_type != PrefixType.PTuningV2,
+            prefix_tensors=prefix_tensors)
+    
+class Ptuning(PtuningBase):
     def __init__(self, config: GptInitModelParameters, cache_manage: CacheManager, prefix_prompt: torch.Tensor, prefix_tensor: torch.Tensor, prefix_type: PrefixType) -> None:
         self.config = config
         self.cache_manage = cache_manage
@@ -30,9 +51,6 @@ class Ptuning:
         with Timer() as t:
             self.create_prefix_block(prefix_prompt)
         logging.info(f"create prefix block time: {t.cost_ms()}ms")
-
-    def count_length(self) -> bool:
-        return self.prefix_type == PrefixType.PromptTuning
 
     def calc_prefix_block_size(self, generate_config: GenerateConfig):
         return len(self.prefix_block_indice)
@@ -90,7 +108,7 @@ class Ptuning:
 2. prompt-tuning count_length = 1
 '''
 
-class MultiTaskPtuning:
+class MultiTaskPtuning(PtuningBase):
     def __init__(self, config: GptInitModelParameters, cache_manage: CacheManager, prefix_prompts: Dict[int, torch.Tensor], prefix_type: PrefixType, prefix_tensors: Dict[int, torch.Tensor]):
         #TODO(xinfei.sxf) 这句对吗？
         assert prefix_type in [PrefixType.PromptTuning, PrefixType]
@@ -116,6 +134,3 @@ class MultiTaskPtuning:
         if not task_id or task_id not in self.ptunings_:
             return 0
         return self.ptunings_[task_id].calc_prefix_block_size(generate_config)
-
-    def count_length(self) -> bool:
-        return self.prefix_type == PrefixType.PromptTuning

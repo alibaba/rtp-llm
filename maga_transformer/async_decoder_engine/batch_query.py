@@ -2,15 +2,15 @@ import copy
 import torch
 import logging
 import numpy as np
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 from threading import Lock
 from pydantic import BaseModel
+
 from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
-from transformers.generation.stopping_criteria import StoppingCriteria
 from maga_transformer.utils.stop_utils import create_stop_criteria_list
-from maga_transformer.async_decoder_engine.ptuning import PrefixType
+from maga_transformer.async_decoder_engine.ptuning.ptuning import PtuningInfo
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 from maga_transformer.utils.util import to_cuda, to_cpu
 from maga_transformer.metrics import kmonitor, GaugeMetrics
@@ -33,13 +33,12 @@ class ModelOutput(BaseModel):
 
 
 class BatchQuery:
-    def __init__(self, count_prefix_length:bool, gen_num_per_circle: int, nccl_op: Any) -> None:
+    def __init__(self, gen_num_per_circle: int, nccl_op: Any) -> None:
         self.gen_num_per_circle = gen_num_per_circle
         self.nccl_op_ = nccl_op
         if g_parallel_info.tp_size > 1:
             assert self.nccl_op_ is not None, "nccl op should not be None when tp_size > 1"
         # input
-        self.count_prefix_length = count_prefix_length
         self.context_streams: List[GenerateStream] = []
         self.decode_streams: List[GenerateStream] = []
         self.generate_batch_size: int = 0
@@ -55,6 +54,7 @@ class BatchQuery:
         self.context_lengths_list: List[int] = []
         self.record_index_prob: Optional[torch.Tensor] = None
         self.lora_ids: List[int] = []
+        self._ptuning_info = PtuningInfo()
 
         self.model_output = ModelOutput()
 
@@ -67,7 +67,7 @@ class BatchQuery:
                 lora_ids: {self.lora_ids}'
 
     def deepcopy(self) -> 'BatchQuery':
-        new_batch_query = BatchQuery(self.count_prefix_length, self.gen_num_per_circle, self.nccl_op_)
+        new_batch_query = BatchQuery(self.gen_num_per_circle, self.nccl_op_)
         new_batch_query.context_streams = copy.copy(self.context_streams)
         new_batch_query.decode_streams = copy.copy(self.decode_streams)
         new_batch_query.generate_batch_size = self.generate_batch_size
@@ -81,6 +81,7 @@ class BatchQuery:
         new_batch_query.reuse_lengths_list = copy.deepcopy(self.reuse_lengths_list)
         new_batch_query.context_lengths_list = copy.deepcopy(self.context_lengths_list)
         new_batch_query.lora_ids = copy.deepcopy(self.lora_ids)
+        new_batch_query._ptuning_info = self._ptuning_info
         new_batch_query.model_output.update_length = self.model_output.update_length
         return new_batch_query
 
@@ -93,6 +94,9 @@ class BatchQuery:
             check_num,
             self.generate_batch_size, self.context_batch_size, self.num_beams,
             self.output_token_ids.shape[1], self.cache_block_indice.shape[1],
+            self._ptuning_info.ptuning,
+            self._ptuning_info.count_length,
+            self._ptuning_info.count_prefix_length,
             check_num2
         ])
         shape_hints = to_cuda(shape_hints)
@@ -115,6 +119,9 @@ class BatchQuery:
             output_token_ids = torch.zeros((self.decoder_batch_size, int(shape_hints[4])), dtype=torch.int32, device="cuda:0")
             cache_block_indice = torch.zeros(
                 (self.decoder_batch_size, int(shape_hints[5])), dtype=torch.int32, device="cuda:0")
+            self._ptuning_info.ptuning = bool(shape_hints[6])
+            self._ptuning_info.count_length = bool(shape_hints[7])
+            self._ptuning_info.count_prefix_length = bool(shape_hints[8])
             seq_lengths_tensor = torch.zeros((self.generate_batch_size * self.num_beams), dtype=torch.int32, device="cuda:0")
             reuse_lengths_tensor = torch.zeros((self.decoder_batch_size), dtype=torch.int32, device="cuda:0")
             context_lengths_tensor = torch.zeros((self.decoder_batch_size), dtype=torch.int32, device="cuda:0")
@@ -164,7 +171,7 @@ class BatchQuery:
         start_index = 0
         end_index = self.context_lengths_list[index]
         # 除去ptuningv2以外，前缀token不参与计算
-        if self.count_prefix_length:
+        if self._ptuning_info.count_prefix_length:
             start_index += self.reuse_lengths_list[index]
             end_index += self.reuse_lengths_list[index]
 
@@ -214,7 +221,7 @@ class BatchQuery:
         total_batch_size = len(self.streams)
         if total_batch_size > 0:
             self.num_beams = self.streams[0].generate_config.num_beams
-
+        self._ptuning_info = self.streams[0].ptuning_info
         cache_block_indice = np.zeros(
             [self.decoder_batch_size, max([len(q.block_indice[0]) for q in self.streams])],
             dtype=np.int32
@@ -230,7 +237,7 @@ class BatchQuery:
             cache_block_indice[start_batch_idx:end_batch_idx, :len(stream.block_indice[0])] = stream.block_indice
             output_token_ids[start_batch_idx:end_batch_idx, :stream.seq_length] = stream.complete_token_ids
             self.seq_lengths_list.extend([stream.seq_length] * self.num_beams)
-            self.reuse_lengths_list.extend([QueryHelper.decoder_prefix_length(self.count_prefix_length, stream)] * self.num_beams)
+            self.reuse_lengths_list.extend([stream.reuse_length * (1 - int(self._ptuning_info.count_prefix_length))] * self.num_beams)
             self.context_lengths_list.extend([stream.input_length] * self.num_beams)
 
         images = []
@@ -240,8 +247,8 @@ class BatchQuery:
             cache_block_indice[batch_idx, :len(stream.block_indice[0])] = stream.block_indice[0]
             output_token_ids[batch_idx, :stream.seq_length] = stream.complete_token_ids[0]
             self.seq_lengths_list.extend([stream.seq_length])
-            self.reuse_lengths_list.append(QueryHelper.context_prefix_length(stream))
-            self.context_lengths_list.append(stream.seq_length - stream.reuse_length * int(self.count_prefix_length))
+            self.reuse_lengths_list.append(stream.reuse_length)
+            self.context_lengths_list.append(stream.seq_length - stream.reuse_length * int(self._ptuning_info.count_prefix_length))
 
         lora_ids = []
         for stream in self.streams:
@@ -335,14 +342,13 @@ class BatchQuery:
         res.gen_hash_value()
         return res
 
-class QueryHelper(object):
-    @staticmethod
-    def context_prefix_length(stream) -> int:
-        return stream.reuse_length
-
-    @staticmethod
-    def decoder_prefix_length(count_prefix_length: bool, stream) -> int:
-        if count_prefix_length:
-            return 0
+    def get_prefix_args(self) -> Tuple[torch.IntTensor, torch.BoolTensor, torch.IntTensor]:
+        count_length = torch.BoolTensor([self._ptuning_info.count_length])
+        if self._ptuning_info.ptuning:
+            max_length = 0 if self.generate_batch_size == 0 else \
+                max(self.reuse_lengths_list[:self.generate_batch_size * self.num_beams])
         else:
-            return stream.reuse_length
+            max_length = 0
+        max_prefix_length = torch.IntTensor([max_length])
+        prefix_lengths = torch.IntTensor(self.reuse_lengths_list)
+        return prefix_lengths, count_length, max_prefix_length
