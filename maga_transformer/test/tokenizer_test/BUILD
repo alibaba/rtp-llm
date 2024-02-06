@@ -17,3 +17,16 @@ py_test(
         "//maga_transformer:testlib",
     ]
 )
+
+py_test(
+    name = "qwen2_tokenizer_test",
+    srcs = [
+        "qwen2_tokenizer_test.py"
+    ],
+    data = [
+        ":testdata"
+    ],
+    deps = [
+        "//maga_transformer:testlib",
+    ]
+)
