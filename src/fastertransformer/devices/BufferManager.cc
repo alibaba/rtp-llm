@@ -10,7 +10,7 @@ BufferManager::BufferManager(IAllocator* deviceAllocator, IAllocator* hostAlloca
 BufferManager::~BufferManager() {}
 
 Tensor BufferManager::allocate(const BufferParams& params, const BufferHints& hints) {
-    auto allocator = (params.allocation == AllocationType::DEVICE) ? hostAllocator_ : deviceAllocator_;
+    auto allocator = (params.allocation == AllocationType::DEVICE) ? deviceAllocator_ : hostAllocator_;
     return Tensor(allocator, params.type, params.dims);
 }
 

@@ -7,9 +7,6 @@ test_copts = [
 test_linkopts = [
     "-lpython3.10",
     "-ltorch",
-    # "-lc10",
-    # "-ltorch_cpu",
-    # "-ltorch_python",
     "-L/usr/local/cuda/lib64",
     "-lcudart",
     "-lcuda",
@@ -19,7 +16,7 @@ test_linkopts = [
 
 test_deps = [
     "//src/fastertransformer/devices:device_factory",
-    "//tests:test_lib",
+    "//src/fastertransformer/devices/testing:device_test_utils",
 ] + torch_deps()
 
 cc_test(

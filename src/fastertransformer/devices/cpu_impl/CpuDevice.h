@@ -15,6 +15,7 @@ public:
     IAllocator* getHostAllocator() override { return allocator_.get(); }
 
 public:
+    OpStatus copy();
     OpStatus layernorm(LayernormParams& params);
     OpStatus gemm(GemmParams& params);
     OpStatus groupedGemm(GroupedGemmParams& params);

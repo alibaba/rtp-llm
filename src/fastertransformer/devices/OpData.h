@@ -32,6 +32,11 @@ public:
     std::string error_message;
 };
 
+struct CopyParams {
+    const Tensor& src;
+    Tensor&       dst;
+};
+
 enum class NormType {
     Layernorm,
     RmsNorm,

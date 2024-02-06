@@ -4,6 +4,10 @@ using namespace std;
 
 namespace fastertransformer {
 
+OpStatus CudaDevice::copy() {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 OpStatus CudaDevice::layernorm(LayernormParams& params) {
     return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }

@@ -14,7 +14,10 @@ public:
 public:
     virtual size_t getKvCacheBlockSize(const ModelInfo& model) const ;
 
-    // basic ops
+    // tensor ops
+    virtual OpStatus copy() = 0;
+
+    // basic compuation ops
     virtual OpStatus layernorm(LayernormParams& params)        = 0;
     virtual OpStatus gemm(GemmParams& params)                  = 0;
     virtual OpStatus groupedGemm(GroupedGemmParams& params)    = 0;

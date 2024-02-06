@@ -18,6 +18,7 @@ public:
     int getDeviceId() const { return device_id_; }
 
 public:
+    OpStatus copy();
     OpStatus layernorm(LayernormParams& params);
     OpStatus gemm(GemmParams& params);
     OpStatus groupedGemm(GroupedGemmParams& params);

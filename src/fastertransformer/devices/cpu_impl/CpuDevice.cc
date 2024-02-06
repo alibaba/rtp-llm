@@ -8,6 +8,7 @@ CpuDevice::CpuDevice() {
 CpuDevice::~CpuDevice() {
 }
 
+OpStatus CpuDevice::copy() {}
 OpStatus CpuDevice::layernorm(LayernormParams& params) {}
 OpStatus CpuDevice::gemm(GemmParams& params) {}
 OpStatus CpuDevice::groupedGemm(GroupedGemmParams& params) {}
