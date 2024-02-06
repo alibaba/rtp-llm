@@ -71,5 +71,11 @@ class ModelDict:
                     return 'baichuan2'
                 else:
                     return 'baichuan'
+            if architecture == 'GPTNeoXForCausalLM':
+                vocab_size = config.get('vocab_size', 50432)
+                if vocab_size == 250752:
+                    return 'gpt_neox_13b'
+                else:
+                    return 'gpt_neox'
             return ModelDict.get_ft_model_type_by_hf_architectures(architecture)   
         return None  
