@@ -8,17 +8,17 @@ CpuDevice::CpuDevice() {
 CpuDevice::~CpuDevice() {
 }
 
-void CpuDevice::layernorm(LayernormParams& params) {}
-void CpuDevice::gemm(GemmParams& params) {}
-void CpuDevice::groupedGemm(GroupedGemmParams& params) {}
-void CpuDevice::contextAttention(AttentionModuleParams& params) {}
-void CpuDevice::decoderSelfAttention(AttentionModuleParams& params) {}
-void CpuDevice::attentionLayer(AttentionLayerParams& params) {}
-void CpuDevice::ffnLayer(FfnLayerParams& params) {}
-void CpuDevice::sampleTopP(SamplerParams& params) {}
-void CpuDevice::sampleTopK(SamplerParams& params) {}
-void CpuDevice::broadcast(BroadcastParams& params) {}
-void CpuDevice::allReduceSum(AllReduceParams& params) {}
+OpStatus CpuDevice::layernorm(LayernormParams& params) {}
+OpStatus CpuDevice::gemm(GemmParams& params) {}
+OpStatus CpuDevice::groupedGemm(GroupedGemmParams& params) {}
+OpStatus CpuDevice::contextAttention(AttentionModuleParams& params) {}
+OpStatus CpuDevice::decoderSelfAttention(AttentionModuleParams& params) {}
+OpStatus CpuDevice::attentionLayer(AttentionLayerParams& params) {}
+OpStatus CpuDevice::ffnLayer(FfnLayerParams& params) {}
+OpStatus CpuDevice::sampleTopP(SamplerParams& params) {}
+OpStatus CpuDevice::sampleTopK(SamplerParams& params) {}
+OpStatus CpuDevice::broadcast(BroadcastParams& params) {}
+OpStatus CpuDevice::allReduceSum(AllReduceParams& params) {}
 
 
 } // namespace fastertransformer

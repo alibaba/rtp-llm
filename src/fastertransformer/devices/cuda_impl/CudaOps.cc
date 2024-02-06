@@ -4,48 +4,48 @@ using namespace std;
 
 namespace fastertransformer {
 
-void CudaDevice::layernorm(LayernormParams& params) {
-
+OpStatus CudaDevice::layernorm(LayernormParams& params) {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::gemm(GemmParams& params) {
-
+OpStatus CudaDevice::gemm(GemmParams& params) {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::groupedGemm(GroupedGemmParams& params) {
-
+OpStatus CudaDevice::groupedGemm(GroupedGemmParams& params) {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::contextAttention(AttentionModuleParams& params) {
-
+OpStatus CudaDevice::contextAttention(AttentionModuleParams& params) {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::decoderSelfAttention(AttentionModuleParams& params) {
-
+OpStatus CudaDevice::decoderSelfAttention(AttentionModuleParams& params) {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::attentionLayer(AttentionLayerParams& params) {
-
+OpStatus CudaDevice::attentionLayer(AttentionLayerParams& params) {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::ffnLayer(FfnLayerParams& params) {
-
+OpStatus CudaDevice::ffnLayer(FfnLayerParams& params) {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::sampleTopP(SamplerParams& params) {
-
+OpStatus CudaDevice::sampleTopP(SamplerParams& params) {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::sampleTopK(SamplerParams& params) {
-
+OpStatus CudaDevice::sampleTopK(SamplerParams& params) {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::broadcast(BroadcastParams& params) {
-
+OpStatus CudaDevice::broadcast(BroadcastParams& params) {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::allReduceSum(AllReduceParams& params) {
-
+OpStatus CudaDevice::allReduceSum(AllReduceParams& params) {
+    return OpStatus(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 
