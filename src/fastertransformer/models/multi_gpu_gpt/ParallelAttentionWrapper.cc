@@ -1014,12 +1014,18 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
 #if (CUDART_VERSION >= 12000)
     use_trt_fmha_ = UseTRTFMHA();
     if (use_trt_fmha_) {
-        FT_LOG_INFO("use TRT fmha");
         // Load kernels for contiguous cache and paged kv cache at the same time.
         mFMHARunner.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(
             data_type, local_head_num_, params_.size_per_head_, q_scaling_));
-        // Set flags: force_fp32_acc, is_s_padded, causal_mask, num_kv_heads.
-        mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, true, local_head_num_kv_);
+        if (mFMHARunner -> fmha_supported()) {
+            FT_LOG_INFO("use TRT fmha");
+            // Set flags: force_fp32_acc, is_s_padded, causal_mask, num_kv_heads.
+            mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, true, local_head_num_kv_);
+        }
+        else {
+            FT_LOG_WARNING("FMHA is disabled for size_per_head %d", params_.size_per_head_);
+            use_trt_fmha_ = false;
+        }
     }
 #endif
     use_open_source_fmha_ = UseOpenSourceFMHA();

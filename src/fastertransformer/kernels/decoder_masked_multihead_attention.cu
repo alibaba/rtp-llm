@@ -43,8 +43,11 @@ void multihead_attention_(KERNEL_PARAMS_TYPE& params, const KVCacheBuffer& kv_ca
             mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 64>(params, kv_cache_buffer, stream);
             break;
         // case 80: mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 80>(params, kv_cache_buffer, stream);
-        // break; case 96: mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 96>(params, kv_cache_buffer,
-        // stream); break; case 112:
+        // break; 
+        case 96: 
+            mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 96>(params, kv_cache_buffer,stream); 
+            break; 
+        // case 112:
         //     mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 112>(params, kv_cache_buffer, stream);
         //     break;
         case 128:

@@ -184,32 +184,32 @@ void run_mha_fwd_hdim64(Flash_fwd_params &params, cudaStream_t stream) {
 //    });
 }
 
-// template<typename T>
-// void run_mha_fwd_hdim96(Flash_fwd_params &params, cudaStream_t stream) {
-//     constexpr int Headdim = 96;
-//     constexpr static bool Is_dropout = false;
-//     // BOOL_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
-//         BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-//             BOOL_SWITCH(params.is_alibi, Is_alibi, [&] {
-//                 // For sm86 or sm89, 64 x 64 is the fastest for causal (because it's square),
-//                 if (is_sm8x()) {
-//                     if constexpr(!Is_causal) {
-//                         run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal, Is_alibi>(params, stream);
-//                     } else {
-//                         run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 64, 64, 4, false, false, T>, Is_dropout, Is_causal, Is_alibi>(params, stream);
-//                     }
-//                 } else {
-//                     run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal, Is_alibi>(params, stream);
-//                 }
-//                 // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
-//                 // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, true, T>, Is_dropout, Is_causal>(params, stream);
-//                 // These two are always slower
-//                 // run_flash_fwd<Flash_fwd_kernel_traits<96, 128, 128, 4, true, T>>(params, stream);
-//                 // run_flash_fwd<Flash_fwd_kernel_traits<96, 64, 128, 4, true, T>>(params, stream);
-//             });
-//         });
-//         // });
-// }
+template<typename T>
+void run_mha_fwd_hdim96(Flash_fwd_params &params, cudaStream_t stream) {
+    constexpr int Headdim = 96;
+    constexpr static bool Is_dropout = false;
+    // BOOL_SWITCH(params.p_dropout < 1.f, Is_dropout, [&] {
+        BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+            BOOL_SWITCH(params.is_alibi, Is_alibi, [&] {
+                // For sm86 or sm89, 64 x 64 is the fastest for causal (because it's square),
+                if (is_sm8x()) {
+                    if constexpr(!Is_causal) {
+                        run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal, Is_alibi>(params, stream);
+                    } else {
+                        run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 64, 64, 4, false, false, T>, Is_dropout, Is_causal, Is_alibi>(params, stream);
+                    }
+                } else {
+                    run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, false, false, T>, Is_dropout, Is_causal, Is_alibi>(params, stream);
+                }
+                // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, false, T>, Is_dropout, Is_causal>(params, stream);
+                // run_flash_fwd<Flash_fwd_kernel_traits<Headdim, 128, 64, 4, true, true, T>, Is_dropout, Is_causal>(params, stream);
+                // These two are always slower
+                // run_flash_fwd<Flash_fwd_kernel_traits<96, 128, 128, 4, true, T>>(params, stream);
+                // run_flash_fwd<Flash_fwd_kernel_traits<96, 64, 128, 4, true, T>>(params, stream);
+            });
+        });
+        // });
+}
 
 template<typename T>
 void run_mha_fwd_hdim128(Flash_fwd_params &params, cudaStream_t stream) {

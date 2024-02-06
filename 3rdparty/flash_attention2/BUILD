@@ -6,6 +6,8 @@ cc_library(
     srcs = glob([
         "flash_fwd_hdim128_bf16_sm80.cu",
         "flash_fwd_hdim128_fp16_sm80.cu",
+        "flash_fwd_hdim96_bf16_sm80.cu",
+        "flash_fwd_hdim96_fp16_sm80.cu",
         "flash_fwd_hdim64_bf16_sm80.cu",
         "flash_fwd_hdim64_fp16_sm80.cu",
         "*.cpp"
