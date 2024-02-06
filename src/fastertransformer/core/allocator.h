@@ -42,10 +42,6 @@ public:
 protected:
     virtual bool        isExist(void* address) const                 = 0;
     virtual ReallocType isReMalloc(void* address, size_t size) const = 0;
-
-    void* getAddress(void* ptr) const {
-        return ptr;
-    }
 };
 
 template<AllocatorType AllocType_>

@@ -6,7 +6,7 @@ void* IAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero, bool 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     size              = ((size + 31) / 32) * 32;  // make the buffer align with 32 bytes
     void* void_ptr    = (void*)ptr;
-    void* ptr_address = getAddress(void_ptr);
+    void* ptr_address = void_ptr;
     if (isExist(ptr_address)) {
         ReallocType realloc_type = isReMalloc(ptr_address, size);
         if (realloc_type == ReallocType::INCREASE) {
@@ -103,14 +103,14 @@ void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero
     check_cuda_error(getSetDevice(o_device));
     FT_LOG_DEBUG("malloc buffer %p with size %ld", ptr, size);
 
-    pointer_mapping_->insert({getAddress(ptr), size});
+    pointer_mapping_->insert({ptr, size});
 
     return ptr;
 }
 
 void Allocator<AllocatorType::CUDA>::free(void** ptr, bool is_host) const {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    void* address = getAddress(*ptr);
+    void* address = *ptr;
     if (*ptr != nullptr) {
         int o_device = 0;
         if (pointer_mapping_->count(address)) {

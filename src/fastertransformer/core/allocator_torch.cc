@@ -25,7 +25,7 @@ Allocator<AllocatorType::TH>::~Allocator() {
 
 void Allocator<AllocatorType::TH>::free(void** ptr, bool is_host) const {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    void* address = getAddress(*ptr);
+    void* address = *ptr;
     pointer_mapping_->erase(address);
     *ptr = nullptr;
     return;
@@ -45,7 +45,7 @@ void* Allocator<AllocatorType::TH>::malloc(size_t size, const bool is_set_zero, 
         cudaMemsetAsync(ptr, 0, buf_size, stream_);
     }
     FT_LOG_DEBUG("malloc buffer %p with size %ld", ptr, buf_size);
-    pointer_mapping_->insert({getAddress(ptr), buf});
+    pointer_mapping_->insert({ptr, buf});
     return ptr;
 }
 
