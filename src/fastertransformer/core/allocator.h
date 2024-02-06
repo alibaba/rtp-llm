@@ -9,6 +9,7 @@ namespace fastertransformer {
 enum class AllocatorType {
     CPU,
     CUDA,
+    CUDA_HOST,
     TH,
 };
 
@@ -35,13 +36,10 @@ public:
 
     virtual void* malloc(size_t size, const bool is_set_zero = true, bool is_host = false) = 0;
     virtual void  free(void** ptr, bool is_host = false) const                             = 0;
-    virtual void  memSet(void* ptr, const int val, const size_t size)                      = 0;
-
-    void* reMalloc(void* ptr, size_t size, const bool is_set_zero = false, bool is_host = false);
+    virtual void* reMalloc(void* ptr, size_t size, const bool is_set_zero = false, bool is_host = false) = 0;
 
 protected:
-    virtual bool        isExist(void* address) const                 = 0;
-    virtual ReallocType isReMalloc(void* address, size_t size) const = 0;
+    virtual void  memSet(void* ptr, const int val, const size_t size)                      = 0;
 };
 
 template<AllocatorType AllocType_>
