@@ -29,14 +29,12 @@ namespace fastertransformer {
 template<typename T>
 void DynamicDecodeLayer<T>::allocateBuffer() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    h_pinned_finished_sum_ = (int*)allocator_->reMalloc(h_pinned_finished_sum_, sizeof(int), true, true);
     return;
 }
 
 template<typename T>
 void DynamicDecodeLayer<T>::freeBuffer() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    allocator_->free((void**)(&h_pinned_finished_sum_), true);
     return;
 }
 
@@ -451,18 +449,6 @@ void DynamicDecodeLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_
         POP_RANGE;
     }
 
-    if (input_tensors->isExist("sequence_limit_length")) {
-        PUSH_RANGE(stream_, "length_criterion");
-        invokeLengthCriterion(output_tensors->at("finished").getPtr<bool>(),
-                              output_tensors->at("should_stop").getPtr<bool>(),
-                              h_pinned_finished_sum_,
-                              input_tensors->at("sequence_limit_length").getPtr<const uint32_t>(),
-                              batch_size,
-                              beam_width,
-                              step,
-                              stream_);
-        POP_RANGE;
-    }
 }
 
 template<typename T>

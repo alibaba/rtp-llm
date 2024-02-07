@@ -53,7 +53,6 @@ protected:
                                                          "min_length"};
 
     bool has_diff_runtime_args_ = false;
-    int* h_pinned_finished_sum_ = nullptr;
 
 public:
     DynamicDecodeLayer(size_t           vocab_size,

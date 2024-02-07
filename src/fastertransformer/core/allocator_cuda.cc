@@ -2,7 +2,7 @@
 
 namespace fastertransformer {
 
-void* ICudaAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero, bool is_host) {
+void* ICudaAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     size              = ((size + 31) / 32) * 32;  // make the buffer align with 32 bytes
     void* void_ptr    = (void*)ptr;
@@ -11,12 +11,12 @@ void* ICudaAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero, b
         ReallocType realloc_type = isReMalloc(ptr_address, size);
         if (realloc_type == ReallocType::INCREASE) {
             FT_LOG_DEBUG("ReMalloc the buffer %p since it is too small.", void_ptr);
-            free((void**)(&void_ptr), is_host);
-            return malloc(size, is_set_zero, is_host);
+            free((void**)(&void_ptr));
+            return malloc(size, is_set_zero);
         } else if (realloc_type == ReallocType::DECREASE) {
             FT_LOG_DEBUG("ReMalloc the buffer %p to release unused memory to memory pools.", void_ptr);
-            free((void**)(&void_ptr), is_host);
-            return malloc(size, is_set_zero, is_host);
+            free((void**)(&void_ptr));
+            return malloc(size, is_set_zero);
         } else {
             FT_LOG_DEBUG("Reuse original buffer %p with size %d and do nothing for reMalloc.", void_ptr, size);
             if (is_set_zero) {
@@ -26,7 +26,7 @@ void* ICudaAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero, b
         }
     } else {
         FT_LOG_DEBUG("Cannot find buffer %p, mallocing new one.", void_ptr);
-        return malloc(size, is_set_zero, is_host);
+        return malloc(size, is_set_zero);
     }
 }
 
@@ -72,7 +72,7 @@ Allocator<AllocatorType::CUDA>::~Allocator() {
     }
 }
 
-void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero, bool is_host) {
+void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (size == 0) {
         return nullptr;
@@ -81,11 +81,7 @@ void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero
     int   o_device = 0;
 
     check_cuda_error(getSetDevice(device_id_, &o_device));
-    if (is_host) {
-        check_cuda_error(cudaMallocHost(&ptr, (size_t)(ceil(size / 32.)) * 32));
-    } else {
-        check_cuda_error(cudaMallocAsync(&ptr, (size_t)(ceil(size / 32.)) * 32, stream_));
-    }
+    check_cuda_error(cudaMallocAsync(&ptr, (size_t)(ceil(size / 32.)) * 32, stream_));
     if (is_set_zero) {
         check_cuda_error(cudaMemsetAsync(ptr, 0, (size_t)(ceil(size / 32.)) * 32, stream_));
     }
@@ -97,7 +93,7 @@ void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero
     return ptr;
 }
 
-void Allocator<AllocatorType::CUDA>::free(void** ptr, bool is_host) const {
+void Allocator<AllocatorType::CUDA>::free(void** ptr) const {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     void* address = *ptr;
     if (*ptr != nullptr) {
@@ -105,12 +101,8 @@ void Allocator<AllocatorType::CUDA>::free(void** ptr, bool is_host) const {
         if (pointer_mapping_->count(address)) {
             FT_LOG_DEBUG("Free buffer %p", address);
             check_cuda_error(getSetDevice(device_id_, &o_device));
-            if (is_host) {
-                check_cuda_error(cudaFreeHost(*ptr));
-            } else {
-                check_cuda_error(cudaFreeAsync(*ptr, stream_));
-                cudaStreamSynchronize(stream_);
-            }
+            check_cuda_error(cudaFreeAsync(*ptr, stream_));
+            cudaStreamSynchronize(stream_);
             check_cuda_error(getSetDevice(o_device));
             pointer_mapping_->erase(address);
         } else {
@@ -132,7 +124,7 @@ Allocator<AllocatorType::CUDA_HOST>::~Allocator() {
     }
 }
 
-void* Allocator<AllocatorType::CUDA_HOST>::malloc(size_t size, const bool is_set_zero, bool is_host) {
+void* Allocator<AllocatorType::CUDA_HOST>::malloc(size_t size, const bool is_set_zero) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (size == 0) {
         return nullptr;
@@ -151,7 +143,7 @@ void* Allocator<AllocatorType::CUDA_HOST>::malloc(size_t size, const bool is_set
     return ptr;
 }
 
-void Allocator<AllocatorType::CUDA_HOST>::free(void** ptr, bool is_host) const {
+void Allocator<AllocatorType::CUDA_HOST>::free(void** ptr) const {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     void* address = *ptr;
     if (*ptr != nullptr) {

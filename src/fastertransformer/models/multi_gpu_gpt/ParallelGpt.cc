@@ -91,7 +91,7 @@ void ParallelGpt<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num,
         FT_LOG_ERROR("int8_mode == 2 not support");
         abort();
     }
-    h_pinned_token_num_ptr_ = (size_t*)allocator_->reMalloc(h_pinned_token_num_ptr_, sizeof(size_t), true, true);
+    h_pinned_token_num_ptr_ = (size_t*)allocator_->reMalloc(h_pinned_token_num_ptr_, sizeof(size_t), true);
     padding_offset_ = reinterpret_cast<int*>(allocator_->reMalloc(padding_offset_, sizeof(int) * (h_token_num), false));
     cu_seqlens_ =
         reinterpret_cast<int*>(allocator_->reMalloc(cu_seqlens_, sizeof(int) * (total_batch_size + 1), false));
@@ -135,7 +135,7 @@ void ParallelGpt<T>::freeBuffer()
         allocator_->free((void**)(&decoder_normed_input_));
         allocator_->free((void**)(&self_attn_output_));
         allocator_->free((void**)(&decoder_layer_output_));
-        allocator_->free((void**)(&h_pinned_token_num_ptr_), true);
+        allocator_->free((void**)(&h_pinned_token_num_ptr_));
         allocator_->free((void**)(&padding_offset_));
         allocator_->free((void**)(&cu_seqlens_));
         allocator_->free((void**)(&context_lengths_));

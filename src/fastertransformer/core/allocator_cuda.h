@@ -22,7 +22,7 @@ public:
         return stream_;
     };
 
-    void* reMalloc(void* ptr, size_t size, const bool is_set_zero = false, bool is_host = false) override;
+    void* reMalloc(void* ptr, size_t size, const bool is_set_zero = false) override;
 
     void memSet(void* ptr, const int val, const size_t size) const override;
 
@@ -69,8 +69,8 @@ public:
     Allocator(int device_id);
     ~Allocator();
 
-    void* malloc(size_t size, const bool is_set_zero = true, bool is_host = false) override;
-    void free(void** ptr, bool is_host = false) const override;
+    void* malloc(size_t size, const bool is_set_zero = true) override;
+    void free(void** ptr) const override;
 };
 
 template<>
@@ -79,8 +79,8 @@ public:
     Allocator(int device_id);
     ~Allocator();
 
-    void* malloc(size_t size, const bool is_set_zero = true, bool is_host = false) override;
-    void free(void** ptr, bool is_host = false) const override;
+    void* malloc(size_t size, const bool is_set_zero = true) override;
+    void free(void** ptr) const override;
 };
 
 
