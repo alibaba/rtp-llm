@@ -29,7 +29,8 @@ typedef enum memorytype_enum {
 // Each allocator should only allocate memory on one device.
 class IAllocator {
 public:
-    virtual ~IAllocator(){};
+    IAllocator() {};
+    virtual ~IAllocator() {};
 
     virtual AllocatorType type() const = 0;
     virtual MemoryType    memoryType() const = 0;
@@ -39,7 +40,7 @@ public:
     virtual void* reMalloc(void* ptr, size_t size, const bool is_set_zero = false, bool is_host = false) = 0;
 
 protected:
-    virtual void  memSet(void* ptr, const int val, const size_t size)                      = 0;
+    virtual void  memSet(void* ptr, const int val, const size_t size) const                = 0;
 };
 
 template<AllocatorType AllocType_>

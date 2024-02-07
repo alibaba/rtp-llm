@@ -9,8 +9,6 @@ namespace fastertransformer {
 
 template<>
 class Allocator<AllocatorType::TH>: public ICudaAllocator, public TypedAllocator<AllocatorType::TH> {
-    std::unordered_map<void*, torch::Tensor>* pointer_mapping_;
-
     bool isExist(void* address) const {
         return pointer_mapping_->count(address) > 0;
     }
@@ -39,9 +37,8 @@ public:
 
     virtual ~Allocator();
 
-    void memSet(void* ptr, const int val, const size_t size) {
-        check_cuda_error(cudaMemsetAsync(ptr, val, size, stream_));
-    }
+private:
+    std::unique_ptr<std::unordered_map<void*, torch::Tensor>> pointer_mapping_;
 };
 
 }

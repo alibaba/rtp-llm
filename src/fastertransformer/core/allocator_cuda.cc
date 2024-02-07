@@ -30,16 +30,15 @@ void* ICudaAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero, b
     }
 }
 
+
+void ICudaAllocator::memSet(void* ptr, const int val, const size_t size) const {
+    check_cuda_error(cudaMemsetAsync(ptr, val, size, stream_));
+}
+
 // cuda allocator
 
-Allocator<AllocatorType::CUDA>::Allocator(int device_id): device_id_(device_id) {
+Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocator(device_id) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    pointer_mapping_ = new std::unordered_map<void*, size_t>();
-#if defined(CUDA_MEMORY_POOL_DISABLED)
-    FT_LOG_WARNING(
-        "Async cudaMalloc/Free is not supported before CUDA 11.2. Using Sync cudaMalloc/Free."
-        "Note this may lead to hang with NCCL kernels launched in parallel; if so, try NCCL_LAUNCH_MODE=GROUP");
-#else
     int device_count = 1;
     check_cuda_error(cudaGetDeviceCount(&device_count));
     cudaMemPool_t mempool;
@@ -64,7 +63,6 @@ Allocator<AllocatorType::CUDA>::Allocator(int device_id): device_id_(device_id) 
     // set memory pool threshold to avoid shrinking the pool
     uint64_t setVal = UINT64_MAX;
     check_cuda_error(cudaMemPoolSetAttribute(mempool, cudaMemPoolAttrReleaseThreshold, &setVal));
-#endif
 }
 
 Allocator<AllocatorType::CUDA>::~Allocator() {
@@ -72,7 +70,6 @@ Allocator<AllocatorType::CUDA>::~Allocator() {
     while (!pointer_mapping_->empty()) {
         free((void**)(&pointer_mapping_->begin()->first));
     }
-    delete pointer_mapping_;
 }
 
 void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero, bool is_host) {
@@ -87,11 +84,7 @@ void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero
     if (is_host) {
         check_cuda_error(cudaMallocHost(&ptr, (size_t)(ceil(size / 32.)) * 32));
     } else {
-#if defined(CUDA_MEMORY_POOL_DISABLED)
-        check_cuda_error(cudaMalloc(&ptr, (size_t)(ceil(size / 32.)) * 32));
-#else
         check_cuda_error(cudaMallocAsync(&ptr, (size_t)(ceil(size / 32.)) * 32, stream_));
-#endif
     }
     if (is_set_zero) {
         check_cuda_error(cudaMemsetAsync(ptr, 0, (size_t)(ceil(size / 32.)) * 32, stream_));
@@ -115,13 +108,58 @@ void Allocator<AllocatorType::CUDA>::free(void** ptr, bool is_host) const {
             if (is_host) {
                 check_cuda_error(cudaFreeHost(*ptr));
             } else {
-#if defined(CUDA_MEMORY_POOL_DISABLED)
-                check_cuda_error(cudaFree(*ptr));
-#else
                 check_cuda_error(cudaFreeAsync(*ptr, stream_));
                 cudaStreamSynchronize(stream_);
-#endif
             }
+            check_cuda_error(getSetDevice(o_device));
+            pointer_mapping_->erase(address);
+        } else {
+            FT_LOG_WARNING("pointer_mapping_ does not have information of ptr at %p.", address);
+        }
+    }
+    *ptr = nullptr;
+    return;
+}
+
+Allocator<AllocatorType::CUDA_HOST>::Allocator(int device_id): PurePointerCudaAllocator(device_id) {
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+}
+
+Allocator<AllocatorType::CUDA_HOST>::~Allocator() {
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    while (!pointer_mapping_->empty()) {
+        free((void**)(&pointer_mapping_->begin()->first));
+    }
+}
+
+void* Allocator<AllocatorType::CUDA_HOST>::malloc(size_t size, const bool is_set_zero, bool is_host) {
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    if (size == 0) {
+        return nullptr;
+    }
+    void* ptr      = nullptr;
+    int   o_device = 0;
+
+    check_cuda_error(getSetDevice(device_id_, &o_device));
+    check_cuda_error(cudaMallocHost(&ptr, (size_t)(ceil(size / 32.)) * 32));
+    check_cuda_error(cudaMemsetAsync(ptr, 0, (size_t)(ceil(size / 32.)) * 32, stream_));
+    check_cuda_error(getSetDevice(o_device));
+    FT_LOG_DEBUG("malloc cuda host buffer %p with size %ld", ptr, size);
+
+    pointer_mapping_->insert({ptr, size});
+
+    return ptr;
+}
+
+void Allocator<AllocatorType::CUDA_HOST>::free(void** ptr, bool is_host) const {
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    void* address = *ptr;
+    if (*ptr != nullptr) {
+        int o_device = 0;
+        if (pointer_mapping_->count(address)) {
+            FT_LOG_DEBUG("Free buffer %p", address);
+            check_cuda_error(getSetDevice(device_id_, &o_device));
+            check_cuda_error(cudaFreeHost(*ptr));
             check_cuda_error(getSetDevice(o_device));
             pointer_mapping_->erase(address);
         } else {

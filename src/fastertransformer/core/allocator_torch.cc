@@ -7,10 +7,10 @@
 
 namespace fastertransformer {
 
-
-Allocator<AllocatorType::TH>::Allocator() {
-    pointer_mapping_ = new std::unordered_map<void*, torch::Tensor>();
-}
+Allocator<AllocatorType::TH>::Allocator()
+    : ICudaAllocator(0)
+    , pointer_mapping_(new std::unordered_map<void*, torch::Tensor>)
+    {}
 
 Allocator<AllocatorType::TH>::~Allocator() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -19,9 +19,7 @@ Allocator<AllocatorType::TH>::~Allocator() {
         free((void**)(&ptr));
     }
     pointer_mapping_->clear();
-    delete pointer_mapping_;
 }
-
 
 void Allocator<AllocatorType::TH>::free(void** ptr, bool is_host) const {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
