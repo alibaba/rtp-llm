@@ -15,18 +15,18 @@ public:
     IAllocator* getHostAllocator() override { return allocator_.get(); }
 
 public:
-    OpStatus copy();
-    OpStatus layernorm(LayernormParams& params);
-    OpStatus gemm(GemmParams& params);
-    OpStatus groupedGemm(GroupedGemmParams& params);
-    OpStatus contextAttention(AttentionModuleParams& params);
-    OpStatus decoderSelfAttention(AttentionModuleParams& params);
-    OpStatus attentionLayer(AttentionLayerParams& params);
-    OpStatus ffnLayer(FfnLayerParams& params);
-    OpStatus sampleTopP(SamplerParams& params);
-    OpStatus sampleTopK(SamplerParams& params);
-    OpStatus broadcast(BroadcastParams& params);
-    OpStatus allReduceSum(AllReduceParams& params);
+    OpStatus copy(const CopyParams& params);
+    OpStatus layernorm(const LayernormParams& params);
+    OpStatus gemm(const GemmParams& params);
+    OpStatus groupedGemm(const GroupedGemmParams& params);
+    OpStatus contextAttention(const AttentionModuleParams& params);
+    OpStatus decoderSelfAttention(const AttentionModuleParams& params);
+    OpStatus attentionLayer(const AttentionLayerParams& params);
+    OpStatus ffnLayer(const FfnLayerParams& params);
+    OpStatus sampleTopP(const SamplerParams& params);
+    OpStatus sampleTopK(const SamplerParams& params);
+    OpStatus broadcast(const BroadcastParams& params);
+    OpStatus allReduceSum(const AllReduceParams& params);
 
 private:
     std::unique_ptr<IAllocator> allocator_;

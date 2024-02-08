@@ -8,18 +8,18 @@ CpuDevice::CpuDevice() {
 CpuDevice::~CpuDevice() {
 }
 
-OpStatus CpuDevice::copy() {}
-OpStatus CpuDevice::layernorm(LayernormParams& params) {}
-OpStatus CpuDevice::gemm(GemmParams& params) {}
-OpStatus CpuDevice::groupedGemm(GroupedGemmParams& params) {}
-OpStatus CpuDevice::contextAttention(AttentionModuleParams& params) {}
-OpStatus CpuDevice::decoderSelfAttention(AttentionModuleParams& params) {}
-OpStatus CpuDevice::attentionLayer(AttentionLayerParams& params) {}
-OpStatus CpuDevice::ffnLayer(FfnLayerParams& params) {}
-OpStatus CpuDevice::sampleTopP(SamplerParams& params) {}
-OpStatus CpuDevice::sampleTopK(SamplerParams& params) {}
-OpStatus CpuDevice::broadcast(BroadcastParams& params) {}
-OpStatus CpuDevice::allReduceSum(AllReduceParams& params) {}
+OpStatus CpuDevice::copy(const CopyParams& params) {}
+OpStatus CpuDevice::layernorm(const LayernormParams& params) {}
+OpStatus CpuDevice::gemm(const GemmParams& params) {}
+OpStatus CpuDevice::groupedGemm(const GroupedGemmParams& params) {}
+OpStatus CpuDevice::contextAttention(const AttentionModuleParams& params) {}
+OpStatus CpuDevice::decoderSelfAttention(const AttentionModuleParams& params) {}
+OpStatus CpuDevice::attentionLayer(const AttentionLayerParams& params) {}
+OpStatus CpuDevice::ffnLayer(const FfnLayerParams& params) {}
+OpStatus CpuDevice::sampleTopP(const SamplerParams& params) {}
+OpStatus CpuDevice::sampleTopK(const SamplerParams& params) {}
+OpStatus CpuDevice::broadcast(const BroadcastParams& params) {}
+OpStatus CpuDevice::allReduceSum(const AllReduceParams& params) {}
 
 
 } // namespace fastertransformer

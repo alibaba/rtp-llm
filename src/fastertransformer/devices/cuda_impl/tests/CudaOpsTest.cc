@@ -16,7 +16,15 @@ public:
 };
 
 TEST_F(CudaOpsTest, testCopy) {
+    auto A = createHostTensor({2, 3}, vector<float>{1, 2, 3, 4, 5, 6});
+    auto B = device_->allocateBuffer({DataType::TYPE_FP32, {2, 3}, AllocationType::DEVICE}, {});
+    auto C = device_->allocateBuffer({DataType::TYPE_FP32, {2, 3}, AllocationType::HOST}, {});
+    assertOpSuccess(device_->copy({A, B}));
+    assertOpSuccess(device_->copy({B, C}));
+    sync_check_cuda_error();
 
+    vector<float> expected = {1, 2, 3, 4, 5, 6};
+    assertTensorValueEqual(C, expected);
 }
 
 TEST_F(CudaOpsTest, testGemmOp) {
