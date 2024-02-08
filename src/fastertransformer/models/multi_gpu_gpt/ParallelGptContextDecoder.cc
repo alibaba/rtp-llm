@@ -383,7 +383,7 @@ void ParallelGptContextDecoder<T>::forward(
 
     PUSH_RANGE(stream_, "context_generation");
     for (uint ite = 0; ite < iteration_num; ite++) {
-        size_t h_token_num = local_batch_size * seq_len;
+        int h_token_num = local_batch_size * seq_len;
 
         if (is_unpadded_mha) {
             const int* base_input_lengths =

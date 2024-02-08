@@ -26,7 +26,7 @@
 namespace fastertransformer {
 
 void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
-                                        size_t*      h_token_num,
+                                        int*         h_token_num,
                                         int*         tmp_mask_offset,
                                         int*         cu_seqlens,
                                         const int*   sequence_length,
@@ -41,17 +41,6 @@ void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
                                         const int    batch_size,
                                         const int    max_seq_len,
                                         cudaStream_t stream);
-
-inline void invokeGetPaddingOffset(size_t*      h_pinned_token_num,
-                                   size_t*      h_token_num,
-                                   int*         tmp_mask_offset,
-                                   const int*   sequence_length,
-                                   const int    batch_size,
-                                   const int    max_seq_len,
-                                   cudaStream_t stream) {
-    invokeGetPaddingOffsetAndCuSeqLens(
-        h_pinned_token_num, h_token_num, tmp_mask_offset, nullptr, sequence_length, batch_size, max_seq_len, stream);
-}
 
 template<typename T>
 void invokeBuildEncoderAttentionMask(

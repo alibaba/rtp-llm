@@ -21,8 +21,7 @@
 
 namespace fastertransformer {
 
-__global__ void getPaddingOffsetAndCuSeqLensKernel(size_t*    h_valid_word_num,
-                                                   int*       tmp_mask_offset,
+__global__ void getPaddingOffsetAndCuSeqLensKernel(int*       tmp_mask_offset,
                                                    int*       cu_seqlens,
                                                    const int* sequence_length,
                                                    const int  batch_size,
@@ -48,11 +47,10 @@ __global__ void getPaddingOffsetAndCuSeqLensKernel(size_t*    h_valid_word_num,
     if (calculate_cu_seqlens) {
         cu_seqlens[batch_size] = total_seq_len;
     }
-    h_valid_word_num[0] = (size_t)total_seq_len;
 }
 
 void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
-                                        size_t*      h_token_num,
+                                        int*         h_token_num,
                                         int*         tmp_mask_offset,
                                         int*         cu_seqlens,
                                         const int*   sequence_lengths,
@@ -60,12 +58,11 @@ void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
                                         const int    max_seq_len,
                                         cudaStream_t stream)
 {
-    h_pinned_token_num[0] = 0;
+    // h_pinned_token_num[0] = 0;
     getPaddingOffsetAndCuSeqLensKernel<<<1, 1, 0, stream>>>(
-        h_pinned_token_num, tmp_mask_offset, cu_seqlens, sequence_lengths, batch_size, max_seq_len);
-    while (((volatile size_t*)h_pinned_token_num)[0] == 0) {};
-    h_token_num[0] = h_pinned_token_num[0];
+        tmp_mask_offset, cu_seqlens, sequence_lengths, batch_size, max_seq_len);
     sync_check_cuda_error();
+    cudaMemcpyAsync(h_token_num, cu_seqlens + batch_size, sizeof(int), cudaMemcpyDeviceToHost, stream);
 }
 
 void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
@@ -77,7 +74,7 @@ void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
                                         cudaStream_t stream)
 {
     getPaddingOffsetAndCuSeqLensKernel<<<1, 1, 0, stream>>>(
-        h_pinned_token_num, tmp_mask_offset, cu_seqlens, sequence_lengths, batch_size, max_seq_len);
+        tmp_mask_offset, cu_seqlens, sequence_lengths, batch_size, max_seq_len);
     sync_check_cuda_error();
 }
 
