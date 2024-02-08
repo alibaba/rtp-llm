@@ -5,6 +5,7 @@ namespace fastertransformer {
 
 CudaDevice::CudaDevice() : device_id_(getDevice()) {
     allocator_.reset(new Allocator<AllocatorType::CUDA>(device_id_));
+    host_allocator_.reset(new Allocator<AllocatorType::CUDA_HOST>(device_id_));
 
     cudaStreamCreate(&stream_);
     cublasCreate(&cublas_handle_);

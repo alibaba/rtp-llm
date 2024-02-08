@@ -29,6 +29,7 @@
 #include <sys/types.h>
 #include <unordered_map>
 #include <vector>
+#include <functional>
 
 namespace fastertransformer {
 
@@ -59,11 +60,12 @@ DataType getTensorType();
 struct Tensor {
 public:
     Tensor();
-    Tensor(IAllocator*               allocator,
-           const DataType            type,
+    // Note: Tensor owns the memory iff deleter is not null.
+    Tensor(const MemoryType where,
+           const DataType type,
            const std::vector<size_t> shape,
-           const bool                is_set_zero = false);
-    Tensor(const MemoryType where, const DataType type, const std::vector<size_t> shape, const void* data);
+           const void* data,
+           const std::function<void(Tensor&)> deleter = nullptr);
 
     ~Tensor();
 
@@ -72,11 +74,14 @@ public:
     Tensor& operator=(const Tensor& tensor) = default;
     Tensor& operator=(Tensor&& tensor) = default;
 
+    bool isValid() const;
+    void reset();
+
     MemoryType                 where() const;
     DataType                   type() const;
     const std::vector<size_t>& shape() const;
     void*                      data() const;
-    IAllocator*                allocator() const;
+    void**                     dataPtr();
 
     size_t size() const;
     size_t sizeBytes() const;
@@ -249,10 +254,8 @@ private:
     DataType            type_;
     std::vector<size_t> shape_;
     void*               data_      = nullptr;
-    IAllocator*         allocator_ = nullptr;
-
-    bool                 owned_;
-    std::shared_ptr<int> ref_counter_;
+    std::function<void(Tensor&)> deleter_;
+    std::shared_ptr<int>         ref_counter_;
 };
 
 class TensorMap {

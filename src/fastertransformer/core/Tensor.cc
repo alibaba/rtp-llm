@@ -34,52 +34,43 @@
 namespace fastertransformer {
 
 Tensor::Tensor():
-    // a none tensor.
     where_(MEMORY_CPU),
     type_(TYPE_INVALID),
     shape_({}),
     data_(nullptr),
-    owned_(false) {}
+    deleter_(nullptr),
+    ref_counter_(nullptr) {}
 
-Tensor::Tensor(IAllocator*               allocator,
-               const DataType            type,
+Tensor::Tensor(const MemoryType where,
+               const DataType type,
                const std::vector<size_t> shape,
-               const bool                is_set_zero):
-    where_(allocator->memoryType()),
-    type_(type),
-    shape_(shape),
-    data_(nullptr),
-    allocator_(allocator),
-    owned_(true),
-    ref_counter_(std::make_shared<int>(1)) {
-    const size_t allocBytes = std::accumulate(shape_.begin(), shape_.end(), (size_t)1, std::multiplies<size_t>())
-                              * Tensor::getTypeSize(type_);
-    if (where_ == MEMORY_GPU) {
-        // TODO(wangyin.yx): Self owned tensor should use Allocator::<AllocatorType::CUDA> to allocate memory.
-        // check_cuda_error(allocator->reMalloc(data, sizeBytes(), is_set_zero));
-        // check_cuda_error(cudaMalloc(&data, sizeBytes()));
-        data_ = allocator_->reMalloc(data_, allocBytes, is_set_zero);
-    } else {
-        data_ = malloc(allocBytes);
-    }
-}
-
-Tensor::Tensor(const MemoryType where, const DataType type, const std::vector<size_t> shape, const void* data):
+               const void* data,
+               const std::function<void(Tensor&)> deleter):
     where_(where),
     type_(type),
     shape_(shape),
     data_(const_cast<void*>(data)),
-    owned_(false),
-    ref_counter_(nullptr) {}
+    deleter_(deleter),
+    ref_counter_(deleter ? std::make_shared<int>(1) : nullptr) {}
 
 Tensor::~Tensor() {
-    if (owned_ && data_ != nullptr && ref_counter_.use_count() == 1) {
-        if (where_ == MEMORY_GPU) {
-            // check_cuda_error(cudaFree((void*)data));
-            allocator_->free((void**)(&data_));
-        } else {
-            free((void*)data_);
+    reset();
+}
+
+bool Tensor::isValid() const {
+    return (type_ != TYPE_INVALID) && (shape_.size() > 0) && (data_ != nullptr);
+}
+
+void Tensor::reset() {
+    if (isValid()) {
+        if (ref_counter_ && ref_counter_.use_count() == 1) {
+            deleter_(*this);
         }
+        ref_counter_.reset();
+        type_ = TYPE_INVALID;
+        shape_.clear();
+        data_ = nullptr;
+        deleter_ = nullptr;
     }
 }
 
@@ -99,8 +90,8 @@ void* Tensor::data() const {
     return data_;
 }
 
-IAllocator* Tensor::allocator() const {
-    return allocator_;
+void** Tensor::dataPtr() {
+    return &data_;
 }
 
 // TODO(wangyin): move this implementation to DeviceOps.

@@ -37,14 +37,15 @@ struct BufferParams {
 
 class BufferManager {
 public:
-    BufferManager(IAllocator* deviceAllocator, IAllocator* hostAllocator);
+    BufferManager(IAllocator* device_allocator, IAllocator* host_allocator);
     ~BufferManager();
 
     Tensor allocate(const BufferParams& params, const BufferHints& hints);
+    void recycle(Tensor& tensor, IAllocator* allocator);
 
 private:
-    IAllocator* deviceAllocator_;
-    IAllocator* hostAllocator_;
+    IAllocator* device_allocator_;
+    IAllocator* host_allocator_;
 };
 
 } // namespace fastertransformer
