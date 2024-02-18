@@ -198,8 +198,8 @@ class BeamSearchSampler(FtSampler):
 
             if (block_index_map != None):
                 # indicates async mode.
-                # key_cache: [layers, reserved_blocks, local_head_num, size_per_head // x, block_size, x]
-                # value_cache: [layers, reserved_blocks, local_head_num, block_size, size_per_head]
+                # key_cache: [layers, reserved_blocks, local_head_num, size_per_head // x, block_num, x]
+                # value_cache: [layers, reserved_blocks, local_head_num, block_num, size_per_head]
                 src_blocks = block_index_map.view([batch_size, self.beam_width, -1])[batch_idx, best_beams.cpu()]
                 tgt_blocks = block_index_map.view([batch_size, self.beam_width, -1])[batch_idx]
                 key_cache[:, tgt_blocks] = key_cache[:, src_blocks]

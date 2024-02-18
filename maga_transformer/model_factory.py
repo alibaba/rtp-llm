@@ -87,6 +87,7 @@ class ModelFactory:
         ckpt_path = os.environ["CHECKPOINT_PATH"]
         lora_infos = os.environ.get("LORA_INFO", "{}")
         max_seq_len = int(os.environ.get("MAX_SEQ_LEN", "0"))
+        seq_size_per_block = int(os.environ.get("SEQ_SIZE_PER_BLOCK", "8"))
 
         tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
         ckpt_path = fetch_remote_file_to_local(ckpt_path)
@@ -122,6 +123,7 @@ class ModelFactory:
                                    weight_type=weight_type,
                                    act_type=act_type,
                                    max_seq_len=max_seq_len,
+                                   seq_size_per_block=seq_size_per_block,
                                    lora_infos=lora_infos,
                                    ptuning_path=ptuning_path)
     

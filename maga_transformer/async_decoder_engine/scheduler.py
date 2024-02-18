@@ -18,7 +18,6 @@ class Scheduler:
                  stream_cache_manager,
                  gen_num_per_circle: int = 1,
                  nccl_op: Any = None):
-        # TODO(xinfei.sxf) move this config
         self.gen_num_per_circle = gen_num_per_circle
         self._stream_cache_manager = stream_cache_manager
         logging.info(f"model generate length per circle: {self.gen_num_per_circle}")
@@ -59,6 +58,13 @@ class Scheduler:
             stream.check_timeout()
         new_streams = self._schedule_streams(waiting_streams)
         new_streams = self._schedule_strategy.schedule_new(new_streams)
+
+        # ensure that at least one query in waiting_streams goto run
+        if len(new_streams) == 0 and self.batch_query.empty():
+            if len(self._waiting_streams) > 0:
+                stream = self._waiting_streams[0]
+                new_streams.append(stream)
+
         for stream in new_streams[:]:
             try:
                 self._stream_cache_manager.init_kvcache(stream)
@@ -76,6 +82,7 @@ class Scheduler:
         to_remove, to_wait = self._schedule_strategy.schedule_current(
             self.batch_query.streams)
         for stream in to_remove + to_wait:
+            # TODO(xinfei.sxf) to_wait stream 已经被删除了，这里又删除了一次。
             self.batch_query.remove_stream(stream)
         for stream in to_wait:
             self._waiting_streams.appendleft(stream)

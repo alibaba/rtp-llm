@@ -16,7 +16,9 @@ class BasicScheduleStrategy:
         total_tokens = 0
         for stream in streams:
             cur_tokens = stream.input_length
+            # TODO(xinfei.sxf) inital_kvcache_count 有点保守，会导致query运行不了
             cur_kvcache = self._generate_reserve_blocks + self._stream_cache_manager.inital_kvcache_count(stream)
+
             if (total_kvcache + cur_kvcache <= self._stream_cache_manager.free_kvcache_count() and
                 total_tokens + cur_tokens <= self._max_tokens):
                 total_kvcache += cur_kvcache
@@ -28,8 +30,14 @@ class BasicScheduleStrategy:
 
     def schedule_current(self, streams: List[GenerateStream]) -> List[GenerateStream]:
         to_remove, to_wait = [], []
-        while not self._stream_cache_manager.enough_kvcache(streams):
-            stream = streams[-1]
+        
+        self._stream_cache_manager.reserve_enough_kvcache(streams)
+        
+        while not self._stream_cache_manager.enough_kvcache(streams):    
+            if len(streams) > 0:
+                stream = streams[-1]
+            else:
+                break
             self._stream_cache_manager.free_block_cache(stream)
             if stream.generate_config.num_beams > 1:
                 stream.seq_length = stream.input_length

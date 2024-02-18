@@ -18,7 +18,7 @@ class StreamCacheManager:
         self.seq_size_per_block_ = config.seq_size_per_block
         self.construct_ptuning(prefix_params)
         logging.info(f"reuse_cache: {self.reuse_cache_}")
-        logging.info(f"block_size after Ptuning: {len(self.cache_manager_.free_blocks_index)}")
+        logging.info(f"block_num after Ptuning: {self.cache_manager_.free_block_nums}")
 
     def construct_ptuning(self, prefix_params: PrefixParams):
         if prefix_params is None:
@@ -26,12 +26,14 @@ class StreamCacheManager:
             self.reuse_cache_ = os.environ.get('REUSE_CACHE', None) == '1'
             return
 
-        self.reuse_cache_ = False
         if isinstance(prefix_params.prefix_kvcache, dict):
+            # reuse cache must be true in system prompt case
+            self.reuse_cache_ = True
             assert prefix_params.prefix_tensor is not None
             self.ptuning_ = MultiTaskPtuning(self.config_, self.cache_manager_,
                                              prefix_params.prefix_kvcache, prefix_params.prefix_type, prefix_params.prefix_tensor)
         else:
+            self.reuse_cache_ = False
             assert isinstance(prefix_params.prefix_kvcache, torch.Tensor)
             self.ptuning_ = Ptuning(self.config_, self.cache_manager_, prefix_params.prefix_kvcache, torch.zeros([0]), prefix_params.prefix_type)
 
@@ -44,16 +46,16 @@ class StreamCacheManager:
 
     def init_kvcache(self, stream: GenerateStream):
         # reuse length represent for ptuning length or kvcache reuse length
-        block_size = self.inital_kvcache_count(stream)
+        block_num = self.inital_kvcache_count(stream)
         block_indice = []
         reuse_length = 0
-        if self.ptuning_:
-            block_indice, reuse_length = self.ptuning_.get_block_indice(block_size, stream.generate_config)
+        if self.ptuning_ and isinstance(self.ptuning_, Ptuning):
+            block_indice, reuse_length = self.ptuning_.get_block_indice(block_num, stream.generate_config)
         elif self.reuse_cache_:
             block_indice, reuse_length = self.cache_manager_.malloc_with_cache(
-                block_size, stream.complete_token_ids[0].numpy().tolist(), stream.generate_config.chat_id)
+                block_num, stream.complete_token_ids[0].numpy().tolist())
         else:
-            block_indice = self.cache_manager_.malloc(block_size)
+            block_indice = self.cache_manager_.malloc(block_num)
             reuse_length = 0
 
         stream.set_kvcache([block_indice], reuse_length)
@@ -72,13 +74,21 @@ class StreamCacheManager:
 
     def enough_kvcache(self, streams):
         malloc_sizes = self._collect_malloc_sizes(streams)
-        return len(self.cache_manager_.free_blocks_index) > sum(malloc_sizes.values())
+        sum_size = sum(malloc_sizes.values())
+        return self.cache_manager_.free_block_nums >= sum_size
 
+    def reserve_enough_kvcache(self, streams):
+        malloc_sizes = self._collect_malloc_sizes(streams)
+        sum_size = sum(malloc_sizes.values())
+        self.cache_manager_.reserve_blocks(sum_size)
+
+    # TODO(xinfei.sxf) 没有考虑cache
     def inital_kvcache_count(self, stream: GenerateStream):
-        return (stream.input_length - 2 + self.gen_num_per_circle) // self.seq_size_per_block_ + 1
+        # TODO(xinfei.sf) block num shoud be not same in different case
+        return (stream.seq_length - 2 + self.gen_num_per_circle) // self.seq_size_per_block_ + 1
 
     def free_kvcache_count(self):
-        return len(self.cache_manager_.free_blocks_index)
+        return self.cache_manager_.free_block_nums
 
     def _collect_malloc_sizes(self, streams):
         malloc_sizes = {}
@@ -99,13 +109,11 @@ class StreamCacheManager:
         block_indice = stream.pop_block_indice()
         if not block_indice:
             return
-        if self.ptuning_:
-            prefix_block_size = self.ptuning_.calc_prefix_block_size(stream.generate_config)
-            self.cache_manager_.free([indice[prefix_block_size:] for indice in block_indice])
+        if self.ptuning_ and isinstance(self.ptuning_, Ptuning):
+            prefix_block_num = self.ptuning_.calc_prefix_block_num(stream.generate_config)
+            self.cache_manager_.free([indice[prefix_block_num:] for indice in block_indice])
         elif self.reuse_cache_ and not stream.stopped:
-            self.cache_manager_.free_with_cache(
-                block_indice, stream.complete_token_ids[0].numpy().tolist(), stream.generate_config.chat_id
-            )
+            self.cache_manager_.free_with_cache(block_indice, stream.complete_token_ids[0].numpy().tolist())
         else:
             self.cache_manager_.free(block_indice)
 

@@ -131,10 +131,10 @@ class DecoderEngineTest(TestCase):
             pipeline.model.stop()
 
     @mock.patch('maga_transformer.models.base_model.BaseModel.create_context_decoder_mask')
-    def test_error_internal(self, create_context_decder_mask) -> None:
+    def test_error_internal(self, create_context_decoder_mask) -> None:
         pipeline = self.create_pipeline()
         try:
-            create_context_decder_mask.side_effect = Exception("test exception")
+            create_context_decoder_mask.side_effect = Exception("test exception")
             with self.assertRaisesRegex(Exception, "test exception"):
                 [_ for _ in pipeline("hello, what's your name?")]
             # just ensure every input has result
@@ -162,11 +162,11 @@ class DecoderEngineTest(TestCase):
         generate_model_input.side_effect = Exception("test exception")
         pipeline = self.create_pipeline()
         try:
-            origin_block = len(pipeline.model.decoder_engine_.scheduler_._stream_cache_manager.cache_manager_.free_blocks_index)
+            origin_block = pipeline.model.decoder_engine_.scheduler_._stream_cache_manager.cache_manager_.free_block_nums
             gen = pipeline("hello, what's your name?")
             with self.assertRaisesRegex(Exception, "test exception"):
                 results = [result for result in gen]
-            remain_block = len(pipeline.model.decoder_engine_.scheduler_._stream_cache_manager.cache_manager_.free_blocks_index)
+            remain_block = pipeline.model.decoder_engine_.scheduler_._stream_cache_manager.cache_manager_.free_block_nums
             self.assertEqual(origin_block, remain_block)
         finally:
             pipeline.model.stop()

@@ -16,7 +16,6 @@ from maga_transformer.utils.util import to_cuda, to_cpu
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 
-
 class ModelOutput(BaseModel):
     finished: Optional[torch.Tensor] = None
     update_length: List[int] = []
@@ -30,7 +29,6 @@ class ModelOutput(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
-
 
 class BatchQuery:
     def __init__(self, gen_num_per_circle: int, nccl_op: Any) -> None:
@@ -214,6 +212,13 @@ class BatchQuery:
     @property
     def streams(self):
         return self.decode_streams + self.context_streams
+
+    @property
+    def streams_num(self):
+        return len(self.streams)
+
+    def empty(self):
+        return self.streams_num == 0
 
     def generate_model_input(self):
         if g_parallel_info.tp_rank > 0:

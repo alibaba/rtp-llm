@@ -2,6 +2,7 @@ import torch
 import atexit
 import time
 import logging
+import hashlib
 from threading import Lock, Thread
 from typing import List, Set, Tuple, NamedTuple, Any, Optional
 
@@ -15,15 +16,53 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 class SeqPosition(NamedTuple):
     indice: int
     offset: int
-
+    
+class BlockRefCounter:
+    def __init__(self, block_nums):
+        self.ref_counter = {}
+        for i in range(1, block_nums):
+            self.ref_counter[i] = 0
+            
+    def get_ref_counter(self, block_index):
+        return self.ref_counter[block_index]
+    
+    def increment_ref_counter(self, block_indice: List[int]):
+        for index in block_indice:
+            self.ref_counter[index] += 1
+            
+    def dec_ref_counter(self, block_indice: List[int]):
+        for index in block_indice:
+            self.ref_counter[index] -= 1
+            
 class CacheManager:
     def __init__(self, config: CacheConfig, nccl_op: Any) -> None:
+        self.config = config
+        self.seq_size_per_block = config.seq_size_per_block
+        self.__init_free_block(config, nccl_op)
+        self.__init_kv_cache(config)
+        self.lock = Lock()
+        self.start()
+
+    def __init_free_block(self, config, nccl_op):
         block_nums = config.block_nums
+        self.block_nums = block_nums
+        
         if g_parallel_info.tp_size > 1:
             block_nums_t = torch.tensor([block_nums], dtype=torch.int32, device="cuda:0")
             nccl_op.broadcast_tp([block_nums_t])
             block_nums = int(block_nums_t[0])
         logging.info(f"block num: {block_nums}")
+            
+        self.free_blocks_index: Set[int] = set()
+        # block 0 is reserved for tmp or padding use
+        for i in range(1, block_nums):
+            self.free_blocks_index.add(i)
+        
+        self.block_ref_counter = BlockRefCounter(block_nums)
+        self.block_cache = BlockCache()
+        
+    def __init_kv_cache(self, config):
+        block_nums = config.block_nums
         self.k_blocks = torch.zeros((config.layer_num, block_nums, config.local_head_num_kv,
                                 config.seq_size_per_block, config.size_per_head), dtype=config.dtype, device='cuda:0')
         self.v_blocks = torch.zeros((config.layer_num, block_nums, config.local_head_num_kv, config.seq_size_per_block, config.size_per_head), dtype=config.dtype, device='cuda:0')
@@ -34,20 +73,14 @@ class CacheManager:
         else:
             self.k_scale = None
             self.v_scale = None
-        self.free_blocks_index: Set[int] = set()
-        # 0 block for tmp or padding use
-        for i in range(1, block_nums):
-            self.free_blocks_index.add(i)
-        self.seq_size_per_block = config.seq_size_per_block
-        self.block_nums = block_nums
-        self.lock = Lock()
-        self.block_cache = BlockCache()
-        self.start()
 
     def __free(self, indices: List[List[int]]) -> None:
         for indice in indices:
+            self.block_ref_counter.dec_ref_counter(indice)
             for i in indice:
-                self.free_blocks_index.add(i)
+                ref_count = self.block_ref_counter.get_ref_counter(i)
+                if ref_count == 0:
+                    self.free_blocks_index.add(i)
 
     def free(self, indices: List[List[int]]) -> None:
         if len(indices) == 0:
@@ -56,15 +89,23 @@ class CacheManager:
             self.__free(indices)
 
     def __malloc(self, nums: int) -> List[int]:
-        if len(self.free_blocks_index) < nums:
-            raise ConcurrencyException(f"failed to malloc {nums} blocks, only {len(self.free_blocks_index)} blocks left")
+        if self.free_block_nums < nums:
+            raise ConcurrencyException(f"failed to malloc {nums} blocks, only {self.free_block_nums} blocks left")
         else:
-            return [self.free_blocks_index.pop() for _ in range(nums)]
+            result = [self.free_blocks_index.pop() for _ in range(nums)]
+            
+            self.block_ref_counter.increment_ref_counter(result)
+                
+            return result
 
     def malloc(self, nums: int = 1) -> List[int]:
         with self.lock:
             self._maybe_free_block_from_cache(nums)
             return self.__malloc(nums)
+
+    def reserve_blocks(self, nums):
+        with self.lock:
+            self._maybe_free_block_from_cache(nums)
 
     def get_kv_cache_base(self):
         return self.k_blocks, self.v_blocks
@@ -81,39 +122,66 @@ class CacheManager:
         self.v_blocks[ :, dest_block_indice, ...] = self.v_blocks[ :, src_block_indice, ...]
 
     def _maybe_free_block_from_cache(self, num: int):
-        while len(self.free_blocks_index) < num and not self.block_cache.empty():
+        while self.free_block_nums < num and not self.block_cache.empty():
             indices = self.block_cache.pop()
+            if len(indices) == 0:
+                # avoid infinite loop
+                break
             self.__free([indices])
-
-    def free_with_cache(self, block_indice: List[List[int]], token_ids: List[int], chat_id: Optional[str] = None) -> None:
+            
+    def free_with_cache(self, block_indice: List[List[int]], token_ids: List[int], ) -> None:
+        self._insert_into_cache(block_indice, token_ids, is_resident=False)
+        
+    def insert_resident_cache(self, block_indice: List[int], token_ids: List[int]):
+        self._insert_into_cache([block_indice], token_ids, is_resident=True)
+        
+    def _insert_into_cache(self, block_indice: List[List[int]], token_ids: List[int], is_resident) -> None:
         with self.lock:
-            if not chat_id:
-                self.__free(block_indice)
-            # kvcache长度比output token长度少1
-            elif len(token_ids) > 1:
-                indices = self.block_cache.put(chat_id, token_ids[: -1], block_indice[0])
+            # the kvcache length is 1 less than the output token length.
+            if len(token_ids) > 1:
+                cache_block = block_indice[0]
+                cache_len = len(token_ids) - 1
+                # only cache aligned block
+                block_len = cache_len // self.config.seq_size_per_block
+                indices = self.block_cache.put(token_ids[: cache_len], cache_block[: block_len], is_resident)
                 self.__free([indices])
+                self.__free([cache_block[block_len:]])
                 self.__free(block_indice[1: ])
+            else:
+                self.__free(block_indice)
+                pass
 
-    def malloc_with_cache(self, nums: int, token_ids: List[int], chat_id: Optional[str] = None) -> Tuple[List[int], int]:
+    def malloc_with_cache(self, want_block_nums: int, token_ids: List[int]) -> Tuple[List[int], int]:
         with self.lock:
-            reuse_cache, common_length = self.block_cache.match(chat_id, token_ids)
-            kmonitor.report(GaugeMetrics.KVCACHE_REUSE_LENGTH_METRIC, common_length)
-            reuse_num = len(reuse_cache)
-            self._maybe_free_block_from_cache(nums - reuse_num)
-            # 如果cache里的block size大于当前block size，就释放多余的部分
-            if reuse_num > nums:
-                self.__free([reuse_cache[nums: ]])
-                reuse_cache = reuse_cache[: nums]
-                reuse_num = nums
+            cache_blocks, common_length = self.block_cache.match(token_ids)
+            kmonitor.report(GaugeMetrics.KV_CACHE_REUSE_LENGTH_METRIC, common_length)
+            
+            cache_block_num = len(cache_blocks)
+            # here, select min(xxx, len(token_ids) - 1) is to calculate the hidden_states of the last token.
+            reuse_length = min(common_length, len(token_ids) - 1)
+            old_reuse_length = reuse_length
+            # this is to ensure that the reuse block must be aligned, must be read-only, and cannot be modified.
+            reuse_block_num = reuse_length // self.config.seq_size_per_block
+            reuse_length = reuse_block_num * self.config.seq_size_per_block
+            if reuse_block_num > want_block_nums or reuse_block_num > cache_block_num:
+                logging.info(f"token_ids len = {len(token_ids)}, common_length = {common_length}, cache_block_num = {cache_block_num}, \
+                    old_reuse_length = {old_reuse_length}, reuse_block_num = {reuse_block_num}, reuse_length = {reuse_length}, \
+                    want_block_nums = {want_block_nums}, self.config.seq_size_per_block = {self.config.seq_size_per_block}")
+            assert reuse_block_num <= want_block_nums, f"reuse_block_num {reuse_block_num} should <= want_block_nums {want_block_nums}"
+            assert reuse_block_num <= cache_block_num, f"reuse_block_num {reuse_block_num} should <= cache_block_num {cache_block_num}"
+            reuse_blocks = cache_blocks[: reuse_block_num]
+            
+            # increase the reference count first to prevent it from being recycled later
+            self.block_ref_counter.increment_ref_counter(reuse_blocks)
+            self._maybe_free_block_from_cache(want_block_nums - reuse_block_num)
+            
             try:
-                # 这里取min(xxx, len - 1)是一定需要算最后一个token的hidden_states
-                return reuse_cache + self.__malloc(nums - reuse_num), min(common_length, len(token_ids) - 1)
+                return reuse_blocks + self.__malloc(want_block_nums - reuse_block_num), reuse_length
             except Exception as e:
-                self.__free([reuse_cache])
+                self.__free([reuse_blocks])
                 raise e
 
-    #TODO 看看能不能和prefix的kvcache block copy合并
+    #TODO check if it can be merged with the kvcache block copy of prefix
     def copy_kvcache_from_seq_idxs(self, block_indice_list: List[int], src_index: List[int], tgt_index: List[int]):
         if (len(src_index) != len(tgt_index)):
             raise Exception("src and tgt length should equal")
@@ -132,11 +200,16 @@ class CacheManager:
         self.k_blocks[:, dst_seq_position.indice, :, dst_seq_position.offset, :].copy_(self.k_blocks[:, src_seq_position.indice, :, src_seq_position.offset, :], non_blocking=True)
         self.v_blocks[:, dst_seq_position.indice, :, dst_seq_position.offset, :].copy_(self.v_blocks[:, src_seq_position.indice, :, src_seq_position.offset, :], non_blocking=True)
 
-    def is_lack_mem(self) -> bool:
-        return len(self.free_blocks_index) > 0
+    @property
+    def free_block_nums(self):
+        return len(self.free_blocks_index)
+
+    @property
+    def cache_item_num(self):
+        return self.block_cache.item_num()
 
     def _block_used_ratio(self):
-        return 100 * (1 - (len(self.free_blocks_index) + self.block_cache.total_block) / self.block_nums)
+        return 100 * (1 - (self.free_block_nums / self.block_nums))
 
     def start(self):
         self._running = True
@@ -146,25 +219,25 @@ class CacheManager:
 
     def stop(self):
         self._running = False
-        self._thread.join()  # 等待线程终止
+        self._thread.join()
 
     def _report_metrics(self):
         while self._running:
-            kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self._block_used_ratio())
+            with self.lock:
+                kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self._block_used_ratio())
+                kmonitor.report(GaugeMetrics.KV_CACHE_ITEM_NUM_METRIC, self.cache_item_num)
             time.sleep(1)
 
-
-class SingleBlock(NamedTuple):
-    input_id_list: List[int] = []
-    cache_indice: List[int] = []
+class CacheItem(NamedTuple):
+    token_list: List[int] = []
+    block_indice: List[int] = []
+    cache_key: int = None
+    is_resident: bool = False
 
 class BlockCache(object):
     def __init__(self):
         self.cache = LruDict()
-        # 为每次插入设置一个unique id
-        # 记录所有存储的block
-        self.total_block = 0
-
+        
     @staticmethod
     def prefix_length(left: List[int], right: List[int]):
         max_common_length = min(len(left), len(right))
@@ -173,32 +246,69 @@ class BlockCache(object):
                 return index
         return max_common_length
 
-    def match(self, chat_id: Optional[str], token_list: List[int]) -> Tuple[List[int], int]:
-        if not chat_id or chat_id not in self.cache:
-            return [], 0
-        single_block: SingleBlock = self.cache.pop(chat_id)
-        common_length = BlockCache.prefix_length(single_block.input_id_list, token_list)
-        self.total_block -= len(single_block.cache_indice)
-        return single_block.cache_indice, common_length
+    def match(self, token_list: List[int]) -> Tuple[List[int], int]:
+        matched_item = CacheItem()
+        matched_len = 0
+        
+        for item in self.cache.items():
+            common_length = BlockCache.prefix_length(item[1].token_list, token_list)
+            if common_length > matched_len:
+                matched_item = item[1]
+                matched_len = common_length    
+        
+        if matched_len != 0:
+            # increase the popularity of matched cache items
+            self.cache[matched_item.cache_key]
+        
+        return matched_item.block_indice, matched_len
 
     def empty(self) -> bool:
         return self.cache.empty()
 
-    def pop_key(self, key: Any) -> List[int]:
-        single_block: SingleBlock = self.cache.pop(key)
-        self.total_block -= len(single_block.cache_indice)
-        return single_block.cache_indice
+    def item_num(self) -> int:
+        return len(self.cache.items())
 
     def pop(self) -> List[int]:
-        single_block: SingleBlock = self.cache.poplast()[1]
-        self.total_block -= len(single_block.cache_indice)
-        return single_block.cache_indice
+        return_cache_item = CacheItem()
+        resident_list: List[CacheItem] = []
+        
+        while not self.empty():
+            cache_item = self.cache.poplast()[1]
+            if cache_item.is_resident:
+                resident_list.append(cache_item)
+            else:
+                return_cache_item = cache_item
+                break
+        
+        for resident_cache_item in resident_list:
+            self.cache[resident_cache_item.cache_key] = resident_cache_item
+    
+        return return_cache_item.block_indice
 
-    def put(self, chat_id: str, token_list: List[int], block_indice: List[int]) -> List[int]:
-        self.total_block += len(block_indice)
-        single_block: SingleBlock = SingleBlock()
-        if chat_id in self.cache:
-            single_block = self.cache.pop(chat_id)
-        self.cache[chat_id] = SingleBlock(token_list, block_indice)
-        self.total_block -= len(single_block.cache_indice)
-        return single_block.cache_indice
+    def hash_key(self, token_list: List[int]):
+        return hashlib.md5(str(token_list).encode()).hexdigest()
+    
+    def put(self, token_list: List[int], block_indice: List[int], is_resident) -> List[int]:    
+        assert len(token_list) > 0, f"token_list shoud not be empty"
+        
+        if len(block_indice) == 0:
+            return []
+        
+        cache_key = self.hash_key(token_list)
+        cache_item: CacheItem = CacheItem(token_list, block_indice, cache_key, is_resident) 
+        # if cache has this key, reject put to protect resident item
+        if cache_key in self.cache:
+            return block_indice
+            
+        self.cache[cache_key] = cache_item
+        return []
+    
+    def has_key(self, token_list):
+        cache_key = self.hash_key(token_list)
+        return cache_key in self.cache
+    
+    def is_resident(self, token_list):
+        if not self.has_key(token_list):
+            return False
+        cache_key = self.hash_key(token_list)
+        return self.cache[cache_key].is_resident 

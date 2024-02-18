@@ -28,7 +28,6 @@ def prepare_prompt(model: BaseModel, tokenizer: TokenizerBase, multi_task_prompt
             input_lengths=generate_context.input_lengths,
             memory_length=generate_context.memory_length,
             **generate_context.extra_args)
-        # print(k_cache, v_cache)
         kvcache = torch.concat([k_cache.unsqueeze_(0), v_cache.unsqueeze_(0)], dim=0)
         kvcache = kvcache.squeeze_(2).permute(1, 0, 2, 3, 4).contiguous()
         s = kvcache.shape            
@@ -40,6 +39,7 @@ def prepare_prompt(model: BaseModel, tokenizer: TokenizerBase, multi_task_prompt
         id: int = info['task_id']
         prompt: str = info['prompt']
         input_tokens = torch.IntTensor(tokenizer.encode(prompt))
+        print(f"system prompt {id}, token id size {input_tokens.size()} ")
         kvcache = run_context_decoder(input_tokens.unsqueeze(0))
         multi_task_prompt_tensor[id] = kvcache
         multi_task_tensor_id[id] = input_tokens

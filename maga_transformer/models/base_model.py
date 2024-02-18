@@ -71,6 +71,7 @@ class AuxInfo(BaseModel):
     iter_count: int = 0
     input_len: int = 0
     output_len: int = 0
+    reuse_len: int = 0
     cum_log_probs: List[float] = Field(default_factory=list)
     beam_responses: List[str] = None
 

@@ -31,6 +31,7 @@ class CacheConfigGenerator(object):
         logging.info(f'kv_cache dtype: {dtype}')
         dtype_size = get_dtype_size(dtype)
         block_size = (config.layer_num * local_head_num_kv * (config.size_per_head + scale_size) * dtype_size * seq_size_per_block)
+        
         return CacheConfig(config.layer_num, 0, block_size, local_head_num_kv, config.size_per_head, seq_size_per_block, dtype)
 
     @staticmethod

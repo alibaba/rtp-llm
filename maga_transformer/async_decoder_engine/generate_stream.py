@@ -184,6 +184,7 @@ class GenerateStream(BaseModel):
             self._output.aux_info.output_len = self._output.output_ids.shape[-1]
             self._output.aux_info.cum_log_probs = cum_log_probs.tolist() if cum_log_probs is not None else None
             self._output.aux_info.iter_count += 1
+            self._output.aux_info.reuse_len = self._reuse_length 
 
     def set_loss(self, loss):
         self._output.loss = loss
