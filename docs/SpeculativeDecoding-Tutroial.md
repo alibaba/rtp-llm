@@ -27,7 +27,7 @@ sp_model_config = ModelConfig(
     weight_type = "SP_WEIGHT_TYPE"
 )
 
-model = ModelFactory.from_model_type(model_config, sp_model_config)
+model = ModelFactory.from_model_config(model_config, sp_model_config)
 pipeline = Pipeline(model, model.tokenizer)
 
 generate_config = {

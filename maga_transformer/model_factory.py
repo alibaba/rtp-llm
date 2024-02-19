@@ -43,7 +43,7 @@ class ModelFactory:
     def _create_model(model_config: ModelConfig):
         global _model_factory
         if model_config.model_type not in _model_factory:
-            raise Exception(f"model {model_config.model_type} not registered!")
+            raise Exception(f"model type {model_config.model_type} not registered!")
         model_cls = _model_factory[model_config.model_type]
         config: GptInitModelParameters = model_cls.create_config(model_config)
         model = model_cls.from_config(config)
@@ -66,7 +66,7 @@ class ModelFactory:
         return config_json
 
     @staticmethod
-    def from_model_type(model_config: ModelConfig, sp_model_config: Optional[ModelConfig] = None) -> Union[AsyncModel, BaseModel]:
+    def from_model_config(model_config: ModelConfig, sp_model_config: Optional[ModelConfig] = None) -> Union[AsyncModel, BaseModel]:
         model = ModelFactory._create_model(model_config)
         if model_config.async_mode and model_config.model_type != 'fake_model': # for test
             sp_model = None if sp_model_config is None else ModelFactory._create_model(sp_model_config)
@@ -76,56 +76,44 @@ class ModelFactory:
     @staticmethod
     def from_huggingface(model_path_or_name: str, revision: Optional[str] = None, model_config: ModelConfig = ModelConfig()):
         model_path, model_type = get_model_info_from_hf(model_path_or_name, revision)
-        new_model_config = ModelConfig(
-            model_type=model_type,
-            ckpt_path=model_path,
-            tokenizer_path=model_path,
-            async_mode=model_config.async_mode,
-            weight_type=model_config.weight_type,
-            act_type=model_config.act_type,
-            max_seq_len=model_config.max_seq_len,
-            seq_size_per_block=model_config.seq_size_per_block,
-            gen_num_per_circle=model_config.gen_num_per_circle,
-            ptuning_path=model_config.ptuning_path,
-            lora_infos=model_config.lora_infos
-        )
-        return ModelFactory.from_model_type(new_model_config)
-
+        new_model_config = model_config
+        new_model_config = new_model_config._replace(model_type=model_type, ckpt_path=model_path, tokenizer_path=model_path)
+        return ModelFactory.from_model_config(new_model_config)
+    
     @staticmethod
-    def create_from_env():
+    def __create_normal_model_config():
+        model_type = os.environ["MODEL_TYPE"]
         tokenizer_path = os.environ["TOKENIZER_PATH"]
         ckpt_path = os.environ["CHECKPOINT_PATH"]
         lora_infos = os.environ.get("LORA_INFO", "{}")
+        max_seq_len = int(os.environ.get("MAX_SEQ_LEN", "0"))
+
+        tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
+        ckpt_path = fetch_remote_file_to_local(ckpt_path)
 
         extra_data_path = os.environ.get('EXTRA_DATA_PATH', "")
         if extra_data_path:
             extra_data_path = fetch_remote_file_to_local(extra_data_path)
             os.environ['LOCAL_EXTRA_DATA_PATH'] = extra_data_path
 
-        tokenizer_path = fetch_remote_file_to_local(tokenizer_path)
-
-        ckpt_path = fetch_remote_file_to_local(ckpt_path)
-        if lora_infos is not None:
-            logging.info(f"lora_infos is {lora_infos}")
-            lora_infos = json.loads(lora_infos)
-            for lora_name, lora_path in lora_infos.items():
-                lora_infos[lora_name] = fetch_remote_file_to_local(lora_path)
-
-        logging.info(f"load model from tokenizer_path: {tokenizer_path}, ckpt_path: {ckpt_path}")
-        model_type = os.environ["MODEL_TYPE"]
-
-        weight_type: WEIGHT_TYPE = get_weight_type_from_env(os.environ)
-        act_type = weight_type if weight_type in [ WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16
-        ACT_TYPE = "ACT_TYPE"
-        if os.environ.get(ACT_TYPE, None):
-            act_type = WEIGHT_TYPE.from_str(os.environ.get(ACT_TYPE))
-
-        max_seq_len = int(os.environ.get("MAX_SEQ_LEN", "0"))
-
         ptuning_path = None
         if 'PTUNING_PATH' in os.environ:
             ptuning_path = os.environ['PTUNING_PATH']
             ptuning_path = fetch_remote_file_to_local(ptuning_path)
+
+        lora_infos = json.loads(lora_infos)
+        for lora_name, lora_path in lora_infos.items():
+            lora_infos[lora_name] = fetch_remote_file_to_local(lora_path)
+
+        logging.info(f"load model from tokenizer_path: {tokenizer_path}, ckpt_path: {ckpt_path}, lora_infos: {lora_infos}, ptuning_path: {ptuning_path}")
+        
+        weight_type: WEIGHT_TYPE = get_weight_type_from_env(os.environ)
+        act_type = weight_type if weight_type in [ WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16
+        
+        # TODO(xinfei.sxf) fix this
+        ACT_TYPE = "ACT_TYPE"
+        if os.environ.get(ACT_TYPE, None):
+            act_type = WEIGHT_TYPE.from_str(os.environ.get(ACT_TYPE))
 
         model_config = ModelConfig(model_type=model_type,
                                    ckpt_path=ckpt_path,
@@ -136,15 +124,19 @@ class ModelFactory:
                                    max_seq_len=max_seq_len,
                                    lora_infos=lora_infos,
                                    ptuning_path=ptuning_path)
+    
+        return model_config
+    
+    @staticmethod
+    def __create_sp_model_config(tokenizer_path, max_seq_len):
         # speculative model params
         sp_model_config = None
         sp_model_type = os.environ.get("SP_MODEL_TYPE", None)
         if sp_model_type is not None:
             logging.info("use sp model")
+            gen_num_per_circle = int(os.environ.get('GEN_NUM_PER_CIRCLE', '5'))
             sp_ckpt_path = fetch_remote_file_to_local(os.environ['SP_CHECKPOINT_PATH'])
             logging.info(f"load sp model from ckpt_path: {sp_ckpt_path}")
-
-            gen_num_per_circle = int(os.environ.get('GEN_NUM_PER_CIRCLE', '5'))
 
             sp_weight_type = get_sp_weight_type_from_env(os.environ)
             sp_act_type = sp_weight_type if sp_weight_type in [ WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16
@@ -161,9 +153,10 @@ class ModelFactory:
                                           act_type=sp_act_type,
                                           max_seq_len=max_seq_len,
                                           gen_num_per_circle=gen_num_per_circle)
+        return sp_model_config
 
-        model = ModelFactory.from_model_type(model_config, sp_model_config)
-
+    @staticmethod
+    def load_default_generate_config(model):
         if 'GENERATION_CONFIG_PATH' in os.environ:
             model.default_generate_config.update(
                 json.load(open(os.path.join(os.environ['GENERATION_CONFIG_PATH'], 'generation_config.json')))
@@ -171,4 +164,12 @@ class ModelFactory:
             logging.info(f"load generate config:{os.environ['GENERATION_CONFIG_PATH']}/generation_config.json: \n\
                          {json.dumps(model.default_generate_config, indent=4)}"
             )
+
+    @staticmethod
+    def create_from_env():
+        normal_model_config = ModelFactory.__create_normal_model_config()
+        sp_model_config = ModelFactory.__create_sp_model_config(normal_model_config.tokenizer_path, normal_model_config.max_seq_len)
+        model = ModelFactory.from_model_config(normal_model_config, sp_model_config)
+        ModelFactory.load_default_generate_config(model)
+        
         return model

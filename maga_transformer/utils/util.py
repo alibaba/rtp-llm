@@ -145,6 +145,7 @@ def to_cuda(tensor: torch.Tensor) -> torch.Tensor:
 def to_cpu(tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops.fastertransformer.async_copy_to_cpu(tensor)
 
+#TODO(xinfei.sxf) split this class
 class WEIGHT_TYPE(Enum):
     INT4 = ["int4"]
     INT8 = ["int8"]

@@ -70,7 +70,7 @@ class InferenceWorker():
         if return_hidden_states:
             response["hidden_states"] = hidden_states.tolist()
         if calculate_loss:
-            response['loss'] = lost.tolist()
+            response['loss'] = loss.tolist()
         if return_logits:
             response['logits'] = logits.tolist()
 

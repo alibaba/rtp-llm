@@ -45,7 +45,7 @@ class async_gather_batch_test(TestCase):
         ckpt_path = 'maga_transformer/test/model_test/fake_test/testdata/llama/fake/hf_source'
         tokenizer_path = 'maga_transformer/test/model_test/fake_test/testdata/llama/fake/hf_source'
         model_config = ModelConfig('llama', ckpt_path, tokenizer_path, False, 0)
-        model = ModelFactory.from_model_type(model_config)
+        model = ModelFactory.from_model_config(model_config)
         DecoderEngine.gathered_batch = False
         DecoderEngine.report_metric = report_metric
         model = AsyncModel(model)

@@ -170,7 +170,7 @@ class ModelTestBase(TestCase):
         self.assertTrue(all(self.flat(self.close(expect_result[1], batch_loss).tolist())))
 
     def _load_model(self):
-        model = ModelFactory.from_model_type(ModelConfig(
+        model = ModelFactory.from_model_config(ModelConfig(
             model_type=self.model_type,
             tokenizer_path=self.tokenizer_path,
             ckpt_path=self.ckpt_path,
