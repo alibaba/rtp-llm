@@ -7,6 +7,8 @@ from collections import OrderedDict
 import math
 import requests
 from io import BytesIO
+import time
+import os
 from functools import partial
 from PIL import Image
 from typing import Callable, Optional, Sequence, Tuple, List
@@ -19,6 +21,29 @@ from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
+import tensorrt as trt
+
+def torch_dtype_from_trt(dtype):
+   if dtype == trt.int8:
+       return torch.int8
+   elif dtype == trt.bool:
+       return torch.bool
+   elif dtype == trt.int32:
+       return torch.int32
+   elif dtype == trt.float16:
+       return torch.float16
+   elif dtype == trt.float32:
+       return torch.float32
+   else:
+       raise TypeError("%s is not supported by torch" % dtype)
+   
+def torch_device_from_trt(device):
+   if device == trt.TensorLocation.DEVICE:
+       return torch.device("cuda")
+   elif device == trt.TensorLocation.HOST:
+       return torch.device("cpu")
+   else:
+       return TypeError("%s is not supported by torch" % device)
 
 def get_abs_pos(abs_pos, tgt_size):
     # abs_pos: L, C
@@ -424,3 +449,171 @@ class VisionTransformer(nn.Module):
             images.append(self.image_transform(image))
         images = torch.stack(images, dim=0)
         return self(images)
+
+
+class Preprocss:
+
+    def __init__(self, image_size: int):
+        mean = (0.48145466, 0.4578275, 0.40821073)
+        std = (0.26862954, 0.26130258, 0.27577711)
+        self.image_transform = transforms.Compose([
+            transforms.Resize((image_size, image_size),
+                              interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
+
+    def encode(self, image_paths: List[str]) -> torch.Tensor:
+        images = []
+        headers = {
+            'authority': 'img.alicdn.com',
+            'sec-ch-ua': '" Not A;Brand";v="99", "Chromium";v="90", "Google Chrome";v="90"',
+            'sec-ch-ua-mobile': '?0',
+            'dnt': '1',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36',
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+            'sec-fetch-site': 'none',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-user': '?1',
+            'sec-fetch-dest': 'document',
+            'accept-language': 'en-US,en;q=0.9'
+        }
+        for image_path in image_paths:
+            if image_path.startswith("http://") or image_path.startswith("https://"):
+                image = Image.open(requests.get(image_path, headers=headers, stream=True).raw)
+            else:
+                image = Image.open(image_path)
+            image = image.convert("RGB")
+            images.append(self.image_transform(image))
+        images = torch.stack(images, dim=0)
+        return images
+
+
+class VITEngine(torch.nn.Module):
+    def __init__(self, vit: VisionTransformer, image_size: int):
+        super(VITEngine, self).__init__()
+        self.image_size = image_size
+        self.vit = vit
+        self.device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
+        
+        output_dir = os.path.join(os.getcwd(), "qwen_vl_onnx")
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        onnx_file_path = os.path.join(output_dir, "vit.onnx")
+        engine_file_path = os.path.join(output_dir, "vit.trt")
+        
+        self.export_onnx(onnx_file_path)
+        self.generate_trt_engine(onnx_file_path, engine_file_path)
+
+        self.engine = self.loadEngine2TensorRT(engine_file_path)
+        
+        if self.engine is not None:
+            self.context = self.engine.create_execution_context()
+            
+        self.input_names = ["input"]
+        self.output_names = ["output"]
+        self.bindings = [None] * (len(self.input_names) + len(self.output_names))
+        self.outputs = [None] * len(self.output_names)
+        self.output_idx = self.engine.get_binding_index(self.output_names[0])
+        self.output_dtype = torch_dtype_from_trt(self.engine.get_binding_dtype(self.output_idx))
+        self.output_shape = tuple(self.engine.get_binding_shape(self.output_idx))
+        self.output_device = torch_device_from_trt(self.engine.get_location(self.output_idx))
+        self.input_idx = self.engine.get_binding_index(self.input_names[0])
+
+    def export_onnx(self, onnx_file_path):
+        print("Start converting ONNX model!")
+        image_url = [os.path.join(os.path.abspath(os.path.dirname(__file__)), 'test', 'testdata', 'qwen_vl', '1.jpg')]
+        image_pre_obj = Preprocss(self.image_size)
+        image = image_pre_obj.encode(image_url).to(self.device)
+        torch.onnx.export(
+            self.vit,
+            image.to('cuda'),
+            onnx_file_path,
+            opset_version=17,
+            input_names=['input'],
+            output_names=['output'],
+            dynamic_axes={'input': {0: 'batch'}}
+        )
+
+    def generate_trt_engine(self,
+                            onnxFile,
+                            planFile,
+                            minBS=1,
+                            optBS=2,
+                            maxBS=4):
+        print("Start converting TRT engine!")
+        logger = trt.Logger(trt.Logger.VERBOSE)
+        builder = trt.Builder(logger)
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+        profile = builder.create_optimization_profile()
+        config = builder.create_builder_config()
+        # config.set_flag(trt.BuilderFlag.FP16)
+        parser = trt.OnnxParser(network, logger)
+
+        with open(onnxFile, 'rb') as model:
+            if not parser.parse(model.read(), "/".join(onnxFile.split("/"))):
+                print("Failed parsing %s" % onnxFile)
+                for error in range(parser.num_errors):
+                    print(parser.get_error(error))
+            print("Succeeded parsing %s" % onnxFile)
+
+        nBS = -1
+        nMinBS = minBS
+        nOptBS = optBS
+        nMaxBS = maxBS
+        inputT = network.get_input(0)
+        inputT.shape = [nBS, 3, self.image_size, self.image_size]
+        profile.set_shape(inputT.name,
+                          [nMinBS, 3, self.image_size, self.image_size],
+                          [nOptBS, 3, self.image_size, self.image_size],
+                          [nMaxBS, 3, self.image_size, self.image_size])
+
+        config.add_optimization_profile(profile)
+
+        t0 = time.time()
+        engineString = builder.build_serialized_network(network, config)
+        t1 = time.time()
+        if engineString == None:
+            print("Failed building %s" % planFile)
+        else:
+            print("Succeeded building %s in %d s" % (planFile, t1 - t0))
+        print("plan file is", planFile)
+        with open(planFile, 'wb') as f:
+            f.write(engineString)
+    
+    def loadEngine2TensorRT(self, filepath: str):
+        print("Start loading TRT engine!")
+        G_LOGGER = trt.Logger(trt.Logger.WARNING)
+        with open(filepath, "rb") as f, trt.Runtime(G_LOGGER) as runtime:
+            engine = runtime.deserialize_cuda_engine(f.read())
+            return engine
+
+    def forward(self, *inputs):
+        batch_size = inputs[0].shape[0]
+        
+        shape = (batch_size, ) + self.output_shape[1:]
+        output = torch.empty(size=shape, dtype=self.output_dtype, device=self.output_device)
+        self.outputs[0] = output
+        self.bindings[self.output_idx] = output.data_ptr()
+        
+        self.context.set_binding_shape(self.input_idx, tuple(inputs[0].shape))
+        self.bindings[self.input_idx] = inputs[0].contiguous().data_ptr()
+
+        self.context.execute_async(
+            batch_size, self.bindings, torch.cuda.current_stream().cuda_stream
+        )
+
+        outputs = tuple(self.outputs)[0]
+        return outputs
+
+    def encode(self, image_paths: List[str]):
+        image_pre_obj = Preprocss(self.image_size)
+        image = image_pre_obj.encode(image_paths).to(device=self.device)
+        return self(image)
+    
+    def image_embedding(self, images: List[str], device) -> torch.Tensor:
+        if len(images) != 0:
+            images = self.encode(images)
+            assert images.shape[0] == len(images)
+        return images.to(device=device)

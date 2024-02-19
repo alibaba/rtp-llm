@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.qwen import QWen
 from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo, QwenVLVitWeight
-from maga_transformer.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
+from maga_transformer.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT, VITEngine
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal_mixin import MultiModalMixin, BaseImageEmbedding
 from maga_transformer.model_factory_register import register_model
@@ -30,6 +30,8 @@ class QWen_VL(QWen, MultiModalMixin):
         config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.visual.vit})
 
         QWen.__init__(self, config)
+        if os.environ.get("VIT_TRT", "0") == "1":
+            self.visual = VITEngine(self.visual.vit, config.vit_related_params.config.get("image_size"))
 
     @classmethod
     def is_multimodal(cls) -> bool:
