@@ -185,6 +185,22 @@ cc_library(
 )
 
 cc_library(
+    name = "tensor_utils",
+    srcs = [
+        "tensor_utils.cc"
+    ],
+    hdrs = [
+        "tensor_utils.h"
+    ],
+    copts = copts(),
+    deps = torch_deps() + [
+        "//src/fastertransformer/core:Tensor",
+    ],
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "gemm_test_utils",
     srcs = [
         "gemm_test/encoder_igemm_func.cc",

@@ -87,11 +87,6 @@ public:
     std::string whereToString() const;
     std::string toString() const;
     std::string getNumpyTypeDesc(DataType type) const;
-
-    void          saveNpy(const std::string& filename) const;
-    static Tensor loadNpy(const std::string& npy_file, const MemoryType where);
-
-    static DataType typeFromNumpyDesc(std::string type);
     static size_t   getTypeSize(DataType type);
 
     template<typename T>
@@ -242,10 +237,6 @@ public:
         }
         return str;
     }
-
-private:
-    static void parseNpyIntro(FILE*& f_ptr, uint32_t& header_len, uint32_t& start_data);
-    static int  parseNpyHeader(FILE*& f_ptr, uint32_t header_len, DataType& type, std::vector<size_t>& shape);
 
 private:
     MemoryType          where_;
@@ -430,8 +421,6 @@ public:
     }
 
     std::string      toString() const;
-    static TensorMap fromNpyFolder(const std::string& base_folder);
-    void             saveNpy(const std::string& base_folder);
 };
 
 }  // namespace fastertransformer
