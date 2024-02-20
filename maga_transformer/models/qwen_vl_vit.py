@@ -523,9 +523,7 @@ class VITEngine(torch.nn.Module):
 
     def export_onnx(self, onnx_file_path):
         print("Start converting ONNX model!")
-        image_url = [os.path.join(os.path.abspath(os.path.dirname(__file__)), 'test', 'testdata', 'qwen_vl', '1.jpg')]
-        image_pre_obj = Preprocss(self.image_size)
-        image = image_pre_obj.encode(image_url).to(self.device)
+        image = torch.randn(1, 3, self.image_size, self.image_size).to(self.device)
         torch.onnx.export(
             self.vit,
             image.to('cuda'),
