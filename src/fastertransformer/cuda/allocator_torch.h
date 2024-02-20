@@ -1,5 +1,5 @@
 #pragma once
-#include "src/fastertransformer/core/allocator_cuda.h"
+#include "src/fastertransformer/cuda/allocator_cuda.h"
 #include "torch/extension.h"
 #include "src/fastertransformer/utils/logger.h"
 #include <unordered_map>

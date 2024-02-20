@@ -7,7 +7,7 @@
 #include <sys/time.h>
 
 #include "src/fastertransformer/kernels/logprob_kernels.h"
-#include "src/fastertransformer/core/allocator_cuda.h"
+#include "src/fastertransformer/cuda/allocator_cuda.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/cuda/memory_utils.h"

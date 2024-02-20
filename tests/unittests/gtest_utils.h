@@ -10,7 +10,7 @@
 
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/core/Tensor.h"
-#include "src/fastertransformer/core/allocator_cuda.h"
+#include "src/fastertransformer/cuda/allocator_cuda.h"
 #include "src/fastertransformer/utils/logger.h"
 
 namespace ft = fastertransformer;

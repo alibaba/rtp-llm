@@ -1,4 +1,4 @@
-#include "src/fastertransformer/core/allocator_cuda.h"
+#include "src/fastertransformer/cuda/allocator_cuda.h"
 
 namespace fastertransformer {
 

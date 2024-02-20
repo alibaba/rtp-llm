@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "src/fastertransformer/utils/DenseWeight.h"
-#include "src/fastertransformer/core/allocator_cuda.h"
+#include "src/fastertransformer/cuda/allocator_cuda.h"
 #include "src/fastertransformer/cuda/cublas/cublas.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/gemm.h"

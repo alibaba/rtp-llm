@@ -70,11 +70,11 @@ cc_library(
     name = "memory_utils",
     srcs = [
         "memory_utils.cu",
-        
+
     ],
     hdrs = [
         "memory_utils.h",
-        
+
     ],
     deps = [
         "//src/fastertransformer/cutlass:cutlass_interface",
@@ -147,6 +147,39 @@ cc_library(
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "allocator_cuda",
+    srcs = [
+        "allocator_cuda.cc"
+    ],
+    hdrs = [
+        "allocator_cuda.h"
+    ],
+    copts = cuda_copts(),
+    deps = [
+        "//src/fastertransformer/core:allocator",
+        ":cuda_utils",
+    ],
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "allocator_torch",
+    srcs = [
+        "allocator_torch.cc"
+    ],
+    hdrs = [
+        "allocator_torch.h"
+    ],
+    copts = copts(),
+    deps = torch_deps() + [
+        ":allocator_cuda",
+    ],
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
