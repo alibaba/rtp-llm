@@ -25,6 +25,8 @@ requirement([
     "prettytable",
     "timm",
     "aiohttp",
+    "tensorrt",
+    "onnx"
 ])
 
 py_library(
@@ -90,7 +92,9 @@ py_library(
         ":einops",
         ":utils",
         ":ops",
-        ":timm"
+        ":timm",
+        ":tensorrt",
+        ":onnx"
     ],
 )
 
@@ -257,6 +261,8 @@ py_wheel(
         "prettytable",
         "pydantic==2.5.3",
         "timm==0.9.12",
+        "tensorrt>=8.6.1",
+        "onnx"
     ] + whl_deps(),
 )
 
