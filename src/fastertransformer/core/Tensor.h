@@ -64,8 +64,7 @@ public:
     Tensor(const MemoryType where,
            const DataType type,
            const std::vector<size_t> shape,
-           const void* data,
-           const std::function<void(Tensor&)> deleter = nullptr);
+           const void* data);
 
     ~Tensor();
 
@@ -75,7 +74,6 @@ public:
     Tensor& operator=(Tensor&& tensor) = default;
 
     bool isValid() const;
-    void reset();
 
     MemoryType                 where() const;
     DataType                   type() const;
@@ -253,9 +251,8 @@ private:
     MemoryType          where_;
     DataType            type_;
     std::vector<size_t> shape_;
-    void*               data_      = nullptr;
-    std::function<void(Tensor&)> deleter_;
-    std::shared_ptr<int>         ref_counter_;
+    void*               data_   = nullptr;
+    bool                owned_  = false;
 };
 
 class TensorMap {

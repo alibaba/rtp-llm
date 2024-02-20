@@ -38,3 +38,9 @@ buffer manager的申请接口参数除了基本的size信息之外，还要提�
 
 长短生命周期的buffer会从两个池子里进行复用，并且对于长生命周期的buffer，manager会记录其分配和释放的顺序，
 可供打印timeline并计算碎片复用策略。
+
+## 基础对象
+
+### Tensor
+Tensor 在这里只记录一块内存指针及where、type、shape这些metadata。Tensor本身不持有内存，也不负责内存释放。
+BufferManager分配的内存放置在`std::shared_ptr<Tensor>`中，

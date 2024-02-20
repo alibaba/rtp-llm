@@ -37,41 +37,29 @@ Tensor::Tensor():
     where_(MEMORY_CPU),
     type_(TYPE_INVALID),
     shape_({}),
-    data_(nullptr),
-    deleter_(nullptr),
-    ref_counter_(nullptr) {}
+    data_(nullptr)
+    {}
 
 Tensor::Tensor(const MemoryType where,
                const DataType type,
                const std::vector<size_t> shape,
-               const void* data,
-               const std::function<void(Tensor&)> deleter):
+               const void* data):
     where_(where),
     type_(type),
     shape_(shape),
-    data_(const_cast<void*>(data)),
-    deleter_(deleter),
-    ref_counter_(deleter ? std::make_shared<int>(1) : nullptr) {}
+    data_(const_cast<void*>(data))
+    {}
 
 Tensor::~Tensor() {
-    reset();
+    if (isValid()) {
+        type_ = TYPE_INVALID;
+        shape_.clear();
+        data_ = nullptr;
+    }
 }
 
 bool Tensor::isValid() const {
     return (type_ != TYPE_INVALID) && (shape_.size() > 0) && (data_ != nullptr);
-}
-
-void Tensor::reset() {
-    if (isValid()) {
-        if (ref_counter_ && ref_counter_.use_count() == 1) {
-            deleter_(*this);
-        }
-        ref_counter_.reset();
-        type_ = TYPE_INVALID;
-        shape_.clear();
-        data_ = nullptr;
-        deleter_ = nullptr;
-    }
 }
 
 MemoryType Tensor::where() const {

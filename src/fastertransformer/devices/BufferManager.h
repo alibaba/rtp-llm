@@ -40,8 +40,8 @@ public:
     BufferManager(IAllocator* device_allocator, IAllocator* host_allocator);
     ~BufferManager();
 
-    Tensor allocate(const BufferParams& params, const BufferHints& hints);
-    void recycle(Tensor& tensor, IAllocator* allocator);
+    std::shared_ptr<Tensor> allocate(const BufferParams& params, const BufferHints& hints);
+    void recycle(Tensor* tensor, IAllocator* allocator);
 
 private:
     IAllocator* device_allocator_;

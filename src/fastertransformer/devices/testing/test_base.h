@@ -19,10 +19,10 @@ public:
 
 protected:
     template <typename T>
-    Tensor createHostTensor(const std::vector<size_t>& shape, const std::vector<T>& data) {
+    std::shared_ptr<Tensor> createHostTensor(const std::vector<size_t>& shape, const std::vector<T>& data) {
         auto tensor = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::HOST}, {});
-        assert(tensor.size() == data.size());
-        memcpy(tensor.data(), data.data(), data.size() * sizeof(T));
+        assert(tensor->size() == data.size());
+        memcpy(tensor->data(), data.data(), data.size() * sizeof(T));
         return tensor;
     }
 
