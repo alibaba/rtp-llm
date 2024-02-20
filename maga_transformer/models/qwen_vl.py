@@ -30,7 +30,7 @@ class QWen_VL(QWen, MultiModalMixin):
         config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.visual.vit})
 
         QWen.__init__(self, config)
-        if os.environ.get("VIT_TRT", "0") == "1":
+        if os.environ.get("VIT_TRT", "1") == "1":
             self.visual = VITEngine(self.visual.vit, config.vit_related_params.config.get("image_size"))
 
     @classmethod
