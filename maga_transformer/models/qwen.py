@@ -288,13 +288,7 @@ class QWen_1B8(QWenBase):
         QWenBase._common_config(config, ckpt_path)
         return config
 
-class QWen2(QWen):
-    def load_tokenizer(self):
-        # if not set unk_token, will continuously log 'Using unk_token, but it is not set yet'
-        self.tokenizer = QWen2Tokenizer.from_pretrained(self.config.tokenizer_path, unk_token='<|endoftext|>')
-
 register_model('qwen', QWen, ["QWenLMHeadModel"])
 register_model('qwen_7b', QWen_7B)
 register_model('qwen_13b', QWen_13B)
 register_model('qwen_1b8', QWen_1B8)
-register_model('qwen2', QWen2, ["Qwen2ForCausalLM"])

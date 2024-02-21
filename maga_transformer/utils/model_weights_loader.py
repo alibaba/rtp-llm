@@ -252,9 +252,7 @@ class ModelWeightsLoader:
         before_merge_tensors = []
         for ckpt_weight in weight_info.weights:
             before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(ckpt_weight.tensor_name(layer_id))))
-            
         after_merge_tensor = weight_info.process_fun(before_merge_tensors)
-
         return after_merge_tensor
 
     def _split_and_sanitize_tensor(self, tensor: torch.Tensor, weight: WeightInfo):
