@@ -22,6 +22,7 @@ TEST_F(CudaOpsTest, testCopy) {
     auto B = device_->allocateBuffer({DataType::TYPE_FP32, {2, 3}, AllocationType::DEVICE}, {});
     auto C = device_->allocateBuffer({DataType::TYPE_FP32, {2, 3}, AllocationType::HOST}, {});
     device_->copy({*A, *B});
+    sync_check_cuda_error();
     device_->copy({*B, *C});
     sync_check_cuda_error();
 
