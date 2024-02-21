@@ -10,6 +10,7 @@ from transformers import PreTrainedTokenizer
 
 from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
+from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
     ChatCompletionRequest, RoleEnum, FunctionCall
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
@@ -119,7 +120,7 @@ class QwenRenderer(CustomChatRenderer):
         self.add_extra_stop_word_ids([[37763, 367, 25]]) # Observation:
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        assert (isinstance(self.tokenizer, QWenTokenizer))
+        assert (isinstance(self.tokenizer, QWenTokenizer) or isinstance(self.tokenizer, Qwen2Tokenizer))
         query, history = self.parse_messages(request.messages, request.functions)
         input_ids = []
         if (query == _TEXT_COMPLETION_CMD):

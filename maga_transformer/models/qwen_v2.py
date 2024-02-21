@@ -14,7 +14,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.models.gpt import GptContextDecoder
 from maga_transformer.models.qwen import QWen, transpose_pad
-from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer as QWen2TokenizerOrigin
+from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer as QWen2Tokenizer
 from maga_transformer.model_factory_register import register_model
 
 def merge_qkv_b(ts: List[torch.Tensor]):
@@ -26,11 +26,6 @@ def merge_qkv_hf(ts: List[torch.Tensor]):
     q, k, v = ts
     qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
     return qkv_weight
-
-class QWen2Tokenizer(QWen2TokenizerOrigin):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
 
 class QWenV2Weight(ModelDeployWeightInfo):
     def _get_weight_info(self):
@@ -141,7 +136,8 @@ class QWenV2(QWen):
         return QWenV2Weight
     
     def load_tokenizer(self):
-        # if not set unk_token, will continuously log 'Using unk_token, but it is not set yet'
-        self.tokenizer = QWen2Tokenizer.from_pretrained(self.config.tokenizer_path)
+        self.tokenizer = QWen2Tokenizer.from_pretrained(self.config.tokenizer_path, verbose = False)
+        self.tokenizer.im_start_id = self.tokenizer.encode('<|im_start|>')[0]
+        self.tokenizer.im_end_id = self.tokenizer.encode('<|im_end|>')[0]
 
 register_model('qwen_2', QWenV2, ["Qwen2ForCausalLM"])
