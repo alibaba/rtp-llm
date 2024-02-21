@@ -10,7 +10,7 @@ void DeviceBase::init() {
     buffer_manager_.reset(new BufferManager(getAllocator(), getHostAllocator()));
 }
 
-std::shared_ptr<Tensor> DeviceBase::allocateBuffer(const BufferParams& params, const BufferHints& hints) {
+std::shared_ptr<Buffer> DeviceBase::allocateBuffer(const BufferParams& params, const BufferHints& hints) {
     return buffer_manager_->allocate(params, hints);
 }
 

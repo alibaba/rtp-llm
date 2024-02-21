@@ -201,7 +201,7 @@ protected:
                             const std::vector<size_t> shape)
     {
         size_t n_elmts  = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
-        size_t buf_size = ft::Tensor::getTypeSize(dtype) * n_elmts;
+        size_t buf_size = getTypeSize(dtype) * n_elmts;
 
         void* data = nullptr;
         if (mtype == ft::MEMORY_CPU || mtype == ft::MEMORY_CPU_PINNED) {

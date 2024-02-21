@@ -1,7 +1,7 @@
 #pragma once
 
 #include "src/fastertransformer/devices/Weights.h"
-#include "src/fastertransformer/core/Tensor.h"
+#include "src/fastertransformer/core/Buffer.h"
 
 #include <optional>
 
@@ -33,11 +33,11 @@ public:
 };
 
 struct CopyParams {
-    const Tensor& src;
-    Tensor&       dst;
+    const Buffer& src;
+    Buffer&       dst;
 };
 
-enum class NormType {
+enum class LayerNormOpType {
     Layernorm,
     RmsNorm,
     AlphaNorm,
@@ -58,21 +58,21 @@ enum class ActivationType {
 };
 
 struct LayernormParams {
-    const NormType norm_type;
-    const Tensor&  input;
-    const std::optional<Tensor>  residual1;
-    const std::optional<Tensor>  residual2;
-    const std::optional<Tensor>  bias;
-    const Tensor&  gamma;
-    const Tensor&  beta;
+    const LayerNormOpType norm_type;
+    const Buffer&  input;
+    const std::optional<Buffer>  residual1;
+    const std::optional<Buffer>  residual2;
+    const std::optional<Buffer>  bias;
+    const Buffer&  gamma;
+    const Buffer&  beta;
     const float    eps;
 
-    const Tensor& scale_inter;
-    const Tensor& scale_out;
-    const Tensor& scale;
-    const Tensor& dynamic_scale;
+    const Buffer& scale_inter;
+    const Buffer& scale_out;
+    const Buffer& scale;
+    const Buffer& dynamic_scale;
 
-    Tensor& norm_output;
+    Buffer& norm_output;
 };
 
 // corresponds to cublasOperation_t
@@ -87,19 +87,19 @@ enum class TransposeOperation {
 // or [bs, m, k], [bs, k, n], [bs, m, n], [bs, m, n] where bs is batch_size
 // NOTE: caller needs to preallocate C
 struct GemmParams {
-    GemmParams(const Tensor& A, const Tensor& B, Tensor& C)
+    GemmParams(const Buffer& A, const Buffer& B, Buffer& C)
     : A(A), B(B), C(C), D(C) {}
-    GemmParams(const Tensor& A, const Tensor& B, const Tensor& C, Tensor& D)
+    GemmParams(const Buffer& A, const Buffer& B, const Buffer& C, Buffer& D)
     : A(A), B(B), C(C), D(D) {}
 
-    const Tensor& A;
-    const Tensor& B;
-    const Tensor& C;
-    Tensor&       D;
+    const Buffer& A;
+    const Buffer& B;
+    const Buffer& C;
+    Buffer&       D;
 
-    const std::optional<const Tensor> A_scale = std::nullopt;
-    const std::optional<const Tensor> B_Scale = std::nullopt;
-    const std::optional<const Tensor> C_scale = std::nullopt;
+    const std::optional<const Buffer> A_scale = std::nullopt;
+    const std::optional<const Buffer> B_Scale = std::nullopt;
+    const std::optional<const Buffer> C_scale = std::nullopt;
 
     const TransposeOperation transA = TransposeOperation::NONE;
     const TransposeOperation transB = TransposeOperation::NONE;
@@ -113,41 +113,41 @@ struct GemmParams {
 // shapes of each A, B, C, D needs to be [m, k], [k, n], [m, n], [m, n]
 struct GroupedGemmParams {
     GroupedGemmParams(
-        const std::vector<Tensor>& A,
-        const std::vector<Tensor>& B,
-        std::vector<Tensor>& C
+        const std::vector<Buffer>& A,
+        const std::vector<Buffer>& B,
+        std::vector<Buffer>& C
     ) : A(A), B(B), C(C), D(C) {}
     GroupedGemmParams(
-        const std::vector<Tensor>& A,
-        const std::vector<Tensor>& B,
-        const std::vector<Tensor>& C,
-        std::vector<Tensor>&       D
+        const std::vector<Buffer>& A,
+        const std::vector<Buffer>& B,
+        const std::vector<Buffer>& C,
+        std::vector<Buffer>&       D
     ) : A(A), B(B), C(C), D(D) {}
 
-    const std::vector<Tensor>& A;
-    const std::vector<Tensor>& B;
-    const std::vector<Tensor>& C;
-    std::vector<Tensor>&       D;
+    const std::vector<Buffer>& A;
+    const std::vector<Buffer>& B;
+    const std::vector<Buffer>& C;
+    std::vector<Buffer>&       D;
 };
 
 struct AttentionCommonInputs {
-    Tensor& kv_cache_blocks;
-    const std::optional<const Tensor> kv_cache_scales;
+    Buffer& kv_cache_blocks;
+    const std::optional<const Buffer> kv_cache_scales;
 
-    const Tensor& input_lengths;
-    const Tensor& sequence_lengths;
-    const Tensor& padding_offset;
-    const Tensor& cu_seqlens;  // cumulated sequence lengths
+    const Buffer& input_lengths;
+    const Buffer& sequence_lengths;
+    const Buffer& padding_offset;
+    const Buffer& cu_seqlens;  // cumulated sequence lengths
 
-    const std::optional<const Tensor> position_ids;
-    const std::optional<const Tensor> attention_mask;
-    const std::optional<const Tensor> linear_bias_slopes;
-    const std::optional<const Tensor> prefix_prompt_lengths;
+    const std::optional<const Buffer> position_ids;
+    const std::optional<const Buffer> attention_mask;
+    const std::optional<const Buffer> linear_bias_slopes;
+    const std::optional<const Buffer> prefix_prompt_lengths;
     const std::optional<bool>         count_prefix_length;
     const std::optional<uint32_t>     max_prefix_length;
 
-    const std::optional<Tensor> lora_ids;
-    const std::optional<Tensor> lora_input_lengths;
+    const std::optional<Buffer> lora_ids;
+    const std::optional<Buffer> lora_input_lengths;
 };
 
 // TODO(wangyin): figure out these styles and doc them.
@@ -173,8 +173,8 @@ struct AttentionConfigs {
 };
 
 struct AttentionModuleParams {
-    const Tensor& input;
-    Tensor&       output;
+    const Buffer& input;
+    Buffer&       output;
 
     const AttentionConfigs&      configs;
     const AttentionLayerWeights& weights;
@@ -186,8 +186,8 @@ struct AttentionModuleParams {
 };
 
 struct AttentionLayerParams {
-    const Tensor& input;
-    Tensor&       output;
+    const Buffer& input;
+    Buffer&       output;
 
     const AttentionLayerWeights& weights;
 
@@ -200,55 +200,55 @@ struct AttentionLayerParams {
 };
 
 struct FfnLayerParams {
-    const Tensor& input;
-    Tensor& output;
+    const Buffer& input;
+    Buffer& output;
 
     const FfnLayerWeights&       weights;
 
     const ActivationType activation_type;
 
-    const std::optional<Tensor> lora_ids;
-    const std::optional<Tensor> lora_input_lengths;
+    const std::optional<Buffer> lora_ids;
+    const std::optional<Buffer> lora_input_lengths;
 };
 
 struct SamplerParams {
-    const Tensor& logits;
-    const Tensor& step;              // shape: [1]
-    const Tensor& max_input_length;  // shape: [1]
-    const Tensor& input_lengths;     // shape: [batch_size]
-    const Tensor& ite;               // shape: [1]
-    const Tensor& eos_id;
+    const Buffer& logits;
+    const Buffer& step;              // shape: [1]
+    const Buffer& max_input_length;  // shape: [1]
+    const Buffer& input_lengths;     // shape: [batch_size]
+    const Buffer& ite;               // shape: [1]
+    const Buffer& eos_id;
 
-    Tensor& output_ids;
-    Tensor& sequence_length;
-    Tensor& finished;
-    Tensor& cum_log_probs;
-    Tensor& output_log_probs;
+    Buffer& output_ids;
+    Buffer& sequence_length;
+    Buffer& finished;
+    Buffer& cum_log_probs;
+    Buffer& output_log_probs;
 };
 
 struct TopPSamplerParams {
     const SamplerParams& sampler_params;
-    const Tensor&        top_p;
-    const Tensor&        temperature;
-    const Tensor&        random_seed;
-    const Tensor&        repetition_penalty;
+    const Buffer&        top_p;
+    const Buffer&        temperature;
+    const Buffer&        random_seed;
+    const Buffer&        repetition_penalty;
 };
 
 struct TopKSamplerParams {
     const SamplerParams& sampler_params;
-    const Tensor&        top_k;
-    const Tensor&        temperature;
-    const Tensor&        random_seed;
-    const Tensor&        repetition_penalty;
+    const Buffer&        top_k;
+    const Buffer&        temperature;
+    const Buffer&        random_seed;
+    const Buffer&        repetition_penalty;
 };
 
 struct BroadcastParams {
-    std::vector<Tensor>& tensors;
+    std::vector<Buffer>& buffers;
     const int64_t        root;
 };
 
 struct AllReduceParams {
-    std::vector<Tensor>& tensors;
+    std::vector<Buffer>& buffers;
 };
 
 }  // namespace fastertransformer

@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "allocator.h"
+#include "Types.h"
 #include "src/fastertransformer/utils/string_utils.h"
 #include "src/fastertransformer/utils/assert_utils.h"
 
@@ -32,30 +32,6 @@
 #include <functional>
 
 namespace fastertransformer {
-
-typedef enum datatype_enum {
-    TYPE_INVALID,
-    TYPE_BOOL,
-    TYPE_UINT8,
-    TYPE_UINT16,
-    TYPE_UINT32,
-    TYPE_UINT64,
-    TYPE_INT8,
-    TYPE_INT16,
-    TYPE_INT32,
-    TYPE_INT64,
-    TYPE_FP16,
-    TYPE_FP32,
-    TYPE_FP64,
-    TYPE_BYTES,
-    TYPE_BF16,
-    TYPE_FP8_E4M3,
-    TYPE_STR,
-    TYPE_VOID,
-} DataType;
-
-template<typename T>
-DataType getTensorType();
 
 struct Tensor {
 public:
@@ -87,7 +63,6 @@ public:
     std::string whereToString() const;
     std::string toString() const;
     std::string getNumpyTypeDesc(DataType type) const;
-    static size_t   getTypeSize(DataType type);
 
     template<typename T>
     inline T getVal(size_t index) const;
@@ -122,7 +97,7 @@ public:
             FT_CHECK_WITH_INFO(offset < size(),
                                "offset " + std::to_string(offset) + " is larger than buffer size"
                                    + std::to_string(size()));
-            return (void*)((char*)data_ + offset * Tensor::getTypeSize(type_));
+            return (void*)((char*)data_ + offset * getTypeSize(type_));
         }
     }
 
@@ -243,7 +218,6 @@ private:
     DataType            type_;
     std::vector<size_t> shape_;
     void*               data_   = nullptr;
-    bool                owned_  = false;
 };
 
 class TensorMap {

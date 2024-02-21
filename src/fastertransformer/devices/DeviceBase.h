@@ -10,7 +10,7 @@ public:
     DeviceBase();
 
     void init();
-    std::shared_ptr<Tensor> allocateBuffer(const BufferParams& params, const BufferHints& hints);
+    std::shared_ptr<Buffer> allocateBuffer(const BufferParams& params, const BufferHints& hints);
     virtual std::string type() const = 0;
 
 private:

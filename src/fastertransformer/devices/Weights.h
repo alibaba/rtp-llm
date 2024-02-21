@@ -1,6 +1,6 @@
 #pragma once
 
-#include "src/fastertransformer/core/Tensor.h"
+#include "src/fastertransformer/core/Buffer.h"
 
 #include <optional>
 #include <unordered_map>
@@ -10,20 +10,20 @@ namespace fastertransformer {
 // These weights should correspond to `maga_transformer/utils/model_weight.py`
 
 struct LayerNormWeights {
-    Tensor gamma;
-    Tensor beta;
+    Buffer gamma;
+    Buffer beta;
 };
 
 struct DenseWeights {
-    Tensor                kernel;
-    std::optional<Tensor> bias;
+    Buffer                kernel;
+    std::optional<Buffer> bias;
 };
 
 struct LoraWeights {
-    Tensor A;
-    Tensor B;
-    std::optional<Tensor> A_scale;
-    std::optional<Tensor> B_scale;
+    Buffer A;
+    Buffer B;
+    std::optional<Buffer> A_scale;
+    std::optional<Buffer> B_scale;
 };
 
 typedef std::unordered_map<std::string, LoraWeights> LoraWeightsMap;

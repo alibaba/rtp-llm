@@ -41,6 +41,11 @@ buffer manager的申请接口参数除了基本的size信息之外，还要提�
 
 ## 基础对象
 
-### Tensor
-Tensor 在这里只记录一块内存指针及where、type、shape这些metadata。Tensor本身不持有内存，也不负责内存释放。
-BufferManager分配的内存放置在`std::shared_ptr<Tensor>`中，
+### Buffer
+Buffer 在这里只记录一块内存指针及where、type、shape这些metadata。Buffer本身不持有内存，也不负责内存释放。
+BufferManager分配的内存放置在`std::shared_ptr<Buffer>`中，配备了自定义的deleter，在shared_ptr析构时标记释放。
+
+### Allocator
+Allocator 封装了硬件的基础内存分配逻辑。
+每种device配套两个allocator，一个用来分配和释放device内存，另一个对应host内存。两个allocator可以使用同一个。
+

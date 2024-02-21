@@ -1,5 +1,7 @@
 #include "src/fastertransformer/devices/BufferManager.h"
 
+#include <numeric>
+
 using namespace std;
 
 namespace fastertransformer {
@@ -11,19 +13,20 @@ BufferManager::BufferManager(IAllocator* device_allocator, IAllocator* host_allo
 
 BufferManager::~BufferManager() {}
 
-shared_ptr<Tensor> BufferManager::allocate(const BufferParams& params, const BufferHints& hints) {
+shared_ptr<Buffer> BufferManager::allocate(const BufferParams& params, const BufferHints& hints) {
     const auto allocator = (params.allocation == AllocationType::DEVICE) ? device_allocator_ : host_allocator_;
     const auto shape = params.dims;
-    const auto alloc_bytes = std::accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>())
-                            * Tensor::getTypeSize(params.type);
+    const auto alloc_bytes = accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>())
+                           * getTypeSize(params.type);
     const auto data = allocator->malloc(alloc_bytes);
-    const auto deleter = [this, allocator](Tensor* tensor) { this->recycle(tensor, allocator); };
-    const auto tensor = new Tensor(allocator->memoryType(), params.type, shape, data);
-    return shared_ptr<Tensor>(tensor, deleter);
+    const auto deleter = [this, allocator](Buffer* buffer) { this->recycle(buffer, allocator); };
+    const auto buffer = new Buffer(allocator->memoryType(), params.type, shape, data);
+    return shared_ptr<Buffer>(buffer, deleter);
 }
 
-void BufferManager::recycle(Tensor* tensor, IAllocator* allocator) {
-    allocator->free(tensor->dataPtr());
+void BufferManager::recycle(Buffer* buffer, IAllocator* allocator) {
+    void* data = buffer->data();
+    allocator->free(&data);
 }
 
 } // namespace fastertransformer

@@ -20,8 +20,6 @@
 #include "src/fastertransformer/utils/string_utils.h"
 
 #include "stdlib.h"
-#include <cuda_fp16.h>
-#include <cuda_runtime_api.h>
 #include <dirent.h>
 #include <numeric>
 #include <stdlib.h>
@@ -104,47 +102,9 @@ inline T Tensor::getVal(size_t index) const {
     }
 }
 
-template<typename T>
-DataType getTensorType() {
-    using RealT = typename std::remove_cv<T>::type;
-    if (std::is_same<RealT, float>::value) {
-        return TYPE_FP32;
-    } else if (std::is_same<RealT, half>::value) {
-        return TYPE_FP16;
-    }
-#ifdef ENABLE_BF16
-    else if (std::is_same<RealT, __nv_bfloat16>::value) {
-        return TYPE_BF16;
-    }
-#endif
-#ifdef ENABLE_FP8
-    else if (std::is_same<RealT, __nv_fp8_e4m3>::value) {
-        return TYPE_FP8_E4M3;
-    }
-#endif
-    else if (std::is_same<RealT, int>::value) {
-        return TYPE_INT32;
-    } else if (std::is_same<RealT, int8_t>::value) {
-        return TYPE_INT8;
-    } else if (std::is_same<RealT, uint>::value) {
-        return TYPE_UINT32;
-    } else if (std::is_same<RealT, unsigned long long int>::value || std::is_same<RealT, uint64_t>::value) {
-        return TYPE_UINT64;
-    } else if (std::is_same<RealT, bool>::value) {
-        return TYPE_BOOL;
-    } else if (std::is_same<RealT, char>::value) {
-        return TYPE_BYTES;
-    } else {
-        return TYPE_INVALID;
-    }
-}
-
 #define DECLARE_TEMPLATE_METHODS_WITH_TYPE(T) \
     template T Tensor::getVal<T>(size_t index) const; \
     template const T Tensor::getVal<const T>(size_t index) const; \
-    template DataType getTensorType<T>(); \
-    template DataType getTensorType<const T*>(); \
-    template DataType getTensorType<const T>();
 
 DECLARE_TEMPLATE_METHODS_WITH_TYPE(float)
 DECLARE_TEMPLATE_METHODS_WITH_TYPE(half)
@@ -166,8 +126,6 @@ DECLARE_TEMPLATE_METHODS_WITH_TYPE(__nv_fp8_e4m3)
 
 #undef DECLARE_TEMPLATE_METHODS_WITH_TYPE
 
-template DataType getTensorType<void>();
-
 size_t Tensor::size() const {
     if (data_ == nullptr || shape_.size() == 0) {
         return 0;
@@ -176,7 +134,7 @@ size_t Tensor::size() const {
 }
 
 size_t Tensor::sizeBytes() const {
-    return size() * Tensor::getTypeSize(type());
+    return size() * getTypeSize(type());
 }
 
 std::string Tensor::whereToString() const {
@@ -212,30 +170,6 @@ std::string Tensor::toString() const {
                   type_to_string.at(type()).c_str(),
                   vec2str(shape()).c_str(),
                   data());
-}
-
-
-size_t Tensor::getTypeSize(DataType type) {
-    static const std::unordered_map<DataType, size_t> type_map{{TYPE_BOOL, sizeof(bool)},
-                                                               {TYPE_BYTES, sizeof(char)},
-                                                               {TYPE_UINT8, sizeof(uint8_t)},
-                                                               {TYPE_UINT16, sizeof(uint16_t)},
-                                                               {TYPE_UINT32, sizeof(uint32_t)},
-                                                               {TYPE_UINT64, sizeof(uint64_t)},
-                                                               {TYPE_INT8, sizeof(int8_t)},
-                                                               {TYPE_INT16, sizeof(int16_t)},
-                                                               {TYPE_INT32, sizeof(int32_t)},
-                                                               {TYPE_INT64, sizeof(int64_t)},
-#ifdef ENABLE_BF16
-                                                               {TYPE_BF16, sizeof(__nv_bfloat16)},
-#endif
-#ifdef ENABLE_FP8
-                                                               {TYPE_FP8_E4M3, sizeof(__nv_fp8_e4m3)},
-#endif
-                                                               {TYPE_FP16, sizeof(half)},
-                                                               {TYPE_FP32, sizeof(float)},
-                                                               {TYPE_FP64, sizeof(double)}};
-    return type_map.at(type);
 }
 
 std::string Tensor::getNumpyTypeDesc(DataType type) const {

@@ -223,7 +223,7 @@ Tensor tensor_to_cpu(Tensor &tensor)
 Tensor create_tensor(MemoryType memory_type, DataType data_type, std::vector<size_t> shape, bool init_zero)
 {
     auto size = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
-    auto size_bytes = size * Tensor::getTypeSize(data_type);
+    auto size_bytes = size * getTypeSize(data_type);
 
     void* data = nullptr;
     if (memory_type == MEMORY_GPU) {

@@ -14,7 +14,7 @@ cc_library(
     ]),
     deps = [
         "//src/fastertransformer/core:allocator",
-        "//src/fastertransformer/core:tensor_hdr",
+        "//src/fastertransformer/core:buffer",
         "//src/fastertransformer/utils:utils",
     ],
     visibility = ["//visibility:public"],

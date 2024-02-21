@@ -1,5 +1,6 @@
 #pragma once
 #include "src/fastertransformer/utils/logger.h"
+#include "src/fastertransformer/core/Types.h"
 #include <unordered_map>
 #include <vector>
 
@@ -18,12 +19,6 @@ enum class ReallocType {
     REUSE,
     DECREASE,
 };
-
-typedef enum memorytype_enum {
-    MEMORY_CPU,
-    MEMORY_CPU_PINNED,
-    MEMORY_GPU
-} MemoryType;
 
 class IAllocator {
 public:
