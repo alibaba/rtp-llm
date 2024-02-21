@@ -134,7 +134,9 @@ void* Allocator<AllocatorType::CUDA_HOST>::malloc(size_t size, const bool is_set
 
     check_cuda_error(getSetDevice(device_id_, &o_device));
     check_cuda_error(cudaMallocHost(&ptr, (size_t)(ceil(size / 32.)) * 32));
-    check_cuda_error(cudaMemsetAsync(ptr, 0, (size_t)(ceil(size / 32.)) * 32, stream_));
+    if (is_set_zero) {
+        check_cuda_error(cudaMemsetAsync(ptr, 0, (size_t)(ceil(size / 32.)) * 32, stream_));
+    }
     check_cuda_error(getSetDevice(o_device));
     FT_LOG_DEBUG("malloc cuda host buffer %p with size %ld", ptr, size);
 

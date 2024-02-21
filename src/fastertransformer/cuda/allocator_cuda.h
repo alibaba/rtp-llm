@@ -69,7 +69,7 @@ public:
     Allocator(int device_id);
     ~Allocator();
 
-    void* malloc(size_t size, const bool is_set_zero = true) override;
+    void* malloc(size_t size, const bool is_set_zero = false) override;
     void free(void** ptr) const override;
 };
 
@@ -79,7 +79,7 @@ public:
     Allocator(int device_id);
     ~Allocator();
 
-    void* malloc(size_t size, const bool is_set_zero = true) override;
+    void* malloc(size_t size, const bool is_set_zero = false) override;
     void free(void** ptr) const override;
 };
 
