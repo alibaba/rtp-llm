@@ -12,6 +12,7 @@ import os
 from functools import partial
 from PIL import Image
 from typing import Callable, Optional, Sequence, Tuple, List
+from pathlib import Path
 import numpy as np
 
 import torch
@@ -491,41 +492,54 @@ class Preprocss:
 
 
 class VITEngine(torch.nn.Module):
+    @staticmethod
+    def should_generate_engine():
+        return not VITEngine.get_check_done_file().exists()
+    
+    @staticmethod
+    def get_engine_filepath():
+        return os.environ.get('QWEN_VL_VIT_TRT_ONNX_EXPORT_PATH', os.path.join(os.getcwd(), "qwen_vl_onnx"))
+    
+    @staticmethod
+    def get_check_done_file() -> Path:
+        return Path(os.path.join(VITEngine.get_engine_filepath(), 'vit_trt.done'))
+    
     def __init__(self, vit: VisionTransformer, image_size: int):
         super(VITEngine, self).__init__()
         self.image_size = image_size
-        self.vit = vit
         self.device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
         
-        output_dir = os.path.join(os.getcwd(), "qwen_vl_onnx")
+        output_dir = VITEngine.get_engine_filepath()
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         onnx_file_path = os.path.join(output_dir, "vit.onnx")
         engine_file_path = os.path.join(output_dir, "vit.trt")
         
-        self.export_onnx(onnx_file_path)
-        self.generate_trt_engine(onnx_file_path, engine_file_path)
+        if VITEngine.should_generate_engine():
+            self.export_onnx(vit, onnx_file_path)
+            self.generate_trt_engine(onnx_file_path, engine_file_path)
+            VITEngine.get_check_done_file().touch()
 
         self.engine = self.loadEngine2TensorRT(engine_file_path)
         
         if self.engine is not None:
-            self.context = self.engine.create_execution_context()
+            self.input_names = ["input"]
+            self.output_names = ["output"]
+            self.bindings = [None] * (len(self.input_names) + len(self.output_names))
+            self.outputs = [None] * len(self.output_names)
             
-        self.input_names = ["input"]
-        self.output_names = ["output"]
-        self.bindings = [None] * (len(self.input_names) + len(self.output_names))
-        self.outputs = [None] * len(self.output_names)
-        self.output_idx = self.engine.get_binding_index(self.output_names[0])
-        self.output_dtype = torch_dtype_from_trt(self.engine.get_binding_dtype(self.output_idx))
-        self.output_shape = tuple(self.engine.get_binding_shape(self.output_idx))
-        self.output_device = torch_device_from_trt(self.engine.get_location(self.output_idx))
-        self.input_idx = self.engine.get_binding_index(self.input_names[0])
+            self.context = self.engine.create_execution_context()
+            self.output_idx = self.engine.get_binding_index(self.output_names[0])
+            self.output_dtype = torch_dtype_from_trt(self.engine.get_binding_dtype(self.output_idx))
+            self.output_shape = tuple(self.engine.get_binding_shape(self.output_idx))
+            self.output_device = torch_device_from_trt(self.engine.get_location(self.output_idx))
+            self.input_idx = self.engine.get_binding_index(self.input_names[0])
 
-    def export_onnx(self, onnx_file_path):
+    def export_onnx(self, vit, onnx_file_path):
         print("Start converting ONNX model!")
         image = torch.randn(1, 3, self.image_size, self.image_size).to(self.device)
         torch.onnx.export(
-            self.vit,
+            vit,
             image.to('cuda'),
             onnx_file_path,
             opset_version=17,
@@ -585,6 +599,7 @@ class VITEngine(torch.nn.Module):
         G_LOGGER = trt.Logger(trt.Logger.WARNING)
         with open(filepath, "rb") as f, trt.Runtime(G_LOGGER) as runtime:
             engine = runtime.deserialize_cuda_engine(f.read())
+            print("Finish loading TRT engine!")
             return engine
 
     def forward(self, *inputs):

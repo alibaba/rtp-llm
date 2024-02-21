@@ -1,8 +1,9 @@
 
 import torch
 import os
+import re
 import json
-from typing import List, Any, Tuple, Dict
+from typing import List, Any, Tuple, Dict, Optional, Union
 
 from transformers import AutoTokenizer
 
@@ -13,6 +14,10 @@ from maga_transformer.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal_mixin import MultiModalMixin, BaseImageEmbedding
 from maga_transformer.model_factory_register import register_model
+from maga_transformer.utils.util import get_device, to_torch_dtype, get_mem_info
+from maga_transformer.distribute.worker_info import g_parallel_info
+from maga_transformer.utils.model_weights_loader import get_model_weights_loader
+from maga_transformer.utils.ckpt_database import CkptDatabase
 
 class QwenVLImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
@@ -28,15 +33,62 @@ class QWen_VL(QWen, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         self.visual = QwenVLImageEmbedding(config.vit_related_params.config)
         config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.visual.vit})
-
+        
         QWen.__init__(self, config)
-        if os.environ.get("VIT_TRT", "1") == "1":
-            self.visual = VITEngine(self.visual.vit, config.vit_related_params.config.get("image_size"))
 
     @classmethod
     def is_multimodal(cls) -> bool:
         return True
-
+    
+    def load(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        if os.environ.get("VIT_TRT", "0") == "1":
+            os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
+            self.init_vit_trt()
+        super().load(device=device)
+    
+    def _prepare_model_weight_loader(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        device = device or get_device()
+        # Load weight only for self.visual
+        compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
+        weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
+        database = CkptDatabase(self.config.ckpt_path)
+        weight_loader = get_model_weights_loader(weights_info, database, compute_dtype=compute_dtype)
+        return weight_loader
+    
+    def init_vit_trt(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        if VITEngine.should_generate_engine():
+            assert type(self.visual) == QwenVLImageEmbedding
+            weight_loader = self._prepare_model_weight_loader(device=device)
+            ctype = to_torch_dtype(self.config.data_type or self.dtype)
+            vit_weight = self.config.vit_related_params.vit_weights
+            ckpt_prefix = vit_weight.ckpt_prefix
+            ft_prefix = vit_weight.ft_prefix
+            vit_weight_names = vit_weight.weight_names
+            for vit_weight_name in vit_weight_names:
+                ckpt_weight_name = ckpt_prefix + vit_weight_name
+                param_name = ft_prefix + vit_weight_name
+                param_name = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', param_name)
+                tensor = weight_loader.load_tensor(ckpt_weight_name)[0]
+                param = eval(param_name)
+                param.data = tensor.reshape(param.data.shape).to(ctype).to('cuda:0')
+        
+        vit_visual = VITEngine(self.visual.vit, self.config.vit_related_params.config.get("image_size"))
+        
+        del self.visual
+        self.visual = None
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.visual = vit_visual
+        QWenVLWeightInfo.set_need_vit_info(False)
+    
+    def load_vit_weight(self, ctype: str):
+        if type(self.visual) == VITEngine:
+            # No need to load weight for VITEngine, its weight is inside trt engine.
+            return
+        else:
+            super().load_vit_weight(ctype=ctype)
+    
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: str, **kwargs: Any) -> Tuple[str, List[Any]]:
         prompt, images = MultiModalMixin.multimodal_modify_prompt_plugin(prompt, **kwargs)
