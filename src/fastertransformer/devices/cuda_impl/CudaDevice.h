@@ -18,18 +18,18 @@ public:
     int getDeviceId() const { return device_id_; }
 
 public:
-    OpStatus copy(const CopyParams& params);
-    OpStatus layernorm(const LayernormParams& params);
-    OpStatus gemm(const GemmParams& params);
-    OpStatus groupedGemm(const GroupedGemmParams& params);
-    OpStatus contextAttention(const AttentionModuleParams& params);
-    OpStatus decoderSelfAttention(const AttentionModuleParams& params);
-    OpStatus attentionLayer(const AttentionLayerParams& params);
-    OpStatus ffnLayer(const FfnLayerParams& params);
-    OpStatus sampleTopP(const SamplerParams& params);
-    OpStatus sampleTopK(const SamplerParams& params);
-    OpStatus broadcast(const BroadcastParams& params);
-    OpStatus allReduceSum(const AllReduceParams& params);
+    void copy(const CopyParams& params);
+    void layernorm(const LayernormParams& params);
+    void gemm(const GemmParams& params);
+    void groupedGemm(const GroupedGemmParams& params);
+    void contextAttention(const AttentionModuleParams& params);
+    void decoderSelfAttention(const AttentionModuleParams& params);
+    void attentionLayer(const AttentionLayerParams& params);
+    void ffnLayer(const FfnLayerParams& params);
+    void sampleTopP(const SamplerParams& params);
+    void sampleTopK(const SamplerParams& params);
+    void broadcast(const BroadcastParams& params);
+    void allReduceSum(const AllReduceParams& params);
 
 private:
     std::unique_ptr<IAllocator> allocator_;

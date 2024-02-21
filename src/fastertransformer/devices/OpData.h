@@ -4,6 +4,7 @@
 #include "src/fastertransformer/core/Buffer.h"
 
 #include <optional>
+#include <sstream>
 
 namespace fastertransformer {
 
@@ -30,6 +31,22 @@ public:
 public:
     OpErrorType error_type;
     std::string error_message;
+};
+
+class OpException : public std::exception {
+public:
+    OpException(const OpStatus& status)
+    : status_(status) {}
+
+    const char* what() const noexcept override {
+        std::stringstream ss;
+        ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message;
+        return status_.error_message.c_str();
+    }
+
+    const OpStatus& status() const { return status_; }
+private:
+    OpStatus status_;
 };
 
 struct CopyParams {

@@ -1,5 +1,5 @@
 #define private public
-#include "src/fastertransformer/devices/testing/test_base.h"
+#include "src/fastertransformer/devices/testing/TestBase.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 
 using namespace std;
@@ -16,15 +16,16 @@ public:
 };
 
 TEST_F(CudaOpsTest, testCopy) {
-    auto A = createHostTensor({2, 3}, vector<float>{1, 2, 3, 4, 5, 6});
+
+    vector<float> expected = {12, 223, 334, 4, 5, 6};
+    auto A = createHostBuffer({2, 3}, expected);
     auto B = device_->allocateBuffer({DataType::TYPE_FP32, {2, 3}, AllocationType::DEVICE}, {});
     auto C = device_->allocateBuffer({DataType::TYPE_FP32, {2, 3}, AllocationType::HOST}, {});
-    assertOpSuccess(device_->copy({*A, *B}));
-    assertOpSuccess(device_->copy({*B, *C}));
+    device_->copy({*A, *B});
+    device_->copy({*B, *C});
     sync_check_cuda_error();
 
-    vector<float> expected = {1, 2, 3, 4, 5, 6};
-    assertTensorValueEqual(*C, expected);
+    assertBufferValueEqual(*C, expected);
 }
 
 TEST_F(CudaOpsTest, testGemmOp) {

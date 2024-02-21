@@ -6,7 +6,7 @@ namespace fastertransformer {
     if (!(predicate)) { \
         char msg[4096]; \
         sprintf(msg, __VA_ARGS__); \
-        return OpStatus(OpErrorType::ERROR_INVALID_ARGS, msg); \
+        throw OpException(OpStatus(OpErrorType::ERROR_INVALID_ARGS, msg)); \
     } \
 }
 
