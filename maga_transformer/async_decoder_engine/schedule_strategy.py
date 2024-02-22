@@ -23,7 +23,7 @@ class BasicScheduleStrategy:
                 total_tokens += cur_tokens
                 new_streams.append(stream)
             else:
-                continue
+                break
         return new_streams
 
     def schedule_current(self, streams: List[GenerateStream]) -> List[GenerateStream]:
