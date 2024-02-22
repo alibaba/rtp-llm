@@ -257,15 +257,14 @@ class Pipeline(object):
                               images=images,
                               generate_config=generate_config,
                               tokenizer=self.tokenizer)
-        return self.generate_stream(input, **kwargs)
+        stream = self.model.enqueue(input)
+        return self.generate_stream(input, stream, **kwargs)
 
     @torch.inference_mode()
-    async def generate_stream(self, input: GenerateInput, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
+    async def generate_stream(self, input, stream, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         # TODO(xinfei.sxf) stop words etc 直接带入raw query中去
         stop_word_strs = self._get_stop_word_strs(self.tokenizer, input.generate_config)
         stop_word_str_slices = get_stop_word_slice_list(stop_word_strs)
-
-        stream = self.model.generate_stream(input)
 
         decoding_state = DecodingState() if input.generate_config.num_beams == 1 else None
         async for generate_output in stream:

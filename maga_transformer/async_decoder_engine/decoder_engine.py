@@ -39,13 +39,14 @@ class DecoderEngine:
         self.executor_ = executor
         self.scheduler_ = scheduler
         self.config_ = config
-
-        self.need_stop_ = False
         self.wait_decode_counter_ = AtomicCounter()
+        self.start()
+        logging.info(f'last mem info:{get_mem_info().used} {get_mem_info().free}')
+
+    def start(self):
+        self.need_stop_ = False
         self.thread = threading.Thread(target=self.run_engine, daemon=True)
         self.thread.start()
-
-        logging.info(f'last mem info:{get_mem_info().used} {get_mem_info().free}')
 
     def stop(self):
         logging.info("decoder engine begin stop")
@@ -53,7 +54,7 @@ class DecoderEngine:
         self.thread.join()
         logging.info("decoder engine stop done")
 
-    async def decoder(self, input: GenerateInput) -> AsyncGenerator[GenerateOutput, None]:
+    def decoder(self, input: GenerateInput) -> AsyncGenerator[GenerateOutput, None]:
         if input.prompt_length <= 0:
             raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
                                      f"model tokens can not be empty, request length is {input.prompt_length}")
@@ -69,14 +70,19 @@ class DecoderEngine:
             input.lora_id = lora_holder.lora_id
             stream.add_resource_dtor(lambda: lora_holder.release())
         self.scheduler_.enqueue(stream)
+        # 保证性能测试时能凑批到一起，都用一个起始 counter
+        init_counter = self.wait_decode_counter_.get()
+        return self._generator_loop_wrap(stream, init_counter)
+
+    async def _generator_loop_wrap(self, stream, init_counter):
         try:
-            async for output in self.generate_loop(stream):
+            async for output in self._generate_loop(stream, init_counter):
                 yield output
         finally:
             stream.release_resource()
 
-    async def generate_loop(self, stream):
-        counter = self.wait_decode_counter_.get()
+    async def _generate_loop(self, stream, init_counter):
+        counter = init_counter
         while True:
             while True:
                 new_counter = self.wait_decode_counter_.get()
@@ -101,48 +107,45 @@ class DecoderEngine:
     # 这个后台任务一直在跑，应该用线程实现，用 Python 自己的线程切换机制。
     # 如果用协程的话对外返回的 decode 协程会因为 run_engine 协程一直运行被饿死。
     @torch.inference_mode()
+    def step(self):
+        batch_query = None
+        try:
+            with Timer() as t:
+                be = time.perf_counter()
+                torch.cuda.nvtx.range_push('pre_input')
+                batch_query = self.scheduler_.schedule()
+                if batch_query.total_batch_size == 0 and g_parallel_info.tp_rank == 0:
+                    torch.cuda.nvtx.range_pop()
+                    time.sleep(0.001)
+                    return
+                batch_query.generate_model_input()
+                batch_query.tp_sync()
+                torch.cuda.nvtx.range_pop()
+
+                self.executor_.process(batch_query)
+
+                torch.cuda.nvtx.range_push('update')
+                if g_parallel_info.tp_rank == 0:
+                    self.scheduler_.prepare_next_step()
+                torch.cuda.nvtx.range_pop()
+
+            self.report_metric(t.cost_ms())
+
+        except Exception as e:
+            if batch_query:
+                self.scheduler_.update_all_errors(str(e))
+            logging.error(
+                f'process run error: {e}, Traceback: {traceback.format_exc()}'
+            )
+            if (g_parallel_info.tp_size) > 1 or ("CUDA" in str(e)):
+                kmonitor.report(GaugeMetrics.ERROR_EXIT_METRIC, 1)
+                kmonitor.flush()
+                time.sleep(0.1)
+                # NOTE: nccl could hang when any error. GPU may hang under CUDA error.
+                os._exit(-1)
+        self.wait_decode_counter_.increment()
+
     def run_engine(self):
-        while True:
-            if self.need_stop_:
-                logging.info("need stop flag is true, exit run_engine")
-                return
-            if not self.scheduler_.have_streams() and g_parallel_info.tp_rank == 0:
-                time.sleep(0.001)
-                continue
-
-            batch_query = None
-            try:
-                with Timer() as t:
-                    be = time.perf_counter()
-
-                    torch.cuda.nvtx.range_push('pre_input')
-                    batch_query = self.scheduler_.schedule()
-                    if batch_query.total_batch_size == 0 and g_parallel_info.tp_rank == 0:
-                        torch.cuda.nvtx.range_pop()
-                        continue
-                    batch_query.generate_model_input()
-                    batch_query.tp_sync()
-                    torch.cuda.nvtx.range_pop()
-
-                    self.executor_.process(batch_query)
-
-                    torch.cuda.nvtx.range_push('update')
-                    if g_parallel_info.tp_rank == 0:
-                        self.scheduler_.prepare_next_step()
-                    torch.cuda.nvtx.range_pop()
-
-                self.report_metric(t.cost_ms())
-
-            except Exception as e:
-                if batch_query:
-                    self.scheduler_.update_all_errors(str(e))
-                logging.error(
-                    f'process run error: {e}, Traceback: {traceback.format_exc()}'
-                )
-                if (g_parallel_info.tp_size) > 1 or ("CUDA" in str(e)):
-                    kmonitor.report(GaugeMetrics.ERROR_EXIT_METRIC, 1)
-                    kmonitor.flush()
-                    time.sleep(0.1)
-                    # NOTE: nccl could hang when any error. GPU may hang under CUDA error.
-                    os._exit(-1)
-            self.wait_decode_counter_.increment()
+        while not self.need_stop_:
+            self.step()
+        logging.info("need stop flag is true, exit run_engine")

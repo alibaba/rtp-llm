@@ -392,6 +392,9 @@ class BaseModel(object):
             for name in generate_config.adapter_name:
                 self.weight.lora_resource.read_release(name)
 
+    def enqueue(self, input):
+        return self.generate_stream(input)
+
     @torch.no_grad()
     async def generate_stream(self, input: GenerateInput) -> AsyncGenerator[GenerateOutput, None]:
         self.acquire_resource(input.generate_config)

@@ -51,14 +51,7 @@ class AsyncModel:
         logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
     @torch.no_grad()
-    async def generate_stream(self, input: GenerateInput) -> AsyncGenerator[GenerateOutput, None]:
+    def enqueue(self, input: GenerateInput):
         if g_parallel_info.tp_size > 1 and g_parallel_info.tp_rank > 0:
-            return
-        stream = None
-        try:
-            stream = self.decoder_engine_.decoder(input)
-            async for output in stream:
-                yield output
-        except Exception as e:
-            logging.error(f'generate error: {e}, Traceback: {traceback.format_exc()}')
-            raise e
+            raise Exception('bug, not supposed to be here')
+        return self.decoder_engine_.decoder(input)

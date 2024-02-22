@@ -171,7 +171,7 @@ class OpenaiEndopoint():
         input_images = rendered_input.input_images
         generate_config = self._extract_generation_config(chat_request)
 
-        output_generator: AsyncGenerator[GenerateOutput, None] = self.model.generate_stream(
+        output_generator: AsyncGenerator[GenerateOutput, None] = self.model.enqueue(
             GenerateInput(
                 token_ids=input_id_tensor,
                 images=input_images,
