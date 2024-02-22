@@ -7,7 +7,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery
-from maga_transformer.async_decoder_engine.schedule_strategy import create_schedule_strategy
+from maga_transformer.async_decoder_engine.schedule_strategy import PerfTestScheduleStrategy, create_schedule_strategy
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
 from maga_transformer.metrics import kmonitor, AccMetrics
@@ -26,6 +26,10 @@ class Scheduler:
         self.batch_query = BatchQuery(gen_num_per_circle, nccl_op)
         self._waiting_streams: deque[GenerateStream] = deque()
         self._schedule_strategy = create_schedule_strategy(config, stream_cache_manager)
+
+    # just for perf test
+    def reset_perf_test_schedule_strategy(self):
+        self._schedule_strategy = PerfTestScheduleStrategy(None, self._stream_cache_manager)
 
     def create_config_json(self) -> Dict[str, Any]:
         config_json = {

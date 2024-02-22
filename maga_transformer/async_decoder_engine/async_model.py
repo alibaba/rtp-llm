@@ -38,6 +38,10 @@ class AsyncModel:
     def default_generate_config(self) -> Dict[str, Any]:
         return self.model.default_generate_config
 
+    # just for perf test
+    def reset_perf_test_schedule_strategy(self):
+        self.decoder_engine_.scheduler_.reset_perf_test_schedule_strategy()
+
     def stop(self):
         self.decoder_engine_.stop()
 

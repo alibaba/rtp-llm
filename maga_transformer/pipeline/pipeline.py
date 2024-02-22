@@ -84,6 +84,11 @@ class Pipeline(object):
         if isinstance(self.model, AsyncModel):
             self.model.stop()
 
+    # just for perf test
+    def reset_perf_test_schedule_strategy(self):
+        if isinstance(self.model, AsyncModel):
+            self.model.reset_perf_test_schedule_strategy()
+
     def _get_func(self, func_name: str, default: Callable[..., Any]) -> Callable[..., Any]:
         ft_plugin = plguin_loader.get_plugin()
         if getattr(ft_plugin, func_name, None) is not None:
