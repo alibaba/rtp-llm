@@ -54,9 +54,10 @@ class Scheduler:
 
     # NOTE: This function is executed in single-thread environment.
     def schedule(self) -> BatchQuery:
-        for stream in self._waiting_streams:
+        waiting_streams = self._waiting_streams.copy()
+        for stream in waiting_streams:
             stream.check_timeout()
-        new_streams = self._schedule_streams(self._waiting_streams)
+        new_streams = self._schedule_streams(waiting_streams)
         new_streams = self._schedule_strategy.schedule_new(new_streams)
         for stream in new_streams[:]:
             try:
