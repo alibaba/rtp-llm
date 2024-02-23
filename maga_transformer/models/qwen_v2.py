@@ -140,5 +140,6 @@ class QWenV2(QWen):
         tokenizer = QWen2Tokenizer.from_pretrained(config.tokenizer_path, verbose = False)
         tokenizer.im_start_id = tokenizer.encode('<|im_start|>')[0]
         tokenizer.im_end_id = tokenizer.encode('<|im_end|>')[0]
+        return tokenizer
 
 register_model('qwen_2', QWenV2, ["Qwen2ForCausalLM"])

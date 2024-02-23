@@ -92,6 +92,10 @@ class QWen_VL(QWen, MultiModalMixin):
             'image_end_id': vit_config['image_start_id'] + 1,
             'image_pad_id': vit_config['image_start_id'] + 2})
         config.vit_related_params.vit_special_tokens.update({'default_image_token': '<img/>'})
+
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        return AutoTokenizer.from_pretrained(config.tokenizer_path, trust_remote_code=True)
     
     @staticmethod
     def get_weight_cls():
