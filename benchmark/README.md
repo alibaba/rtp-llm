@@ -25,7 +25,7 @@ python3 ./benchmark_serving.py --dataset /path/to/ShareGPT_V3_unfiltered_cleaned
 ### Qwen-7B-Chat
 test vllm-0.2.6 whl and rtp-llm
 #### A10
-<img src=picture/A10_perf_data.png width="600px">
+<img src=../picture/A10_perf_data.png width="600px">
 
 
 
