@@ -81,7 +81,7 @@ class ModelFactory:
         return ModelFactory.from_model_config(new_model_config)
     
     @staticmethod
-    def __create_normal_model_config():
+    def create_normal_model_config():
         model_type = os.environ["MODEL_TYPE"]
         tokenizer_path = os.environ["TOKENIZER_PATH"]
         ckpt_path = os.environ["CHECKPOINT_PATH"]
@@ -167,7 +167,7 @@ class ModelFactory:
 
     @staticmethod
     def create_from_env():
-        normal_model_config = ModelFactory.__create_normal_model_config()
+        normal_model_config = ModelFactory.create_normal_model_config()
         sp_model_config = ModelFactory.__create_sp_model_config(normal_model_config.tokenizer_path, normal_model_config.max_seq_len)
         model = ModelFactory.from_model_config(normal_model_config, sp_model_config)
         ModelFactory.load_default_generate_config(model)
