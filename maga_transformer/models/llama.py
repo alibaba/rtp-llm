@@ -102,14 +102,15 @@ class Llama(GPT):
         config.special_tokens.eos_token_id = 2
         return config
 
-    def load_tokenizer(self):
-        tokenizer_config_file = os.path.join(self.config.tokenizer_path, "tokenizer_config.json")
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        tokenizer_config_file = os.path.join(config.tokenizer_path, "tokenizer_config.json")
         if os.path.exists(tokenizer_config_file):
             logging.info("llama load super tokenzier")
-            super().load_tokenizer()
+            return super().get_tokenizer(config)
         else:
             logging.info("llamaload LlamaTokenizer")
-            self.tokenizer = LlamaTokenizer.from_pretrained(self.config.tokenizer_path)
+            return LlamaTokenizer.from_pretrained(config.tokenizer_path)
 
 class Baichuan(Llama):
     @staticmethod

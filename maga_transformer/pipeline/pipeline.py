@@ -239,7 +239,7 @@ class Pipeline(object):
         # for delete stop word from output
         prompt = self.modify_prompt_func(prompt, generate_config=generate_config.model_dump(), images=images, **kwargs)
 
-        if self.model.is_multimodal:
+        if self.model.is_multimodal():
             prompt, images = self.multimodal_modify_prompt_func(prompt, images=images, img_token=self._img_token, generate_config=generate_config.model_dump(), **kwargs)
 
         token_ids = self.process_encode_func(prompt,

@@ -5,13 +5,12 @@ from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.models.chat_glm_v2 import ChatGlmV2
 from maga_transformer.tokenizer.tokenization_chatglm3 import ChatGLMTokenizer
 from maga_transformer.model_factory_register import register_model
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 class ChatGlmV3(ChatGlmV2):
-    def load_tokenizer(self):
-        self.tokenizer = None
-        if self.config.tokenizer_path:
-            self.tokenizer = ChatGLMTokenizer.from_pretrained(self.config.tokenizer_path, encode_special_tokens=True)
-            self.config.special_tokens.eos_token_id = self.tokenizer.tokenizer.eos_id
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        return ChatGLMTokenizer.from_pretrained(config.tokenizer_path, encode_special_tokens=True)
 
     @staticmethod
     def _create_config(ckpt_path: str):

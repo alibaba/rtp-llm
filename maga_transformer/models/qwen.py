@@ -228,8 +228,9 @@ class QWenBase(GPT):
             config.use_logn_attn = True
             config.logn_seq_len = config_json.get("seq_length")
 
-    def load_tokenizer(self):
-        self.tokenizer = QWenTokenizer.from_pretrained(self.config.tokenizer_path)
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        return QWenTokenizer.from_pretrained(config.tokenizer_path)
 
 class QWen(QWenBase):
     @staticmethod

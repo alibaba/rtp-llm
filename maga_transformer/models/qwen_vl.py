@@ -31,6 +31,10 @@ class QWen_VL(QWen, MultiModalMixin):
 
         QWen.__init__(self, config)
 
+    @classmethod
+    def is_multimodal(cls) -> bool:
+        return True
+
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: str, **kwargs: Any) -> Tuple[str, List[Any]]:
         prompt, images = MultiModalMixin.multimodal_modify_prompt_plugin(prompt, **kwargs)
@@ -89,9 +93,6 @@ class QWen_VL(QWen, MultiModalMixin):
             'image_pad_id': vit_config['image_start_id'] + 2})
         config.vit_related_params.vit_special_tokens.update({'default_image_token': '<img/>'})
     
-    def load_tokenizer(self):
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
-
     @staticmethod
     def get_weight_cls():
         return QWenVLWeightInfo

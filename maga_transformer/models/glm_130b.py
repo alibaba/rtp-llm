@@ -6,9 +6,6 @@ from maga_transformer.model_factory_register import register_model
 class Glm130B(ChatGlm):
     def __init__(self, config: GptInitModelParameters):
         super().__init__(config)
-        self.bos_id = 150004
-        if self.tokenizer:
-            self.bos_id = self.tokenizer.bos_token_id
 
     @staticmethod
     def _create_config(ckpt_path: str):

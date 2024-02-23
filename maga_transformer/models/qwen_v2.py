@@ -134,10 +134,11 @@ class QWenV2(QWen):
     @staticmethod
     def get_weight_cls():
         return QWenV2Weight
-    
-    def load_tokenizer(self):
-        self.tokenizer = QWen2Tokenizer.from_pretrained(self.config.tokenizer_path, verbose = False)
-        self.tokenizer.im_start_id = self.tokenizer.encode('<|im_start|>')[0]
-        self.tokenizer.im_end_id = self.tokenizer.encode('<|im_end|>')[0]
+
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        tokenizer = QWen2Tokenizer.from_pretrained(config.tokenizer_path, verbose = False)
+        tokenizer.im_start_id = tokenizer.encode('<|im_start|>')[0]
+        tokenizer.im_end_id = tokenizer.encode('<|im_end|>')[0]
 
 register_model('qwen_2', QWenV2, ["Qwen2ForCausalLM"])

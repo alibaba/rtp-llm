@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional, Union, Iterator, Tuple, NamedTuple, AsyncGenerator
 
 import torch.distributed as dist
+from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.utils.util import WEIGHT_TYPE
@@ -171,6 +172,14 @@ class BaseModel(object):
     def from_config(cls, config: Any) -> 'BaseModel':
         raise NotImplementedError()
 
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters) -> Union[TokenizerBase, PreTrainedTokenizerBase]:
+        raise NotImplementedError()
+
+    @classmethod
+    def is_multimodal(cls) -> bool:
+        return False
+
     def __init__(self) -> None:
         self.weight = None
         self._parameters: Dict[str, Any] = {}
@@ -201,10 +210,6 @@ class BaseModel(object):
             return
         self._parameters[name] = p
         setattr(self, name, p)
-
-    @property
-    def is_multimodal(self) -> bool:
-        return self.config.is_multimodal
 
     @property
     def dtype(self) -> Union[str, torch.dtype]:

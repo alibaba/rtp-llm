@@ -172,10 +172,14 @@ class GPT(BaseModel):
     def from_config(cls, config: GptInitModelParameters):
         return cls(config)
 
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        assert config.tokenizer_path
+        return AutoTokenizer.from_pretrained(config.tokenizer_path, trust_remote_code=True)
+
     def load_tokenizer(self):
-        self.tokenizer = None
         if self.config.tokenizer_path:
-            self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
+            self.tokenizer = self.get_tokenizer(self.config)
             self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
 
     @staticmethod
@@ -260,7 +264,7 @@ class GPT(BaseModel):
 
         # pylint:disable=line-too-long
         if g_parallel_info.is_pp_first:
-            if self.is_multimodal:
+            if self.is_multimodal():
                 self.load_vit_weight(compute_dtype)
             if self.position_encoding is not None:
                 self.position_encoding.weight.data = \

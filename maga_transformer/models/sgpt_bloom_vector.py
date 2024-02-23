@@ -50,14 +50,15 @@ class SGPTBloomVector(SGPTBloom):
                             torch.ones(batch_size),
                             [{"decimals": 6}] * batch_size)
 
-    def process_encode_plugin(self, prompt: str, generate_config: Dict, **kwargs: Any) -> List[int]:
+    @staticmethod
+    def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], tokenizer: Any, max_seq_len: int, **kwargs: Any) -> List[int]:
         custon_gen_cfg = generate_config["custom_prop"]
         is_query = custon_gen_cfg.get("is_query", False)
         case_sensitive = custon_gen_cfg.get("case_sensitive", False)
 
         prompt = prompt if case_sensitive else prompt.lower() 
-        tokenizer = self.tokenizer.tokenizer # PreTrainedTokenizerFast
-        batch_tokens = tokenizer(prompt, padding=False, truncation=True, max_length=self.config.max_seq_len - 2)
+        tokenizer = tokenizer.tokenizer # PreTrainedTokenizerFast
+        batch_tokens = tokenizer(prompt, padding=False, truncation=True, max_length=max_seq_len - 2)
 
         input_ids = batch_tokens["input_ids"]
         if is_query:

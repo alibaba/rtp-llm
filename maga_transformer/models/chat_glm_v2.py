@@ -9,11 +9,9 @@ from maga_transformer.models.gpt import GPT
 from maga_transformer.model_factory_register import register_model
 
 class ChatGlmV2(GPT):
-    def load_tokenizer(self):
-        self.tokenizer = None
-        if self.config.tokenizer_path:
-            self.tokenizer = ChatGLMTokenizer.from_pretrained(self.config.tokenizer_path)
-            self.config.special_tokens.eos_token_id = self.tokenizer.tokenizer.eos_id
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        return ChatGLMTokenizer.from_pretrained(config.tokenizer_path)
 
     @staticmethod
     def get_weight_cls():

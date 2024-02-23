@@ -30,9 +30,8 @@ class AsyncModel:
         else:
             self.decoder_engine_ = create_engine(model, self.config, ptuning_args)
 
-    @property
     def is_multimodal(self) -> bool:
-        return self.model.is_multimodal
+        return self.model.is_multimodal()
 
     @property
     def default_generate_config(self) -> Dict[str, Any]:

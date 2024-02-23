@@ -83,7 +83,11 @@ class Llava(Llama, MultiModalMixin):
         self.nccl_op_ = NcclOp()
         config.vit_related_params.vit_weights = BaseVitWeights({"mm_projector": self.visual.mm_projector}, True)
         Llama.__init__(self, config)
-    
+
+    @classmethod
+    def is_multimodal(cls) -> bool:
+        return True
+
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str], 
                                         img_token: str, **kwargs: Any) -> Tuple[str, List[Any]]:
@@ -163,13 +167,14 @@ class Llava(Llama, MultiModalMixin):
             config.vit_related_params.config["img_expand_len"] = (img_size // patch_size) ** 2
         config.vit_related_params.config["vit_tower_path"] = vis_tower_name
 
-    def load_tokenizer(self):
-        self.tokenizer = LlavaTokenizer(self.config.tokenizer_path, 
-                                        self.config.vit_related_params.config["mm_use_im_patch_token"], 
-                                        self.config.vit_related_params.config["mm_use_im_start_end"], 
-                                        self.config.vit_related_params.config["img_expand_len"], 
-                                        self.config.vit_related_params.vit_special_token_ids,
-                                        self.config.vit_related_params.vit_special_tokens)
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        return LlavaTokenizer(config.tokenizer_path,
+                              config.vit_related_params.config["mm_use_im_patch_token"],
+                              config.vit_related_params.config["mm_use_im_start_end"],
+                              config.vit_related_params.config["img_expand_len"],
+                              config.vit_related_params.vit_special_token_ids,
+                              config.vit_related_params.vit_special_tokens)
 
     def encode_images(self, images):
         if images.shape[0] == 0:

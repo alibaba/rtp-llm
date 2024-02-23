@@ -48,9 +48,9 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
 StarcoderTokenizer = GPT2TokenizerFast
 
 class StarCoder(GPT):
-    def load_tokenizer(self):
-        self.tokenizer = StarcoderTokenizer.from_pretrained(self.config.tokenizer_path)
-        self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        return StarcoderTokenizer.from_pretrained(config.tokenizer_path)
 
     @staticmethod
     def get_weight_cls():

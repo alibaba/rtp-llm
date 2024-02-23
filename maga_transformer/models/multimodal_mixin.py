@@ -51,7 +51,7 @@ class MultiModalMixin:
     visual: BaseImageEmbedding
 
     @staticmethod
-    def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], special_tokens: Any, tokenizer: Any, **kwargs: Any) -> List[int]:
+    def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], tokenizer: Any, **kwargs: Any) -> List[int]:
         if len(prompt) == 0:
             raise FtRuntimeException(ExceptionType.EMPTY_PROMPT_ERROR, "prompt should have at least one token!")
         if type(prompt) is not str:

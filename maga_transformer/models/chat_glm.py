@@ -15,10 +15,10 @@ class ChatGlm(GPT):
         super().__init__(*args, **kwargs)
         if os.environ.get('REUSE_CACHE', None) is not None:
             raise Exception("chatglm kvcache style not support block cache")
-    def load_tokenizer(self):
-        self.tokenizer = ChatGLMTokenizer.from_pretrained(self.config.tokenizer_path)
-        self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
-        self.bos_id = self.tokenizer.bos_token_id
+
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        return ChatGLMTokenizer.from_pretrained(config.tokenizer_path)
 
     @staticmethod
     def get_weight_cls():
