@@ -25,6 +25,8 @@ class StopWordStrsCriteria(StoppingCriteria):
         if not isinstance(output_str, str):
             return False
         for stop_word_str in self.stop_word_str_list:
+            if len(stop_word_str) == 0:
+                continue
             if len(output_str) >= len(stop_word_str) and output_str[-len(stop_word_str):] == stop_word_str:
                 return True
 

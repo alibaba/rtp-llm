@@ -181,7 +181,7 @@ class Conversation:
                 if message:
                     ret += role + "\n" + message
                 else:
-                    ret += role
+                    ret += role + "\n"
             return ret
         elif self.sep_style == SeparatorStyle.CHATINTERN:
             # source: https://huggingface.co/internlm/internlm-chat-7b-8k/blob/bd546fa984b4b0b86958f56bf37f94aa75ab8831/modeling_internlm.py#L771

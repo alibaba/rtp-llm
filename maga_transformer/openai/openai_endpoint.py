@@ -49,9 +49,11 @@ class OpenaiEndopoint():
         logging.info(f"chat_renderer [{self.chat_renderer}] is created.")
         extra_stop_word_ids_list = self.chat_renderer.get_all_extra_stop_word_ids_list()
         self.stop_word_ids_list.extend(extra_stop_word_ids_list)
-        self.stop_words_list = [
-            self.tokenizer.decode(stop_word_ids) for stop_word_ids in self.stop_word_ids_list
-        ]
+        self.stop_words_list = []
+        for stop_word_ids in self.stop_word_ids_list:
+            word = self.tokenizer.decode(stop_word_ids)
+            if len(word):
+                self.stop_words_list.append(word)
         logging.info(f"use stop_words_list [{self.stop_words_list}]")
 
     async def list_models(self):
