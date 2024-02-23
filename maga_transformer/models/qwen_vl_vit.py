@@ -560,7 +560,7 @@ class VITEngine(torch.nn.Module):
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
         profile = builder.create_optimization_profile()
         config = builder.create_builder_config()
-        # config.set_flag(trt.BuilderFlag.FP16)
+        config.set_flag(trt.BuilderFlag.FP16)
         parser = trt.OnnxParser(network, logger)
 
         with open(onnxFile, 'rb') as model:
