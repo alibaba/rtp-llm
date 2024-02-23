@@ -245,7 +245,7 @@ py_wheel(
 
 pyc_wheel(
     name = "maga_transformer",
-    package_name = "maga_transformer-0.1.3",
+    package_name = "maga_transformer-0.1.4",
     src = ":maga_transformer_whl",
 )
 
