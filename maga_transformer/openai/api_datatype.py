@@ -102,6 +102,7 @@ class ChatCompletionRequest(BaseModel):
     trace_id: Optional[str] = None
     chat_id: Optional[str] = None
     debug_info: Optional[bool] = False
+    extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
 
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
