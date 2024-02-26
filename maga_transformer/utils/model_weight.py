@@ -836,3 +836,17 @@ class ModelWeights:
     @property
     def dtype(self):
         return self._dtype
+    
+class LoraResourceHolder:
+    def __init__(self, lora_resource, adapter_name):
+        self._lora_resource = lora_resource
+        self._adapter_name = adapter_name
+        self._lora_resource.read_acquire(self._adapter_name)
+        self._lora_id = self._lora_resource.get_id(self._adapter_name)
+
+    @property
+    def lora_id(self):
+        return self._lora_id
+
+    def release(self):
+        self._lora_resource.read_release(self._adapter_name)

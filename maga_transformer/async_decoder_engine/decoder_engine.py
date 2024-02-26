@@ -19,20 +19,7 @@ from maga_transformer.metrics import GaugeMetrics, kmonitor
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.async_decoder_engine.normal_model_executor import ExecutorBase
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
-
-class LoraHolder:
-    def __init__(self, lora_resource, adapter_name):
-        self._lora_resource = lora_resource
-        self._adapter_name = adapter_name
-        self._lora_resource.read_acquire(self._adapter_name)
-        self._lora_id = self._lora_resource.get_id(self._adapter_name)
-
-    @property
-    def lora_id(self):
-        return self._lora_id
-
-    def release(self):
-        self._lora_resource.read_release(self._adapter_name)
+from maga_transformer.utils.model_weight import LoraResourceHolder
 
 class DecoderEngine:
     def __init__(self, executor: ExecutorBase, scheduler: Scheduler, config: GptInitModelParameters) -> None:
@@ -54,7 +41,7 @@ class DecoderEngine:
         self.thread.join()
         logging.info("decoder engine stop done")
 
-    def decoder(self, input: GenerateInput) -> AsyncGenerator[GenerateOutput, None]:
+    def decode(self, input: GenerateInput) -> AsyncGenerator[GenerateOutput, None]:
         if input.prompt_length <= 0:
             raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
                                      f"model tokens can not be empty, request length is {input.prompt_length}")
@@ -65,10 +52,10 @@ class DecoderEngine:
         stream = GenerateStream(input=input,
                                 max_seq_len=self.config_.max_seq_len)
         if input.generate_config.adapter_name is not None:
-            lora_holder = LoraHolder(self.executor_.base_model_ops.gpt_op.weight.lora_resource,
+            lora_resource_holder = LoraResourceHolder(self.executor_.base_model_ops.gpt_op.weight.lora_resource,
                                      input.generate_config.adapter_name)
-            input.lora_id = lora_holder.lora_id
-            stream.add_resource_dtor(lambda: lora_holder.release())
+            input.lora_id = lora_resource_holder.lora_id
+            stream.add_resource_dtor(lambda: lora_resource_holder.release())
         self.scheduler_.enqueue(stream)
         # 保证性能测试时能凑批到一起，都用一个起始 counter
         init_counter = self.wait_decode_counter_.get()
