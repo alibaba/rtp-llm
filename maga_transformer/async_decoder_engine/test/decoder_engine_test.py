@@ -1,5 +1,9 @@
 import os
 import torch
+import asyncio
+import logging
+import threading
+import time
 from unittest import TestCase, main
 from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.test.model_test.test_util.fake_model_loader import FakeModelLoader
@@ -55,6 +59,39 @@ class DecoderEngineTest(TestCase):
             gen = pipeline("what's your name?", max_new_tokens=100, timeout_ms=10)
             with self.assertRaisesRegex(Exception, "ms timeout"):
                 results = [result for result in gen]
+            self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
+        finally:
+            pipeline.model.stop()
+
+    def test_cancel_request(self) -> None:
+        pipeline = self.create_pipeline()
+        
+        async def _simplified_generator():
+            try:
+                # 假设 self.pipeline_async 是一个异步生成器
+                async for x in pipeline.pipeline_async("please write a story about dog", max_new_tokens=1000, top_k = 1):
+                    yield x
+            except Exception as e:
+                raise e
+            
+        async def _run():
+            count = 0
+            last_element = ""
+            gen =  _simplified_generator()
+            async for result in gen:
+                # 处理每个生成的结果
+                if count == 3:
+                    await gen.aclose()
+                    break
+                else:
+                    last_element = result.generate_texts
+                    logging.info(f"{count}: {last_element}")
+                count = count + 1
+            self.assertEqual(last_element, ['ProductsProductsProducts'])
+            await asyncio.sleep(0.01)
+            
+        try:
+            asyncio.run(_run())
             self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             pipeline.model.stop()

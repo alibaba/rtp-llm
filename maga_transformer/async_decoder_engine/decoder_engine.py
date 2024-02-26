@@ -78,6 +78,9 @@ class DecoderEngine:
         try:
             async for output in self._generate_loop(stream, init_counter):
                 yield output
+        except GeneratorExit:
+            logging.info("stream is closed")
+            stream.set_stop("stream is closed")
         finally:
             stream.release_resource()
 

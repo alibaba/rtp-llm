@@ -90,11 +90,20 @@ class OpenaiEndopoint():
     async def _complete_non_stream_response(
             self, choice_generator: AsyncGenerator[StreamResponseObject, None],
             debug_info: Optional[DebugInfo],
+            raw_request: Optional[Request]
     ) -> ChatCompletionResponse:
         all_choices = []
         usage = None
 
+        if raw_request and await raw_request.is_disconnected():
+            if choice_generator is not None:
+                await choice_generator.aclose()
+            raise asyncio.CancelledError("client disconnects")
+        
         async for response in choice_generator:
+            if raw_request and await raw_request.is_disconnected():
+                await choice_generator.aclose()
+                raise asyncio.CancelledError("client disconnects")
             if len(response.choices) != len(all_choices):
                 if (all_choices == []):
                     all_choices = [
@@ -192,5 +201,5 @@ class OpenaiEndopoint():
         if chat_request.stream:
             return self._complete_stream_response(choice_generator, debug_info)
         else:
-            return self._complete_non_stream_response(choice_generator, debug_info)
+            return self._complete_non_stream_response(choice_generator, debug_info, raw_request)
 

@@ -12,7 +12,8 @@ from typing import Generator, Union, Any, Dict, List, AsyncGenerator, Callable, 
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi import FastAPI
-from fastapi import Request
+from fastapi import Request as RawRequest
+from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 import torch
 import asyncio
@@ -96,19 +97,19 @@ class InferenceApp(object):
 
         # entry for worker RANK != 0
         @app.post("/inference_internal")
-        async def inference_internal(req: Union[str,Dict[Any, Any]]):
+        async def inference_internal(req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
             if g_parallel_info.is_master:
                 return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
                                     "gang cluster is None or role is master, should not access /inference_internal!")
-            return await self.inference_server._infer_wrap(req)
+            return await self.inference_server._infer_wrap(req, raw_request)
 
         # entry for worker RANK == 0
         @app.post("/")
-        async def inference(req: Union[str,Dict[Any, Any]]):
+        async def inference(req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
             if not g_parallel_info.is_master:
                 return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
                                     "gang worker should not access this / api directly!")
-            return await self.inference_server._infer_wrap(req)
+            return await self.inference_server._infer_wrap(req, raw_request)
 
         # update for worker RANK != 0
         @app.post("/update_internal")
@@ -134,7 +135,7 @@ class InferenceApp(object):
         # entry for worker RANK == 0
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
-        async def chat_completion(request: ChatCompletionRequest, raw_request: Request):
+        async def chat_completion(request: ChatCompletionRequest, raw_request: RawRequest):
             if not g_parallel_info.is_master:
                 return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
                                     "gang worker should not access this completions api directly!")
@@ -252,15 +253,18 @@ class InferenceServer(object):
             rep = JSONResponse(self.handler_exceptions(e), status_code=error_code)
         return rep
 
-    async def _infer_wrap(self, req: Union[str,Dict[Any, Any]]):
+    async def _infer_wrap(self, req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
         id = self._atomic_count.increment()
         try:
-            rep = await self._infer_impl(req, id)
+            rep = await self._infer_impl(req, id, raw_request)
         except Exception as e:
             self._access_logger.log_exception_access(req, e, id)
             if isinstance(e, ConcurrencyException):
                 kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
                 error_code = 409
+            elif isinstance(e, asyncio.CancelledError):
+                kmonitor.report(AccMetrics.CANCAL_QPS_METRIC, 1)
+                error_code = 499
             else:
                 error_code = 500
                 kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
@@ -268,7 +272,7 @@ class InferenceServer(object):
         return rep
 
     #TODO(xinfei.sxf) refactor this
-    async def _chat_completion_wrap(self, request: ChatCompletionRequest, raw_request: Request):
+    async def _chat_completion_wrap(self, request: ChatCompletionRequest, raw_request: RawRequest):
         try:
             self._controller.increment()
         except ConcurrencyException as e:
@@ -326,17 +330,19 @@ class InferenceServer(object):
         kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
         kmonitor.report(GaugeMetrics.LANTENCY_METRIC, t.cost_ms())
 
-    async def _infer_impl(self, req: Union[str,Dict[Any, Any]], id: int):
+    async def _infer_impl(self, req: Union[str,Dict[Any, Any]], id: int, raw_request: RawRequest):
         assert self._inference_worker is not None
         if isinstance(req, str):
             req = json.loads(req)
         if not isinstance(req, dict):
             raise Exception("request body should be json-format")
+
         kmonitor.report(AccMetrics.QPS_METRIC, 1)
         self._access_logger.log_query_access(req, id)
         is_streaming = self._inference_worker.is_streaming(req)
         self._controller.increment()
-
+        if await raw_request.is_disconnected():
+            raise asyncio.CancelledError("client disconnects")
         def generate_call():
             assert self._inference_worker is not None
             return self._inference_worker.inference(**req)
@@ -350,6 +356,11 @@ class InferenceServer(object):
             return StreamingResponse(self.stream_response(req, res, id), media_type="text/event-stream")
         last_element = None
         async for x in res:
+            if await raw_request.is_disconnected():
+                # Abort the request if the client disconnects.
+                await res.aclose()
+                # await self._inference_worker.abort(id)
+                raise asyncio.CancelledError("client disconnects")
             last_element = x
         self._access_logger.log_success_access(req, last_element, id)
         return JSONResponse(content=last_element)

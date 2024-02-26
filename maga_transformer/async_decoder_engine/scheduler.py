@@ -64,8 +64,10 @@ class Scheduler:
                 self._stream_cache_manager.init_kvcache(stream)
             except Exception as e:
                 stream.set_stop(str(e))
-                new_streams.remove(stream)
-            self._waiting_streams.remove(stream)
+            finally:
+                if stream.stopped:
+                    new_streams.remove(stream)
+                self._waiting_streams.remove(stream)
         self.batch_query.add_new_stream(new_streams)
         return self.batch_query
 
