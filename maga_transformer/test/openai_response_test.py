@@ -10,6 +10,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.models.base_model import BaseModel, GenerateOutput, AuxInfo
 from maga_transformer.pipeline.chatapi_format import encode_chatapi
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
+from maga_transformer.tokenizer.tokenization_chatglm3 import ChatGLMTokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, RoleEnum, FinisheReason, \
     ChatCompletionRequest, GPTFunctionDefinition, ContentPart, ContentPartTypeEnum, RendererInfo
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
@@ -104,6 +105,16 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         print(response)
         assert(response.choices[0].finish_reason)
         self.assertEqual(FinisheReason.length, response.choices[0].finish_reason)
+
+    def test_chatglm_stop_word(self):
+        os.environ["MODEL_TYPE"] = "chatglm3"
+        tokenizer = ChatGLMTokenizer.from_pretrained(
+            "maga_transformer/test/tokenizer_test/testdata/chatglm3_tokenizer",
+            encode_special_tokens=True)
+        self.model.tokenizer = tokenizer
+        self.endpoint = OpenaiEndopoint(self.model)
+        self.assertEqual(self.endpoint.stop_word_ids_list, [[64795], [64797], [2]])
+        self.assertEqual(self.endpoint.stop_words_list, ['<|user|>', '<|observation|>'])
 
 if __name__ == '__main__':
     main()

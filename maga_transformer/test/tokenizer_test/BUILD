@@ -3,6 +3,7 @@ filegroup(
     srcs = glob([
         "testdata/**/*",
     ]),
+    visibility = ["//visibility:public"],
 )
 
 py_test(
