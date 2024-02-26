@@ -28,7 +28,7 @@ class Scheduler:
         self._schedule_strategy = create_schedule_strategy(config, stream_cache_manager)
 
     # just for perf test
-    def reset_perf_test_schedule_strategy(self):
+    def enable_perf_test_schedule_strategy(self):
         self._schedule_strategy = PerfTestScheduleStrategy(None, self._stream_cache_manager)
 
     def create_config_json(self) -> Dict[str, Any]:

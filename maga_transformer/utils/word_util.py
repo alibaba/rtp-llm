@@ -1,5 +1,12 @@
 import numpy as np
+import torch
 from typing import List, Any
+
+def remove_padding_eos(token_ids: torch.Tensor, eos_token_id: int) -> List[torch.Tensor]:
+    # token_ids shape: [beam_width, max_length]
+    out_token_ids = [tokens.cpu().numpy() for tokens in token_ids]
+    out_token_ids = [tokens[tokens != eos_token_id].tolist() for tokens in out_token_ids]
+    return [torch.IntTensor(x) for x in out_token_ids]
 
 def get_list_dim(origin: Any) -> int:
     def _get_dim_internal(x: Any) -> int:
@@ -53,6 +60,13 @@ def get_stop_word_slice_list(stop_word_strs: List[str]) -> List[str]:
         for i in range(1, len(stop_word_str)):
             result.append(stop_word_str[:-i])
     return result
+
+def truncate_response_with_stop_words(response: str, stop_word_strs: List[str]):
+    for stop_word in stop_word_strs:
+        if stop_word and response.endswith(stop_word):
+            response = response[:(-len(stop_word))]
+    return response
+
 # main
 if __name__ == "__main__":
     # word_list = [[20490, 25]]

@@ -317,31 +317,6 @@ class BatchQuery:
                 self.remove_stream(stream)
                 stream.release_resource()
 
-    # generate config for sample
-    # TODO: do not gen generate config, gen sample config
-    @staticmethod
-    def union_generate_config(configs: List['GenerateConfig']):
-        top_k: List[int] = []
-        top_p: List[float] = []
-        min_new_tokens: List[int] = []
-        repetition_penalty: List[float] = []
-        for config in configs:
-            top_k.append(config.top_k)
-            top_p.append(config.top_p)
-            min_new_tokens.append(config.min_new_tokens)
-            repetition_penalty.append(config.repetition_penalty)
-
-        res = GenerateConfig(
-            top_k=top_k,
-            top_p=top_p,
-            min_new_tokens=min_new_tokens,
-            repetition_penalty=repetition_penalty,
-            eos_token_id=configs[0].eos_token_id,
-            num_beams=configs[0].num_beams,
-        )
-        res.gen_hash_value()
-        return res
-
     def get_prefix_args(self) -> Tuple[torch.IntTensor, torch.BoolTensor, torch.IntTensor]:
         count_length = torch.BoolTensor([self._ptuning_info.count_length])
         if self._ptuning_info.ptuning:

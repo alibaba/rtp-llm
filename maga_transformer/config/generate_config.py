@@ -66,7 +66,7 @@ class GenerateConfig(BaseModel):
     # generate config for sample
     # TODO: do not gen generate config, gen sample config
     @staticmethod
-    def merge_generate_config(configs: List['GenerateConfig']):
+    def merge_generate_config(configs: List['GenerateConfig']) -> 'GenerateConfig':
         top_k: List[int] = []
         top_p: List[float] = []
         min_new_tokens: List[int] = []
@@ -88,7 +88,23 @@ class GenerateConfig(BaseModel):
         res.gen_hash_value()
         return res
 
-    def check_data_type(self):
+    @staticmethod
+    def create_generate_config(generate_config: Dict[str, Any], **kwargs: Any) -> 'GenerateConfig':
+        generate_config.update(kwargs)
+        try:
+            config = GenerateConfig(**generate_config)
+        except Exception as e:
+            raise FtRuntimeException(ExceptionType.ERROR_GENERATE_CONFIG_FORMAT, f"generate_config validate failed: {str(e)}")
+        config.validate()
+        return config
+
+    def add_special_tokens(self, special_tokens: Any):
+        # 如果同时在外面和里面都有设置采样参数，选择使用外面的
+        # 这里假设外部传进来的stop_word_list和stop_word_str都不包含batch维度
+        self.stop_words_list += special_tokens.stop_words_list
+        self.stop_words_str += special_tokens.stop_words_str
+
+    def validate(self):
         try:
             assert isinstance(self.top_k, int) or \
              (isinstance(self.top_k, list) and all([isinstance(i, int) for i in self.top_k]))

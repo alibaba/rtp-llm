@@ -38,8 +38,8 @@ class AsyncModel:
         return self.model.default_generate_config
 
     # just for perf test
-    def reset_perf_test_schedule_strategy(self):
-        self.decoder_engine_.scheduler_.reset_perf_test_schedule_strategy()
+    def enable_perf_test_schedule_strategy(self):
+        self.decoder_engine_.scheduler_.enable_perf_test_schedule_strategy()
 
     def stop(self):
         self.decoder_engine_.stop()
@@ -53,4 +53,4 @@ class AsyncModel:
     def enqueue(self, input: GenerateInput):
         if g_parallel_info.tp_size > 1 and g_parallel_info.tp_rank > 0:
             raise Exception('bug, not supposed to be here')
-        return self.decoder_engine_.decoder(input)
+        return self.decoder_engine_.decode(input)
