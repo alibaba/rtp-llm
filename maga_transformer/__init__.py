@@ -1,6 +1,5 @@
 import os
 
-import logging
 import logging.config
 
 if os.environ.get('FT_SERVER_TEST') is not None:

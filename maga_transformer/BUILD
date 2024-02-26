@@ -138,14 +138,30 @@ py_library(
 
 py_library(
     name = "sdk",
-    srcs = glob([
-        "*.py",
-    ]),
+    srcs = [
+        '__init__.py',
+        'inference.py',
+        'model_factory.py',
+        'start_server.py',
+        '_ft_pickler.py',
+        'model_factory_register.py',
+    ],
     deps = [
         ":models",
         ":uvicorn",
         ":fastapi",
         ":psutil",
+    ],
+    imports = ["."],
+)
+
+py_library(
+    name = "kserve_server",
+    srcs = [
+        'kserve_server.py',
+    ],
+    deps = [
+        ":sdk",
     ],
     imports = ["."],
 )
@@ -242,7 +258,48 @@ py_wheel(
     ] + whl_deps(),
 )
 
-
+py_wheel(
+    name = "maga_transformer_kserve_whl",
+    distribution = "maga_transformer",
+    python_tag = "py3",
+    tags = ["manual", "local"],
+    version = "0.0.1",
+    deps = [
+        ":maga_transformer_package",
+        "//deps:extension_package",
+    ],
+    requires=[
+        "filelock",
+        "jinja2",
+        "sympy",
+        "typing-extensions",
+        "importlib_metadata",
+        "transformers==4.33.1",
+        "sentencepiece==0.1.99",
+        "fastapi==0.108.0",
+        "uvicorn==0.21.1",
+        "dacite",
+        "pynvml",
+        "thrift",
+        "numpy==1.24.1",
+        "psutil",
+        "tiktoken==0.4.0",
+        "lru-dict",
+        "py-spy",
+        "safetensors",
+        "cpm_kernels",
+        "pyodps",
+        "Pillow",
+        "protobuf==3.20.0",
+        "torchvision==0.16.0",
+        "einops",
+        "prettytable",
+        "pydantic==2.5.3",
+        "timm==0.9.12",
+        "kserve",
+    ] + whl_deps(),
+)
+ 
 pyc_wheel(
     name = "maga_transformer",
     package_name = "maga_transformer-0.1.4",
