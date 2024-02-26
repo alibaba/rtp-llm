@@ -92,7 +92,7 @@ py_test(
         "server_test.py",
     ],
     data = [
-        "//maga_transformer:sdk"
+        "//maga_transformer:sdk",
     ],
     deps = [
         "//maga_transformer:uvicorn",
@@ -100,6 +100,7 @@ py_test(
         "//maga_transformer:psutil",
         "//maga_transformer:tiktoken",
         "//maga_transformer:testlib",
+        "//deps:extension_lib",
     ],
     imports = ["aios/kmonitor/python_client"],
     tags = ["manual"],

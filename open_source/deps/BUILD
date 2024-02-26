@@ -9,3 +9,8 @@ py_package(
         "maga_transformer"
     ],
 )
+
+py_library(
+    name = "extension_lib",
+    deps = [],
+)
