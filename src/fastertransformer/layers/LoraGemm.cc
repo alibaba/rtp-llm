@@ -70,6 +70,7 @@ void LoraGemm<T>::applyLoRA(const int              s,
         return;
     }
     allocateBuffer(s, k, n, r);
+    T* lora_buf_tmp = lora_buf_;
 
     if (!use_single_lora) {
         FT_CHECK(input_lengths != nullptr);
@@ -87,7 +88,7 @@ void LoraGemm<T>::applyLoRA(const int              s,
                 r_array_cpu[index]        = rank;
                 input_array_cpu[index]    = const_cast<T*>(input);
                 output_array_cpu[index]   = output;
-                lora_buf_array_cpu[index] = lora_buf_;
+                lora_buf_array_cpu[index] = lora_buf_tmp;
                 m_array_cpu[index]        = input_lengths[i];
                 n_array_cpu[index]        = n;
                 k_array_cpu[index]        = k;
@@ -98,7 +99,7 @@ void LoraGemm<T>::applyLoRA(const int              s,
 
             input           = input + input_lengths[i] * k;
             output          = output + input_lengths[i] * n;
-            lora_buf_       = lora_buf_ + input_lengths[i] * r;
+            lora_buf_tmp    = lora_buf_tmp + input_lengths[i] * r;
             total_token_num = total_token_num + input_lengths[i];
         }
         FT_CHECK(total_token_num == s);
@@ -125,7 +126,7 @@ void LoraGemm<T>::LoRAGemm(const int m,
                              const T*  input,
                              const T*  lora_a,
                              const T*  lora_b,
-                             T*        lora_buf_,
+                             T*        lora_buf,
                              T*        output) {
     // X = [m, k]
     // A = [k, r]
@@ -133,18 +134,20 @@ void LoraGemm<T>::LoRAGemm(const int m,
     // M = [m, r]
     // Y = [m, n]
     // M = X * A
-    cublas_wrapper_->Gemm(CUBLAS_OP_N, CUBLAS_OP_N, r, m, k, lora_a, r, input, k, lora_buf_, r, 1.0f, 0.0f);
+    cublas_wrapper_->Gemm(CUBLAS_OP_N, CUBLAS_OP_N, r, m, k, lora_a, r, input, k, lora_buf, r, 1.0f, 0.0f);
     // Y = M * B + Y
-    cublas_wrapper_->Gemm(CUBLAS_OP_N, CUBLAS_OP_N, n, m, r, lora_b, n, lora_buf_, r, output, n, 1.0f, 1.0f);
+    cublas_wrapper_->Gemm(CUBLAS_OP_N, CUBLAS_OP_N, n, m, r, lora_b, n, lora_buf, r, output, n, 1.0f, 1.0f);
 }
 
 template<typename T>
 void LoraGemm<T>::BatchLoraGemm(const int b, const int k, const int n) {
-    bool same_rank = false;
+    bool same_rank = true;
     int  rank      = r_array_cpu[0];
     int  m         = m_array_cpu[0];
     for (int i = 0; i < b; i++) {
-        same_rank = (r_array_cpu[0] == rank) && (m == m_array_cpu[i]);
+        if ((r_array_cpu[i] != rank) || (m != m_array_cpu[i])) {
+            same_rank = false;
+        }
     }
 
     // TODO(lidongjin): (32x32) can not use group gemm.

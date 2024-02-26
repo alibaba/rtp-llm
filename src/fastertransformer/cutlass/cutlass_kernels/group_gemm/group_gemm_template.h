@@ -39,7 +39,7 @@ void groupedGemm_(cutlassType** A, cutlassType** B, cutlassType** C,
 
     using GemmKernel = typename cutlass::gemm::kernel::DefaultGemmGrouped<ElementA, LayoutA,
         cutlass::ComplexTransform::kNone, kAlignmentA, ElementB, LayoutB, cutlass::ComplexTransform::kNone, kAlignmentB,
-        ElementOutput, LayoutC, ElementAccumulator, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+        ElementOutput, LayoutC, ElementAccumulator, cutlass::arch::OpClassTensorOp, arch,
         cutlass::gemm::GemmShape<128, 128, 32>,
         cutlass::gemm::GemmShape<64, 64, 32>,
         typename GroupGemmArchTraits::InstructionShape,
