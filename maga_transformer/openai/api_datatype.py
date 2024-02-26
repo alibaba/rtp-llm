@@ -77,6 +77,7 @@ class ExtraConfigs(BaseModel):
     top_k: Optional[int] = None
     repitition_penalty: Optional[float] = None
     max_new_tokens: Optional[int] = None
+    timeout_ms: Optional[int] = None
 
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None

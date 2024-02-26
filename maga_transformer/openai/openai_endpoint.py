@@ -84,6 +84,7 @@ class OpenaiEndopoint():
             config.top_k = extra_configs.top_k or config.top_k
             config.repetition_penalty = extra_configs.repitition_penalty or config.repetition_penalty
             config.max_new_tokens = extra_configs.max_new_tokens or config.max_new_tokens
+            config.timeout_ms = extra_configs.timeout_ms or config.timeout_ms
         return config
 
     async def _complete_non_stream_response(
