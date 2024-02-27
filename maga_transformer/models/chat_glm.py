@@ -69,11 +69,12 @@ class ChatGlm(GPT):
         '''
         config = ChatGlm.default_config()
         config.head_num = config_json.get('num_attention_heads', config.head_num)
+        config.hidden_size = config_json.get('hidden_size', 4096)
         if config_json.get('multi_query_attention', False):
             config.head_num_kv = config_json['multi_query_group_num']
         else:
             config.head_num_kv = config.head_num
-        config.size_per_head = config_json.get('hidden_size', 4096) // config.head_num
+        config.size_per_head = config.hidden_size // config.head_num
         config.layer_num = config_json.get('num_layers', config.layer_num)
         config.max_seq_len = config_json.get('max_sequence_length', config.max_seq_len)
         config.vocab_size = config_json.get('vocab_size', config.vocab_size)
@@ -85,7 +86,6 @@ class ChatGlm(GPT):
         config.special_tokens.eos_token_id = config_json.get('eos_token_id', config.special_tokens.eos_token_id)
         config.src_quantization_bit = config_json.get('quantization_bit', 0)
         return config
-    
 
     # override
     def create_context_decoder_mask(self, input_lengths: torch.Tensor):
