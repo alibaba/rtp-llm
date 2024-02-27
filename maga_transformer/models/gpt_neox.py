@@ -85,7 +85,6 @@ class GPTNeox13B(GPTNeox):
                 layer_num=40,
                 max_seq_len=4096,
                 vocab_size=250752,
-                eos_token_id=2,
                 inter_size = 20480,
                 inter_padding_size = 20480)
         config.ckpt_path = ckpt_path
@@ -94,6 +93,7 @@ class GPTNeox13B(GPTNeox):
         config.has_pre_decoder_layernorm = False
         config.has_post_decoder_layernorm = True
         config.norm_type = 'rmsnorm'
+        config.special_tokens.eos_token_id = 2
         return config
 
     @staticmethod
