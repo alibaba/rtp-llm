@@ -1,6 +1,6 @@
-common --spawn_strategy=local # avoid nvcc conflicts
-common --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
+build --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
 
+build --spawn_strategy=local # avoid nvcc conflicts
 build --action_env PYTHON_BIN_PATH="/opt/conda310/bin/python3"
 build --cxxopt="-std=c++17" --copt="-DGTEST_USE_OWN_TR1_TUPLE=0" --copt="-DEIGEN_MAX_CPP_VER=11" --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 build -c opt
