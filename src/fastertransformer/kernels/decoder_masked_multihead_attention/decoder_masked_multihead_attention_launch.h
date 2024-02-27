@@ -140,31 +140,36 @@ inline void multi_block_grid_setup(dim3&                                        
         DYNAMIC_THDS_PER_BLOCK,                                                                                        \
         dynamic_smem_sz));
 
-#define MMHA_KERNEL(DYNAMIC_THDS_PER_BLOCK, ENABLE_MULTI_BLOCK)                                                        \
-    std::size_t const dynamic_smem_sz{smem_size_in_bytes<T, Dh, ENABLE_MULTI_BLOCK>(params, DYNAMIC_THDS_PER_BLOCK)};  \
-    /* Set 46KB threshold here because we have to take static/driver shared memory into consideration. */              \
-    if (dynamic_smem_sz >= 46 * 1024) {                                                                                \
-        cudaError_t res = cudaFuncSetAttribute(masked_multihead_attention_kernel<T,                                    \
-                                                                                 T_cache,                              \
-                                                                                 KVCacheBuffer,                        \
-                                                                                 Dh,                                   \
-                                                                                 DYNAMIC_THDS_PER_BLOCK,               \
-                                                                                 KernelParamsType::DO_CROSS_ATTENTION, \
-                                                                                 HAS_BEAMS,                            \
-                                                                                 ENABLE_MULTI_BLOCK>,                  \
-                                               cudaFuncAttributeMaxDynamicSharedMemorySize,                            \
-                                               dynamic_smem_sz);                                                       \
-        FT_CHECK_WITH_INFO(res == cudaSuccess,                                                                         \
-                           "Sequence Length is too long for the MMHA kernel (not enough shared memory).");             \
-    }                                                                                                                  \
-    masked_multihead_attention_kernel<T,                                                                               \
-                                      T_cache,                                                                         \
-                                      KVCacheBuffer,                                                                   \
-                                      Dh,                                                                              \
-                                      DYNAMIC_THDS_PER_BLOCK,                                                          \
-                                      KernelParamsType::DO_CROSS_ATTENTION,                                            \
-                                      HAS_BEAMS,                                                                       \
-                                      ENABLE_MULTI_BLOCK>                                                              \
+#define MMHA_KERNEL(DYNAMIC_THDS_PER_BLOCK, ENABLE_MULTI_BLOCK)                                                                           \
+    std::size_t const dynamic_smem_sz{smem_size_in_bytes<T, Dh, ENABLE_MULTI_BLOCK>(params, DYNAMIC_THDS_PER_BLOCK)};                     \
+    /* Set 46KB threshold here because we have to take static/driver shared memory into consideration. */                                 \
+    if (dynamic_smem_sz >= 46 * 1024) {                                                                                                   \
+        cudaError_t res = cudaFuncSetAttribute(masked_multihead_attention_kernel<T,                                                       \
+                                                                                 T_cache,                                                 \
+                                                                                 KVCacheBuffer,                                           \
+                                                                                 Dh,                                                      \
+                                                                                 DYNAMIC_THDS_PER_BLOCK,                                  \
+                                                                                 KernelParamsType::DO_CROSS_ATTENTION,                    \
+                                                                                 HAS_BEAMS,                                               \
+                                                                                 ENABLE_MULTI_BLOCK>,                                     \
+                                               cudaFuncAttributeMaxDynamicSharedMemorySize,                                               \
+                                               dynamic_smem_sz);                                                                          \
+        FT_CHECK_WITH_INFO(                                                                                                               \
+            res == cudaSuccess,                                                                                                           \
+            "Sequence Length is too long for the MMHA kernel (not enough shared memory). batch: %d head: %d seq: %d processor_count: %d", \
+            params.batch_size,                                                                                                            \
+            params.num_heads,                                                                                                             \
+            tlength,                                                                                                                      \
+            params.multi_processor_count);                                                                                                \
+    }                                                                                                                                     \
+    masked_multihead_attention_kernel<T,                                                                                                  \
+                                      T_cache,                                                                                            \
+                                      KVCacheBuffer,                                                                                      \
+                                      Dh,                                                                                                 \
+                                      DYNAMIC_THDS_PER_BLOCK,                                                                             \
+                                      KernelParamsType::DO_CROSS_ATTENTION,                                                               \
+                                      HAS_BEAMS,                                                                                          \
+                                      ENABLE_MULTI_BLOCK>                                                                                 \
         <<<grid, DYNAMIC_THDS_PER_BLOCK, dynamic_smem_sz, stream>>>(params, kv_cache_buffer);
 
 // if resources are not enough to launch 512 threads per block, we will fallback to 256.
@@ -208,7 +213,7 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
     const int kernel_total_blocks = params.batch_size * params.num_heads;
     // Don't tune the block size if batchxhead is large enough.
     // The max number of warps we can launch per SM is 32 limited by registers.
-    if (kernel_total_blocks >= params.multi_processor_count * 4) {
+    if (kernel_total_blocks >= params.multi_processor_count * 4 && tlength < 16384) {
         MMHA_KERNEL(THDS_PER_BLOCK, false);
         return;
     }
