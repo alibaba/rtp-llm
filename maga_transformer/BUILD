@@ -23,7 +23,8 @@ requirement([
     "torchvision",
     "einops",
     "prettytable",
-    "timm"
+    "timm",
+    "aiohttp",
 ])
 
 py_library(
@@ -268,5 +269,6 @@ py_library(
     ],
     deps = [
         ":maga_transformer_lib",
+        ":aiohttp",
     ]
 )
