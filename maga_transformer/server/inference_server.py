@@ -142,7 +142,7 @@ class InferenceServer(object):
             self._access_logger.log_exception_access(version_info.__dict__, e, id)
             kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
             error_code = 500
-            rep = JSONResponse(self.format_exception(e), status_code=error_code)
+            rep = JSONResponse(self.handler_exceptions(e), status_code=error_code)
         return rep
 
     async def _infer_wrap(self, req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
@@ -160,7 +160,7 @@ class InferenceServer(object):
             else:
                 error_code = 500
                 kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
-            rep = JSONResponse(self.format_exception(e), status_code=error_code)
+            rep = JSONResponse(self.handler_exceptions(e), status_code=error_code)
         return rep
 
     #TODO(xinfei.sxf) refactor this
@@ -169,7 +169,7 @@ class InferenceServer(object):
             self._controller.increment()
         except ConcurrencyException as e:
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
-            return JSONResponse(self.format_exception(e), status_code=409)
+            return JSONResponse(self.handler_exceptions(e), status_code=409)
 
         try:
             assert (self._openai_endpoint != None)
@@ -195,7 +195,7 @@ class InferenceServer(object):
         except Exception as e:
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC)
             logging.error(f'chat_completion error: {e}, trace: {traceback.format_exc()}')
-            return JSONResponse(self.format_exception(e), status_code=500)
+            return JSONResponse(self.handler_exceptions(e), status_code=500)
         finally:
             self._controller.decrement()
 
