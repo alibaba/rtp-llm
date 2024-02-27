@@ -28,6 +28,7 @@ def register_hf_architecture(name: str, model_type: str):
     global _hf_architecture_2_ft
     if name in _hf_architecture_2_ft and _hf_architecture_2_ft[name] != model_type:
         raise Exception(f"try register model {name} with type {_hf_architecture_2_ft[name]} and {model_type}, confict!")
+    logging.info(f"registerhf_architecture: {name} -> {model_type}")
     _hf_architecture_2_ft[name] = model_type
 
 _hf_repo_2_ft = {}
@@ -36,6 +37,7 @@ def register_hf_repo(name: str, model_type: str):
     global _hf_repo_2_ft
     if name in _hf_repo_2_ft and _hf_repo_2_ft[name] != model_type:
         raise Exception(f"try register model {name} with type {_hf_repo_2_ft[name]} and {model_type}, confict!")
+    logging.info(f"register_hf_repo: {name} -> {model_type}")
     _hf_repo_2_ft[name] = model_type
 
 
@@ -43,12 +45,16 @@ class ModelDict:
     @staticmethod
     def get_ft_model_type_by_hf_repo(repo: str) -> Optional[str]:
         global _hf_repo_2_ft
-        return _hf_repo_2_ft.get(repo, None)
+        model_type = _hf_repo_2_ft.get(repo, None)
+        logging.info(f"get hf_repo model type: {repo}, {model_type}")
+        return model_type
 
     @staticmethod
     def get_ft_model_type_by_hf_architectures(architecture):
         global _hf_architecture_2_ft
-        return _hf_architecture_2_ft.get(architecture, None)
+        model_type = _hf_architecture_2_ft.get(architecture, None)
+        logging.info(f"get architectur model type: {architecture}, {model_type}")
+        return model_type
 
     @staticmethod
     def get_ft_model_type_by_config(config) ->Optional[str]:
@@ -78,4 +84,6 @@ class ModelDict:
                 else:
                     return 'gpt_neox'
             return ModelDict.get_ft_model_type_by_hf_architectures(architecture)   
+        else:
+            logging.warning(f"config have no architectures: {config}")
         return None  
