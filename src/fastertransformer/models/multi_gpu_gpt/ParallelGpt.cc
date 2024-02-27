@@ -24,8 +24,7 @@ void ParallelGpt<T>::initialize()
     // max_seq_len + max_generate_batch_size because max_seq_len >> max_generate_batch_size
     ffn_layer_ = new TensorParallelFfnLayer<T>(params_.max_context_batch_size_,
                                                params_.max_seq_len_ + params_.max_generate_batch_size_,
-                                               params_.head_num_,
-                                               params_.size_per_head_,
+                                               params_.hidden_size_,
                                                params_.expert_num_,  // expert_num
                                                params_.inter_size_,
                                                params_.inter_padding_size_,
@@ -68,7 +67,7 @@ template<typename T>
 void ParallelGpt<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num, bool reuse_buf, bool pre_attn_ln)
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    size_t hidden_units   = params_.size_per_head_ * params_.head_num_;
+    size_t hidden_units   = params_.hidden_size_;
     decoder_normed_input_ = reinterpret_cast<T*>(
         allocator_->reMalloc(decoder_normed_input_, sizeof(T) * h_token_num * hidden_units, false));
     self_attn_output_ =
@@ -318,7 +317,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
 
 
     Tensor decoder_input_tensor = input_tensors->at("decoder_input");
-    size_t hidden_units         = params_.size_per_head_ * params_.head_num_;
+    size_t hidden_units         = params_.hidden_size_;
     FT_CHECK(decoder_input_tensor.shape()[1] == hidden_units);
     const size_t total_batch_size = input_tensors->at("input_lengths").shape()[0];
     size_t       batch_size       = 0;

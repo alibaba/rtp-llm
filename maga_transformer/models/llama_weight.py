@@ -96,6 +96,9 @@ class Internlm2WeightNames:
     NORM = 'model.norm.weight'
     OUTPUT = 'output.weight'
 
+class GemmaWeightNames(HfWeightNames):
+    OUTPUT = 'model.embed_tokens.weight'
+
 class LlamaWeightInfo(ModelDeployWeightInfo):
     def __init__(self, config, tp_size, tp_rank):
         super().__init__(config, tp_size, tp_rank)
@@ -128,6 +131,10 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
         elif HfWeightNames.OUTPUT in weight_keys:
             logging.info('load hf llama1 style weight')
             self._names = HfWeightNames
+            self._merge_qkv = merge_qkv_hf
+        elif GemmaWeightNames.OUTPUT in weight_keys:
+            logging.info('load gemma style weight')
+            self._names = GemmaWeightNames
             self._merge_qkv = merge_qkv_hf
         else:
             raise Exception('unknown weights format')

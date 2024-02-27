@@ -444,7 +444,7 @@ class ModelWeightInfo:
 class ModelDeployWeightInfo:
 
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
-        self._hidden_size = config.head_num * config.size_per_head
+        self._hidden_size = config.hidden_size
         self._inter_size = config.inter_size
         self._inter_padding_size = config.inter_padding_size
         self._head_num = config.head_num

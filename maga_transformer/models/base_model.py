@@ -139,6 +139,8 @@ class BaseModel(object):
     @classmethod
     def create_config(cls, model_config: ModelConfig) -> GptInitModelParameters:
         config: GptInitModelParameters = cls._create_config(model_config.ckpt_path)
+        if config.hidden_size == 0:
+            config.hidden_size = config.size_per_head * config.head_num
         config.update_common(
             ckpt_path=model_config.ckpt_path,
             tokenizer_path=model_config.tokenizer_path,

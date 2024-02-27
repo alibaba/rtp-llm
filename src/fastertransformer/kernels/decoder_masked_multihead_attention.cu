@@ -43,10 +43,10 @@ void multihead_attention_(KERNEL_PARAMS_TYPE& params, const KVCacheBuffer& kv_ca
             mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 64>(params, kv_cache_buffer, stream);
             break;
         // case 80: mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 80>(params, kv_cache_buffer, stream);
-        // break; 
-        case 96: 
-            mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 96>(params, kv_cache_buffer,stream); 
-            break; 
+        // break;
+        case 96:
+            mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 96>(params, kv_cache_buffer,stream);
+            break;
         // case 112:
         //     mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 112>(params, kv_cache_buffer, stream);
         //     break;
@@ -65,11 +65,11 @@ void multihead_attention_(KERNEL_PARAMS_TYPE& params, const KVCacheBuffer& kv_ca
         // case 224:
         //     mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 224>(params, kv_cache_buffer, stream);
         //     break;
-        // case 256:
-        //     mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 256>(params, kv_cache_buffer, stream);
-        //     break;
+        case 256:
+            mmha_launch_kernel<T, KVCacheBuffer, KERNEL_PARAMS_TYPE, 256>(params, kv_cache_buffer, stream);
+            break;
         default:
-            throw("unsupported head_size");
+            throw std::invalid_argument("unsupported head_size: " + std::to_string(params.hidden_size_per_head));
     }
 }
 

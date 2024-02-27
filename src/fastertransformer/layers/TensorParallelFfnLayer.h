@@ -33,8 +33,7 @@ private:
 public:
     TensorParallelFfnLayer(size_t                              max_batch_size,
                            size_t                              max_seq_len,
-                           size_t                              head_num,
-                           size_t                              size_per_head,
+                           size_t                              hidden_units,
                            size_t                              expert_num,
                            size_t                              inter_size,
                            size_t                              inter_padding_size,

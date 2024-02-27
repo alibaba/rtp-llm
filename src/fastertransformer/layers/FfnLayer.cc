@@ -321,7 +321,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                                mixed_gemm_workspace_,
                                mixed_gemm_ws_bytes_,
                                m_padded);
-            
+
             // lora
 
             lora_gemm_->applyLoRA(m,
@@ -427,8 +427,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
 template<typename T>
 FfnLayer<T>::FfnLayer(size_t               max_batch_size,
                       size_t               max_seq_len,
-                      size_t               head_num,
-                      size_t               size_per_head,
+                      size_t               hidden_units,
                       size_t               expert_num,
                       size_t               inter_size,
                       size_t               inter_padding_size,
@@ -445,10 +444,8 @@ FfnLayer<T>::FfnLayer(size_t               max_batch_size,
                       float                layernorm_eps):
     BaseLayer(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, nullptr, sparse),
     max_token_num_(max_batch_size * max_seq_len),
-    head_num_(head_num),
-    size_per_head_(size_per_head),
     expert_num_(expert_num),
-    hidden_units_(head_num * size_per_head),
+    hidden_units_(hidden_units),
     inter_size_(inter_size),
     inter_padding_size_(inter_padding_size),
     local_layer_inter_size_(local_layer_inter_size),
@@ -484,8 +481,6 @@ FfnLayer<T>::FfnLayer(FfnLayer<T> const& ffn_layer):
               ffn_layer.cuda_device_prop_,
               ffn_layer.sparse_),
     max_token_num_(ffn_layer.max_token_num_),
-    head_num_(ffn_layer.head_num_),
-    size_per_head_(ffn_layer.size_per_head_),
     expert_num_(ffn_layer.expert_num_),
     hidden_units_(ffn_layer.hidden_units_),
     inter_size_(ffn_layer.inter_size_),

@@ -61,11 +61,13 @@ class Llama(GPT):
     @staticmethod
     def from_huggingface(config, config_json: Dict[str, Any]):
         model_type = config_json['model_type']
-        if model_type not in ['llama', 'baichuan2', 'baichuan', 'xverse', 'internlm', 'aquila', 'Yi', 'llava', 'mistral']:
+        if model_type not in ['llama', 'baichuan2', 'baichuan', 'xverse', 'internlm', 'aquila', 'Yi', 'llava', 'mistral', 'gemma']:
             raise BaseException(f'model type is not llama: {model_type}')
         config.head_num = config_json['num_attention_heads']
         config.head_num_kv = config_json.get('num_key_value_heads', config.head_num)
+        config.hidden_size = config_json['hidden_size']
         config.size_per_head = config_json['hidden_size'] // config_json['num_attention_heads']
+        config.size_per_head = config_json.get('head_dim', config.size_per_head)
         config.layer_num = config_json['num_hidden_layers']
         config.max_seq_len = config_json.get('max_sequence_length', 2048)
         config.vocab_size = config_json['vocab_size']
@@ -134,6 +136,13 @@ class Baichuan2(Baichuan):
         config.normalize_lm_head_weight = True
         return config
 
+class Gemma(Llama):
+    @staticmethod
+    def _create_config(ckpt_path: str):
+        config = Llama._create_config(ckpt_path)
+        config.has_post_decoder_layernorm = False
+        return config
+
 register_model('internlm', Llama, ["InternLMForCausalLM"])
 register_model('internlm2', Llama, ["InternLM2ForCausalLM"])
 register_model('llama', Llama, ["LlamaForCausalLM", "YiForCausalLM"])
@@ -142,3 +151,4 @@ register_model('aquila', Llama, ["AquilaModel"])
 register_model('mistral', Llama, ["MistralForCausalLM"])
 register_model('baichuan', Baichuan, ["BaichuanForCausalLM"])
 register_model('baichuan2', Baichuan2)
+register_model('gemma', Gemma, ["GemmaForCausalLM"])

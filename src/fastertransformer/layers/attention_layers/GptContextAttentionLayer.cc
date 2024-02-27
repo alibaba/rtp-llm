@@ -141,7 +141,7 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
                         mixed_gemm_workspace_,
                         mixed_gemm_ws_bytes_,
                         m_padded);
-    
+
     // lora
     lora_gemm_->applyLoRA(m,
                           request_batch_size,
@@ -158,7 +158,7 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
     int k_start = local_hidden_units_rt;
     int v_start = local_hidden_units_rt + local_hidden_units_kv_rt;
 
-    print_bsd(layer_id, "q", qkv_buf_, request_batch_size, request_seq_len, local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
+    print_bsd(layer_id, "context q", qkv_buf_, request_batch_size, request_seq_len, local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
               0, 4);
     print_bsd(layer_id, "k", qkv_buf_, request_batch_size, request_seq_len, local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
               k_start, k_start + 4);
@@ -449,7 +449,7 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
                         mixed_gemm_workspace_,
                         mixed_gemm_ws_bytes_,
                         m_padded);
-    
+
     // lora
     lora_gemm_->applyLoRA(m,
                           request_batch_size,

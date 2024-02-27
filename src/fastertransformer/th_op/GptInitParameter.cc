@@ -11,12 +11,14 @@ SpecialTokens::SpecialTokens():
 GptInitParameter::GptInitParameter(): special_tokens_(c10::intrusive_ptr<SpecialTokens>::reclaim(new SpecialTokens)) {}
 
 GptInitParameter::GptInitParameter(
-    int64_t head_num, int64_t size_per_head, int64_t num_layers, int64_t max_seq_len, int64_t vocab_size):
+    int64_t head_num, int64_t size_per_head, int64_t num_layers,
+    int64_t max_seq_len, int64_t vocab_size, int64_t hidden_size):
     head_num_(head_num),
     size_per_head_(size_per_head),
     num_layers_(num_layers),
     max_seq_len_(max_seq_len),
     vocab_size_(vocab_size),
+    hidden_size_(hidden_size),
     special_tokens_(c10::intrusive_ptr<SpecialTokens>::reclaim(new SpecialTokens)) {}
 
 void GptInitParameter::setLayerNormType() {
@@ -78,6 +80,7 @@ static auto specialTokensTHS =
     DEF_PROPERTY(size_per_head, size_per_head_)                                                                        \
     DEF_PROPERTY(max_seq_len, max_seq_len_)                                                                            \
     DEF_PROPERTY(vocab_size, vocab_size_)                                                                              \
+    DEF_PROPERTY(hidden_size, hidden_size_)                                                                            \
     DEF_PROPERTY(gen_num_per_circle, gen_num_per_circle_)                                                              \
     DEF_PROPERTY(inter_size, inter_size_)                                                                              \
     DEF_PROPERTY(inter_padding_size, inter_padding_size_)                                                              \
@@ -143,7 +146,9 @@ static auto fasterTransformerGptInitParameterTHS =
                               int64_t,     // size_per_head
                               int64_t,     // num_layers
                               int64_t,     // max_seq_len
-                              int64_t>())  // vocab_size
+                              int64_t,     // vocab_size
+                              int64_t      // hidden_size
+        >())
         .def("setLayerNormType", &GptInitParameter::setLayerNormType)
         .def("setNormType", &GptInitParameter::setNormType)
         .def("setActivationType", &GptInitParameter::setActivationType) REGISTER_PROPERTYS;

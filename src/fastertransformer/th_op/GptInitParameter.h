@@ -35,6 +35,7 @@ public:
     int64_t inter_padding_size_ = -1;
     int64_t num_layers_         = 0;
     int64_t num_valid_layer_    = 0;
+    int64_t hidden_size_        = 0;
 
     // in sparse, those params might vary among layers
     bool                 is_sparse_head_           = false;
@@ -105,7 +106,8 @@ public:
     GptInitParameter();
 
     GptInitParameter(
-        int64_t head_num, int64_t size_per_head, int64_t num_layers, int64_t max_seq_len, int64_t vocab_size);
+        int64_t head_num, int64_t size_per_head, int64_t num_layers, int64_t max_seq_len,
+        int64_t vocab_size, int64_t hidden_size);
 
     void setLayerNormType();
     void setNormType();

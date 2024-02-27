@@ -61,8 +61,7 @@ void ParallelGptContextDecoder<T>::initialize()
     ffn_layer_.reset(new TensorParallelFfnLayer<T>(
                              max_batch_size_,
                              1,
-                             gpt_init_parameter_.head_num_,
-                             gpt_init_parameter_.size_per_head_,
+                             gpt_init_parameter_.hidden_size_,
                              gpt_init_parameter_.expert_num_,  // expert_num
                              gpt_init_parameter_.inter_size_,
                              gpt_init_parameter_.inter_padding_size_,
@@ -100,7 +99,7 @@ void ParallelGptContextDecoder<T>::allocateBuffer(size_t batch_size, size_t seq_
                                                   bool pre_attn_ln)
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    size_t hidden_units = gpt_init_parameter_.size_per_head_ * gpt_init_parameter_.head_num_;
+    size_t hidden_units = gpt_init_parameter_.hidden_size_;
     decoder_layer_output_ = reinterpret_cast<T*>(
         allocator_->reMalloc(decoder_layer_output_, sizeof(T) * batch_size * seq_len * hidden_units, false));
     decoder_normed_input_ = reinterpret_cast<T*>(
@@ -302,7 +301,7 @@ void ParallelGptContextDecoder<T>::forward(
     const bool use_shared_contexts = input_tensors->isExist("compact_idx");
     FT_CHECK(!use_shared_contexts || input_tensors->isExist("batch_to_compact_idx"));
 
-    size_t hidden_units = gpt_init_parameter_.size_per_head_ * gpt_init_parameter_.head_num_;
+    size_t hidden_units = gpt_init_parameter_.hidden_size_;
     Tensor decoder_input_tensor = input_tensors->at("decoder_input");
     FT_CHECK(decoder_input_tensor.shape()[2] == hidden_units);
 

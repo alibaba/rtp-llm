@@ -227,6 +227,7 @@ void ParallelAttentionWrapper<T>::OpenSourceFMHA(
     memset(&flash_fwd_params_, 0, sizeof(flash_fwd_params_));
     flash_fwd_params_.is_bf16 = std::is_same_v<__nv_bfloat16, T>;
 
+    // TODO(wangyin): pass hidden_units from params
     const int hidden_units          = num_heads * head_size;
     const int hidden_units_kv       = num_heads_kv * head_size;
     // Set the pointers and strides.
@@ -411,7 +412,7 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
                        mixed_gemm_workspace_,
                        mixed_gemm_ws_bytes_,
                        m_padded);
-    
+
     // lora
     lora_gemm_->applyLoRA(h_token_num,
                           batch_size,
@@ -464,7 +465,7 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
                        mixed_gemm_workspace_,
                        mixed_gemm_ws_bytes_,
                        m_padded);
-    
+
     // lora
 
     lora_gemm_->applyLoRA(h_token_num,
@@ -479,7 +480,7 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
 
     int k_start = local_hidden_units_rt;
     int v_start = local_hidden_units_rt + local_hidden_units_kv_rt;
-    print_bsd(layer_id, "q", qkv_buf_, h_token_num, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt, 0, 4);
+    print_bsd(layer_id, "parallel attention q", qkv_buf_, h_token_num, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt, 0, 4);
     print_bsd(layer_id,
               "k",
               qkv_buf_,
@@ -975,11 +976,11 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
 
     BaseAttentionLayer<T>(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, sparse),
     params_(gpt_init_parameter),
-    hidden_units_(gpt_init_parameter.size_per_head_ * gpt_init_parameter.head_num_),
+    hidden_units_(gpt_init_parameter.hidden_size_),
     local_head_num_(gpt_init_parameter.head_num_ / tensor_para.world_size_),
     local_head_num_kv_(
         gpt_init_parameter.head_num_kv_ == 1 ? 1 : gpt_init_parameter.head_num_kv_ / tensor_para.world_size_),
-    local_hidden_units_(local_head_num_ * gpt_init_parameter.size_per_head_),
+    local_hidden_units_(gpt_init_parameter.hidden_size_ / tensor_para.world_size_),
     is_qk_buf_float_(is_qk_buf_float),
     weight_only_int8_fc_runner_(
         gpt_init_parameter.int8_mode_ == 1 ? std::make_shared<CutlassFpAIntBGemmRunner<T, uint8_t>>() : nullptr),
@@ -1055,24 +1056,24 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
 
     // const auto type_size = int8_mode_ == 2 ? sizeof(int8_t) : sizeof(T);
     // NOTE (perkzz): use sizeof(T) here for cutlass int8 kernels.
+    const auto qkv_hidden_size = local_head_num_ * params_.size_per_head_;
+    const auto qkv_merged_size = qkv_hidden_size + 2 * local_head_num_kv_ * params_.size_per_head_;
     qkv_buf_   = (T*)allocator_->reMalloc(qkv_buf_,
-                                        sizeof(T) * h_token_num
-                                            * (local_hidden_units_ + 2 * local_head_num_kv_ * params_.size_per_head_),
+                                        sizeof(T) * h_token_num * qkv_merged_size,
                                         true);
     q_buf_2_   = (T*)allocator_->reMalloc(q_buf_2_,
-                                        sizeof(T) * context_batch_size * seq_len_with_prefix
-                                            * (local_hidden_units_ + 2 * local_head_num_kv_ * params_.size_per_head_),
+                                        sizeof(T) * context_batch_size * seq_len_with_prefix * qkv_merged_size,
                                         false);
     k_buf_2_   = q_buf_2_ + context_batch_size * seq_len_with_prefix * local_head_num_ * params_.size_per_head_;
     v_buf_2_   = k_buf_2_ + context_batch_size * seq_len_with_prefix * local_head_num_kv_ * params_.size_per_head_;
-    qkv_buf_2_ = (T*)allocator_->reMalloc(qkv_buf_2_, sizeof(T) * h_token_num * local_hidden_units_, false);
+    qkv_buf_2_ = (T*)allocator_->reMalloc(qkv_buf_2_, sizeof(T) * h_token_num * qkv_hidden_size, false);
 
     // save memory usage when using fmha
     if (allocate_qk_buf) {
         qk_buf_ = (T*)allocator_->reMalloc(
             qk_buf_, sizeof(T) * context_batch_size * local_head_num_ * seq_len * seq_len_with_prefix, true);
         qkv_buf_3_ =
-            (T*)allocator_->reMalloc(qkv_buf_3_, sizeof(T) * context_batch_size * seq_len * local_hidden_units_, true);
+            (T*)allocator_->reMalloc(qkv_buf_3_, sizeof(T) * context_batch_size * seq_len * qkv_hidden_size, true);
     }
     else {
         softmax_lse_ = (float*)allocator_->reMalloc(
@@ -1094,7 +1095,7 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
         // We use max_size for n and k since we reuse buffers for both FCs and want to allocate the max
         // possible memory that would be required by any of the individual gemms.
         const int max_size =
-            std::max(hidden_units_, local_hidden_units_ + 2 * local_head_num_kv_ * params_.size_per_head_);
+            std::max(hidden_units_, qkv_merged_size);
         mixed_gemm_ws_bytes_  = weight_only_int8_fc_runner_->getWorkspaceSize(h_token_num, max_size, max_size);
         mixed_gemm_workspace_ = (char*)allocator_->reMalloc(mixed_gemm_workspace_, mixed_gemm_ws_bytes_, false);
     }

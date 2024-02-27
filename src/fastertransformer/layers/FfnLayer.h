@@ -38,11 +38,7 @@ private:
     size_t max_token_num_ = 0;
 
     // meta data
-    size_t head_num_      = 0;  // (martinma): this member is not used in this class. Remove it?
-    size_t size_per_head_ = 0;  // (martinma): this member is not used in this class. Remove it?
     size_t expert_num_    = 0;
-
-    // calculated data
     size_t hidden_units_ = 0;
 
     std::shared_ptr<GemmRunner<T>>                        gemm_runner_;
@@ -102,8 +98,7 @@ protected:
 public:
     FfnLayer(size_t               max_batch_size,
              size_t               max_seq_len,
-             size_t               head_num,       // (martinma): redundant parameter?
-             size_t               size_per_head,  // (martinma): redundant parameter?
+             size_t               hidden_units,
              size_t               expert_num,
              size_t               inter_size,
              size_t               inter_padding_size,

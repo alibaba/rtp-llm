@@ -66,11 +66,11 @@ class Linear(torch.nn.Module):
 class GPT(BaseModel):
     def __init__(self, config: GptInitModelParameters):
         super().__init__()
-        
+
         # 兼容逻辑
         if os.environ.get('USE_BLOCK_CACHE', None):
             os.environ["REUSE_CACHE"] = os.environ.get('USE_BLOCK_CACHE')
-        
+
         self.config = config
         compute_dtype = to_torch_dtype(self.config.data_type)
 
@@ -81,8 +81,10 @@ class GPT(BaseModel):
         # torch.classes.load_library(os.path.abspath(lib_path)) # type: ignore
 
         # Embeddings to encode or decode tokens.
-        hidden_dim = self.config.head_num * self.config.size_per_head
+        print(f"hidden_dim: {self.config.gpt_init_params.hidden_size}")
+        hidden_dim = self.config.gpt_init_params.hidden_size
         all_gather = self.config.tp_split_emb_and_lm_head and g_parallel_info.tp_size > 1
+        assert(hidden_dim != 0)
 
         self.register_param(
             'context_decoder',
@@ -239,6 +241,7 @@ class GPT(BaseModel):
 
         def _safe_load_from_module(param: torch.nn.Parameter, fname: str):
             # np_w is 1-D array since a bin file doesn't have shape info.
+            print(f"load {fname} to {param.data.shape}")
             param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to('cuda:0')
 
         def _safe_load_prefix_encoder_weight_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):

@@ -280,7 +280,7 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
                        mixed_gemm_workspace_,
                        mixed_gemm_ws_bytes_,
                        m_padded);
-    
+
     // lora
 
     lora_gemm_->applyLoRA(batch_size,
@@ -295,11 +295,11 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
 
     int k_start = local_hidden_units_rt;
     int v_start = local_hidden_units_rt + local_hidden_units_kv_rt;
-    print_bsd(layer_id, "q", qkv_buf_, 1, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
+    print_bsd(layer_id, "self q", qkv_buf_, 1, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
               0, 20);
-    print_bsd(layer_id, "k", qkv_buf_, 1, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
+    print_bsd(layer_id, "self k", qkv_buf_, 1, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
               k_start, k_start + 20);
-    print_bsd(layer_id, "v", qkv_buf_, 1, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
+    print_bsd(layer_id, "self v", qkv_buf_, 1, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
               v_start, v_start + 20);
 
     sync_check_cuda_error();
@@ -403,7 +403,7 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
                         mixed_gemm_workspace_,
                         mixed_gemm_ws_bytes_,
                         m_padded);
-    
+
     // lora
     lora_gemm_->applyLoRA(batch_size,
                           batch_size,

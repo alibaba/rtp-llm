@@ -58,9 +58,8 @@ void ParallelGptDecoder<T>::initialize()
     ffn_layer_.reset(new TensorParallelFfnLayer<T>(
                              max_batch_size_,
                              1,
-                             gpt_init_parameter_.head_num_,
-                             gpt_init_parameter_.size_per_head_,
-                             gpt_init_parameter_.expert_num_,  // expert_num
+                             gpt_init_parameter_.hidden_size_,
+                             gpt_init_parameter_.expert_num_,
                              gpt_init_parameter_.inter_size_,
                              gpt_init_parameter_.inter_padding_size_,
                              gpt_init_parameter_.layer_inter_size_,
@@ -135,7 +134,7 @@ template<typename T>
 void ParallelGptDecoder<T>::allocateBuffer(size_t batch_size, bool reuse_buf, bool pre_attn_ln)
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    size_t hidden_units = gpt_init_parameter_.size_per_head_ * gpt_init_parameter_.head_num_;
+    size_t hidden_units = gpt_init_parameter_.hidden_size_;
     decoder_layer_output_ = reinterpret_cast<T*>(
         allocator_->reMalloc(decoder_layer_output_, sizeof(T) * batch_size * hidden_units, false));
     decoder_normed_input_ = reinterpret_cast<T*>(
@@ -261,7 +260,7 @@ void ParallelGptDecoder<T>::forward(std::unordered_map<std::string, Tensor>*    
     FT_CHECK(output_tensors->count("value_cache"));
 
     const size_t local_batch_size = input_tensors->at("decoder_input").shape()[0];
-    const size_t hidden_units = gpt_init_parameter_.size_per_head_ * gpt_init_parameter_.head_num_;
+    const size_t hidden_units = gpt_init_parameter_.hidden_size_;
     bool reuse_buf = !gpt_init_parameter_.use_norm_input_residual_;
     bool pre_attn_ln = gpt_decoder_layer_weight->at(0)->pre_attn_layernorm_weights.gamma;
     allocateBuffer(local_batch_size, reuse_buf, pre_attn_ln);

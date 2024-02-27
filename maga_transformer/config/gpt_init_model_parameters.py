@@ -101,9 +101,9 @@ class GptInitModelParameters:
                  max_seq_len: int,
                  vocab_size: int,
                  **kwargs):
-
+        hidden_size = head_num * size_per_head
         self.gpt_init_params = torch.classes.FasterTransformer.GptInitParameter(
-            head_num, size_per_head, layer_num, max_seq_len, vocab_size
+            head_num, size_per_head, layer_num, max_seq_len, vocab_size, hidden_size
         )
         self._model_related_types: Dict[str, str] = {
             "layernorm_type": "setLayerNormType",
@@ -298,7 +298,7 @@ class GptInitModelParameters:
         return res
 
     def eval_model_size(self):
-        hidden_size = self.size_per_head * self.head_num
+        hidden_size = self.gpt_init_params.hidden_size
 
         layer_weight_param_count = 0
         # qkv
