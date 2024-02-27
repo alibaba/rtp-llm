@@ -347,12 +347,12 @@ template<typename T, typename KVCacheBuffer, typename KernelParamsType, int Dh>
 void mmha_launch_kernel(KernelParamsType& params, const KVCacheBuffer& kv_cache_buffer, const cudaStream_t& stream)
 {
     assert(params.rotary_embedding_dim >= 0);
-    if (params.beam_width == 1) {
+    // if (params.beam_width == 1) {
         mmha_launch_kernel_dispatch<T, KVCacheBuffer, KernelParamsType, Dh, false>(params, kv_cache_buffer, stream);
-    }
-    else {
-        mmha_launch_kernel_dispatch<T, KVCacheBuffer, KernelParamsType, Dh, true>(params, kv_cache_buffer, stream);
-    }
+    // }
+    // else {
+    //     mmha_launch_kernel_dispatch<T, KVCacheBuffer, KernelParamsType, Dh, true>(params, kv_cache_buffer, stream);
+    // }
 }
 
 #define INSTANTIATE_MMHA_LAUNCHERS(T, Dh)                                                                              \
