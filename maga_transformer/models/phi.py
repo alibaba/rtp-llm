@@ -46,7 +46,7 @@ class Phi(GPT):
             vocab_size=config_dict.get('vocab_size', 32),
             rotary_embedding_dim=config_dict.get('rotary_dim', 32),
             rotary_embedding_style=1,
-            activation_type='gelu-none-approximate',
+            activation_type='gelu',
             has_positional_encoding=False,
             has_post_decoder_layernorm=True,
             has_lm_head_bias=True)
