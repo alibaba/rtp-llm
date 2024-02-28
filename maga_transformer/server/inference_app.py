@@ -21,6 +21,8 @@ from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatComp
 from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from maga_transformer.models.base_model import BaseModel
+from maga_transformer.server.inference_server import InferenceServer
+from maga_transformer.config.exceptions import ExceptionType
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
@@ -28,18 +30,19 @@ MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
 class InferenceApp(object):
-    def __init__(self, inference_server):
-        self.inference_server = inference_server
+    def __init__(self):
+        self.inference_server = InferenceServer()
         
     def start(self):
-        app = self.create_server()
+        self.inference_server.start()
+        app = self.create_app()
         self.inference_server.wait_all_worker_ready()
         
         timeout_keep_alive = int(os.environ.get("TIMEOUT_KEEP_ALIVE", 5))
         uvicorn.run(app, host="0.0.0.0", port=g_worker_info.server_port, log_config=UVICORN_LOGGING_CONFIG,
                     timeout_keep_alive = timeout_keep_alive, h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE)
 
-    def create_server(self):
+    def create_app(self):
         middleware = [
             Middleware(
                 CORSMiddleware,

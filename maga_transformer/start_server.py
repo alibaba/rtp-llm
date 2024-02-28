@@ -14,11 +14,12 @@ import torch
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), '..'))
 
+from maga_transformer.config.log_config import LOGGING_CONFIG
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
-from maga_transformer.server.inference_server import InferenceServer
+from maga_transformer.server.inference_app import InferenceApp
 
 def local_rank_start():
-    server = None
+    app = None
     try:
         # avoid multiprocessing load failed
         if os.environ.get('FT_SERVER_TEST', None) is None:
@@ -27,12 +28,12 @@ def local_rank_start():
         g_parallel_info.reload()
         g_worker_info.reload()
         logging.info(f'start local {g_worker_info}, {g_parallel_info}')
-        server = InferenceServer()
-        server.start()
+        app = InferenceApp()
+        app.start()
     except BaseException as e:
         logging.error(f'start server error: {e}, trace: {traceback.format_exc()}')
         raise e
-    return server
+    return app
 
 def multi_rank_start():
     local_world_size = min(torch.cuda.device_count(), g_parallel_info.world_size)

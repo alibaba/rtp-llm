@@ -22,7 +22,6 @@ from maga_transformer.utils.util import AtomicCounter
 from maga_transformer.utils.model_weight import LoraCountException, LoraPathException
 from maga_transformer.metrics import sys_reporter, kmonitor, AccMetrics, GaugeMetrics
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
-from maga_transformer.config.log_config import LOGGING_CONFIG
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
 from maga_transformer.distribute.gang_server import GangServer
 from maga_transformer.utils.concurrency_controller import ConcurrencyController, ConcurrencyException
@@ -31,7 +30,6 @@ from maga_transformer.access_logger.access_logger import AccessLogger
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatCompletionStreamResponse
 from maga_transformer.server.inference_worker import InferenceWorker
-from maga_transformer.server.inference_app import InferenceApp
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -59,8 +57,6 @@ class InferenceServer(object):
             self._inference_worker = InferenceWorker()
             self._openai_endpoint = OpenaiEndopoint(self._inference_worker.model)
         self._init_controller()
-        app = InferenceApp(self)
-        app.start()
         
     def wait_all_worker_ready(self):
         # master需要等其他所有机器都ready以后才能起服务，挂vipserver

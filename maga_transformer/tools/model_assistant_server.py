@@ -22,11 +22,11 @@ class ModelAssistantServer(object):
         
 
     def start(self):
-        app = self.create_server()
+        app = self.create_app()
         uvicorn.run(app, host="0.0.0.0", port=self._server_port, log_config=UVICORN_LOGGING_CONFIG, h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE)
 
     
-    def create_server(self):
+    def create_app(self):
         app = FastAPI()
 
         @app.on_event("startup")
