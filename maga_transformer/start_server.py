@@ -37,7 +37,11 @@ def local_rank_start():
 def multi_rank_start():
     local_world_size = min(torch.cuda.device_count(), g_parallel_info.world_size)
     os.environ['LOCAL_WORLD_SIZE'] = str(local_world_size)
-    multiprocessing.set_start_method('spawn')
+    try:
+        multiprocessing.set_start_method('spawn')
+    except RuntimeError as e:
+        logging.warn(str(e))
+        pass
     procs: List[Process] = []
     cuda_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
     cuda_device_list = cuda_devices.split(',') if cuda_devices is not None else \
