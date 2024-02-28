@@ -64,6 +64,8 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [多卡推理](docs/MultiGPU.md)
 * [LoRA](docs/LoRA-Tutorial.md)
 * [PTuning](docs/PTuning-Tutorial.md)
+* [SystemPrompt](docs/SystemPrompt-Tutorial)
+* [多轮会话](docs/ReuseKVCache-Tutorial.md)
 * [多模态](docs/Multimodal-Tutorial.md)
 * [结构化剪枝](docs/Sparse-Tutorial.md)
 * [投机采样](docs/SpeculativeDecoding-Tutroial.md)

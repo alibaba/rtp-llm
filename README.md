@@ -62,6 +62,8 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [Multi GPU Inference](docs/MultiGPU.md)
 * [LoRA](docs/LoRA-Tutorial.md)
 * [PTuning](docs/PTuning-Tutorial.md)
+* [SystemPrompt](docs/SystemPrompt-Tutorial)
+* [ReuseKVCache](docs/ReuseKVCache-Tutorial.md)
 * [Multimodal](docs/Multimodal-Tutorial.md)
 * [Structured Pruning](docs/Sparse-Tutorial.md)
 * [Speculative Sampling](docs/SpeculativeDecoding-Tutorial.md)
