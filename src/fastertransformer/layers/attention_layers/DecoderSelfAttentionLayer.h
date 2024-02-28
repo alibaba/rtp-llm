@@ -55,9 +55,11 @@ private:
     const std::vector<int64_t> local_layer_head_num_;
     const std::vector<int64_t> local_layer_head_num_kv_;
 
-    std::shared_ptr<CutlassFpAIntBGemmRunner<T, uint8_t>> weight_only_int8_fc_runner_;
-    std::shared_ptr<GemmRunner<T>>                        gemm_runner_;
     std::shared_ptr<LoraGemm<T>>                          lora_gemm_;
+    std::shared_ptr<tensorrt_llm::kernels::cutlass_kernels::
+                        CutlassFpAIntBGemmRunner<T, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>>
+                                   weight_only_int8_fc_runner_;
+    std::shared_ptr<GemmRunner<T>> gemm_runner_;
 
     void allocateBuffer() override;
     void freeBuffer() override;
@@ -84,6 +86,7 @@ protected:
     // int8_mode_ == 1 for weight quantized only gemm for GPT
     // int8_mode_ == 2 for SmoothQuant O3 (per tensor scales)
     const int int8_mode_ = 0;
+    const bool int4_mode_ = false;
 
 public:
     DecoderSelfAttentionLayer(size_t              max_batch_size,
@@ -111,7 +114,8 @@ public:
                               bool                is_free_buffer_after_forward,
                               bool                sparse         = false,
                               bool                is_sparse_head = false,
-                              int                 int8_mode      = 0);
+                              int                 int8_mode      = 0,
+                              bool int4_mode = false);
 
     DecoderSelfAttentionLayer(DecoderSelfAttentionLayer<T> const& attention_layer);
 

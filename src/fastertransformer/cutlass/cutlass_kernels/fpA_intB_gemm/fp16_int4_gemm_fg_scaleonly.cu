@@ -16,8 +16,13 @@
 
 #include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm_template.h"
 
-namespace fastertransformer {
-#ifdef ENABLE_BF16
-template class CutlassFpAIntBGemmRunner<__nv_bfloat16, cutlass::uint4b_t>;
-#endif
-}  // namespace fastertransformer
+namespace tensorrt_llm
+{
+namespace kernels
+{
+namespace cutlass_kernels
+{
+template class CutlassFpAIntBGemmRunner<half, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY>;
+} // namespace cutlass_kernels
+} // namespace kernels
+} // namespace tensorrt_llm

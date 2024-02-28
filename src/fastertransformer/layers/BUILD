@@ -14,6 +14,7 @@ cc_library(
         "**/*.h",
     ]),
     deps = [
+        "//src/fastertransformer/trt_plugins:trt_plugins",
         "//src/fastertransformer/cutlass:cutlass_interface",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/cuda:cuda",

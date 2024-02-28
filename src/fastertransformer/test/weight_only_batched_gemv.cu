@@ -4,10 +4,8 @@
 #include <vector>
 
 #include "src/fastertransformer/cuda/cuda_utils.h"
-#include "src/fastertransformer/cuda/memory_utils.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/enabled.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
+#include "src/fastertransformer/utils/memory_utils.h"
+#include "src/fastertransformer/cutlass/interface.h"
 
 using namespace fastertransformer;
 
@@ -66,9 +64,15 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
         fastertransformer::kernels::WeightOnlyType::PerChannel,
         fastertransformer::kernels::WeightOnlyActivationFunctionType::Identity,
         weight_only_act_type};
-    CutlassFpAIntBGemmRunner<half, uint8_t> runner;
+    tensorrt_llm::kernels::cutlass_kernels::
+        CutlassFpAIntBGemmRunner<half, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>
+                                                        runner;
+
     char*                                   ws_ptr = nullptr;
     deviceMalloc(&ws_ptr, runner.getWorkspaceSize(m, n, k));
+    tensorrt_llm::cutlass_extensions::CutlassGemmConfig config = runner.getChosenConfig(
+        in_ptr2, w_ptr2, s_ptr2, nullptr, nullptr, out_ptr2, m, n, k, k, ws_ptr, runner.getWorkspaceSize(m, n, k), stream);
+
 
     // warm up
 
@@ -100,7 +104,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     cudaEventRecord(start2, stream);
 
     for (int iter = 0; iter < iterations; iter++) {
-        runner.gemm(in_ptr2, w_ptr2, s_ptr2, out_ptr2, m, n, k, ws_ptr, m * n * k, stream);
+        runner.gemm(in_ptr2, w_ptr2, s_ptr2, out_ptr2, m, n, k, config, ws_ptr, runner.getWorkspaceSize(m, n, k), stream);
     }
     cudaEventRecord(stop2, stream);
     cudaEventSynchronize(stop2);

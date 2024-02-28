@@ -24,7 +24,7 @@
 #endif
 
 namespace torch_ext {
-namespace ft = fastertransformer;
+namespace ft = tensorrt_llm::kernels::cutlass_kernels;
 using torch::Tensor;
 
 void check_quant_type_allowed(torch::ScalarType quant_type)

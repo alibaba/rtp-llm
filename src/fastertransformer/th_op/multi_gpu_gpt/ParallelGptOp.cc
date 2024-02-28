@@ -13,13 +13,8 @@ FtGpt<T>::FtGpt(const GptInitParameter&       gpt_init_parameter,
                 const int                     pipeline_para_size,
                 const std::string&            master_ip,
                 const int                     master_port,
-                const std::vector<std::unordered_map<std::string, th::Tensor>> &weights,
-                const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_weights,
-                const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_scales):
-    gpt_init_parameter_(gpt_init_parameter),
-    weights_(weights),
-    int8_weights_(int8_weights),
-    int8_scales_(int8_scales)
+                const std::vector<std::unordered_map<std::string, th::Tensor>> &weights):
+    gpt_init_parameter_(gpt_init_parameter)
 {
     check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     cublas_algo_map_      = new ft::cublasAlgoMap(GEMM_CONFIG);
@@ -34,9 +29,8 @@ FtGpt<T>::FtGpt(const GptInitParameter&       gpt_init_parameter,
                                         pipeline_para_.rank_,
                                         gpt_init_parameter_.num_layers_,
                                         gpt_init_parameter_.int8_mode_,
+                                        gpt_init_parameter_.int4_mode_,
                                         weights,
-                                        int8_weights,
-                                        int8_scales,
                                         &gpt_lora_layer_weights_);
     
     auto stream        = at::cuda::getCurrentCUDAStream().stream();
@@ -178,42 +172,39 @@ void FtGpt<T>::removeLoRA(const int lora_id)
     removeLoRAWeights(lora_id, gpt_lora_layer_weights_);
 }
 
-ParallelGptOp::ParallelGptOp(c10::intrusive_ptr<GptInitParameter> gpt_init_parameter,
-                             const int64_t                        tensor_para_size,
-                             const int64_t                        pipeline_para_size,
-                             const std::string                    master_ip,
-                             const int64_t                        master_port,
-                             const std::vector<std::unordered_map<std::string, th::Tensor>> &weights,
-                             const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_weights,
-                             const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_scales):
+ParallelGptOp::ParallelGptOp(c10::intrusive_ptr<GptInitParameter>                            gpt_init_parameter,
+                             const int64_t                                                   tensor_para_size,
+                             const int64_t                                                   pipeline_para_size,
+                             const std::string                                               master_ip,
+                             const int64_t                                                   master_port,
+                             const std::vector<std::unordered_map<std::string, th::Tensor>>& weights):
     gpt_init_parameter_(*gpt_init_parameter),
     tensor_para_size_(tensor_para_size),
     pipeline_para_size_(pipeline_para_size),
-    scalar_type_(weights[0].begin()->second.scalar_type()) {
+    scalar_type_(getScalarType(gpt_init_parameter->data_type_))
+{
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    for (auto layer_weght : weights) {
-        for (auto weight: layer_weght) {
-            CHECK_INPUT(weight.second, scalar_type_);
-        }
-    }
+    // for (auto layer_weght : weights) {
+    //     for (auto weight: layer_weght) {
+    //         CHECK_INPUT(weight.second, scalar_type_);
+    //     }
+    // }
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    for (auto layer_weght : int8_scales) {
-        for (auto weight: layer_weght) {
-            CHECK_INPUT(weight.second, scalar_type_);
-        }
-    }
-    
-#define CREATE_INSTANCE(T_)                                             \
-    gpt_ = new FtGpt<T_>(gpt_init_parameter_,                           \
-                         tensor_para_size,                              \
-                         pipeline_para_size,                            \
-                         master_ip,                                     \
-                         master_port,                                   \
-                         weights,                                       \
-                         int8_weights,                                  \
-                         int8_scales);                                  \
-    chunk_size_          = 16 / sizeof(T_)
+    // for (auto layer_weght : quant_scales) {
+    //     for (auto weight: layer_weght) {
+    //         CHECK_INPUT(weight.second, scalar_type_);
+    //     }
+    // }
+
+#define CREATE_INSTANCE(T_)                                                                                            \
+    gpt_        = new FtGpt<T_>(gpt_init_parameter_,                                                                   \
+                         tensor_para_size,                                                                      \
+                         pipeline_para_size,                                                                    \
+                         master_ip,                                                                             \
+                         master_port,                                                                           \
+                         weights);       \                                                                        
+    chunk_size_ = 16 / sizeof(T_)
 
     switch (scalar_type_) {
         case at::ScalarType::Float:
@@ -334,9 +325,7 @@ static auto fasterTransformerGptTHS =
                               int64_t,                  // pipeline_para_size
                               std::string,              // master_ip
                               int64_t,                  // master_port
-                              std::vector<std::unordered_map<std::string, th::Tensor>>,     // weights
-                              std::vector<std::unordered_map<std::string, th::Tensor>>,     // int8_weights
-                              std::vector<std::unordered_map<std::string, th::Tensor>>>())  // scale
+                              std::vector<std::unordered_map<std::string, th::Tensor>>>())  // quant_pre_scales
         .def("forward", &torch_ext::ParallelGptOp::forward)
         .def("add_lora", &torch_ext::ParallelGptOp::addLoRA)
         .def("remove_lora", &torch_ext::ParallelGptOp::removeLoRA);

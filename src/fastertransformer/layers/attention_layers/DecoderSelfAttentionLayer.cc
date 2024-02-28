@@ -108,7 +108,8 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t               max
                                                         bool                 is_free_buffer_after_forward,
                                                         bool                 sparse,
                                                         bool                 is_sparse_head,
-                                                        int                  int8_mode):
+                                                        int                  int8_mode,
+                                                        bool                 int4_mode):
     BaseAttentionLayer<T>(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, sparse),
     max_batch_size_(max_batch_size),
     head_num_(head_num),
@@ -132,16 +133,18 @@ DecoderSelfAttentionLayer<T>::DecoderSelfAttentionLayer(size_t               max
     d_model_(d_model),
     q_scaling_(q_scaling),
     is_sparse_head_(is_sparse_head),
-    int8_mode_(int8_mode)
-{
+    int8_mode_(int8_mode),
+    int4_mode_(int4_mode) {
     if (int8_mode_ == 1) {
         FT_CHECK_WITH_INFO(!(std::is_same<T, float>::value), "Weight only quant not supported for fp32.");
-        weight_only_int8_fc_runner_ = std::make_shared<CutlassFpAIntBGemmRunner<T, uint8_t>>();
+        weight_only_int8_fc_runner_ = std::make_shared<
+            tensorrt_llm::kernels::cutlass_kernels::
+                CutlassFpAIntBGemmRunner<T, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>>();
     } else if (int8_mode_ == 2) {
         FT_LOG_ERROR("int8_mode == 2 not support");
         abort();
     }
-    gemm_runner_ = std::make_shared<GemmRunner<T>>(sparse, stream, cublas_wrapper, weight_only_int8_fc_runner_);
+    gemm_runner_ = std::make_shared<GemmRunner<T>>(stream, allocator, cublas_wrapper, int8_mode_);
 }
 
 template<typename T>
@@ -274,13 +277,8 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
                        d_model_,
                        attention_input,
                        &attention_weights->query_weight,
-                       qkv_buf_,
-                       int8_mode_,
-                       use_sparse_gemm,
-                       mixed_gemm_workspace_,
-                       mixed_gemm_ws_bytes_,
-                       m_padded);
-
+                       qkv_buf_);
+    
     // lora
 
     lora_gemm_->applyLoRA(batch_size,
@@ -397,13 +395,8 @@ void DecoderSelfAttentionLayer<T>::forward(TensorMap*                output_tens
                         local_hidden_units_rt,
                         context_buf_input,
                         &attention_weights->attention_output_weight,
-                        attention_out,
-                        int8_mode_,
-                        use_sparse_gemm,
-                        mixed_gemm_workspace_,
-                        mixed_gemm_ws_bytes_,
-                        m_padded);
-
+                        attention_out);
+    
     // lora
     lora_gemm_->applyLoRA(batch_size,
                           batch_size,

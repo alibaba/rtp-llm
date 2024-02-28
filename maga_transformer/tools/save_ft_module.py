@@ -16,12 +16,8 @@ class FTModelWeights:
     def append_pytorch_weight(self, name: str, tensor: torch.Tensor):
         self.model[name] = tensor
 
-    def append_layer_weight(self, int8_flag: bool, layer_id: int, name: str, tensor: torch.Tensor):
-        if int8_flag:
-            self.model[f'layer.{layer_id}.{name}.int8_weight'] = tensor[1]
-            self.model[f'layer.{layer_id}.{name}.int8_scale'] = tensor[2]
-        else:
-            self.model[f'layer.{layer_id}.{name}'] = tensor
+    def append_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
+        self.model[f'layer.{layer_id}.{name}'] = tensor
 
 def load_as_ft_module(ckpt_path: str, model_type: str, **kwargs: Any) -> Any:
     if model_type not in _model_factory:
@@ -31,6 +27,7 @@ def load_as_ft_module(ckpt_path: str, model_type: str, **kwargs: Any) -> Any:
     config = model_cls.create_config(ckpt_path, **kwargs)
     weight_cls = model_cls.get_weight_cls()
     int8_mode = 0
+    int4_mode = False
 
     weights_info = weight_cls(
         hidden_size=config.head_num * config.size_per_head,
@@ -50,7 +47,7 @@ def load_as_ft_module(ckpt_path: str, model_type: str, **kwargs: Any) -> Any:
                              weights_info=weights_info)
     weight = FTModelWeights(config.layer_num)
 
-    ckpt_loader.load_weights_from_scratch(weight, int8_mode, 'cpu')
+    ckpt_loader.load_weights_from_scratch(weight, int8_mode, int4_mode, 'cpu')
     return weight.model
 
 def save_ft_module(ckpt_path: str, save_dir: str, model_type:str):

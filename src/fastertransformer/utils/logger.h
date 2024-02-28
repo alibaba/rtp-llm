@@ -22,6 +22,7 @@
 #include <pthread.h>
 #include <string>
 
+#include "src/fastertransformer/utils/tllmException.h"
 #include "src/fastertransformer/utils/string_utils.h"
 
 namespace fastertransformer {
@@ -64,7 +65,10 @@ public:
         }
     }
 
-    void setLevel(const Level level) {
+    void log(std::exception const& ex, Level level = Level::ERROR);
+
+    void setLevel(const Level level)
+    {
         level_ = level;
         log(INFO, "Set logger level by %s", getLevelName(level).c_str());
     }
@@ -123,4 +127,5 @@ private:
 #define FT_LOG_INFO(...) FT_LOG(fastertransformer::Logger::INFO, __VA_ARGS__)
 #define FT_LOG_WARNING(...) FT_LOG(fastertransformer::Logger::WARNING, __VA_ARGS__)
 #define FT_LOG_ERROR(...) FT_LOG(fastertransformer::Logger::ERROR, __VA_ARGS__)
+#define FT_LOG_EXCEPTION(ex, ...) fastertransformer::Logger::getLogger().log(ex, ##__VA_ARGS__)
 }  // namespace fastertransformer

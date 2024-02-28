@@ -402,13 +402,8 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
                        local_hidden_units_rt,
                        qkv_buf_3_input,
                        &attention_weights->attention_output_weight,
-                       attention_out,
-                       params_.int8_mode_,
-                       use_sparse,
-                       mixed_gemm_workspace_,
-                       mixed_gemm_ws_bytes_,
-                       m_padded);
-
+                       attention_out);
+    
     // lora
     lora_gemm_->applyLoRA(h_token_num,
                           batch_size,
@@ -455,13 +450,8 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
                        hidden_units_,
                        attention_input,
                        &attention_weights->query_weight,
-                       qkv_buf_,
-                       params_.int8_mode_,
-                       use_sparse,
-                       mixed_gemm_workspace_,
-                       mixed_gemm_ws_bytes_,
-                       m_padded);
-
+                       qkv_buf_);
+    
     // lora
 
     lora_gemm_->applyLoRA(h_token_num,
@@ -973,6 +963,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
                                                       NcclParam               tensor_para,
                                                       cudaStream_t            stream,
                                                       cublasMMWrapper*        cublas_wrapper,
+                                                      tc::QuantAlgo           quant_algo,
                                                       IAllocator*             allocator,
                                                       bool                    is_free_buffer_after_forward,
                                                       bool                    is_qk_buf_float,
@@ -986,32 +977,25 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
         gpt_init_parameter.head_num_kv_ == 1 ? 1 : gpt_init_parameter.head_num_kv_ / tensor_para.world_size_),
     local_hidden_units_(gpt_init_parameter.hidden_size_ / tensor_para.world_size_),
     is_qk_buf_float_(is_qk_buf_float),
-    weight_only_int8_fc_runner_(
-        gpt_init_parameter.int8_mode_ == 1 ? std::make_shared<CutlassFpAIntBGemmRunner<T, uint8_t>>() : nullptr),
-    gemm_runner_(
-        std::make_shared<GemmRunner<T>>(sparse, stream, cublas_wrapper, weight_only_int8_fc_runner_)),
-    lora_gemm_(
-        std::make_shared<LoraGemm<T>>(stream, allocator, cublas_wrapper)
-    ),
+    lora_gemm_(std::make_shared<LoraGemm<T>>(stream, allocator, cublas_wrapper)),
+    gemm_runner_(std::make_shared<GemmRunner<T>>(stream, allocator, cublas_wrapper, quant_algo)),
     local_layer_head_num_(getLocalParameter(gpt_init_parameter.layer_head_num_, tensor_para.world_size_)),
     local_layer_head_num_kv_(getLocalParameter(gpt_init_parameter.layer_head_num_kv_, tensor_para.world_size_)),
     q_scaling_(1.0f),
-    tensor_para_(tensor_para)
-{
+    tensor_para_(tensor_para) {
     multi_block_mode_ = UseMultiBlockMode();
 
     if (params_.int8_mode_ == 2) {
         abort();
     }
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    // dispatcher_fp16.reset(new FusedMHARunnerFP16v2(local_head_num_, gpt_init_parameter.size_per_head_, sm_, 1.0f));
 
     tensorrt_llm::kernels::Data_type data_type;
-    if constexpr(std::is_same<T, half>::value){
+    if constexpr (std::is_same<T, half>::value) {
         data_type = tensorrt_llm::kernels::DATA_TYPE_FP16;
     }
 #ifdef ENABLE_BF16
-    if constexpr(std::is_same<T, __nv_bfloat16>::value){
+    if constexpr (std::is_same<T, __nv_bfloat16>::value) {
         data_type = tensorrt_llm::kernels::DATA_TYPE_BF16;
     }
 #endif
@@ -1034,7 +1018,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     }
 #endif
     use_open_source_fmha_ = UseOpenSourceFMHA();
-    if (use_open_source_fmha_){
+    if (use_open_source_fmha_) {
         FT_LOG_INFO("use open source fmha");
     }
 }
@@ -1093,15 +1077,6 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
                                                          true);
             // qk_buf_ = (T *)qk_buf_float_;
         }
-    }
-
-    if (params_.int8_mode_ == 1) {
-        // We use max_size for n and k since we reuse buffers for both FCs and want to allocate the max
-        // possible memory that would be required by any of the individual gemms.
-        const int max_size =
-            std::max(hidden_units_, qkv_merged_size);
-        mixed_gemm_ws_bytes_  = weight_only_int8_fc_runner_->getWorkspaceSize(h_token_num, max_size, max_size);
-        mixed_gemm_workspace_ = (char*)allocator_->reMalloc(mixed_gemm_workspace_, mixed_gemm_ws_bytes_, false);
     }
 
     if(multi_block_mode_){

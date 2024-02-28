@@ -53,7 +53,7 @@ class ModelWeightsLoader:
     def _process_ckpt_metas(self):
         self._weights_info.process_meta(self._ckpt_metas)
 
-    def load_weights_from_scratch(self, int8_mode: int, ref_model: Optional[torch.nn.Module]=None, device: str='cuda:0', num_process=1):
+    def load_weights_from_scratch(self, int8_mode: int, int4_mode: bool, ref_model: Optional[torch.nn.Module]=None, device: str='cuda:0', num_process=1):
         weights = ModelWeights(self._num_layers)
         if num_process > 1:
             ctx = multiprocessing.get_context('spawn')
@@ -63,15 +63,15 @@ class ModelWeightsLoader:
                     zip(range(self._num_layers),
                         repeat(int8_mode),
                         repeat(ref_model),
+                        repeat(int4_mode),
                         repeat(device)))
         else:
-            all_results = [self._load_layer_weight(id, int8_mode, ref_model, device)
+            all_results = [self._load_layer_weight(id, int8_mode, int4_mode, ref_model, device)
                            for id in range(self._num_layers)]
         for results, logs in all_results:
             self._weight_access_log.update(logs)
-            for (int8_flag, layer_id, name, tensor) in results:
-                weights.append_layer_weight(
-                    int8_flag, layer_id, name, tensor)
+            for (layer_id, name, tensor) in results:
+                weights.append_layer_weight(layer_id, name, tensor)
         for weight in self._model_weights_info.weights:
             tensor = self._load_and_convert_tensor(weight, ref_model)
             tensor = self._split_and_sanitize_tensor(tensor, weight)
@@ -136,7 +136,66 @@ class ModelWeightsLoader:
 
         return results, self._weight_access_log
 
-    def _load_layer_weight(self, layer_id: int, int8_mode: int, ref_model: Optional[torch.nn.Module] = None, device: str = "cuda:0"):
+    def _load_int4_layer_weight(self, layer_weights, layer_id: int, is_moe: bool, device: str):
+        if is_moe:
+            raise Exception("moe in int4 is not implemented")
+        weight_lists = W.int4_quant_weights
+        results = []
+        for weight_list in weight_lists: 
+            qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
+            qzero  = [weight for weight in layer_weights if weight.name == weight_list[1]]
+            qscale  = [weight for weight in layer_weights if weight.name == weight_list[2]]
+            assert len(qweight) == 1 and len(qzero) == 1 and len(qscale) == 1, "len error"
+            qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id, torch.int32)
+            qzero_tensor = self._load_and_convert_tensor(qzero[0], layer_id, torch.int32)
+            qscale_tensor = self._load_and_convert_tensor(qscale[0], layer_id)
+            qweight_tensor = self._split_and_sanitize_tensor(qweight_tensor, qweight[0]).to(device)
+            qzero_tensor = self._split_and_sanitize_tensor(qzero_tensor, qzero[0]).to(device)
+            qscale_tensor = self._split_and_sanitize_tensor(qscale_tensor, qscale[0]).to(device)
+            weight, zero, scale = self.preprocess_groupwise_weight_params(qweight_tensor, qzero_tensor, qscale_tensor, device)
+            results.append((layer_id, qweight[0].name, weight))
+            results.append((layer_id, qzero[0].name, zero))
+            results.append((layer_id, qscale[0].name, scale))
+        return results
+    
+    def _load_int8_layer_weight(self, layer_weights, layer_id: int, is_moe: bool, device):
+        results = []
+        def convert_weight(weight_lists, apply_func):
+            for weight_list in weight_lists:
+                qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
+                scale_name = weight_list[1]
+                qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id)
+                qweight_tensor = self._split_and_sanitize_tensor(qweight_tensor, qweight[0]).to(device)
+                weight, scale = apply_func(qweight_tensor, device)
+                results.append((layer_id, qweight[0].name, weight))
+                results.append((layer_id, scale_name, scale))
+
+        convert_weight(W.int8_attn_weights, self.apply_int8)
+        if is_moe:
+            convert_weight(W.int8_ffn_weights, self.moe_apply_int8)
+        else:
+            convert_weight(W.int8_ffn_weights, self.apply_int8)
+            
+        return results
+
+    # def _load_moe_int8_layer_weight(self, layer_weights, layer_id: int, device):
+    #     weight_lists = W.moe_int8_quant_weights
+    #     results = []
+    #     try: 
+    #         for weight_list in weight_lists:
+    #             qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
+    #             scale_name = weight_list[1]
+    #             qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id)
+    #             qweight_tensor = self._split_and_sanitize_tensor(qweight_tensor, qweight[0]).to(device)
+    #             weight, scale = self.moe_apply_int8(qweight_tensor, device)
+    #             results.append((layer_id, qweight[0].name, weight))
+    #             results.append((layer_id, scale_name, scale))
+    #     except Exception as e:
+    #         logging.error(f'load {qweight.name} in layer {layer_id} failed: {e}')
+    #         raise e
+    #     return results
+
+    def _load_layer_weight(self, layer_id: int, int8_mode: int, int4_mode: bool = False, ref_model: Optional[torch.nn.Module] = None, device: str = "cuda:0"):
         use_fp32 = os.environ.get("USE_FLOAT32", None) is not None
         results = []
         if isinstance(self._model_weights_info.layer_weights[0], List):
@@ -145,31 +204,30 @@ class ModelWeightsLoader:
             layer_weights = self._model_weights_info.layer_weights
         for weight in layer_weights:
             try:
-
-                int8_flag = int8_mode == 1 and (weight.name in W.int8_quant_w)
-                moe_int8_flag = int8_mode == 1 and (weight.name in W.moe_int8_quant_w) and self._weights_info.expert_num_ > 0
+                int8_flag = int8_mode == 1 and (weight.name in W.quant_w)
+                int4_flag = int4_mode == True and (weight.name in W.quant_w or weight.name in W.int4_quant_params)
+                is_moe = self._weights_info.expert_num_ > 0
 
                 tensor = self._load_and_convert_tensor(weight, ref_model=ref_model, layer_id=layer_id)
+                if int4_flag or int8_flag:
+                    continue
                 
                 if self._merge_lora:
                     tensor = self.apply_lora(tensor, weight, layer_id)
 
-                tensor = self._split_and_sanitize_tensor(tensor, weight)
-
-                if moe_int8_flag:
-                    tensor = self.moe_apply_int8(tensor, device)
-                elif int8_flag:
-                    tensor = self.apply_int8(tensor, device)
-                else:
-                    tensor = tensor.to(device)
+                tensor = self._split_and_sanitize_tensor(tensor, weight).to(device)
 
                 if use_fp32:
                     tensor = tensor.float()
 
-                results.append((int8_flag or moe_int8_flag, layer_id, weight.name, tensor))
+                results.append((layer_id, weight.name, tensor))
             except Exception as e:
                 logging.error(f'load {weight.name} in layer {layer_id} failed: {e}')
                 raise e
+        if int4_mode:
+            results.extend(self._load_int4_layer_weight(layer_weights, layer_id, is_moe, device))
+        elif int8_mode:
+            results.extend(self._load_int8_layer_weight(layer_weights, layer_id, is_moe, device))
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -215,9 +273,7 @@ class ModelWeightsLoader:
         int8_weight, int8_scale = torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix( # type: ignore
             tensor.reshape([shape[0], -1]).cpu(), torch.int8)
         int8_weight = int8_weight.reshape(shape)
-        dummy = torch.IntTensor([0]).to(self._data_type)
-        return (dummy.to(device), int8_weight.to(device), int8_scale.to(device))
-        
+        return int8_weight.to(device), int8_scale.to(device)
         
     def moe_apply_int8(self, tensor: torch.Tensor, device: str):
         assert tensor.dim() == 3
@@ -233,13 +289,42 @@ class ModelWeightsLoader:
             int8_scales.append(scale)
         int8_weight = torch.stack(int8_weights, dim=0)
         int8_scale = torch.stack(int8_scales, dim=0)
-        dummy = torch.IntTensor([0]).to(self._data_type)
-        return (dummy.to(device), int8_weight.to(device), int8_scale.to(device))
+        return int8_weight.to(device), int8_scale.to(device)
 
+    def unpack_int32_into_int8(self, w_packed: torch.Tensor):
+        # unpack inputs packed in int32/float32 into uint4 and store them in int8 format
+        w_packed_int4x2 = w_packed.contiguous().view(torch.uint8)
+        w_unpacked = torch.zeros(w_packed_int4x2.shape[0],
+                                 w_packed_int4x2.shape[1] * 2,
+                                 dtype=torch.int8)
+        w_unpacked[:, ::2] = w_packed_int4x2 % 16
+        w_unpacked[:, 1::2] = w_packed_int4x2 // 16
+        return w_unpacked.contiguous()
 
-    def load_tensor(self, name: str) -> List[torch.Tensor]:
+    def preprocess_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str):
+        UINT4_TO_INT4_FLAG = 1
+        GPTQ_FLAG = 1
+        packer = torch.ops.fastertransformer.pack_int8_tensor_to_packed_int4
+        preprocessor = torch.ops.fastertransformer.preprocess_weights_for_mixed_gemm
+
+        qweight_unpacked_int8 = (
+            self.unpack_int32_into_int8(qweight_int32.T).T.contiguous() - 8)
+        qweight_interleaved = preprocessor(packer(qweight_unpacked_int8),
+                                           torch.quint4x2)
+        # zeros = zeros * scales
+        qzeros_unpacked_int32 = self.unpack_int32_into_int8(qzeros_int32)
+
+        zeros_x_scales_fp16 = (-qzeros_unpacked_int32 + 8 * UINT4_TO_INT4_FLAG -
+                               GPTQ_FLAG) * scales_fp16
+        zeros_x_scales_fp16 = zeros_x_scales_fp16.half()
+
+        # return processed interleaved weight, original scales and zeros * scales
+        return qweight_interleaved.contiguous().to(device),  zeros_x_scales_fp16.contiguous().to(device), scales_fp16.contiguous().to(device)
+
+    
+    def load_tensor(self, name: str, datatype: str = torch.float16) -> List[torch.Tensor]:
         self._weight_access_log.add(name)
-        return self._database.load_tensor(name)
+        return self._database.load_tensor(name, datatype)
     
     def load_lora_tensor(self, lora_name: str, tensor_name: str) -> List[torch.Tensor]:
         return self._database.load_lora_tensor(lora_name, tensor_name)
@@ -256,11 +341,11 @@ class ModelWeightsLoader:
 
         return after_merge_tensor
 
-    def _load_and_convert_tensor(self, weight_info: WeightInfo, ref_model: Optional[torch.nn.Module] = None, layer_id: Optional[int] = None):
+    def _load_and_convert_tensor(self, weight_info: WeightInfo, ref_model: Optional[torch.nn.Module] = None, layer_id: Optional[int] = None, datatype: str = torch.float16):
         before_merge_tensors = []
         for ckpt_weight in weight_info.weights:
-            before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(ckpt_weight.tensor_name(layer_id))))
-
+            before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(ckpt_weight.tensor_name(layer_id), datatype)))
+            
         after_merge_tensor = weight_info.process_fun(before_merge_tensors)
         return after_merge_tensor
 

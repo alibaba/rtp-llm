@@ -57,6 +57,7 @@ public:
                                            bool                                sparse                   = false,
                                            bool                                is_sparse_head           = false,
                                            int                                 int8_mode                = 0,
+                                           bool                                int4_mode                = false,
                                            std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm   = nullptr,
                                            int                                 enable_custom_all_reduce = 0);
 

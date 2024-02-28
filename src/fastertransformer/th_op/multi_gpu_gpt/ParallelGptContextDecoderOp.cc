@@ -30,8 +30,9 @@ FtGptContextDecoder<T>::FtGptContextDecoder(const GptInitParameter&       gpt_in
                                             const std::string&            master_ip,
                                             const int                     master_port,
                                             const std::vector<std::unordered_map<std::string, th::Tensor>>& weights,
-                                            const std::vector<std::unordered_map<std::string, th::Tensor>>& int8_weights,
-                                            const std::vector<std::unordered_map<std::string, th::Tensor>>& int8_scales,
+                                            // const std::vector<std::unordered_map<std::string, th::Tensor>>& quant_weights,
+                                            // const std::vector<std::unordered_map<std::string, th::Tensor>>& quant_scales,
+                                            // const std::vector<std::unordered_map<std::string, th::Tensor>>& quant_zeros,
                                             const bool                    remove_padding):
     gpt_init_parameter_(gpt_init_parameter),
     remove_padding_(remove_padding)
@@ -49,9 +50,11 @@ FtGptContextDecoder<T>::FtGptContextDecoder(const GptInitParameter&       gpt_in
                                         pipeline_para_.rank_,
                                         gpt_init_parameter_.num_layers_,
                                         gpt_init_parameter_.int8_mode_,
+                                        gpt_init_parameter_.int4_mode_,
                                         weights,
-                                        int8_weights,
-                                        int8_scales,
+                                        // quant_weights,
+                                        // quant_scales,
+                                        // quant_zeros,
                                         &gpt_lora_layer_weights_);
 }
 
@@ -198,36 +201,27 @@ void FtGptContextDecoder<T>::removeLoRA(const int lora_id)
     removeLoRAWeights(lora_id, gpt_lora_layer_weights_);
 }
 
-
-ParallelGptContextDecoderOp::ParallelGptContextDecoderOp(c10::intrusive_ptr<GptInitParameter> gpt_init_parameter,
-                                                         const int64_t                 tensor_para_size,
-                                                         const int64_t                 pipeline_para_size,
-                                                         const std::string             master_ip,
-                                                         const int64_t                 master_port,
-                                                         const std::vector<std::unordered_map<std::string, th::Tensor>>& weights,
-                                                         const std::vector<std::unordered_map<std::string, th::Tensor>>& int8_weights,
-                                                         const std::vector<std::unordered_map<std::string, th::Tensor>>& scale,
-                                                         const bool                    remove_padding):
+ParallelGptContextDecoderOp::ParallelGptContextDecoderOp(
+    c10::intrusive_ptr<GptInitParameter>                            gpt_init_parameter,
+    const int64_t                                                   tensor_para_size,
+    const int64_t                                                   pipeline_para_size,
+    const std::string                                               master_ip,
+    const int64_t                                                   master_port,
+    const std::vector<std::unordered_map<std::string, th::Tensor>>& weights,
+    const bool                                                      remove_padding):
     gpt_init_parameter_(*gpt_init_parameter),
     tensor_para_size_(tensor_para_size),
     pipeline_para_size_(pipeline_para_size),
-    scalar_type_(weights[0].begin()->second.scalar_type())
+    scalar_type_(getScalarType(gpt_init_parameter->data_type_))
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     for (size_t i = 0; i < weights.size(); i++) {
-        for (auto weight : weights[i]) {
-            CHECK_INPUT(weight.second, scalar_type_);
+        if (scalar_type_ == torch::kInt8){
+            FT_LOG_ERROR("scalar type int8");
         }
 
         if (gpt_init_parameter_.int8_mode_ == 1) {
-            TORCH_CHECK(scalar_type_ != torch::kFloat32, "Int8 weight only quant does not work for FP32.");
-            for (auto int8_weight : int8_weights[i]) {
-                CHECK_INPUT(int8_weight.second, torch::kInt8);
-            }
-
-            for (auto weight_scale : scale[i]) {
-                CHECK_INPUT(weight_scale.second, scalar_type_);
-            }
+            // TORCH_CHECK(scalar_type_ != torch::kFloat32, "Int8 weight only quant does not work for FP32.");
         }
     }
 
@@ -238,8 +232,6 @@ ParallelGptContextDecoderOp::ParallelGptContextDecoderOp(c10::intrusive_ptr<GptI
                                                        master_ip,                                                      \
                                                        master_port,                                                    \
                                                        weights,                                                        \
-                                                       int8_weights,                                                   \
-                                                       scale,                                                          \
                                                        remove_padding);                                                \
     chunk_size_          = 16 / sizeof(T_)
 
@@ -411,8 +403,6 @@ static auto fasterTransformerGptContextDecoderTHS =
                               std::string,              // master_ip
                               int64_t,                  // master_port
                               std::vector<std::unordered_map<std::string, th::Tensor>>,  // weights
-                              std::vector<std::unordered_map<std::string, th::Tensor>>,  // int8_weights
-                              std::vector<std::unordered_map<std::string, th::Tensor>>,  // scale
                               bool>())                  // remove_padding
         .def("forward", &torch_ext::ParallelGptContextDecoderOp::forward)
         .def("add_lora", &torch_ext::ParallelGptContextDecoderOp::addLoRA)

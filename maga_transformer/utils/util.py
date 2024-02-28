@@ -149,9 +149,9 @@ def to_cpu(tensor: torch.Tensor) -> torch.Tensor:
 class WEIGHT_TYPE(Enum):
     INT4 = ["int4"]
     INT8 = ["int8"]
-    FP16 = ["float16", "fp16"]
-    FP32 = ["float32", "fp32"]
-    BF16 = ["bfloat16", "bp16", "bf16"]
+    FP16 = ["fp16", "float16"]
+    FP32 = ["fp32", "float32"]
+    BF16 = ["bf16", "bfloat16","bp16"]
     @classmethod
     def from_str(cls, value: str) -> 'WEIGHT_TYPE':
         lower_value = value.lower()

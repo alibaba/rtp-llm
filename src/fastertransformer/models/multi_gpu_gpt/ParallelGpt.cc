@@ -12,10 +12,14 @@ template<typename T>
 void ParallelGpt<T>::initialize()
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    // FT_LOG_WARNING("gpt: %d %d %d %d %d", params_.int8_mode_, params_.int4_mode_, params_.has_pre_scale_, params_.has_zeros_, params_.weight_only_group_size_);
+    quant_algo_ = tc::QuantAlgo(params_.int8_mode_, params_.int4_mode_, params_.has_pre_scale_, params_.has_zeros_, params_.weight_only_group_size_);
+    // FT_LOG_WARNING("gpt: %d %d %d %d %d", quant_algo_.int8Mode(), quant_algo_.int4Mode(), quant_algo_.usePreScales(), quant_algo_.useZeros(), quant_algo_.getGroupSize());
     parallel_attention_wrapper_ = new ParallelAttentionWrapper<T>(params_,
                                                                   tensor_para_,
                                                                   stream_,
                                                                   cublas_wrapper_,
+                                                                  quant_algo_,
                                                                   allocator_,
                                                                   is_free_buffer_after_forward_,
                                                                   is_qk_buf_float_,
@@ -26,6 +30,7 @@ void ParallelGpt<T>::initialize()
                                                params_.max_seq_len_ + params_.max_generate_batch_size_,
                                                params_.hidden_size_,
                                                params_.expert_num_,  // expert_num
+                                               params_.moe_k_,
                                                params_.inter_size_,
                                                params_.inter_padding_size_,
                                                params_.layer_inter_size_,
@@ -33,12 +38,12 @@ void ParallelGpt<T>::initialize()
                                                tensor_para_,
                                                stream_,
                                                cublas_wrapper_,
+                                               quant_algo_,
                                                allocator_,
                                                true,
                                                is_free_buffer_after_forward_,
                                                sparse_,
                                                params_.is_sparse_head_,
-                                               params_.int8_mode_,
                                                params_.activation_type_,
                                                params_.layernorm_eps_,
                                                custom_all_reduce_comm_,
@@ -202,19 +207,6 @@ ParallelGpt<T>::ParallelGpt(const GptInitParameter&             gpt_init_paramet
     custom_all_reduce_comm_(custom_all_reduce_comm),
     enable_custom_all_reduce_(enable_custom_all_reduce),
     is_qk_buf_float_(is_qk_buf_float)
-{
-    initialize();
-}
-
-template<typename T>
-ParallelGpt<T>::ParallelGpt(ParallelGpt<T> const& decoder):
-    BaseLayer(decoder.stream_, decoder.cublas_wrapper_, decoder.allocator_, decoder.is_free_buffer_after_forward_),
-    params_(decoder.params_),
-    tensor_para_(decoder.tensor_para_),
-    pipeline_para_(decoder.pipeline_para_),
-    custom_all_reduce_comm_(decoder.custom_all_reduce_comm_),
-    enable_custom_all_reduce_(decoder.enable_custom_all_reduce_),
-    is_qk_buf_float_(decoder.is_qk_buf_float_)
 {
     initialize();
 }
@@ -454,7 +446,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
 
         sync_check_cuda_error();
         POP_RANGE;
-
+        
         size_t   cache_offset = (l - getFirstLayerParallelId()) * kv_cache_offset;
         const T* input_query  = nullptr;
         if (pre_attn_ln) {
@@ -585,27 +577,20 @@ void ParallelGpt<T>::forward(TensorMap*                                         
              {"lora_input_lengths", Tensor{MEMORY_GPU, TYPE_INT32, {total_batch_size}, lora_input_lengths}},
              {"batch_size", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &ffn_batch_size_lora}}});
         TensorMap ffn_output_tensors;
-        size_t moe_k = params_.moe_k_;
-        if (!use_moe || moe_k <= 0) {
-            ffn_output_tensors.insert("ffn_output",
-                                    Tensor{MEMORY_GPU, activation_out_type, {h_token_num, hidden_units}, ffn_output_ptr});
-        } else {
-
-            ffn_input_tensors.insert("moe_k", Tensor{MEMORY_CPU, TYPE_UINT64, {1}, &moe_k});
-
-            ffn_output_tensors.insert("ffn_output",
-                                        Tensor{MEMORY_GPU,
-                                                activation_out_type,
-                                                {moe_k * h_token_num, hidden_units},
-                                                fc2_result_});
+        size_t    moe_k = params_.moe_k_;
+        ffn_output_tensors.insert("ffn_output",
+                                  Tensor{MEMORY_GPU, activation_out_type, {h_token_num, hidden_units}, ffn_output_ptr});
+        if (use_moe) {
             ffn_output_tensors.insert(
-                "expert_scales", Tensor{MEMORY_GPU, activation_out_type, {h_token_num, moe_k}, expert_scales_});
+                "fc2_result",
+                Tensor{MEMORY_GPU, activation_out_type, {moe_k * h_token_num, hidden_units}, fc2_result_});
+            ffn_output_tensors.insert("expert_scales",
+                                      Tensor{MEMORY_GPU, activation_out_type, {h_token_num, moe_k}, expert_scales_});
             ffn_output_tensors.insert(
                 "expanded_source_row_to_expanded_dest_row",
                 Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expanded_source_row_to_expanded_dest_row_});
-            ffn_output_tensors.insert(
-                "expert_for_source_row",
-                Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expert_for_source_row_});
+            ffn_output_tensors.insert("expert_for_source_row",
+                                      Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expert_for_source_row_});
         }
         ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->ffn_weights);
 
@@ -613,69 +598,25 @@ void ParallelGpt<T>::forward(TensorMap*                                         
 
         // the adapter after ffn (only pre layernorm currently)
         PUSH_RANGE(stream_, "post ffn");
-        if (!use_moe) {            
-            norm_wrapper_->ffnAddBiasResidualLayerNorm(decoder_output,
-                                                    params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ :
-                                                                                            self_attn_output_,
-                                                    ffn_output_ptr,
-                                                    input_residual,
-                                                    layer_weight->ffn_weights.output_weight.bias,
-                                                    layer_weight->posf_ffn_layernorm_weights.gamma,
-                                                    layer_weight->posf_ffn_layernorm_weights.beta,
-                                                    params_.layernorm_eps_,
-                                                    h_token_num,
-                                                    hidden_units,
-                                                    nullptr,
-                                                    nullptr,
-                                                    stream_);
 
-            sync_check_cuda_error();
-            print_bsd(l, "after ffn ln", decoder_output, 1, h_token_num, hidden_units);
-        } else {
-            if (params_.layernorm_type_ == LayerNormType::pre_layernorm) {
-                finalize_moe_routing_kernelLauncher(fc2_result_,
-                                                    decoder_output,
-                                                    params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ : self_attn_output_,
-                                                    (T*)nullptr,
-                                                    layer_weight->ffn_weights.output_weight.bias,
-                                                    expert_scales_,
-                                                    expanded_source_row_to_expanded_dest_row_,
-                                                    expert_for_source_row_,
-                                                    h_token_num,
-                                                    hidden_units,
-                                                    params_.moe_k_,
-                                                    stream_);
-                sync_check_cuda_error();
-                print_bsd(l, "moe decoder_output", decoder_output, 1, h_token_num, hidden_units);
-            }
-            else if (params_.layernorm_type_ == LayerNormType::post_layernorm) {
-                finalize_moe_routing_kernelLauncher(fc2_result_,
-                                                    decoder_output,
-                                                    params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ : self_attn_output_,
-                                                    layer_weight->ffn_weights.output_weight.bias,
-                                                    expert_scales_,
-                                                    expanded_source_row_to_expanded_dest_row_,
-                                                    expert_for_source_row_,
-                                                    h_token_num,
-                                                    hidden_units,
-                                                    params_.moe_k_,
-                                                    stream_);
-                invokeGeneralLayerNorm(decoder_output,
-                                       decoder_output,
-                                       layer_weight->posf_ffn_layernorm_weights.gamma,
-                                       layer_weight->posf_ffn_layernorm_weights.beta,
-                                       params_.layernorm_eps_,
-                                       h_token_num,
-                                       hidden_units,
-                                       nullptr,
-                                       nullptr,
-                                       params_.int8_mode_,
-                                       stream_);
-                sync_check_cuda_error();
-            }
+        norm_wrapper_->ffnAddBiasResidualLayerNorm(decoder_output,
+                                                   params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ :
+                                                                                         self_attn_output_,
+                                                   ffn_output_ptr,
+                                                   input_residual,
+                                                   layer_weight->ffn_weights.output_weight.bias,
+                                                   layer_weight->posf_ffn_layernorm_weights.gamma,
+                                                   layer_weight->posf_ffn_layernorm_weights.beta,
+                                                   params_.layernorm_eps_,
+                                                   h_token_num,
+                                                   hidden_units,
+                                                   nullptr,
+                                                   nullptr,
+                                                   stream_);
 
-        }
+        sync_check_cuda_error();
         POP_RANGE;
+
         // PUSH_RANGE(stream_, "Nccl send");
         if (isLastLayerParallelId(l) == true && (pipeline_para_.rank_ != pipeline_para_.world_size_ - 1)) {
             const int data_size = h_token_num * hidden_units / tensor_para_.world_size_;
@@ -694,6 +635,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     // PUSH_RANGE(stream_, "Rebuild padding");
     T* base_ptr = output_tensors->at("decoder_output").getPtr<T>();
     cudaD2Dcpy(base_ptr, decoder_layer_output_, h_token_num * hidden_units);
+    sync_check_cuda_error();
     if (is_free_buffer_after_forward_ == true) {
         freeBuffer();
     }

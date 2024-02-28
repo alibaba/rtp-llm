@@ -18,6 +18,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <cassert>
 
 #include "src/fastertransformer/utils/string_utils.h"
 

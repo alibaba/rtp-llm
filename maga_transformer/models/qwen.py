@@ -16,6 +16,8 @@ from maga_transformer.models.gpt import GPT
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer as QwenTokenizerOrigin
 from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer as QWen2Tokenizer
 from maga_transformer.model_factory_register import register_model
+from pathlib import Path
+import logging
 
 def transpose_pad(ts, inter_padding_size, dim):
     if dim == 0:
@@ -156,6 +158,49 @@ class QWenWeight(ModelDeployWeightInfo):
                        identity),
         ]
         return layer_weights
+    
+    def _get_hf_qptq_weight_info(self, layer_id):
+        inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
+        layer_quant_weights =[
+            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_1.weight', identity)],
+                       identity),
+            WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qweight', identity)],
+                       identity),
+            WeightInfo(W.attn_qkv_z, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qzeros', identity)],
+                       identity),
+            WeightInfo(W.attn_qkv_s, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.scales', identity)],
+                       identity),
+            WeightInfo(W.attn_qkv_b, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.bias', identity)],
+                       identity),
+            WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qweight', identity)],
+                       identity),
+            WeightInfo(W.attn_o_z, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qzeros', identity)],
+                       identity),
+            WeightInfo(W.attn_o_s, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.scales', identity)],
+                       identity),
+            WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.qweight', identity)],
+                       identity),
+            WeightInfo(W.ffn_z1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.qzeros', identity)],
+                       identity),
+            WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.scales', identity)],
+                       identity),
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qweight', identity)], 
+                       identity),
+            WeightInfo(W.ffn_z3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qzeros', identity)],
+                       identity),
+            WeightInfo(W.ffn_s3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.scales', identity)],
+                       identity),
+            WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qweight', identity)],
+                       identity),
+            WeightInfo(W.ffn_z2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qzeros', identity)],
+                       identity),
+            WeightInfo(W.ffn_s2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.scales', identity)],
+                       identity),
+            WeightInfo(W.post_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_2.weight', identity)],
+                       identity),
+        ]
+        return layer_quant_weights
+        
 
     def _get_hf_weight_info(self):
         weights = [
@@ -167,8 +212,13 @@ class QWenWeight(ModelDeployWeightInfo):
 
         layer_weights: List[List[WeightInfo]] = []
         for layer in range(self._num_layers):
-            w = self._get_hf_layer_weight_info(layer)
-            layer_weights.append(w)
+            if self._int4_mode:
+                logging.info("logging int4 weights")
+                w=self._get_hf_qptq_weight_info(layer)
+                layer_weights.append(w)
+            else:
+                w = self._get_hf_layer_weight_info(layer)
+                layer_weights.append(w)
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
 
@@ -221,6 +271,17 @@ class QWenBase(GPT):
         config.rotary_embedding_base = int(config_json.get('rotary_emb_base', 10000))
         config.rotary_embedding_dim = config.size_per_head
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", config.special_tokens.eos_token_id)
+        # config.data_type = "fp16"
+
+        quant_config_path = os.path.join(ckpt_path, "quantize_config.json")
+        if os.path.exists(quant_config_path):
+            quant_config=json.loads(Path(quant_config_path).read_text())
+            config.int4_mode = True
+            group_size = quant_config.get("group_size", 0)
+            assert group_size == 128 or group_size == 64, "int4 only support group size == 64 or 128"
+            config.weight_only_group_size = group_size
+            config.has_pre_scale = os.environ.get("has_pre_scale", False)
+            config.has_zeros = os.environ.get("has_zeros", True)
 
         use_dynamic_ntk = config_json.get("use_dynamic_ntk")
         use_logn_attn = config_json.get("use_logn_attn")

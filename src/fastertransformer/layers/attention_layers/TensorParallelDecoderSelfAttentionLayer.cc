@@ -47,6 +47,7 @@ TensorParallelDecoderSelfAttentionLayer<T>::TensorParallelDecoderSelfAttentionLa
     bool                                is_sparse,
     bool                                is_sparse_head,
     int                                 int8_mode,
+    bool                                int4_mode,
     std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
     int                                 enable_custom_all_reduce):
     DecoderSelfAttentionLayer<T>(max_batch_size,
@@ -74,12 +75,12 @@ TensorParallelDecoderSelfAttentionLayer<T>::TensorParallelDecoderSelfAttentionLa
                                  is_free_buffer_after_forward,
                                  is_sparse,
                                  is_sparse_head,
-                                 int8_mode),
+                                 int8_mode,
+                                 int4_mode),
     do_all_reduce_(do_all_reduce),
     tensor_para_(tensor_para),
     custom_all_reduce_comm_(custom_all_reduce_comm),
-    enable_custom_all_reduce_(enable_custom_all_reduce)
-{
+    enable_custom_all_reduce_(enable_custom_all_reduce) {
     FT_CHECK(head_num % tensor_para_.world_size_ == 0);
 }
 

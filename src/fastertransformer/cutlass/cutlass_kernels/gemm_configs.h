@@ -16,10 +16,14 @@
 
 #pragma once
 
-namespace fastertransformer {
+namespace tensorrt_llm
+{
+namespace cutlass_extensions
+{
 // Note: The shapes are in the format MxNxK. The K shape of the runtime config MUST match the K shape
 //       in the kernel layout details when doing weight only quantization.
-enum class CutlassTileConfig {
+enum class CutlassTileConfig
+{
     // Signals that we should run heuristics do choose a config
     Undefined,
 
@@ -35,24 +39,34 @@ enum class CutlassTileConfig {
 
     // Warp configs for M=64
     CtaShape64x128x64_WarpShape32x64x64,
+    CtaShape64x64x128_WarpShape32x64x64,
     CtaShape64x128x64_WarpShape64x32x64,
 
     // Warp configs for M=128
+    CtaShape128x64x64_WarpShape64x32x64,
     CtaShape128x128x64_WarpShape64x32x64,
-    CtaShape128x128x64_WarpShape128x32x64
+    CtaShape128x128x64_WarpShape64x64x64,
+    CtaShape128x128x64_WarpShape128x32x64,
+    CtaShape128x256x64_WarpShape64x64x64,
+
+    // Warp configs for M=256
+    CtaShape256x128x64_WarpShape64x64x64
 };
 
-enum class SplitKStyle {
+enum class SplitKStyle
+{
     NO_SPLIT_K,
     SPLIT_K_SERIAL,
     // SPLIT_K_PARALLEL // Not supported yet
 };
 
-struct CutlassGemmConfig {
-    CutlassTileConfig tile_config    = CutlassTileConfig::ChooseWithHeuristic;
-    SplitKStyle       split_k_style  = SplitKStyle::NO_SPLIT_K;
-    int               split_k_factor = -1;
-    int               stages         = -1;
+struct CutlassGemmConfig
+{
+    CutlassTileConfig tile_config = CutlassTileConfig::ChooseWithHeuristic;
+    SplitKStyle split_k_style = SplitKStyle::NO_SPLIT_K;
+    int split_k_factor = -1;
+    int stages = -1;
 };
 
-}  // namespace fastertransformer
+} // namespace cutlass_extensions
+} // namespace tensorrt_llm

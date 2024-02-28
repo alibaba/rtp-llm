@@ -16,6 +16,7 @@
 
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels_template.h"
 
-namespace fastertransformer {
+namespace tensorrt_llm
+{
 template class MoeGemmRunner<float, float>;
 }

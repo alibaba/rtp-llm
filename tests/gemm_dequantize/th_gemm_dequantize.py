@@ -12,7 +12,6 @@ class TestGemmDequantize(unittest.TestCase):
         self.unpack_packed_int4s = torch.ops.fastertransformer.unpack_int4_packed_tensor_to_int8
         self.pack_int4s = torch.ops.fastertransformer.pack_int8_tensor_to_packed_int4
         self.fused_gemm_dq = torch.ops.gemm_dq_unit_ops.fused_gemm_dq
-        self.fused_gemm_dq_bias_act = torch.ops.gemm_dq_unit_ops.fused_gemm_dq_bias_act
         self.bench = torch.ops.gemm_dq_unit_ops.benchmark_against_cublas_fp
         self.preprocess_weights_for_mixed_gemm = torch.ops.fastertransformer.preprocess_weights_for_mixed_gemm
 
@@ -53,17 +52,6 @@ class TestGemmDequantize(unittest.TestCase):
     def test_bf16_int4_dequantize(self):
       self.dequantize_test_helper(torch.bfloat16, torch.quint4x2)
     '''
-    def apply_act(self, inp, act_str):
-      if act_str == "identity":
-        return inp
-      elif act_str == "silu":
-        return torch.nn.SiLU()(inp)
-      elif act_str == "relu":
-        return torch.nn.ReLU()(inp)
-      elif act_str == "gelu":
-        return torch.nn.GELU(approximate="tanh")(inp)
-      else:
-        assert False, "Unsupported activation"
 
     def gemm_dequant_test_helper(self, compute_type, weight_dtype, gemm_ms, gemm_ns, gemm_ks, rtol, atol, use_tensor_core, act_str="only_gemm", benchmark=False):
         assert weight_dtype == torch.int8 or weight_dtype == torch.quint4x2, "Weight must be quantized"
@@ -98,15 +86,8 @@ class TestGemmDequantize(unittest.TestCase):
                       reference_result = results[0]
                       ft_result = results[1]
                     else:
-                      if act_str == "only_gemm":
-                        reference_result = torch.matmul(torch_activations, dequantized_weights)
-                        ft_result = self.fused_gemm_dq(torch_activations, processed_torch_weights, torch_weight_scales, use_tensor_core)
-                      else:
-                        reference_result = torch.matmul(torch_activations, dequantized_weights)
-                        reference_result += torch_biases.unsqueeze(0)
-                        reference_result = self.apply_act(reference_result, act_str)
-
-                        ft_result = self.fused_gemm_dq_bias_act(torch_activations, processed_torch_weights, torch_weight_scales, torch_biases, act_str)
+                      reference_result = torch.matmul(torch_activations, dequantized_weights)
+                      ft_result = self.fused_gemm_dq(torch_activations, processed_torch_weights, torch_weight_scales, use_tensor_core)
 
                     msg = "FC1 Failed on m={}, n={}, k={}".format(num_rows, gemm_n, gemm_k)
                     torch.testing.assert_close(ft_result, reference_result, rtol=rtol, atol=atol, msg=msg, check_dtype=False)
@@ -148,41 +129,6 @@ class TestGemmDequantize(unittest.TestCase):
                                       gemm_ks = [4096, 8192, 16384],
                                       rtol=0.01, atol=0.01)
     '''
-    def test_fp16_int8_gemm_bias(self):
-        self.gemm_dequant_test_helper(torch.float16, torch.int8,
-                                      gemm_ms = [256],
-                                      gemm_ns = [1024],
-                                      gemm_ks = [8192],
-                                      rtol=0.001, atol=0.002,
-                                      use_tensor_core=True,
-                                      act_str="identity")
-
-    def test_fp16_int8_gemm_bias_relu(self):
-        self.gemm_dequant_test_helper(torch.float16, torch.int8,
-                                      gemm_ms = [256],
-                                      gemm_ns = [1024],
-                                      gemm_ks = [8192],
-                                      rtol=0.001, atol=0.002,
-                                      use_tensor_core=True,
-                                      act_str="relu")
-
-    def test_fp16_int8_gemm_bias_gelu(self):
-        self.gemm_dequant_test_helper(torch.float16, torch.int8,
-                                      gemm_ms = [256],
-                                      gemm_ns = [1024],
-                                      gemm_ks = [8192],
-                                      rtol=0.001, atol=0.002,
-                                      use_tensor_core=True,
-                                      act_str="gelu")
-
-    def test_fp16_int8_gemm_bias_silu(self):
-        self.gemm_dequant_test_helper(torch.float16, torch.int8,
-                                      gemm_ms = [256],
-                                      gemm_ns = [1024],
-                                      gemm_ks = [8192],
-                                      rtol=0.001, atol=0.002,
-                                      use_tensor_core=True,
-                                      act_str="silu")
 
     def bench_helper(self, act_type, quant_type, rtol, atol):
       # Warm, using bfloat here since it seems to reliably use cublas.

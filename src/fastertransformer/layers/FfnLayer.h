@@ -27,6 +27,7 @@
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
+#include "src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 #include <stdint.h>
 #include <vector>
 
@@ -40,25 +41,26 @@ private:
 
     // meta data
     size_t expert_num_    = 0;
+    size_t moe_k_         = 0;
+
+    // calculated data
     size_t hidden_units_ = 0;
 
-    std::shared_ptr<GemmRunner<T>>                        gemm_runner_;
-    std::shared_ptr<LoraGemm<T>>                          lora_gemm_;
-    std::shared_ptr<CutlassFpAIntBGemmRunner<T, uint8_t>> weight_only_int8_fc_runner_;
+    std::shared_ptr<LoraGemm<T>>   lora_gemm_;
+    std::shared_ptr<GemmRunner<T>> gemm_runner_;
 
-    std::shared_ptr<CutlassMoeFCRunner<T, T>>       moe_fc_runner_;
-    std::shared_ptr<CutlassMoeFCRunner<T, uint8_t>> moe_int8_weight_only_fc_runner_;
+    std::shared_ptr<tensorrt_llm::plugins::MixtureOfExpertsPlugin> moe_plugin_;
 
     void allocateBuffer() override;
     void freeBuffer() override;
-    void allocateBuffer(size_t token_num, int moe_k = 0, bool use_moe = false, bool use_ffn3 = true);
+    void allocateBuffer(size_t token_num, int moe_k = 0, bool use_moe = false);
 
 protected:
-    T*    inter_buf_        = nullptr;
-    T*    inter_buf_2_      = nullptr;  // for gated activation
-    T*    inter_buf_normed_ = nullptr;
-    T*    moe_gates_buf_    = nullptr;
-    char* moe_fc_workspace_ = nullptr;
+    T*     inter_buf_        = nullptr;
+    T*     inter_buf_2_      = nullptr;  // for gated activation
+    T*     inter_buf_normed_ = nullptr;
+    float* moe_gates_buf_    = nullptr;
+    char*  moe_fc_workspace_ = nullptr;
 
     char*  mixed_gemm_workspace_ = nullptr;
     size_t mixed_gemm_ws_bytes_  = 0;
@@ -70,10 +72,7 @@ protected:
     const std::vector<int64_t> local_layer_inter_size_;
     const std::vector<int64_t> local_layer_inter_padding_size_;
 
-    // int8_mode_ == 0 means we don't use any mechanism related to INT8.
-    // int8_mode_ == 1 for weight quantized only gemm for GPT
-    // int8_mode_ == 2 for SmoothQuant O3 (per tensor scales)
-    int int8_mode_ = 0;
+    tc::QuantAlgo quant_algo_;
 
     ActivationType activation_type_ = ActivationType::InvalidType;
 
@@ -101,21 +100,20 @@ public:
              size_t               max_seq_len,
              size_t               hidden_units,
              size_t               expert_num,
+             size_t               moe_k,
              size_t               inter_size,
              size_t               inter_padding_size,
              std::vector<int64_t> local_layer_inter_size,
              std::vector<int64_t> local_layer_inter_padding_size,
              cudaStream_t         stream,
              cublasMMWrapper*     cublas_wrapper,
+             tc::QuantAlgo        quant_algo,
              IAllocator*          allocator,
              bool                 is_free_buffer_after_forward,
              bool                 sparse,
              bool                 is_sparse_head,
-             int                  int8_mode,
              ActivationType       activation_type,
              float                layernorm_eps);
-
-    FfnLayer(FfnLayer<T> const& ffn_layer);
 
     virtual ~FfnLayer();
 

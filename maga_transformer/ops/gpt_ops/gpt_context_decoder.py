@@ -28,8 +28,6 @@ class GptContextDecoder(FTOPBase):
             g_master_info.ip,
             g_master_info.context_decoder_nccl_port,
             self.weight.weights,
-            self.weight.int8_weights,
-            self.weight.int8_scales,
             self.remove_padding)
         
         for id, lora_weight in self.weight.lora_resource.lora_map.weights_map.items():

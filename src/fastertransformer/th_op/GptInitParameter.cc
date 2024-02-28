@@ -137,8 +137,12 @@ static auto specialTokensTHS =
     DEF_PROPERTY(pre_allocate_op_mem, pre_allocate_op_mem_)                                                            \
     DEF_PROPERTY(seq_size_per_block, seq_size_per_block_)                                                              \
     DEF_PROPERTY(int8_kv_cache, int8_kv_cache_)                                                                        \
-    DEF_PROPERTY(use_medusa, use_medusa_)                                                                              \
-    DEF_PROPERTY(is_causal, is_causal_)
+    DEF_PROPERTY(is_causal, is_causal_)                                                                                \
+    DEF_PROPERTY(int4_mode, int4_mode_)                                                                                \
+    DEF_PROPERTY(has_pre_scale, has_pre_scale_)                                                                        \
+    DEF_PROPERTY(has_zeros, has_zeros_)                                                                                \
+    DEF_PROPERTY(weight_only_group_size, weight_only_group_size_)                                                      \
+    DEF_PROPERTY(use_medusa, use_medusa_)
 
 static auto fasterTransformerGptInitParameterTHS =
 #ifdef LEGACY_THS

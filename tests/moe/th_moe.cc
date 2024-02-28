@@ -291,7 +291,7 @@ Tensor run_moe_fc_helper(Tensor                            input_activations,
     T*    skip_layer_ptr = get_ptr<T>(skip_layer);
     bool* finished_ptr   = get_ptr<bool>(finished);
 
-    fastertransformer::CutlassMoeFCRunner<T, WeightType> moe_runner;
+    tensorrt_llm::CutlassMoeFCRunner<T, WeightType> moe_runner;
     long int bytes        = moe_runner.getWorkspaceSize(num_rows, hidden_size, inter_size, num_experts, k, false);
     auto workspace_tensor = torch::empty({bytes}, torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
     char* workspace_ptr   = get_ptr<char>(workspace_tensor);

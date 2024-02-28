@@ -20,39 +20,35 @@
 
 namespace fastertransformer {
 
-enum class ActivationType {
-    Gelu,
-    GatedGelu,
-    GeluNoneApproximate,
+enum class ActivationType
+{
+    Gelu = 0,
     Relu,
     Silu,
-    GeGLU,
-    GeGluNoneApproximate,
-    ReGLU,
-    SiGLU,
+    Swiglu,
+    Geglu,
     Identity,
+    GeluNoneApproximate,
+    GeGluNoneApproximate,
     InvalidType
 };
 
 inline ActivationType getActivationType(std::string activation_type_str) {
     if (activation_type_str == "Gelu" || activation_type_str == "gelu") {
         return ActivationType::Gelu;
-    } else if (activation_type_str == "gated-gelu" || activation_type_str == "GatedGelu") {
-        return ActivationType::GatedGelu;
     } else if (activation_type_str == "GeluNoneApproximate" || activation_type_str == "gelu-none-approximate") {
         return ActivationType::GeluNoneApproximate;
+    } else if (activation_type_str == "GeGLU" || activation_type_str == "geglu"
+               || activation_type_str == "gated-gelu") {
+        return ActivationType::Geglu;
     } else if (activation_type_str == "Relu" || activation_type_str == "relu") {
         return ActivationType::Relu;
     } else if (activation_type_str == "Silu" || activation_type_str == "silu") {
         return ActivationType::Silu;
-    } else if (activation_type_str == "GeGLU" || activation_type_str == "geglu"
-               || activation_type_str == "gated-gelu") {
-        return ActivationType::GeGLU;
-    } else if (activation_type_str == "ReGLU" || activation_type_str == "reglu"
-               || activation_type_str == "gated-relu") {
-        return ActivationType::ReGLU;
     } else if (activation_type_str == "SiGLU" || activation_type_str == "gated-silu") {
-        return ActivationType::SiGLU;
+        return ActivationType::Swiglu;
+    } else if (activation_type_str == "GeluNoneApproximate" || activation_type_str == "gelu-none-approximate") {
+        return ActivationType::GeluNoneApproximate;
     } else if (activation_type_str == "GeGluNoneApproximate" || activation_type_str == "geglu-none-approximate") {
         return ActivationType::GeGluNoneApproximate;
     } else {
@@ -63,7 +59,6 @@ inline ActivationType getActivationType(std::string activation_type_str) {
 
 inline bool isGatedActivation(ActivationType activaiton_type) {
     return activaiton_type == ActivationType::GeGLU || activaiton_type == ActivationType::ReGLU
-           || activaiton_type == ActivationType::GatedGelu
            || activaiton_type == ActivationType::SiGLU
            || activaiton_type == ActivationType::GeGluNoneApproximate;
 }

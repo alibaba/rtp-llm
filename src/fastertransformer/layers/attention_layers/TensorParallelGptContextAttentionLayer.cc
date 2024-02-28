@@ -49,8 +49,7 @@ void TensorParallelGptContextAttentionLayer<T>::forward(TensorMap*              
     if (do_all_reduce_ && tensor_para_.world_size_ > 1) {
         if (!use_custom_all_reduce_kernel) {
             ftNcclAllReduceSum(attention_out, attention_out, size, tensor_para_, GptContextAttentionLayer<T>::stream_);
-        }
-        else {
+        } else {
             custom_all_reduce_comm_->customAllReduce(size, GptContextAttentionLayer<T>::stream_);
         }
         sync_check_cuda_error();
@@ -86,6 +85,7 @@ TensorParallelGptContextAttentionLayer<T>::TensorParallelGptContextAttentionLaye
     bool                                sparse,
     bool                                is_sparse_head,
     int                                 int8_mode,
+    bool                                int4_mode,
     std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
     int                                 enable_custom_all_reduce):
     GptContextAttentionLayer<T>(max_batch_size,
@@ -113,12 +113,12 @@ TensorParallelGptContextAttentionLayer<T>::TensorParallelGptContextAttentionLaye
                                 is_qk_buf_float,
                                 sparse,
                                 is_sparse_head,
-                                int8_mode),
+                                int8_mode,
+                                int4_mode),
     tensor_para_(tensor_para),
     custom_all_reduce_comm_(custom_all_reduce_comm),
     enable_custom_all_reduce_(enable_custom_all_reduce),
-    do_all_reduce_(do_all_reduce)
-{
+    do_all_reduce_(do_all_reduce) {
     FT_CHECK(head_num % tensor_para_.world_size_ == 0);
 }
 

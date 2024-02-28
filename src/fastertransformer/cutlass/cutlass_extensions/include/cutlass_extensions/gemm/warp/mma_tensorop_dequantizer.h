@@ -52,17 +52,25 @@
 #include "cutlass/functional.h"
 #include "cutlass/platform/platform.h"
 
+// #include "cutlass_extensions/weight_only_quant_op.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/weight_only_quant_op.h"
 
+#ifdef ENABLE_BF16
+#include <cuda_bf16.h>
+#endif
 
 ////////////////////////////////////////////////////////////////////////////////
 
-namespace cutlass {
-namespace gemm {
-namespace warp {
+namespace cutlass
+{
+namespace gemm
+{
+namespace warp
+{
 
 ////////////////////////////////////////////////////////////////////////////////
 
-template<
+template <
     /// Matrix multiply operator
     typename MmaOperator_,
     /// Size of the matrix to load (concept: MatrixShape)
@@ -76,26 +84,24 @@ template<
     /// Number of threads participating in one matrix operation
     int Threads,
     ///
+    WeightOnlyQuantOp QuantOp_,
+    ///
     typename Enable = void>
 class MmaTensorOpDequantizer;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Bfloat specialization for Ampere
-template<
+template <
     /// Underlying matrix multiply operator (concept: MmaTensorOp)
     typename MmaOperator_,
     /// Shape of the warp level matrix multiply (concept: GemmShape)
-    typename Shape_>
-class MmaTensorOpDequantizer<
-    MmaOperator_,
-    Shape_,
-    Operand::kB,
-    bfloat16_t,
-    layout::RowMajor,
-    32,
-    typename platform::enable_if<
-        MmaOperator_::ArchTag::kMinComputeCapability >= 80
-        && platform::is_same<typename MmaOperator_::ArchMmaOperator::LayoutB, layout::ColumnMajor>::value>::type> {
+    typename Shape_,
+    ///
+    WeightOnlyQuantOp QuantOp_>
+class MmaTensorOpDequantizer<MmaOperator_, Shape_, Operand::kB, bfloat16_t, layout::RowMajor, 32, QuantOp_,
+    typename platform::enable_if<MmaOperator_::ArchTag::kMinComputeCapability >= 80
+        && platform::is_same<typename MmaOperator_::ArchMmaOperator::LayoutB, layout::ColumnMajor>::value>::type>
+{
 
 public:
     /// Mma Operator
@@ -120,6 +126,7 @@ public:
     // We need 1 fp16 per matrix iteration in the N dimension
     static constexpr int kColsPerMmaPerThread = 1;
     using FragmentScale = Array<ElementScale, kColsPerMmaPerThread * MmaOperator::MmaIterations::kColumn>;
+    using FragmentZero = Array<ElementScale, kColsPerMmaPerThread * MmaOperator::MmaIterations::kColumn>;
 
     /// Warp mma shape
     using Shape = Shape_;
@@ -130,22 +137,34 @@ public:
     /// TensorRef type for loading element from a tensor
     using TensorRef = TensorRef<ElementScale, Layout>;
 
+    static constexpr WeightOnlyQuantOp QuantOp = QuantOp_;
+
+    CUTLASS_DEVICE
+    MmaTensorOpDequantizer(TensorRef smem_scales, TensorRef smem_zeros, const int warp_idx_n, const int lane_idx)
+    {
+        const int warp_offset = warp_idx_n * Shape::kN;
+        const int quad = lane_idx / 4;
+        const int thread_offset = warp_offset + quad;
+        pointer_scale_ = smem_scales.data() + thread_offset;
+        if constexpr (hasZero(QuantOp))
+        {
+            pointer_zero_ = smem_zeros.data() + thread_offset;
+        }
+    }
+
     CUTLASS_DEVICE
     MmaTensorOpDequantizer(TensorRef smem_scales, const int warp_idx_n, const int lane_idx)
+        : MmaTensorOpDequantizer(smem_scales, TensorRef(), warp_idx_n, lane_idx)
     {
-        const int warp_offset   = warp_idx_n * Shape::kN;
-        const int quad          = lane_idx / 4;
-        const int thread_offset = warp_offset + quad;
-        pointer_                = smem_scales.data() + thread_offset;
     }
 
     CUTLASS_DEVICE
     void load(FragmentScale& scale_frag)
     {
-
         CUTLASS_PRAGMA_UNROLL
-        for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter) {
-            scale_frag[mma_n_iter] = pointer_[mma_n_iter * InstructionShape::kN];
+        for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter)
+        {
+            scale_frag[mma_n_iter] = pointer_scale_[mma_n_iter * InstructionShape::kN];
         }
     }
 
@@ -153,23 +172,25 @@ public:
     void dequantize(FragmentDequantizedOperand& operand_frag, const FragmentScale& scale_frag)
     {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && defined(ENABLE_BF16))
-        using _MmaOperandB        = typename ArchMmaOperator::FragmentB;
+        using _MmaOperandB = typename ArchMmaOperator::FragmentB;
         using ExpandedMmaOperandB = Array<typename _MmaOperandB::Element, kExpansionFactor * _MmaOperandB::kElements>;
         static_assert(ExpandedMmaOperandB::kElements * MmaOperator::MmaIterations::kColumn
-                          == FragmentDequantizedOperand::kElements,
-                      "");
+                == FragmentDequantizedOperand::kElements,
+            "");
 
         const __nv_bfloat16* scale_ptr = reinterpret_cast<const __nv_bfloat16*>(&scale_frag);
-
         ExpandedMmaOperandB* operand_frag_ptr = reinterpret_cast<ExpandedMmaOperandB*>(&operand_frag);
         CUTLASS_PRAGMA_UNROLL
-        for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter) {
+        for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter)
+        {
             static_assert(ExpandedMmaOperandB::kElements % 2 == 0, "");
 
-            __nv_bfloat162  scalex2            = __bfloat162bfloat162(scale_ptr[mma_n_iter]);
+            __nv_bfloat162 scalex2 = __bfloat162bfloat162(scale_ptr[mma_n_iter]);
             __nv_bfloat162* operand_bf16x2_ptr = reinterpret_cast<__nv_bfloat162*>(&operand_frag_ptr[mma_n_iter]);
+
             CUTLASS_PRAGMA_UNROLL
-            for (int ii = 0; ii < ExpandedMmaOperandB::kElements / 2; ++ii) {
+            for (int ii = 0; ii < ExpandedMmaOperandB::kElements / 2; ++ii)
+            {
                 operand_bf16x2_ptr[ii] = __hmul2(operand_bf16x2_ptr[ii], scalex2);
             }
         }
@@ -181,28 +202,105 @@ public:
 #endif
     }
 
+    CUTLASS_DEVICE
+    void load(FragmentScale& scale_frag, FragmentScale& zero_frag)
+    {
+        if constexpr (hasZero(QuantOp))
+        {
+            CUTLASS_PRAGMA_UNROLL
+            for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter)
+            {
+                scale_frag[mma_n_iter] = pointer_scale_[mma_n_iter * InstructionShape::kN];
+                zero_frag[mma_n_iter] = pointer_zero_[mma_n_iter * InstructionShape::kN];
+            }
+        }
+        else
+        {
+            CUTLASS_PRAGMA_UNROLL
+            for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter)
+            {
+                scale_frag[mma_n_iter] = pointer_scale_[mma_n_iter * InstructionShape::kN];
+            }
+        }
+    }
+
+    CUTLASS_DEVICE
+    void dequantize(
+        FragmentDequantizedOperand& operand_frag, const FragmentScale& scale_frag, const FragmentScale& zero_frag)
+    {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && defined(ENABLE_BF16))
+        using _MmaOperandB = typename ArchMmaOperator::FragmentB;
+        using ExpandedMmaOperandB = Array<typename _MmaOperandB::Element, kExpansionFactor * _MmaOperandB::kElements>;
+        static_assert(ExpandedMmaOperandB::kElements * MmaOperator::MmaIterations::kColumn
+                == FragmentDequantizedOperand::kElements,
+            "");
+
+        const __nv_bfloat16* scale_ptr = reinterpret_cast<const __nv_bfloat16*>(&scale_frag);
+        const __nv_bfloat16* zero_ptr = reinterpret_cast<const __nv_bfloat16*>(&zero_frag);
+
+        ExpandedMmaOperandB* operand_frag_ptr = reinterpret_cast<ExpandedMmaOperandB*>(&operand_frag);
+        CUTLASS_PRAGMA_UNROLL
+        for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter)
+        {
+            static_assert(ExpandedMmaOperandB::kElements % 2 == 0, "");
+
+            __nv_bfloat162 scalex2 = __bfloat162bfloat162(scale_ptr[mma_n_iter]);
+            __nv_bfloat162 zerox2 = __bfloat162bfloat162(zero_ptr[mma_n_iter]);
+            __nv_bfloat162* operand_bf16x2_ptr = reinterpret_cast<__nv_bfloat162*>(&operand_frag_ptr[mma_n_iter]);
+
+            if constexpr (hasZero(QuantOp))
+            {
+                CUTLASS_PRAGMA_UNROLL
+                for (int ii = 0; ii < ExpandedMmaOperandB::kElements / 2; ++ii)
+                {
+                    operand_bf16x2_ptr[ii] = __hfma2(operand_bf16x2_ptr[ii], scalex2, zerox2);
+                }
+            }
+            else
+            {
+                CUTLASS_PRAGMA_UNROLL
+                for (int ii = 0; ii < ExpandedMmaOperandB::kElements / 2; ++ii)
+                {
+                    operand_bf16x2_ptr[ii] = __hmul2(operand_bf16x2_ptr[ii], scalex2);
+                }
+            }
+        }
+#else
+        // Slow path not implemented here on purpose. If we need to do HMMA on older arch, scale conversion should
+        // happen before scales are stored to shared memory and we should use the fp16 dequantizer. This will avoid
+        // numerous conversion instructions in GEMM main loop.
+        arch::device_breakpoint();
+#endif
+    }
+
+    // Adds a pointer offset in units of elements.
+    CUTLASS_DEVICE
+    void add_pointer_offset(int64_t const& offset)
+    {
+        static_assert(sizeof(ElementScale) > 1, "");
+        pointer_scale_ += offset;
+        pointer_zero_ += offset;
+    }
+
 private:
-    ElementScale const* pointer_;
+    ElementScale const* pointer_scale_;
+    ElementScale const* pointer_zero_;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
 
 // Specialization for Turing & Ampere
-template<
+template <
     /// Underlying matrix multiply operator (concept: MmaTensorOp)
     typename MmaOperator_,
     /// Shape of the warp level matrix multiply (concept: GemmShape)
-    typename Shape_>
-class MmaTensorOpDequantizer<
-    MmaOperator_,
-    Shape_,
-    Operand::kB,
-    half_t,
-    layout::RowMajor,
-    32,
-    typename platform::enable_if<
-        MmaOperator_::ArchTag::kMinComputeCapability >= 75
-        && platform::is_same<typename MmaOperator_::ArchMmaOperator::LayoutB, layout::ColumnMajor>::value>::type> {
+    typename Shape_,
+    ///
+    WeightOnlyQuantOp QuantOp_>
+class MmaTensorOpDequantizer<MmaOperator_, Shape_, Operand::kB, half_t, layout::RowMajor, 32, QuantOp_,
+    typename platform::enable_if<MmaOperator_::ArchTag::kMinComputeCapability >= 75
+        && platform::is_same<typename MmaOperator_::ArchMmaOperator::LayoutB, layout::ColumnMajor>::value>::type>
+{
 
 public:
     /// Mma Operator
@@ -227,6 +325,7 @@ public:
     // We need 1 fp16 per matrix iteration in the N dimension
     static constexpr int kColsPerMmaPerThread = 1;
     using FragmentScale = Array<ElementScale, kColsPerMmaPerThread * MmaOperator::MmaIterations::kColumn>;
+    using FragmentZero = Array<ElementScale, kColsPerMmaPerThread * MmaOperator::MmaIterations::kColumn>;
 
     /// Warp mma shape
     using Shape = Shape_;
@@ -237,65 +336,140 @@ public:
     /// TensorRef type for loading element from a tensor
     using TensorRef = TensorRef<ElementScale, Layout>;
 
+    static constexpr WeightOnlyQuantOp QuantOp = QuantOp_;
+
+    CUTLASS_DEVICE
+    MmaTensorOpDequantizer(TensorRef smem_scales, TensorRef smem_zeros, const int warp_idx_n, const int lane_idx)
+    {
+        const int warp_offset = warp_idx_n * Shape::kN;
+        const int quad = lane_idx / 4;
+        const int thread_offset = warp_offset + quad;
+        pointer_scale_ = smem_scales.data() + thread_offset;
+        if constexpr (hasZero(QuantOp))
+        {
+            pointer_zero_ = smem_zeros.data() + thread_offset;
+        }
+    }
+
     CUTLASS_DEVICE
     MmaTensorOpDequantizer(TensorRef smem_scales, const int warp_idx_n, const int lane_idx)
+        : MmaTensorOpDequantizer(smem_scales, TensorRef(), warp_idx_n, lane_idx)
     {
-        const int warp_offset   = warp_idx_n * Shape::kN;
-        const int quad          = lane_idx / 4;
-        const int thread_offset = warp_offset + quad;
-        pointer_                = smem_scales.data() + thread_offset;
     }
 
     CUTLASS_DEVICE
     void load(FragmentScale& scale_frag)
     {
-
         CUTLASS_PRAGMA_UNROLL
-        for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter) {
-            scale_frag[mma_n_iter] = pointer_[mma_n_iter * InstructionShape::kN];
+        for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter)
+        {
+            scale_frag[mma_n_iter] = pointer_scale_[mma_n_iter * InstructionShape::kN];
         }
     }
 
     CUTLASS_DEVICE
     void dequantize(FragmentDequantizedOperand& operand_frag, const FragmentScale& scale_frag)
     {
-        using _MmaOperandB        = typename ArchMmaOperator::FragmentB;
+        using _MmaOperandB = typename ArchMmaOperator::FragmentB;
         using ExpandedMmaOperandB = Array<typename _MmaOperandB::Element, kExpansionFactor * _MmaOperandB::kElements>;
         static_assert(ExpandedMmaOperandB::kElements * MmaOperator::MmaIterations::kColumn
-                          == FragmentDequantizedOperand::kElements,
-                      "");
+                == FragmentDequantizedOperand::kElements,
+            "");
 
         multiplies<ExpandedMmaOperandB> mul_op;
 
         ExpandedMmaOperandB* operand_frag_ptr = reinterpret_cast<ExpandedMmaOperandB*>(&operand_frag);
         CUTLASS_PRAGMA_UNROLL
-        for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter) {
+        for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter)
+        {
             operand_frag_ptr[mma_n_iter] = mul_op(operand_frag_ptr[mma_n_iter], scale_frag[mma_n_iter]);
         }
     }
 
+    CUTLASS_DEVICE
+    void load(FragmentScale& scale_frag, FragmentScale& zero_frag)
+    {
+        if constexpr (hasZero(QuantOp))
+        {
+            CUTLASS_PRAGMA_UNROLL
+            for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter)
+            {
+                scale_frag[mma_n_iter] = pointer_scale_[mma_n_iter * InstructionShape::kN];
+                zero_frag[mma_n_iter] = pointer_zero_[mma_n_iter * InstructionShape::kN];
+            }
+        }
+        else
+        {
+            CUTLASS_PRAGMA_UNROLL
+            for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter)
+            {
+                scale_frag[mma_n_iter] = pointer_scale_[mma_n_iter * InstructionShape::kN];
+            }
+        }
+    }
+
+    CUTLASS_DEVICE
+    void dequantize(
+        FragmentDequantizedOperand& operand_frag, const FragmentScale& scale_frag, const FragmentScale& zero_frag)
+    {
+        using _MmaOperandB = typename ArchMmaOperator::FragmentB;
+        using ExpandedMmaOperandB = Array<typename _MmaOperandB::Element, kExpansionFactor * _MmaOperandB::kElements>;
+        static_assert(ExpandedMmaOperandB::kElements * MmaOperator::MmaIterations::kColumn
+                == FragmentDequantizedOperand::kElements,
+            "");
+
+        multiplies<ExpandedMmaOperandB> mul_op;
+        ExpandedMmaOperandB* operand_frag_ptr = reinterpret_cast<ExpandedMmaOperandB*>(&operand_frag);
+
+        if constexpr (hasZero(QuantOp))
+        {
+            plus<ExpandedMmaOperandB> plus_op;
+
+            CUTLASS_PRAGMA_UNROLL
+            for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter)
+            {
+                operand_frag_ptr[mma_n_iter]
+                    = plus_op(mul_op(operand_frag_ptr[mma_n_iter], scale_frag[mma_n_iter]), zero_frag[mma_n_iter]);
+            }
+        }
+        else
+        {
+            CUTLASS_PRAGMA_UNROLL
+            for (int mma_n_iter = 0; mma_n_iter < MmaOperator::MmaIterations::kColumn; ++mma_n_iter)
+            {
+                operand_frag_ptr[mma_n_iter] = mul_op(operand_frag_ptr[mma_n_iter], scale_frag[mma_n_iter]);
+            }
+        }
+    }
+
+    // Adds a pointer offset in units of elements.
+    CUTLASS_DEVICE
+    void add_pointer_offset(int64_t const& offset)
+    {
+        static_assert(sizeof(ElementScale) > 1, "");
+        pointer_scale_ += offset;
+        pointer_zero_ += offset;
+    }
+
 private:
-    ElementScale const* pointer_;
+    ElementScale const* pointer_scale_;
+    ElementScale const* pointer_zero_;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
 
 // Specialization for Volta A x RowMajor B tensorOp, for 32x32x4 interleaved gemm
-template<
+template <
     /// Underlying matrix multiply operator (concept: MmaTensorOp)
     typename MmaOperator_,
     /// Shape of the warp level matrix multiply (concept: GemmShape)
-    typename Shape_>
-class MmaTensorOpDequantizer<
-    MmaOperator_,
-    Shape_,
-    Operand::kB,
-    half_t,
-    layout::RowMajor,
-    32,
-    typename platform::enable_if<
-        platform::is_same<typename MmaOperator_::ArchTag, arch::Sm70>::value
-        && platform::is_same<typename MmaOperator_::ArchMmaOperator::LayoutB, layout::RowMajor>::value>::type> {
+    typename Shape_,
+    ///
+    WeightOnlyQuantOp QuantOp_>
+class MmaTensorOpDequantizer<MmaOperator_, Shape_, Operand::kB, half_t, layout::RowMajor, 32, QuantOp_,
+    typename platform::enable_if<platform::is_same<typename MmaOperator_::ArchTag, arch::Sm70>::value
+        && platform::is_same<typename MmaOperator_::ArchMmaOperator::LayoutB, layout::RowMajor>::value>::type>
+{
 
 public:
     static_assert(platform::is_same<typename MmaOperator_::InterleavedTileShape, GemmShape<32, 32, 4>>::value, "");
@@ -320,10 +494,10 @@ public:
 
     // Fragment to hold scale data to apply to B before mma
     // Each 32x32x4 matmul uses 8 elements from B.
-    static constexpr int ColsPerMmaTile  = 32;
+    static constexpr int ColsPerMmaTile = 32;
     static constexpr int TileNIterations = Shape::kN / ColsPerMmaTile;
-    using FragmentScale                  = Array<ElementScale, TileNIterations * 8>;
-    using AccessType                     = Array<ElementScale, 8>;
+    using FragmentScale = Array<ElementScale, TileNIterations * 8>;
+    using AccessType = Array<ElementScale, 8>;
 
     /// Layout of the scales in shared memory
     using Layout = layout::RowMajor;
@@ -331,13 +505,16 @@ public:
     /// TensorRef type for loading element from a tensor
     using TensorRef = TensorRef<ElementScale, Layout>;
 
+    static constexpr WeightOnlyQuantOp QuantOp = QuantOp_;
+    static_assert(QuantOp == WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY, "");
+
     CUTLASS_DEVICE
     MmaTensorOpDequantizer(TensorRef smem_scales, const int warp_idx_n, const int lane_idx)
     {
-        const int warp_offset   = warp_idx_n * Shape::kN;
-        const int base_col      = lane_idx & 0xF8;
+        const int warp_offset = warp_idx_n * Shape::kN;
+        const int base_col = lane_idx & 0xF8;
         const int thread_offset = warp_offset + base_col;
-        pointer_                = smem_scales.data() + thread_offset;
+        pointer_ = smem_scales.data() + thread_offset;
     }
 
     CUTLASS_DEVICE
@@ -346,7 +523,8 @@ public:
         AccessType* scale_frag_ptr = reinterpret_cast<AccessType*>(&scale_frag);
 
         CUTLASS_PRAGMA_UNROLL
-        for (int tile_iter = 0; tile_iter < TileNIterations; ++tile_iter) {
+        for (int tile_iter = 0; tile_iter < TileNIterations; ++tile_iter)
+        {
             // We jump by 32 here since volta does <32x32x4> super mmas inside a warp.
             scale_frag_ptr[tile_iter] = *reinterpret_cast<AccessType const*>(pointer_ + ColsPerMmaTile * tile_iter);
         }
@@ -368,21 +546,17 @@ private:
 ////////////////////////////////////////////////////////////////////////////////
 
 // Specialization for Volta A x ColumnMajor B tensorOp, for 32x32x4 interleaved gemm
-template<
+template <
     /// Underlying matrix multiply operator (concept: MmaTensorOp)
     typename MmaOperator_,
     /// Shape of the warp level matrix multiply (concept: GemmShape)
-    typename Shape_>
-class MmaTensorOpDequantizer<
-    MmaOperator_,
-    Shape_,
-    Operand::kB,
-    half_t,
-    layout::RowMajor,
-    32,
-    typename platform::enable_if<
-        platform::is_same<typename MmaOperator_::ArchTag, arch::Sm70>::value
-        && platform::is_same<typename MmaOperator_::ArchMmaOperator::LayoutB, layout::ColumnMajor>::value>::type> {
+    typename Shape_,
+    ///
+    WeightOnlyQuantOp QuantOp_>
+class MmaTensorOpDequantizer<MmaOperator_, Shape_, Operand::kB, half_t, layout::RowMajor, 32, QuantOp_,
+    typename platform::enable_if<platform::is_same<typename MmaOperator_::ArchTag, arch::Sm70>::value
+        && platform::is_same<typename MmaOperator_::ArchMmaOperator::LayoutB, layout::ColumnMajor>::value>::type>
+{
 
 public:
     static_assert(platform::is_same<typename MmaOperator_::InterleavedTileShape, GemmShape<32, 32, 4>>::value, "");
@@ -407,9 +581,9 @@ public:
 
     // Fragment to hold scale data to apply to B before mma
     // Each 32x32x4 matmul uses 8 elements from B.
-    static constexpr int ColsPerMmaTile  = 32;
+    static constexpr int ColsPerMmaTile = 32;
     static constexpr int TileNIterations = Shape::kN / ColsPerMmaTile;
-    using FragmentScale                  = Array<ElementScale, TileNIterations * 2>;
+    using FragmentScale = Array<ElementScale, TileNIterations * 2>;
 
     /// Layout of the scales in shared memory
     using Layout = layout::RowMajor;
@@ -417,25 +591,30 @@ public:
     /// TensorRef type for loading element from a tensor
     using TensorRef = TensorRef<ElementScale, Layout>;
 
+    static constexpr WeightOnlyQuantOp QuantOp = QuantOp_;
+    static_assert(QuantOp == WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY, "");
+
     CUTLASS_DEVICE
     MmaTensorOpDequantizer(TensorRef smem_scales, const int warp_idx_n, const int lane_idx)
     {
-        const int warp_offset   = warp_idx_n * Shape::kN;
-        const int base_col      = lane_idx & 0xF8 + lane_idx % 4;
+        const int warp_offset = warp_idx_n * Shape::kN;
+        const int base_col = lane_idx & 0xF8 + lane_idx % 4;
         const int thread_offset = warp_offset + base_col;
-        pointer_                = smem_scales.data() + thread_offset;
+        pointer_ = smem_scales.data() + thread_offset;
     }
 
     CUTLASS_DEVICE
     void load(FragmentScale& scale_frag)
     {
         CUTLASS_PRAGMA_UNROLL
-        for (int tile_iter = 0; tile_iter < TileNIterations; ++tile_iter) {
+        for (int tile_iter = 0; tile_iter < TileNIterations; ++tile_iter)
+        {
             // We jump by 32 here since volta does <32x32x4> super mmas inside a warp.
             // For col major B, each thread will jump 4 cols to get its next value inside
             // of the super mma.
             CUTLASS_PRAGMA_UNROLL
-            for (int mma_iter = 0; mma_iter < 2; ++mma_iter) {
+            for (int mma_iter = 0; mma_iter < 2; ++mma_iter)
+            {
                 scale_frag[tile_iter * 2 + mma_iter] = pointer_[ColsPerMmaTile * tile_iter + 4 * mma_iter];
             }
         }
@@ -444,7 +623,7 @@ public:
     CUTLASS_DEVICE
     void dequantize(FragmentDequantizedOperand& operand_frag, const FragmentScale& scale_frag)
     {
-        using MmaOperandB                 = typename ArchMmaOperator::FragmentB;
+        using MmaOperandB = typename ArchMmaOperator::FragmentB;
         static constexpr int total_n_mmas = 2 * TileNIterations;
         static_assert(MmaOperandB::kElements * total_n_mmas == FragmentDequantizedOperand::kElements, "");
 
@@ -452,7 +631,8 @@ public:
 
         MmaOperandB* operand_frag_ptr = reinterpret_cast<MmaOperandB*>(&operand_frag);
         CUTLASS_PRAGMA_UNROLL
-        for (int mma_n_iter = 0; mma_n_iter < total_n_mmas; ++mma_n_iter) {
+        for (int mma_n_iter = 0; mma_n_iter < total_n_mmas; ++mma_n_iter)
+        {
             operand_frag_ptr[mma_n_iter] = mul_op(operand_frag_ptr[mma_n_iter], scale_frag[mma_n_iter]);
         }
     }
@@ -463,8 +643,8 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////
 
-}  // namespace warp
-}  // namespace gemm
-}  // namespace cutlass
+} // namespace warp
+} // namespace gemm
+} // namespace cutlass
 
 ////////////////////////////////////////////////////////////////////////////////

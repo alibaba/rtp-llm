@@ -53,4 +53,9 @@ Logger::Logger() {
     }
 }
 
+void Logger::log(std::exception const& ex, Logger::Level level)
+{
+    log(level, "%s: %s", tensorrt_llm::common::TllmException::demangle(typeid(ex).name()).c_str(), ex.what());
+}
+
 }  // namespace fastertransformer

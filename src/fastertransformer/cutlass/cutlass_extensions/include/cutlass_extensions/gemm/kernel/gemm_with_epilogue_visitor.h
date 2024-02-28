@@ -51,90 +51,97 @@
 
 #include "cutlass_extensions/epilogue/threadblock/epilogue_per_row_per_col_scale.h"
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
-
-namespace cutlass {
-namespace gemm {
-namespace kernel {
+namespace tk = tensorrt_llm::common;
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Mma_,                ///! Threadblock-scoped matrix multiply-accumulate
-         typename Epilogue_,           ///! Epilogue
-         typename ThreadblockSwizzle_  ///! Threadblock swizzling function
-         >
-struct GemmWithEpilogueVisitor {
+namespace cutlass
+{
+namespace gemm
+{
+namespace kernel
+{
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+
+template <typename Mma_,         ///! Threadblock-scoped matrix multiply-accumulate
+    typename Epilogue_,          ///! Epilogue
+    typename ThreadblockSwizzle_ ///! Threadblock swizzling function
+    >
+struct GemmWithEpilogueVisitor
+{
 public:
-    using Mma                = Mma_;
-    using Epilogue           = Epilogue_;
-    using EpilogueVisitor    = typename Epilogue::Visitor;
+    using Mma = Mma_;
+    using Epilogue = Epilogue_;
+    using EpilogueVisitor = typename Epilogue::Visitor;
     using ThreadblockSwizzle = ThreadblockSwizzle_;
 
-    using ElementA   = typename Mma::IteratorA::Element;
-    using LayoutA    = typename Mma::IteratorA::Layout;
+    using ElementA = typename Mma::IteratorA::Element;
+    using LayoutA = typename Mma::IteratorA::Layout;
     using TensorRefA = TensorRef<ElementA, LayoutA>;
 
-    using ElementB   = typename Mma::IteratorB::Element;
-    using LayoutB    = typename Mma::IteratorB::Layout;
+    using ElementB = typename Mma::IteratorB::Element;
+    using LayoutB = typename Mma::IteratorB::Layout;
     using TensorRefB = TensorRef<ElementB, LayoutB>;
 
-    using ElementCompute    = typename EpilogueVisitor::ElementCompute;
-    using LayoutAlphaCol    = cutlass::layout::RowMajor;
-    using LayoutAlphaRow    = cutlass::layout::ColumnMajor;
+    using ElementCompute = typename EpilogueVisitor::ElementCompute;
+    using LayoutAlphaCol = cutlass::layout::RowMajor;
+    using LayoutAlphaRow = cutlass::layout::ColumnMajor;
     using TensorRefAlphaCol = TensorRef<ElementCompute, LayoutAlphaCol>;
     using TensorRefAlphaRow = TensorRef<ElementCompute, LayoutAlphaRow>;
 
-    using ElementC   = typename EpilogueVisitor::ElementOutput;
-    using LayoutC    = typename Epilogue::Layout;
+    using ElementC = typename EpilogueVisitor::ElementOutput;
+    using LayoutC = typename Epilogue::Layout;
     using TensorRefC = TensorRef<ElementC, LayoutC>;
 
     static ComplexTransform const kTransformA = Mma::kTransformA;
     static ComplexTransform const kTransformB = Mma::kTransformB;
-    using Operator                            = typename Mma::Operator;
+    using Operator = typename Mma::Operator;
 
-    using OperatorClass    = typename Mma::Operator::OperatorClass;
+    using OperatorClass = typename Mma::Operator::OperatorClass;
     using ThreadblockShape = typename Mma::Shape;
-    using WarpShape        = typename Mma::Operator::Shape;
+    using WarpShape = typename Mma::Operator::Shape;
     using InstructionShape = typename Mma::Policy::Operator::InstructionShape;
-    using ArchTag          = typename Mma::ArchTag;
+    using ArchTag = typename Mma::ArchTag;
     using EpilogueOutputOp =
-        typename Epilogue::Visitor::ElementwiseFunctor;  // Define type so GemmUniversalBase doesn't complain
+        typename Epilogue::Visitor::ElementwiseFunctor; // Define type so GemmUniversalBase doesn't complain
 
-    static int const kStages     = Mma::kStages;
+    static int const kStages = Mma::kStages;
     static int const kAlignmentA = Mma::IteratorA::AccessType::kElements;
     static int const kAlignmentB = Mma::IteratorB::AccessType::kElements;
     static int const kAlignmentC = EpilogueVisitor::kElementsPerAccess;
 
     /// Warp count (concept: GemmShape)
-    using WarpCount               = typename Mma::WarpCount;
+    using WarpCount = typename Mma::WarpCount;
     static int const kThreadCount = 32 * WarpCount::kCount;
 
     /// Split-K preserves splits that are 128b aligned
-    static int const kSplitKAlignment =
-        const_max(128 / sizeof_bits<ElementA>::value, 128 / sizeof_bits<ElementB>::value);
+    static int const kSplitKAlignment
+        = const_max(128 / sizeof_bits<ElementA>::value, 128 / sizeof_bits<ElementB>::value);
 
     //
     // Structures
     //
 
     /// Argument structure
-    struct Arguments {
+    struct Arguments
+    {
 
         //
         // Data members
         //
 
         GemmUniversalMode mode;
-        GemmCoord         problem_size;
-        int               batch_count;
+        GemmCoord problem_size;
+        int batch_count;
 
-        TensorRefA          ref_A;
-        TensorRefB          ref_B;
-        epilogue::QuantMode quant_mode;
-        TensorRefAlphaCol   ref_alpha_col;
-        TensorRefAlphaRow   ref_alpha_row;
-        TensorRefC          ref_C;
-        TensorRefC          ref_D;
+        TensorRefA ref_A;
+        TensorRefB ref_B;
+        tk::QuantMode quant_option;
+        TensorRefAlphaCol ref_alpha_col;
+        TensorRefAlphaRow ref_alpha_row;
+        TensorRefC ref_C;
+        TensorRefC ref_D;
 
         int64_t batch_stride_A;
         int64_t batch_stride_B;
@@ -146,36 +153,31 @@ public:
         // Methods
         //
 
-        Arguments(): mode(GemmUniversalMode::kGemm), batch_count(1) {}
+        Arguments()
+            : mode(GemmUniversalMode::kGemm)
+            , batch_count(1)
+        {
+        }
 
         /// constructs an arguments structure
-        Arguments(GemmUniversalMode                   mode_,
-                  GemmCoord                           problem_size_,
-                  int                                 batch_count_,
-                  TensorRefA                          ref_A_,
-                  TensorRefB                          ref_B_,
-                  epilogue::QuantMode                 quant_mode_,
-                  TensorRefAlphaCol                   ref_alpha_col_,
-                  TensorRefAlphaRow                   ref_alpha_row_,
-                  TensorRefC                          ref_C_,
-                  TensorRefC                          ref_D_,
-                  int64_t                             batch_stride_A_,
-                  int64_t                             batch_stride_B_,
-                  typename EpilogueVisitor::Arguments epilogue_visitor_):
-            mode(mode_),
-            problem_size(problem_size_),
-            batch_count(batch_count_),
-            ref_A(ref_A_),
-            ref_B(ref_B_),
-            quant_mode(quant_mode_),
-            ref_alpha_col(ref_alpha_col_),
-            ref_alpha_row(ref_alpha_row_),
-            ref_C(ref_C_),
-            ref_D(ref_D_),
-            batch_stride_A(batch_stride_A_),
-            batch_stride_B(batch_stride_B_),
-            batch_stride_D(0),
-            epilogue_visitor(epilogue_visitor_)
+        Arguments(GemmUniversalMode mode_, GemmCoord problem_size_, int batch_count_, TensorRefA ref_A_,
+            TensorRefB ref_B_, tk::QuantMode quant_option_, TensorRefAlphaCol ref_alpha_col_,
+            TensorRefAlphaRow ref_alpha_row_, TensorRefC ref_C_, TensorRefC ref_D_, int64_t batch_stride_A_,
+            int64_t batch_stride_B_, typename EpilogueVisitor::Arguments epilogue_visitor_)
+            : mode(mode_)
+            , problem_size(problem_size_)
+            , batch_count(batch_count_)
+            , ref_A(ref_A_)
+            , ref_B(ref_B_)
+            , quant_option(quant_option_)
+            , ref_alpha_col(ref_alpha_col_)
+            , ref_alpha_row(ref_alpha_row_)
+            , ref_C(ref_C_)
+            , ref_D(ref_D_)
+            , batch_stride_A(batch_stride_A_)
+            , batch_stride_B(batch_stride_B_)
+            , batch_stride_D(0)
+            , epilogue_visitor(epilogue_visitor_)
         {
         }
     };
@@ -185,30 +187,31 @@ public:
     //
 
     /// Parameters structure
-    struct Params {
+    struct Params
+    {
 
         cutlass::gemm::GemmCoord problem_size;
         cutlass::gemm::GemmCoord grid_tiled_shape;
-        int                      swizzle_log_tile;
+        int swizzle_log_tile;
 
-        typename Mma::IteratorA::Params                      params_A;
-        typename Mma::IteratorB::Params                      params_B;
-        typename EpilogueVisitor::ScaleTileIterator::Params  params_alpha_col;
-        typename EpilogueVisitor::ScaleTileIterator::Params  params_alpha_row;
+        typename Mma::IteratorA::Params params_A;
+        typename Mma::IteratorB::Params params_B;
+        typename EpilogueVisitor::ScaleTileIterator::Params params_alpha_col;
+        typename EpilogueVisitor::ScaleTileIterator::Params params_alpha_row;
         typename EpilogueVisitor::OutputTileIterator::Params params_C;
         typename EpilogueVisitor::OutputTileIterator::Params params_D;
 
         GemmUniversalMode mode;
-        int               batch_count;
-        int               gemm_k_size;
+        int batch_count;
+        int gemm_k_size;
 
-        void*                                                 ptr_A;
-        void*                                                 ptr_B;
-        epilogue::QuantMode                                   quant_mode;
+        void* ptr_A;
+        void* ptr_B;
+        tk::QuantMode quant_option;
         typename EpilogueVisitor::ScaleTileIterator::Element* ptr_alpha_col;
         typename EpilogueVisitor::ScaleTileIterator::Element* ptr_alpha_row;
-        ElementC*                                             ptr_C;
-        ElementC*                                             ptr_D;
+        ElementC* ptr_C;
+        ElementC* ptr_D;
 
         int64_t batch_stride_A;
         int64_t batch_stride_B;
@@ -220,69 +223,67 @@ public:
         //
 
         CUTLASS_HOST_DEVICE
-        Params():
-            swizzle_log_tile(0),
-            params_A(0),
-            params_B(0),
-            params_alpha_col(0),
-            params_C(0),
-            params_D(0),
-            batch_count(0),
-            gemm_k_size(0),
-            mode(cutlass::gemm::GemmUniversalMode::kGemm),
-            ptr_A(nullptr),
-            ptr_B(nullptr),
-            ptr_alpha_col(nullptr),
-            ptr_alpha_row(nullptr),
-            ptr_C(nullptr),
-            ptr_D(nullptr),
-            batch_stride_A(0),
-            batch_stride_B(0)
+        Params()
+            : swizzle_log_tile(0)
+            , params_A(0)
+            , params_B(0)
+            , params_alpha_col(0)
+            , params_C(0)
+            , params_D(0)
+            , batch_count(0)
+            , gemm_k_size(0)
+            , mode(cutlass::gemm::GemmUniversalMode::kGemm)
+            , ptr_A(nullptr)
+            , ptr_B(nullptr)
+            , ptr_alpha_col(nullptr)
+            , ptr_alpha_row(nullptr)
+            , ptr_C(nullptr)
+            , ptr_D(nullptr)
+            , batch_stride_A(0)
+            , batch_stride_B(0)
         {
         }
 
-        Params(Arguments const&                args,
-               cutlass::gemm::GemmCoord const& grid_tiled_shape_,
-               int                             gemm_k_size_,
-               int*                            workspace_):
-            problem_size(args.problem_size),
-            swizzle_log_tile(0),
-            params_A(args.ref_A.layout()),
-            params_B(args.ref_B.layout()),
-            params_alpha_col(args.ref_alpha_col.layout()),
-            params_alpha_row(args.ref_alpha_col.layout()),
-            params_C(args.ref_C.layout()),
-            params_D(args.ref_D.layout()),
-            mode(args.mode),
-            batch_count(args.batch_count),
-            gemm_k_size(args.problem_size.k()),
-            ptr_A(args.ref_A.data()),
-            ptr_B(args.ref_B.data()),
-            quant_mode(args.quant_mode),
-            ptr_alpha_col(args.ref_alpha_col.data()),
-            ptr_alpha_row(args.ref_alpha_row.data()),
-            ptr_C(args.ref_C.data()),
-            ptr_D(args.ref_D.data()),
-            batch_stride_A(args.batch_stride_A),
-            batch_stride_B(args.batch_stride_B),
-            epilogue_visitor(args.epilogue_visitor)
+        Params(
+            Arguments const& args, cutlass::gemm::GemmCoord const& grid_tiled_shape_, int gemm_k_size_, int* workspace_)
+            : problem_size(args.problem_size)
+            , swizzle_log_tile(0)
+            , params_A(args.ref_A.layout())
+            , params_B(args.ref_B.layout())
+            , params_alpha_col(args.ref_alpha_col.layout())
+            , params_alpha_row(args.ref_alpha_col.layout())
+            , params_C(args.ref_C.layout())
+            , params_D(args.ref_D.layout())
+            , mode(args.mode)
+            , batch_count(args.batch_count)
+            , gemm_k_size(args.problem_size.k())
+            , ptr_A(args.ref_A.data())
+            , ptr_B(args.ref_B.data())
+            , quant_option(args.quant_option)
+            , ptr_alpha_col(args.ref_alpha_col.data())
+            , ptr_alpha_row(args.ref_alpha_row.data())
+            , ptr_C(args.ref_C.data())
+            , ptr_D(args.ref_D.data())
+            , batch_stride_A(args.batch_stride_A)
+            , batch_stride_B(args.batch_stride_B)
+            , epilogue_visitor(args.epilogue_visitor)
         {
 
             ThreadblockSwizzle threadblock_swizzle;
 
-            grid_tiled_shape =
-                threadblock_swizzle.get_tiled_shape(args.problem_size,
-                                                    {ThreadblockShape::kM, ThreadblockShape::kN, ThreadblockShape::kK},
-                                                    args.batch_count);
+            grid_tiled_shape = threadblock_swizzle.get_tiled_shape(args.problem_size,
+                {ThreadblockShape::kM, ThreadblockShape::kN, ThreadblockShape::kK}, args.batch_count);
 
-            if (args.mode == GemmUniversalMode::kGemm || args.mode == GemmUniversalMode::kGemmSplitKParallel) {
+            if (args.mode == GemmUniversalMode::kGemm || args.mode == GemmUniversalMode::kGemmSplitKParallel)
+            {
 
-                int const kAlignK =
-                    const_max(const_max(128 / sizeof_bits<ElementA>::value, 128 / sizeof_bits<ElementB>::value), 1);
+                int const kAlignK
+                    = const_max(const_max(128 / sizeof_bits<ElementA>::value, 128 / sizeof_bits<ElementB>::value), 1);
 
                 gemm_k_size = round_up(ceil_div(args.problem_size.k(), args.batch_count), kAlignK);
 
-                if (gemm_k_size) {
+                if (gemm_k_size)
+                {
                     grid_tiled_shape.k() = ceil_div(args.problem_size.k(), gemm_k_size);
                 }
             }
@@ -292,12 +293,14 @@ public:
     };
 
     /// Shared memory storage structure
-    union SharedStorage {
+    union SharedStorage
+    {
 
         typename Mma::SharedStorage main_loop;
 
-        struct {
-            typename Epilogue::SharedStorage        epilogue;
+        struct
+        {
+            typename Epilogue::SharedStorage epilogue;
             typename EpilogueVisitor::SharedStorage visitor;
         } epilogue;
     };
@@ -324,50 +327,62 @@ public:
         bool isBMisaligned = false;
         bool isCMisaligned = false;
 
-        if (platform::is_same<LayoutA, layout::RowMajor>::value) {
+        if (platform::is_same<LayoutA, layout::RowMajor>::value)
+        {
             isAMisaligned = problem_size.k() % kAlignmentA;
         }
-        else if (platform::is_same<LayoutA, layout::ColumnMajor>::value) {
+        else if (platform::is_same<LayoutA, layout::ColumnMajor>::value)
+        {
             isAMisaligned = problem_size.m() % kAlignmentA;
         }
         else if (platform::is_same<LayoutA, layout::ColumnMajorInterleaved<32>>::value
-                 || platform::is_same<LayoutA, layout::ColumnMajorInterleaved<64>>::value) {
+            || platform::is_same<LayoutA, layout::ColumnMajorInterleaved<64>>::value)
+        {
             isAMisaligned = problem_size.k() % kAlignmentA;
         }
 
-        if (platform::is_same<LayoutB, layout::RowMajor>::value) {
+        if (platform::is_same<LayoutB, layout::RowMajor>::value)
+        {
             isBMisaligned = problem_size.n() % kAlignmentB;
         }
-        else if (platform::is_same<LayoutB, layout::ColumnMajor>::value) {
+        else if (platform::is_same<LayoutB, layout::ColumnMajor>::value)
+        {
             isBMisaligned = problem_size.k() % kAlignmentB;
         }
         else if (platform::is_same<LayoutB, layout::RowMajorInterleaved<32>>::value
-                 || platform::is_same<LayoutB, layout::RowMajorInterleaved<64>>::value) {
+            || platform::is_same<LayoutB, layout::RowMajorInterleaved<64>>::value)
+        {
             isBMisaligned = problem_size.k() % kAlignmentB;
         }
 
-        if (platform::is_same<LayoutC, layout::RowMajor>::value) {
+        if (platform::is_same<LayoutC, layout::RowMajor>::value)
+        {
             isCMisaligned = problem_size.n() % kAlignmentC;
         }
-        else if (platform::is_same<LayoutC, layout::ColumnMajor>::value) {
+        else if (platform::is_same<LayoutC, layout::ColumnMajor>::value)
+        {
             isCMisaligned = problem_size.m() % kAlignmentC;
         }
         else if (platform::is_same<LayoutC, layout::ColumnMajorInterleaved<32>>::value
-                 || platform::is_same<LayoutC, layout::ColumnMajorInterleaved<64>>::value) {
+            || platform::is_same<LayoutC, layout::ColumnMajorInterleaved<64>>::value)
+        {
             isCMisaligned = problem_size.n() % kAlignmentC;
         }
 
-        if (isAMisaligned) {
+        if (isAMisaligned)
+        {
             CUTLASS_TRACE_HOST("  returning kErrorMisalignedOperand for A operand");
             return Status::kErrorMisalignedOperand;
         }
 
-        if (isBMisaligned) {
+        if (isBMisaligned)
+        {
             CUTLASS_TRACE_HOST("  returning kErrorMisalignedOperand for B operand");
             return Status::kErrorMisalignedOperand;
         }
 
-        if (isCMisaligned) {
+        if (isCMisaligned)
+        {
             CUTLASS_TRACE_HOST("  returning kErrorMisalignedOperand for C operand");
             return Status::kErrorMisalignedOperand;
         }
@@ -402,12 +417,13 @@ public:
 
         // Early exit if CTA is out of range
         if (params.grid_tiled_shape.m() <= threadblock_tile_offset.m()
-            || params.grid_tiled_shape.n() <= threadblock_tile_offset.n()) {
+            || params.grid_tiled_shape.n() <= threadblock_tile_offset.n())
+        {
 
             return;
         }
 
-        int offset_k       = 0;
+        int offset_k = 0;
         int problem_size_k = params.problem_size.k();
 
         ElementA* ptr_A = static_cast<ElementA*>(params.ptr_A);
@@ -417,20 +433,24 @@ public:
         //
         // Fetch pointers based on mode.
         //
-        if (params.mode == GemmUniversalMode::kGemm || params.mode == GemmUniversalMode::kGemmSplitKParallel) {
+        if (params.mode == GemmUniversalMode::kGemm || params.mode == GemmUniversalMode::kGemmSplitKParallel)
+        {
 
-            if (threadblock_tile_offset.k() + 1 < params.grid_tiled_shape.k()) {
+            if (threadblock_tile_offset.k() + 1 < params.grid_tiled_shape.k())
+            {
 
                 problem_size_k = (threadblock_tile_offset.k() + 1) * params.gemm_k_size;
             }
 
             offset_k = threadblock_tile_offset.k() * params.gemm_k_size;
         }
-        else if (params.mode == GemmUniversalMode::kBatched) {
+        else if (params.mode == GemmUniversalMode::kBatched)
+        {
             ptr_A += threadblock_tile_offset.k() * params.batch_stride_A;
             ptr_B += threadblock_tile_offset.k() * params.batch_stride_B;
         }
-        else if (params.mode == GemmUniversalMode::kArray) {
+        else if (params.mode == GemmUniversalMode::kArray)
+        {
             ptr_A = static_cast<ElementA* const*>(params.ptr_A)[threadblock_tile_offset.k()];
             ptr_B = static_cast<ElementB* const*>(params.ptr_B)[threadblock_tile_offset.k()];
         }
@@ -484,8 +504,8 @@ public:
         threadblock_tile_offset = threadblock_swizzle.get_tile_offset(params.swizzle_log_tile);
 
         // assume identity swizzle
-        MatrixCoord threadblock_offset(threadblock_tile_offset.m() * Mma::Shape::kM,
-                                       threadblock_tile_offset.n() * Mma::Shape::kN);
+        MatrixCoord threadblock_offset(
+            threadblock_tile_offset.m() * Mma::Shape::kM, threadblock_tile_offset.n() * Mma::Shape::kN);
 
         int block_idx = threadblock_tile_offset.m() + threadblock_tile_offset.n() * params.grid_tiled_shape.m();
 
@@ -493,28 +513,18 @@ public:
         // Construct the epilogue visitor
         //
 
-        EpilogueVisitor epilogue_visitor(params.epilogue_visitor,
-                                         shared_storage.epilogue.visitor,
-                                         params.problem_size.mn(),
-                                         thread_idx,
-                                         warp_idx,
-                                         lane_idx,
-                                         params.params_alpha_col,
-                                         params.params_C,
-                                         params.params_D,
-                                         params.quant_mode,
-                                         params.ptr_alpha_row,
-                                         params.ptr_alpha_col,
-                                         params.ptr_C,
-                                         params.ptr_D,
-                                         threadblock_offset,
-                                         blockIdx.y * params.problem_size.m());
+        EpilogueVisitor epilogue_visitor(params.epilogue_visitor, shared_storage.epilogue.visitor,
+            params.problem_size.mn(), thread_idx, warp_idx, lane_idx, params.params_alpha_col, params.params_C,
+            params.params_D, params.quant_option, params.ptr_alpha_row, params.ptr_alpha_col, params.ptr_C,
+            params.ptr_D, threadblock_offset, blockIdx.y * params.problem_size.m());
 
-        if (params.mode == GemmUniversalMode::kGemm) {
+        if (params.mode == GemmUniversalMode::kGemm)
+        {
             // Indicate which position in a serial reduction the output operator is currently updating
             epilogue_visitor.set_k_partition(threadblock_tile_offset.k(), params.grid_tiled_shape.k());
         }
-        else if (params.mode == GemmUniversalMode::kBatched || params.mode == GemmUniversalMode::kArray) {
+        else if (params.mode == GemmUniversalMode::kBatched || params.mode == GemmUniversalMode::kArray)
+        {
             epilogue_visitor.set_batch_index(threadblock_tile_offset.k());
         }
 
@@ -528,8 +538,8 @@ public:
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-}  // namespace kernel
-}  // namespace gemm
-}  // namespace cutlass
+} // namespace kernel
+} // namespace gemm
+} // namespace cutlass
 
 /////////////////////////////////////////////////////////////////////////////////////////////////

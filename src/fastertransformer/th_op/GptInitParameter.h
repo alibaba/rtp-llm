@@ -4,6 +4,7 @@
 #include "torch/extension.h"
 #include <torch/custom_class.h>
 #include <torch/script.h>
+#include "src/fastertransformer/utils/quantization.h"
 #include <vector>
 
 namespace ft = fastertransformer;
@@ -89,6 +90,11 @@ public:
     bool add_bias_linear_            = false;
 
     bool is_causal_                  = true;
+    // weight_only_int4_algo
+    bool    int4_mode_              = false;
+    bool    has_pre_scale_          = false;
+    bool    has_zeros_              = false;
+    int64_t weight_only_group_size_ = 0;
 
     std::string tokenizer_path_    = "";
     std::string ckpt_path_         = "";

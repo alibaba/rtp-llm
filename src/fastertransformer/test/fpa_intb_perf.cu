@@ -38,7 +38,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    CutlassFpAIntBGemmRunner<half, uint8_t> runner;
+    tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunner<half, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY> runner;
     char*                                   ws_ptr = nullptr;
     deviceMalloc(&ws_ptr, runner.getWorkspaceSize(m, n, k));
 

@@ -58,8 +58,6 @@ public:
                         const std::string&            master_ip,
                         const int                     master_port,
                         const std::vector<std::unordered_map<std::string, th::Tensor>>& weights,
-                        const std::vector<std::unordered_map<std::string, th::Tensor>>& int8_weights,
-                        const std::vector<std::unordered_map<std::string, th::Tensor>>& int8_scales,
                         const bool                    remove_padding);
 
     ~FtGptContextDecoder() override;
@@ -103,15 +101,13 @@ private:
 
 class ParallelGptContextDecoderOp: public th::jit::CustomClassHolder {
 public:
-    ParallelGptContextDecoderOp(c10::intrusive_ptr<GptInitParameter> gpt_init_parameter,
-                                const int64_t                 tensor_para_size,
-                                const int64_t                 pipeline_para_size,
-                                const std::string             master_ip,
-                                const int64_t                 master_port,
+    ParallelGptContextDecoderOp(c10::intrusive_ptr<GptInitParameter>                            gpt_init_parameter,
+                                const int64_t                                                   tensor_para_size,
+                                const int64_t                                                   pipeline_para_size,
+                                const std::string                                               master_ip,
+                                const int64_t                                                   master_port,
                                 const std::vector<std::unordered_map<std::string, th::Tensor>>& weights,
-                                const std::vector<std::unordered_map<std::string, th::Tensor>>& int8_weights,
-                                const std::vector<std::unordered_map<std::string, th::Tensor>>& scale,
-                                const bool                    remove_padding);
+                                const bool                                                      remove_padding);
 
     ~ParallelGptContextDecoderOp();
 

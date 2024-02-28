@@ -27,7 +27,7 @@ template<typename T>
 void ParallelGptContextDecoder<T>::initialize()
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-
+    quant_algo_ = tc::QuantAlgo(gpt_init_parameter_.int8_mode_, gpt_init_parameter_.int4_mode_, gpt_init_parameter_.has_pre_scale_, gpt_init_parameter_.has_zeros_, gpt_init_parameter_.weight_only_group_size_);
     self_attention_layer_.reset(new TensorParallelGptContextAttentionLayer<T>(
                                         max_batch_size_,
                                         max_seq_len_,
@@ -55,6 +55,7 @@ void ParallelGptContextDecoder<T>::initialize()
                                         sparse_,
                                         gpt_init_parameter_.is_sparse_head_,
                                         gpt_init_parameter_.int8_mode_,
+                                        gpt_init_parameter_.int4_mode_,
                                         custom_all_reduce_comm_,
                                         enable_custom_all_reduce_));
 
@@ -63,6 +64,7 @@ void ParallelGptContextDecoder<T>::initialize()
                              1,
                              gpt_init_parameter_.hidden_size_,
                              gpt_init_parameter_.expert_num_,  // expert_num
+                             gpt_init_parameter_.moe_k_,
                              gpt_init_parameter_.inter_size_,
                              gpt_init_parameter_.inter_padding_size_,
                              gpt_init_parameter_.layer_inter_size_,
@@ -70,12 +72,12 @@ void ParallelGptContextDecoder<T>::initialize()
                              tensor_para_,
                              stream_,
                              cublas_wrapper_,
+                             quant_algo_,
                              allocator_,
                              true,
                              is_free_buffer_after_forward_,
                              sparse_,
                              gpt_init_parameter_.is_sparse_head_,
-                             gpt_init_parameter_.int8_mode_,
                              gpt_init_parameter_.activation_type_,
                              gpt_init_parameter_.layernorm_eps_,
                              custom_all_reduce_comm_,

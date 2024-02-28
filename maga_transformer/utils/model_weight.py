@@ -225,21 +225,74 @@ class W:
     ffn_w2_lora_a = 'ffn_weights.intermediate_weight2.kernel.lora_A'
     ffn_w2_lora_b = 'ffn_weights.intermediate_weight2.kernel.lora_B'
 
+    # gptq
+    attn_qkv_z = 'self_attention_weights.query_weight.zero'
+    attn_qkv_s = 'self_attention_weights.query_weight.weight_only_quant_scale'
+    attn_qkv_p = 'self_attention_weights.query_weight.pre_scale'
+    attn_o_z = 'self_attention_weights.attention_output_weight.zero'
+    attn_o_s = 'self_attention_weights.attention_output_weight.weight_only_quant_scale'
+    attn_o_p = 'self_attention_weights.attention_output_weight.pre_scale'
+    ffn_z1 = 'ffn_weights.intermediate_weight.zero'
+    ffn_s1 = 'ffn_weights.intermediate_weight.weight_only_quant_scale'
+    ffn_p1 = 'ffn_weights.intermediate_weight.pre_scale'
+    ffn_z3 = 'ffn_weights.intermediate_weight3.zero'
+    ffn_s3 = 'ffn_weights.intermediate_weight3.weight_only_quant_scale'
+    ffn_p3 = 'ffn_weights.intermediate_weight3.pre_scale'
+    ffn_z2 = 'ffn_weights.intermediate_weight2.zero'
+    ffn_s2 = 'ffn_weights.intermediate_weight2.weight_only_quant_scale'
+    ffn_p2 = 'ffn_weights.intermediate_weight2.pre_scale'
+
     # medusa lm_head
     medusa_head = 'medusa_head'
 
-    int8_quant_w = set([
+    quant_w = set([
         attn_qkv_w,
         attn_o_w,
         ffn_w1,
         ffn_w2,
         ffn_w3,
     ])
-    moe_int8_quant_w = set([
-        ffn_w1,
-        ffn_w2,
-        ffn_w3,
+
+    int4_quant_params = set([
+        attn_qkv_z,
+        attn_qkv_s,
+        attn_o_z,
+        attn_o_s,
+        ffn_z1,
+        ffn_s1,
+        ffn_z2,
+        ffn_s2,
+        ffn_z3,
+        ffn_s3,
     ])
+
+    int8_attn_weights = [
+        [attn_qkv_w, attn_qkv_s],
+        [attn_o_w, attn_o_s],
+    ]
+
+    int8_ffn_weights = [
+        [ffn_w1, ffn_s1],
+        [ffn_w3, ffn_s3],
+        [ffn_w2, ffn_s2], 
+    ]
+
+    int4_attn_weights = [
+        [attn_qkv_w, attn_qkv_z, attn_qkv_s],
+        [attn_o_w, attn_o_z, attn_o_s],
+    ]
+
+    int4_attn_weights = [
+        [ffn_w1, ffn_z1, ffn_s1],
+        [ffn_w3, ffn_z3, ffn_s3],
+        [ffn_w2, ffn_z2, ffn_s2], 
+    ]
+
+    moe_int8_quant_weights = [
+        [ffn_w1, ffn_s1],
+        [ffn_w3, ffn_s3],
+        [ffn_w2, ffn_s2], 
+    ]
 
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
@@ -254,14 +307,29 @@ class W:
         pre_attn_ln_gamma: sp_id,
         pre_attn_ln_beta: sp_id,
         attn_qkv_w: sp_head,
+        attn_qkv_z: sp_head,
+        attn_qkv_s: sp_head,
+        attn_qkv_p: sp_head,
         attn_qkv_b: sp_head_b,
         attn_o_w: sp_0,
+        attn_o_z: sp_0,
+        attn_o_s: sp_0,
+        attn_o_p: sp_0,
         attn_o_b: sp_id,
         ffn_w1: sp_neg1,
+        ffn_z1: sp_neg1,
+        ffn_s1: sp_neg1,
+        ffn_p1: sp_neg1,
         ffn_b1: sp_neg1,
         ffn_w3: sp_neg1,
+        ffn_z3: sp_neg1,
+        ffn_s3: sp_neg1,
+        ffn_p3: sp_neg1,
         ffn_b3: sp_neg1,
         ffn_w2: sp_0,
+        ffn_z2: sp_0,
+        ffn_s2: sp_0,
+        ffn_p2: sp_0,
         ffn_b2: sp_id,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
@@ -483,6 +551,10 @@ class ModelDeployWeightInfo:
 
         self.expert_num_ = config.gpt_init_params.expert_num
         self.moe_k_      = config.gpt_init_params.moe_k
+        self._int4_mode = config.int4_mode
+        self._weight_only_group_size = config.weight_only_group_size
+        self._has_zeros = config.has_zeros
+        self._has_pre_scale = config.has_pre_scale
 
     def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:
         # auto create weight info based on exist tensor names
@@ -811,16 +883,12 @@ class LoraResource():
 class ModelWeights:
     def __init__(self, num_layers: int):
         self.weights: List[Dict[str, torch.Tensor]] = []
-        self.int8_weights: List[Dict[str, torch.Tensor]] = []
-        self.int8_scales: List[Dict[str, torch.Tensor]] = []
         self._pytorch_weights: Dict[str, torch.Tensor] = {}
         self.lora_resource: LoraResource = LoraResource()
         self._dtype = None
 
         for i in range(num_layers):
             self.weights.append({})
-            self.int8_weights.append({})
-            self.int8_scales.append({})
 
     def append_pytorch_weight(self, name: str, tensor: torch.Tensor):
         self._dtype = tensor.dtype
@@ -836,18 +904,8 @@ class ModelWeights:
     def has_pytorch_weight(self, name: str):
         return name in self._pytorch_weights
 
-    def append_layer_weight(self, int8_flag: bool, layer_id: int, name: str, tensor: torch.Tensor):
-        if int8_flag:
-            dummy, int8_weight, int8_scale = tensor
-            self.weights[layer_id][name] = dummy
-            self.int8_weights[layer_id][name] = int8_weight
-            self.int8_scales[layer_id][name] = int8_scale
-        else:
-            self.weights[layer_id][name] = tensor
-
-    def append_int8_weight(self, layer_id: int, name: str, tensor: torch.Tensor, scale: torch.Tensor):
-        self.int8_weights[layer_id][name] = tensor
-        self.int8_scales[layer_id][name] = scale
+    def append_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
+        self.weights[layer_id][name] = tensor
 
     @property
     def device(self):

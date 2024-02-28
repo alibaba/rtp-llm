@@ -8,8 +8,7 @@ class FTWeightsBase:
     def __init__(self):
         self.weights: Union[Dict[str, torch.Tensor], List[torch.Tensor]] = []
         self.int8_mode = 0
-        self.int8_weights: List[torch.Tensor] = []
-        self.int8_scales: List[torch.Tensor] = []
+        self.int4_mode = False
         self.lora_resource: LoraResource = LoraResource()
 
     @abstractmethod
@@ -38,21 +37,6 @@ class FTWeightsBase:
             else:
                 self.weights[i] = func(self.weights[i])
 
-    def _map_int8(self, func: Callable[[torch.Tensor], torch.Tensor]):
-        for i in range(len(self.int8_weights)):
-            if isinstance(self.int8_weights[i], list):
-                for j in range(len(self.int8_weights[i])):
-                    self.int8_weights[i][j] = func(self.int8_weights[i][j])
-
-            else:
-                self.int8_weights[i] = func(self.int8_weights[i])
-        for i in range(len(self.int8_scales)):
-            if isinstance(self.int8_scales[i], list):
-                for j in range(len(self.int8_scales[i])):
-                    self.int8_scales[i][j] = func(self.int8_scales[i][j])
-            else:
-                self.int8_scales[i] = func(self.int8_scales[i])
-
     def float(self):
         if self.dtype == torch.float32:
             return
@@ -62,25 +46,17 @@ class FTWeightsBase:
         if self.dtype == torch.float16:
             return
         self._map(lambda x: x.half())
-        if self.int8_mode == 1:
-            self._map_int8(lambda w: w.half())
 
     def bfloat16(self):
         if self.dtype == torch.bfloat16:
             return
         self._map(lambda x: x.bfloat16())
-        if self.int8_mode == 1:
-            self._map_int8(lambda w: w.bfloat16())
 
     def cuda(self, device: Optional[str]=None):
         self._map(lambda x: x.cuda(device))
-        if self.int8_mode == 1:
-            self._map_int8(lambda x: x.cuda(device))
 
     def to(self, device: Optional[str]=None):
         self._map(lambda x: x.to(device))
-        if self.int8_mode == 1:
-            self._map_int8(lambda x: x.to(device))
 
 class FTOPBase:
     def __init__(self):

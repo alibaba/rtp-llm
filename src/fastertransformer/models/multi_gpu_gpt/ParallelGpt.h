@@ -15,6 +15,7 @@
 #include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/cuda/cublas/cublas.h"
 #include "src/fastertransformer/cuda/custom_ar_comm.h"
+#include "src/fastertransformer/utils/activation_types.h"
 
 namespace fastertransformer {
 
@@ -39,6 +40,7 @@ private:
 
     FfnLayer<T>*                    ffn_layer_;
     std::unique_ptr<NormWrapper<T>> norm_wrapper_;
+    tc::QuantAlgo  quant_algo_;
 
     void allocateBuffer() override;
     void allocateBuffer(size_t total_batch_size, size_t max_seq_len, bool reuse_buf, bool pre_attn_ln);
@@ -84,8 +86,6 @@ public:
                 bool                                sparse                   = false,
                 std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm   = nullptr,
                 int                                 enable_custom_all_reduce = 0);
-
-    ParallelGpt(ParallelGpt<T> const& decoder);
 
     ~ParallelGpt();
     void preAllocate();

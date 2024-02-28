@@ -21,6 +21,7 @@ cc_binary(
     ],
     deps = [
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
+        "//src/fastertransformer/cutlass:cutlass_interface",
         "//src/fastertransformer/utils:utils",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",

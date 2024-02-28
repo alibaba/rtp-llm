@@ -116,7 +116,7 @@ class Mixtral(GPT):
             max_seq_len=config_json.get('max_sequence_length', 2048),
             vocab_size=config_json['vocab_size'],
             head_num_kv = config_json['num_key_value_heads'],
-            activation_type='Silu',
+            activation_type='SiGLU',
             norm_type='rmsnorm',
             rotary_embedding_dim=size_per_head,
             rotary_embedding_style=1,

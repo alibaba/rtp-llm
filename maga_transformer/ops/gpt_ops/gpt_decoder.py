@@ -23,9 +23,7 @@ class GptDecoder(FTOPBase):
             g_parallel_info.pp_size,
             g_master_info.ip,
             g_master_info.decoder_nccl_port,
-            self.weight.weights,
-            self.weight.int8_weights,
-            self.weight.int8_scales)
+            self.weight.weights)
         
         for id, lora_weight in self.weight.lora_resource.lora_map.weights_map.items():
             self.ft_op.add_lora(id, lora_weight.lora_a_weights, lora_weight.lora_b_weights)

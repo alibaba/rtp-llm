@@ -45,9 +45,7 @@ public:
           const int                     pipeline_para_size,
           const std::string&            master_ip,
           const int                     master_port,
-          const std::vector<std::unordered_map<std::string, th::Tensor>> &weights,
-          const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_weights,
-          const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_scales);
+          const std::vector<std::unordered_map<std::string, th::Tensor>> &weights);
 
     ~FtGpt() override;
 
@@ -79,8 +77,6 @@ private:
     const GptInitParameter& gpt_init_parameter_;
 
     const std::vector<std::unordered_map<std::string, th::Tensor>> weights_;
-    const std::vector<std::unordered_map<std::string, th::Tensor>> int8_weights_;
-    const std::vector<std::unordered_map<std::string, th::Tensor>> int8_scales_;
 
     ft::NcclParam tensor_para_;
     ft::NcclParam pipeline_para_;
@@ -99,14 +95,12 @@ private:
 
 class ParallelGptOp: public th::jit::CustomClassHolder {
 public:
-    ParallelGptOp(c10::intrusive_ptr<GptInitParameter> gpt_init_parameter,
-                  const int64_t                        tensor_para_size,
-                  const int64_t                        pipeline_para_size,
-                  const std::string                    master_ip,
-                  const int64_t                        master_port,
-                  const std::vector<std::unordered_map<std::string, th::Tensor>> &weights,
-                  const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_weights,
-                  const std::vector<std::unordered_map<std::string, th::Tensor>> &int8_scales);
+    ParallelGptOp(c10::intrusive_ptr<GptInitParameter>                            gpt_init_parameter,
+                  const int64_t                                                   tensor_para_size,
+                  const int64_t                                                   pipeline_para_size,
+                  const std::string                                               master_ip,
+                  const int64_t                                                   master_port,
+                  const std::vector<std::unordered_map<std::string, th::Tensor>>& weights);
 
     ~ParallelGptOp();
 

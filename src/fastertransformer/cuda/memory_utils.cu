@@ -471,11 +471,11 @@ int loadWeightFromBinAndQuantizeForWeightOnlyFunc(int8_t*             ptr,
     std::vector<T>      host_scales_buf(shape[1]);
 
     // Note: This function preprocesses the weights to a special format for weight only quant!
-    symmetric_quantize<T, T_IN>(host_quantized_weight_buf.data(),
+    tensorrt_llm::kernels::cutlass_kernels::symmetric_quantize<T, T_IN>(host_quantized_weight_buf.data(),
                                 host_scales_buf.data(),
                                 host_array.data(),
                                 shape,
-                                QuantType::INT8_WEIGHT_ONLY);
+                                tensorrt_llm::kernels::cutlass_kernels::QuantType::INT8_WEIGHT_ONLY);
 
     cudaH2Dcpy(ptr, (int8_t*)host_quantized_weight_buf.data(), host_quantized_weight_buf.size());
     cudaH2Dcpy(scales_ptr, (T*)host_scales_buf.data(), host_scales_buf.size());

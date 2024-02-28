@@ -68,7 +68,9 @@ private:
 
     bool is_qk_buf_float_;
 
-    std::shared_ptr<CutlassFpAIntBGemmRunner<T, uint8_t>> weight_only_int8_fc_runner_;
+    std::shared_ptr<tensorrt_llm::kernels::cutlass_kernels::
+                        CutlassFpAIntBGemmRunner<T, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>>
+                                   weight_only_int8_fc_runner_;
     std::shared_ptr<GemmRunner<T>> gemm_runner_;
     std::shared_ptr<LoraGemm<T>>   lora_gemm_;
 
@@ -93,35 +95,37 @@ protected:
     // int8_mode_ == 0 means we don't use any mechanism related to INT8.
     // int8_mode_ == 1 for weight quantized only gemm for GPT
     // int8_mode_ == 2 for SmoothQuant O3 (per tensor scales)
-    const int int8_mode_ = 0;
+    const int  int8_mode_ = 0;
+    const bool int4_mode_ = false;
 
 public:
-    GptContextAttentionLayer(size_t              max_batch_size,
-                             size_t              max_seq_len,
-                             size_t              head_num,
-                             size_t              head_num_kv,
-                             size_t              size_per_head,
-                             size_t              local_head_num,
-                             size_t              local_head_num_kv,
+    GptContextAttentionLayer(size_t               max_batch_size,
+                             size_t               max_seq_len,
+                             size_t               head_num,
+                             size_t               head_num_kv,
+                             size_t               size_per_head,
+                             size_t               local_head_num,
+                             size_t               local_head_num_kv,
                              std::vector<int64_t> local_layer_head_num,
                              std::vector<int64_t> local_layer_head_num_kv,
-                             size_t              rotary_embedding_dim,
-                             int                 rotary_embedding_style,
-                             int                 rotary_embedding_base,
-                             float               dynamic_embedding_scalar,
-                             int                 dynamic_embedding_max_pos,
-                             int                 position_embeddings_scale,
-                             int                 base_scale,
-                             int                 logn_seq_len,
-                             cudaStream_t        stream,
-                             cublasMMWrapper*    cublas_wrapper,
-                             IAllocator*         allocator,
-                             bool                use_logn_attn,
-                             bool                is_free_buffer_after_forward,
-                             bool                is_qk_buf_float,
-                             bool                sparse          = false,
-                             bool                is_sparse_head_ = false,
-                             int                 int8_mode       = 0);
+                             size_t               rotary_embedding_dim,
+                             int                  rotary_embedding_style,
+                             int                  rotary_embedding_base,
+                             float                dynamic_embedding_scalar,
+                             int                  dynamic_embedding_max_pos,
+                             int                  position_embeddings_scale,
+                             int                  base_scale,
+                             int                  logn_seq_len,
+                             cudaStream_t         stream,
+                             cublasMMWrapper*     cublas_wrapper,
+                             IAllocator*          allocator,
+                             bool                 use_logn_attn,
+                             bool                 is_free_buffer_after_forward,
+                             bool                 is_qk_buf_float,
+                             bool                 sparse          = false,
+                             bool                 is_sparse_head_ = false,
+                             int                  int8_mode       = 0,
+                             bool                 int4_mode       = false);
 
     GptContextAttentionLayer(GptContextAttentionLayer<T> const& attention_layer);
 

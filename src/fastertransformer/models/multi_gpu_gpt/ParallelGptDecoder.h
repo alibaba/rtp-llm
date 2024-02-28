@@ -61,6 +61,7 @@ private:
     std::unique_ptr<BaseAttentionLayer<T>> self_attention_layer_;
     std::unique_ptr<FfnLayer<T>>           ffn_layer_;
     std::unique_ptr<NormWrapper<T>>        norm_wrapper_;
+    tc::QuantAlgo quant_algo_;
 
     void initialize();
     void allocateBuffer() override;
@@ -83,8 +84,6 @@ public:
                        bool                                sparse                    = false,
                        std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm    = nullptr,
                        int                                 enable_custom_all_reduce_ = 0);
-
-    ParallelGptDecoder(ParallelGptDecoder<T> const& decoder);
 
     ~ParallelGptDecoder();
 

@@ -17,7 +17,6 @@ build --copt="-DGOOGLE_CUDA=1"
 build --copt="-DBUILD_MULTI_GPU_TCP=ON"
 build --copt="-DBUILD_MULTI_GPU=ON"
 build --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
-build --copt="-DUSE_WEIGHT_ONLY=1"
 
 build --copt="-DUSE_NVTX=ON"
 build --copt="-DENABLE_BF16=1"

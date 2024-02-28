@@ -62,9 +62,7 @@ public:
                  const int                     pipeline_para_size,
                  const std::string&            master_ip,
                  const int                     master_port,
-                 const std::vector<std::unordered_map<std::string, th::Tensor>>& weights,
-                 const std::vector<std::unordered_map<std::string, th::Tensor>>& int8_weights,
-                 const std::vector<std::unordered_map<std::string, th::Tensor>>& scale);
+                 const std::vector<std::unordered_map<std::string, th::Tensor>>& weights);
 
     ~FtGptDecoder() override;
 
@@ -108,14 +106,12 @@ private:
 
 class ParallelGptDecoderOp: public th::jit::CustomClassHolder {
 public:
-    ParallelGptDecoderOp(c10::intrusive_ptr<GptInitParameter> gpt_init_parameter,
-                         const int64_t                 tensor_para_size,
-                         const int64_t                 pipeline_para_size,
-                         std::string                   master_ip,
-                         const int64_t                 master_port,
-                         const std::vector<std::unordered_map<std::string, th::Tensor>>& weights,
-                         const std::vector<std::unordered_map<std::string, th::Tensor>>& int8_weights,
-                         const std::vector<std::unordered_map<std::string, th::Tensor>>& int8_scales);
+    ParallelGptDecoderOp(c10::intrusive_ptr<GptInitParameter>                            gpt_init_parameter,
+                         const int64_t                                                   tensor_para_size,
+                         const int64_t                                                   pipeline_para_size,
+                         std::string                                                     master_ip,
+                         const int64_t                                                   master_port,
+                         const std::vector<std::unordered_map<std::string, th::Tensor>>& weights);
 
     ~ParallelGptDecoderOp();
 

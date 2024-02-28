@@ -16,8 +16,9 @@
 
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels_template.h"
 
-namespace fastertransformer {
+namespace tensorrt_llm
+{
 #ifdef ENABLE_BF16
 template class MoeGemmRunner<__nv_bfloat16, __nv_bfloat16>;
 #endif
-}  // namespace fastertransformer
+} // namespace tensorrt_llm

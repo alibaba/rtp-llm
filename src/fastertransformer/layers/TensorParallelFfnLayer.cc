@@ -82,6 +82,7 @@ TensorParallelFfnLayer<T>::TensorParallelFfnLayer(size_t                        
                                                   size_t                              max_seq_len,
                                                   size_t                              hidden_units,
                                                   size_t                              expert_num,
+                                                  size_t                              moe_k,
                                                   size_t                              inter_size,
                                                   size_t                              inter_padding_size,
                                                   std::vector<int64_t>                layer_inter_size,
@@ -89,12 +90,12 @@ TensorParallelFfnLayer<T>::TensorParallelFfnLayer(size_t                        
                                                   NcclParam                           tensor_para,
                                                   cudaStream_t                        stream,
                                                   cublasMMWrapper*                    cublas_wrapper,
+                                                  tc::QuantAlgo                       quant_algo,
                                                   IAllocator*                         allocator,
                                                   bool                                do_all_reduce,
                                                   bool                                is_free_buffer_after_forward,
                                                   bool                                is_sparse,
                                                   bool                                is_sparse_head,
-                                                  int                                 int8_mode,
                                                   ActivationType                      activation_type,
                                                   float                               layernorm_eps,
                                                   std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
@@ -103,17 +104,18 @@ TensorParallelFfnLayer<T>::TensorParallelFfnLayer(size_t                        
                 max_seq_len,
                 hidden_units,
                 expert_num,
+                moe_k,
                 inter_size / tensor_para.world_size_,
                 inter_padding_size / tensor_para.world_size_,
                 getLocalParameter(layer_inter_size, tensor_para.world_size_),
                 getLocalParameter(layer_inter_padding_size, tensor_para.world_size_),
                 stream,
                 cublas_wrapper,
+                quant_algo,
                 allocator,
                 is_free_buffer_after_forward,
                 is_sparse,
                 is_sparse_head,
-                int8_mode,
                 activation_type,
                 layernorm_eps),
     tensor_para_(tensor_para),
@@ -122,16 +124,6 @@ TensorParallelFfnLayer<T>::TensorParallelFfnLayer(size_t                        
     do_all_reduce_(do_all_reduce) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     FT_CHECK(inter_size % tensor_para_.world_size_ == 0);
-}
-
-template<typename T>
-TensorParallelFfnLayer<T>::TensorParallelFfnLayer(TensorParallelFfnLayer<T> const& ffn_layer):
-    FfnLayer<T>(ffn_layer),
-    tensor_para_(ffn_layer.tensor_para_),
-    custom_all_reduce_comm_(ffn_layer.custom_all_reduce_comm_),
-    enable_custom_all_reduce_(ffn_layer.enable_custom_all_reduce_),
-    do_all_reduce_(ffn_layer.do_all_reduce_) {
-    FfnLayer<T>::layernorm_eps_ = ffn_layer.layernorm_eps_;
 }
 
 template class TensorParallelFfnLayer<float>;

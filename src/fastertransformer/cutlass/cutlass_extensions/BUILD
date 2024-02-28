@@ -6,6 +6,7 @@ cc_library(
         "include/**/*.h",
     ]),
     deps = [
+        "//src/fastertransformer/cutlass:cutlass_interface",
         "@cutlass//:cutlass",
         "@cutlass//:cutlass_utils",
         "@local_config_cuda//cuda:cuda",

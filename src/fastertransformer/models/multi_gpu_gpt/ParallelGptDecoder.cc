@@ -25,6 +25,7 @@ void ParallelGptDecoder<T>::initialize()
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
+    quant_algo_ = tc::QuantAlgo(gpt_init_parameter_.int8_mode_, gpt_init_parameter_.int4_mode_, gpt_init_parameter_.has_pre_scale_, gpt_init_parameter_.has_zeros_, gpt_init_parameter_.weight_only_group_size_);
     self_attention_layer_.reset(new TensorParallelDecoderSelfAttentionLayer<T>(
                                         max_batch_size_,
                                         gpt_init_parameter_.head_num_,
@@ -52,14 +53,17 @@ void ParallelGptDecoder<T>::initialize()
                                         sparse_,
                                         gpt_init_parameter_.is_sparse_head_,
                                         gpt_init_parameter_.int8_mode_,
+                                        gpt_init_parameter_.int4_mode_,
                                         custom_all_reduce_comm_,
                                         enable_custom_all_reduce_));
 
     ffn_layer_.reset(new TensorParallelFfnLayer<T>(
                              max_batch_size_,
                              1,
-                             gpt_init_parameter_.hidden_size_,
-                             gpt_init_parameter_.expert_num_,
+                             gpt_init_parameter_.head_num_,
+                             gpt_init_parameter_.size_per_head_,
+                             gpt_init_parameter_.expert_num_,  // expert_num
+                             gpt_init_parameter_.moe_k_,
                              gpt_init_parameter_.inter_size_,
                              gpt_init_parameter_.inter_padding_size_,
                              gpt_init_parameter_.layer_inter_size_,
@@ -67,12 +71,12 @@ void ParallelGptDecoder<T>::initialize()
                              tensor_para_,
                              stream_,
                              cublas_wrapper_,
+                             quant_algo_,
                              allocator_,
                              true,
                              is_free_buffer_after_forward_,
                              sparse_,
                              gpt_init_parameter_.is_sparse_head_,
-                             gpt_init_parameter_.int8_mode_,
                              gpt_init_parameter_.activation_type_,
                              gpt_init_parameter_.layernorm_eps_,
                              custom_all_reduce_comm_,
@@ -102,24 +106,6 @@ ParallelGptDecoder<T>::ParallelGptDecoder(size_t                              ma
     pipeline_para_(pipeline_para),
     custom_all_reduce_comm_(custom_all_reduce_comm),
     enable_custom_all_reduce_(enable_custom_all_reduce)
-{
-    initialize();
-}
-
-template<typename T>
-ParallelGptDecoder<T>::ParallelGptDecoder(ParallelGptDecoder<T> const& decoder):
-    BaseLayer(decoder.stream_,
-              decoder.cublas_wrapper_,
-              decoder.allocator_,
-              decoder.is_free_buffer_after_forward_,
-              decoder.cuda_device_prop_,
-              decoder.sparse_),
-    max_batch_size_(decoder.max_batch_size_),
-    gpt_init_parameter_(decoder.gpt_init_parameter_),
-    tensor_para_(decoder.tensor_para_),
-    pipeline_para_(decoder.pipeline_para_),
-    custom_all_reduce_comm_(decoder.custom_all_reduce_comm_),
-    enable_custom_all_reduce_(decoder.enable_custom_all_reduce_)
 {
     initialize();
 }

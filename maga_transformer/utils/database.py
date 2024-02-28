@@ -250,15 +250,15 @@ class CkptDatabase(BaseDatabase):
         else:
             return torch.load(file, pickle_module=meta_pickler)
 
-    def load_tensor(self, name: str) -> List[torch.Tensor]:
+    def load_tensor(self, name: str, datatype: str = torch.float16) -> List[torch.Tensor]:
         tensors = []
         for ckpt_file in self.PretrainFileList:
             if name in ckpt_file.get_tensor_names():
-                tensors.append(self._load(name, ckpt_file))
+                tensors.append(self._load(name, ckpt_file, datatype))
 
         for ckpt_file in self.FinetuneFileList:
             if name in ckpt_file.get_tensor_names():
-                tensors.append(self._load(name, ckpt_file))
+                tensors.append(self._load(name, ckpt_file, datatype))
 
         return tensors
     
@@ -272,12 +272,12 @@ class CkptDatabase(BaseDatabase):
                     tensors.append(self._load(tensor_name, ckpt_file))
         return tensors
     
-    def _load(self, name: str, ckptfile: CkptFileInfo) -> torch.Tensor:
+    def _load(self, name: str, ckptfile: CkptFileInfo, datatype: str = torch.float16) -> torch.Tensor:
 
         path: str = ckptfile.file_name
         if ckptfile.is_safetensor():
             with safe_open(path, framework="pt") as f:
-                return f.get_tensor(name).half()
+                return f.get_tensor(name).to(datatype)
         else:
             meta = ckptfile.metadata[name]
             def __preload_tensor_content(file, tensor, meta, storage_offset):

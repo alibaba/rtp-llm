@@ -22,10 +22,9 @@ private:
     const size_t local_head_num_kv_;
     const size_t local_hidden_units_;
 
-    bool                                                  is_qk_buf_float_;
-    std::shared_ptr<CutlassFpAIntBGemmRunner<T, uint8_t>> weight_only_int8_fc_runner_;
-    std::shared_ptr<GemmRunner<T>>                        gemm_runner_;
-    std::shared_ptr<LoraGemm<T>>                          lora_gemm_;
+    bool                           is_qk_buf_float_;
+    std::shared_ptr<LoraGemm<T>>   lora_gemm_;
+    std::shared_ptr<GemmRunner<T>> gemm_runner_;
 
     bool multi_block_mode_ = false;
     // for sparse
@@ -117,6 +116,7 @@ public:
                              NcclParam               tensor_para,
                              cudaStream_t            stream,
                              cublasMMWrapper*        cublas_wrapper,
+                             tc::QuantAlgo           quant_algo,
                              IAllocator*             allocator,
                              bool                    is_free_buffer_after_forward,
                              bool                    is_qk_buf_float,

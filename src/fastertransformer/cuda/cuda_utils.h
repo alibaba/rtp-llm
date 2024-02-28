@@ -281,6 +281,10 @@ void check_max_val(const T* result, const int size);
 template<typename T>
 void check_abs_mean_val(const T* result, const int size);
 
+#define PRINT_FUNC_NAME_()                                                                                             \
+    do {                                                                                                               \
+        std::cout << "[FT][CALL] " << __FUNCTION__ << " " << std::endl;                                                \
+    } while (0)
 
 #ifdef SPARSITY_ENABLED
 #define CHECK_CUSPARSE(func)                                                                                           \
@@ -365,6 +369,13 @@ inline std::string getDeviceName() {
 
 inline int div_up(int a, int n) {
     return (a + n - 1) / n;
+}
+
+template <typename T, typename U, typename = std::enable_if_t<std::is_integral<T>::value>,
+    typename = std::enable_if_t<std::is_integral<U>::value>>
+auto constexpr ceilDiv(T numerator, U denominator)
+{
+    return (numerator + denominator - 1) / denominator;
 }
 
 cudaError_t getSetDevice(int i_device, int* o_device = NULL);

@@ -41,68 +41,88 @@
 #include "cutlass/gemm/gemm.h"
 #include "cutlass/matrix_coord.h"
 #include "cutlass/semaphore.h"
-#include "cutlass/gemm/kernel/params_universal_base.h"
+
+#include <type_traits>
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-namespace cutlass {
-namespace gemm {
-namespace kernel {
+namespace cutlass
+{
+namespace gemm
+{
+namespace kernel
+{
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Mma_,                 ///! Threadblock-scoped matrix multiply-accumulate
-         typename Epilogue_,            ///! Epilogue
-         typename ThreadblockSwizzle_,  ///! Threadblock swizzling function
-         typename KernelArch,  ///! The Architecture this kernel is compiled for. Used since SIMT kernels lose top-level
-                               /// arch.
-         bool SplitKSerial     ///! If true, code supporting split-K via serial reduction is enabled.
-         >
-struct GemmFpAIntB {
+namespace detail
+{
+template <typename>
+inline constexpr bool dependent_false_v = false;
+}
 
-    using Mma                       = Mma_;
-    using Epilogue                  = Epilogue_;
-    using EpilogueOutputOp          = typename Epilogue::OutputOp;
-    using ThreadblockSwizzle        = ThreadblockSwizzle_;
+template <typename Mma_,          ///! Threadblock-scoped matrix multiply-accumulate
+    typename Epilogue_,           ///! Epilogue
+    typename ThreadblockSwizzle_, ///! Threadblock swizzling function
+    typename KernelArch, ///! The Architecture this kernel is compiled for. Used since SIMT kernels lose top-level
+                         /// arch.
+    bool SplitKSerial    ///! If true, code supporting split-K via serial reduction is enabled.
+    >
+struct GemmFpAIntB
+{
+
+    using Mma = Mma_;
+    using Epilogue = Epilogue_;
+    using EpilogueOutputOp = typename Epilogue::OutputOp;
+    using ThreadblockSwizzle = ThreadblockSwizzle_;
     static bool const kSplitKSerial = SplitKSerial;
 
-    using ElementA     = typename Mma::IteratorA::Element;
-    using LayoutA      = typename Mma::IteratorA::Layout;
-    using ElementB     = typename Mma::IteratorB::Element;
-    using LayoutB      = typename Mma::IteratorB::Element;
-    using ElementC     = typename Epilogue::OutputTileIterator::Element;
-    using LayoutC      = typename Mma::LayoutC;
+    using ElementA = typename Mma::IteratorA::Element;
+    using LayoutA = typename Mma::IteratorA::Layout;
+    using ElementB = typename Mma::IteratorB::Element;
+    using LayoutB = typename Mma::IteratorB::Element;
+    using ElementC = typename Epilogue::OutputTileIterator::Element;
+    using LayoutC = typename Mma::LayoutC;
     using ElementScale = ElementC;
 
     static ComplexTransform const kTransformA = Mma::kTransformA;
     static ComplexTransform const kTransformB = Mma::kTransformA;
 
     // Type definitions about the mainloop.
-    using Operator         = typename Mma::Operator;
-    using OperatorClass    = typename Mma::Operator::OperatorClass;
+    using Operator = typename Mma::Operator;
+    using OperatorClass = typename Mma::Operator::OperatorClass;
     using ThreadblockShape = typename Mma::Shape;
-    using WarpShape        = typename Mma::Operator::Shape;
+    using WarpShape = typename Mma::Operator::Shape;
     using InstructionShape = typename Mma::Policy::Operator::InstructionShape;
-    using ArchTag          = typename Mma::ArchTag;
+    using ArchTag = typename Mma::ArchTag;
 
-    static int const kStages     = Mma::kStages;
+    static int const kStages = Mma::kStages;
     static int const kAlignmentA = Mma::IteratorA::AccessType::kElements;
     static int const kAlignmentB = Mma::IteratorB::AccessType::kElements;
     static int const kAlignmentC = Epilogue::OutputTileIterator::kElementsPerAccess;
 
     /// Warp count (concept: GemmShape)
-    using WarpCount               = typename Mma::WarpCount;
+    using WarpCount = typename Mma::WarpCount;
     static int const kThreadCount = 32 * WarpCount::kCount;
 
     static constexpr int kInterleave = Mma::IteratorB::Shape::kRow / Mma::Shape::kK;
 
-    // Parameters structure
-    struct Arguments : UniversalArgumentsBase {
-        typename Mma::IteratorA::TensorRef               ref_A;
-        typename Mma::IteratorB::TensorRef               ref_B;
-        typename Mma::IteratorScale::TensorRef           ref_scale;
+    /// Parameters structure
+    struct Arguments
+    {
+        GemmUniversalMode mode = GemmUniversalMode::kGemm;
+
+        cutlass::gemm::GemmCoord problem_size;
+        int group_size;
+        typename Mma::IteratorA::TensorRef ref_A;
+        typename Mma::IteratorB::TensorRef ref_B;
+        typename Mma::IteratorScale::TensorRef ref_scale;
+        typename Mma::IteratorScale::TensorRef ref_zero;
         typename Epilogue::OutputTileIterator::TensorRef ref_C;
         typename Epilogue::OutputTileIterator::TensorRef ref_D;
+
+        // Control serial split-k
+        int batch_count;
 
         typename EpilogueOutputOp::Params output_op;
 
@@ -110,6 +130,9 @@ struct GemmFpAIntB {
         int const* gather_A_indices;
         int const* gather_B_indices;
         int const* scatter_D_indices;
+
+        // Included so we can use Gemm Universal
+        int batch_stride_D = 0;
 
         //
         // Methods
@@ -119,60 +142,52 @@ struct GemmFpAIntB {
         Arguments() {}
 
         CUTLASS_HOST_DEVICE
-        Arguments(cutlass::gemm::GemmCoord const&                  problem_size,
-                  typename Mma::IteratorA::TensorRef               ref_A,
-                  typename Mma::IteratorB::TensorRef               ref_B,
-                  typename Mma::IteratorScale::TensorRef           ref_scale,
-                  typename Epilogue::OutputTileIterator::TensorRef ref_C,
-                  typename Epilogue::OutputTileIterator::TensorRef ref_D,
-                  int                                              serial_split_k_factor,
-                  typename EpilogueOutputOp::Params                output_op = typename EpilogueOutputOp::Params(),
-                  int const*                                       gather_A_indices  = nullptr,
-                  int const*                                       gather_B_indices  = nullptr,
-                  int const*                                       scatter_D_indices = nullptr):
-            UniversalArgumentsBase(GemmUniversalMode::kGemm, problem_size, serial_split_k_factor, 0),
-            ref_A(ref_A),
-            ref_B(ref_B),
-            ref_scale(ref_scale),
-            ref_C(ref_C),
-            ref_D(ref_D),
-            output_op(output_op),
-            gather_A_indices(gather_A_indices),
-            gather_B_indices(gather_B_indices),
-            scatter_D_indices(scatter_D_indices)
+        Arguments(cutlass::gemm::GemmCoord const& problem_size, const int group_size,
+            typename Mma::IteratorA::TensorRef ref_A, typename Mma::IteratorB::TensorRef ref_B,
+            typename Mma::IteratorScale::TensorRef ref_scale, typename Mma::IteratorScale::TensorRef ref_zero,
+            typename Epilogue::OutputTileIterator::TensorRef ref_C,
+            typename Epilogue::OutputTileIterator::TensorRef ref_D, int serial_split_k_factor,
+            typename EpilogueOutputOp::Params output_op = typename EpilogueOutputOp::Params(),
+            int const* gather_A_indices = nullptr, int const* gather_B_indices = nullptr,
+            int const* scatter_D_indices = nullptr)
+            : problem_size(problem_size)
+            , group_size(group_size)
+            , ref_A(ref_A)
+            , ref_B(ref_B)
+            , ref_scale(ref_scale)
+            , ref_zero(ref_zero)
+            , ref_C(ref_C)
+            , ref_D(ref_D)
+            , batch_count(serial_split_k_factor)
+            , output_op(output_op)
+            , gather_A_indices(gather_A_indices)
+            , gather_B_indices(gather_B_indices)
+            , scatter_D_indices(scatter_D_indices)
         {
         }
     };
 
     /// Parameters structure
-    struct Params : UniversalParamsBase<
-        ThreadblockSwizzle,
-        ThreadblockShape,
-        ElementA,
-        ElementB,
-        ElementC,
-        LayoutA,
-        LayoutB>
+    struct Params
     {
-        using ParamsBase = UniversalParamsBase<
-            ThreadblockSwizzle,
-            ThreadblockShape,
-            ElementA,
-            ElementB,
-            ElementC,
-            LayoutA,
-            LayoutB>;
-        typename Mma::IteratorA::Params                  params_A;
-        typename Mma::IteratorA::TensorRef               ref_A;
-        typename Mma::IteratorB::Params                  params_B;
-        typename Mma::IteratorB::TensorRef               ref_B;
-        typename Mma::IteratorScale::Params              params_scale;
-        typename Mma::IteratorScale::TensorRef           ref_scale;
-        typename Epilogue::OutputTileIterator::Params    params_C;
+        cutlass::gemm::GemmCoord problem_size;
+        int group_size;
+        cutlass::gemm::GemmCoord grid_tiled_shape;
+        int swizzle_log_tile;
+        typename Mma::IteratorA::Params params_A;
+        typename Mma::IteratorA::TensorRef ref_A;
+        typename Mma::IteratorB::Params params_B;
+        typename Mma::IteratorB::TensorRef ref_B;
+        typename Mma::IteratorScale::Params params_scale;
+        typename Mma::IteratorScale::TensorRef ref_scale;
+        typename Mma::IteratorScale::TensorRef ref_zero;
+        typename Epilogue::OutputTileIterator::Params params_C;
         typename Epilogue::OutputTileIterator::TensorRef ref_C;
-        typename Epilogue::OutputTileIterator::Params    params_D;
+        typename Epilogue::OutputTileIterator::Params params_D;
         typename Epilogue::OutputTileIterator::TensorRef ref_D;
-        typename EpilogueOutputOp::Params                output_op;
+        typename EpilogueOutputOp::Params output_op;
+        int* semaphore;
+        int gemm_k_size;
         // For gather+scatter operations
         int const* gather_A_indices;
         int const* gather_B_indices;
@@ -183,35 +198,45 @@ struct GemmFpAIntB {
         //
 
         CUTLASS_HOST_DEVICE
-        Params() {}
+        Params()
+            : swizzle_log_tile(0)
+            , semaphore(0)
+            , gemm_k_size(0)
+        {
+        }
 
-        /// Constructor
-        Params(
-                Arguments const &args,  /// GEMM application arguments
-                int device_sms,         /// Number of SMs on the device
-                int sm_occupancy)       /// Kernel SM occupancy (in thread blocks)
-            :
-            ParamsBase(args, device_sms, sm_occupancy),
-            params_A(args.ref_A.layout()),
-            ref_A(args.ref_A),
-            params_B(args.ref_B.layout()),
-            ref_B(args.ref_B),
-            params_scale(args.ref_scale.layout()),
-            ref_scale(args.ref_scale),
-            params_C(args.ref_C.layout()),
-            ref_C(args.ref_C),
-            params_D(args.ref_D.layout()),
-            ref_D(args.ref_D),
-            output_op(args.output_op),
-            gather_A_indices(args.gather_A_indices),
-            gather_B_indices(args.gather_B_indices),
-            scatter_D_indices(args.scatter_D_indices)
+        CUTLASS_HOST_DEVICE
+        Params(Arguments const& args, cutlass::gemm::GemmCoord const& grid_tiled_shape, const int gemm_k_size,
+            void* workspace = nullptr)
+            : problem_size(args.problem_size)
+            , group_size(args.group_size)
+            , grid_tiled_shape(grid_tiled_shape)
+            , swizzle_log_tile(ThreadblockSwizzle().get_log_tile(grid_tiled_shape))
+            , params_A(args.ref_A.layout())
+            , ref_A(args.ref_A)
+            , params_B(args.ref_B.layout())
+            , ref_B(args.ref_B)
+            , params_scale(args.ref_scale.layout())
+            , ref_scale(args.ref_scale)
+            , ref_zero(args.ref_zero)
+            , params_C(args.ref_C.layout())
+            , ref_C(args.ref_C)
+            , params_D(args.ref_D.layout())
+            , ref_D(args.ref_D)
+            , output_op(args.output_op)
+            , semaphore(static_cast<int*>(workspace))
+            , gemm_k_size(gemm_k_size)
+            , gather_A_indices(args.gather_A_indices)
+            , gather_B_indices(args.gather_B_indices)
+            , scatter_D_indices(args.scatter_D_indices)
         {
         }
     };
+
     /// Shared memory storage structure
-    union SharedStorage {
-        typename Mma::SharedStorage      main_loop;
+    union SharedStorage
+    {
+        typename Mma::SharedStorage main_loop;
         typename Epilogue::SharedStorage epilogue;
     };
 
@@ -227,47 +252,83 @@ struct GemmFpAIntB {
     static Status can_implement(Arguments const& args)
     {
 
-        static int const kAlignmentA =
-            (platform::is_same<typename Mma::IteratorA::Layout, layout::ColumnMajorInterleaved<32>>::value) ?
-                32 :
-            (platform::is_same<typename Mma::IteratorA::Layout, layout::ColumnMajorInterleaved<64>>::value) ?
-                64 :
-                Mma::IteratorA::AccessType::kElements;
-        static int const kAlignmentB =
-            (platform::is_same<typename Mma::IteratorB::Layout, layout::RowMajorInterleaved<32>>::value) ?
-                32 :
-            (platform::is_same<typename Mma::IteratorB::Layout, layout::RowMajorInterleaved<64>>::value) ?
-                64 :
-                Mma::IteratorB::AccessType::kElements;
+        static int const kAlignmentA
+            = (platform::is_same<typename Mma::IteratorA::Layout, layout::ColumnMajorInterleaved<32>>::value) ? 32
+            : (platform::is_same<typename Mma::IteratorA::Layout, layout::ColumnMajorInterleaved<64>>::value)
+            ? 64
+            : Mma::IteratorA::AccessType::kElements;
+        static int const kAlignmentB
+            = (platform::is_same<typename Mma::IteratorB::Layout, layout::RowMajorInterleaved<32>>::value) ? 32
+            : (platform::is_same<typename Mma::IteratorB::Layout, layout::RowMajorInterleaved<64>>::value)
+            ? 64
+            : Mma::IteratorB::AccessType::kElements;
 
         static int const kAlignmentScale = Mma::IteratorScale::AccessType::kElements;
 
         static int const kAlignmentC = (platform::is_same<typename Epilogue::OutputTileIterator::Layout,
-                                                          layout::ColumnMajorInterleaved<32>>::value) ?
-                                           32 :
-                                       (platform::is_same<typename Epilogue::OutputTileIterator::Layout,
-                                                          layout::ColumnMajorInterleaved<64>>::value) ?
-                                           64 :
-                                           Epilogue::OutputTileIterator::kElementsPerAccess;
+                                           layout::ColumnMajorInterleaved<32>>::value)
+            ? 32
+            : (platform::is_same<typename Epilogue::OutputTileIterator::Layout,
+                  layout::ColumnMajorInterleaved<64>>::value)
+            ? 64
+            : Epilogue::OutputTileIterator::kElementsPerAccess;
 
-        if (!TensorRef_aligned(args.ref_A, kAlignmentA)) {
+        if (!TensorRef_aligned(args.ref_A, kAlignmentA))
+        {
             return Status::kErrorMisalignedOperand;
         }
 
-        if (!TensorRef_aligned(args.ref_B, kAlignmentB)) {
+        if (!TensorRef_aligned(args.ref_B, kAlignmentB))
+        {
             return Status::kErrorMisalignedOperand;
         }
 
-        if (!TensorRef_aligned(args.ref_scale, kAlignmentScale)) {
+        if (!TensorRef_aligned(args.ref_scale, kAlignmentScale))
+        {
             return Status::kErrorMisalignedOperand;
         }
 
-        if (!TensorRef_aligned(args.ref_C, kAlignmentC)) {
+        if (!TensorRef_aligned(args.ref_zero, kAlignmentScale))
+        {
             return Status::kErrorMisalignedOperand;
         }
 
-        if (!TensorRef_aligned(args.ref_D, kAlignmentC)) {
+        if (!TensorRef_aligned(args.ref_C, kAlignmentC))
+        {
             return Status::kErrorMisalignedOperand;
+        }
+
+        if (!TensorRef_aligned(args.ref_D, kAlignmentC))
+        {
+            return Status::kErrorMisalignedOperand;
+        }
+
+        if (!args.ref_scale.good())
+        {
+            return Status::kErrorNotSupported;
+        }
+
+        if constexpr (hasZero(Mma::QuantOp))
+        {
+            if (!args.ref_zero.good())
+            {
+                return Status::kErrorNotSupported;
+            }
+        }
+        else
+        {
+            if (args.ref_zero.good())
+            {
+                return Status::kErrorNotSupported;
+            }
+        }
+
+        if constexpr (isFinegrained(Mma::QuantOp))
+        {
+            if (args.group_size != 64 && args.group_size != 128)
+            {
+                return Status::kErrorNotSupported;
+            }
         }
 
         return Status::kSuccess;
@@ -282,8 +343,9 @@ struct GemmFpAIntB {
     // The dummy template parameter is not used and exists so that we can compile this code using
     // a standard earlier than C++17. Prior to C++17, fully specialized templates HAD to exists in
     // a namespace
-    template<bool B, typename dummy = void>
-    struct KernelRunner {
+    template <bool B, typename dummy = void>
+    struct KernelRunner
+    {
         CUTLASS_DEVICE
         static void run_kernel(Params const& params, SharedStorage& shared_storage)
         {
@@ -291,25 +353,49 @@ struct GemmFpAIntB {
         }
     };
 
-    template<typename dummy>
-    struct KernelRunner<true, dummy> {
+    // Initializes the fine grained scale+bias iterator. Needed since the fine grained iterator
+    // has a different constructor signature than a regular cutlass iterator
+    template <typename IteratorScale, WeightOnlyQuantOp op, std::enable_if_t<isFinegrained(op), bool> = true>
+    CUTLASS_DEVICE static IteratorScale initialize_scale(typename IteratorScale::Params const& params,
+        typename IteratorScale::Pointer pointer_scale, typename IteratorScale::Pointer pointer_zero,
+        typename IteratorScale::TensorCoord extent, int thread_id,
+        typename IteratorScale::TensorCoord const& threadblock_offset, int group_size)
+    {
+
+        return IteratorScale(params, pointer_scale, pointer_zero, extent, thread_id, threadblock_offset, group_size);
+    }
+
+    template <typename IteratorScale, WeightOnlyQuantOp op, std::enable_if_t<!isFinegrained(op), bool> = true>
+    CUTLASS_DEVICE static IteratorScale initialize_scale(typename IteratorScale::Params const& params,
+        typename IteratorScale::Pointer pointer_scale, typename IteratorScale::Pointer pointer_zero,
+        typename IteratorScale::TensorCoord extent, int thread_id,
+        typename IteratorScale::TensorCoord const& threadblock_offset, int group_size)
+    {
+
+        return IteratorScale(params, pointer_scale, extent, thread_id, threadblock_offset);
+    }
+
+    template <typename dummy>
+    struct KernelRunner<true, dummy>
+    {
         CUTLASS_DEVICE
         static void run_kernel(Params const& params, SharedStorage& shared_storage)
         {
             using LayoutB = typename Mma::IteratorB::Layout;
             static_assert(platform::is_same<LayoutB, layout::RowMajor>::value && kInterleave == 1
-                              || platform::is_same<LayoutB, layout::ColumnMajor>::value && kInterleave >= 1,
-                          "B must be row major/col major OR col major interleaved.");
+                    || platform::is_same<LayoutB, layout::ColumnMajor>::value && kInterleave >= 1,
+                "B must be row major/col major OR col major interleaved.");
 
             // Compute threadblock location
             ThreadblockSwizzle threadblock_swizzle;
 
-            cutlass::gemm::GemmCoord threadblock_tile_offset =
-                threadblock_swizzle.get_tile_offset(params.swizzle_log_tile);
+            cutlass::gemm::GemmCoord threadblock_tile_offset
+                = threadblock_swizzle.get_tile_offset(params.swizzle_log_tile);
 
             // Early exit if CTA is out of range
             if (params.grid_tiled_shape.m() <= threadblock_tile_offset.m()
-                || params.grid_tiled_shape.n() <= threadblock_tile_offset.n()) {
+                || params.grid_tiled_shape.n() <= threadblock_tile_offset.n())
+            {
 
                 return;
             }
@@ -321,9 +407,11 @@ struct GemmFpAIntB {
             };
 
             cutlass::MatrixCoord tb_offset_B{threadblock_tile_offset.k() * params.gemm_k_size * kInterleave,
-                                             threadblock_tile_offset.n() * Mma::Shape::kN / kInterleave};
+                threadblock_tile_offset.n() * Mma::Shape::kN / kInterleave};
 
-            cutlass::MatrixCoord tb_offset_scale{0, threadblock_tile_offset.n() * Mma::Shape::kN};
+            typename MatrixCoord::Index fg_row_offset = threadblock_tile_offset.k() * params.gemm_k_size / 64;
+            typename MatrixCoord::Index scale_row_offset = isFinegrained(Mma::QuantOp) ? fg_row_offset : 0;
+            cutlass::MatrixCoord tb_offset_scale{scale_row_offset, threadblock_tile_offset.n() * Mma::Shape::kN};
 
             // Problem size is a function of threadblock index in the K dimension
             int problem_size_k = min(params.problem_size.k(), (threadblock_tile_offset.k() + 1) * params.gemm_k_size);
@@ -335,25 +423,17 @@ struct GemmFpAIntB {
             int thread_idx = threadIdx.x;
 
             // Construct iterators to A and B operands
-            typename Mma::IteratorA iterator_A(params.params_A,
-                                               params.ref_A.data(),
-                                               {params.problem_size.m(), problem_size_k},
-                                               thread_idx,
-                                               tb_offset_A,
-                                               params.gather_A_indices);
+            typename Mma::IteratorA iterator_A(params.params_A, params.ref_A.data(),
+                {params.problem_size.m(), problem_size_k}, thread_idx, tb_offset_A, params.gather_A_indices);
 
-            typename Mma::IteratorB iterator_B(params.params_B,
-                                               params.ref_B.data(),
-                                               {problem_size_k * kInterleave, params.problem_size.n() / kInterleave},
-                                               thread_idx,
-                                               tb_offset_B,
-                                               params.gather_B_indices);
+            typename Mma::IteratorB iterator_B(params.params_B, params.ref_B.data(),
+                {problem_size_k * kInterleave, params.problem_size.n() / kInterleave}, thread_idx, tb_offset_B,
+                params.gather_B_indices);
 
-            typename Mma::IteratorScale iterator_scale(params.params_scale,
-                                                       params.ref_scale.data(),
-                                                       {1, params.problem_size.n()},
-                                                       thread_idx,
-                                                       tb_offset_scale);
+            typename MatrixCoord::Index scale_row_extent = isFinegrained(Mma::QuantOp) ? problem_size_k / 64 : 1;
+            typename Mma::IteratorScale iterator_scale = initialize_scale<typename Mma::IteratorScale, Mma::QuantOp>(
+                params.params_scale, params.ref_scale.data(), params.ref_zero.data(),
+                {scale_row_extent, params.problem_size.n()}, thread_idx, tb_offset_scale, params.group_size);
 
             // Broadcast the warp_id computed by lane 0 to ensure dependent code
             // is compiled as warp-uniform.
@@ -364,13 +444,14 @@ struct GemmFpAIntB {
             // Main loop
             //
             // Construct thread-scoped matrix multiply
-            Mma mma(shared_storage.main_loop, thread_idx, warp_idx, lane_idx);
+            Mma mma(shared_storage.main_loop, params.group_size, thread_idx, warp_idx, lane_idx);
 
             typename Mma::FragmentC accumulators;
 
             accumulators.clear();
 
-            if (!kSplitKSerial || gemm_k_iterations > 0) {
+            if (!kSplitKSerial || gemm_k_iterations > 0)
+            {
                 // Compute threadblock-scoped matrix multiply-add
                 mma(gemm_k_iterations, accumulators, iterator_A, iterator_B, iterator_scale, accumulators);
             }
@@ -388,8 +469,8 @@ struct GemmFpAIntB {
             threadblock_tile_offset = threadblock_swizzle.get_tile_offset(params.swizzle_log_tile);
 
             // assume identity swizzle
-            MatrixCoord threadblock_offset(threadblock_tile_offset.m() * Mma::Shape::kM,
-                                           threadblock_tile_offset.n() * Mma::Shape::kN);
+            MatrixCoord threadblock_offset(
+                threadblock_tile_offset.m() * Mma::Shape::kM, threadblock_tile_offset.n() * Mma::Shape::kN);
 
             int block_idx = threadblock_tile_offset.m() + threadblock_tile_offset.n() * params.grid_tiled_shape.m();
 
@@ -397,7 +478,8 @@ struct GemmFpAIntB {
             Semaphore semaphore(params.semaphore + block_idx, thread_idx);
 
             // If performing a reduction via split-K, fetch the initial synchronization
-            if (kSplitKSerial && params.grid_tiled_shape.k() > 1) {
+            if (kSplitKSerial && params.grid_tiled_shape.k() > 1)
+            {
 
                 // Fetch the synchronization lock initially but do not block.
                 semaphore.fetch();
@@ -407,28 +489,22 @@ struct GemmFpAIntB {
             }
 
             // Tile iterator loading from source tensor.
-            typename Epilogue::OutputTileIterator iterator_C(params.params_C,
-                                                             params.ref_C.data(),
-                                                             params.problem_size.mn(),
-                                                             thread_idx,
-                                                             threadblock_offset,
-                                                             params.scatter_D_indices);
+            typename Epilogue::OutputTileIterator iterator_C(params.params_C, params.ref_C.data(),
+                params.problem_size.mn(), thread_idx, threadblock_offset, params.scatter_D_indices);
 
             // Tile iterator writing to destination tensor.
-            typename Epilogue::OutputTileIterator iterator_D(params.params_D,
-                                                             params.ref_D.data(),
-                                                             params.problem_size.mn(),
-                                                             thread_idx,
-                                                             threadblock_offset,
-                                                             params.scatter_D_indices);
+            typename Epilogue::OutputTileIterator iterator_D(params.params_D, params.ref_D.data(),
+                params.problem_size.mn(), thread_idx, threadblock_offset, params.scatter_D_indices);
 
             Epilogue epilogue(shared_storage.epilogue, thread_idx, warp_idx, lane_idx);
 
             // Wait on the semaphore - this latency may have been covered by iterator construction
-            if (kSplitKSerial && params.grid_tiled_shape.k() > 1) {
+            if (kSplitKSerial && params.grid_tiled_shape.k() > 1)
+            {
 
                 // For subsequent threadblocks, the source matrix is held in the 'D' tensor.
-                if (threadblock_tile_offset.k()) {
+                if (threadblock_tile_offset.k())
+                {
                     iterator_C = iterator_D;
                 }
 
@@ -442,15 +518,18 @@ struct GemmFpAIntB {
             // Release the semaphore
             //
 
-            if (kSplitKSerial && params.grid_tiled_shape.k() > 1) {
+            if (kSplitKSerial && params.grid_tiled_shape.k() > 1)
+            {
 
                 int lock = 0;
-                if (params.grid_tiled_shape.k() == threadblock_tile_offset.k() + 1) {
+                if (params.grid_tiled_shape.k() == threadblock_tile_offset.k() + 1)
+                {
 
                     // The final threadblock resets the semaphore for subsequent grids.
                     lock = 0;
                 }
-                else {
+                else
+                {
                     // Otherwise, the semaphore is incremented
                     lock = threadblock_tile_offset.k() + 1;
                 }
@@ -468,33 +547,28 @@ struct GemmFpAIntB {
     CUTLASS_DEVICE
     void operator()(Params const& params, SharedStorage& shared_storage)
     {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700) && (__CUDA_ARCH__ < 750)
+#if defined(__CUDA_ARCH__)
+#if (__CUDA_ARCH__ >= 700) && (__CUDA_ARCH__ < 750)
         static constexpr bool compile_needed = platform::is_same<KernelArch, arch::Sm70>::value;
         KernelRunner<compile_needed>::run_kernel(params, shared_storage);
-#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 750) && (__CUDA_ARCH__ < 800)
+#elif (__CUDA_ARCH__ >= 750) && (__CUDA_ARCH__ < 800)
         static constexpr bool compile_needed = platform::is_same<KernelArch, arch::Sm75>::value;
         KernelRunner<compile_needed>::run_kernel(params, shared_storage);
-#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && (__CUDA_ARCH__ < 900)
+#elif (__CUDA_ARCH__ >= 800) && (__CUDA_ARCH__ <= 900)
         static constexpr bool compile_needed = platform::is_same<KernelArch, arch::Sm80>::value;
         KernelRunner<compile_needed>::run_kernel(params, shared_storage);
+#else
+        static_assert(
+            false, "Invalid architecture being compiled. Only Volta+ supported in weight-only quantization kernels.");
+#endif
 #else
         CUTLASS_NOT_IMPLEMENTED();
 #endif
     }
-
-  // Factory invocation
-  CUTLASS_DEVICE
-  static void invoke(
-    Params const &params,
-    SharedStorage &shared_storage)
-  {
-    GemmFpAIntB op;
-    op(params, shared_storage);
-  }
 };
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-}  // namespace kernel
-}  // namespace gemm
-}  // namespace cutlass
+} // namespace kernel
+} // namespace gemm
+} // namespace cutlass

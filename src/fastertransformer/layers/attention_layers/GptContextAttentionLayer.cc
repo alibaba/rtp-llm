@@ -135,13 +135,8 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
                         hidden_units_,
                         attention_input,
                         &attention_weights->query_weight,
-                        qkv_buf_,
-                        int8_mode_,
-                        use_sparse,
-                        mixed_gemm_workspace_,
-                        mixed_gemm_ws_bytes_,
-                        m_padded);
-
+                        qkv_buf_);
+    
     // lora
     lora_gemm_->applyLoRA(m,
                           request_batch_size,
@@ -443,13 +438,8 @@ void GptContextAttentionLayer<T>::Attention(TensorMap*                output_ten
                         local_hidden_units_rt,
                         qkv_buf_3_input,
                         &attention_weights->attention_output_weight,
-                        attention_out,
-                        int8_mode_,
-                        use_sparse,
-                        mixed_gemm_workspace_,
-                        mixed_gemm_ws_bytes_,
-                        m_padded);
-
+                        attention_out);
+    
     // lora
     lora_gemm_->applyLoRA(m,
                           request_batch_size,
@@ -497,7 +487,8 @@ GptContextAttentionLayer<T>::GptContextAttentionLayer(size_t               max_b
                                                       bool                 is_qk_buf_float,
                                                       bool                 sparse,
                                                       bool                 is_sparse_head,
-                                                      int                  int8_mode):
+                                                      int                  int8_mode,
+                                                      bool                 int4_mode):
     BaseAttentionLayer<T>(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, sparse),
     max_batch_size_(max_batch_size),
     max_seq_len_(max_seq_len),
@@ -520,11 +511,17 @@ GptContextAttentionLayer<T>::GptContextAttentionLayer(size_t               max_b
     use_logn_attn_(use_logn_attn),
     logn_seq_len_(logn_seq_len),
     is_qk_buf_float_(is_qk_buf_float),
-    weight_only_int8_fc_runner_(int8_mode == 1 ? std::make_shared<CutlassFpAIntBGemmRunner<T, uint8_t>>() : nullptr),
-    gemm_runner_(std::make_shared<GemmRunner<T>>(sparse, stream, cublas_wrapper, weight_only_int8_fc_runner_)),
     lora_gemm_(std::make_shared<LoraGemm<T>>(stream, allocator, cublas_wrapper)),
+    weight_only_int8_fc_runner_(
+        int8_mode == 1 ? std::make_shared<
+            tensorrt_llm::kernels::cutlass_kernels::
+                CutlassFpAIntBGemmRunner<T, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>>() :
+                         nullptr),
+    gemm_runner_(std::make_shared<GemmRunner<T>>(stream, allocator, cublas_wrapper, int8_mode)),
     is_sparse_head_(is_sparse_head),
-    int8_mode_(int8_mode)
+    int8_mode_(int8_mode),
+    int4_mode_(int4_mode)
+
 {
     if (int8_mode_ == 2) {
         abort();

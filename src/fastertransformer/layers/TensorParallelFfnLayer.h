@@ -35,6 +35,7 @@ public:
                            size_t                              max_seq_len,
                            size_t                              hidden_units,
                            size_t                              expert_num,
+                           size_t                              moe_k,
                            size_t                              inter_size,
                            size_t                              inter_padding_size,
                            std::vector<int64_t>                layer_inter_size,
@@ -42,18 +43,16 @@ public:
                            NcclParam                           tensor_para,
                            cudaStream_t                        stream,
                            cublasMMWrapper*                    cublas_wrapper,
+                           tc::QuantAlgo                       quant_algo,
                            IAllocator*                         allocator,
                            bool                                do_all_reduce,
                            bool                                is_free_buffer_after_forward,
                            bool                                is_sparse,
                            bool                                is_sparse_head,
-                           int                                 int8_mode,
                            ActivationType                      activation_type,
                            float                               layernorm_eps,
                            std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
                            int                                 enable_custom_all_reduce);
-
-    TensorParallelFfnLayer(TensorParallelFfnLayer<T> const& ffn_layer);
 
     void forward(std::vector<fastertransformer::Tensor>*       output_tensors,
                  const std::vector<fastertransformer::Tensor>* input_tensors,
