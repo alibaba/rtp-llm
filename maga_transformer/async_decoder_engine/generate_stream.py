@@ -143,7 +143,7 @@ class GenerateStream(BaseModel):
     def check_timeout(self):
         running_time = current_time_ms() - self._begin_time
         if self.generate_config.timeout_ms > 0 and self.generate_config.timeout_ms < running_time:
-            self.set_stop(f"query has been running {running_time} ms timeout")
+            self.set_stop(f"query has been running {running_time} ms, it's timeout")
 
     def _release(self):
         self._lora_holder.release()
