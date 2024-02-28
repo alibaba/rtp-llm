@@ -125,7 +125,7 @@ LayoutDetails getLayoutDetailsForTransform(QuantType quant_type)
         return getLayoutDetailsForArch<cutlass::arch::Sm80>(quant_type);
     }
     else {
-        FT_CHECK_WITH_INFO(false, "Unsupported Arch");
+        FT_CHECK_WITH_INFO(false, "Unsupported Arch: %d", arch);
         return LayoutDetails();
     }
 }
