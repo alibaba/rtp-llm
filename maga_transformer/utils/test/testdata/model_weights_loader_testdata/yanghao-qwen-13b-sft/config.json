@@ -1,8 +1,7 @@
 {
   "activation_type": "swiglu",
   "n_head": 5,
-  "head_num_kv": 40,
-  "hidden_size": 5120,
+  "hidden_size": 640,
   "inter_size": 27392,
   "layer_num": 1,
   "n_layer": 1,

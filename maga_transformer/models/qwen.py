@@ -211,6 +211,7 @@ class QWenBase(GPT):
         config.head_num = config_json.get("n_head", config_json.get("num_attention_heads", config.head_num))  # 如果2者不一致就是 attention sparse场景,headnum不能用attention的heads
         config.head_num_kv = config.head_num
         config.size_per_head = config_json.get("kv_channels", config.size_per_head)
+        config.hidden_size = config_json.get("hidden_size", config.hidden_size)
         config.inter_size = int(
             config_json.get("intermediate_size", config_json.get("ffn_hidden_size", hidden_to_inter(config.head_num * config.size_per_head) * 2)) / 2
         )
