@@ -95,7 +95,7 @@ class QWenV2(QWen):
         config.has_post_decoder_layernorm = True
         config.norm_type = 'rmsnorm'
         config.layernorm_eps = 1e-5
-        config.special_tokens.bos_token_id = 151643
+        config.special_tokens.bos_token_id = -1
         config.special_tokens.eos_token_id = 151643
         # <|im_start|> and <|im_end|>
         config.special_tokens.stop_words_list = [[151645], [151644]]
@@ -119,8 +119,6 @@ class QWenV2(QWen):
             content = reader.read()
             config_json = json.loads(content)
         
-        config.special_tokens.bos_token_id = config_json.get("bos_token_id", config.special_tokens.bos_token_id)
-        config.special_tokens.eos_token_id = config_json.get("bos_token_id", config.special_tokens.eos_token_id)
         # config.activation_type = config_json["hidden_act"]
         config.inter_size = config_json["intermediate_size"]
         config.head_num = config_json["num_attention_heads"]
