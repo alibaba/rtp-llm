@@ -62,6 +62,24 @@ cc_library(
 )
 
 cc_library(
+    name = "int8_gemm_cu",
+    srcs = glob([
+        "cutlass_kernels/int8_gemm/*.cu",
+        "cutlass_kernels/int8_gemm/*.h",
+    ]),
+    hdrs = glob([
+        "cutlass_kernels/int8_gemm/*.h",
+    ]),
+    deps = [
+    	":cutlass_kernels_common",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    alwayslink = True,
+)
+
+cc_library(
     name = "moe_cu",
     srcs = glob([
         "cutlass_kernels/moe_gemm/*.cu",
@@ -118,7 +136,8 @@ cc_library(
         ":fpA_intB_cu",
         ":weight_only_gemm_cu",
         ":group_cu",
-        ":moe_cu"
+        ":moe_cu",
+        "int8_gemm_cu"
     ],
     visibility = ["//visibility:public"],
 )

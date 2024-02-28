@@ -44,7 +44,7 @@
 #include "cutlass/cutlass.h"
 #include "cutlass/fast_math.h"
 #include "cutlass/numeric_conversion.h"
-// #include "tensorrt_llm/common/quantization.h"
+#include "src/fastertransformer/utils/quantization.h"
 
 namespace tk = tensorrt_llm::common;
 
