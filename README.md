@@ -57,6 +57,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [Serving Example](docs/OpenAI-Tutorial.md)
 * [RWKV-Runner Example](docs/RWKV-Runner.md)
 * [Python Library Example](docs/HF.md)
+* [Using RTP-LLm in Aliyun Ecs](https://zhuanlan.zhihu.com/p/679610919)
 * [Configuration Parameters](docs/Config.md)
 * [Source Code Build](docs/Build.md)
 * [Request Format](docs/Request.md)
