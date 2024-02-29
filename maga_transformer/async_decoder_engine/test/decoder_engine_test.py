@@ -57,7 +57,7 @@ class DecoderEngineTest(TestCase):
         pipeline = self.create_pipeline()
         try:
             gen = pipeline("what's your name?", max_new_tokens=100, timeout_ms=10)
-            with self.assertRaisesRegex(Exception, "ms timeout"):
+            with self.assertRaisesRegex(Exception, "it's timeout"):
                 results = [result for result in gen]
             self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
