@@ -200,6 +200,14 @@ class GPT(BaseModel):
         logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
     def load(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        self._load_weights(device)
+        self._initialize_from_weight(device)
+
+    def reload_from_module(self, ref_model: torch.nn.Module, reuse_mem: bool = False,
+                           device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        self._initialize_from_weight(device)
+
+    def _load_weights(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         device = device or get_device()
         compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
 
@@ -227,6 +235,7 @@ class GPT(BaseModel):
 
         logging.info(f'load weights time: {timer.cost_ms() / 1000 :.2f} s')
 
+    def _initialize_from_weight(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         self.context_decoder.set_weight(self.weight)
         self.decoder.set_weight(self.weight)
 
