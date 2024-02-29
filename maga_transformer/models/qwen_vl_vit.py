@@ -11,7 +11,8 @@ import time
 import os
 from functools import partial
 from PIL import Image
-from typing import Callable, Optional, Sequence, Tuple, List
+import threading
+from typing import Callable, Optional, Sequence, Tuple, List, Any
 from pathlib import Path
 import numpy as np
 
@@ -355,6 +356,24 @@ class TransformerBlock(nn.Module):
         return x
 
 
+class PullImageThread(threading.Thread):
+    def __init__(self, image_path: str, images: List[Any], i: int, image_transform: transforms.Compose):
+        threading.Thread.__init__(self)
+        self.image_path = image_path
+        self.images = images
+        self.index = i
+        self.image_transform = image_transform
+    
+    def run(self):
+        if self.image_path.startswith("http://") or self.image_path.startswith("https://"):
+            if os.environ.get("IMAGE_RESIZE_SUFFIX", None) is not None and "picasso" in self.image_path:
+                self.image_path += os.environ.get("IMAGE_RESIZE_SUFFIX")
+            image = Image.open(requests.get(self.image_path, stream=True).raw)
+        else:
+            image = Image.open(self.image_path)
+        image = image.convert("RGB")
+        self.images[self.index] = self.image_transform(image)
+
 class VisionTransformer(nn.Module):
 
     def __init__(
@@ -441,13 +460,27 @@ class VisionTransformer(nn.Module):
 
     def encode(self, image_paths: List[str]):
         images = []
-        for image_path in image_paths:
-            if image_path.startswith("http://") or image_path.startswith("https://"):
-                image = Image.open(requests.get(image_path, stream=True).raw)
-            else:
-                image = Image.open(image_path)
-            image = image.convert("RGB")
-            images.append(self.image_transform(image))
+        if os.environ.get("PARALLEL_PULL_IMAGE", "0") == "1" and len(image_paths) > 1:
+            images = [None]*len(image_paths)
+            threads = []
+            for i, image_path in enumerate(image_paths):
+                t = PullImageThread(image_path, images, i, self.image_transform)
+                t.setDaemon(True)
+                t.start()
+                threads.append(t)
+            for t in threads:
+                t.join(1)
+        else:
+            images = []
+            for image_path in image_paths:
+                if image_path.startswith("http://") or image_path.startswith("https://"):
+                    if os.environ.get("IMAGE_RESIZE_SUFFIX", None) is not None and "picasso" in self.image_path:
+                        image_path += os.environ.get("IMAGE_RESIZE_SUFFIX")
+                    image = Image.open(requests.get(image_path, stream=True).raw)
+                else:
+                    image = Image.open(image_path)
+                image = image.convert("RGB")
+                images.append(self.image_transform(image))
         images = torch.stack(images, dim=0)
         return self(images)
 
@@ -466,27 +499,27 @@ class Preprocss:
 
     def encode(self, image_paths: List[str]) -> torch.Tensor:
         images = []
-        headers = {
-            'authority': 'img.alicdn.com',
-            'sec-ch-ua': '" Not A;Brand";v="99", "Chromium";v="90", "Google Chrome";v="90"',
-            'sec-ch-ua-mobile': '?0',
-            'dnt': '1',
-            'upgrade-insecure-requests': '1',
-            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-            'sec-fetch-site': 'none',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-user': '?1',
-            'sec-fetch-dest': 'document',
-            'accept-language': 'en-US,en;q=0.9'
-        }
-        for image_path in image_paths:
-            if image_path.startswith("http://") or image_path.startswith("https://"):
-                image = Image.open(requests.get(image_path, headers=headers, stream=True).raw)
-            else:
-                image = Image.open(image_path)
-            image = image.convert("RGB")
-            images.append(self.image_transform(image))
+        if os.environ.get("PARALLEL_PULL_IMAGE", "0") == "1" and len(image_paths) > 1:
+            images = [None]*len(image_paths)
+            threads = []
+            for i, image_path in enumerate(image_paths):
+                t = PullImageThread(image_path, images, i, self.image_transform)
+                t.setDaemon(True)
+                t.start()
+                threads.append(t)
+            for t in threads:
+                t.join(1)
+        else:
+            images = []
+            for image_path in image_paths:
+                if image_path.startswith("http://") or image_path.startswith("https://"):
+                    if os.environ.get("IMAGE_RESIZE_SUFFIX", None) is not None and "picasso" in self.image_path:
+                        image_path += os.environ.get("IMAGE_RESIZE_SUFFIX")
+                    image = Image.open(requests.get(image_path, stream=True).raw)
+                else:
+                    image = Image.open(image_path)
+                image = image.convert("RGB")
+                images.append(self.image_transform(image))
         images = torch.stack(images, dim=0)
         return images
 
