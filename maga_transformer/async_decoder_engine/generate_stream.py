@@ -11,7 +11,7 @@ from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.utils.stop_utils import create_stop_criteria_list
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.models.base_model import GenerateInput, GenerateOutput
-from maga_transformer.async_decoder_engine.ptuning.ptuning import PtuningInfo
+from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
 
 class Status(Enum):
     WAITING = 0
@@ -50,7 +50,7 @@ class GenerateStream(BaseModel):
             self._input.generate_config.stop_words_list,
             self._input.generate_config.stop_words_str,
             self._input.tokenizer)
-        self._ptuning_info = PtuningInfo()
+        self._ptuning_info = PrefixInfo()
         self._lock = Lock()
 
     def add_resource_dtor(self, dtor):
@@ -61,10 +61,10 @@ class GenerateStream(BaseModel):
             dtor()
         self._resource_dtors.clear()
 
-    def update_ptuning(self, ptuning_info):
+    def update_prefix(self, ptuning_info):
         self._ptuning_info = ptuning_info
         if ptuning_info.prefix_tensors is not None:
-            self._input.update_ptuning(ptuning_info.prefix_tensors)
+            self._input.update_prefix(ptuning_info.prefix_tensors)
             self._seq_length = self.input_length
             self._complete_token_ids[0, :self._seq_length] = self._input.token_ids
 
@@ -91,6 +91,10 @@ class GenerateStream(BaseModel):
     @property
     def input_length(self):
         return self._input.input_length
+
+    @property
+    def prefix_length(self):
+        return self._input.prefix_length
 
     @property
     def seq_length(self):
@@ -186,6 +190,7 @@ class GenerateStream(BaseModel):
             self._output.finished = finished
             self._output.aux_info.cost_time = current_time_ms() - self._begin_time
             self._output.aux_info.input_len = self._input.prompt_length
+            self._output.aux_info.prefix_len = self._input.prefix_length
             self._output.aux_info.output_len = self._output.output_ids.shape[-1]
             self._output.aux_info.cum_log_probs = cum_log_probs.tolist() if cum_log_probs is not None else None
             self._output.aux_info.iter_count += 1

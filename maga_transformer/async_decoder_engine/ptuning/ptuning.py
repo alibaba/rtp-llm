@@ -21,7 +21,7 @@ class PrefixParams(NamedTuple):
     prefix_type: PrefixType
     prefix_tensor: Optional[Dict[int, torch.Tensor]]
 
-class PtuningInfo(BaseModel):
+class PrefixInfo(BaseModel):
     ptuning: bool = False
     count_length: bool = True
     count_prefix_length: bool = True
@@ -34,7 +34,7 @@ class PtuningBase:
     def get_ptuning_info(self, generate_config):
         _, prefix_tensors = self.get_prefix_params(
             generate_config)
-        return PtuningInfo(
+        return PrefixInfo(
             ptuning=True,
             count_length=self.prefix_type == PrefixType.PromptTuning,
             count_prefix_length=self.prefix_type != PrefixType.PTuningV2,

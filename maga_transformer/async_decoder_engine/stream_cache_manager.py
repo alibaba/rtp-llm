@@ -6,7 +6,7 @@ from typing import Any, List, Optional, Union, Dict
 from maga_transformer.async_decoder_engine.cache_manager import CacheManager
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
-from maga_transformer.async_decoder_engine.ptuning.ptuning import PtuningInfo
+from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 
 class StreamCacheManager:
@@ -39,10 +39,10 @@ class StreamCacheManager:
 
     def update_prefix(self, stream):
         if not self.ptuning_:
-            ptuning_info = PtuningInfo()
+            ptuning_info = PrefixInfo()
         else:
             ptuning_info = self.ptuning_.get_ptuning_info(stream.generate_config)
-        stream.update_ptuning(ptuning_info)
+        stream.update_prefix(ptuning_info)
 
     def init_kvcache(self, stream: GenerateStream):
         # reuse length represent for ptuning length or kvcache reuse length

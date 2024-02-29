@@ -10,7 +10,7 @@ from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.stop_utils import create_stop_criteria_list
-from maga_transformer.async_decoder_engine.ptuning.ptuning import PtuningInfo
+from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 from maga_transformer.utils.util import to_cuda, to_cpu
 from maga_transformer.metrics import kmonitor, GaugeMetrics
@@ -53,7 +53,8 @@ class BatchQuery:
         self.record_index_prob: Optional[torch.Tensor] = None
         self.lora_ids: List[int] = []
         self.calculate_loss: List[int] = []
-        self._ptuning_info = PtuningInfo()
+        self._ptuning_info = PrefixInfo()
+
         self.model_output = ModelOutput()
 
     def __str__(self):

@@ -49,7 +49,7 @@ class GenerateInput(PyBaseModel):
     generate_config: GenerateConfig
     tokenizer: Any = None # TODO: remove this
     lora_id: int = -1
-    ptuning_prefix_length: int = 0
+    prefix_length: int = 0
 
     class Config:
         arbitrary_types_allowed = True
@@ -60,18 +60,19 @@ class GenerateInput(PyBaseModel):
 
     @property
     def prompt_length(self):
-        return self.token_ids.shape[-1] - self.ptuning_prefix_length
+        return self.token_ids.shape[-1] - self.prefix_length
 
-    def update_ptuning(self, prefix_tokens: torch.Tensor):
+    def update_prefix(self, prefix_tokens: torch.Tensor):
         self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
-        self.ptuning_prefix_length = prefix_tokens.nelement()
+        self.prefix_length = prefix_tokens.nelement()
 
 class AuxInfo(PyBaseModel):
     cost_time: float = 0
     iter_count: int = 0
+    prefix_len: int = 0
     input_len: int = 0
-    output_len: int = 0
     reuse_len: int = 0
+    output_len: int = 0
     cum_log_probs: List[float] = []
     beam_responses: List[str] = []
 
