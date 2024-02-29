@@ -137,20 +137,6 @@ class BaseModel(object):
     @classmethod
     def create_config(cls, model_config: ModelConfig) -> GptInitModelParameters:
         config: GptInitModelParameters = cls._create_config(model_config.ckpt_path)
-        ptuning_path = model_config.ptuning_path
-        if not ptuning_path:
-            inner_ptuing_path = os.path.join(model_config.ckpt_path, 'ptuning')
-            if os.path.exists(inner_ptuing_path):
-                logging.info(f"ckpt contain ptuning ckpt files, {model_config.ckpt_path}/ptuning")
-                ptuning_path = inner_ptuing_path
-            else:
-                logging.info(f"try using base ckpt as the ptuning dir for compatibility with base ckpt that has been merged with ptuning")
-                ptuning_path = model_config.ckpt_path
-        else:
-            logging.info(f"use ptuning from model_config set by env, {ptuning_path}")
-        config.ptuning_path = ptuning_path
-        config.update_prefix_prompt(ptuning_path)
-
         config.update_common(
             ckpt_path=model_config.ckpt_path,
             tokenizer_path=model_config.tokenizer_path,
@@ -160,9 +146,9 @@ class BaseModel(object):
             seq_size_per_block=model_config.seq_size_per_block,
             tp_size=g_parallel_info.tp_size,
             gen_num_per_circle=model_config.gen_num_per_circle,
-            lora_infos=model_config.lora_infos
+            lora_infos=model_config.lora_infos,
+            ptuning_path=model_config.ptuning_path
         )
-
         return config
 
     @staticmethod

@@ -202,7 +202,8 @@ class GPT(BaseModel):
         with Timer() as timer:
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
             database = CkptDatabase(self.config.ckpt_path)
-            if (self.config.lora_infos is not None and len(self.config.lora_infos) == 1):
+            database.load_ptuning(self.config.ptuning_path)
+            if self.config.lora_infos is not None and len(self.config.lora_infos) == 1:
                 for name, path in self.config.lora_infos.items():
                     database.load_lora(name, path)
             load_parallel_num = estimate_load_parallel_num(

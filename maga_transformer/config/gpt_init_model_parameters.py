@@ -116,6 +116,10 @@ class GptInitModelParameters:
         self.src_quantization_bit = 0
         self.tp_split_emb_and_lm_head = True
         self.medusa_config = None
+
+        self.ptuning_path = None
+        self.pre_seq_len = 0
+        self.prefix_projection = False
         self.vit_related_params: VitParameters = VitParameters()
         for k, v in kwargs.items():
             setattr(self, k, v)
@@ -178,17 +182,6 @@ class GptInitModelParameters:
             self.medusa_config = medusa_config
             self.gpt_init_params.use_medusa = True
 
-    def update_prefix_prompt(self, ptuning_path: str):
-        config_file_path = os.path.join(ptuning_path, "config.json")
-        if not os.path.exists(config_file_path):
-            return
-        with open(config_file_path, 'r') as reader:
-            content = json.load(reader)
-            if 'pre_seq_len' in content:
-                self.pre_seq_len = content['pre_seq_len']
-            if 'prefix_projection' in content:
-                self.prefix_projection = content['prefix_projection']
-
     def update_inter_padding_size(self, tp_size: int):
         align_size = tp_size * 64
         if self.layer_inter_size:
@@ -220,10 +213,33 @@ class GptInitModelParameters:
         else:
             self.multi_task_prompt = json.loads(prompt_str, strict=False)
             return
+        
+    def update_ptuning_config(self):
+        if not self.ptuning_path:
+            inner_ptuing_path = os.path.join(self.ckpt_path, 'ptuning')
+            if os.path.exists(inner_ptuing_path):
+                logging.info(f"ckpt contain ptuning ckpt files, {inner_ptuing_path}")
+                self.ptuning_path = inner_ptuing_path
+            else:
+                logging.info(f"try using base ckpt as the ptuning dir for compatibility with base ckpt that has been merged with ptuning")
+                self.ptuning_path = self.ckpt_path        
+        logging.info(f"use ptuning from model_config set by env, {self.ptuning_path}")
+
+        config_file_path = os.path.join(self.ptuning_path, "config.json")
+        if not os.path.exists(config_file_path):
+            return
+        with open(config_file_path, 'r') as reader:
+            content = json.load(reader)
+            if 'pre_seq_len' in content:
+                self.pre_seq_len = content['pre_seq_len']
+            if 'prefix_projection' in content:
+                self.prefix_projection = content['prefix_projection']
+        logging.info(f"read ptuning config, pre_seq_len:{self.pre_seq_len}, prefix_projection:{self.prefix_projection}")
 
     def update_common(self,
                       ckpt_path: str,
                       lora_infos: Optional[Dict[str, str]],
+                      ptuning_path: Optional[str],
                       tokenizer_path: str,
                       int8_mode: int,
                       data_type: WEIGHT_TYPE,
@@ -237,6 +253,7 @@ class GptInitModelParameters:
         self.int8_mode = int8_mode
         self.data_type = data_type.to_str()
         self.gen_num_per_circle = gen_num_per_circle
+        self.ptuning_path = ptuning_path
         if max_seq_len != 0:
             self.max_seq_len = max_seq_len
         if self.max_seq_len < 1:
@@ -246,6 +263,7 @@ class GptInitModelParameters:
         self.update_config_with_sparse_config(ckpt_path)
         self.update_inter_padding_size(tp_size)
         self.update_task_prompt_config()
+        self.update_ptuning_config()
         self.update_medusa_config(ckpt_path)
 
         self.seq_size_per_block = seq_size_per_block

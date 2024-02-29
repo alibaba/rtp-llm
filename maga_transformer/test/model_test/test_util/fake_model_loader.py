@@ -4,6 +4,7 @@ import json
 import torch
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.model_factory import ModelConfig, ModelFactory
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 
 class FakeModelLoader(object):
@@ -38,7 +39,7 @@ class FakeModelLoader(object):
             gen_num_per_circle=1
             )
 
-        raw_config = model_cls.create_config(model_config)
+        raw_config: GptInitModelParameters = model_cls.create_config(model_config)
         raw_config.head_num = config_json.get("num_attention_heads", raw_config.head_num)
         raw_config.head_num_kv = config_json.get("num_attention_heads", raw_config.head_num_kv)
         if config_json.get('multi_query_attention', False):
@@ -59,7 +60,8 @@ class FakeModelLoader(object):
             max_seq_len=self.max_seq_len,
             seq_size_per_block=8,
             tp_size=1,
-            gen_num_per_circle=1
+            gen_num_per_circle=1,
+            ptuning_path=None
         )
 
         model = model_cls.from_config(raw_config)

@@ -185,11 +185,18 @@ class CkptDatabase:
                         ckpt.set_metadata(self._load_meta(ckpt.file_name))
                         self.PretrainFileList.append(ckpt)
                 break
+            
+    def _contains(self, path: Path):
+        for info in self.PretrainFileList + self.FinetuneFileList:
+            if Path(info.file_name).resolve() == path.resolve():
+                return True
+        return False
 
-        # temp support for ptuning from aop
-        if os.path.exists(os.path.join(path, 'ptuning')):
-            ptuning_path = os.path.join(path, 'ptuning')
-            for f in Path(ptuning_path).glob("pytorch_model.bin"):
+    def load_ptuning(self, ptuning_path: Optional[str]):
+        if ptuning_path is None or not os.path.exists(ptuning_path):
+            return
+        for f in Path(ptuning_path).glob("pytorch_model.bin"):            
+            if not self._contains(f):
                 ckpt = CkptFileInfo(file_name=str(f), finetune_type=FinetuneType.ptuning)
                 ckpt.set_metadata(self._load_meta(ckpt.file_name))
                 self.FinetuneFileList.append(ckpt)
