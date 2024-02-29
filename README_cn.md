@@ -49,12 +49,13 @@ pip3 install -r ./open_source/deps/requirements_torch_gpu.txt
 # 使用release版本中对应的whl, 这里以0.1.0的cuda11版本为例子，cuda12的whl包请查看release发布页。
 pip3 install maga_transformer-0.0.1+cuda118-cp310-cp310-manylinux1_x86_64.whl
 # 启动 http 服务
-TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model FT_SERVER_TEST=1 python3 -m maga_transformer.start_server
+TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your_model_type FT_SERVER_TEST=1 python3 -m maga_transformer.start_server
 # request to server
 curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 ```
 
 ## 文档
+* [在Deploy Docker中测试](docs/Deploy-Docker.md)
 * [启动服务样例](docs/OpenAI-Tutorial.md)
 * [RWKV-Runner 样例](docs/RWKV-Runner.md)
 * [Python Library 样例](docs/HF.md)

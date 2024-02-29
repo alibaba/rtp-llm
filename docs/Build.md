@@ -11,6 +11,7 @@
 git clone https://github.com/alibaba/rtp-llm.git
 cd docker
 # 注意：以下两条指令，不要使用sudo执行
+# 如果是cuda11的环境，CONTAINER_NAME不需要提供，如果是cuda12环境，需要提供CONTAINER_NAME -> registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:cuda12
 sh ./create_container.sh <CONTAINER_NAME>
 sh  CONTAINER_NAME/sshme.sh
 ```
@@ -24,8 +25,6 @@ pip3 install -r ./open_source/deps/requirements_torch_gpu.txt
 bazel build //maga_transformer:maga_transformer --jobs 100 --verbose_failures
 # 修改test.py中的模型路径，运行一个实际的模型
 bazel test //example:test --jobs 100
-# 单元测试
-bazel test //maga_transformer/test/model_test/fake_test:all_fake_model_test --jobs 100  --test_output=all
 ```
 cuda12的环境：
 ```bash
@@ -34,6 +33,4 @@ pip3 install -r ../open_source/deps/requirements_torch_gpu_cuda12.txt
 bazel build //maga_transformer:maga_transformer --jobs 100 --verbose_failures --config=cuda12_2
 # 修改test.py中的模型路径，运行一个实际的模型
 bazel test //example:test --jobs 100
-# 单元测试
-bazel test //maga_transformer/test/model_test/fake_test:all_fake_model_test --jobs 100  --test_output=all --config=cuda12_2
 ```
