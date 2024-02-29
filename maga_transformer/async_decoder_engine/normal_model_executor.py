@@ -52,9 +52,9 @@ class NormalModelExecutor(ExecutorBase):
 
     def process(self, batch_query: BatchQuery) -> None:
         all_hidden_states = self._process(batch_query)
-        hidden_states = self._unpack_hidden_states(batch_query, all_hidden_states)
-        self._calculate_loss(batch_query, all_hidden_states)
+        hidden_states = self._select_last_hidden_states(batch_query, all_hidden_states)
         logits = self._post_transformer_nn(hidden_states)
+        self._calculate_loss(batch_query, all_hidden_states)
         if g_parallel_info.tp_size > 1 and g_parallel_info.tp_rank > 0:
             return
         with torch.cuda.nvtx.range('post_process'):
@@ -66,13 +66,19 @@ class NormalModelExecutor(ExecutorBase):
         }
         return config_json
 
-    def _unpack_hidden_states(self, batch_query: BatchQuery, hidden_states: torch.Tensor):
+    def _select_last_hidden_states(self, batch_query: BatchQuery, hidden_states: torch.Tensor):
         index_list = list(range(0, batch_query.generate_batch_size * batch_query.num_beams))
         offset = batch_query.generate_batch_size * batch_query.num_beams - 1
         for i in range(0, batch_query.context_batch_size):
             offset = offset + batch_query.context_query_context_lengths_list[i]
             index_list.append(offset)
         return hidden_states.index_select(0, torch.tensor(index_list, device="cuda:0"))
+
+    def _select_context_hidden_states(self, batch_query: BatchQuery, hidden_states: torch.Tensor, idx):
+        offset = batch_query.generate_batch_size * batch_query.num_beams
+        for i in range(idx):
+            offset += batch_query.context_query_context_lengths_list[i]
+        return hidden_states[offset:offset + batch_query.context_query_context_lengths_list[idx],...]
 
     def _process(self, batch_query: BatchQuery) -> torch.Tensor:
         with torch.cuda.nvtx.range('pre_process'):
@@ -251,26 +257,23 @@ class NormalModelExecutor(ExecutorBase):
             self.model_ops.sampler.config = new_config
         self.model_ops.sampler.setup(SamplerSetupParams(batch_query.total_batch_size, self.model_ops.config.special_tokens.eos_token_id, 0, None))
 
-    def _calculate_loss(self,
-            batch_query: BatchQuery, all_hidden_states: torch.Tensor):
-        for stream in batch_query.streams:
-            if stream.generate_config.calculate_loss and query.loss == None:
-                all_logits = self._post_transformer_nn(all_hidden_states)
-                break
-
-        start_idx = 0
-        for i, stream in enumerate(batch_query.streams):
-            if not stream.generate_config.calculate_loss:
+    def _calculate_loss(self, batch_query: BatchQuery, all_hidden_states: torch.Tensor):
+        for context_idx, calculate_loss in enumerate(batch_query.calculate_loss):
+            if not calculate_loss:
                 continue
-            if query.loss != None:
+            hidden_states = self._select_context_hidden_states(
+                batch_query, all_hidden_states, context_idx)
+            logits = self._post_transformer_nn(hidden_states)
+            if g_parallel_info.tp_size > 1 and g_parallel_info.tp_rank > 0:
                 continue
-            shift_labels = stream.complete_token_ids[0, 1:stream.context_length].type(torch.int64).contiguous()
-            shift_logits = all_logits[start_idx : start_idx + stream.context_length - 1, ].contiguous()
-            start_idx += stream.context_length
+            stream = batch_query.context_streams[context_idx]
+            shift_labels = stream.complete_token_ids[0, 1:stream.input_length].type(torch.int64)
+            shift_logits = logits[:stream.input_length - 1, ]
             loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
             loss = loss_fct(shift_logits.to("cuda:0"), shift_labels.to("cuda:0"))
+
             if stream.generate_config.calculate_loss == 1:
-                loss_mean = loss.sum(dim=0) / (stream.context_length - 1)
+                loss_mean = loss.sum(dim=0) / (stream.input_length - 1)
                 loss_mean = loss_mean.exp()
                 stream.set_loss(loss_mean)
             elif stream.generate_config.calculate_loss == 2:

@@ -52,8 +52,8 @@ class BatchQuery:
         self.context_lengths_list: List[int] = []
         self.record_index_prob: Optional[torch.Tensor] = None
         self.lora_ids: List[int] = []
+        self.calculate_loss: List[int] = []
         self._ptuning_info = PtuningInfo()
-
         self.model_output = ModelOutput()
 
     def __str__(self):
@@ -79,6 +79,7 @@ class BatchQuery:
         new_batch_query.reuse_lengths_list = copy.deepcopy(self.reuse_lengths_list)
         new_batch_query.context_lengths_list = copy.deepcopy(self.context_lengths_list)
         new_batch_query.lora_ids = copy.deepcopy(self.lora_ids)
+        new_batch_query.calculate_loss = copy.deepcopy(self.calculate_loss)
         new_batch_query._ptuning_info = self._ptuning_info
         new_batch_query.model_output.update_length = self.model_output.update_length
         return new_batch_query
@@ -110,6 +111,7 @@ class BatchQuery:
             output_token_ids = to_cuda(self.output_token_ids)
             cache_block_indice = to_cuda(self.cache_block_indice)
             lora_ids_tensor = to_cuda(torch.IntTensor(self.lora_ids))
+            calculate_loss_tensor = to_cuda(torch.IntTensor(self.calculate_loss))
         else:
             self.generate_batch_size = int(shape_hints[1])
             self.context_batch_size = int(shape_hints[2])
@@ -124,9 +126,11 @@ class BatchQuery:
             reuse_lengths_tensor = torch.zeros((self.decoder_batch_size), dtype=torch.int32, device="cuda:0")
             context_lengths_tensor = torch.zeros((self.decoder_batch_size), dtype=torch.int32, device="cuda:0")
             lora_ids_tensor = torch.zeros((max(1, self.total_batch_size)), dtype=torch.int32, device="cuda:0")
+            calculate_loss_tensor = torch.zeros((self.context_batch_size), dtype=torch.int32, device="cuda:0")
         self.nccl_op_.broadcast_tp([
             cache_block_indice, output_token_ids, seq_lengths_tensor,
-            reuse_lengths_tensor, context_lengths_tensor, lora_ids_tensor
+            reuse_lengths_tensor, context_lengths_tensor, lora_ids_tensor,
+            calculate_loss_tensor
         ])
         if g_parallel_info.tp_rank > 0:
             self.cache_block_indice = to_cpu(cache_block_indice)
@@ -135,6 +139,7 @@ class BatchQuery:
             self.reuse_lengths_list = to_cpu(reuse_lengths_tensor).numpy().tolist()
             self.context_lengths_list = to_cpu(context_lengths_tensor).numpy().tolist()
             self.lora_ids = to_cpu(lora_ids_tensor).numpy().tolist()
+            self.calculate_loss = to_cpu(calculate_loss_tensor).numpy().tolist()
 
     @property
     def max_context_length(self):
@@ -266,6 +271,7 @@ class BatchQuery:
         self.cache_block_indice = torch.IntTensor(cache_block_indice)
         self.merge_generate_config = GenerateConfig.merge_generate_config(self.generate_configs)
         self.lora_ids = lora_ids
+        self.calculate_loss = [c.calculate_loss for c in self.generate_configs[self.generate_batch_size:]]
         self.check()
 
     def update_all_errors(self, err: str):

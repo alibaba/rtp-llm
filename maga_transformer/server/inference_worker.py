@@ -66,11 +66,12 @@ class InferenceWorker():
             "finished": finished,
             "aux_info": aux_info.model_dump(mode='json'),
         }
-        if return_hidden_states:
+        # 判断 None，可能有 batch 还没算出来
+        if return_hidden_states and hidden_states is not None:
             response["hidden_states"] = hidden_states.tolist()
-        if calculate_loss:
+        if calculate_loss and loss is not None: 
             response['loss'] = loss.tolist()
-        if return_logits:
+        if return_logits and logits is not None:
             response['logits'] = logits.tolist()
 
         return response
