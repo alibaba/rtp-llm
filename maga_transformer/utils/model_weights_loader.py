@@ -136,64 +136,66 @@ class ModelWeightsLoader:
 
         return results, self._weight_access_log
 
-    def _load_int4_layer_weight(self, layer_weights, layer_id: int, is_moe: bool, device: str):
-        if is_moe:
-            raise Exception("moe in int4 is not implemented")
-        weight_lists = W.int4_quant_weights
+    def _load_int4_layer_weight(self, layer_weights, layer_id: int, is_moe: bool, merge_lora: bool, device: str):
+        if merge_lora:
+            raise Exception("lora in int4 is not implemented yet")
         results = []
-        for weight_list in weight_lists: 
-            qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
-            qzero  = [weight for weight in layer_weights if weight.name == weight_list[1]]
-            qscale  = [weight for weight in layer_weights if weight.name == weight_list[2]]
-            assert len(qweight) == 1 and len(qzero) == 1 and len(qscale) == 1, "len error"
-            qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id, torch.int32)
-            qzero_tensor = self._load_and_convert_tensor(qzero[0], layer_id, torch.int32)
-            qscale_tensor = self._load_and_convert_tensor(qscale[0], layer_id)
-            qweight_tensor = self._split_and_sanitize_tensor(qweight_tensor, qweight[0]).to(device)
-            qzero_tensor = self._split_and_sanitize_tensor(qzero_tensor, qzero[0]).to(device)
-            qscale_tensor = self._split_and_sanitize_tensor(qscale_tensor, qscale[0]).to(device)
-            weight, zero, scale = self.preprocess_groupwise_weight_params(qweight_tensor, qzero_tensor, qscale_tensor, device)
-            results.append((layer_id, qweight[0].name, weight))
-            results.append((layer_id, qzero[0].name, zero))
-            results.append((layer_id, qscale[0].name, scale))
+        def convert_weight(weight_lists, apply_func):
+            for weight_list in weight_lists: 
+                try:
+                    qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
+                    qzero  = [weight for weight in layer_weights if weight.name == weight_list[1]]
+                    qscale  = [weight for weight in layer_weights if weight.name == weight_list[2]]
+                    assert len(qweight) == 1 and len(qzero) == 1 and len(qscale) == 1, "len error"
+                    qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id, torch.int32)
+                    qzero_tensor = self._load_and_convert_tensor(qzero[0], layer_id, torch.int32)
+                    qscale_tensor = self._load_and_convert_tensor(qscale[0], layer_id)
+                    qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor)
+                    qzero_tensor = self._split_tensor(qzero[0].name, qzero_tensor)
+                    qscale_tensor = self._split_tensor(qscale[0].name, qscale_tensor)
+                    weight, zero, scale = apply_func(qweight_tensor, qzero_tensor, qscale_tensor, device)
+                    results.append((layer_id, qweight[0].name, weight))
+                    results.append((layer_id, qzero[0].name, zero))
+                    results.append((layer_id, qscale[0].name, scale))
+                except Exception as e:
+                    logging.error(f'load {qweight[0].name} in layer {layer_id} failed: {e}')
+                    raise e
+        convert_weight(W.int4_attn_weights, self.preprocess_groupwise_weight_params)
+        if is_moe:
+            convert_weight(W.int4_ffn_weights, self.preprocess_moe_groupwise_weight_params)
+        else:
+            convert_weight(W.int4_ffn_weights, self.preprocess_groupwise_weight_params)
+
         return results
     
-    def _load_int8_layer_weight(self, layer_weights, layer_id: int, is_moe: bool, device):
+    def _load_int8_layer_weight(self, layer_weights, layer_id: int, is_moe: bool, merge_lora: bool, device):
         results = []
         def convert_weight(weight_lists, apply_func):
             for weight_list in weight_lists:
-                qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
-                scale_name = weight_list[1]
-                qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id)
-                qweight_tensor = self._split_and_sanitize_tensor(qweight_tensor, qweight[0]).to(device)
-                weight, scale = apply_func(qweight_tensor, device)
-                results.append((layer_id, qweight[0].name, weight))
-                results.append((layer_id, scale_name, scale))
-
+                try:
+                    qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
+                    scale_name = weight_list[1]
+                    qweight_tensor = self._load_and_split_tensor(qweight[0], layer_id, merge_lora)
+                    weight, scale = apply_func(qweight_tensor, device)
+                    results.append((layer_id, qweight[0].name, weight))
+                    results.append((layer_id, scale_name, scale))
+                except Exception as e:
+                    logging.error(f'load {qweight[0].name} in layer {layer_id} failed: {e}')
+                    raise e
         convert_weight(W.int8_attn_weights, self.apply_int8)
         if is_moe:
             convert_weight(W.int8_ffn_weights, self.moe_apply_int8)
         else:
             convert_weight(W.int8_ffn_weights, self.apply_int8)
-            
         return results
-
-    # def _load_moe_int8_layer_weight(self, layer_weights, layer_id: int, device):
-    #     weight_lists = W.moe_int8_quant_weights
-    #     results = []
-    #     try: 
-    #         for weight_list in weight_lists:
-    #             qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
-    #             scale_name = weight_list[1]
-    #             qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id)
-    #             qweight_tensor = self._split_and_sanitize_tensor(qweight_tensor, qweight[0]).to(device)
-    #             weight, scale = self.moe_apply_int8(qweight_tensor, device)
-    #             results.append((layer_id, qweight[0].name, weight))
-    #             results.append((layer_id, scale_name, scale))
-    #     except Exception as e:
-    #         logging.error(f'load {qweight.name} in layer {layer_id} failed: {e}')
-    #         raise e
-    #     return results
+    
+    def _load_and_split_tensor(self, weight, layer_id, merge_lora):
+        tensor = self._load_and_convert_tensor(weight, layer_id)
+        if merge_lora:
+            tensor = self.apply_lora(tensor, weight, layer_id)
+        tensor = self._split_and_sanitize_tensor(tensor, weight)
+        return tensor
+        
 
     def _load_layer_weight(self, layer_id: int, int8_mode: int, int4_mode: bool = False, ref_model: Optional[torch.nn.Module] = None, device: str = "cuda:0"):
         use_fp32 = os.environ.get("USE_FLOAT32", None) is not None
@@ -215,7 +217,7 @@ class ModelWeightsLoader:
                 if self._merge_lora:
                     tensor = self.apply_lora(tensor, weight, layer_id)
 
-                tensor = self._split_and_sanitize_tensor(tensor, weight).to(device)
+                tensor = self._load_and_split_tensor(weight, layer_id, self._merge_lora).to(device)
 
                 if use_fp32:
                     tensor = tensor.float()
@@ -225,9 +227,9 @@ class ModelWeightsLoader:
                 logging.error(f'load {weight.name} in layer {layer_id} failed: {e}')
                 raise e
         if int4_mode:
-            results.extend(self._load_int4_layer_weight(layer_weights, layer_id, is_moe, device))
+            results.extend(self._load_int4_layer_weight(layer_weights, layer_id, is_moe, self._merge_lora, device))
         elif int8_mode:
-            results.extend(self._load_int8_layer_weight(layer_weights, layer_id, is_moe, device))
+            results.extend(self._load_int8_layer_weight(layer_weights, layer_id, is_moe, self._merge_lora, device))
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -301,6 +303,27 @@ class ModelWeightsLoader:
         w_unpacked[:, 1::2] = w_packed_int4x2 // 16
         return w_unpacked.contiguous()
 
+    def preprocess_moe_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str):
+        assert qweight_int32.dim() == 3
+        qweight_list = torch.chunk(tensor, qweight_int32.shape[0], dim=0)
+        qzeros_list = torch.chunk(tensor, qzeros_int32.shape[0], dim=0)
+        scales_list = torch.chunk(tensor, scales_fp16.shape[0], dim=0)
+        processed_weights = []
+        processed_zeros = []
+        processed_scalses = []
+        for w, z, s in zip(qweight_list, qzeros_list, scales_list):
+            w = torch.squeeze(w)
+            z = torch.squeeze(z)
+            s = torch.squeeze(s)
+            p_w, p_z, p_s = self.preprocess_groupwise_weight_params(w, z, s, device)
+            processed_weights.append(p_w)
+            processed_zeros.append(p_z)
+            processed_scalses.append(p_s)
+        processed_weights = torch.stack(processed_weights, dim=0)
+        processed_zeros = torch.stack(processed_zeros, dim=0)
+        processed_scalses = torch.stack(processed_scalses, dim=0)
+        return processed_weights, processed_zeros, processed_scalses
+        
     def preprocess_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str):
         UINT4_TO_INT4_FLAG = 1
         GPTQ_FLAG = 1

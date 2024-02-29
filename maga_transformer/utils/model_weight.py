@@ -282,7 +282,7 @@ class W:
         [attn_o_w, attn_o_z, attn_o_s],
     ]
 
-    int4_attn_weights = [
+    int4_ffn_weights = [
         [ffn_w1, ffn_z1, ffn_s1],
         [ffn_w3, ffn_z3, ffn_s3],
         [ffn_w2, ffn_z2, ffn_s2], 
