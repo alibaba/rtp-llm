@@ -68,7 +68,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         request = ChatCompletionRequest(messages=[])
         id_generator = fake_output_generator(test_ids, 1024, tokenizer.eos_token_id or 0)
         stream_generator = chat_renderer.render_response_stream(id_generator, request, 314)
-        response = await self.endpoint._complete_non_stream_response(stream_generator, None, None)
+        generate = self.endpoint._complete_non_stream_response(stream_generator, None, None)
+        response = [x async for x in generate][-1]
         print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
         self.assertEqual(json.loads(response.choices[0].model_dump_json()), {
@@ -102,7 +103,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         id_generator = fake_output_generator(test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0)
         input_length = 1018
         stream_generator = chat_renderer.render_response_stream(id_generator, request, input_length)
-        response = await self.endpoint._complete_non_stream_response(stream_generator, None, None)
+        generate = self.endpoint._complete_non_stream_response(stream_generator, None, None)
+        response = [x async for x in generate][-1]
         print(response)
         assert(response.choices[0].finish_reason)
         self.assertEqual(FinisheReason.length, response.choices[0].finish_reason)

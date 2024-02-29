@@ -2,7 +2,7 @@ from fastapi import Request
 import torch
 from typing import Union, Optional, List, Dict, Generator, Coroutine, AsyncGenerator, Any, Iterator
 import os
-import time
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -88,10 +88,10 @@ class OpenaiEndopoint():
         return config
 
     async def _complete_non_stream_response(
-            self, choice_generator: AsyncGenerator[StreamResponseObject, None],
+            self, choice_generator: Optional[AsyncGenerator[StreamResponseObject, None]],
             debug_info: Optional[DebugInfo],
             raw_request: Optional[Request]
-    ) -> ChatCompletionResponse:
+    ) -> AsyncGenerator[ChatCompletionResponse, None]:
         all_choices = []
         usage = None
 
@@ -136,7 +136,7 @@ class OpenaiEndopoint():
                 completion_tokens=0
             )
 
-        return ChatCompletionResponse(
+        yield ChatCompletionResponse(
             choices=all_choices,
             usage=usage,
             model=self.model.__class__.__name__,

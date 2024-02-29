@@ -83,11 +83,13 @@ class InferenceWorker():
                                         generate_config.get("calculate_loss", 0), generate_config["return_logits"])
 
     def is_streaming(self, req: Dict[str, Any]):
-        return req.get(
+        normal_stream = req.get(
             'yield_generator',
             req.get('generation_config',
                     req.get('generate_config', {})
                     ).get('yield_generator', False))
+        openai_stream = req.get('stream', False)
+        return normal_stream or openai_stream
 
     def update(self, version_info: VersionInfo):
         lora_infos = dict()

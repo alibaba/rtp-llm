@@ -118,3 +118,16 @@ py_test(
         "//maga_transformer/test/model_test/test_util",
     ]
 )
+
+py_test(
+    name = "concurrency_limit_test",
+    srcs = [
+        "concurrency_limit_test.py"
+    ],
+    deps = [
+        "//maga_transformer:sdk",
+        "//maga_transformer:testlib",
+        "//maga_transformer/test/model_test/test_util",
+    ],
+    timeout = 'short'
+)

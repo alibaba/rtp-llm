@@ -87,7 +87,7 @@ class InferenceApp(object):
             if g_parallel_info.is_master:
                 return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
                                     "gang cluster is None or role is master, should not access /inference_internal!")
-            return await self.inference_server._infer_wrap(req, raw_request)
+            return await self.inference_server.inference(req, raw_request)
 
         # entry for worker RANK == 0
         @app.post("/")
@@ -95,7 +95,7 @@ class InferenceApp(object):
             if not g_parallel_info.is_master:
                 return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
                                     "gang worker should not access this / api directly!")
-            return await self.inference_server._infer_wrap(req, raw_request)
+            return await self.inference_server.inference(req, raw_request)
 
         # update for worker RANK != 0
         @app.post("/update_internal")
@@ -103,7 +103,7 @@ class InferenceApp(object):
             if g_parallel_info.is_master:
                 return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
                                     "gang cluster is None or role is master, should not access /update_internal!")
-            return self.inference_server._update_wrap(version_info)
+            return self.inference_server.update(version_info)
 
         # update for worker RANK == 0
         @app.post("/update")
@@ -111,11 +111,11 @@ class InferenceApp(object):
             if not g_parallel_info.is_master:
                 return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
                                     "gang worker should not access /update api directly!")
-            return self.inference_server._update_wrap(version_info)
+            return self.inference_server.update(version_info)
 
         @app.get("/v1/models")
         async def list_models():
-            assert (self._openai_endpoint != None)
+            assert (self.inference_server._openai_endpoint != None)
             return await self.inference_server._openai_endpoint.list_models()
 
         # entry for worker RANK == 0
@@ -125,6 +125,6 @@ class InferenceApp(object):
             if not g_parallel_info.is_master:
                 return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
                                     "gang worker should not access this completions api directly!")
-            return await self.inference_server._chat_completion_wrap(request, raw_request)
+            return await self.inference_server.chat_completion(request, raw_request)
 
         return app
