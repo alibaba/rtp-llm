@@ -36,8 +36,12 @@ class Pipeline(object):
             self.model.enable_perf_test_schedule_strategy()
 
     @staticmethod
-    def create_generate_config(generate_config: Dict[str, Any], special_tokens: Any, **kwargs: Any) -> GenerateConfig:
-        config = GenerateConfig.create_generate_config(generate_config, **kwargs)
+    def create_generate_config(generate_config: Union[GenerateConfig, Dict[str, Any]], special_tokens: Any, **kwargs: Any) -> GenerateConfig:
+        if isinstance(generate_config, dict):
+            config = GenerateConfig.create_generate_config(generate_config, **kwargs)
+        else:
+            # 认为是从inference_worker传递进来的，不需要再处理一遍
+            config = generate_config
         config.add_special_tokens(special_tokens)
         return config
 

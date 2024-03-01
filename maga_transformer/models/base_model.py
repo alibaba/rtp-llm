@@ -5,8 +5,8 @@ import pynvml
 import logging
 import json
 import pydantic
-from pydantic import BaseModel, Field
-from typing import Any, Dict, List, Optional, Union, Iterator, Tuple, NamedTuple, AsyncGenerator
+from pydantic import BaseModel as PyBaseModel
+from typing import Any, Dict, List, Optional, Union, Tuple, NamedTuple, AsyncGenerator
 
 import torch.distributed as dist
 from transformers import PreTrainedTokenizerBase
@@ -25,7 +25,7 @@ from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
-def debug_print_hidden(name, t):
+def debug_print_hidden(name: str, t: torch.Tensor):
     if not (os.environ.get('FT_DEBUG_PRINT_LEVEL') == 'DEBUG'):
         return
     if not (os.environ.get('WORLD_RANK') == '0'):
@@ -43,7 +43,7 @@ def debug_print_hidden(name, t):
             print(b_idx, s_idx, t[b_idx,s_idx,:8])
 
 # single batch prompt input
-class GenerateInput(BaseModel):
+class GenerateInput(PyBaseModel):
     token_ids: torch.Tensor
     images: List[str] = []
     generate_config: GenerateConfig
@@ -62,31 +62,31 @@ class GenerateInput(BaseModel):
     def prompt_length(self):
         return self.token_ids.shape[-1] - self.ptuning_prefix_length
 
-    def update_ptuning(self, prefix_tokens):
+    def update_ptuning(self, prefix_tokens: torch.Tensor):
         self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
         self.ptuning_prefix_length = prefix_tokens.nelement()
 
-class AuxInfo(BaseModel):
+class AuxInfo(PyBaseModel):
     cost_time: float = 0
     iter_count: int = 0
     input_len: int = 0
     output_len: int = 0
     reuse_len: int = 0
-    cum_log_probs: List[float] = Field(default_factory=list)
-    beam_responses: List[str] = None
+    cum_log_probs: List[float] = []
+    beam_responses: List[str] = []
 
-class GenerateOutput(BaseModel):
+class GenerateOutput(PyBaseModel):
     hidden_states: Optional[torch.Tensor] = None
-    output_ids: torch.Tensor = None
+    output_ids: Optional[torch.Tensor] = None
     finished: bool = False
-    aux_info: AuxInfo = Field(default_factory=AuxInfo)
+    aux_info: AuxInfo = AuxInfo()
     loss: Optional[torch.Tensor] = None
     logits: Optional[torch.Tensor] = None
 
     class Config:
         arbitrary_types_allowed = True
 
-class GenerateResponse(BaseModel):
+class GenerateResponse(PyBaseModel):
     generate_output: GenerateOutput
     generate_texts: List[str]
 
@@ -152,7 +152,7 @@ class BaseModel(object):
         return config
 
     @staticmethod
-    def _create_config(ckpt_path: str):
+    def _create_config(ckpt_path: str) -> GptInitModelParameters:
         raise NotImplementedError()
 
     @classmethod
@@ -190,7 +190,7 @@ class BaseModel(object):
         self.tokenizer: Optional[TokenizerBase] = None
         self.max_input_buffer_len: int = 0
 
-        self.default_generate_config: Dict[str, Any] = {}
+        self.default_generate_config: GenerateConfig = GenerateConfig()
 
     def register_param(self, name: str, p: torch.nn.Module, force_update: bool=False):
         if not force_update and name in self._parameters:

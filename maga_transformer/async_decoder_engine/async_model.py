@@ -34,7 +34,7 @@ class AsyncModel:
         return self.model.is_multimodal()
 
     @property
-    def default_generate_config(self) -> Dict[str, Any]:
+    def default_generate_config(self) -> GenerateConfig:
         return self.model.default_generate_config
 
     # just for perf test

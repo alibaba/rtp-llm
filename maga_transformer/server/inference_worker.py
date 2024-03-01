@@ -5,7 +5,7 @@ import json
 import logging
 import pathlib
 import torch
-from typing import Any, Dict, List, Tuple, Optional, Union, NamedTuple
+from typing import Any, Dict, List, AsyncGenerator, Set
 
 current_file_path = pathlib.Path(__file__).parent.absolute()
 sys.path.append(str(current_file_path.parent.absolute()))
@@ -13,8 +13,7 @@ sys.path.append(str(current_file_path.parent.absolute()))
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.utils.util import copy_gemm_config
 from maga_transformer.utils.version_info import VersionInfo
-from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
-from maga_transformer.models.base_model import GenerateResponse
+from maga_transformer.models.base_model import GenerateResponse, GenerateConfig
 from maga_transformer.model_factory import ModelFactory, AsyncModel
 from maga_transformer.structure.request_extractor import RequestExtractor
 
@@ -31,13 +30,14 @@ class InferenceWorker():
 
     def inference(self, **kwargs: Any):
         request_extractor = RequestExtractor(self.model.default_generate_config)
-        request = request_extractor.extract_request(kwargs)
+        request, kwargs = request_extractor.extract_request(kwargs)
         
         if len(request.input_texts) > 1 or request.batch_infer:
             generators = [self._yield_generate(text, images, generate_config=generate_config, **kwargs)
                           for text, images, generate_config in zip(request.input_texts, request.input_images, request.generate_configs)]
-            incremental = request.generate_configs[0].get('return_incremental', False)
-            return self._batch_async_generators(incremental, request.num_return_sequences, generators, request.batch_infer)
+            incremental = request.generate_configs[0].return_incremental
+            num_return_sequences = request.generate_configs[0].num_return_sequences
+            return self._batch_async_generators(incremental, num_return_sequences, generators, request.batch_infer)
         else:
             return self._yield_generate(request.input_texts[0], request.input_images[0], generate_config=request.generate_configs[0], **kwargs)
 
@@ -61,7 +61,7 @@ class InferenceWorker():
         if beam_width > 1:
             aux_info.beam_responses = generate_texts
 
-        response = {
+        response: Dict[str, Any] = {
             "response": generate_texts[0],
             "finished": finished,
             "aux_info": aux_info.model_dump(mode='json'),
@@ -75,12 +75,11 @@ class InferenceWorker():
 
         return response
 
-    async def _yield_generate(self, text: str, images: List[str], **kwargs):
-        stream = self.pipeline.pipeline_async(prompt=text, images=images, **kwargs)
-        generate_config = kwargs.get("generate_config")
+    async def _yield_generate(self, text: str, images: List[str], generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[Dict[str, Any], None]:
+        stream = self.pipeline.pipeline_async(prompt=text, images=images, generate_config=generate_config, **kwargs)
         async for generate_response in stream:
-            yield self._format_response(generate_response, generate_config["return_hidden_states"],
-                                        generate_config.get("calculate_loss", 0), generate_config["return_logits"])
+            yield self._format_response(generate_response, generate_config.return_hidden_states,
+                                        generate_config.calculate_loss, generate_config.return_logits)
 
     def is_streaming(self, req: Dict[str, Any]):
         normal_stream = req.get(
@@ -99,10 +98,12 @@ class InferenceWorker():
 
 
     @staticmethod
-    async def _batch_async_generators(incremental, num_return_sequences, generators, batch_infer):
+    async def _batch_async_generators(incremental: bool, num_return_sequences: int, 
+                                      generators: List[AsyncGenerator[Dict[str, Any], None]], 
+                                      batch_infer: bool) -> AsyncGenerator[Dict[str, Any], None]:
         iterators = [gen.__aiter__() for gen in generators]
-        done_idxs = set()
-        batch_state = [None] * len(iterators)
+        done_idxs: Set[int] = set()
+        batch_state: List[Any] = [None] * len(iterators)
         while True:
             for idx, itr in enumerate(iterators):
                 try:
@@ -116,11 +117,10 @@ class InferenceWorker():
                         batch_state[idx]['response'] = ''
             if len(done_idxs) == len(iterators):
                 break
-            if num_return_sequences is not None:
-                batch_size = int(len(batch_state) / num_return_sequences)
+            batch_size = int(len(batch_state) / num_return_sequences)
             batch = batch_state
             if num_return_sequences > 1:
-                new_batch = []
+                new_batch: List[Any] = []
                 for batch_idx in range(batch_size):
                     seqs = batch_state[batch_idx * num_return_sequences:(batch_idx + 1) * num_return_sequences]
                     new_batch.append({"response": [seq['response'] for seq in seqs],

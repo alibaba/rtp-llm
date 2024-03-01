@@ -158,13 +158,13 @@ class ModelFactory:
         return sp_model_config
 
     @staticmethod
-    def load_default_generate_config(model):
+    def load_default_generate_config(model: Union[BaseModel, AsyncModel]):
         if 'GENERATION_CONFIG_PATH' in os.environ:
             model.default_generate_config.update(
                 json.load(open(os.path.join(os.environ['GENERATION_CONFIG_PATH'], 'generation_config.json')))
             )
             logging.info(f"load generate config:{os.environ['GENERATION_CONFIG_PATH']}/generation_config.json: \n\
-                         {json.dumps(model.default_generate_config, indent=4)}"
+                         {json.dumps(model.default_generate_config.model_dump(), indent=4)}"
             )
 
     @staticmethod

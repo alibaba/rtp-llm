@@ -62,6 +62,14 @@ class GenerateConfig(BaseModel):
         for key, value in new.items():
             if hasattr(self, key):
                 setattr(self, key, value)
+                
+    def update_and_pop(self, new: Dict[str, Any]):
+        to_remove: List[str] = []
+        for key, value in new.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+                to_remove.append(key)
+        return {k: v for k, v in new.items() if k not in to_remove}
 
     # generate config for sample
     # TODO: do not gen generate config, gen sample config
