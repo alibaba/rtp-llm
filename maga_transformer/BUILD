@@ -254,19 +254,19 @@ py_wheel(
 
 pyc_wheel(
     name = "maga_transformer",
-    package_name = "maga_transformer-0.1.4",
+    package_name = "maga_transformer-0.1.5",
     src = ":maga_transformer_whl",
 )
 
 pyc_wheel(
     name = "maga_transformer_cuda11",
-    package_name = "maga_transformer-0.1.4+cuda118",
+    package_name = "maga_transformer-0.1.5+cuda118",
     src = ":maga_transformer_whl",
 )
 
 pyc_wheel(
     name = "maga_transformer_cuda12",
-    package_name = "maga_transformer-0.1.4+cuda121",
+    package_name = "maga_transformer-0.1.5+cuda121",
     src = ":maga_transformer_whl",
 )
 

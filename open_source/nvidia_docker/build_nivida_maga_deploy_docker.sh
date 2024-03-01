@@ -120,7 +120,7 @@ MAGA_DEPLOY_TAG=`date "+%Y_%m_%d_%H_%M"`_`git rev-parse --short HEAD`
 echo "FROM $NVIDIA_MAGA_BASE_IMAGE:$NVIDIA_MAGA_BASE_TAG" > /tmp/nvidia_maga_deploy.Dockerfile
 cat $DIR/nvidia_maga_deploy.Dockerfile >> /tmp/nvidia_maga_deploy.Dockerfile
 
-WHL_FILE=maga_transformer-0.1.4-cp310-cp310-manylinux1_x86_64.whl
+WHL_FILE=maga_transformer-0.1.5-cp310-cp310-manylinux1_x86_64.whl
 # setup context
 cp $DIR/../deps/requirements_base.txt $DIR/
 cp $DIR/../deps/$REQUIREMENT_FILE $DIR/
