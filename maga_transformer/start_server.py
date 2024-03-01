@@ -47,11 +47,11 @@ StreamObjectType = Union[Dict[str, Any], BaseModel]
 class InferenceApp(object):
     def __init__(self, inference_server):
         self.inference_server = inference_server
-
+        
     def start(self):
         app = self.create_server()
         self.inference_server.wait_all_worker_ready()
-
+        
         timeout_keep_alive = int(os.environ.get("TIMEOUT_KEEP_ALIVE", 5))
         uvicorn.run(app, host="0.0.0.0", port=g_worker_info.server_port, log_config=UVICORN_LOGGING_CONFIG,
                     timeout_keep_alive = timeout_keep_alive, h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE)
@@ -169,7 +169,7 @@ class InferenceServer(object):
         self._init_controller()
         app = InferenceApp(self)
         app.start()
-
+        
     def wait_all_worker_ready(self):
         # master需要等其他所有机器都ready以后才能起服务，挂vipserver
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
@@ -351,7 +351,7 @@ class InferenceServer(object):
             res = self._call_generate_with_report(generate_call)
         finally:
             self._controller.decrement()
-
+        
         if is_streaming:
             return StreamingResponse(self.stream_response(req, res, id), media_type="text/event-stream")
         last_element = None
