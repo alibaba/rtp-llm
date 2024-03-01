@@ -8,7 +8,7 @@ import uvicorn
 import traceback
 import multiprocessing
 from multiprocessing import Process
-from typing import Generator, Union, Any, Dict, List, AsyncGenerator, Callable, Coroutine
+from typing import Generator, Union, Any, Dict, List
 import torch
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))

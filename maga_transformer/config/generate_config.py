@@ -40,6 +40,7 @@ class GenerateConfig(BaseModel):
     return_incremental: bool = False
     return_hidden_states: bool = False
     return_input_ids: bool = False
+    return_output_ids: bool = False
     md5_value: str = ""
     custom_prop: str = "{}"
 

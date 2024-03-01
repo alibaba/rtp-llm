@@ -79,6 +79,10 @@ class GenerateStream(BaseModel):
     @property
     def complete_token_ids(self):
         return self._complete_token_ids[:,:self.seq_length]
+    
+    @property
+    def input_token_ids(self):
+        return self._complete_token_ids[:, :self.input_length]
 
     @property
     def reuse_length(self):
@@ -176,6 +180,7 @@ class GenerateStream(BaseModel):
             if finished:
                 self._set_finished()
             self._output.output_ids = self._complete_token_ids[:,self.input_length:self._seq_length]
+            self._output.input_ids = self.input_token_ids
             self._output.hidden_states = hidden_states
             self._output.logits = logits
             self._output.finished = finished

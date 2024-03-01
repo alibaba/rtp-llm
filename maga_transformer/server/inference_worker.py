@@ -46,15 +46,14 @@ class InferenceWorker():
             logging.info("stoping InferenceWorker")
             self.model.stop()
 
-    def _format_response(self, gen_responses: GenerateResponse,
-                         return_hidden_states: bool = False,
-                         calculate_loss: int = 0,
-                         return_logits: bool = False) -> Dict[str, Any]:
+    def _format_response(self, gen_responses: GenerateResponse, generate_config: GenerateConfig) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         finished = gen_responses.generate_output.finished
         beam_width = gen_responses.generate_output.output_ids.shape[0]
         aux_info = gen_responses.generate_output.aux_info
         hidden_states = gen_responses.generate_output.hidden_states
+        output_ids = gen_responses.generate_output.output_ids
+        input_ids = gen_responses.generate_output.input_ids
         loss = gen_responses.generate_output.loss
         logits = gen_responses.generate_output.logits
 
@@ -66,21 +65,22 @@ class InferenceWorker():
             "finished": finished,
             "aux_info": aux_info.model_dump(mode='json'),
         }
-        # 判断 None，可能有 batch 还没算出来
-        if return_hidden_states and hidden_states is not None:
+        if generate_config.return_hidden_states:
             response["hidden_states"] = hidden_states.tolist()
-        if calculate_loss and loss is not None: 
+        if generate_config.calculate_loss and loss is not None:
             response['loss'] = loss.tolist()
-        if return_logits and logits is not None:
+        if generate_config.return_logits:
             response['logits'] = logits.tolist()
-
+        if generate_config.return_output_ids:
+            response['output_ids'] = output_ids.tolist()
+        if generate_config.return_input_ids:
+            response['input_ids'] = input_ids.tolist()
         return response
 
     async def _yield_generate(self, text: str, images: List[str], generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[Dict[str, Any], None]:
         stream = self.pipeline.pipeline_async(prompt=text, images=images, generate_config=generate_config, **kwargs)
         async for generate_response in stream:
-            yield self._format_response(generate_response, generate_config.return_hidden_states,
-                                        generate_config.calculate_loss, generate_config.return_logits)
+            yield self._format_response(generate_response, generate_config)
 
     def is_streaming(self, req: Dict[str, Any]):
         normal_stream = req.get(

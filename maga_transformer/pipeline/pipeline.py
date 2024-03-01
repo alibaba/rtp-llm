@@ -159,7 +159,7 @@ class Pipeline(object):
         return texts, output_lens
 
     @torch.inference_mode()
-    async def generate_stream(self, input, stream, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
+    async def generate_stream(self, input: GenerateInput, stream: AsyncGenerator[GenerateOutput, None], **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         # TODO(xinfei.sxf) stop words etc 直接带入raw query中去
         stop_word_strs = self._get_stop_word_strs(self.tokenizer, input.generate_config)
         stop_word_str_slices = get_stop_word_slice_list(stop_word_strs)
@@ -187,6 +187,6 @@ class Pipeline(object):
                 kmonitor.report(GaugeMetrics.FT_ITERATE_COUNT_METRIC, generate_output.aux_info.iter_count)
                 for l in output_lens:
                     kmonitor.report(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, l)
-            kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
+            kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)            
             
             yield GenerateResponse(generate_output=generate_output, generate_texts=generate_texts)

@@ -78,6 +78,7 @@ class AuxInfo(PyBaseModel):
 class GenerateOutput(PyBaseModel):
     hidden_states: Optional[torch.Tensor] = None
     output_ids: Optional[torch.Tensor] = None
+    input_ids: Optional[torch.Tensor] = None
     finished: bool = False
     aux_info: AuxInfo = AuxInfo()
     loss: Optional[torch.Tensor] = None
@@ -384,7 +385,7 @@ class BaseModel(object):
             for name in generate_config.adapter_name:
                 self.weight.lora_resource.read_release(name)
 
-    def enqueue(self, input):
+    def enqueue(self, input: GenerateInput) -> AsyncGenerator[GenerateOutput, None]:
         return self.generate_stream(input)
 
     @torch.no_grad()
