@@ -1,4 +1,5 @@
 import os
+import re
 import gc
 import logging
 import multiprocessing
@@ -46,7 +47,7 @@ class ModelWeightsLoader:
     def _process_ckpt_metas(self):
         self._weights_info.process_meta(self._ckpt_metas)
 
-    def load_weights_from_scratch(self, int8_mode: int, device: str='cuda:0', num_process=1):
+    def load_weights_from_scratch(self, int8_mode: int, ref_model: Optional[torch.nn.Module]=None, device: str='cuda:0', num_process=1):
         weights = ModelWeights(self._num_layers)
         if num_process > 1:
             ctx = multiprocessing.get_context('spawn')
@@ -55,9 +56,10 @@ class ModelWeightsLoader:
                     self._load_layer_weight,
                     zip(range(self._num_layers),
                         repeat(int8_mode),
+                        repeat(ref_model),
                         repeat(device)))
         else:
-            all_results = [self._load_layer_weight(id, int8_mode, device)
+            all_results = [self._load_layer_weight(id, int8_mode, ref_model, device)
                            for id in range(self._num_layers)]
         for results, logs in all_results:
             self._weight_access_log.update(logs)
@@ -65,7 +67,7 @@ class ModelWeightsLoader:
                 weights.append_layer_weight(
                     int8_flag, layer_id, name, tensor)
         for weight in self._model_weights_info.weights:
-            tensor = self._load_and_convert_tensor(weight)
+            tensor = self._load_and_convert_tensor(weight, ref_model)
             tensor = self._split_and_sanitize_tensor(tensor, weight)
             tensor = tensor.to('cuda')
             weights.append_pytorch_weight(weight.name, tensor)
@@ -74,7 +76,7 @@ class ModelWeightsLoader:
             weights.append_pytorch_weight(name, tensor)
         
         return weights
-    
+
     def _load_medusa_weights(self, medusa_weights: List[WeightInfo], device: str='cuda:0') -> List[Tuple[str, torch.Tensor]]:
         if len(medusa_weights) == 0:
             return []
@@ -128,7 +130,7 @@ class ModelWeightsLoader:
 
         return results, self._weight_access_log
 
-    def _load_layer_weight(self, layer_id: int, int8_mode: int, device: str = "cuda:0"):
+    def _load_layer_weight(self, layer_id: int, int8_mode: int, ref_model: Optional[torch.nn.Module] = None, device: str = "cuda:0"):
         use_fp32 = os.environ.get("USE_FLOAT32", None) is not None
         results = []
         if isinstance(self._model_weights_info.layer_weights[0], List):
@@ -141,7 +143,7 @@ class ModelWeightsLoader:
                 int8_flag = int8_mode == 1 and (weight.name in W.int8_quant_w)
                 moe_int8_flag = int8_mode == 1 and (weight.name in W.moe_int8_quant_w) and self._weights_info.expert_num_ > 0
 
-                tensor = self._load_and_convert_tensor(weight, layer_id)
+                tensor = self._load_and_convert_tensor(weight, ref_model=ref_model, layer_id=layer_id)
                 
                 if self._merge_lora:
                     tensor = self.apply_lora(tensor, weight, layer_id)
@@ -248,11 +250,15 @@ class ModelWeightsLoader:
 
         return after_merge_tensor
 
-
-    def _load_and_convert_tensor(self, weight_info: WeightInfo, layer_id: Optional[int] = None):
+    def _load_and_convert_tensor(self, weight_info: WeightInfo, ref_model: Optional[torch.nn.Module] = None, layer_id: Optional[int] = None):
         before_merge_tensors = []
         for ckpt_weight in weight_info.weights:
-            before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(ckpt_weight.tensor_name(layer_id))))
+            if ref_model is not None:
+                weight_name: str = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', ckpt_weight.tensor_name(layer_id))
+                before_merge_tensors.append(ckpt_weight.merge_fun([eval('ref_model.' + weight_name).detach().clone()]))
+            else:
+                before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(ckpt_weight.tensor_name(layer_id))))
+            
         after_merge_tensor = weight_info.process_fun(before_merge_tensors)
         return after_merge_tensor
 

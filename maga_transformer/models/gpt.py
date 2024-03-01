@@ -199,15 +199,11 @@ class GPT(BaseModel):
             self.weight.lora_resource.update(lora_infos)
         logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
-    def load(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
-        self._load_weights(device)
+    def load(self, ref_model: Optional[torch.nn.Module] = None, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        self._load_weights(ref_model, device)
         self._initialize_from_weight(device)
 
-    def reload_from_module(self, ref_model: torch.nn.Module, reuse_mem: bool = False,
-                           device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
-        self._initialize_from_weight(device)
-
-    def _load_weights(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+    def _load_weights(self, ref_model: Optional[torch.nn.Module] = None, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         device = device or get_device()
         compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
 
@@ -224,7 +220,7 @@ class GPT(BaseModel):
             load_parallel_num = estimate_load_parallel_num(
                 self.config, g_parallel_info.tp_size)
             model_weights_loader = get_model_weights_loader(weights_info, database, compute_dtype=compute_dtype)
-            self.weight = model_weights_loader.load_weights_from_scratch(weights_info._int8_mode, num_process=load_parallel_num)
+            self.weight = model_weights_loader.load_weights_from_scratch(weights_info._int8_mode, ref_model=ref_model, num_process=load_parallel_num)
             model_weights_loader.show_warns()
 
             self.weight.lora_resource = LoraResource({}, database, weights_info, LoRAMap())
