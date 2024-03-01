@@ -22,6 +22,7 @@ namespace fastertransformer {
 
 enum class ActivationType {
     Gelu,
+    GatedGelu,
     GeluNoneApproximate,
     Relu,
     Silu,
@@ -36,6 +37,8 @@ enum class ActivationType {
 inline ActivationType getActivationType(std::string activation_type_str) {
     if (activation_type_str == "Gelu" || activation_type_str == "gelu") {
         return ActivationType::Gelu;
+    } else if (activation_type_str == "gated-gelu" || activation_type_str == "GatedGelu") {
+        return ActivationType::GatedGelu;
     } else if (activation_type_str == "GeluNoneApproximate" || activation_type_str == "gelu-none-approximate") {
         return ActivationType::GeluNoneApproximate;
     } else if (activation_type_str == "Relu" || activation_type_str == "relu") {
@@ -60,7 +63,9 @@ inline ActivationType getActivationType(std::string activation_type_str) {
 
 inline bool isGatedActivation(ActivationType activaiton_type) {
     return activaiton_type == ActivationType::GeGLU || activaiton_type == ActivationType::ReGLU
-           || activaiton_type == ActivationType::SiGLU || activaiton_type == ActivationType::GeGluNoneApproximate;
+           || activaiton_type == ActivationType::GatedGelu
+           || activaiton_type == ActivationType::SiGLU
+           || activaiton_type == ActivationType::GeGluNoneApproximate;
 }
 
 }  // namespace fastertransformer

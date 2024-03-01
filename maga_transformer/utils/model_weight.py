@@ -45,6 +45,11 @@ def identity(ts: List[torch.Tensor], allow_empty=False) -> torch.Tensor:
         return None
     return ts[0].contiguous()
 
+def shift_one(ts: List[torch.Tensor], allow_empty=False) -> torch.Tensor:
+    if len(ts) == 0 and allow_empty:
+        return None
+    return (ts[0] + 1.0).contiguous()
+
 def sp_0(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.Tensor]:
     if (t.dim() == 3):
         return torch.split(t, t.shape[1] // tp, dim=1)[tp_rank]
@@ -844,7 +849,7 @@ class ModelWeights:
     @property
     def dtype(self):
         return self._dtype
-    
+
 class LoraResourceHolder:
     def __init__(self, lora_resource, adapter_name):
         self._lora_resource = lora_resource

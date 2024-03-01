@@ -59,6 +59,7 @@ public:
     int64_t dynamic_embedding_max_pos_ = 0;
     int64_t position_embeddings_scale_ = 1;
     int64_t base_scale_                = 1;
+    double  input_embedding_scalar_    = 1; // for Gemma, hidden_states = hidden_states * (hidden_size**0.5)
 
     bool    use_logn_attn_ = false;
     int64_t logn_seq_len_  = 2048;

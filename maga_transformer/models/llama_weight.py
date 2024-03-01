@@ -8,7 +8,7 @@ from einops import rearrange
 
 from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, LoRAModelWeightInfo, \
     ModelDeployWeightInfo, CkptWeightInfo, \
-    concat_1, concat_0, identity, zeros, transpose, merge_qkv_lora_A, merge_qkv_lora_B
+    concat_1, concat_0, identity, zeros, transpose, merge_qkv_lora_A, merge_qkv_lora_B, shift_one
 
 # permute for sliced rotary
 def permute(w, head_num, dim1, dim2):
@@ -132,10 +132,6 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
             logging.info('load hf llama1 style weight')
             self._names = HfWeightNames
             self._merge_qkv = merge_qkv_hf
-        elif GemmaWeightNames.OUTPUT in weight_keys:
-            logging.info('load gemma style weight')
-            self._names = GemmaWeightNames
-            self._merge_qkv = merge_qkv_hf
         else:
             raise Exception('unknown weights format')
 
@@ -220,3 +216,27 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights,
                                tp_strategy=W.gpt_style_tp_strategy)
+
+class GemmaWeightInfo(LlamaWeightInfo):
+    def __init__(self, config, tp_size, tp_rank):
+        super().__init__(config, tp_size, tp_rank)
+
+    def _process_meta(self, meta_dicts, weight_keys):
+        logging.info('load gemma style weight')
+        self._names = GemmaWeightNames
+        self._merge_qkv = merge_qkv_hf
+
+    def _check_layernorm(self, weight):
+        if isinstance(weight, list):
+            return
+        if ("layernorm" in weight.name) and ("gamma" in weight.name):
+            logging.info(f"gemma adds shift 1 to {weight.name}")
+            weight.process_fun = shift_one
+
+    def _get_weight_info(self):
+        weight_info = super()._get_weight_info()
+        for layer_weight in weight_info.layer_weights:
+            self._check_layernorm(layer_weight)
+        for weight in weight_info.weights:
+            self._check_layernorm(weight)
+        return weight_info

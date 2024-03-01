@@ -35,13 +35,19 @@ class Embedding(torch.nn.Module):
     def __init__(self, all_gather):
         super().__init__()
         self._emb = None
+        self._scalar: Optional[float] = None
         self._all_gather = all_gather
 
     def set_weight(self, emb):
         self._emb = emb
 
+    def set_scalar(self, scalar):
+        self._scalar = scalar
+
     def forward(self, input):
         output = F.embedding(input, self._emb)
+        if self._scalar:
+            output = output * self._scalar
         if self._all_gather:
             return all_gather(output)
         return output
@@ -226,6 +232,8 @@ class GPT(BaseModel):
         self.decoder.set_weight(self.weight)
 
         self.word_embedding.set_weight(self.weight.steal_pytorch_weight(W.embedding))
+        if (self.config.dynamic_embedding_scalar - 1 > 1e-6):
+            self.word_embedding.set_scalar(self.config.dynamic_embedding_scalar)
         if self.weight.has_pytorch_weight(W.lm_head):
             lm_head_w = self.weight.steal_pytorch_weight(W.lm_head)
         else:

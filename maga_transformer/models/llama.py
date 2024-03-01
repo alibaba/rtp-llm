@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from transformers.models.llama.tokenization_llama import LlamaTokenizer as LlamaTokenizerOrigin
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.llama_weight import LlamaWeightInfo
+from maga_transformer.models.llama_weight import LlamaWeightInfo, GemmaWeightInfo
 from maga_transformer.models.gpt import GPT
 from maga_transformer.model_factory_register import register_model
 
@@ -82,6 +82,7 @@ class Llama(GPT):
                 config.position_embeddings_scale = int(config_json['rope_scaling']['factor'])
             else:
                 raise Exception(f"unsupport rope_scaling {config_json['rope_scaling']}")
+        # config.activation_type = config_json.get("hidden_act", config.activation_type)
         config.special_tokens.eos_token_id = config_json['eos_token_id']
         use_logn_attn = config_json.get("use_logn_attn")
         if (use_logn_attn):
@@ -138,9 +139,16 @@ class Baichuan2(Baichuan):
 
 class Gemma(Llama):
     @staticmethod
+    def get_weight_cls():
+        return GemmaWeightInfo
+
+    @staticmethod
     def _create_config(ckpt_path: str):
         config = Llama._create_config(ckpt_path)
-        config.has_post_decoder_layernorm = False
+        config.has_post_decoder_layernorm = True
+        config.dynamic_embedding_scalar = (config.hidden_size ** 0.5)
+        config.rotary_embedding_dim = config.size_per_head
+        config.activation_type = 'gated-gelu'
         return config
 
 register_model('internlm', Llama, ["InternLMForCausalLM"])

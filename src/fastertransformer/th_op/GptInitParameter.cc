@@ -109,6 +109,7 @@ static auto specialTokensTHS =
     DEF_PROPERTY(dynamic_embedding_max_pos, dynamic_embedding_max_pos_)                                                \
     DEF_PROPERTY(position_embeddings_scale, position_embeddings_scale_)                                                \
     DEF_PROPERTY(base_scale, base_scale_)                                                                              \
+    DEF_PROPERTY(input_embedding_scalar, input_embedding_scalar_)                                                      \
     DEF_PROPERTY(use_norm_input_residual, use_norm_input_residual_)                                                    \
     DEF_PROPERTY(use_norm_attn_out_residual, use_norm_attn_out_residual_)                                              \
     DEF_PROPERTY(int8_mode, int8_mode_)                                                                                \

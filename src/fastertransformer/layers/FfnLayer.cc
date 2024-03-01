@@ -454,9 +454,7 @@ FfnLayer<T>::FfnLayer(size_t               max_batch_size,
     int8_mode_(int8_mode),
     activation_type_(activation_type),
     layernorm_eps_(layernorm_eps) {
-    use_gated_activation_ = activation_type_ == ActivationType::GeGLU
-                            || activation_type_ == ActivationType::GeGluNoneApproximate
-                            || activation_type_ == ActivationType::ReGLU || activation_type_ == ActivationType::SiGLU;
+    use_gated_activation_ = isGatedActivation(activation_type_);
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (int8_mode_ == 1) {
         FT_CHECK_WITH_INFO(!(std::is_same<T, float>::value), "Weight only quant not supported for fp32.");
@@ -617,6 +615,7 @@ void FfnLayer<T>::genericActivation(int          layer_id,
     switch (getActivationType()) {
         case ActivationType::Gelu:
         case ActivationType::GeGLU:
+        case ActivationType::GatedGelu:
             if (inter_buf_2_ == nullptr && int8_mode_ <= 1) {
                 invokeAddBiasGeluV2(
                     inter_buf_, bias1, ia3_tasks, ia3_weights, padding_offset, seq_len, m, inter_padding_size, stream_);
