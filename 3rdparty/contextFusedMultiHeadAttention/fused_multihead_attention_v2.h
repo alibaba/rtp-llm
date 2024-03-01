@@ -48,16 +48,6 @@ static const struct TmaKernelMetaInfo
 } sTmaMetaInfo[] = {{32, 64, 256}, {64, 64, 256}, {128, 64, 128}, {256, 64, 64}};
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
-// meta info for tma warp-specialized kernels that supports paged kv cache
-static const struct TmaPagedKVKernelMetaInfo
-{
-    unsigned int mD;
-    unsigned int mQStep;
-    unsigned int mKVStep;
-} sTmaPagedKVMetaInfo[] = {{32, 64, 128}, {64, 64, 128}, {128, 64, 128}, {256, 64, 64}};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
 // Base Class
 
 template <typename TKernelMeta, typename TKernelParam>
@@ -323,7 +313,8 @@ public:
 
             // 2 * 2 stands for kv cache and 2 bytes per element.
             size_t size_in_bytes = block_size.y * params.s * params.d * 2 * 2;
-            if (size_in_bytes <= launch_params.device_l2_cache_size)
+            // Take uGPU into consideration.
+            if (size_in_bytes <= launch_params.device_l2_cache_size / 2)
             {
                 // strategy 1: limit to only 1 wave
                 block_size.x = std::min(m_steps / NUM_COMPUTE_GROUPS, sms_per_head);
@@ -452,7 +443,8 @@ public:
 
             // 2 * 2 stands for kv cache and 2 bytes per element.
             size_t size_in_bytes = block_size.y * launch_params.kernel_kv_s * params.d * 2 * 2;
-            if (size_in_bytes <= launch_params.device_l2_cache_size)
+            // Take uGPU into consideration.
+            if (size_in_bytes <= launch_params.device_l2_cache_size / 2)
             {
                 // strategy 1: limit to only 1 wave
                 block_size.x = std::min(m_steps / NUM_COMPUTE_GROUPS, sms_per_head);
