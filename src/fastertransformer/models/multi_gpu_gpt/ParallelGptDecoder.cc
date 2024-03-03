@@ -435,7 +435,6 @@ void ParallelGptDecoder<T>::forward(std::unordered_map<std::string, Tensor>*    
                     normed_self_attn_output_,
                     self_attn_output_,
                     gpt_init_parameter_.use_norm_input_residual_ ? decoder_normed_input_ : decoder_input,
-                    (T*)nullptr,
                     layer_weight->self_attn_layernorm_weights.gamma,
                     layer_weight->self_attn_layernorm_weights.beta,
                     layer_weight->self_attention_weights.attention_output_weight.bias,

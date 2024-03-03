@@ -39,7 +39,6 @@ public:
                                            T*           norm_output,
                                            const T*     input,
                                            const T*     residual1,
-                                           const T*     residual2,
                                            const T*     gamma,
                                            const T*     beta,
                                            const T*     bias,
