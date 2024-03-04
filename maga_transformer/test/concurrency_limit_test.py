@@ -2,29 +2,32 @@ import os
 import random
 import time
 import requests
+import logging
 from unittest import TestCase, main
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 import asyncio
+from pydantic import BaseModel, Field
+
 
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.server.inference_server import InferenceWorker
 from maga_transformer.server.inference_app import InferenceApp
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
-
+from maga_transformer.utils.loggable_async_generator import LoggableAsyncGenerator
 def fake_init(self, *args, **kwargs):
     self.model = None
 
-async def fake_inference(*args, **kwargs):
-    for _ in range(5):
-        await asyncio.sleep(1)
-        yield {"hello": "gg"}
-
-async def fake_inference(*args, **kwargs):
-    for _ in range(5):
-        await asyncio.sleep(1)
-        yield {"hello": "gg"}
+class FakePipelineResponse(BaseModel):
+    hello: str
+    
+def fake_inference(*args, **kwargs):
+    async def response_generator():
+        for _ in range(5):
+            await asyncio.sleep(1)
+            yield FakePipelineResponse(hello="gg")
+    return LoggableAsyncGenerator(response_generator(), LoggableAsyncGenerator.get_last_value)
         
 InferenceWorker.__init__ = fake_init
 InferenceWorker.inference = fake_inference
@@ -63,6 +66,7 @@ class ConcurrencyLimitTest(TestCase):
 
     def curl(self):
         res = requests.post(f"http://localhost:{self.port}", json={"prompt": "gg!"}, timeout=60)
+        logging.info(f"resutl:{res.text}, {dir(res)}")
         self.assertTrue(res.status_code == 200)
 
     def chat_completion(self):

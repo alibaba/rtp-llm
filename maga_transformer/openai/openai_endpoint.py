@@ -5,10 +5,12 @@ import os
 import asyncio
 import logging
 from dataclasses import dataclass
+from functools import partial
 
 from transformers import PreTrainedTokenizer
 from transformers.generation.stopping_criteria import StoppingCriteria
 
+from maga_transformer.utils.loggable_async_generator import LoggableAsyncGenerator
 from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateOutput, GenerateResponse, GenerateInput
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessage, RoleEnum, \
@@ -87,23 +89,13 @@ class OpenaiEndopoint():
             config.timeout_ms = extra_configs.timeout_ms or config.timeout_ms
         return config
 
-    async def _complete_non_stream_response(
-            self, choice_generator: Optional[AsyncGenerator[StreamResponseObject, None]],
-            debug_info: Optional[DebugInfo],
-            raw_request: Optional[Request]
-    ) -> AsyncGenerator[ChatCompletionResponse, None]:
+    async def _collect_complete_response(
+            self, 
+            choice_generator: Optional[AsyncGenerator[StreamResponseObject, None]],
+            debug_info: Optional[DebugInfo]) -> ChatCompletionResponse:
         all_choices = []
-        usage = None
-
-        if raw_request and await raw_request.is_disconnected():
-            if choice_generator is not None:
-                await choice_generator.aclose()
-            raise asyncio.CancelledError("client disconnects")
-        
+        usage = None        
         async for response in choice_generator:
-            if raw_request and await raw_request.is_disconnected():
-                await choice_generator.aclose()
-                raise asyncio.CancelledError("client disconnects")
             if len(response.choices) != len(all_choices):
                 if (all_choices == []):
                     all_choices = [
@@ -135,26 +127,29 @@ class OpenaiEndopoint():
                 total_tokens=0,
                 completion_tokens=0
             )
-
-        yield ChatCompletionResponse(
+        return ChatCompletionResponse(
             choices=all_choices,
             usage=usage,
             model=self.model.__class__.__name__,
             debug_info=debug_info,
         )
 
-    async def _complete_stream_response(
+    def _complete_stream_response(
             self, choice_generator: AsyncGenerator[StreamResponseObject, None],
-            debug_info: Optional[DebugInfo],
-    ) -> AsyncGenerator[ChatCompletionStreamResponse, None]:
-        debug_info_responded = False
-        async for response in choice_generator:
-            yield ChatCompletionStreamResponse(
-                choices=response.choices,
-                usage=response.usage,
-                debug_info=debug_info if not debug_info_responded else None
-            )
-            debug_info_responded = True
+            debug_info: Optional[DebugInfo]
+    ) -> LoggableAsyncGenerator:
+        async def response_generator():
+            debug_info_responded = False
+            async for response in choice_generator:
+                yield ChatCompletionStreamResponse(
+                    choices=response.choices,
+                    usage=response.usage,
+                    debug_info=debug_info if not debug_info_responded else None
+                )
+                debug_info_responded = True
+            
+        complete_response_collect_func = partial(self._collect_complete_response, debug_info=debug_info)
+        return LoggableAsyncGenerator(response_generator(), complete_response_collect_func)
 
     def _get_debug_info(self, renderered_input: RenderedInputs) -> Optional[DebugInfo]:
         prompt = self.tokenizer.decode(renderered_input.input_ids)
@@ -172,7 +167,7 @@ class OpenaiEndopoint():
 
     def chat_completion(
             self, chat_request: ChatCompletionRequest, raw_request: Request
-    ) -> Union[Coroutine[Any, Any, ChatCompletionResponse], AsyncGenerator[ChatCompletionStreamResponse, None]]:
+    ) -> LoggableAsyncGenerator:
         rendered_input = self.chat_renderer.render_chat(chat_request)
         input_ids = rendered_input.input_ids
         input_length = len(input_ids)
@@ -198,8 +193,5 @@ class OpenaiEndopoint():
             input_length
         )
 
-        if chat_request.stream:
-            return self._complete_stream_response(choice_generator, debug_info)
-        else:
-            return self._complete_non_stream_response(choice_generator, debug_info, raw_request)
+        return self._complete_stream_response(choice_generator, debug_info)
 

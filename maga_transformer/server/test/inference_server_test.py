@@ -4,11 +4,22 @@ from unittest import TestCase, main
 from fastapi import Request as RawRequest
 
 from maga_transformer.server.inference_server import InferenceServer
-from typing import Any
+from maga_transformer.utils.loggable_async_generator import LoggableAsyncGenerator
 
+from typing import Any
+from pydantic import BaseModel, Field
+
+class FakePipelinResponse(BaseModel):
+    res: str
+    
 class FakeInferenceWorker(object):
-    async def inference(self, prompt: str, *args: Any, **kwargs: Any):
-        yield {"res": prompt}
+    def inference(self, prompt: str, *args: Any, **kwargs: Any):
+        
+        response_generator = self._inference(prompt, *args, **kwargs)
+        return LoggableAsyncGenerator(response_generator, LoggableAsyncGenerator.get_last_value)
+    
+    async def _inference(self, prompt: str, *args: Any, **kwargs: Any):
+        yield FakePipelinResponse(res=prompt)
         
     def is_streaming(self, *args: Any, **kawrgs: Any):
         return False
@@ -31,8 +42,8 @@ class InferenceServerTest(TestCase):
     def test_simple(self):        
         loop = asyncio.new_event_loop()
         res = loop.run_until_complete(self._async_run(req={"prompt": "hello"}, raw_request=FakeRawRequest()))        
-        self.assertEqual(res.body.decode('utf-8'), '{"res":"hello"}')
+        self.assertEqual(res.body.decode('utf-8'), '{"res":"hello"}', res.body.decode('utf-8'))
         res = loop.run_until_complete(self._async_run(req='{"prompt": "hello"}',raw_request=FakeRawRequest()))
-        self.assertEqual(res.body.decode('utf-8'), '{"res":"hello"}')        
+        self.assertEqual(res.body.decode('utf-8'), '{"res":"hello"}', res.body.decode('utf-8'))        
 
 main()

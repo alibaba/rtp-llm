@@ -15,6 +15,15 @@ class Request(NamedTuple):
     input_texts: Any
     input_images: Any
     generate_configs: List[GenerateConfig]
+    is_streaming: bool
+    
+    @property
+    def num_return_sequences(self) -> int:
+        return self.generate_configs[0].num_return_sequences
+
+    @property
+    def incremental(self) -> bool:
+        return self.generate_configs[0].return_incremental
 
 class RequestExtractor:
     def __init__(self, default_generate_config: GenerateConfig):
@@ -25,6 +34,14 @@ class RequestExtractor:
         request = self._get_request(generate_config, remain_args)
         return request, remain_args
 
+    @staticmethod
+    def is_streaming(req: Dict[str, Any]):
+        return req.get(
+            'yield_generator',
+            req.get('generation_config',
+                    req.get('generate_config', {})
+                    ).get('yield_generator', False))
+        
     def _format_generate_config(self, kwargs: Dict[str, Any]) -> Tuple[GenerateConfig, Dict[str, Any]]:
         config_json = kwargs.pop('generate_config', kwargs.pop('generation_config', {}))
         generate_config = copy.deepcopy(self.default_generate_config)
@@ -94,6 +111,7 @@ class RequestExtractor:
     def _is_batch(self, kwargs: Dict[str,Any]):
          return "prompt_batch" in kwargs
 
+        
     def _get_adapter(self, generate_config: GenerateConfig, input_len: int) -> List[GenerateConfig]:
         generate_configs: List[GenerateConfig] = [generate_config] * input_len
         adapter_name = generate_config.adapter_name
@@ -123,8 +141,9 @@ class RequestExtractor:
         input_images = self._get_images(len(input_texts), kwargs)
         generate_configs = self._get_adapter(generate_config, len(input_texts))
         input_texts, input_images, generate_configs = self.extend_sequences(input_texts, input_images, generate_configs)
+        is_streaming = RequestExtractor.is_streaming(kwargs)
 
-        return Request(batch_infer, input_texts, input_images, generate_configs)
+        return Request(batch_infer, input_texts, input_images, generate_configs, is_streaming)
 
     def _format_chat_api_messages(self, generate_config: GenerateConfig, kwargs: Dict[str, Any]) -> Tuple[GenerateConfig, Dict[str, Any]]:
         if 'messages' in kwargs:

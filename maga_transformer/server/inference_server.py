@@ -16,6 +16,7 @@ from fastapi import Request as RawRequest
 from maga_transformer.utils.time_util import Timer, current_time_ms
 from maga_transformer.utils.util import AtomicCounter
 from maga_transformer.utils.model_weight import LoraCountException, LoraPathException
+from maga_transformer.utils.loggable_async_generator import LoggableAsyncGenerator
 from maga_transformer.metrics import sys_reporter, kmonitor, AccMetrics, GaugeMetrics
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -25,7 +26,7 @@ from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.access_logger.access_logger import AccessLogger
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatCompletionStreamResponse
-from maga_transformer.server.inference_worker import InferenceWorker
+from maga_transformer.server.inference_worker import InferenceWorker, BatchPipelineResponse
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -77,21 +78,18 @@ class InferenceServer(object):
 
     # use asyncio.sleep(0) to correctly exit when client closed https://github.com/tiangolo/fastapi/issues/4146
     async def stream_response(
-            self, request: Dict[str, Any], response: AsyncGenerator[StreamObjectType, None], id: int
+            self, request: Dict[str, Any], response: LoggableAsyncGenerator, id: int
     ):
         is_openai_response = request.get("stream", False)
         response_data_prefix = "data: " if is_openai_response else "data:"
         try:
-            last_response = ''
             async for res in response:
-                last_response = res
-                data_str = res.model_dump_json(exclude_none=True) if isinstance(res, BaseModel) \
-                    else json.dumps(res, ensure_ascii=False)
+                data_str = res.model_dump_json(exclude_none=True)
                 yield response_data_prefix + data_str + "\r\n\r\n"
                 await asyncio.sleep(0)
             if not is_openai_response:
                 yield f"data:[done]\r\n\r\n"
-            self._access_logger.log_success_access(request, last_response, id)
+            await self._collect_complete_response_and_record_access_log(request, id, response)
         except asyncio.CancelledError as e:
             self._access_logger.log_exception_access(request, e, id)
             kmonitor.report(AccMetrics.CANCAL_QPS_METRIC, 1)
@@ -148,7 +146,7 @@ class InferenceServer(object):
 
         return await self._infer_wrap(req, raw_request, generate_call)
 
-    async def _infer_wrap(self, req: Dict[Any, Any], raw_request: RawRequest, generate_call: Callable[[], AsyncGenerator[StreamObjectType, None]]):
+    async def _infer_wrap(self, req: Dict[Any, Any], raw_request: RawRequest, generate_call: Callable[[], LoggableAsyncGenerator]):
         id = self._atomic_count.increment()
         try:
             rep = await self._infer_impl(req, id, raw_request, generate_call)
@@ -170,20 +168,17 @@ class InferenceServer(object):
         def generate_call():
             assert (self._openai_endpoint != None)
             response = self._openai_endpoint.chat_completion(request, raw_request)
-            assert (isinstance(response, AsyncGenerator)), f"error type: {type(response)}"
+            assert (isinstance(response, LoggableAsyncGenerator)), f"error type: {type(response)}"
             return response
         return await self._infer_wrap(request.model_dump(), raw_request, generate_call)
 
-    async def _call_generate_with_report(
-            self, generate_call: Callable[[], AsyncGenerator[StreamObjectType, None]]
-    ) -> AsyncGenerator[StreamObjectType, None]:
-        try:
-            assert self._inference_worker is not None
-            with Timer() as t:
+    async def _call_generate_with_report(self, generate_call: Callable[[], LoggableAsyncGenerator]):
+        async def __gen_response_with_report(start_time, response_generator):
+            try:
                 last_iterate_time = current_time_ms()
                 first_token = True
                 iter_count = 0
-                response_generator = generate_call()
+                all_responses = []
                 async for x in response_generator:
                     end_time = current_time_ms()
                     if first_token:
@@ -195,12 +190,28 @@ class InferenceServer(object):
                     last_iterate_time = end_time
                     iter_count += 1
                     yield x
-            kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
-            kmonitor.report(GaugeMetrics.LANTENCY_METRIC, t.cost_ms())
-        finally:
+                kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
+                kmonitor.report(GaugeMetrics.LANTENCY_METRIC, current_time_ms()-start_time)
+            finally:
+                self._controller.decrement()
+            
+        assert self._inference_worker is not None
+        start_time = current_time_ms()
+        try:
+            response_generator = generate_call()
+        except Exception as e:
             self._controller.decrement()
+            raise e
 
-    async def _infer_impl(self, req: Union[str,Dict[Any, Any]], id: int, raw_request: RawRequest, generate_call: Callable[[], AsyncGenerator[StreamObjectType, None]]):
+        return LoggableAsyncGenerator(__gen_response_with_report(start_time, response_generator), response_generator._collect_complete_response_func)
+
+    async def _collect_complete_response_and_record_access_log(self, req, id, res):
+        complete_response = await res.collect_loggable_response()
+        complete_response = complete_response.model_dump(exclude_none=True) if isinstance(complete_response, BaseModel) else complete_response
+        self._access_logger.log_success_access(req, complete_response, id)
+        return complete_response
+        
+    async def _infer_impl(self, req: Union[str,Dict[Any, Any]], id: int, raw_request: RawRequest, generate_call: Callable[[], LoggableAsyncGenerator]):
         assert self._inference_worker is not None
         if not isinstance(req, dict):
             raise Exception("request body should be json-format")
@@ -211,18 +222,16 @@ class InferenceServer(object):
         self._controller.increment()
         if await raw_request.is_disconnected():
             raise asyncio.CancelledError("client disconnects")
-        res = self._call_generate_with_report(generate_call)
-
+        res = await self._call_generate_with_report(generate_call)
+        
         if is_streaming:
             return StreamingResponse(self.stream_response(req, res, id), media_type="text/event-stream")
-        last_element = None
         async for x in res:
             if await raw_request.is_disconnected():
                 # Abort the request if the client disconnects.
                 await res.aclose()
                 # await self._inference_worker.abort(id)
                 raise asyncio.CancelledError("client disconnects")
-            last_element = x
-        last_element = last_element.model_dump(exclude_none=True) if isinstance(last_element, BaseModel) else last_element
-        self._access_logger.log_success_access(req, last_element, id)
-        return JSONResponse(content=last_element)
+
+        complete_response = await self._collect_complete_response_and_record_access_log(req, id, res)
+        return JSONResponse(content=complete_response)
