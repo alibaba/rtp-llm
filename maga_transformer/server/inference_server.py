@@ -57,7 +57,7 @@ class InferenceServer(object):
             self._inference_worker = InferenceWorker()
             self._openai_endpoint = OpenaiEndopoint(self._inference_worker.model)
         self._init_controller()
-        
+
     def wait_all_worker_ready(self):
         # master需要等其他所有机器都ready以后才能起服务，挂vipserver
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
@@ -140,14 +140,19 @@ class InferenceServer(object):
             error_code = 500
             rep = JSONResponse(self.handler_exceptions(e), status_code=error_code)
         return rep
-    
+
     async def inference(self, req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
+        if isinstance(req, str):
+            req = json.loads(req)
+        assert isinstance(req, dict)
+
         def generate_call():
             assert self._inference_worker is not None
             return self._inference_worker.inference(**req)
+
         return await self._infer_wrap(req, raw_request, generate_call)
 
-    async def _infer_wrap(self, req: Union[str,Dict[Any, Any]], raw_request: RawRequest, generate_call: Callable[[], AsyncGenerator[StreamObjectType, None]]):
+    async def _infer_wrap(self, req: Dict[Any, Any], raw_request: RawRequest, generate_call: Callable[[], AsyncGenerator[StreamObjectType, None]]):
         id = self._atomic_count.increment()
         try:
             rep = await self._infer_impl(req, id, raw_request, generate_call)
@@ -164,7 +169,7 @@ class InferenceServer(object):
                 kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
             rep = JSONResponse(self.handler_exceptions(e), status_code=error_code)
         return rep
-    
+
     async def chat_completion(self, request: ChatCompletionRequest, raw_request: Request):
         def generate_call():
             assert (self._openai_endpoint != None)
@@ -172,42 +177,6 @@ class InferenceServer(object):
             assert (isinstance(response, AsyncGenerator)), f"error type: {type(response)}"
             return response
         return await self._infer_wrap(request.model_dump(), raw_request, generate_call)
-
-    #TODO(xinfei.sxf) refactor this
-    async def _chat_completion_wrap(self, request: ChatCompletionRequest, raw_request: RawRequest):
-        try:
-            self._controller.increment()
-        except ConcurrencyException as e:
-            kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
-            return JSONResponse(self.handler_exceptions(e), status_code=409)
-
-        try:
-            assert (self._openai_endpoint != None)
-            id = self._atomic_count.increment()
-            kmonitor.report(AccMetrics.QPS_METRIC, 1)
-            self._access_logger.log_query_access(request.model_dump(), id)
-
-            if request.stream:
-                def generate_call():
-                    assert (self._openai_endpoint != None)
-                    response = self._openai_endpoint.chat_completion(request, raw_request)
-                    assert (isinstance(response, AsyncGenerator))
-                    return response
-                reported_response = self._call_generate_with_report(generate_call)
-                return StreamingResponse(
-                    self.stream_response(request.model_dump(), reported_response, id),
-                    media_type="text/event-stream"
-                )
-            else:
-                response = self._openai_endpoint.chat_completion(request, raw_request)
-                assert (isinstance(response, Coroutine))
-                return (await response).model_dump(exclude_none=True)
-        except Exception as e:
-            kmonitor.report(AccMetrics.ERROR_QPS_METRIC)
-            logging.error(f'chat_completion error: {e}, trace: {traceback.format_exc()}')
-            return JSONResponse(self.handler_exceptions(e), status_code=500)
-        finally:
-            self._controller.decrement()
 
     async def _call_generate_with_report(
             self, generate_call: Callable[[], AsyncGenerator[StreamObjectType, None]]
@@ -237,8 +206,6 @@ class InferenceServer(object):
 
     async def _infer_impl(self, req: Union[str,Dict[Any, Any]], id: int, raw_request: RawRequest, generate_call: Callable[[], AsyncGenerator[StreamObjectType, None]]):
         assert self._inference_worker is not None
-        if isinstance(req, str):
-            req = json.loads(req)
         if not isinstance(req, dict):
             raise Exception("request body should be json-format")
 
@@ -249,7 +216,7 @@ class InferenceServer(object):
         if await raw_request.is_disconnected():
             raise asyncio.CancelledError("client disconnects")
         res = self._call_generate_with_report(generate_call)
-        
+
         if is_streaming:
             return StreamingResponse(self.stream_response(req, res, id), media_type="text/event-stream")
         last_element = None
