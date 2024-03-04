@@ -1,14 +1,10 @@
 import os
-import sys
 import json
 import time
 import logging
 import logging.config
-import uvicorn
 import traceback
-import multiprocessing
-from multiprocessing import Process
-from typing import Generator, Union, Any, Dict, List, AsyncGenerator, Callable, Coroutine
+from typing import Union, Any, Dict, AsyncGenerator, Callable
 from pydantic import BaseModel
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi import Request
@@ -22,7 +18,7 @@ from maga_transformer.utils.util import AtomicCounter
 from maga_transformer.utils.model_weight import LoraCountException, LoraPathException
 from maga_transformer.metrics import sys_reporter, kmonitor, AccMetrics, GaugeMetrics
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
-from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.distribute.gang_server import GangServer
 from maga_transformer.utils.concurrency_controller import ConcurrencyController, ConcurrencyException
 from maga_transformer.utils.version_info import VersionInfo
@@ -45,6 +41,7 @@ class InferenceServer(object):
         self._openai_endpoint = None
         self._system_reporter = sys_reporter
         self._atomic_count = AtomicCounter()
+        self._init_controller()
 
     def start(self):
         self._system_reporter.start()
@@ -55,8 +52,7 @@ class InferenceServer(object):
             self._inference_worker = None
         else:
             self._inference_worker = InferenceWorker()
-            self._openai_endpoint = OpenaiEndopoint(self._inference_worker.model)
-        self._init_controller()
+            self._openai_endpoint = OpenaiEndopoint(self._inference_worker.model)        
 
     def wait_all_worker_ready(self):
         # master需要等其他所有机器都ready以后才能起服务，挂vipserver

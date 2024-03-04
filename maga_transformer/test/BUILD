@@ -10,8 +10,7 @@ py_test(
     ],
     deps = [
         "//maga_transformer:testlib",
-    ],
-    imports = ["aios/kmonitor/python_client"],
+    ]    
 )
 
 py_test(
