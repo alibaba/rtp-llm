@@ -12,6 +12,7 @@ from maga_transformer.utils.stop_utils import create_stop_criteria_list
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.models.base_model import GenerateInput, GenerateOutput
 from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
+from maga_transformer.utils.util import AtomicCounter
 
 class Status(Enum):
     WAITING = 0
@@ -23,6 +24,8 @@ class GenerateStatus(BaseModel):
     status: Status = Status.WAITING
     error_info: str = ''
 
+stream_counter = AtomicCounter()
+
 class GenerateStream(BaseModel):
     _input: GenerateInput
     _status: GenerateStatus = PrivateAttr(default_factory=GenerateStatus)
@@ -33,6 +36,8 @@ class GenerateStream(BaseModel):
     _reuse_length : int = PrivateAttr(default_factory=int)
     _resource_dtors: List = []
     medusa_state: Any = None
+    _stream_id: int = PrivateAttr(default_factory=int)
+    _released: bool = PrivateAttr(default_factory=bool)
 
     def __init__(self, input, max_seq_len=2048):
         super().__init__()
@@ -52,14 +57,20 @@ class GenerateStream(BaseModel):
             self._input.tokenizer)
         self._ptuning_info = PrefixInfo()
         self._lock = Lock()
+        
+        global stream_counter
+        self._stream_id = stream_counter.increment()
+        self._released = False
 
     def add_resource_dtor(self, dtor):
         self._resource_dtors.append(dtor)
 
     def release_resource(self):
+        if self._released:
+            return
         for dtor in self._resource_dtors:
             dtor()
-        self._resource_dtors.clear()
+        self._released = True
 
     def update_prefix(self, ptuning_info):
         self._ptuning_info = ptuning_info
@@ -123,15 +134,25 @@ class GenerateStream(BaseModel):
         with self._lock:
             self._status.status = Status.STOPPED
             self._status.error_info = err
+
+    def stop_and_release(self, err: str):
+        self.set_stop(err)
         self.release_resource()
 
     def set_running(self):
         with self._lock:
+            if self._stopped:
+                return False                
             self._report_wait_time()
             self._status.status = Status.RUNNING
+            return True
 
     def _set_finished(self):
         self._status.status = Status.FINISHED
+
+    @property
+    def _stopped(self):
+        return self._status.status == Status.STOPPED
 
     @property
     def stopped(self):
@@ -151,10 +172,7 @@ class GenerateStream(BaseModel):
     def check_timeout(self):
         running_time = current_time_ms() - self._begin_time
         if self.generate_config.timeout_ms > 0 and self.generate_config.timeout_ms < running_time:
-            self.set_stop(f"query has been running {running_time} ms, it's timeout")
-
-    def _release(self):
-        self._lora_holder.release()
+            self.stop_and_release(f"query has been running {running_time} ms, it's timeout")
 
     def _report_wait_time(self):
         kmonitor.report(GaugeMetrics.ASYNC_WAIT_WAIT_TIME_METRIC, current_time_ms() - self._begin_time)
@@ -203,17 +221,15 @@ class GenerateStream(BaseModel):
     def set_loss(self, loss):
         self._output.loss = loss
 
-    def add_block_index(self, block_index: List[List[int]]):
-        with self._lock:
-            assert len(block_index) == len(self._block_indice)
-            for i in range(len(block_index)):
-                self._block_indice[i].extend(block_index[i])
+    def add_block_index(self, block_index: List[List[int]]):            
+        assert len(block_index) == len(self._block_indice)
+        for i in range(len(block_index)):
+            self._block_indice[i].extend(block_index[i])
 
     def pop_block_indice(self):
-        with self._lock:
-            block_indice = self._block_indice
-            self._block_indice = [[]]
-            return block_indice
+        block_indice = self._block_indice
+        self._block_indice = [[]]
+        return block_indice
 
     @property
     def block_indice(self):

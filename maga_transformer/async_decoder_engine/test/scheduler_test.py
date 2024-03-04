@@ -95,7 +95,8 @@ class SchedulerTest(TestCase):
         batch_query = self._get_batch_query(scheduler)
         self.assertEqual(scheduler.running_batch_size(), 1)
         self.assertEqual(scheduler.wait_stream_size(), 0)
-        [s.release_resource() for s in [stream1, stream2]]
+        self.assertEqual(stream1.finished, False)
+        stream1.release_resource()
         self.assertEqual(stream1.block_indice, [[]])
         self.assertEqual(stream2.block_indice, [[]])
         self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 7)
@@ -182,7 +183,6 @@ class SchedulerTest(TestCase):
             finished=finished, update_length=update_length, update_token_ids=update_token_ids)
 
         scheduler.prepare_next_step()
-        stream.release_resource()
         self.assertEqual(stream.block_indice, [[]])
         self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 5)
         self.assertEqual(len(scheduler.batch_query.streams), 0)
@@ -200,7 +200,6 @@ class SchedulerTest(TestCase):
             finished=finished, update_length=update_length, update_token_ids=update_token_ids)
 
         scheduler.prepare_next_step()
-        stream.release_resource()
         self.assertEqual(len(scheduler.batch_query.streams), 0)
         stream = GenerateStream(GenerateInput(token_ids=torch.tensor(list(range(24))), generate_config=generate_config))
         scheduler.enqueue(stream)

@@ -65,6 +65,7 @@ class DecoderEngineTest(TestCase):
 
     def test_cancel_request(self) -> None:
         pipeline = self.create_pipeline()
+        origin_block = pipeline.model.decoder_engine_.scheduler_._stream_cache_manager.cache_manager_.free_block_nums
         
         async def _simplified_generator():
             try:
@@ -93,6 +94,8 @@ class DecoderEngineTest(TestCase):
         try:
             asyncio.run(_run())
             self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
+            remain_block = pipeline.model.decoder_engine_.scheduler_._stream_cache_manager.cache_manager_.free_block_nums
+            self.assertEqual(origin_block, remain_block)
         finally:
             pipeline.model.stop()
 

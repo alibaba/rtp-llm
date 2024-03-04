@@ -69,7 +69,7 @@ class StreamCacheManager:
                                for _ in range(stream.generate_config.num_beams)]
                 stream.add_block_index(block_index)
             except Exception as e:
-                stream.set_stop('LACK_MEM')
+                stream.stop_and_release('LACK_MEM')
                 logging.warning(f"lack of mem, finished. err: {str(e)}")
 
     def enough_kvcache(self, streams):

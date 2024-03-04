@@ -65,23 +65,26 @@ class DecoderEngine:
         try:
             async for output in self._generate_loop(stream, init_counter):
                 yield output
-        except GeneratorExit:
-            logging.info("stream is closed")
-            stream.set_stop("stream is closed")
-        finally:
-            stream.release_resource()
+        except BaseException as e:
+            # Note that BaseException is used here to catch GeneratorExit and ordinary types of Exception.
+            error_msg = f"request_id = {stream._stream_id}, exception type = {type(e)}, exception str {str(e)}"
+            logging.info(error_msg)
+            # Note: can't release resources here
+            stream.set_stop(error_msg)
+            raise e
 
     async def _generate_loop(self, stream, init_counter):
         counter = init_counter
         while True:
             while True:
                 new_counter = self.wait_decode_counter_.get()
+                if stream.stopped:
+                    raise Exception(stream.stop_reason)
                 if new_counter != counter:
                     counter = new_counter
                     break
-                if stream.stopped:
-                    raise Exception(stream.stop_reason)
                 await asyncio.sleep(0.001)
+                
             output = stream.output
             yield output
             if output.finished:

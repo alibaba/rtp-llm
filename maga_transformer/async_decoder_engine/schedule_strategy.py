@@ -43,7 +43,7 @@ class BasicScheduleStrategy:
                 stream.seq_length = stream.input_length
             streams.remove(stream)
             to_wait.append(stream)
-            logging.info(f"lack mem running query back to wait and input_length:{stream.input_length} seq_length:{stream.seq_length}")
+            logging.info(f"request_id = {stream._stream_id}, lack mem running stream back to wait and input_length:{stream.input_length} seq_length:{stream.seq_length}")
         return to_remove, to_wait
 
 class PerfTestScheduleStrategy:

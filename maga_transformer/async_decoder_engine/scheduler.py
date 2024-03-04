@@ -11,6 +11,7 @@ from maga_transformer.async_decoder_engine.schedule_strategy import PerfTestSche
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
 from maga_transformer.metrics import kmonitor, AccMetrics
+from maga_transformer.utils.thread_safe_deque import ThreadSafeDeque
 
 class Scheduler:
     def __init__(self,
@@ -23,7 +24,7 @@ class Scheduler:
         logging.info(f"model generate length per circle: {self.gen_num_per_circle}")
 
         self.batch_query = BatchQuery(gen_num_per_circle, nccl_op)
-        self._waiting_streams: deque[GenerateStream] = deque()
+        self._waiting_streams: ThreadSafeDeque = ThreadSafeDeque()
         self._schedule_strategy = create_schedule_strategy(config, stream_cache_manager)
 
     # just for perf test
@@ -39,7 +40,7 @@ class Scheduler:
     def enqueue(self, stream: GenerateStream):
         self._stream_cache_manager.update_prefix(stream)
         self._waiting_streams.append(stream)
-
+ 
     def _schedule_streams(self, streams: List[GenerateStream]) -> List[GenerateStream]:
         new_streams = []
         for stream in streams:
@@ -51,29 +52,39 @@ class Scheduler:
             new_streams.append(stream)
         return new_streams
 
-    # NOTE: This function is executed in single-thread environment.
-    def schedule(self) -> BatchQuery:
+    def evict_stopped_stream(self):
         waiting_streams = self._waiting_streams.copy()
         for stream in waiting_streams:
             stream.check_timeout()
+        to_remove = []
+        for stream in waiting_streams:
+            if stream.stopped:
+                to_remove.append(stream)
+        for stream in to_remove:
+            self._waiting_streams.remove(stream)
+            stream.release_resource()
+
+    # NOTE: This function is executed in single-thread environment.
+    def schedule(self) -> BatchQuery:
+        self.evict_stopped_stream()
+        
+        waiting_streams = self._waiting_streams.copy()
         new_streams = self._schedule_streams(waiting_streams)
         new_streams = self._schedule_strategy.schedule_new(new_streams)
 
         # ensure that at least one query in waiting_streams goto run
         if len(new_streams) == 0 and self.batch_query.empty():
-            if len(self._waiting_streams) > 0:
-                stream = self._waiting_streams[0]
+            if len(waiting_streams) > 0:
+                stream = waiting_streams[0]
                 new_streams.append(stream)
 
         for stream in new_streams[:]:
             try:
                 self._stream_cache_manager.init_kvcache(stream)
             except Exception as e:
-                stream.set_stop(str(e))
-            finally:
-                if stream.stopped:
-                    new_streams.remove(stream)
-                self._waiting_streams.remove(stream)
+                stream.stop_and_release(str(e))
+                new_streams.remove(stream)
+            self._waiting_streams.remove(stream)
         self.batch_query.add_new_stream(new_streams)
         return self.batch_query
 
@@ -82,8 +93,8 @@ class Scheduler:
         to_remove, to_wait = self._schedule_strategy.schedule_current(
             self.batch_query.streams)
         for stream in to_remove + to_wait:
-            # TODO(xinfei.sxf) to_wait stream 已经被删除了，这里又删除了一次。
             self.batch_query.remove_stream(stream)
+                         
         for stream in to_wait:
             self._waiting_streams.appendleft(stream)
         self._stream_cache_manager.incr_kvcache(self.batch_query.streams)
