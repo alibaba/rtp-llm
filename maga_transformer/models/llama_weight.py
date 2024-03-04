@@ -212,4 +212,4 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                         functools.partial(merge_qkv_lora_B)))
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights,
-                               tp_strategy=W.gpt_style_tp_strategy, lora_weights=lora_weights)
+                               tp_strategy=W.gpt_style_tp_strategy)

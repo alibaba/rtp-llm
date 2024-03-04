@@ -395,16 +395,24 @@ class ModelWeightInfo:
 
         for lora_a_b in ['lora_A', 'lora_B']:
             for lora_name in lora_names:
+                ckpt_layer_weight = None
                 for layer_weight in layer_weights:
 
                     if layer_weight.name == lora_name:
-                        layer_weight_ckpt_name = layer_weight.weights[0].name
+                        ckpt_layer_weight = layer_weight.weights
 
-                assert (layer_weight_ckpt_name != None)
-                ckpt_name = lora_base_name.format(layer_weight_ckpt_name[:-len(".weight")], lora_a_b)
-                ckpt_weight_info = CkptWeightInfo(ckpt_name, identity)
-                lora_layer_weights.append(WeightInfo(lora_name + "." + lora_a_b, [ckpt_weight_info], transpose))
-
+                assert (ckpt_layer_weight != None)
+                if lora_name == W.attn_qkv_w and len(ckpt_layer_weight) == 3:
+                    ckpt_names = [lora_base_name.format(ckpt.name[:-len(".weight")], lora_a_b) for ckpt in ckpt_layer_weight]
+                    qkv_ckpt_weights = [CkptWeightInfo(name, identity) for name in ckpt_names]
+                    if lora_a_b == 'lora_A':
+                        lora_layer_weights.append(WeightInfo(lora_name + "." + lora_a_b, qkv_ckpt_weights, merge_qkv_lora_A))
+                    elif lora_a_b == 'lora_B':
+                        lora_layer_weights.append(WeightInfo(lora_name + "." + lora_a_b, qkv_ckpt_weights, merge_qkv_lora_B))
+                else:
+                    ckpt_name = lora_base_name.format(ckpt_layer_weight[0].name[:-len(".weight")], lora_a_b)
+                    ckpt_weight_info = CkptWeightInfo(ckpt_name, identity)
+                    lora_layer_weights.append(WeightInfo(lora_name + "." + lora_a_b, [ckpt_weight_info], transpose))
         return lora_layer_weights
 
     def set_lora(self, qkv_fun = None, half1 = None , half2 = None):
