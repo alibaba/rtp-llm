@@ -115,27 +115,32 @@ else
 fi
 
 MAGA_DEPLOY_IMAGE=reg.docker.alibaba-inc.com/isearch/maga_deploy_image_open_source_$IMAGE_SUFFIX
-MAGA_DEPLOY_TAG=`date "+%Y_%m_%d_%H_%M"`_`git rev-parse --short HEAD`
 
 echo "FROM $NVIDIA_MAGA_BASE_IMAGE:$NVIDIA_MAGA_BASE_TAG" > /tmp/nvidia_maga_deploy.Dockerfile
 cat $DIR/nvidia_maga_deploy.Dockerfile >> /tmp/nvidia_maga_deploy.Dockerfile
 
-WHL_FILE=maga_transformer-0.1.5-cp310-cp310-manylinux1_x86_64.whl
+# 输入是whl name，绝对路径
+DIR_NAME=$(dirname "$WHL_FILE")
+FILE_NAME=$(basename "$WHL_FILE")
+
 # setup context
 cp $DIR/../deps/requirements_base.txt $DIR/
 cp $DIR/../deps/$REQUIREMENT_FILE $DIR/
 
-# rm $DIR/../../bazel-bin/maga_transformer/$WHL_FILE -f
-bazel build $BAZEL_CONFIG //maga_transformer:maga_transformer --jobs 100
-rm $DIR/$WHL_FILE -f
-cp $DIR/../../bazel-bin/maga_transformer/$WHL_FILE $DIR/
+if [ $? -ne 0 ]; then
+  exit 1
+fi
 
-docker build --build-arg REQUIREMENT_FILE=$REQUIREMENT_FILE --build-arg WHL_FILE=$WHL_FILE \
-       -f /tmp/nvidia_maga_deploy.Dockerfile --network=host -t $MAGA_DEPLOY_IMAGE:$MAGA_DEPLOY_TAG $DIR
-docker tag $MAGA_DEPLOY_IMAGE:$MAGA_DEPLOY_TAG $MAGA_DEPLOY_IMAGE:latest
-docker push $MAGA_DEPLOY_IMAGE:$MAGA_DEPLOY_TAG
+# rm $DIR/../../bazel-bin/maga_transformer/$WHL_FILE -f
+rm $DIR/$FILE_NAME -f
+cp $WHL_FILE $DIR/
+
+docker build --build-arg REQUIREMENT_FILE=$REQUIREMENT_FILE --build-arg WHL_FILE=$FILE_NAME \
+       -f /tmp/nvidia_maga_deploy.Dockerfile --network=host -t $MAGA_DEPLOY_IMAGE:$· $DIR
+docker tag $MAGA_DEPLOY_IMAGE:$VERSION_TAG $MAGA_DEPLOY_IMAGE:latest
+docker push $MAGA_DEPLOY_IMAGE:$VERSION_TAG
 docker push $MAGA_DEPLOY_IMAGE:latest
-echo "docker name: $MAGA_DEPLOY_IMAGE:$MAGA_DEPLOY_TAG"
+echo "docker name: $MAGA_DEPLOY_IMAGE:$VERSION_TAG"
 
 rm $DIR/$WHL_FILE -f
 rm $DIR/requirements_base.txt -f
