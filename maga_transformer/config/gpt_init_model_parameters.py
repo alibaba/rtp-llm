@@ -220,14 +220,14 @@ class GptInitModelParameters:
             if os.path.exists(inner_ptuing_path):
                 logging.info(f"ckpt contain ptuning ckpt files, {inner_ptuing_path}")
                 self.ptuning_path = inner_ptuing_path
-            else:
-                logging.info(f"try using base ckpt as the ptuning dir for compatibility with base ckpt that has been merged with ptuning")
-                self.ptuning_path = self.ckpt_path        
         logging.info(f"use ptuning from model_config set by env, {self.ptuning_path}")
-
-        config_file_path = os.path.join(self.ptuning_path, "config.json")
+        if self.ptuning_path:
+            config_file_path = os.path.join(self.ptuning_path, "config.json")
+        else:
+            config_file_path = os.path.join(self.ckpt_path, "config.json")
         if not os.path.exists(config_file_path):
             return
+        logging.info(f"load ptuing config from {config_file_path}")
         with open(config_file_path, 'r') as reader:
             content = json.load(reader)
             if 'pre_seq_len' in content:
