@@ -158,7 +158,7 @@ class Gemma(Llama):
     def _create_config(ckpt_path: str):
         config = Llama._create_config(ckpt_path)
         config.has_post_decoder_layernorm = True
-        config.dynamic_embedding_scalar = (config.hidden_size ** 0.5)
+        config.input_embedding_scalar = (config.hidden_size ** 0.5)
         config.rotary_embedding_dim = config.size_per_head
         config.activation_type = 'gated-gelu'
         return config

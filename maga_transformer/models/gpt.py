@@ -231,8 +231,8 @@ class GPT(BaseModel):
         self.decoder.set_weight(self.weight)
 
         self.word_embedding.set_weight(self.weight.steal_pytorch_weight(W.embedding))
-        if (self.config.dynamic_embedding_scalar - 1 > 1e-6):
-            self.word_embedding.set_scalar(self.config.dynamic_embedding_scalar)
+        if (self.config.input_embedding_scalar - 1 > 1e-6):
+            self.word_embedding.set_scalar(self.config.input_embedding_scalar)
         if self.weight.has_pytorch_weight(W.lm_head):
             lm_head_w = self.weight.steal_pytorch_weight(W.lm_head)
         else:
