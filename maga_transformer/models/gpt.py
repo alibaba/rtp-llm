@@ -199,11 +199,16 @@ class GPT(BaseModel):
             self.weight.lora_resource.update(lora_infos)
         logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
-    def load(self, ref_model: Optional[torch.nn.Module] = None, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
-        self._load_weights(ref_model, device)
+    def load(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        self._load_weights(device)
         self._initialize_from_weight(device)
 
-    def _load_weights(self, ref_model: Optional[torch.nn.Module] = None, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+    def update_weights_from_module(self, ref_model: torch.nn.Module, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        self._load_weights_from_module(ref_model, device)
+        self._initialize_from_weight(device)
+        torch.cuda.empty_cache()
+
+    def _load_weights(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         device = device or get_device()
         compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
 
@@ -220,7 +225,7 @@ class GPT(BaseModel):
             load_parallel_num = estimate_load_parallel_num(
                 self.config, g_parallel_info.tp_size)
             model_weights_loader = get_model_weights_loader(weights_info, database, compute_dtype=compute_dtype)
-            self.weight = model_weights_loader.load_weights_from_scratch(weights_info._int8_mode, ref_model=ref_model, num_process=load_parallel_num)
+            self.weight = model_weights_loader.load_weights_from_scratch(weights_info._int8_mode, num_process=load_parallel_num)
             model_weights_loader.show_warns()
 
             self.weight.lora_resource = LoraResource({}, database, weights_info, LoRAMap())
@@ -230,6 +235,29 @@ class GPT(BaseModel):
                 self.update(self.config.lora_infos)
 
         logging.info(f'load weights time: {timer.cost_ms() / 1000 :.2f} s')
+
+    def _load_weights_from_module(self, ref_model: Optional[torch.nn.Module] = None, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        if ref_model == None:
+            logging.info(f'cannot update weights from None, should be a nn.module')
+            return
+        
+        device = device or get_device()
+        compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
+
+        assert(self.context_decoder)
+        assert(self.decoder)
+
+        with Timer() as timer:
+            weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
+            model_weights_loader = get_model_weights_loader(weights_info, None, compute_dtype=compute_dtype)
+            self.weight = model_weights_loader.load_weights_from_scratch(weights_info._int8_mode, ref_model=ref_model, num_process=1)
+            model_weights_loader.show_warns()
+            
+            self.weight.lora_resource = LoraResource({}, None, weights_info, LoRAMap())
+            self.weight.lora_resource.model_weights_loader = model_weights_loader
+            self.weight.lora_resource.ft_op = [self.context_decoder, self.decoder]
+
+        logging.info(f'update weights time: {timer.cost_ms() / 1000 :.2f} s')
 
     def _initialize_from_weight(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         self.context_decoder.set_weight(self.weight)

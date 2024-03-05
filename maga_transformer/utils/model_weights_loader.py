@@ -15,24 +15,28 @@ from maga_transformer.utils.util import get_mem_info
 
 class ModelWeightsLoader:
 
-    def __init__(self, weights_info: ModelDeployWeightInfo, database: CkptDatabase):
+    def __init__(self, weights_info: ModelDeployWeightInfo, database: Optional[CkptDatabase] = None):
         self._num_layers = weights_info._num_layers
         self._tp_size = weights_info.tp_size
         self._tp_rank = weights_info.tp_rank
         self._tp_split_emb_and_lm_head = weights_info.tp_split_emb_and_lm_head
         self._weights_info = weights_info
         self._weight_access_log: Set[str] = set([])
-        self._database: CkptDatabase = database
         self._ckpt_metas: List[CkptFileInfo] = []
         self._all_tensor_names: Set[str] = set([])
         for ckpt in self._ckpt_metas:
             self._all_tensor_names.update(ckpt.get_tensor_names())
-        self._weights_info.process_meta(self._database.PretrainFileList)
-        self._weights_info.process_meta(self._database.FinetuneFileList)
         self.preprocessed = 'ft_module' in self._all_tensor_names
-        self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info(self.preprocessed, self._all_tensor_names)
-        self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
-        logging.info(f"merge lora {self._merge_lora}")
+        self._database: CkptDatabase = database
+
+        if self._database is not None:
+            self._weights_info.process_meta(self._database.PretrainFileList)
+            self._weights_info.process_meta(self._database.FinetuneFileList)
+            self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info(self.preprocessed, self._all_tensor_names)
+            self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
+        else:
+            self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info(self.preprocessed, self._all_tensor_names)
+            self._merge_lora = False
         
     def set_data_type(self, data_type):
         self._data_type = data_type
