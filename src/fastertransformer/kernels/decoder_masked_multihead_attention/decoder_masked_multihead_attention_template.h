@@ -40,6 +40,40 @@
 namespace fastertransformer {
 
 template<typename T>
+inline __device__ float convert_to_float(const T* value) {
+    printf("convert type: %s", typeid(T).name());
+    return (float)(value[0]);
+}
+
+template<>
+inline __device__ float convert_to_float(const uint16_t* value) {
+    return __half2float(((half*)value)[0]);
+}
+
+template<>
+inline __device__ float convert_to_float(const float* value) {
+    return value[0];
+}
+
+template<>
+inline __device__ float convert_to_float(const half* value) {
+    return __half2float(value[0]);
+}
+
+template<>
+inline __device__ float convert_to_float(const __nv_bfloat16* value) {
+    return (float)(value[0]);
+}
+
+template<typename T>
+inline __device__ void print_floats(const char* hint, const T* value, const size_t hint_idx = 0, const size_t num = 1) {
+    for (size_t i = 0; i < num; i++) {
+        const auto ptr = value + i;
+        printf("%s[%d](%p): %f\n", hint, hint_idx + i, ptr, convert_to_float(ptr));
+    }
+}
+
+template<typename T>
 __inline__ __host__ __device__ T constexpr flat_index_strided3(
     T const& index_0, T const& index_1, T const& index_2, T const& stride_1, T const& stride_2)
 {
@@ -76,7 +110,7 @@ __inline__ __host__ __device__ T constexpr flat_index2(T const& index_0, T const
 // Seems to slightly improve the accuracy
 #define MMHA_USE_FP32_ACCUM_FOR_OUT
 
-// #define MMHA_USE_FP32_ACCUM_FOR_LOGITS 
+// #define MMHA_USE_FP32_ACCUM_FOR_LOGITS
 
 #if 0 && defined(MMHA_USE_FP32_ACCUM_FOR_OUT)
  // Does not seem to improve the accuracy
@@ -161,9 +195,11 @@ struct Qk_vec_m_<uint16_t, 128> {
     using Type = uint2;
 };
 
+// NOTE: RoPE kernel impelmentation does not work correctly under vector_t=uint4
+// here the vec_t is hakced to uint2 for correctness
 template<>
 struct Qk_vec_m_<uint16_t, 256> {
-    using Type = uint4;
+    using Type = uint2;
 };
 #ifdef ENABLE_BF16
 template<>
@@ -1166,7 +1202,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     // FP8 KV Cache.
 #ifdef ENABLE_FP8
     static constexpr bool FP8_KV_CACHE = std::is_same<Tcache, __nv_fp8_e4m3>::value;
-#else 
+#else
     static constexpr bool FP8_KV_CACHE = false;
 #endif
     // INT8 KV Cache.

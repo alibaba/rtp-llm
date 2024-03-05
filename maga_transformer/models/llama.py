@@ -9,6 +9,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.models.llama_weight import LlamaWeightInfo, GemmaWeightInfo
 from maga_transformer.models.gpt import GPT
 from maga_transformer.model_factory_register import register_model
+from maga_transformer.tokenizer.tokenization_gemma import GemmaTokenizer
 
 def compute_intermediate_size(n, ffn_dim_multiplier=1, multiple_of=256):
     return multiple_of * ((int(ffn_dim_multiplier * int(8 * n / 3)) + multiple_of - 1) // multiple_of)
@@ -138,9 +139,20 @@ class Baichuan2(Baichuan):
         return config
 
 class Gemma(Llama):
+    def __init__(self, config: GptInitModelParameters):
+        if os.environ.get("ENABLE_OPENSOURCE_FMHA", None) != "OFF":
+            logging.warn("opensource fmha does not support head dim 256, thus disabled for gemma model")
+            os.environ["ENABLE_OPENSOURCE_FMHA"] = "OFF"
+        super().__init__(config)
+
     @staticmethod
     def get_weight_cls():
         return GemmaWeightInfo
+
+    @classmethod
+    def get_tokenizer(cls, config: GptInitModelParameters):
+        tokenizer = GemmaTokenizer.from_pretrained(config.tokenizer_path, verbose = False)
+        return tokenizer
 
     @staticmethod
     def _create_config(ckpt_path: str):

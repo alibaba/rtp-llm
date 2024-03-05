@@ -87,7 +87,6 @@ class GPT(BaseModel):
         # torch.classes.load_library(os.path.abspath(lib_path)) # type: ignore
 
         # Embeddings to encode or decode tokens.
-        print(f"hidden_dim: {self.config.gpt_init_params.hidden_size}")
         hidden_dim = self.config.gpt_init_params.hidden_size
         all_gather = self.config.tp_split_emb_and_lm_head and g_parallel_info.tp_size > 1
         assert(hidden_dim != 0)
