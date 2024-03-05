@@ -1235,25 +1235,47 @@ void invokeGeneralAddBiasResidualPreLayerNorm(T*           output,
         block.x = (block.x + 31) / 32 * 32;
 
         size_t maxbytes = n * sizeof(T);
-        if (maxbytes >= (48 << 10)) {
-            check_cuda_error(cudaFuncSetAttribute(
-                generalAddBiasResidualLayerNorm<T, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes));
+        if (residual1 == nullptr) {
+            if (maxbytes >= (48 << 10)) {
+                check_cuda_error(cudaFuncSetAttribute(
+                    generalAddBiasResidualLayerNorm<T, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes));
+            }
+            generalAddBiasResidualLayerNorm<T, false><<<grid, block, maxbytes, stream>>>(input,
+                                                                                         residual1,
+                                                                                         gamma,
+                                                                                         beta,
+                                                                                         bias,
+                                                                                         output,
+                                                                                         norm_output,
+                                                                                         layernorm_eps,
+                                                                                         m,
+                                                                                         n,
+                                                                                         scale_inter,
+                                                                                         scale_out,
+                                                                                         scale,
+                                                                                         dynamic_scale,
+                                                                                         int8_mode);
+        } else {
+            if (maxbytes >= (48 << 10)) {
+                check_cuda_error(cudaFuncSetAttribute(
+                    generalAddBiasResidualLayerNorm<T, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes));
+            }
+            generalAddBiasResidualLayerNorm<T, true><<<grid, block, maxbytes, stream>>>(input,
+                                                                                        residual1,
+                                                                                        gamma,
+                                                                                        beta,
+                                                                                        bias,
+                                                                                        output,
+                                                                                        norm_output,
+                                                                                        layernorm_eps,
+                                                                                        m,
+                                                                                        n,
+                                                                                        scale_inter,
+                                                                                        scale_out,
+                                                                                        scale,
+                                                                                        dynamic_scale,
+                                                                                        int8_mode);
         }
-        generalAddBiasResidualLayerNorm<T, 1><<<grid, block, maxbytes, stream>>>(input,
-                                                                                 residual1,
-                                                                                 gamma,
-                                                                                 beta,
-                                                                                 bias,
-                                                                                 output,
-                                                                                 norm_output,
-                                                                                 layernorm_eps,
-                                                                                 m,
-                                                                                 n,
-                                                                                 scale_inter,
-                                                                                 scale_out,
-                                                                                 scale,
-                                                                                 dynamic_scale,
-                                                                                 int8_mode);
     }
 }
 
