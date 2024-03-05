@@ -105,6 +105,7 @@ void NormWrapper<T>::attentionAddBiasResidualLayerNorm(T*           output,
                 stream);
         } else if (norm_type_ == NormType::alphanorm) {
             // norm_output = layernorm(input + residual1 * alpha + bias) * gamma + beta
+            // won't support W8A8 since it's only implemented in ChatGLM
             invokeAlphaAddBiasResidualLayerNorm(
                 norm_output,
                 input,
@@ -133,6 +134,7 @@ void NormWrapper<T>::attentionAddBiasResidualLayerNorm(T*           output,
     }
     else if (layernorm_type_ == LayerNormType::post_layernorm) {
         // output = layernorm(output + residual1 + bias) * gamma + beta
+        // won't support W8A8 since it's only implemented in BERT
         invokeAddBiasResidualLayerNorm(output,
                                        residual1,
                                        bias,

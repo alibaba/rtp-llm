@@ -2,6 +2,7 @@
 
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/add_residual_kernels.h"
+#include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
 
 namespace fastertransformer
 {
