@@ -127,6 +127,7 @@ class QWenV2(QWen):
         config.layer_num = config_json["num_hidden_layers"]
         config.rotary_embedding_base = int(config_json.get("rope_theta", config.rotary_embedding_base))
         config.vocab_size = config_json["vocab_size"]
+        config.rotary_embedding_dim = config.size_per_head
 
     
     @staticmethod

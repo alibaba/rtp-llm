@@ -107,9 +107,10 @@ class Mixtral(GPT):
         config_path = os.path.join(ckpt_path, 'config.json')
         with open(config_path) as f:
             config_json = json.load(f)
+        size_per_head=config_json['hidden_size'] // config_json['num_attention_heads']
         config = GptInitModelParameters(
             head_num=config_json['num_attention_heads'],
-            size_per_head=config_json['hidden_size'] // config_json['num_attention_heads'],
+            size_per_head=size_per_head,
             inter_size=config_json['intermediate_size'],
             layer_num=config_json['num_hidden_layers'],
             max_seq_len=config_json.get('max_sequence_length', 2048),
@@ -117,7 +118,7 @@ class Mixtral(GPT):
             head_num_kv = config_json['num_key_value_heads'],
             activation_type='Silu',
             norm_type='rmsnorm',
-            rotary_embedding_dim=128,
+            rotary_embedding_dim=size_per_head,
             rotary_embedding_style=1,
             has_post_decoder_layernorm=True,
             rotary_embedding_base = int(config_json.get('rope_theta', 10000)),

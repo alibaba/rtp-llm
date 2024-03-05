@@ -81,7 +81,7 @@ class ChatGlm(GPT):
         config.weights_data_type = config_json.get('torch_dtype', config.weights_data_type)
         config.layernorm_eps = config_json.get('layernorm_epsilon', config.layernorm_eps)
         config.inter_size = config_json.get('inner_hidden_size', config.inter_size)
-
+        config.rotary_embedding_dim = config.size_per_head
         config.special_tokens.bos_token_id = config_json.get('bos_token_id', config.special_tokens.bos_token_id)
         config.special_tokens.eos_token_id = config_json.get('eos_token_id', config.special_tokens.eos_token_id)
         config.src_quantization_bit = config_json.get('quantization_bit', 0)
