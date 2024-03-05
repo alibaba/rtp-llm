@@ -15,20 +15,20 @@ from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.server.inference_server import InferenceWorker
 from maga_transformer.server.inference_app import InferenceApp
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
-from maga_transformer.utils.loggable_async_generator import LoggableAsyncGenerator
+from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 def fake_init(self, *args, **kwargs):
     self.model = None
 
 class FakePipelineResponse(BaseModel):
     hello: str
-    
+
 def fake_inference(*args, **kwargs):
     async def response_generator():
         for _ in range(5):
             await asyncio.sleep(1)
             yield FakePipelineResponse(hello="gg")
-    return LoggableAsyncGenerator(response_generator(), LoggableAsyncGenerator.get_last_value)
-        
+    return CompleteResponseAsyncGenerator(response_generator(), CompleteResponseAsyncGenerator.get_last_value)
+
 InferenceWorker.__init__ = fake_init
 InferenceWorker.inference = fake_inference
 

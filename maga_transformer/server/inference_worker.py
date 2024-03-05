@@ -14,7 +14,7 @@ sys.path.append(str(current_file_path.parent.absolute()))
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.utils.util import copy_gemm_config
 from maga_transformer.utils.version_info import VersionInfo
-from maga_transformer.utils.loggable_async_generator import LoggableAsyncGenerator
+from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.models.base_model import GenerateResponse, GenerateConfig
 from maga_transformer.model_factory import ModelFactory, AsyncModel
@@ -51,7 +51,7 @@ class InferenceWorker():
         self.pipeline = Pipeline(self.model, self.model.tokenizer)
         logging.info("Load model done.")
 
-    def inference(self, **kwargs: Any) -> LoggableAsyncGenerator:
+    def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
         request_extractor = RequestExtractor(self.model.default_generate_config)
         request, kwargs = request_extractor.extract_request(kwargs)
 
@@ -60,11 +60,11 @@ class InferenceWorker():
 
         response_generator = self._inference(request, **kwargs)
 
-        complete_response_collect_func = partial(InferenceWorker.collect_complete_response, 
-                                                 incremental=request.incremental, 
-                                                 batch_infer=request.batch_infer, 
+        complete_response_collect_func = partial(InferenceWorker.collect_complete_response,
+                                                 incremental=request.incremental,
+                                                 batch_infer=request.batch_infer,
                                                  num_return_sequences=request.num_return_sequences)
-        return LoggableAsyncGenerator(response_generator, complete_response_collect_func)
+        return CompleteResponseAsyncGenerator(response_generator, complete_response_collect_func)
 
 
     def _inference(self, request, **kwargs):
@@ -123,8 +123,8 @@ class InferenceWorker():
 
 
     @staticmethod
-    async def _batch_async_generators(incremental: bool, num_return_sequences: int, 
-                                      generators: List[AsyncGenerator[Dict[str, Any], None]], 
+    async def _batch_async_generators(incremental: bool, num_return_sequences: int,
+                                      generators: List[AsyncGenerator[Dict[str, Any], None]],
                                       batch_infer: bool) -> AsyncGenerator[Dict[str, Any], None]:
         iterators = [gen.__aiter__() for gen in generators]
         done_idxs: Set[int] = set()
@@ -169,7 +169,7 @@ class InferenceWorker():
     ) -> Union[PipelineResponse, MultiSequencesPipelineResponse, BatchPipelineResponse]:
 
         if not incremental:
-            return await LoggableAsyncGenerator.get_last_value(all_responses)
+            return await CompleteResponseAsyncGenerator.get_last_value(all_responses)
 
         if batch_infer:
             batch_response_incremental_stream = None
@@ -180,8 +180,8 @@ class InferenceWorker():
                     for batch_idx, single_response in enumerate(response.response_batch):
                         batch_response_incremental_stream[batch_idx].append(single_response)
             complete_batch_response = []
-            async for single_response_incremental_stream in LoggableAsyncGenerator.generate_from_list(batch_response_incremental_stream):
-                single_yield_response = LoggableAsyncGenerator.generate_from_list(single_response_incremental_stream)
+            async for single_response_incremental_stream in CompleteResponseAsyncGenerator.generate_from_list(batch_response_incremental_stream):
+                single_yield_response = CompleteResponseAsyncGenerator.generate_from_list(single_response_incremental_stream)
                 single_complete_response = await InferenceWorker.collect_complete_response(single_yield_response, incremental, False, num_return_sequences)
                 complete_batch_response.append(single_complete_response)
             return BatchPipelineResponse(response_batch=complete_batch_response)

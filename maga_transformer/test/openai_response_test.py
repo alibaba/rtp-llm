@@ -21,7 +21,7 @@ async def fake_output_generator(
 ) -> AsyncGenerator[GenerateOutput, None]:
     for i in range(0, len(output_ids)):
         output_tensor = torch.full((1, max_seq_len), eos_id, dtype=torch.int)
-        
+
         output_tensor[0, :len(output_ids[:i + 1])] = torch.tensor(output_ids[:i + 1], dtype=torch.int)
         finished = torch.full((1,), (i == (len(output_ids) - 1)), dtype=torch.bool)
         logging.info(f"i={i}, finished={finished}")
@@ -70,7 +70,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         stream_generator = chat_renderer.render_response_stream(id_generator, request, 314)
         generate = self.endpoint._complete_stream_response(stream_generator, None)
         response = [x async for x in generate][-1]
-        response = await generate.collect_loggable_response()
+        response = await generate.gen_complete_response_once()
         print(response.choices[0].model_dump_json())
         self.assertEqual(1, len(response.choices))
         self.assertEqual(json.loads(response.choices[0].model_dump_json()), {
@@ -106,7 +106,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         stream_generator = chat_renderer.render_response_stream(id_generator, request, input_length)
         generate = self.endpoint._complete_stream_response(stream_generator, None)
         response = [x async for x in generate][-1]
-        response = await generate.collect_loggable_response()
+        response = await generate.gen_complete_response_once()
         print(response)
         assert(response.choices[0].finish_reason)
         self.assertEqual(FinisheReason.length, response.choices[0].finish_reason)

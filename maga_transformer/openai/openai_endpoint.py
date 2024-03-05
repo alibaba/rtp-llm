@@ -10,7 +10,7 @@ from functools import partial
 from transformers import PreTrainedTokenizer
 from transformers.generation.stopping_criteria import StoppingCriteria
 
-from maga_transformer.utils.loggable_async_generator import LoggableAsyncGenerator
+from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateOutput, GenerateResponse, GenerateInput
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessage, RoleEnum, \
@@ -90,11 +90,11 @@ class OpenaiEndopoint():
         return config
 
     async def _collect_complete_response(
-            self, 
+            self,
             choice_generator: Optional[AsyncGenerator[StreamResponseObject, None]],
             debug_info: Optional[DebugInfo]) -> ChatCompletionResponse:
         all_choices = []
-        usage = None        
+        usage = None
         async for response in choice_generator:
             if len(response.choices) != len(all_choices):
                 if (all_choices == []):
@@ -137,7 +137,7 @@ class OpenaiEndopoint():
     def _complete_stream_response(
             self, choice_generator: AsyncGenerator[StreamResponseObject, None],
             debug_info: Optional[DebugInfo]
-    ) -> LoggableAsyncGenerator:
+    ) -> CompleteResponseAsyncGenerator:
         async def response_generator():
             debug_info_responded = False
             async for response in choice_generator:
@@ -147,9 +147,9 @@ class OpenaiEndopoint():
                     debug_info=debug_info if not debug_info_responded else None
                 )
                 debug_info_responded = True
-            
+
         complete_response_collect_func = partial(self._collect_complete_response, debug_info=debug_info)
-        return LoggableAsyncGenerator(response_generator(), complete_response_collect_func)
+        return CompleteResponseAsyncGenerator(response_generator(), complete_response_collect_func)
 
     def _get_debug_info(self, renderered_input: RenderedInputs) -> Optional[DebugInfo]:
         prompt = self.tokenizer.decode(renderered_input.input_ids)
@@ -167,7 +167,7 @@ class OpenaiEndopoint():
 
     def chat_completion(
             self, chat_request: ChatCompletionRequest, raw_request: Request
-    ) -> LoggableAsyncGenerator:
+    ) -> CompleteResponseAsyncGenerator:
         rendered_input = self.chat_renderer.render_chat(chat_request)
         input_ids = rendered_input.input_ids
         input_length = len(input_ids)
@@ -194,4 +194,3 @@ class OpenaiEndopoint():
         )
 
         return self._complete_stream_response(choice_generator, debug_info)
-

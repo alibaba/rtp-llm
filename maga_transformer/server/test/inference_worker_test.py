@@ -58,7 +58,7 @@ class InferenceWorkerTest(TestCase):
                 logging.info(f"stream response:{response.response}")
 
         # collect log response
-        log_response = await gen.collect_loggable_response()
+        log_response = await gen.gen_complete_response_once()
         if isinstance(log_response, BatchPipelineResponse):
             result = [_.response for _ in log_response.response_batch]
             aux_info = [_.aux_info for _ in log_response.response_batch]
@@ -118,7 +118,7 @@ class InferenceWorkerTest(TestCase):
             self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             inference_worker.stop()
-            
+
     def test_incremental(self):
         inference_worker = self.create_inference_worker()
         try:
@@ -169,7 +169,7 @@ class InferenceWorkerTest(TestCase):
         finally:
             inference_worker.stop()
 
-    
+
     def test_num_return_incremental(self):
         inference_worker = self.create_inference_worker()
         try:
