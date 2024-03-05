@@ -260,6 +260,8 @@ class GPT(BaseModel):
         logging.info(f'update weights time: {timer.cost_ms() / 1000 :.2f} s')
 
     def _initialize_from_weight(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
+        
         self.context_decoder.set_weight(self.weight)
         self.decoder.set_weight(self.weight)
 
