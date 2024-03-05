@@ -73,7 +73,13 @@ class RequestExtractor:
             if not isinstance(input_texts, list):
                 raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "prompt batch input should be list")
         else:
-            prompt: Union[str, List[str], List[Dict[str, str]]] = kwargs.pop('prompt')
+            prompt: Union[str, List[str], List[Dict[str, str]]]
+            if 'prompt' in kwargs:
+                prompt = kwargs.pop('prompt')
+            elif 'text' in kwargs:
+                prompt = kwargs.pop('text')
+            else:
+                raise Exception('can not find prompt or text in request')
             if isinstance(prompt, str):
                 input_texts = [prompt]
             # for AutoML format
