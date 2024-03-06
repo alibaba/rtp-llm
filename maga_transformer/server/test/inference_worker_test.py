@@ -139,6 +139,62 @@ class InferenceWorkerTest(TestCase):
         finally:
             inference_worker.stop()
 
+    def test_num_return_sequences_1(self):
+        inference_worker = self.create_inference_worker()
+        try:
+            thread_count = 10
+            t = ThreadPoolExecutor(thread_count)
+            def func():
+                return asyncio.run(self._run(inference_worker,
+                                             prompt="please write a story about dog",
+                                             yield_generator=True,
+                                             generate_config={"top_k":1, "max_new_tokens":3, "top_p": 1, "return_incremental": True, "num_return_sequences": 1}))
+            result = []
+            for i in range(0, thread_count):
+                result.append(t.submit(func))
+            # just ensure every input has result
+            for i in range(0, thread_count):
+                result_text, aux_info, finished = result[i].result()
+                expect_text = "ProductsProductsProducts"
+                logging.info(f"no batch * num_return_sequences 1 {i} th : {result_text}, aux_info: {aux_info}, finished:{finished}")
+                self.assertEqual(1, len(result_text))
+                self.assertEqual(1, len(aux_info))
+                self.assertEqual([True], finished)
+                # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
+            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
+        finally:
+            inference_worker.stop()
+
+    def test_batch_num_return_sequences_1(self):
+        inference_worker = self.create_inference_worker()
+        try:
+            thread_count = 10
+            t = ThreadPoolExecutor(thread_count)
+            def func():
+                return asyncio.run(self._run(inference_worker,
+                                             prompt_batch=["please write a story about dog", "please write a story about dog"],
+                                             yield_generator=True,
+                                             generate_config={"top_k":1, "max_new_tokens":3, "top_p": 1, "return_incremental": True, "num_return_sequences": 1}))
+            result = []
+            for i in range(0, thread_count):
+                result.append(t.submit(func))
+            # just ensure every input has result
+            for i in range(0, thread_count):
+                result_text, aux_info, finished = result[i].result()
+                expect_text = "ProductsProductsProducts"
+                logging.info(f"batch 2 * num_return_sequences 1 {i} th : {result_text}, aux_info: {aux_info}, finished:{finished}")
+                self.assertEqual(2, len(result_text))
+                self.assertEqual(1, len(result_text[0]))
+                self.assertEqual(1, len(result_text[1]))
+                self.assertEqual(2, len(aux_info))
+                self.assertEqual(1, len(aux_info[0]))
+                self.assertEqual(1, len(aux_info[1]))
+                self.assertEqual([[True], [True]], finished)
+                # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
+            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
+        finally:
+            inference_worker.stop()
+
     def test_incremental(self):
         inference_worker = self.create_inference_worker()
         try:

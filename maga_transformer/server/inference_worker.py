@@ -79,7 +79,7 @@ class InferenceWorker():
 
 
     def _inference(self, request, **kwargs):
-        if len(request.input_texts) > 1 or request.batch_infer:
+        if len(request.input_texts) > 1 or request.batch_infer or request.num_return_sequences > 0:
             num_return_sequences = request.generate_configs[0].num_return_sequences
             generators = [self._yield_generate(text, images, generate_config=generate_config, **kwargs)
                           for text, images, generate_config in zip(request.input_texts, request.input_images, request.generate_configs)]
@@ -153,9 +153,9 @@ class InferenceWorker():
                         batch_state[idx] = PipelineResponse()
             if len(done_idxs) == len(iterators):
                 break
-            batch_size = int(len(batch_state) / num_return_sequences)
             batch = batch_state
-            if num_return_sequences > 1:
+            if num_return_sequences > 0:
+                batch_size = int(len(batch_state) / num_return_sequences)
                 new_batch: List[Any] = []
                 for batch_idx in range(batch_size):
                     seqs = batch_state[batch_idx * num_return_sequences:(batch_idx + 1) * num_return_sequences]
@@ -197,7 +197,7 @@ class InferenceWorker():
                 complete_batch_response.append(single_complete_response)
             return BatchPipelineResponse(response_batch=complete_batch_response)
 
-        if num_return_sequences > 1:
+        if num_return_sequences > 0:
             complete_multi_seq_response = None
             complete_multi_seq_finised = None
             complete_multi_seq_aux_info = None

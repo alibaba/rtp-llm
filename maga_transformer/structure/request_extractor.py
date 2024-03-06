@@ -135,7 +135,7 @@ class RequestExtractor:
         # check adapter_name size is same with prompt
         def repeat_elements(lst, n):
             return [e for e in lst for _ in range(n)]
-        if num_return_sequences:
+        if num_return_sequences > 0:
             input_texts = repeat_elements(input_texts, num_return_sequences)
             input_images = repeat_elements(input_images, num_return_sequences)
             generate_configs = repeat_elements(generate_configs, num_return_sequences)
