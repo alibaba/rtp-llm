@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 from unittest import TestCase, main
 from fastapi import Request as RawRequest
@@ -14,9 +15,11 @@ class FakePipelinResponse(BaseModel):
 
 class FakeInferenceWorker(object):
     def inference(self, prompt: str, *args: Any, **kwargs: Any):
-
         response_generator = self._inference(prompt, *args, **kwargs)
         return CompleteResponseAsyncGenerator(response_generator, CompleteResponseAsyncGenerator.get_last_value)
+
+    def tokenizer_encode(self, prompt: str):
+        return [1,2,3,4], ['b', 'c', 'd', 'e']
 
     async def _inference(self, prompt: str, *args: Any, **kwargs: Any):
         yield FakePipelinResponse(res=prompt)
@@ -45,5 +48,12 @@ class InferenceServerTest(TestCase):
         self.assertEqual(res.body.decode('utf-8'), '{"res":"hello"}', res.body.decode('utf-8'))
         res = loop.run_until_complete(self._async_run(req='{"prompt": "hello"}',raw_request=FakeRawRequest()))
         self.assertEqual(res.body.decode('utf-8'), '{"res":"hello"}', res.body.decode('utf-8'))
+
+    def test_encode(self):
+        res = self.inference_server.tokenizer_encode('{"prompt": "b c d e"}')
+        self.assertEqual(res.body.decode('utf-8'), '{"token_ids":[1,2,3,4],"tokens":["b","c","d","e"],"error":""}')
+        # test error input
+        res = self.inference_server.tokenizer_encode('{"text": "b c d e"}')
+        self.assertEqual(json.loads(res.body.decode('utf-8'))['error_code'], 514)
 
 main()

@@ -40,6 +40,11 @@ class MultiSequencesPipelineResponse(BaseModel):
 class BatchPipelineResponse(BaseModel):
     response_batch: List[Union[PipelineResponse, MultiSequencesPipelineResponse]]
 
+class TokenizerEncodeResponse(BaseModel):
+    token_ids: List[int] = []
+    tokens: List[str] = []
+    error: str = ""
+
 class InferenceWorker():
     def __init__(self) -> None:
         copy_gemm_config()
@@ -50,6 +55,12 @@ class InferenceWorker():
         self.model = ModelFactory.create_from_env()
         self.pipeline = Pipeline(self.model, self.model.tokenizer)
         logging.info("Load model done.")
+
+    def tokenizer_encode(self, prompt: str) -> Tuple[List[int], List[str]]:
+        token_ids = self.pipeline.encode(prompt)
+        token_ids = [int(id) for id in token_ids]
+        tokens = [self.pipeline.decode(id) for id in token_ids]
+        return token_ids, tokens
 
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
         request_extractor = RequestExtractor(self.model.default_generate_config)

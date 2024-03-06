@@ -30,6 +30,14 @@ class Pipeline(object):
         if isinstance(self.model, AsyncModel):
             self.model.stop()
 
+    def encode(self, prompt: str):
+        assert self.tokenizer is not None
+        return self.tokenizer.encode(prompt)
+
+    def decode(self, token_id: int):
+        assert self.tokenizer is not None
+        return self.tokenizer.decode([token_id])
+
     # just for perf test
     def enable_perf_test_schedule_strategy(self):
         if isinstance(self.model, AsyncModel):

@@ -127,4 +127,12 @@ class InferenceApp(object):
                                     "gang worker should not access this completions api directly!")
             return await self.inference_server.chat_completion(request, raw_request)
 
+        # entry for worker RANK == 0
+        @app.post("/tokenizer/encode")
+        async def encode(req: Union[str,Dict[Any, Any]]):
+            if not g_parallel_info.is_master:
+                return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
+                                    "gang worker should not access this completions api directly!")
+            return self.inference_server.tokenizer_encode(req)
+
         return app

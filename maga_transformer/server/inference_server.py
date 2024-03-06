@@ -26,7 +26,7 @@ from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.access_logger.access_logger import AccessLogger
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatCompletionStreamResponse
-from maga_transformer.server.inference_worker import InferenceWorker, BatchPipelineResponse
+from maga_transformer.server.inference_worker import InferenceWorker, BatchPipelineResponse, TokenizerEncodeResponse
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -235,3 +235,16 @@ class InferenceServer(object):
 
         complete_response = await self._collect_complete_response_and_record_access_log(req, id, res)
         return JSONResponse(content=complete_response)
+
+    def tokenizer_encode(self, req: Union[str,Dict[Any, Any]]):
+        try:
+            if isinstance(req, str):
+                req = json.loads(req)
+            assert isinstance(req, dict)
+            prompt = req.pop('prompt')
+            assert self._inference_worker is not None
+            token_ids, tokens = self._inference_worker.tokenizer_encode(prompt)
+            response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
+            return JSONResponse(content=response.model_dump(exclude_none=True))
+        except Exception as e:
+            return JSONResponse(self.handler_exceptions(e), status_code=500)

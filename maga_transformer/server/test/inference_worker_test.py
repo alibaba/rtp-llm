@@ -89,6 +89,26 @@ class InferenceWorkerTest(TestCase):
         finally:
             inference_worker.stop()
 
+    def test_text_input(self):
+        inference_worker = self.create_inference_worker()
+        try:
+            thread_count = 10
+            t = ThreadPoolExecutor(thread_count)
+            def func():
+                return asyncio.run(self._run(inference_worker, text="please write a story about dog", generate_config={"top_k":1, "max_new_tokens":3, "top_p": 1}))
+            result = []
+            for i in range(0, thread_count):
+                result.append(t.submit(func))
+            # just ensure every input has result
+            for i in range(0, thread_count):
+                result_text, aux_info, finished = result[i].result()
+                expect_text = "ProductsProductsProducts"
+                logging.info(f"{i} th : {result_text}, aux_info: {aux_info}, finished:{finished}")
+                # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
+            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
+        finally:
+            inference_worker.stop()
+
     def test_num_batch(self):
         inference_worker = self.create_inference_worker()
         try:
@@ -225,6 +245,12 @@ class InferenceWorkerTest(TestCase):
             self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             inference_worker.stop()
+
+    def test_encode(self):
+        inference_worker = self.create_inference_worker()
+        token_ids, tokens = inference_worker.tokenizer_encode('a b c')
+        self.assertEqual(token_ids, [1, 263, 289, 274])
+        self.assertEqual(tokens, ['<s>', 'a', 'b', 'c'])
 
 if __name__ == '__main__':
     if os.environ.get('FT_SERVER_TEST', None) is None:
