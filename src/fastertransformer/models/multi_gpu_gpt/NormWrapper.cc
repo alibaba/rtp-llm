@@ -119,13 +119,14 @@ void NormWrapper<T>::attentionAddBiasResidualLayerNorm(T*           output,
                 stream);
         } else if (norm_type_ == NormType::rmsnorm) {
             // norm_output = rmsnorm(output + residual1 + bias) * gamma + beta
-            invokeGeneralAddBiasResidualT5PreLayerNorm(
+            invokeAddBiasResidualRmsNorm(
                 output,
                 norm_output,
+                input,
+                bias,
                 residual1,
                 gamma,
                 beta,
-                bias,
                 eps,
                 m,
                 n,

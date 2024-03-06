@@ -142,26 +142,4 @@ void invokeGeneralLayerNormWithPadding(T*           out,
                                        cudaStream_t stream,
                                        int          opt_version = 2);
 
-template<typename T>
-void invokeGeneralAddResidualT5PreLayerNorm(T*           output,
-                                            T*           norm_output,
-                                            const T*     input,
-                                            const T*     gamma,
-                                            const float  layernorm_eps,
-                                            int          m,
-                                            int          n,
-                                            cudaStream_t stream);
-
-template<typename T>
-void invokeGeneralAddBiasResidualT5PreLayerNorm(T*           output,
-                                                T*           norm_output,
-                                                const T*     input,
-                                                const T*     gamma,
-                                                const T*     beta,
-                                                const T*     bias,
-                                                const float  layernorm_eps,
-                                                int          m,
-                                                int          n,
-                                                cudaStream_t stream);
-
 }  // namespace fastertransformer
