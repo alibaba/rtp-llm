@@ -67,16 +67,6 @@ struct LayerNormWeight {
     const T* beta  = nullptr;
 };
 
-template<typename T>
-void invokeAddBiasResidualLayerNorm(T*           out,
-                                    const T*     input,
-                                    const T*     bias,
-                                    const T*     gamma,
-                                    const T*     beta,
-                                    const float  layernorm_eps,
-                                    const int    m,
-                                    const int    n,
-                                    cudaStream_t stream);
 
 template<typename T>
 void invokeGeneralAddBiasResidualPreLayerNorm(T*           output,
