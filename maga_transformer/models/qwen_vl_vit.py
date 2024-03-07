@@ -474,7 +474,7 @@ class VisionTransformer(nn.Module):
             images = []
             for image_path in image_paths:
                 if image_path.startswith("http://") or image_path.startswith("https://"):
-                    if os.environ.get("IMAGE_RESIZE_SUFFIX", None) is not None and "picasso" in self.image_path:
+                    if os.environ.get("IMAGE_RESIZE_SUFFIX", None) is not None and "picasso" in image_path:
                         image_path += os.environ.get("IMAGE_RESIZE_SUFFIX")
                     image = Image.open(requests.get(image_path, stream=True).raw)
                 else:
@@ -513,7 +513,7 @@ class Preprocss:
             images = []
             for image_path in image_paths:
                 if image_path.startswith("http://") or image_path.startswith("https://"):
-                    if os.environ.get("IMAGE_RESIZE_SUFFIX", None) is not None and "picasso" in self.image_path:
+                    if os.environ.get("IMAGE_RESIZE_SUFFIX", "") != "" and "picasso" in image_path:
                         image_path += os.environ.get("IMAGE_RESIZE_SUFFIX")
                     image = Image.open(requests.get(image_path, stream=True).raw)
                 else:
