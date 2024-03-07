@@ -24,8 +24,20 @@
 | `temperature` | `float` | logits计算参数(温度) |
 | `repetition_penalty` | `float` | 重复token惩罚系数 |
 | `random_seed` | `long` | 随机种子 |
+| `using_hf_sampling` | `bool` | 是否使用hf的采样 |
 | `num_beams` | `bool` | beam search的个数 |
-| `calculate_loss` | `bool` | 是否计算loss |
+| `print_stop_words` | `bool` | 是否打印stop words |
+| `stop_words_str` | `List[str]` | stop words的字符串 |
+| `stop_words_list` | `List[List[int]]` | stop words的token ids |
+| `calculate_loss` | `int` | 是否计算loss,0:不计算，1:单词的loss求和，2:每个token的loss各自返回 |
 | `return_hidden_states`/`output_hidden_states` | `bool` | 是否返回hidden_states |
 | `return_logits`/`output_logits` | `bool` | 是否返回logits |
+| `select_tokens_id` | `List[int]` | 只有在select_tokens_id集合中token 才返回logtis，不指定的话，就返回所有。|
+| `select_tokens_str` | `List[str]` | 这个列表中的str，会使用tokenizer encode成对应的token id，append到select_tokens_id中。|
+| `return_input_ids` | `bool` | 是否返回input ids |
+| `return_output_ids` | `bool` | 是否返回output ids |
+| `task_id` | `int` | system prompt的id |
+| `chat_id` | `str` | 多轮会话的id |
+| `timeout_ms` | `int` | request的超时时间 |
+| `request_format` | `str` | request的请求格式，取值(raw/chatapi)|
 | `yield_generator` | `bool` | 是否流式输出 |
