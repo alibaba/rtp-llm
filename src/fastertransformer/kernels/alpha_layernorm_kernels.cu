@@ -2,7 +2,7 @@
 #include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 
-
+// wont't support new features
 namespace fastertransformer{
 template<typename T, int N>
 __global__ void alphaAddBiasResidualPostLayerNorm(
@@ -701,6 +701,148 @@ INVOKE_ADD_BIAS_RES_LN(half)
 INVOKE_ADD_BIAS_RES_LN(__nv_bfloat16)
 #endif
 
+template<typename T, bool DYNAMIC_SCALING = false>
+__global__ void generalLayerNormWithPadding(const T* __restrict input,
+                                            const T* __restrict gamma,
+                                            const T* __restrict beta,
+                                            T*          normed_output,
+                                            const float layernorm_eps,
+                                            int         m,
+                                            int         real_n,
+                                            int         padding_n,
+                                            float*      scale,
+                                            float*      dynamic_scale,
+                                            const int   int8_mode) {
+    const int tid = threadIdx.x;
 
+    extern __shared__ __align__(sizeof(float)) char _shmem[];
+    T*                                              shmem = reinterpret_cast<T*>(_shmem);
+
+    __shared__ float s_mean;
+    __shared__ float s_variance;
+    float            mean     = 0.0f;
+    float            variance = 0.0f;
+
+    using Int8_Packed_T  = typename packed_as<int8_t, num_elems<T>::value>::type;
+    using Int32_Packed_T = typename packed_as<int32_t, num_elems<T>::value>::type;
+    using Float_Packed_T = typename packed_as<float, num_elems<T>::value>::type;
+    using Scalar_T       = typename packed_as<T, 1>::type;
+
+    const Float_Packed_T scale_to_int = cuda_cast<Float_Packed_T>(int8_mode == 2 ? *scale : 0.0f);
+
+    float local_sum = 0.0f;
+    for (int i = tid; i < real_n; i += blockDim.x) {
+        local_sum += (float)(ldg(&input[blockIdx.x * padding_n + i]));
+    }
+
+    mean = blockReduceSum(local_sum);
+
+    if (threadIdx.x == 0) {
+        s_mean = mean / real_n;
+    }
+    __syncthreads();
+
+    float local_var_sum = 0.0f;
+    for (int i = tid; i < real_n; i += blockDim.x) {
+        float diff = (float)(ldg(&input[blockIdx.x * padding_n + i])) - s_mean;
+        local_var_sum += diff * diff;
+    }
+    variance = blockReduceSum(local_var_sum);
+
+    if (threadIdx.x == 0) {
+        s_variance = rsqrtf(variance / real_n + layernorm_eps);
+    }
+    __syncthreads();
+
+    Scalar_T abs_max = 1e-6f;
+
+    for (int i = tid; i < real_n; i += blockDim.x) {
+        const int index    = blockIdx.x * padding_n + i;
+        float     beta_val = (beta == nullptr) ? 0.0f : (float)ldg(&beta[i]);
+        T         val      = (T)((((float)input[index] - s_mean) * s_variance) * (float)(ldg(&gamma[i])) + beta_val);
+
+        if (DYNAMIC_SCALING) {
+            abs_max  = cuda_max(cuda_max<Scalar_T, T>(cuda_abs(val)), abs_max);
+            shmem[i] = val;
+        } else if (int8_mode == 2) {
+            reinterpret_cast<Int8_Packed_T*>(normed_output)[index] =
+                cuda_cast<Int8_Packed_T>(cuda_cast<Float_Packed_T>(val) * scale_to_int);
+        } else {
+            normed_output[index] = val;
+        }
+    }
+
+    if (DYNAMIC_SCALING) {
+        float          abs_max_f               = blockAllReduceMax(cuda_cast<float>(abs_max));
+        const Scalar_T dynamic_per_token_scale = 127. / abs_max_f;
+        for (int i = tid; i < real_n; i += blockDim.x) {
+            const int index                                        = blockIdx.x * padding_n + i;
+            reinterpret_cast<Int8_Packed_T*>(normed_output)[index] = cuda_cast<Int8_Packed_T>(
+                cuda_cast<Float_Packed_T>(shmem[i]) * cuda_cast<Float_Packed_T>(dynamic_per_token_scale));
+        }
+        if (threadIdx.x == 0) {
+            dynamic_scale[blockIdx.x] = (*scale * abs_max_f) / 127.f;
+        }
+    }
+}
+
+template<typename T>
+void invokeGeneralLayerNormWithPadding(T*           out,
+                                       const T*     input,
+                                       const T*     gamma,
+                                       const T*     beta,
+                                       const float  layernorm_eps,
+                                       const int    m,
+                                       const int    real_n,
+                                       const int    padding_n,
+                                       float*       scale,
+                                       float*       dynamic_scale,
+                                       const int    int8_mode,
+                                       cudaStream_t stream,
+                                       int          opt_version) {
+    dim3       grid(m);
+    const bool dynamic_quant = dynamic_scale != nullptr;
+
+    dim3 block(min(real_n, 1024));
+
+    /* For general cases, n is equal to hidden_units, e.g., 512/1024.
+        Since we have warp shuffle inside the code, block.x % 32 should be 0.
+    */
+    block.x = 32 * ((block.x + 31) / 32);
+
+    /* should pay attention to the rsqrt precision*/
+    if (dynamic_quant) {
+        size_t maxbytes = real_n * sizeof(T);
+        if (maxbytes >= (48 << 10)) {
+            check_cuda_error(cudaFuncSetAttribute(
+                generalLayerNormWithPadding<T, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes));
+        }
+        generalLayerNormWithPadding<T, true><<<grid, block, maxbytes, stream>>>(
+            input, gamma, beta, out, layernorm_eps, m, real_n, padding_n, scale, dynamic_scale, int8_mode);
+    } else {
+        generalLayerNormWithPadding<T, false><<<grid, block, 0, stream>>>(
+            input, gamma, beta, out, layernorm_eps, m, real_n, padding_n, scale, dynamic_scale, int8_mode);
+    }
+}
+
+#define INVOKE_GENERAL_LN_WITH_PADDING(T)                                                                              \
+    template void invokeGeneralLayerNormWithPadding(T*           out,                                                  \
+                                                    const T*     input,                                                \
+                                                    const T*     gamma,                                                \
+                                                    const T*     beta,                                                 \
+                                                    const float  layernorm_eps,                                        \
+                                                    const int    m,                                                    \
+                                                    const int    real_n,                                               \
+                                                    const int    padding_n,                                            \
+                                                    float*       scale,                                                \
+                                                    float*       dynamic_scale,                                        \
+                                                    const int    int8_mode,                                            \
+                                                    cudaStream_t stream,                                               \
+                                                    int          opt_version);
+INVOKE_GENERAL_LN_WITH_PADDING(float)
+INVOKE_GENERAL_LN_WITH_PADDING(half)
+#ifdef ENABLE_BF16
+INVOKE_GENERAL_LN_WITH_PADDING(__nv_bfloat16)
+#endif
 
 }

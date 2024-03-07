@@ -44,4 +44,19 @@ void invokeAddBiasResidualLayerNorm(T*           out,
                                     const int    m,
                                     const int    n,
                                     cudaStream_t stream);
+
+template<typename T>
+void invokeGeneralLayerNormWithPadding(T*           out,
+                                       const T*     input,
+                                       const T*     gamma,
+                                       const T*     beta,
+                                       const float  layernorm_eps,
+                                       const int    m,
+                                       const int    real_n,
+                                       const int    padding_n,
+                                       float*       scale,
+                                       float*       dynamic_scale,
+                                       const int    int8_mode,
+                                       cudaStream_t stream,
+                                       int          opt_version = 2);
 }

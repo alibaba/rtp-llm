@@ -26,6 +26,7 @@
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
+#include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
 #include <stdint.h>
 #include <vector>
 
