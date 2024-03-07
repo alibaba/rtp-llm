@@ -45,14 +45,13 @@ class CacheManager:
 
     def __init_free_block(self, config, nccl_op):
         block_nums = config.block_nums
-        self.block_nums = block_nums
         
         if g_parallel_info.tp_size > 1:
             block_nums_t = torch.tensor([block_nums], dtype=torch.int32, device="cuda:0")
             nccl_op.broadcast_tp([block_nums_t])
             block_nums = int(block_nums_t[0])
         logging.info(f"block num: {block_nums}")
-            
+        self.block_nums = block_nums
         self.free_blocks_index: Set[int] = set()
         # block 0 is reserved for tmp or padding use
         for i in range(1, block_nums):
@@ -62,14 +61,15 @@ class CacheManager:
         self.block_cache = BlockCache()
         
     def __init_kv_cache(self, config):
-        block_nums = config.block_nums
-        self.k_blocks = torch.zeros((config.layer_num, block_nums, config.local_head_num_kv,
+        # block num not use config when tp, use sync block num
+        # block_nums = config.block_nums
+        self.k_blocks = torch.zeros((config.layer_num, self.block_nums, config.local_head_num_kv,
                                 config.seq_size_per_block, config.size_per_head), dtype=config.dtype, device='cuda:0')
-        self.v_blocks = torch.zeros((config.layer_num, block_nums, config.local_head_num_kv, config.seq_size_per_block, config.size_per_head), dtype=config.dtype, device='cuda:0')
+        self.v_blocks = torch.zeros((config.layer_num, self.block_nums, config.local_head_num_kv, config.seq_size_per_block, config.size_per_head), dtype=config.dtype, device='cuda:0')
         if config.dtype is torch.int8:
-            self.k_scale = torch.zeros((config.layer_num, block_nums, config.local_head_num_kv,
+            self.k_scale = torch.zeros((config.layer_num, self.block_nums, config.local_head_num_kv,
                                 config.seq_size_per_block), dtype=torch.float32, device='cuda:0')
-            self.v_scale = torch.zeros((config.layer_num, block_nums, config.local_head_num_kv, config.seq_size_per_block), dtype=torch.float32, device='cuda:0')
+            self.v_scale = torch.zeros((config.layer_num, self.block_nums, config.local_head_num_kv, config.seq_size_per_block), dtype=torch.float32, device='cuda:0')
         else:
             self.k_scale = None
             self.v_scale = None
@@ -311,4 +311,4 @@ class BlockCache(object):
         if not self.has_key(token_list):
             return False
         cache_key = self.hash_key(token_list)
-        return self.cache[cache_key].is_resident 
+        return self.cache[cache_key].is_resident
