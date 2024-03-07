@@ -460,7 +460,7 @@ class VisionTransformer(nn.Module):
 
     def encode(self, image_paths: List[str]):
         images = []
-        if os.environ.get("PARALLEL_PULL_IMAGE", "0") == "1" and len(image_paths) > 1:
+        if os.environ.get("PARALLEL_PULL_IMAGE", "1") == "1" and len(image_paths) > 1:
             images = [None]*len(image_paths)
             threads = []
             for i, image_path in enumerate(image_paths):
@@ -499,7 +499,7 @@ class Preprocss:
 
     def encode(self, image_paths: List[str]) -> torch.Tensor:
         images = []
-        if os.environ.get("PARALLEL_PULL_IMAGE", "0") == "1" and len(image_paths) > 1:
+        if os.environ.get("PARALLEL_PULL_IMAGE", "1") == "1" and len(image_paths) > 1:
             images = [None]*len(image_paths)
             threads = []
             for i, image_path in enumerate(image_paths):
