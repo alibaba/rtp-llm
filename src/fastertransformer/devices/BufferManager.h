@@ -40,7 +40,7 @@ public:
     BufferManager(IAllocator* device_allocator, IAllocator* host_allocator);
     ~BufferManager();
 
-    std::shared_ptr<Buffer> allocate(const BufferParams& params, const BufferHints& hints);
+    std::unique_ptr<Buffer> allocate(const BufferParams& params, const BufferHints& hints);
     void recycle(Buffer* buffer, IAllocator* allocator);
 
 private:

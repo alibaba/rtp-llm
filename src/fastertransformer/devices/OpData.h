@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <sstream>
+#include <memory>
 
 namespace fastertransformer {
 
@@ -145,6 +146,16 @@ struct GroupedGemmParams {
     const std::vector<Buffer>& B;
     const std::vector<Buffer>& C;
     std::vector<Buffer>&       D;
+};
+
+struct EmbeddingLookupParams {
+    const Buffer& combo_tokens;
+    const Buffer& embedding_table;
+
+    const std::optional<std::reference_wrapper<const Buffer>> position_ids;
+    const std::optional<std::reference_wrapper<const Buffer>> position_table;
+
+    Buffer& embeddings;
 };
 
 struct AttentionCommonInputs {

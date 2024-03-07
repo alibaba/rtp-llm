@@ -5,14 +5,23 @@ using namespace std;
 namespace fastertransformer {
 
 
-Buffer::Buffer(const MemoryType where, const DataType type, const std::vector<size_t>& shape, const void* data)
+Buffer::Buffer(const MemoryType where,
+               const DataType type,
+               const std::vector<size_t>& shape,
+               const void* data,
+               const std::function<void(Buffer *)> deleter)
     : where_(where)
     , type_(type)
     , shape_(shape)
     , data_(const_cast<void*>(data))
+    , deleter_(deleter)
     {}
 
-Buffer::~Buffer() {}
+Buffer::~Buffer() {
+    if (deleter_) {
+        deleter_(this);
+    }
+}
 
 MemoryType Buffer::where() const {
     return where_;

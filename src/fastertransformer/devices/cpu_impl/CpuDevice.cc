@@ -12,6 +12,7 @@ void CpuDevice::copy(const CopyParams& params) {}
 void CpuDevice::layernorm(const LayernormParams& params) {}
 void CpuDevice::gemm(const GemmParams& params) {}
 void CpuDevice::groupedGemm(const GroupedGemmParams& params) {}
+void CpuDevice::embeddingLookup(const EmbeddingLookupParams& params) {}
 void CpuDevice::contextAttention(const AttentionModuleParams& params) {}
 void CpuDevice::decoderSelfAttention(const AttentionModuleParams& params) {}
 void CpuDevice::attentionLayer(const AttentionLayerParams& params) {}

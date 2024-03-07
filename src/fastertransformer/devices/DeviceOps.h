@@ -21,6 +21,7 @@ public:
     virtual void layernorm(const LayernormParams& params)        = 0;
     virtual void gemm(const GemmParams& params)                  = 0;
     virtual void groupedGemm(const GroupedGemmParams& params)    = 0;
+    virtual void embeddingLookup(const EmbeddingLookupParams& params) = 0;
 
     // dedicated attention ops
     virtual void contextAttention(const AttentionModuleParams& params)     = 0;

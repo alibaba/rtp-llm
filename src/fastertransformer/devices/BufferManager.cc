@@ -13,15 +13,15 @@ BufferManager::BufferManager(IAllocator* device_allocator, IAllocator* host_allo
 
 BufferManager::~BufferManager() {}
 
-shared_ptr<Buffer> BufferManager::allocate(const BufferParams& params, const BufferHints& hints) {
+unique_ptr<Buffer> BufferManager::allocate(const BufferParams& params, const BufferHints& hints) {
     const auto allocator = (params.allocation == AllocationType::DEVICE) ? device_allocator_ : host_allocator_;
     const auto shape = params.dims;
     const auto alloc_bytes = accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>())
                            * getTypeSize(params.type);
     const auto data = allocator->malloc(alloc_bytes);
     const auto deleter = [this, allocator](Buffer* buffer) { this->recycle(buffer, allocator); };
-    const auto buffer = new Buffer(allocator->memoryType(), params.type, shape, data);
-    return shared_ptr<Buffer>(buffer, deleter);
+    const auto buffer = new Buffer(allocator->memoryType(), params.type, shape, data, deleter);
+    return unique_ptr<Buffer>(buffer);
 }
 
 void BufferManager::recycle(Buffer* buffer, IAllocator* allocator) {

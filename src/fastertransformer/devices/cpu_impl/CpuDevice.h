@@ -19,6 +19,7 @@ public:
     void layernorm(const LayernormParams& params);
     void gemm(const GemmParams& params);
     void groupedGemm(const GroupedGemmParams& params);
+    void embeddingLookup(const EmbeddingLookupParams& params);
     void contextAttention(const AttentionModuleParams& params);
     void decoderSelfAttention(const AttentionModuleParams& params);
     void attentionLayer(const AttentionLayerParams& params);

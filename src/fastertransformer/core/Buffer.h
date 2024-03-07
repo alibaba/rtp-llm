@@ -4,6 +4,7 @@
 
 #include <vector>
 #include <string>
+#include <functional>
 
 namespace fastertransformer {
 
@@ -14,7 +15,8 @@ public:
     Buffer(const MemoryType where,
            const DataType type,
            const std::vector<size_t>& shape,
-           const void* data);
+           const void* data,
+           const std::function<void(Buffer *)> deleter = nullptr);
     ~Buffer();
 
     Buffer(const Buffer& tensor) = delete;
@@ -36,7 +38,8 @@ private:
     MemoryType          where_;
     DataType            type_;
     std::vector<size_t> shape_;
-    void*               data_   = nullptr;
+    void*               data_;
+    std::function<void(Buffer *)> deleter_;
 };
 
 } // namespace fastertransformer
