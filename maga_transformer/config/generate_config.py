@@ -22,8 +22,8 @@ class GenerateConfig(BaseModel):
     top_p_decay: Optional[Union[List[float], float]] = None
     top_p_min: Optional[Union[List[float], float]] = None
     top_p_reset_ids: Optional[Union[List[int],int]] = None
-    stop_words_list: List[List[int]] = []
     stop_words_str: List[str] = []
+    stop_words_list: List[List[int]] = []
     bad_words_list: Optional[Union[List[List[List[int]]], List[List[int]]]] = None
     eos_token_id: Optional[int] = None
     pad_token_id: Optional[int] = None
@@ -39,6 +39,8 @@ class GenerateConfig(BaseModel):
     return_logits: bool = False
     return_incremental: bool = False
     return_hidden_states: bool = False
+    select_tokens_str: List[str] = []
+    select_tokens_id: List[int] = []
     return_input_ids: bool = False
     return_output_ids: bool = False
     md5_value: str = ""
@@ -107,6 +109,10 @@ class GenerateConfig(BaseModel):
         config.validate()
         return config
 
+    def convert_select_tokens(self, tokenizer):
+        for token_str in self.select_tokens_str:
+            self.select_tokens_id += tokenizer.encode(token_str)
+        
     def add_special_tokens(self, special_tokens: Any):
         # 如果同时在外面和里面都有设置采样参数，选择使用外面的
         # 这里假设外部传进来的stop_word_list和stop_word_str都不包含batch维度

@@ -186,7 +186,11 @@ class GenerateStream(BaseModel):
             self._output.output_ids = self._complete_token_ids[:,self.input_length:self._seq_length]
             self._output.input_ids = self.input_token_ids
             self._output.hidden_states = hidden_states
-            self._output.logits = logits
+            if len(self._input.generate_config.select_tokens_id) > 0:
+                self._output.logits = logits[:,self._input.generate_config.select_tokens_id]
+            else:
+                self._output.logits = logits
+            
             self._output.finished = finished
             self._output.aux_info.cost_time = current_time_ms() - self._begin_time
             self._output.aux_info.input_len = self._input.prompt_length
