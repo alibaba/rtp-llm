@@ -34,7 +34,7 @@ class PipelineResponse(BaseModel):
 
 class MultiSequencesPipelineResponse(BaseModel):
     response: List[str]
-    finished: List[bool]
+    finished: bool
     aux_info: List[Dict[str, Any]] = {}
 
 class BatchPipelineResponse(BaseModel):
@@ -161,7 +161,7 @@ class InferenceWorker():
                     seqs = batch_state[batch_idx * num_return_sequences:(batch_idx + 1) * num_return_sequences]
                     sequences_pipeline_response = MultiSequencesPipelineResponse(
                         response=[seq.response for seq in seqs],
-                        finished=[seq.finished for seq in seqs],
+                        finished=all([seq.finished for seq in seqs]),
                         aux_info=[seq.aux_info for seq in seqs]
                     )
                     new_batch.append(sequences_pipeline_response)
@@ -204,14 +204,14 @@ class InferenceWorker():
             async for response in all_responses:
                 if not complete_multi_seq_response:
                     complete_multi_seq_response = [_ for _ in response.response]
-                    complete_multi_seq_finised = [_ for _ in response.finished]
                     complete_multi_seq_aux_info = [_ for _ in response.aux_info]
+                    complete_multi_seq_finised = response.finished
                 for seq_idx, seq_reponse in enumerate(response.response):
                     complete_multi_seq_response[seq_idx] = complete_multi_seq_response[seq_idx] + seq_reponse
                     if response.aux_info and response.aux_info[seq_idx]:
                         complete_multi_seq_aux_info[seq_idx] = response.aux_info[seq_idx]
-                    if response.finished and response.finished[seq_idx]:
-                        complete_multi_seq_finised[seq_idx] = response.finished[seq_idx]
+                    if response.finished:
+                        complete_multi_seq_finised = True
             return MultiSequencesPipelineResponse(response=complete_multi_seq_response,
                                                   aux_info=complete_multi_seq_aux_info,
                                                   finished=complete_multi_seq_finised)

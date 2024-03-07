@@ -133,7 +133,7 @@ class InferenceWorkerTest(TestCase):
                 self.assertEqual(2, len(aux_info))
                 self.assertEqual(3, len(aux_info[0]))
                 self.assertEqual(3, len(aux_info[1]))
-                self.assertEqual([[True, True, True], [True, True, True]], finished)
+                self.assertEqual([True, True], finished)
                 # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
             self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
@@ -159,7 +159,7 @@ class InferenceWorkerTest(TestCase):
                 logging.info(f"no batch * num_return_sequences 1 {i} th : {result_text}, aux_info: {aux_info}, finished:{finished}")
                 self.assertEqual(1, len(result_text))
                 self.assertEqual(1, len(aux_info))
-                self.assertEqual([True], finished)
+                self.assertEqual(True, finished)
                 # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
             self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
@@ -189,7 +189,7 @@ class InferenceWorkerTest(TestCase):
                 self.assertEqual(2, len(aux_info))
                 self.assertEqual(1, len(aux_info[0]))
                 self.assertEqual(1, len(aux_info[1]))
-                self.assertEqual([[True], [True]], finished)
+                self.assertEqual([True, True], finished)
                 # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
             self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
@@ -266,7 +266,7 @@ class InferenceWorkerTest(TestCase):
                 logging.info(f"incremental num return {i} th : {result_text}, aux_info: {aux_info}, finished:{finished}")
                 self.assertEqual(3, len(result_text))
                 self.assertEqual(3, len(aux_info))
-                self.assertEqual([True, True, True], finished)
+                self.assertEqual(True, finished)
                 # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
             self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
@@ -296,7 +296,7 @@ class InferenceWorkerTest(TestCase):
                 self.assertEqual(2, len(aux_info))
                 self.assertEqual(3, len(aux_info[0]))
                 self.assertEqual(3, len(aux_info[1]))
-                self.assertEqual([[True, True, True], [True, True, True]], finished)
+                self.assertEqual([True, True], finished)
                 # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
             self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
