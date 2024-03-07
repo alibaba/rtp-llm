@@ -9,6 +9,7 @@ from itertools import repeat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
     WeightInfo, W, ModelWeights, LoRAWeights
 from maga_transformer.utils.ckpt_database import CkptDatabase, CkptFileInfo
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.util import get_mem_info
 
 class ModelWeightsLoader:
@@ -292,6 +293,8 @@ def estimate_load_parallel_num(config, tp_size):
     model_mem = model_size / tp_size / (1024.0 ** 3)
     parallel_num = int((free_mem - model_mem) / (weight_compute_mem + cuda_runtime_mem))
     parallel_num = min(max(parallel_num, 1), 4) # 以防并发太多影响 io 效率
+    # hippo mount 最大并发是16， 超过16就会file not found
+    parallel_num = min(parallel_num, 16 // g_parallel_info.local_world_size)
     if model_mem < 1:
         parallel_num = 1 # 单元测试
     logging.info(f'free_mem: {free_mem:.2f} model_mem: {model_mem:.2f}, load weights by {parallel_num} process')
