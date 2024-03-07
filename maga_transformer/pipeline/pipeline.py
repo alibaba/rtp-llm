@@ -44,7 +44,7 @@ class Pipeline(object):
             self.model.enable_perf_test_schedule_strategy()
 
     @staticmethod
-    def create_generate_config(generate_config: Union[GenerateConfig, Dict[str, Any]],
+    def create_generate_config(generate_config: Union[GenerateConfig, Dict[str, Any]], vocab_size: int,
                                special_tokens: Any, tokenizer: TokenizerBase, **kwargs: Any) -> GenerateConfig:
         if isinstance(generate_config, dict):
             config = GenerateConfig.create_generate_config(generate_config, **kwargs)
@@ -52,7 +52,7 @@ class Pipeline(object):
             # 认为是从inference_worker传递进来的，不需要再处理一遍
             config = generate_config
         config.add_special_tokens(special_tokens)
-        config.convert_select_tokens(tokenizer)
+        config.convert_select_tokens(vocab_size, tokenizer)
         return config
 
     def _get_stop_word_strs(self, tokenizer: TokenizerBase, generate_config: GenerateConfig) -> List[str]:
@@ -115,7 +115,8 @@ class Pipeline(object):
         if images is None or len(images) == 0:
             images = []
         generate_config_json = kwargs.pop("generate_config", {})
-        generate_config = self.create_generate_config(generate_config_json, self.model.config.special_tokens, self.tokenizer, **kwargs)
+        generate_config = self.create_generate_config(generate_config_json, self.model.config.vocab_size,
+                                                      self.model.config.special_tokens, self.tokenizer, **kwargs)
         # for delete stop word from output
         prompt = self.piple_funcs.modify_prompt_func(prompt, generate_config=generate_config.model_dump(), images=images, **kwargs)
 

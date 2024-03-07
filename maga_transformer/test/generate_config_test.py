@@ -19,6 +19,11 @@ class GenerateConfigTest(TestCase):
             "max_new_tokens": 100
         }
         
+    def _create_generate_config_for_select_tokens_id(self):
+        return {
+            "select_tokens_id": [0, 3]
+        }
+        
     def _create_kwargs(self):
         return {
             "stop_words_str": ["hi"],
@@ -30,14 +35,16 @@ class GenerateConfigTest(TestCase):
     
     def test_simple(self):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
-        generate_config = Pipeline.create_generate_config(tokenizer=None, special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
+        generate_config = Pipeline.create_generate_config(tokenizer=None, vocab_size=100,
+                                                          special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
         self.assertEqual(generate_config.stop_words_list, [[8848]])
         self.assertEqual(generate_config.stop_words_str, ["hello", "what's your name"])
         self.assertEqual(generate_config.top_k, 1)
         self.assertEqual(generate_config.top_p, 0.95)
         self.assertEqual(generate_config.max_new_tokens, 100)
         
-        generate_config = Pipeline.create_generate_config(tokenizer=None, special_tokens=parameter.special_tokens, generate_config={}, **self._create_generate_config())
+        generate_config = Pipeline.create_generate_config(tokenizer=None, vocab_size=100,
+                                                          special_tokens=parameter.special_tokens, generate_config={}, **self._create_generate_config())
         self.assertEqual(generate_config.stop_words_list, [[8848]])
         self.assertEqual(generate_config.stop_words_str, ["hello", "what's your name"])
         self.assertEqual(generate_config.top_k, 1)
@@ -47,7 +54,9 @@ class GenerateConfigTest(TestCase):
         
     def test_kwargs_overwrite(self):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
-        generate_config = Pipeline.create_generate_config(tokenizer=None, special_tokens=parameter.special_tokens, generate_config=self._create_generate_config(), **self._create_kwargs())
+        generate_config = Pipeline.create_generate_config(tokenizer=None, vocab_size=100,
+                                                          special_tokens=parameter.special_tokens,
+                                                          generate_config=self._create_generate_config(),**self._create_kwargs())
         self.assertEqual(generate_config.stop_words_list, [[1551]])
         self.assertEqual(generate_config.stop_words_str, ["hi"])
         self.assertEqual(generate_config.top_k, 2)
@@ -58,17 +67,33 @@ class GenerateConfigTest(TestCase):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
         parameter.special_tokens.stop_words_list = [[1233, 19912]]
         parameter.special_tokens.stop_words_str = ["gg"]
-        generate_config = Pipeline.create_generate_config(tokenizer=None, special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
+        generate_config = Pipeline.create_generate_config(tokenizer=None, vocab_size=100,
+                                                          special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
         self.assertEqual(generate_config.stop_words_list, [[8848], [1233, 19912]])
         self.assertEqual(generate_config.stop_words_str, ["hello", "what's your name", "gg"])
+        
+    def test_select_tokens_id(self):
+        parameter = GptInitModelParameters(0, 0, 0, 0, 0)
+        generate_config = Pipeline.create_generate_config(tokenizer=None, vocab_size=100,
+                                                          special_tokens=parameter.special_tokens,
+                                                          generate_config=self._create_generate_config_for_select_tokens_id())
+        self.assertEqual(generate_config.select_tokens_id, [0, 3])
+        self.assertEqual(generate_config.select_tokens_str, [])
+        
+        with self.assertRaisesRegex(Exception, "should be less than vocab_size"):
+            generate_config = Pipeline.create_generate_config(tokenizer=None, vocab_size=2,
+                                                          special_tokens=parameter.special_tokens,
+                                                          generate_config=self._create_generate_config_for_select_tokens_id())   
         
     def test_same(self):
         parameter = GptInitModelParameters(0, 0, 0, 0, 0)
         parameter.special_tokens.stop_words_list = [[1233, 19912]]
         parameter.special_tokens.stop_words_str = ["gg"]
 
-        a = Pipeline.create_generate_config(tokenizer=None, special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
-        b = Pipeline.create_generate_config(tokenizer=None, special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
+        a = Pipeline.create_generate_config(tokenizer=None, vocab_size=100,
+                                            special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
+        b = Pipeline.create_generate_config(tokenizer=None, vocab_size=100,
+                                            special_tokens=parameter.special_tokens, generate_config=self._create_generate_config())
         a.gen_hash_value()
         b.gen_hash_value()
         self.assertTrue(a.is_same(b))

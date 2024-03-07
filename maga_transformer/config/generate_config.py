@@ -109,9 +109,12 @@ class GenerateConfig(BaseModel):
         config.validate()
         return config
 
-    def convert_select_tokens(self, tokenizer):
+    def convert_select_tokens(self, vocab_size, tokenizer):
         for token_str in self.select_tokens_str:
             self.select_tokens_id += tokenizer.encode(token_str)
+        if not all(token_id < vocab_size and token_id >= 0 for token_id in self.select_tokens_id):
+            raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                                    f"token_id in select_tokens_id {self.select_tokens_id} should be less than vocab_size {vocab_size}, and shoud not be negative")
         
     def add_special_tokens(self, special_tokens: Any):
         # 如果同时在外面和里面都有设置采样参数，选择使用外面的
@@ -129,9 +132,9 @@ class GenerateConfig(BaseModel):
              (isinstance(self.min_new_tokens, list) and all([isinstance(i, int) for i in self.min_new_tokens]))
             assert isinstance(self.repetition_penalty, (float, int)) or \
              (isinstance(self.repetition_penalty, list) and all([isinstance(i, (int, float)) for i in self.repetition_penalty]))
+             
+            calculate_loss_list = [0, 1, 2]
+            assert self.calculate_loss in calculate_loss_list, \
+                f"calculate_loss in generate_config can only be in {calculate_loss_list}, but it's {self.calculate_loss}"
         except:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "wrong data type in generate config")
-        
-        calculate_loss_list = [0, 1, 2]
-        assert self.calculate_loss in calculate_loss_list, \
-                f"calculate_loss in generate_config can only be in {calculate_loss_list}, but it's {self.calculate_loss}"
