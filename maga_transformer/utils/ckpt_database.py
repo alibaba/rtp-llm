@@ -128,7 +128,23 @@ class LoraConfig:
     def get_scale(self):
         return self.lora_alpha / self.rank
 
-class CkptDatabase:
+class BaseDatabase:
+    def load_tensor(self, name: str) -> List[torch.Tensor]:
+        raise NotImplementedError
+
+class ModuleDatabase(BaseDatabase):
+    ref_model: Optional[torch.nn.Module] = None
+
+    def __init__(self, ref_model: torch.nn.Module):
+        self.ref_model = ref_model
+
+    def load_tensor(self, name: str) -> List[torch.Tensor]:
+        weight_name: str = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', name)
+        try:
+            return [eval('self.ref_model.' + weight_name)]
+        except AttributeError:
+            raise Exception(f'No weight named {weight_name} in reference model')
+class CkptDatabase(BaseDatabase):
 
     PretrainFileList : List[CkptFileInfo]
     FinetuneFileList : List[CkptFileInfo]

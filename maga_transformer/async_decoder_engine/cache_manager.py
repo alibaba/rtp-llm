@@ -228,6 +228,11 @@ class CacheManager:
                 kmonitor.report(GaugeMetrics.KV_CACHE_ITEM_NUM_METRIC, self.cache_item_num)
             time.sleep(1)
 
+    def clean_cache(self):
+        del self.k_blocks, self.v_blocks, self.k_scale, self.v_scale
+        self.k_blocks = self.v_blocks = self.k_scale = self.v_scale = None
+        torch.cuda.empty_cache()
+
 class CacheItem(NamedTuple):
     token_list: List[int] = []
     block_indice: List[int] = []

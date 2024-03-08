@@ -33,6 +33,10 @@ class AsyncModel:
     def is_multimodal(self) -> bool:
         return self.model.is_multimodal()
 
+    def load(self, ref_model: Optional[torch.nn.Module] = None):
+        self.model.load(ref_model)
+        self.decoder_engine_.executor_.gpt_op.set_weight(self.model.weight)
+
     @property
     def default_generate_config(self) -> GenerateConfig:
         return self.model.default_generate_config

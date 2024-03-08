@@ -9,13 +9,13 @@ from typing import List, Set, Optional, Tuple
 from itertools import repeat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
     WeightInfo, W, ModelWeights, LoRAWeights
-from maga_transformer.utils.ckpt_database import CkptDatabase, CkptFileInfo
 from maga_transformer.distribute.worker_info import g_parallel_info
+from maga_transformer.utils.ckpt_database import BaseDatabase, CkptFileInfo, ModuleDatabase, CkptDatabase
 from maga_transformer.utils.util import get_mem_info
 
 class ModelWeightsLoader:
 
-    def __init__(self, weights_info: ModelDeployWeightInfo, database: Optional[CkptDatabase] = None):
+    def __init__(self, weights_info: ModelDeployWeightInfo, database: BaseDatabase):
         self._num_layers = weights_info._num_layers
         self._tp_size = weights_info.tp_size
         self._tp_rank = weights_info.tp_rank
@@ -27,16 +27,18 @@ class ModelWeightsLoader:
         for ckpt in self._ckpt_metas:
             self._all_tensor_names.update(ckpt.get_tensor_names())
         self.preprocessed = 'ft_module' in self._all_tensor_names
-        self._database: CkptDatabase = database
+        self._database: BaseDatabase = database
 
-        if self._database is not None:
+        if isinstance(self._database, CkptDatabase):
             self._weights_info.process_meta(self._database.PretrainFileList)
             self._weights_info.process_meta(self._database.FinetuneFileList)
             self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info(self.preprocessed, self._all_tensor_names)
             self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
-        else:
+        elif isinstance(self._database, ModuleDatabase):
             self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info(self.preprocessed, self._all_tensor_names)
             self._merge_lora = False
+        else:
+            raise Exception("Unknown database class")
         
     def set_data_type(self, data_type):
         self._data_type = data_type
@@ -257,12 +259,8 @@ class ModelWeightsLoader:
     def _load_and_convert_tensor(self, weight_info: WeightInfo, ref_model: Optional[torch.nn.Module] = None, layer_id: Optional[int] = None):
         before_merge_tensors = []
         for ckpt_weight in weight_info.weights:
-            if ref_model is not None:
-                weight_name: str = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', ckpt_weight.tensor_name(layer_id))
-                before_merge_tensors.append(ckpt_weight.merge_fun([eval('ref_model.' + weight_name).detach().clone()]))
-            else:
-                before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(ckpt_weight.tensor_name(layer_id))))
-            
+            before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(ckpt_weight.tensor_name(layer_id))))
+
         after_merge_tensor = weight_info.process_fun(before_merge_tensors)
         return after_merge_tensor
 

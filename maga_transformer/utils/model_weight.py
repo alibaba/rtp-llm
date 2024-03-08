@@ -7,7 +7,7 @@ import torch.serialization
 from typing import Any, NamedTuple, Callable, List, Dict, Set, Tuple, Optional, Union
 from maga_transformer.utils.ckpt_database import FinetuneType, TrainType, CkptFileInfo, LoraConfig
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.ckpt_database import CkptDatabase
+from maga_transformer.utils.ckpt_database import BaseDatabase
 from maga_transformer.utils.RWLock import RWlock
 
 def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
@@ -695,7 +695,7 @@ class LoraPathException(Exception):
         super().__init__(*args)
 
 class LoraResource():
-    def __init__(self, lora_infos: Dict[str, str] = dict(), database: Optional[CkptDatabase] = None,
+    def __init__(self, lora_infos: Dict[str, str] = dict(), database: Optional[BaseDatabase] = None,
                  weights_info: Optional[WeightInfo] = None,
                  lora_map: Optional[LoRAMap] = None):
         self.lora_infos = lora_infos

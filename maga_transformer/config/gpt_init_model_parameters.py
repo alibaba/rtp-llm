@@ -79,7 +79,7 @@ class VitParameters:
 
 class GptInitModelParameters:
     __slots__ = {
-        'gpt_init_params',
+        "gpt_init_params",
         "_model_related_types",
         "has_lm_head_bias",
         "reserve_runtime_mem_mb",
@@ -91,7 +91,8 @@ class GptInitModelParameters:
         "lora_infos",
         "multi_task_prompt",
         "medusa_config",
-        "normalize_lm_head_weight"
+        "normalize_lm_head_weight",
+        "ref_model"
     }
 
     def __init__(self,
@@ -121,6 +122,8 @@ class GptInitModelParameters:
         self.pre_seq_len = 0
         self.prefix_projection = False
         self.vit_related_params: VitParameters = VitParameters()
+        self.ref_model: Optional[torch.nn.Module] = None
+
         for k, v in kwargs.items():
             setattr(self, k, v)
 
@@ -246,7 +249,8 @@ class GptInitModelParameters:
                       max_seq_len: int,
                       seq_size_per_block: int,
                       tp_size: int,
-                      gen_num_per_circle: int):
+                      gen_num_per_circle: int,
+                      ref_model: Optional[torch.nn.Module]):
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path
@@ -254,6 +258,7 @@ class GptInitModelParameters:
         self.data_type = data_type.to_str()
         self.gen_num_per_circle = gen_num_per_circle
         self.ptuning_path = ptuning_path
+        self.ref_model = ref_model
         if max_seq_len != 0:
             self.max_seq_len = max_seq_len
         if self.max_seq_len < 1:

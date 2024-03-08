@@ -5,6 +5,7 @@ import pynvml
 import logging
 import json
 import pydantic
+from dataclasses import dataclass
 from pydantic import BaseModel as PyBaseModel
 from typing import Any, Dict, List, Optional, Union, Tuple, NamedTuple, AsyncGenerator
 
@@ -112,8 +113,8 @@ class GenerateContext(NamedTuple):
     cache_indirection: Any
     output_token_ids: Any
 
-
-class ModelConfigBase(NamedTuple):
+@dataclass
+class ModelConfigBase:
     model_type: str = ""
     ckpt_path: str = ""
     tokenizer_path: str = ""
@@ -125,11 +126,15 @@ class ModelConfigBase(NamedTuple):
     gen_num_per_circle: int = 1
     ptuning_path: Optional[str] = None
     lora_infos: Optional[Dict[str, str]] = None
+    ref_model: Optional[torch.nn.Module] = None
 
 class ModelConfig(ModelConfigBase):
     @property
     def int8_mode(self):
         return 1 if self.weight_type == WEIGHT_TYPE.INT8 else 0
+
+    def add_ref_model(self, ref_model: Optional[torch.nn.Module]):
+        self.ref_model = ref_model
 
 class BaseModel(object):
 
@@ -151,7 +156,8 @@ class BaseModel(object):
             tp_size=g_parallel_info.tp_size,
             gen_num_per_circle=model_config.gen_num_per_circle,
             lora_infos=model_config.lora_infos,
-            ptuning_path=model_config.ptuning_path
+            ptuning_path=model_config.ptuning_path,
+            ref_model=model_config.ref_model
         )
         return config
 

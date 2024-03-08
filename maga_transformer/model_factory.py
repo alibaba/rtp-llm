@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import torch
 from typing import Any, Dict, Type, Union,  Optional
 
 import sys
@@ -174,4 +175,13 @@ class ModelFactory:
         model = ModelFactory.from_model_config(normal_model_config, sp_model_config)
         ModelFactory.load_default_generate_config(model)
         
+        return model
+
+    @staticmethod
+    def create_from_module(ref_model: torch.nn.Module):
+        normal_model_config = ModelFactory.create_normal_model_config()
+        normal_model_config.add_ref_model(ref_model)
+        model = ModelFactory.from_model_config(normal_model_config)
+        ModelFactory.load_default_generate_config(model)
+
         return model
