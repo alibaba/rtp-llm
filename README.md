@@ -88,12 +88,15 @@ Our project is mainly based on [FasterTransformer](https://github.com/NVIDIA/Fas
 * ChatGlm (THUDM/chatglm2-6b, THUDM/chatglm3-6b)
 * Falcon (tiiuae/falcon-7b, tiiuae/falcon-40b, tiiuae/falcon-rw-7b, etc.)
 * GptNeox (EleutherAI/gpt-neox-20b)
-* GPT BigCode (bigcode/starcoder, etc.)
+* GPT BigCode (bigcode/starcoder, bigcode/starcoder2)
 * LLaMA and LLaMA-2 (meta-llama/Llama-2-7b, meta-llama/Llama-2-13b-hf, meta-llama/Llama-2-70b-hf, lmsys/vicuna-33b-v1.3, 01-ai/Yi-34B, xverse/XVERSE-13B, etc.)
 * MPT (mosaicml/mpt-30b-chat, etc.)
 * Phi (microsoft/phi-1_5, etc.)
 * Qwen (Qwen/Qwen-7B, Qwen/Qwen-7B-Chat, Qwen/Qwen-14B, Qwen/Qwen-14B-Chat, etc.)
 * InternLM (internlm/internlm-7b, internlm/internlm-chat-7b, etc.)
+* Gemma (google/gemma-it, etc)
+* Mixtral (mistralai/Mixtral-8x7B-v0.1, etc)
+
 ### LLM + Multimodal
 * LLAVA (liuhaotian/llava-v1.5-13b, liuhaotian/llava-v1.5-7b)
 * Qwen-VL (Qwen/Qwen-VL)
