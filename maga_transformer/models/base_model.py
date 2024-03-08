@@ -136,6 +136,12 @@ class ModelConfig(ModelConfigBase):
     def add_ref_model(self, ref_model: Optional[torch.nn.Module]):
         self.ref_model = ref_model
 
+    def _replace(self, **kwargs):
+        for k, v in kwargs.items():
+            if k in self.__dict__:
+                self.__dict__[k] = v
+        return self
+
 class BaseModel(object):
 
     config: GptInitModelParameters
