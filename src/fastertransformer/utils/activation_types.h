@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/utils/assert_utils.h"
 
 namespace fastertransformer {
 

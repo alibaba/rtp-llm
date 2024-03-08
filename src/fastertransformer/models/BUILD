@@ -13,7 +13,7 @@ cc_library(
         "W.h",
     ],
     deps = [
-        "//:th_utils",
+        "//:gpt_init_params_hdr",
         "//3rdparty/flash_attention2:flash_attention2_header",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_header",
         "//src/fastertransformer/layers:layers",

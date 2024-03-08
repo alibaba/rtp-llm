@@ -2,6 +2,8 @@
 
 #include "src/fastertransformer/devices/Weights.h"
 #include "src/fastertransformer/core/Buffer.h"
+#include "src/fastertransformer/utils/activation_types.h"
+#include "src/fastertransformer/utils/layernorm_types.h"
 
 #include <optional>
 #include <sstream>
@@ -55,28 +57,8 @@ struct CopyParams {
     Buffer&       dst;
 };
 
-enum class LayerNormOpType {
-    Layernorm,
-    RmsNorm,
-    AlphaNorm,
-    InvalidType
-};
-
-enum class ActivationType {
-    Gelu,
-    GeluNoneApproximate,
-    Relu,
-    Silu,
-    GeGLU,
-    GeGluNoneApproximate,
-    ReGLU,
-    SiGLU,
-    Identity,
-    InvalidType
-};
-
 struct LayernormParams {
-    const LayerNormOpType norm_type;
+    const NormType norm_type;
     const Buffer&  input;
     const std::optional<Buffer>  residual1;
     const std::optional<Buffer>  residual2;

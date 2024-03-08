@@ -1,7 +1,9 @@
 #pragma once
-#include "src/fastertransformer/kernels/layernorm_kernels.h"
-#include "src/fastertransformer/th_op/th_utils.h"
+#include "src/fastertransformer/utils/layernorm_types.h"
 #include "src/fastertransformer/utils/activation_types.h"
+#include "torch/extension.h"
+#include <torch/custom_class.h>
+#include <torch/script.h>
 #include <vector>
 
 namespace ft = fastertransformer;
