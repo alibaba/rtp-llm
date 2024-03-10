@@ -70,20 +70,12 @@ class Scheduler:
         
         waiting_streams = self._waiting_streams.copy()
         new_streams = self._schedule_streams(waiting_streams)
-        new_streams = self._schedule_strategy.schedule_new(new_streams)
-
+        
         # ensure that at least one query in waiting_streams goto run
-        if len(new_streams) == 0 and self.batch_query.empty():
-            if len(waiting_streams) > 0:
-                stream = waiting_streams[0]
-                new_streams.append(stream)
+        force = self.batch_query.empty()
+        new_streams = self._schedule_strategy.schedule_new(new_streams, force)
 
-        for stream in new_streams[:]:
-            try:
-                self._stream_cache_manager.init_kvcache(stream)
-            except Exception as e:
-                stream.stop_and_release(str(e))
-                new_streams.remove(stream)
+        for stream in new_streams:
             self._waiting_streams.remove(stream)
         self.batch_query.add_new_stream(new_streams)
         return self.batch_query

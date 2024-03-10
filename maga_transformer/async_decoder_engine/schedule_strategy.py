@@ -7,25 +7,26 @@ from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 class BasicScheduleStrategy:
     def __init__(self, config, stream_cache_manager):
         self._stream_cache_manager = stream_cache_manager
-        self._generate_reserve_blocks = int(os.environ.get("GENERATE_RESERVE_BLOCKS", 3))
         self._max_tokens = config.max_context_batch_size * config.max_seq_len
 
-    def schedule_new(self, streams: List[GenerateStream]) -> List[GenerateStream]:
+    def schedule_new(self, streams: List[GenerateStream], force: bool) -> List[GenerateStream]:
         new_streams = []
-        total_kvcache = len(streams) * self._generate_reserve_blocks
         total_tokens = 0
         for stream in streams:
             cur_tokens = stream.input_length
-            # TODO(xinfei.sxf) inital_kvcache_count 有点保守，会导致query运行不了
-            cur_kvcache = self._generate_reserve_blocks + self._stream_cache_manager.inital_kvcache_count(stream)
-
-            if (total_kvcache + cur_kvcache <= self._stream_cache_manager.free_kvcache_count() and
-                total_tokens + cur_tokens <= self._max_tokens):
-                total_kvcache += cur_kvcache
+            if total_tokens + cur_tokens > self._max_tokens:
+                break
+            try:
+                self._stream_cache_manager.init_kvcache(stream)
                 total_tokens += cur_tokens
                 new_streams.append(stream)
-            else:
-                break
+                # once a query is successfully scheduled, set force to false
+                force = False
+            except Exception as e:
+                if force:
+                    stream.stop_and_release(str(e))
+                else:
+                    break
         return new_streams
 
     def schedule_current(self, streams: List[GenerateStream]) -> List[GenerateStream]:

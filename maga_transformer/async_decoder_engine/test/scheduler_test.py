@@ -116,6 +116,9 @@ class SchedulerTest(TestCase):
         scheduler.enqueue(stream)
         scheduler.schedule()
         self.assertEqual(stream.stop_reason, 'failed to malloc 8 blocks, only 7 blocks left')
+        self.assertEqual(len(scheduler._waiting_streams), 1)
+        self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 7)
+        scheduler.schedule()
         self.assertEqual(len(scheduler._waiting_streams), 0)
         self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 7)
 

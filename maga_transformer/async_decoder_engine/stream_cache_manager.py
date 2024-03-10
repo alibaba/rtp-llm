@@ -45,7 +45,7 @@ class StreamCacheManager:
         stream.update_prefix(ptuning_info)
 
     def init_kvcache(self, stream: GenerateStream):
-        block_num = self.inital_real_kvcache_count(stream)
+        block_num = self.inital_kvcache_count(stream)
         block_indice = []
         # reuse length represent for ptuning length or kvcache reuse length
         reuse_length = 0
@@ -82,13 +82,7 @@ class StreamCacheManager:
         sum_size = sum(malloc_sizes.values())
         self.cache_manager_.reserve_blocks(sum_size)
 
-    # prefix_length needs to be subtracted here
     def inital_kvcache_count(self, stream: GenerateStream):
-        return (stream.seq_length - stream.prefix_length - 2 + self.gen_num_per_circle) // self.seq_size_per_block_ + 1
-
-    # prefix_length needs to be counted here
-    def inital_real_kvcache_count(self, stream: GenerateStream):
-        #TODO(xinfei.sxf) deal ptuing case
         return (stream.seq_length - 2 + self.gen_num_per_circle) // self.seq_size_per_block_ + 1
 
     def free_kvcache_count(self):

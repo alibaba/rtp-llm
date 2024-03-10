@@ -100,7 +100,6 @@ class DecoderEngineTest(TestCase):
             pipeline.model.stop()
 
     def test_stress(self) -> None:
-        os.environ['GUARANTE_GENERATE_MEM'] = "1"
         pipeline = self.create_pipeline()
         try:
             t = ThreadPoolExecutor(32)
@@ -117,7 +116,6 @@ class DecoderEngineTest(TestCase):
             pipeline.model.stop()
 
     def test_guarante_generate(self) -> None:
-        os.environ['GUARANTE_GENERATE_MEM'] = "1"
         pipeline = self.create_pipeline()
         try:
             t = ThreadPoolExecutor(32)
@@ -156,6 +154,7 @@ class DecoderEngineTest(TestCase):
                 gen = pipeline("hello, what's your name?")
                 results = [result for result in gen]
             # just ensure every input has result
+            time.sleep(0.01)
             self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             pipeline.model.stop()
