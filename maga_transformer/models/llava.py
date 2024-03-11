@@ -175,13 +175,6 @@ class Llava(Llama, MultiModalMixin):
                               config.vit_related_params.config["img_expand_len"],
                               config.vit_related_params.vit_special_token_ids,
                               config.vit_related_params.vit_special_tokens)
-
-    def encode_images(self, images):
-        if images.shape[0] == 0:
-            return images
-        image_features = self.vision_tower(images).to(device=self.device)
-        image_features = self.mm_projector(image_features)
-        return image_features
     
     def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[str]]):
         inputs = inputs.reshape(1, -1)
