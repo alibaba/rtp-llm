@@ -104,6 +104,7 @@ class CustomChatRenderer():
         responded_output_ids = []
         responded_string = ""
         finish_reason = None
+        last_token_length = 0
 
         async for output in output_generator:
             if index == 0:
@@ -122,13 +123,15 @@ class CustomChatRenderer():
             finish_reason = self._check_finish_reason(output_ids, input_token_length)
             output_ids = self._remove_stop_word_ids(output_ids)
             # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-            decoded_prev_token = self.tokenizer.decode(responded_output_ids[-1:])
-            tokens_to_decode = responded_output_ids[-1:] + output_ids[len(responded_output_ids):]
+            decoded_prev_token = self.tokenizer.decode(responded_output_ids[-last_token_length:])
+            tokens_to_decode = responded_output_ids[-last_token_length:] + output_ids[len(responded_output_ids):]
             decoded_string = self.tokenizer.decode(tokens_to_decode)
-            decoded_string = decoded_string.strip(u'\uFFFD')
+            if u'\uFFFD' == decoded_string[-1]:
+                continue
             delta_output_string = decoded_string[len(decoded_prev_token):]
 
             if len(delta_output_string) > 0:
+                last_token_length = len(output_ids) - len(responded_output_ids)
                 responded_output_ids = output_ids
                 responded_string += delta_output_string
                 yield StreamResponseObject(
