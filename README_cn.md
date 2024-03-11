@@ -87,12 +87,14 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * ChatGlm (THUDM/chatglm2-6b, THUDM/chatglm3-6b)
 * Falcon (tiiuae/falcon-7b, tiiuae/falcon-40b, tiiuae/falcon-rw-7b等)
 * GptNeox (EleutherAI/gpt-neox-20b)
-* GPT BigCode (bigcode/starcoder等)
+* GPT BigCode (bigcode/starcoder, bigcode/starcoder2等)
 * LLaMA 和 LLaMA-2 (meta-llama/Llama-2-7b, meta-llama/Llama-2-13b-hf, meta-llama/Llama-2-70b-hf, lmsys/vicuna-33b-v1.3, 01-ai/Yi-34B, xverse/XVERSE-13B等)
 * MPT (mosaicml/mpt-30b-chat等)
 * Phi (microsoft/phi-1_5等)
-* Qwen (Qwen/Qwen-7B, Qwen/Qwen-7B-Chat, Qwen/Qwen-14B, Qwen/Qwen-14B-Chat等)
+* Qwen (Qwen/Qwen-7B, Qwen/Qwen-7B-Chat, Qwen/Qwen-14B, Qwen/Qwen-14B-Chat, Qwen1.5等)
 * InternLM (internlm/internlm-7b, internlm/internlm-chat-7b等)
+* Gemma (google/gemma-it等)
+* Mixtral (mistralai/Mixtral-8x7B-v0.1等)
 
 ### LLM + 多模态
 * LLAVA (liuhaotian/llava-v1.5-13b, liuhaotian/llava-v1.5-7b)
