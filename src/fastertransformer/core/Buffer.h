@@ -2,6 +2,7 @@
 
 #include "Types.h"
 
+#include <memory>
 #include <vector>
 #include <string>
 #include <functional>
@@ -19,10 +20,10 @@ public:
            const std::function<void(Buffer *)> deleter = nullptr);
     ~Buffer();
 
-    Buffer(const Buffer& tensor) = delete;
-    Buffer(Buffer&& tensor)      = delete;
-    Buffer& operator=(const Buffer& tensor) = delete;
-    Buffer& operator=(Buffer&& tensor) = delete;
+    Buffer(const Buffer& buffer) = delete;
+    Buffer(Buffer&& buffer)      = delete;
+    Buffer& operator=(const Buffer& buffer) = delete;
+    Buffer& operator=(Buffer&& buffer) = delete;
 
     MemoryType                 where() const;
     DataType                   type() const;
@@ -41,6 +42,9 @@ private:
     void*               data_;
     std::function<void(Buffer *)> deleter_;
 };
+
+using ConstBufferPtr = std::unique_ptr<const Buffer>;
+using BufferPtr = ConstBufferPtr;
 
 } // namespace fastertransformer
 

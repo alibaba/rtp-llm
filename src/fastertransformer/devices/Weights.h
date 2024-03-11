@@ -3,6 +3,7 @@
 #include "src/fastertransformer/core/Buffer.h"
 
 #include <optional>
+#include <memory>
 #include <unordered_map>
 
 namespace fastertransformer {
@@ -10,48 +11,52 @@ namespace fastertransformer {
 // These weights should correspond to `maga_transformer/utils/model_weight.py`
 
 struct LayerNormWeights {
-    Buffer gamma;
-    Buffer beta;
+    BufferPtr gamma;
+    BufferPtr beta;
 };
+
+typedef std::unique_ptr<const LayerNormWeights> LayerNormWeightsPtr;
 
 struct DenseWeights {
-    Buffer                kernel;
-    std::optional<Buffer> bias;
+    BufferPtr kernel;
+    BufferPtr bias;
 };
 
+typedef std::unique_ptr<const DenseWeights> DenseWeightsPtr;
+
 struct LoraWeights {
-    Buffer A;
-    Buffer B;
-    std::optional<Buffer> A_scale;
-    std::optional<Buffer> B_scale;
+    BufferPtr A;
+    BufferPtr B;
+    BufferPtr A_scale;
+    BufferPtr B_scale;
 };
 
 typedef std::unordered_map<std::string, LoraWeights> LoraWeightsMap;
 
 struct AttentionLayerWeights {
-    std::optional<LayerNormWeights> pre_layernorm;
-    std::optional<LayerNormWeights> pre_attention_layernorm;
-    DenseWeights                    query_weight;
-    std::optional<LoraWeightsMap>   query_lora_weights;
-    std::optional<LayerNormWeights> attention_layernorm;
+    std::unique_ptr<const LayerNormWeights> pre_layernorm;
+    std::unique_ptr<const LayerNormWeights> pre_attention_layernorm;
+    std::unique_ptr<const DenseWeights>     qkv_weight;
+    std::unique_ptr<const LoraWeightsMap>   query_lora_weights;
+    std::unique_ptr<const LayerNormWeights> attention_layernorm;
 
-    DenseWeights                    attention_output_weight;
-    std::optional<LoraWeightsMap>   attention_output_lora_weights;
-    std::optional<LayerNormWeights> post_layernorm;
+    std::unique_ptr<const DenseWeights>     output_weight;
+    std::unique_ptr<const LoraWeightsMap>   output_lora_weights;
+    std::unique_ptr<const LayerNormWeights> post_layernorm;
 };
 
 struct FfnLayerWeights {
-    DenseWeights                  intermediate_weight;
-    std::optional<LoraWeightsMap> intermediate_lora_weights;
+    std::unique_ptr<const DenseWeights>     intermediate_weight;
+    std::unique_ptr<const LoraWeightsMap>   intermediate_lora_weights;
 
-    std::optional<DenseWeights>   intermediate_weight2;
-    std::optional<LoraWeightsMap> intermediate_lora_weights2;
+    std::unique_ptr<const DenseWeights>     intermediate_weight2;
+    std::unique_ptr<const LoraWeightsMap>   intermediate_lora_weights2;
 
-    std::optional<DenseWeights>     intermediate_weight3;
-    std::optional<LoraWeightsMap>   intermediate_lora_weights3;
-    std::optional<LayerNormWeights> dense_layernorm;
+    std::unique_ptr<const DenseWeights>     intermediate_weight3;
+    std::unique_ptr<const LoraWeightsMap>   intermediate_lora_weights3;
+    std::unique_ptr<const LayerNormWeights> dense_layernorm;
 
-    std::optional<DenseWeights> gating_weights;
+    std::unique_ptr<const DenseWeights>     gating_weights;
 };
 
 struct LayerWeights {
@@ -59,15 +64,19 @@ struct LayerWeights {
     FfnLayerWeights       ffn_weights;
 };
 
+// TODO: This Weights class might be refactor into a complete model description
+// which includes more info like norm type, activation type, etc.
 struct Weights {
-    DenseWeights                    embedding;
-    std::optional<DenseWeights>     prefix_encoder_embedding;
-    std::optional<LayerNormWeights> pre_decoder_layernorm;
-    std::optional<DenseWeights>     position_encoding;
-    std::vector<LayerWeights>       layers;
-    std::optional<LayerNormWeights> final_layernorm;
-    std::optional<DenseWeights>     lm_head;
-    std::optional<DenseWeights>     medusa_head;
+    std::unique_ptr<const DenseWeights>     embedding;
+    std::unique_ptr<const DenseWeights>     prefix_encoder_embedding;
+    std::unique_ptr<const LayerNormWeights> pre_decoder_layernorm;
+    std::unique_ptr<const DenseWeights>     position_encoding;
+    std::vector<LayerWeights>               layers;
+    std::unique_ptr<const LayerNormWeights> final_layernorm;
+    std::unique_ptr<const DenseWeights>     lm_head;
+    std::unique_ptr<const DenseWeights>     medusa_head;
 };
+
+using WeightsPtr = std::unique_ptr<const Weights>;
 
 }  // namespace fastertransformer

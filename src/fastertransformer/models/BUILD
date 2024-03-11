@@ -1,6 +1,14 @@
 load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
 
 cc_library(
+    name = "weights_define",
+    hdrs = [
+        "W.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "models",
     srcs = glob([
         "multi_gpu_gpt/*.cc",
@@ -9,10 +17,9 @@ cc_library(
     ]),
     hdrs = glob([
         "multi_gpu_gpt/*.h",
-    ]) + [
-        "W.h",
-    ],
+    ]),
     deps = [
+        ":weights_define",
         "//:gpt_init_params_hdr",
         "//3rdparty/flash_attention2:flash_attention2_header",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_header",
