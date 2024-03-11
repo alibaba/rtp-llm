@@ -1,7 +1,7 @@
 import os
 import unittest
 from pathlib import Path
-from maga_transformer.utils.ckpt_database import CkptDatabase
+from maga_transformer.utils.database import CkptDatabase
 
 
 class CkptDataBaseTest(unittest.TestCase):

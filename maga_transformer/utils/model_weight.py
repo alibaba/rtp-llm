@@ -5,9 +5,9 @@ from functools import reduce
 import torch
 import torch.serialization
 from typing import Any, NamedTuple, Callable, List, Dict, Set, Tuple, Optional, Union
-from maga_transformer.utils.ckpt_database import FinetuneType, TrainType, CkptFileInfo, LoraConfig
+from maga_transformer.utils.database import FinetuneType, TrainType, CkptFileInfo, LoraConfig
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.ckpt_database import BaseDatabase
+from maga_transformer.utils.database import BaseDatabase
 from maga_transformer.utils.RWLock import RWlock
 
 def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:

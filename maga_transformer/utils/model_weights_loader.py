@@ -10,7 +10,7 @@ from itertools import repeat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
     WeightInfo, W, ModelWeights, LoRAWeights
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.utils.ckpt_database import BaseDatabase, CkptFileInfo, ModuleDatabase, CkptDatabase
+from maga_transformer.utils.database import BaseDatabase, CkptFileInfo, ModuleDatabase, CkptDatabase
 from maga_transformer.utils.util import get_mem_info
 
 class ModelWeightsLoader:

@@ -15,7 +15,7 @@ from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, LoRAMo
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.ckpt_database import CkptDatabase, ModuleDatabase
+from maga_transformer.utils.database import CkptDatabase, ModuleDatabase
 from maga_transformer.ops.gpt_ops.gpt_decoder import GptDecoder
 from maga_transformer.ops.gpt_ops.gpt_context_decoder import GptContextDecoder
 from maga_transformer.models.gpt_util.prefix_encoder import PrefixEncoder

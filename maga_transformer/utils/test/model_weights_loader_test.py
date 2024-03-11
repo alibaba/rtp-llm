@@ -8,7 +8,7 @@ from maga_transformer.utils.model_weight import W
 from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.utils.model_weights_loader import ModelWeightsLoader
 from maga_transformer.model_factory import ModelFactory, ModelConfig
-from maga_transformer.utils.ckpt_database import CkptDatabase, ModuleDatabase
+from maga_transformer.utils.database import CkptDatabase, ModuleDatabase
 
 class ModelWeihgtsLoaderTest(TestCase):
     @staticmethod
