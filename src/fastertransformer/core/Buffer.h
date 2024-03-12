@@ -44,7 +44,7 @@ private:
 };
 
 using ConstBufferPtr = std::unique_ptr<const Buffer>;
-using BufferPtr = ConstBufferPtr;
+using BufferPtr = std::unique_ptr<Buffer>;
 
 } // namespace fastertransformer
 

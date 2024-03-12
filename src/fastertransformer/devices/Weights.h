@@ -11,24 +11,24 @@ namespace fastertransformer {
 // These weights should correspond to `maga_transformer/utils/model_weight.py`
 
 struct LayerNormWeights {
-    BufferPtr gamma;
-    BufferPtr beta;
+    ConstBufferPtr gamma;
+    ConstBufferPtr beta;
 };
 
 typedef std::unique_ptr<const LayerNormWeights> LayerNormWeightsPtr;
 
 struct DenseWeights {
-    BufferPtr kernel;
-    BufferPtr bias;
+    ConstBufferPtr kernel;
+    ConstBufferPtr bias;
 };
 
 typedef std::unique_ptr<const DenseWeights> DenseWeightsPtr;
 
 struct LoraWeights {
-    BufferPtr A;
-    BufferPtr B;
-    BufferPtr A_scale;
-    BufferPtr B_scale;
+    ConstBufferPtr A;
+    ConstBufferPtr B;
+    ConstBufferPtr A_scale;
+    ConstBufferPtr B_scale;
 };
 
 typedef std::unordered_map<std::string, LoraWeights> LoraWeightsMap;
