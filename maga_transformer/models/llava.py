@@ -263,28 +263,4 @@ class Llava(Llama, MultiModalMixin):
         assert input_ids.shape[1] == new_input_embeds.shape[1]
         return new_input_embeds.type(to_torch_dtype(self.config.data_type))
 
-    @staticmethod
-    def eval_model_size(config: GptInitModelParameters):
-        llm_size = BaseModel.eval_model_size(config)
-        vision_config_dict = config.vit_related_params.config
-
-        hidden_size = vision_config_dict["hidden_size"]
-        patch_num = vision_config_dict["image_size"] // vision_config_dict["patch_size"]
-        conv_size = patch_num ** 2 * hidden_size * 3
-        pos_emb_size = patch_num ** 2 * hidden_size
-        ln_size = 2 * hidden_size * 2
-
-        clip_encoder_size = vision_config_dict["num_hidden_layers"] * (hidden_size ** 2 * 4 + hidden_size * 2 * 2 + hidden_size * vision_config_dict["intermediate_size"] * 2)
-
-        data_type = vision_config_dict["torch_dtype"]
-        if data_type == "float32":
-            data_type_size = 4
-        elif data_type == "int8":
-            data_type_size = 1
-        else:
-            data_type_size = 2
-        llm_size += (conv_size + pos_emb_size + ln_size + clip_encoder_size) * data_type_size
-
-        return llm_size
-    
 register_model("llava", Llava, ["LlavaLlamaForCausalLM"])
