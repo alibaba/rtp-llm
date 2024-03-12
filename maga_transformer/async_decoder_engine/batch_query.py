@@ -301,10 +301,9 @@ class BatchQuery:
     def max_token_len(self):
         return max(self.max_seq_length, self.max_context_length)
 
-    def slice_output_token(self, start: int, end: int, gen_len: int) -> torch.Tensor:
+    def slice_output_token(self, start: int, end: int, update_from_pos, slice_len: int) -> torch.Tensor:
         assert self.model_output.update_token_ids is not None
-        max_token_len = max(self.max_seq_length, self.max_context_length)
-        return self.model_output.update_token_ids[start: end, max_token_len: max_token_len + gen_len].contiguous()
+        return self.model_output.update_token_ids[start: end, update_from_pos: update_from_pos + slice_len].contiguous()
 
     def update_streams(self):
         def try_get(list, idx1, idx2):
@@ -314,12 +313,23 @@ class BatchQuery:
         for i, stream in enumerate(self.streams):
             start_idx = i * self.num_beams
             end_idx = (i + 1) * self.num_beams
-            update_length = self.model_output.update_length[i]
+            num_new_tokens = self.model_output.update_length[i] # for sepculative decoding
             stream.medusa_state = self.model_output.medusa_states[i] if self.model_output.medusa_states else None
-            assert update_length <= self.gen_num_per_circle, "query update length bigger than gen length"
+            current_update_pos = max(self.max_seq_length, self.max_context_length)
+
+            slice_length = num_new_tokens
+            update_from_pos = current_update_pos
             new_tokens = self.slice_output_token(
-                start_idx, end_idx, update_length).reshape(self.num_beams, -1)
+                start_idx, end_idx, update_from_pos, slice_length).reshape(self.num_beams, -1)
+            if (self.num_beams > 1) and (start_idx < len(self.seq_lengths_list)):
+                # previous generated tokens
+                generate_start_pos = self.context_lengths_list[start_idx]
+                generated_length = self.seq_lengths_list[start_idx] - generate_start_pos
+                previous_tokens = self.slice_output_token(
+                    start_idx, end_idx, generate_start_pos, generated_length).reshape(self.num_beams, -1)
+                new_tokens = torch.concatenate([previous_tokens, new_tokens], dim=1)
             stream.update(new_tokens,
+                          num_new_tokens,
                           finished[start_idx],
                           try_get(self.model_output.hidden_states, start_idx, end_idx),
                           try_get(self.model_output.logits, start_idx, end_idx),

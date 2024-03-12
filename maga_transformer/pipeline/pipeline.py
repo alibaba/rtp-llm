@@ -183,21 +183,18 @@ class Pipeline(object):
                 generate_output,
                 input.generate_config,
                 stop_word_strs, stop_word_str_slices, decoding_state, **kwargs)
-            
+
             hidden_states = generate_output.hidden_states
-            if hidden_states is not None:
-                hidden_states = hidden_states.view(num_beams, -1)
-            
             if num_beams == 1:
                 generate_texts[0] = self.piple_funcs.modify_response_func(
                     generate_texts[0], hidden_states=hidden_states,
                     generate_config=input.generate_config.model_dump(),
                     **kwargs)
-                
+
             if generate_output.finished:
                 kmonitor.report(GaugeMetrics.FT_ITERATE_COUNT_METRIC, generate_output.aux_info.iter_count)
                 for l in output_lens:
                     kmonitor.report(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, l)
-            kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)            
-            
+            kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
+
             yield GenerateResponse(generate_output=generate_output, generate_texts=generate_texts)

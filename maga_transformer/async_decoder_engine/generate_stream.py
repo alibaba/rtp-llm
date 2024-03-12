@@ -57,7 +57,7 @@ class GenerateStream(BaseModel):
             self._input.tokenizer)
         self._ptuning_info = PrefixInfo()
         self._lock = Lock()
-        
+
         global stream_counter
         self._stream_id = stream_counter.increment()
         self._released = False
@@ -90,7 +90,7 @@ class GenerateStream(BaseModel):
     @property
     def complete_token_ids(self):
         return self._complete_token_ids[:,:self.seq_length]
-    
+
     @property
     def input_token_ids(self):
         return self._complete_token_ids[:, :self.input_length]
@@ -142,7 +142,7 @@ class GenerateStream(BaseModel):
     def set_running(self):
         with self._lock:
             if self._stopped:
-                return False                
+                return False
             self._report_wait_time()
             self._status.status = Status.RUNNING
             return True
@@ -186,6 +186,7 @@ class GenerateStream(BaseModel):
 
     def update(self,
                new_tokens: torch.Tensor,
+               num_new_tokens: int,
                finished: bool,
                hidden_states: Optional[torch.Tensor],
                logits: Optional[torch.Tensor],
@@ -193,8 +194,16 @@ class GenerateStream(BaseModel):
         with self._lock:
             if self._output.aux_info.iter_count == 0:
                 self._report_first_token_rt()
-            self._complete_token_ids[:, self._seq_length:self._seq_length + new_tokens.shape[-1]] = new_tokens
-            for i in range(new_tokens.shape[-1]):
+
+            # NOTE: new tokens indicate num of newly genearted tokens
+            # typically 1 but can be > 1 under speculative decoding
+            # This differs from new_tokens.shape[-1] under beam search case,
+            # which needs to update all the generated tokens each update.
+            update_length = new_tokens.shape[-1]
+            update_to_pos = self._seq_length + num_new_tokens
+            update_from_pos = update_to_pos - update_length
+            self._complete_token_ids[:, update_from_pos:update_to_pos] = new_tokens
+            for i in range(num_new_tokens):
                 self._seq_length += 1
                 if self._need_finish():
                     finished = True
@@ -208,7 +217,7 @@ class GenerateStream(BaseModel):
                 self._output.logits = logits[:,self._input.generate_config.select_tokens_id]
             else:
                 self._output.logits = logits
-            
+
             self._output.finished = finished
             self._output.aux_info.cost_time = current_time_ms() - self._begin_time
             self._output.aux_info.input_len = self._input.prompt_length
@@ -216,12 +225,12 @@ class GenerateStream(BaseModel):
             self._output.aux_info.output_len = self._output.output_ids.shape[-1]
             self._output.aux_info.cum_log_probs = cum_log_probs.tolist() if cum_log_probs is not None else None
             self._output.aux_info.iter_count += 1
-            self._output.aux_info.reuse_len = self._reuse_length 
+            self._output.aux_info.reuse_len = self._reuse_length
 
     def set_loss(self, loss):
         self._output.loss = loss
 
-    def add_block_index(self, block_index: List[List[int]]):            
+    def add_block_index(self, block_index: List[List[int]]):
         assert len(block_index) == len(self._block_indice)
         for i in range(len(block_index)):
             self._block_indice[i].extend(block_index[i])
