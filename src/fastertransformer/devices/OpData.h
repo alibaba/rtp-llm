@@ -58,19 +58,23 @@ struct CopyParams {
 };
 
 struct LayernormParams {
+    LayernormParams(const NormType norm_type, const Buffer& input,
+    const Buffer& gamma, const Buffer& beta, const float eps, Buffer& output):
+    norm_type(norm_type), input(input), gamma(gamma), beta(beta), eps(eps), norm_output(output) {}
+
     const NormType norm_type;
     const Buffer&  input;
-    const std::optional<Buffer>  residual1;
-    const std::optional<Buffer>  residual2;
-    const std::optional<Buffer>  bias;
+    const std::optional<std::reference_wrapper<const Buffer>>  residual1;
+    const std::optional<std::reference_wrapper<const Buffer>>  residual2;
+    const std::optional<std::reference_wrapper<const Buffer>>  bias;
     const Buffer&  gamma;
     const Buffer&  beta;
     const float    eps;
 
-    const Buffer& scale_inter;
-    const Buffer& scale_out;
-    const Buffer& scale;
-    const Buffer& dynamic_scale;
+    const std::optional<std::reference_wrapper<const Buffer>> scale_inter;
+    const std::optional<std::reference_wrapper<const Buffer>> scale_out;
+    const std::optional<std::reference_wrapper<const Buffer>> scale;
+    const std::optional<std::reference_wrapper<const Buffer>> dynamic_scale;
 
     Buffer& norm_output;
 };
@@ -141,23 +145,22 @@ struct EmbeddingLookupParams {
 };
 
 struct AttentionCommonInputs {
-    Buffer& kv_cache_blocks;
-    const std::optional<const Buffer> kv_cache_scales;
+    const Buffer& kv_cache_blocks; // [batch_size, block_length], int64 block pointers
+    const std::optional<std::reference_wrapper<const Buffer>> kv_cache_scales;
 
     const Buffer& input_lengths;
     const Buffer& sequence_lengths;
-    const Buffer& padding_offset;
-    const Buffer& cu_seqlens;  // cumulated sequence lengths
 
-    const std::optional<const Buffer> position_ids;
-    const std::optional<const Buffer> attention_mask;
-    const std::optional<const Buffer> linear_bias_slopes;
-    const std::optional<const Buffer> prefix_prompt_lengths;
+    const std::optional<std::reference_wrapper<const Buffer>> padding_offset;
+    const std::optional<std::reference_wrapper<const Buffer>> position_ids;
+    const std::optional<std::reference_wrapper<const Buffer>> attention_mask;
+    const std::optional<std::reference_wrapper<const Buffer>> linear_bias_slopes;
+    const std::optional<std::reference_wrapper<const Buffer>> prefix_prompt_lengths;
     const std::optional<bool>         count_prefix_length;
     const std::optional<uint32_t>     max_prefix_length;
 
-    const std::optional<Buffer> lora_ids;
-    const std::optional<Buffer> lora_input_lengths;
+    const std::optional<std::reference_wrapper<const Buffer>> lora_ids;
+    const std::optional<std::reference_wrapper<const Buffer>> lora_input_lengths;
 };
 
 // TODO(wangyin): figure out these styles and doc them.
@@ -182,6 +185,7 @@ struct AttentionConfigs {
     int64_t logn_seq_len  = 2048;
 };
 
+// Attention Module contains
 struct AttentionModuleParams {
     const Buffer& input;
     Buffer&       output;
@@ -199,13 +203,8 @@ struct AttentionLayerParams {
     const Buffer& input;
     Buffer&       output;
 
+    const AttentionConfigs&      configs;
     const AttentionLayerWeights& weights;
-
-    const uint32_t generate_batch_size;
-    const uint32_t max_generate_seq_length;
-    const uint32_t context_batch_size;
-    const uint32_t max_context_seq_length;
-
     AttentionCommonInputs& common;
 };
 
@@ -217,8 +216,8 @@ struct FfnLayerParams {
 
     const ActivationType activation_type;
 
-    const std::optional<Buffer> lora_ids;
-    const std::optional<Buffer> lora_input_lengths;
+    const std::optional<std::reference_wrapper<const Buffer>> lora_ids;
+    const std::optional<std::reference_wrapper<const Buffer>> lora_input_lengths;
 };
 
 struct SamplerParams {
