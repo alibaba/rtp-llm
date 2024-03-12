@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from typing import Any, Dict, Type, Union,  Optional
+from typing import Any, Dict, Type, List, Optional
 
 import sys
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -9,7 +9,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 _model_factory: Dict[str, Type[Any]] = {}
     
-def register_model(name: str, model_type: Any, support_architectures = list(), support_hf_repos = list()):
+def register_model(name: str, model_type: Any, support_architectures: List[str] = [], support_hf_repos: List[str] = []):
     global _model_factory
     if name in _model_factory and _model_factory[name] != model_type:
         raise Exception(f"try register model {name} with type {_model_factory[name]} and {model_type}, confict!")
@@ -57,7 +57,7 @@ class ModelDict:
         return model_type
 
     @staticmethod
-    def get_ft_model_type_by_config(config) ->Optional[str]:
+    def get_ft_model_type_by_config(config: Dict[str, Any]) ->Optional[str]:
         if config.get('architectures', []):
             # hack for ChatGLMModel: chatglm and chatglm2 use same architecture
             architecture = config.get('architectures')[0]

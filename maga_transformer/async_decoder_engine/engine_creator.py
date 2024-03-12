@@ -1,3 +1,4 @@
+import os
 import logging
 from enum import Enum
 from typing import Iterator, List, Optional, Tuple, Union, Any, Dict
@@ -17,11 +18,16 @@ from maga_transformer.async_decoder_engine.speculative.sp_model_executor import 
 from maga_transformer.async_decoder_engine.medusa.medusa_model_executor import MedusaModelExecutor
 from maga_transformer.async_decoder_engine.medusa.utils import generate_medusa_buffers
 from maga_transformer.async_decoder_engine.decoder_engine import DecoderEngine
+from maga_transformer.async_decoder_engine.batch_query import BatchQuery
+from maga_transformer.async_decoder_engine.schedule_strategy import create_schedule_strategy
+
+from maga_transformer.async_decoder_engine.embedding.embedding_decoder_engine import EmbeddingDecoderEngine
 
 class ExecutorType(Enum):
     Normal = "normal"
     Speculative = "speculative"
     Medusa = "medusa"
+    Embedding = 'embedding'
 
 def check_exeutor_type(model: BaseModel, config: GptInitModelParameters, speculative_model: Any = None, speculative_config: Optional[GptInitModelParameters] = None):
     if speculative_model is not None:
@@ -29,6 +35,8 @@ def check_exeutor_type(model: BaseModel, config: GptInitModelParameters, specula
         return ExecutorType.Speculative
     if model.medusa_head is not None:
         return ExecutorType.Medusa
+    if os.environ.get('EMBEDDING_MODEL', None) == '1':
+        return ExecutorType.Embedding
     return ExecutorType.Normal
 
 def create_engine(model: BaseModel, config: GptInitModelParameters, ptuning_args: Optional[PrefixParams],
@@ -41,6 +49,8 @@ def create_engine(model: BaseModel, config: GptInitModelParameters, ptuning_args
         return _create_sp_engine(model, config, speculative_model, speculative_config)
     elif executor_type == ExecutorType.Medusa:
         return _create_medusa_engine(model, config)
+    elif executor_type == ExecutorType.Embedding:
+        return _create_embedding_engine(model, config, ptuning_args)
     else:
         raise Exception(f"unsupported executor type: {executor_type}")
 
@@ -89,6 +99,9 @@ def _create_medusa_engine(model: BaseModel, config: GptInitModelParameters, **kw
     scheduler = Scheduler(config, stream_cache_manager, gen_num_per_circle, nccl_op)
     executor = MedusaModelExecutor(model_ops, cache_manager, medusa_buffer)
     return DecoderEngine(executor, scheduler, config)
+
+def _create_embedding_engine(model: BaseModel, config: GptInitModelParameters, ptuning_args: Optional[PrefixParams]) -> EmbeddingDecoderEngine:
+    return EmbeddingDecoderEngine(config, model)
 
 def _create_ops(type: ModelType, model: BaseModel, config: GptInitModelParameters) -> ModelOps:
     gpt_op = GptOp.from_config(config)

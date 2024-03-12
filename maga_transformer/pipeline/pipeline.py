@@ -17,9 +17,10 @@ from maga_transformer.pipeline.pipeline_custom_func import PipelineCustomFunc, g
 from maga_transformer.async_decoder_engine.generate_stream import GenerateInput
 from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slice_list, truncate_response_with_stop_words
 from maga_transformer.utils.tokenizer_utils import DecodingState
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 class Pipeline(object):
-    def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[TokenizerBase]):
+    def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[PreTrainedTokenizerBase]):
         self.model = model
         self.tokenizer = tokenizer
         self._special_tokens: int = self.model.config.special_tokens
