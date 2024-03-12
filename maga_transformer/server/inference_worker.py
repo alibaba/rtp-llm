@@ -20,7 +20,7 @@ from maga_transformer.models.base_model import GenerateResponse, GenerateConfig
 from maga_transformer.model_factory import ModelFactory, AsyncModel
 from maga_transformer.structure.request_extractor import RequestExtractor
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 class PipelineResponse(BaseModel):
     response: str = ""
@@ -199,22 +199,22 @@ class InferenceWorker():
 
         if num_return_sequences > 0:
             complete_multi_seq_response = None
-            complete_multi_seq_finised = None
+            complete_multi_seq_finished = None
             complete_multi_seq_aux_info = None
             async for response in all_responses:
                 if not complete_multi_seq_response:
                     complete_multi_seq_response = [_ for _ in response.response]
                     complete_multi_seq_aux_info = [_ for _ in response.aux_info]
-                    complete_multi_seq_finised = response.finished
+                    complete_multi_seq_finished = response.finished
                 for seq_idx, seq_reponse in enumerate(response.response):
                     complete_multi_seq_response[seq_idx] = complete_multi_seq_response[seq_idx] + seq_reponse
                     if response.aux_info and response.aux_info[seq_idx]:
                         complete_multi_seq_aux_info[seq_idx] = response.aux_info[seq_idx]
                     if response.finished:
-                        complete_multi_seq_finised = True
+                        complete_multi_seq_finished = True
             return MultiSequencesPipelineResponse(response=complete_multi_seq_response,
                                                   aux_info=complete_multi_seq_aux_info,
-                                                  finished=complete_multi_seq_finised)
+                                                  finished=complete_multi_seq_finished)
         complete_response = ""
         finished = False
         aux_info = None
@@ -232,7 +232,7 @@ class InferenceWorker():
                 input_ids = response.input_ids
         return PipelineResponse(
             response=complete_response,
-            finised=finished,
+            finished=finished,
             aux_info=aux_info,
             output_ids=output_ids,
             input_ids=input_ids
