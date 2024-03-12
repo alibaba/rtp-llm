@@ -15,6 +15,7 @@ import threading
 from typing import Callable, Optional, Sequence, Tuple, List, Any
 from pathlib import Path
 import numpy as np
+import logging
 
 import torch
 from torch import nn
@@ -569,7 +570,7 @@ class VITEngine(torch.nn.Module):
             self.input_idx = self.engine.get_binding_index(self.input_names[0])
 
     def export_onnx(self, vit, onnx_file_path):
-        print("Start converting ONNX model!")
+        logging.info("Start converting ONNX model!")
         image = torch.randn(1, 3, self.image_size, self.image_size).to(self.device)
         torch.onnx.export(
             vit,
@@ -587,7 +588,7 @@ class VITEngine(torch.nn.Module):
                             minBS=1,
                             optBS=2,
                             maxBS=4):
-        print("Start converting TRT engine!")
+        logging.info("Start converting TRT engine!")
         logger = trt.Logger(trt.Logger.VERBOSE)
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
@@ -598,10 +599,10 @@ class VITEngine(torch.nn.Module):
 
         with open(onnxFile, 'rb') as model:
             if not parser.parse(model.read(), "/".join(onnxFile.split("/"))):
-                print("Failed parsing %s" % onnxFile)
+                logging.info("Failed parsing %s" % onnxFile)
                 for error in range(parser.num_errors):
-                    print(parser.get_error(error))
-            print("Succeeded parsing %s" % onnxFile)
+                    logging.info(parser.get_error(error))
+            logging.info("Succeeded parsing %s" % onnxFile)
 
         nBS = -1
         nMinBS = minBS
@@ -620,19 +621,19 @@ class VITEngine(torch.nn.Module):
         engineString = builder.build_serialized_network(network, config)
         t1 = time.time()
         if engineString == None:
-            print("Failed building %s" % planFile)
+            logging.info("Failed building %s" % planFile)
         else:
-            print("Succeeded building %s in %d s" % (planFile, t1 - t0))
-        print("plan file is", planFile)
+            logging.info("Succeeded building %s in %d s" % (planFile, t1 - t0))
+        logging.info("plan file is", planFile)
         with open(planFile, 'wb') as f:
             f.write(engineString)
     
     def loadEngine2TensorRT(self, filepath: str):
-        print("Start loading TRT engine!")
+        logging.info("Start loading TRT engine!")
         G_LOGGER = trt.Logger(trt.Logger.WARNING)
         with open(filepath, "rb") as f, trt.Runtime(G_LOGGER) as runtime:
             engine = runtime.deserialize_cuda_engine(f.read())
-            print("Finish loading TRT engine!")
+            logging.info("Finish loading TRT engine!")
             return engine
 
     def forward(self, *inputs):
