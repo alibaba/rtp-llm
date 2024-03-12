@@ -301,8 +301,10 @@ class BatchQuery:
     def max_token_len(self):
         return max(self.max_seq_length, self.max_context_length)
 
-    def slice_output_token(self, start: int, end: int, update_from_pos, slice_len: int) -> torch.Tensor:
+    def slice_output_token(self, start: int, end: int, slice_len: int, update_from_pos: int = -1) -> torch.Tensor:
         assert self.model_output.update_token_ids is not None
+        if update_from_pos < 0:
+            update_from_pos = max(self.max_seq_length, self.max_context_length)
         return self.model_output.update_token_ids[start: end, update_from_pos: update_from_pos + slice_len].contiguous()
 
     def update_streams(self):
@@ -315,18 +317,15 @@ class BatchQuery:
             end_idx = (i + 1) * self.num_beams
             num_new_tokens = self.model_output.update_length[i] # for sepculative decoding
             stream.medusa_state = self.model_output.medusa_states[i] if self.model_output.medusa_states else None
-            current_update_pos = max(self.max_seq_length, self.max_context_length)
 
-            slice_length = num_new_tokens
-            update_from_pos = current_update_pos
             new_tokens = self.slice_output_token(
-                start_idx, end_idx, update_from_pos, slice_length).reshape(self.num_beams, -1)
+                start_idx, end_idx, num_new_tokens).reshape(self.num_beams, -1)
             if (self.num_beams > 1) and (start_idx < len(self.seq_lengths_list)):
                 # previous generated tokens
                 generate_start_pos = self.context_lengths_list[start_idx]
                 generated_length = self.seq_lengths_list[start_idx] - generate_start_pos
                 previous_tokens = self.slice_output_token(
-                    start_idx, end_idx, generate_start_pos, generated_length).reshape(self.num_beams, -1)
+                    start_idx, end_idx, generated_length, generate_start_pos).reshape(self.num_beams, -1)
                 new_tokens = torch.concatenate([previous_tokens, new_tokens], dim=1)
             stream.update(new_tokens,
                           num_new_tokens,
