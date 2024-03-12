@@ -81,6 +81,7 @@ static auto specialTokensTHS =
     DEF_PROPERTY(max_seq_len, max_seq_len_)                                                                            \
     DEF_PROPERTY(vocab_size, vocab_size_)                                                                              \
     DEF_PROPERTY(hidden_size, hidden_size_)                                                                            \
+    DEF_PROPERTY(type_vocab_size, type_vocab_size_)                                                                    \
     DEF_PROPERTY(gen_num_per_circle, gen_num_per_circle_)                                                              \
     DEF_PROPERTY(inter_size, inter_size_)                                                                              \
     DEF_PROPERTY(inter_padding_size, inter_padding_size_)                                                              \
@@ -118,6 +119,7 @@ static auto specialTokensTHS =
     DEF_PROPERTY(has_positional_encoding, has_positional_encoding_)                                                    \
     DEF_PROPERTY(has_pre_decoder_layernorm, has_pre_decoder_layernorm_)                                                \
     DEF_PROPERTY(has_post_decoder_layernorm, has_post_decoder_layernorm_)                                              \
+    DEF_PROPERTY(has_lm_head, has_lm_head_)                                                                            \
     DEF_PROPERTY(use_attention_linear_bias, use_attention_linear_bias_)                                                \
     DEF_PROPERTY(use_fp32_to_compute_logit, use_fp32_to_compute_logit_)                                                \
     DEF_PROPERTY(add_bias_linear, add_bias_linear_)                                                                    \
@@ -135,7 +137,9 @@ static auto specialTokensTHS =
     DEF_PROPERTY(pre_allocate_op_mem, pre_allocate_op_mem_)                                                            \
     DEF_PROPERTY(seq_size_per_block, seq_size_per_block_)                                                              \
     DEF_PROPERTY(int8_kv_cache, int8_kv_cache_)                                                                        \
-    DEF_PROPERTY(use_medusa, use_medusa_)
+    DEF_PROPERTY(use_medusa, use_medusa_)                                                                              \
+    DEF_PROPERTY(use_kvcache, use_kvcache_)                                                                            \
+    DEF_PROPERTY(is_causal, is_causal_)
 
 static auto fasterTransformerGptInitParameterTHS =
 #ifdef LEGACY_THS

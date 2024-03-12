@@ -289,7 +289,7 @@ void ParallelAttentionWrapper<T>::OpenSourceFMHA(
     flash_fwd_params_.scale_softmax_rp_dropout = flash_fwd_params_.rp_dropout * flash_fwd_params_.scale_softmax;
     TORCH_CHECK(p_dropout < 1.f);
 
-    flash_fwd_params_.is_causal = true;
+    flash_fwd_params_.is_causal = params_.is_causal_;
     flash_fwd_params_.is_alibi  = false;
     if (linear_bias_slopes) {
         flash_fwd_params_.is_alibi           = true;
@@ -338,10 +338,6 @@ void ParallelAttentionWrapper<T>::forward(TensorMap*                output_tenso
     //      key_cache [batch, local_head_num, size_per_head // x, max_seq_len, x]
     //      value_cache [batch, local_head_num, max_seq_len, size_per_head]
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
-    FT_CHECK(output_tensors->at("key_cache").shape().size() == 4);
-    FT_CHECK(output_tensors->at("value_cache").shape().size() == 4
-             || output_tensors->at("value_cache").shape().size() == 3);
-
     Attention(output_tensors, input_tensors, attention_weights);
 
     // PUSH_RANGE(stream_, "all reduce sum");
@@ -504,7 +500,10 @@ template<typename T>
 void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output_tensors,
                                                 TensorMap*                input_tensors,
                                                 const AttentionWeight<T>* attention_weights)
-{
+{   
+    if (!params_.use_kvcache_) {
+        throw std::runtime_error("use_kvcahe_ == false should not do self attention!");
+    }
     const int  layer_id                = input_tensors->getVal<int>("layer_id");
     const int  generate_batch_size     = input_tensors->getVal<int>("generate_batch_size");
     const int* cache_indir             = input_tensors->getPtr<int>("cache_indirection", nullptr);
@@ -616,12 +615,14 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     T* qkv_buf_2 = qkv_buf_2_ + generate_batch_size * local_hidden_units_rt;
 
     KVBlockArray kv_block_array(context_batch_size, max_blocks_per_batch, params_.seq_size_per_block_, 0);
-    kv_block_array.data        = const_cast<int64_t*>(block_pointers);
     KvCacheDataType cache_type = KvCacheDataType::BASE;
-    if (params_.int8_kv_cache_) {
-        kv_block_array.scale     = const_cast<int64_t*>(block_scale_pointers);
-        kv_block_array.int8_mode = true;
-        cache_type               = KvCacheDataType::INT8;
+    if (params_.use_kvcache_) {
+        kv_block_array.data        = const_cast<int64_t*>(block_pointers);        
+        if (params_.int8_kv_cache_) {
+            kv_block_array.scale     = const_cast<int64_t*>(block_scale_pointers);
+            kv_block_array.int8_mode = true;
+            cache_type               = KvCacheDataType::INT8;
+        }
     }
 
     T*                                attention_mask = input_tensors->at("attention_mask").getPtr<T>();
@@ -711,18 +712,20 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     // length_base means some blocks is reused in kvcache and not need to copy
 
     PUSH_RANGE(stream_, "kv_cache");
-    invokeTranspose4dBatchMajor(k_buf_2_,
-                                v_buf_2_,
-                                kv_block_array,
-                                context_batch_size,
-                                max_prompt_length + context_seq_len,  // max input length + prefix prompt length
-                                params_.size_per_head_,
-                                local_head_num_kv,
-                                cache_type,
-                                nullptr,  // kvScaleOrigQuant
-                                input_lengths + generate_batch_size,
-                                d_prefix_prompt_lengths,
-                                stream_);
+    if (params_.use_kvcache_) {
+        invokeTranspose4dBatchMajor(k_buf_2_,
+                                    v_buf_2_,
+                                    kv_block_array,
+                                    context_batch_size,
+                                    max_prompt_length + context_seq_len,  // max input length + prefix prompt length
+                                    params_.size_per_head_,
+                                    local_head_num_kv,
+                                    cache_type,
+                                    nullptr,  // kvScaleOrigQuant
+                                    input_lengths + generate_batch_size,
+                                    d_prefix_prompt_lengths,
+                                    stream_);
+    }
     POP_RANGE;
     // IDEA : after this, k_cache = (batch_size, num_heads, Dh/x, prefix_prompt_len + L, x)
     // k_cache = (batch_size, num_heads, prefix_prompt_len + L, Dh)
@@ -1021,7 +1024,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
         if (mFMHARunner -> fmha_supported()) {
             FT_LOG_INFO("use TRT fmha");
             // Set flags: force_fp32_acc, is_s_padded, causal_mask, num_kv_heads.
-            mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, true, local_head_num_kv_);
+            mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, params_.is_causal_, local_head_num_kv_);
         }
         else {
             FT_LOG_WARNING("FMHA is disabled for size_per_head %d", params_.size_per_head_);

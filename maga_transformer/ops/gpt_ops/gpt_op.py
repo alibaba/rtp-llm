@@ -37,18 +37,19 @@ class GptOp(FTOPBase):
                 decoder_input: torch.Tensor,
                 key_cache: torch.Tensor,
                 value_cache: torch.Tensor,
-                key_cache_scale: torch.IntTensor,
-                value_cache_scale: torch.IntTensor,
+                key_cache_scale: Optional[torch.IntTensor],
+                value_cache_scale: Optional[torch.IntTensor],
+                lora_ids: torch.Tensor,
+                count_length: torch.Tensor,
+                max_prefix_length: torch.Tensor,
                 input_lengths: torch.IntTensor,
                 sequence_lengths: torch.IntTensor,
                 block_index_map: torch.IntTensor,
                 attention_mask: Optional[torch.Tensor] = None,
                 linear_bias_slopes: Optional[torch.Tensor] = None,
                 prefix_lengths: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.Tensor] = None,
-                count_length: Optional[torch.Tensor] = None,
-                max_prefix_length: Optional[torch.Tensor] = None,
-                lora_ids: Optional[torch.Tensor] = None):
+                position_ids: Optional[torch.Tensor] = None):
+                
         """
 
         # Args.

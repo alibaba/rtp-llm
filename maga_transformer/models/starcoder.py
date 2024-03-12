@@ -12,7 +12,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
         weights = [
             WeightInfo(W.embedding, [CkptWeightInfo('transformer.wte.weight', identity)], identity),
             WeightInfo(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
-            WeightInfo(W.wpe, [CkptWeightInfo('transformer.wpe.weight', identity)], identity),
+            WeightInfo(W.positional_embedding, [CkptWeightInfo('transformer.wpe.weight', identity)], identity),
             WeightInfo(W.final_ln_gamma, [CkptWeightInfo('transformer.ln_f.weight', identity)], identity),
             WeightInfo(W.final_ln_beta, [CkptWeightInfo('transformer.ln_f.bias', identity)], identity),
         ]

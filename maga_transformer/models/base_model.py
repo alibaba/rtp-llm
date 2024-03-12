@@ -189,6 +189,7 @@ class BaseModel(object):
         self.word_embedding: Optional[torch.nn.Module] = None
         self.prefix_encoder: Optional[torch.nn.Module] = None
         self.position_encoding: Optional[torch.nn.Module] = None
+        self.token_type_embeddings: Optional[torch.nn.Module] = None
         self.pre_decoder_layernorm: Optional[torch.nn.Module] = None
         self.post_decoder_layernorm: Optional[torch.nn.Module] = None
 
@@ -548,6 +549,8 @@ class BaseModel(object):
         if g_parallel_info.is_pp_first:
             if self.position_encoding is not None:
                 input_embeds += self.position_encoding(position_ids)
+            if self.token_type_embeddings is not None:
+                input_embeds += self.token_type_embeddings(torch.zeros_like(position_ids))
             if self.pre_decoder_layernorm is not None:
                 input_embeds = self.pre_decoder_layernorm(input_embeds)
             debug_print_hidden('attn_in', input_embeds)
@@ -645,10 +648,10 @@ class BaseModel(object):
         batch_size = len(input_lengths)
         max_input_length = max(input_lengths)
         attention_mask = torch.ones(
-            (max_input_length, max_input_length), dtype=torch.bool, device=self.device)\
-            .tril().unsqueeze(0)
-        # attention_mask = ~attention_mask
-        attention_mask = attention_mask.tile(batch_size, 1, 1).to(self.dtype)
+            (max_input_length, max_input_length), dtype=torch.bool, device=self.device)
+        if self.config.is_causal:
+            attention_mask = attention_mask.tril()
+        attention_mask = attention_mask.unsqueeze_(0).tile(batch_size, 1, 1).to(self.dtype)
         for b, input_length in enumerate(input_lengths):
             attention_mask[b, input_length:, ...] = 0
         return attention_mask

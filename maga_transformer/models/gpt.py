@@ -118,6 +118,14 @@ class GPT(BaseModel):
             else:
                 self.position_encoding = None
 
+            if self.config.type_vocab_size > 0:
+                self.register_param(
+                    'token_type_embeddings',
+                    torch.nn.Embedding(self.config.type_vocab_size, hidden_dim)
+                )
+            else:
+                self.token_type_embeddings = None
+
             if self.config.has_pre_decoder_layernorm:
                 if self.config.norm_type == 'layernorm' or self.config.norm_type == 'alphanorm':
                     self.register_param(
@@ -142,7 +150,10 @@ class GPT(BaseModel):
                         RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0'))
             else:
                 self.post_decoder_layernorm = None
-            self.register_param('lm_head', Linear(all_gather))
+            if self.config.has_lm_head:
+                self.register_param('lm_head', Linear(all_gather))
+            else:
+                self.lm_head = None
 
         self.load_tokenizer()
         self.load()
@@ -243,18 +254,20 @@ class GPT(BaseModel):
         self.word_embedding.set_weight(self.weight.steal_pytorch_weight(W.embedding))
         if (self.config.input_embedding_scalar - 1 > 1e-6):
             self.word_embedding.set_scalar(self.config.input_embedding_scalar)
-        if self.weight.has_pytorch_weight(W.lm_head):
-            lm_head_w = self.weight.steal_pytorch_weight(W.lm_head)
-        else:
-            lm_head_w = self.word_embedding._emb
-        if self.config.normalize_lm_head_weight:
-            self.lm_head.set_weight(F.normalize(lm_head_w), self.weight.steal_pytorch_weight(W.lm_head_b))
-        else:
-            self.lm_head.set_weight(lm_head_w, self.weight.steal_pytorch_weight(W.lm_head_b))
-        if self.config.tp_split_emb_and_lm_head:
-            self.vocab_size_padded = self.lm_head._w.shape[0] * g_parallel_info.tp_size
-        else:
-            self.vocab_size_padded = self.lm_head._w.shape[0]
+        if self.lm_head is not None:
+            if self.weight.has_pytorch_weight(W.lm_head):
+                lm_head_w = self.weight.steal_pytorch_weight(W.lm_head)
+            else:
+                lm_head_w = self.word_embedding._emb
+            if self.config.normalize_lm_head_weight:
+                self.lm_head.set_weight(F.normalize(lm_head_w), self.weight.steal_pytorch_weight(W.lm_head_b))
+            else:
+                self.lm_head.set_weight(lm_head_w, self.weight.steal_pytorch_weight(W.lm_head_b))
+        if self.lm_head is not None:
+            if self.config.tp_split_emb_and_lm_head:
+                self.vocab_size_padded = self.lm_head._w.shape[0] * g_parallel_info.tp_size
+            else:
+                self.vocab_size_padded = self.lm_head._w.shape[0]
 
         def _safe_load_from_module(param: torch.nn.Parameter, fname: str):
             # np_w is 1-D array since a bin file doesn't have shape info.
@@ -290,7 +303,10 @@ class GPT(BaseModel):
                 self.load_vit_weight(compute_dtype)
             if self.position_encoding is not None:
                 self.position_encoding.weight.data = \
-                    (self.weight.steal_pytorch_weight(W.wpe))[:self.config.max_seq_len].reshape(self.position_encoding.weight.data.shape).to('cuda:0')
+                    (self.weight.steal_pytorch_weight(W.positional_embedding))[:self.config.max_seq_len].reshape(self.position_encoding.weight.data.shape).to('cuda:0')
+            if self.token_type_embeddings is not None:
+                self.token_type_embeddings.weight.data = \
+                    (self.weight.steal_pytorch_weight(W.token_type_embedding)).reshape(self.token_type_embeddings.weight.data.shape).to('cuda:0')
             if self.pre_decoder_layernorm is not None:
                 _safe_load_from_module(self.pre_decoder_layernorm.weight, W.pre_decoder_ln_gamma)
                 _safe_load_from_module(self.pre_decoder_layernorm.bias, W.pre_decoder_ln_beta)

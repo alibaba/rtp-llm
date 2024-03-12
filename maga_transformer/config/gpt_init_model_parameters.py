@@ -270,6 +270,9 @@ class GptInitModelParameters:
         self.update_task_prompt_config()
         self.update_ptuning_config()
         self.update_medusa_config(ckpt_path)
+        
+        if os.environ.get('EMBEDDING_MODEL', None) == '1':
+            self.use_kvcache = False
 
         self.seq_size_per_block = seq_size_per_block
         logging.info(f'seq_size_per_block: {self.seq_size_per_block}')

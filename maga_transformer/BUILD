@@ -26,7 +26,8 @@ requirement([
     "timm",
     "aiohttp",
     "tensorrt",
-    "onnx"
+    "onnx",
+    "sentence-transformers"
 ])
 
 py_library(
@@ -81,6 +82,7 @@ py_library(
     ], exclude=["models/test/*.py"]),
     deps = [
         ":sentencepiece",
+        ":sentence-transformers",
         ":transformers",
         ":prettytable",
         ":pynvml",
@@ -186,6 +188,13 @@ py_library(
 )
 
 py_library(
+    name = "embedding",
+    srcs = glob([
+        "embedding/*.py",
+    ])
+)
+
+py_library(
     name = "maga_transformer_lib",
     deps = [
         ":utils",
@@ -198,6 +207,7 @@ py_library(
         ":plugins",
         ":async_model",
         ":openai_api",
+        ":embedding",
         ":sdk",
         "//maga_transformer/tools:save_ft_module",
         "//maga_transformer/tools:model_assistant",
@@ -260,7 +270,8 @@ py_wheel(
         "einops",
         "prettytable",
         "pydantic==2.5.3",
-        "timm==0.9.12"
+        "timm==0.9.12",
+        "sentence-transformers==2.3.1"
     ] + whl_deps(),
 )
 

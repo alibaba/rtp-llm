@@ -181,7 +181,8 @@ class W:
     prefix_w = 'transformer.prefix_encoder.embedding.weight'
     pre_decoder_ln_gamma = 'pre_decoder_layernorm.gamma'
     pre_decoder_ln_beta = 'pre_decoder_layernorm.bias'
-    wpe = 'position_encoding.weight'
+    positional_embedding = 'position_encoding.weight'
+    token_type_embedding = 'token_type_embedding.weight'
     final_ln_gamma = 'final_layernorm.gamma'
     final_ln_beta = 'final_layernorm.beta'
 
@@ -209,6 +210,8 @@ class W:
     ffn_w2 = 'ffn_weights.intermediate_weight2.kernel'
     ffn_b2 = 'ffn_weights.intermediate_weight2.bias'
     ffn_gate = 'ffn_weights.gate.kernel'
+    post_ffn_ln_gamma = "post_ffn_layernorm_weights.gamma"
+    post_ffn_ln_beta = "post_ffn_layernorm_weights.beta"
 
     # lora
     attn_qkv_w_lora_a = 'self_attention_weights.query_weight.kernel.lora_A'
@@ -238,7 +241,7 @@ class W:
         ffn_w3,
     ])
 
-    gpt_style_tp_strategy = {
+    gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
         lm_head: sp_0_pad8,
         lm_head_b: sp_0_pad8,
@@ -262,7 +265,7 @@ class W:
         ffn_b2: sp_id,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
-        wpe: sp_id,
+        positional_embedding: sp_id,
         attn_qkv_w_lora_a: sp_id,
         attn_qkv_w_lora_b: sp_head_lora,
         attn_o_w_lora_a: sp_0,
@@ -282,7 +285,7 @@ class W:
         lm_head_b,
         pre_decoder_ln_gamma,
         pre_decoder_ln_beta,
-        wpe,
+        positional_embedding,
         final_ln_gamma,
         final_ln_beta,
         prefix_w
@@ -324,7 +327,8 @@ class CkptWeightInfo:
     name: str
     merge_fun: Callable[[List[torch.Tensor]], torch.Tensor]
 
-    def __init__(self, name, merge_fun) -> None:
+    # hf checkpoint没有tensor做拆分的ckpt，所以默认函数可以是identity
+    def __init__(self, name: str, merge_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity) -> None:
         self.name = name
         self.merge_fun = merge_fun
 
@@ -343,7 +347,7 @@ class WeightInfo:
     weights: List[CkptWeightInfo]
     process_fun: Callable[[List[torch.Tensor]], torch.Tensor]
 
-    def __init__(self, name, weights, process_fun) -> None:
+    def __init__(self, name: str, weights: List[CkptWeightInfo], process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity) -> None:
         self.name = name
         self.weights = weights
         self.process_fun = process_fun

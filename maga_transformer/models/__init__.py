@@ -18,6 +18,7 @@ from .phi import Phi
 from .llava import Llava
 from .qwen_vl import QWen_VL
 from .mixtral import Mixtral
+from .bert import Bert
 
 import logging
 try:

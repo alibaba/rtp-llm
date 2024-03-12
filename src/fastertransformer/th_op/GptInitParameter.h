@@ -75,6 +75,7 @@ public:
 
     int64_t              max_seq_len_     = 0;
     int64_t              vocab_size_      = 0;
+    int64_t              type_vocab_size_ = 0;
     int64_t              expert_num_      = 0;
     int64_t              moe_k_           = 0;
     std::vector<int64_t> moe_layer_index_ = {};
@@ -82,9 +83,13 @@ public:
     bool has_positional_encoding_    = false;
     bool has_pre_decoder_layernorm_  = false;
     bool has_post_decoder_layernorm_ = false;
+    bool has_lm_head_                = true;        
     bool use_attention_linear_bias_  = false;
     bool use_fp32_to_compute_logit_  = false;
     bool add_bias_linear_            = false;
+
+    bool use_kvcache_                = true;
+    bool is_causal_                  = true;
 
     std::string tokenizer_path_    = "";
     std::string ckpt_path_         = "";

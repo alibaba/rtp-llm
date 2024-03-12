@@ -361,25 +361,22 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                 *std::min_element(d_prefix_prompt_lengths + batch_size, d_prefix_prompt_lengths + total_batch_size);
         }
     }
-    convert_to_block_pointers(output_tensors, input_tensors, total_batch_size);
+    if (params_.use_kvcache_) {
+        convert_to_block_pointers(output_tensors, input_tensors, total_batch_size);
+    }
+
     Tensor k_cache = output_tensors->at("key_cache");
-    Tensor v_cache = output_tensors->at("value_cache");
 
-    const auto activation_in_type  = params_.int8_mode_ == 2 ? TYPE_INT8 : data_type;
-    const auto activation_out_type = data_type;
-
-    // The resize of the key cache buffer by
-    //   (local_batch_size, local_head_num, params_.size_per_head_ // x, max_seq_len, x) where x is constant.
-    std::vector<size_t> self_k_cache_size(k_cache.shape().begin() + 1, k_cache.shape().end());
-
-    // The resize of the value cache buffer by
-    //   (local_batch_size, local_head_num, max_seq_len, params_.size_per_head_).
-    std::vector<size_t> self_v_cache_size(v_cache.shape().begin() + 1, v_cache.shape().end());
     size_t              kv_cache_offset = 1;
     for (auto t = k_cache.shape().begin() + 1; t != k_cache.shape().end(); ++t) {
         kv_cache_offset *= *t;
     };
     uint   max_blocks_per_batch = (uint)(input_tensors->at("block_index_map").shape()[1]);
+    const size_t block_stride = total_batch_size * 2 * max_blocks_per_batch;
+
+    const auto activation_in_type  = params_.int8_mode_ == 2 ? TYPE_INT8 : data_type;
+    const auto activation_out_type = data_type;
+
     size_t context_h_token_num = h_token_num - batch_size;
     if (context_batch_size) {
         PUSH_RANGE(stream_, "remove padding");
@@ -423,6 +420,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             }
             POP_RANGE;
         }
+        sync_check_cuda_error();
 
         PUSH_RANGE(stream_, "pre-mha layernorm");
         norm_wrapper_->initDecoderLayerNorm(decoder_normed_input_,
@@ -437,6 +435,8 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                             params_.int8_mode_,
                                             stream_);
         print_bsd(l, "pre ln", decoder_normed_input_, 1, h_token_num, hidden_units);
+        sync_check_cuda_error();
+
         if (pre_attn_ln) {
             norm_wrapper_->preAttentionLayerNorm(attn_normed_input_,
                                                  decoder_input,
@@ -466,7 +466,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         else {
             input_query = decoder_input;
         }
-        const size_t block_stride = total_batch_size * 2 * max_blocks_per_batch;
         TensorMap attention_input_tensors{
             {"input_query", Tensor{MEMORY_GPU, activation_in_type, {h_token_num, hidden_units}, input_query}},
             {"block_pointers",
@@ -517,10 +516,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         }
         TensorMap attention_output_tensors{
             {"hidden_features",
-             Tensor(MEMORY_GPU, activation_out_type, {h_token_num, hidden_units}, self_attn_output_)},
-            {"key_cache", Tensor(MEMORY_GPU, data_type, self_k_cache_size, k_cache.getPtrWithOffset<T>(cache_offset))},
-            {"value_cache",
-             Tensor(MEMORY_GPU, data_type, self_v_cache_size, v_cache.getPtrWithOffset<T>(cache_offset))}};
+             Tensor(MEMORY_GPU, activation_out_type, {h_token_num, hidden_units}, self_attn_output_)}};
 
         if (params_.is_sparse_head_ && params_.layer_head_num_[l] == 0) {
             check_cuda_error(cudaMemcpyAsync(self_attn_output_,
@@ -569,10 +565,12 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         sync_check_cuda_error();
         POP_RANGE;
 
-        T* ffn_output_ptr = decoder_normed_input_;
+        T* ffn_output_ptr =  params_.layernorm_type_ == LayerNormType::pre_layernorm ? decoder_normed_input_ : decoder_output;
 
         int ffn_batch_size_lora = batch_size + context_batch_size;
         const int* lora_input_lengths = input_tensors->getPtr<int>("lora_input_lengths", nullptr);;
+
+        print_bsd(l, "before ffn", params_.layernorm_type_ == LayerNormType::pre_layernorm ? normed_self_attn_output_ : self_attn_output_, 1, h_token_num, hidden_units);
 
         TensorMap ffn_input_tensors(
             {{"ffn_input",
@@ -614,15 +612,15 @@ void ParallelGpt<T>::forward(TensorMap*                                         
 
         // the adapter after ffn (only pre layernorm currently)
         PUSH_RANGE(stream_, "post ffn");
-        if (!use_moe) {
+        if (!use_moe) {            
             norm_wrapper_->ffnAddBiasResidualLayerNorm(decoder_output,
                                                     params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ :
                                                                                             self_attn_output_,
                                                     ffn_output_ptr,
                                                     input_residual,
                                                     layer_weight->ffn_weights.output_weight.bias,
-                                                    layer_weight->self_attn_layernorm_weights.gamma,
-                                                    layer_weight->self_attn_layernorm_weights.beta,
+                                                    layer_weight->posf_ffn_layernorm_weights.gamma,
+                                                    layer_weight->posf_ffn_layernorm_weights.beta,
                                                     params_.layernorm_eps_,
                                                     h_token_num,
                                                     hidden_units,
@@ -631,6 +629,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                                     stream_);
 
             sync_check_cuda_error();
+            print_bsd(l, "after ffn ln", decoder_output, 1, h_token_num, hidden_units);
         } else {
             if (params_.layernorm_type_ == LayerNormType::pre_layernorm) {
                 finalize_moe_routing_kernelLauncher(fc2_result_,
@@ -662,8 +661,8 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                                     stream_);
                 invokeGeneralLayerNorm(decoder_output,
                                        decoder_output,
-                                       layer_weight->self_attn_layernorm_weights.gamma,
-                                       layer_weight->self_attn_layernorm_weights.beta,
+                                       layer_weight->posf_ffn_layernorm_weights.gamma,
+                                       layer_weight->posf_ffn_layernorm_weights.beta,
                                        params_.layernorm_eps_,
                                        h_token_num,
                                        hidden_units,

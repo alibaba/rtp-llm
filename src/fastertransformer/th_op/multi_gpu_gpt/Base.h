@@ -83,6 +83,9 @@ std::vector<ft::ParallelGptDecoderLayerWeight<T>*> loadWeights(
         gpt_layer_weights[i]->ffn_weights.output_weight.kernel                      = get_ptr<T>(weights[i].at(W::ffn_w2));
         gpt_layer_weights[i]->ffn_weights.output_weight.bias                        = maybe_get<T>(weights[i], W::ffn_b2);
         gpt_layer_weights[i]->ffn_weights.gating_weight.kernel                     = maybe_get<T>(weights[i], W::ffn_gate);
+        gpt_layer_weights[i]->posf_ffn_layernorm_weights.gamma                     = maybe_get<T>(weights[i], W::post_ffn_ln_gamma);
+        gpt_layer_weights[i]->posf_ffn_layernorm_weights.beta                      = maybe_get<T>(weights[i], W::post_ffn_ln_beta);
+
         if (int8_mode != 0) {
             gpt_layer_weights[i]->self_attention_weights.query_weight.int8_kernel            = maybe_get<int8_t>(quant_weights[i], W::attn_qkv_w);
             gpt_layer_weights[i]->self_attention_weights.attention_output_weight.int8_kernel = maybe_get<int8_t>(quant_weights[i], W::attn_o_w);
