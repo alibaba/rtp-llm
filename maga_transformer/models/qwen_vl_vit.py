@@ -6,16 +6,12 @@
 from collections import OrderedDict
 import math
 import requests
-from io import BytesIO
-import time
 import os
 from functools import partial
 from PIL import Image
 import threading
-from typing import Callable, Optional, Sequence, Tuple, List, Any
-from pathlib import Path
+from typing import Callable, Optional, List, Any
 import numpy as np
-import logging
 
 import torch
 from torch import nn
@@ -24,29 +20,6 @@ from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
-import tensorrt as trt
-
-def torch_dtype_from_trt(dtype):
-   if dtype == trt.int8:
-       return torch.int8
-   elif dtype == trt.bool:
-       return torch.bool
-   elif dtype == trt.int32:
-       return torch.int32
-   elif dtype == trt.float16:
-       return torch.float16
-   elif dtype == trt.float32:
-       return torch.float32
-   else:
-       raise TypeError("%s is not supported by torch" % dtype)
-   
-def torch_device_from_trt(device):
-   if device == trt.TensorLocation.DEVICE:
-       return torch.device("cuda")
-   elif device == trt.TensorLocation.HOST:
-       return torch.device("cpu")
-   else:
-       return TypeError("%s is not supported by torch" % device)
 
 def get_abs_pos(abs_pos, tgt_size):
     # abs_pos: L, C
@@ -375,6 +348,47 @@ class PullImageThread(threading.Thread):
         image = image.convert("RGB")
         self.images[self.index] = self.image_transform(image)
 
+
+
+class Preprocess:
+
+    def __init__(self, image_size: int):
+        mean = (0.48145466, 0.4578275, 0.40821073)
+        std = (0.26862954, 0.26130258, 0.27577711)
+        self.image_transform = transforms.Compose([
+            transforms.Resize((image_size, image_size),
+                              interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ])
+
+    def encode(self, image_paths: List[str]) -> torch.Tensor:
+        images = []
+        if os.environ.get("PARALLEL_PULL_IMAGE", "1") == "1" and len(image_paths) > 1:
+            images = [None]*len(image_paths)
+            threads = []
+            for i, image_path in enumerate(image_paths):
+                t = PullImageThread(image_path, images, i, self.image_transform)
+                t.setDaemon(True)
+                t.start()
+                threads.append(t)
+            for t in threads:
+                t.join(1)
+        else:
+            images = []
+            for image_path in image_paths:
+                if image_path.startswith("http://") or image_path.startswith("https://"):
+                    if os.environ.get("IMAGE_RESIZE_SUFFIX", "") != "" and "picasso" in image_path:
+                        image_path += os.environ.get("IMAGE_RESIZE_SUFFIX", "")
+                    image = Image.open(requests.get(image_path, stream=True).raw)
+                else:
+                    image = Image.open(image_path)
+                image = image.convert("RGB")
+                images.append(self.image_transform(image))
+        images = torch.stack(images, dim=0)
+        return images
+
+
 class VisionTransformer(nn.Module):
 
     def __init__(
@@ -395,17 +409,7 @@ class VisionTransformer(nn.Module):
         self.grid_size = (image_height // patch_height, image_width // patch_width)
         self.output_dim = output_dim
 
-        mean = (0.48145466, 0.4578275, 0.40821073)
-        std = (0.26862954, 0.26130258, 0.27577711)
-        self.image_transform = transforms.Compose([
-            transforms.Resize(
-                (image_size, image_size),
-                interpolation=InterpolationMode.BICUBIC
-            ),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
-
+        self.image_pre_obj = Preprocess(image_size)
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
 
         # class embeddings and positional embeddings
@@ -460,207 +464,5 @@ class VisionTransformer(nn.Module):
         return x
 
     def encode(self, image_paths: List[str]):
-        images = []
-        if os.environ.get("PARALLEL_PULL_IMAGE", "1") == "1" and len(image_paths) > 1:
-            images = [None]*len(image_paths)
-            threads = []
-            for i, image_path in enumerate(image_paths):
-                t = PullImageThread(image_path, images, i, self.image_transform)
-                t.setDaemon(True)
-                t.start()
-                threads.append(t)
-            for t in threads:
-                t.join(1)
-        else:
-            images = []
-            for image_path in image_paths:
-                if image_path.startswith("http://") or image_path.startswith("https://"):
-                    if os.environ.get("IMAGE_RESIZE_SUFFIX", None) is not None and "picasso" in image_path:
-                        image_path += os.environ.get("IMAGE_RESIZE_SUFFIX")
-                    image = Image.open(requests.get(image_path, stream=True).raw)
-                else:
-                    image = Image.open(image_path)
-                image = image.convert("RGB")
-                images.append(self.image_transform(image))
-        images = torch.stack(images, dim=0)
+        images = self.image_pre_obj.encode(image_paths).to(device=self.device)
         return self(images)
-
-
-class Preprocss:
-
-    def __init__(self, image_size: int):
-        mean = (0.48145466, 0.4578275, 0.40821073)
-        std = (0.26862954, 0.26130258, 0.27577711)
-        self.image_transform = transforms.Compose([
-            transforms.Resize((image_size, image_size),
-                              interpolation=InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
-
-    def encode(self, image_paths: List[str]) -> torch.Tensor:
-        images = []
-        if os.environ.get("PARALLEL_PULL_IMAGE", "1") == "1" and len(image_paths) > 1:
-            images = [None]*len(image_paths)
-            threads = []
-            for i, image_path in enumerate(image_paths):
-                t = PullImageThread(image_path, images, i, self.image_transform)
-                t.setDaemon(True)
-                t.start()
-                threads.append(t)
-            for t in threads:
-                t.join(1)
-        else:
-            images = []
-            for image_path in image_paths:
-                if image_path.startswith("http://") or image_path.startswith("https://"):
-                    if os.environ.get("IMAGE_RESIZE_SUFFIX", "") != "" and "picasso" in image_path:
-                        image_path += os.environ.get("IMAGE_RESIZE_SUFFIX")
-                    image = Image.open(requests.get(image_path, stream=True).raw)
-                else:
-                    image = Image.open(image_path)
-                image = image.convert("RGB")
-                images.append(self.image_transform(image))
-        images = torch.stack(images, dim=0)
-        return images
-
-
-class VITEngine(torch.nn.Module):
-    @staticmethod
-    def should_generate_engine():
-        return not VITEngine.get_check_done_file().exists()
-    
-    @staticmethod
-    def get_engine_filepath():
-        return os.environ.get('QWEN_VL_VIT_TRT_ONNX_EXPORT_PATH', os.path.join(os.getcwd(), "qwen_vl_onnx"))
-    
-    @staticmethod
-    def get_check_done_file() -> Path:
-        return Path(os.path.join(VITEngine.get_engine_filepath(), 'vit_trt.done'))
-    
-    def __init__(self, vit: VisionTransformer, image_size: int):
-        super(VITEngine, self).__init__()
-        self.image_size = image_size
-        self.device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
-        
-        output_dir = VITEngine.get_engine_filepath()
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        onnx_file_path = os.path.join(output_dir, "vit.onnx")
-        engine_file_path = os.path.join(output_dir, "vit.trt")
-        
-        if VITEngine.should_generate_engine():
-            self.export_onnx(vit, onnx_file_path)
-            self.generate_trt_engine(onnx_file_path, engine_file_path)
-            VITEngine.get_check_done_file().touch()
-
-        self.engine = self.loadEngine2TensorRT(engine_file_path)
-        
-        if self.engine is not None:
-            self.input_names = ["input"]
-            self.output_names = ["output"]
-            self.bindings = [None] * (len(self.input_names) + len(self.output_names))
-            self.outputs = [None] * len(self.output_names)
-            
-            self.context = self.engine.create_execution_context()
-            self.output_idx = self.engine.get_binding_index(self.output_names[0])
-            self.output_dtype = torch_dtype_from_trt(self.engine.get_binding_dtype(self.output_idx))
-            self.output_shape = tuple(self.engine.get_binding_shape(self.output_idx))
-            self.output_device = torch_device_from_trt(self.engine.get_location(self.output_idx))
-            self.input_idx = self.engine.get_binding_index(self.input_names[0])
-
-    def export_onnx(self, vit, onnx_file_path):
-        logging.info("Start converting ONNX model!")
-        image = torch.randn(1, 3, self.image_size, self.image_size).to(self.device)
-        torch.onnx.export(
-            vit,
-            image.to('cuda'),
-            onnx_file_path,
-            opset_version=17,
-            input_names=['input'],
-            output_names=['output'],
-            dynamic_axes={'input': {0: 'batch'}}
-        )
-
-    def generate_trt_engine(self,
-                            onnxFile,
-                            planFile,
-                            minBS=1,
-                            optBS=2,
-                            maxBS=4):
-        logging.info("Start converting TRT engine!")
-        logger = trt.Logger(trt.Logger.VERBOSE)
-        builder = trt.Builder(logger)
-        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
-        profile = builder.create_optimization_profile()
-        config = builder.create_builder_config()
-        config.set_flag(trt.BuilderFlag.FP16)
-        parser = trt.OnnxParser(network, logger)
-
-        with open(onnxFile, 'rb') as model:
-            if not parser.parse(model.read(), "/".join(onnxFile.split("/"))):
-                logging.info("Failed parsing %s" % onnxFile)
-                for error in range(parser.num_errors):
-                    logging.info(parser.get_error(error))
-            logging.info("Succeeded parsing %s" % onnxFile)
-
-        nBS = -1
-        nMinBS = minBS
-        nOptBS = optBS
-        nMaxBS = maxBS
-        inputT = network.get_input(0)
-        inputT.shape = [nBS, 3, self.image_size, self.image_size]
-        profile.set_shape(inputT.name,
-                          [nMinBS, 3, self.image_size, self.image_size],
-                          [nOptBS, 3, self.image_size, self.image_size],
-                          [nMaxBS, 3, self.image_size, self.image_size])
-
-        config.add_optimization_profile(profile)
-
-        t0 = time.time()
-        engineString = builder.build_serialized_network(network, config)
-        t1 = time.time()
-        if engineString == None:
-            logging.info("Failed building %s" % planFile)
-        else:
-            logging.info("Succeeded building %s in %d s" % (planFile, t1 - t0))
-        logging.info("plan file is", planFile)
-        with open(planFile, 'wb') as f:
-            f.write(engineString)
-    
-    def loadEngine2TensorRT(self, filepath: str):
-        logging.info("Start loading TRT engine!")
-        G_LOGGER = trt.Logger(trt.Logger.WARNING)
-        with open(filepath, "rb") as f, trt.Runtime(G_LOGGER) as runtime:
-            engine = runtime.deserialize_cuda_engine(f.read())
-            logging.info("Finish loading TRT engine!")
-            return engine
-
-    def forward(self, *inputs):
-        batch_size = inputs[0].shape[0]
-        
-        shape = (batch_size, ) + self.output_shape[1:]
-        output = torch.empty(size=shape, dtype=self.output_dtype, device=self.output_device)
-        self.outputs[0] = output
-        self.bindings[self.output_idx] = output.data_ptr()
-        
-        self.context.set_binding_shape(self.input_idx, tuple(inputs[0].shape))
-        self.bindings[self.input_idx] = inputs[0].contiguous().data_ptr()
-
-        self.context.execute_async(
-            batch_size, self.bindings, torch.cuda.current_stream().cuda_stream
-        )
-
-        outputs = tuple(self.outputs)[0]
-        return outputs
-
-    def encode(self, image_paths: List[str]):
-        image_pre_obj = Preprocss(self.image_size)
-        image = image_pre_obj.encode(image_paths).to(device=self.device)
-        return self(image)
-    
-    def image_embedding(self, images: List[str], device) -> torch.Tensor:
-        if len(images) != 0:
-            images = self.encode(images)
-            assert images.shape[0] == len(images)
-        return images.to(device=device)
