@@ -174,9 +174,9 @@ class InferenceWorker():
     @staticmethod
     async def collect_complete_response(
         all_responses: List[Union[PipelineResponse, MultiSequencesPipelineResponse, BatchPipelineResponse]],
-        incremental,
-        batch_infer,
-        num_return_sequences
+        incremental: bool,
+        batch_infer: bool,
+        num_return_sequences: int
     ) -> Union[PipelineResponse, MultiSequencesPipelineResponse, BatchPipelineResponse]:
 
         if not incremental:

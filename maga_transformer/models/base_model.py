@@ -176,7 +176,7 @@ class BaseModel(object):
         raise NotImplementedError()
 
     @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters) -> Union[TokenizerBase, PreTrainedTokenizerBase]:
+    def get_tokenizer(cls, config: GptInitModelParameters) -> PreTrainedTokenizerBase:
         raise NotImplementedError()
 
     @classmethod
@@ -204,7 +204,7 @@ class BaseModel(object):
         self.medusa_head: Optional[torch.nn.ModuleList] = None
 
         self.prefix_tokens: Optional[torch.Tensor] = None
-        self.tokenizer: Optional[TokenizerBase] = None
+        self.tokenizer: Optional[PreTrainedTokenizerBase] = None
         self.max_input_buffer_len: int = 0
 
         self.default_generate_config: GenerateConfig = GenerateConfig()
