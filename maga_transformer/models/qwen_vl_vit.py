@@ -437,5 +437,5 @@ class VisionTransformer(nn.Module):
         return x
 
     def encode(self, image_paths: List[str]):
-        images = self.image_pre_obj.encode(image_paths).to(device=self.device)
+        images = self.image_pre_obj.encode(image_paths)
         return self(images)

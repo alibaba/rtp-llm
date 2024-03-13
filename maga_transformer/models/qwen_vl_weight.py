@@ -17,7 +17,6 @@ class QwenVLVitWeight(BaseVitWeights):
         return "self.visual.vit."
 
 class QWenVLWeightInfo(QWenWeight, BaseMultiModalWeightInfo):
-    _need_vit_weight = True
     
     def __init__(self, config, tp_size, tp_rank):
         QWenWeight.__init__(self, config, tp_size, tp_rank)
@@ -25,10 +24,5 @@ class QWenVLWeightInfo(QWenWeight, BaseMultiModalWeightInfo):
     
     def _get_weight_info(self):
         qwen_vl_weight = super()._get_weight_info()
-        if self._need_vit_weight:
-            self._get_vit_info(qwen_vl_weight)
+        self._get_vit_info(qwen_vl_weight)
         return qwen_vl_weight
-    
-    @classmethod
-    def set_need_vit_info(cls, need_vit_weight: bool):
-        cls._need_vit_weight = need_vit_weight

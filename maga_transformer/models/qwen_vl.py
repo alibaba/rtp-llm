@@ -81,7 +81,7 @@ class QWen_VL(QWen, MultiModalMixin):
         gc.collect()
         torch.cuda.empty_cache()
         self.visual = vit_visual
-        QWenVLWeightInfo.set_need_vit_info(False)
+        self.config.vit_related_params.vit_weights = None
     
     def load_vit_weight(self, ctype: str):
         if type(self.visual) == VITEngine:

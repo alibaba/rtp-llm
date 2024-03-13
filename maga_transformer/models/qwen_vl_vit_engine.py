@@ -131,7 +131,6 @@ class VITEngine(torch.nn.Module):
             logging.info("Failed building %s" % planFile)
         else:
             logging.info("Succeeded building %s in %d s" % (planFile, t1 - t0))
-        logging.info("plan file is", planFile)
         with open(planFile, 'wb') as f:
             f.write(engineString)
     
