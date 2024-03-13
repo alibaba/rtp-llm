@@ -70,6 +70,7 @@ class GenerateStream(BaseModel):
             return
         for dtor in self._resource_dtors:
             dtor()
+        self._resource_dtors.clear()
         self._released = True
 
     def update_prefix(self, ptuning_info):
