@@ -4,10 +4,10 @@ from typing import List, Union
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.embedding.post_process.sentence_transformer_module import SentenceTransformerModule
 from maga_transformer.async_decoder_engine.embedding.post_process.post_process_module import PostProcessModule
-from maga_transformer.async_decoder_engine.embedding.embedding_batch_query import EmbeddingBatchQuery, EmbeddingOutput
+from maga_transformer.async_decoder_engine.embedding.embedding_stream import EmbeddingBatchedInput, EmbeddingOutput
 
 class NormalModule(PostProcessModule):
-    def process(self, batch_query: EmbeddingBatchQuery, hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> List[EmbeddingOutput]:
+    def process(self, batch_query: EmbeddingBatchedInput, hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> List[EmbeddingOutput]:
         outputs: List[EmbeddingOutput] = []
         # return last hidden states as default for gpt
         bias = 0

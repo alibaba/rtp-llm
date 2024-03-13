@@ -13,13 +13,15 @@ from maga_transformer.metrics import GaugeMetrics, kmonitor
 from maga_transformer.utils.time_util import Timer
 
 from maga_transformer.models.base_model import BaseModel
+from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.async_decoder_engine.embedding.embedding_scheduler import EmbeddingScheduler
 from maga_transformer.async_decoder_engine.embedding.embedding_model_executor import EmbeddingModelExecutor
-from maga_transformer.async_decoder_engine.embedding.embedding_stream import EmbeddingStream, EmbeddingOutput, EmbeddingInput
+from maga_transformer.async_decoder_engine.embedding.embedding_stream import EmbeddingStream, EmbeddingOutput, EmbeddingInput, EmbeddingBatchedInput
 
 class EmbeddingDecoderEngine(object):
     def __init__(self, config: GptInitModelParameters, model: BaseModel):
         self.config_ = config
+        self.batch_input_ = EmbeddingBatchedInput(NcclOp())
         self.scheduler_ = EmbeddingScheduler(self.config_)
         self.executor_ = EmbeddingModelExecutor(model, config)
         self.start()
@@ -44,26 +46,26 @@ class EmbeddingDecoderEngine(object):
 
     @torch.inference_mode()
     def step(self):
-        batch_query = None
+        streams = []
         try:
             with Timer() as t:
-                batch_query = self.scheduler_.schedule()
-                if batch_query.total_batch_size == 0 and g_parallel_info.tp_rank == 0:
+                streams = self.scheduler_.schedule()
+                if len(streams) == 0 and g_parallel_info.tp_rank == 0:
                     torch.cuda.nvtx.range_pop()
                     time.sleep(0.001)
                     return
-                print("total_batch_size: ", batch_query.total_batch_size)
-                batch_query.generate_model_input()
-                batch_query.tp_sync()
-                self.executor_.process(batch_query)
 
-                if g_parallel_info.tp_rank == 0:
-                    batch_query.update_streams()
-            # self.report_metric(t.cost_ms())
+                self.batch_input_.generate_model_input(streams)
+                self.batch_input_.tp_sync()
+                embedding_outputs = self.executor_.process(self.batch_input_)
+            if g_parallel_info.tp_rank == 0:
+                for idx, stream in enumerate(streams):
+                    stream.update(embedding_outputs[idx])
+                self.report_metric(len(streams), t.cost_ms())
 
         except Exception as e:
-            if batch_query:
-                batch_query.update_all_errors(str(e))
+            for stream in streams:
+                stream.set_error(str(e))
             logging.error(
                 f'process run error: {e}, Traceback: {traceback.format_exc()}'
             )
@@ -73,6 +75,10 @@ class EmbeddingDecoderEngine(object):
                 time.sleep(0.1)
                 # NOTE: nccl could hang when any error. GPU may hang under CUDA error.
                 os._exit(-1)
+
+    def report_metric(self, batch_size: int, cost_time: float):
+        kmonitor.report(GaugeMetrics.ASYNC_BATCH_SIZE_METRIC, batch_size)
+        kmonitor.report(GaugeMetrics.ASYNC_ITERATE_LANTENCY, cost_time)
 
     def start(self):
         self.need_stop_ = False

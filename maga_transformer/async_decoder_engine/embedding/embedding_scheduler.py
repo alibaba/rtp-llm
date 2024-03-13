@@ -1,19 +1,15 @@
 import torch
 import copy
-from typing import Optional, List, Deque
+from typing import List, Deque
 from collections import deque
 from threading import Lock
-from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.embedding.embedding_stream import EmbeddingStream, EmbeddingInput
-from maga_transformer.async_decoder_engine.embedding.embedding_batch_query import EmbeddingBatchQuery
 
-from maga_transformer.utils.thread_safe_deque import ThreadSafeDeque
 
 class EmbeddingScheduler(object):
     def __init__(self, config: GptInitModelParameters):
-        self.config_ = config
-        self.batch_query_ = EmbeddingBatchQuery(NcclOp())
+        self.config_ = config    
         self.waiting_streams_: Deque[EmbeddingStream] = deque()
         self.lock_ = Lock()
 
@@ -26,7 +22,7 @@ class EmbeddingScheduler(object):
                 self.waiting_streams_.append(stream)
         return streams
 
-    def schedule(self) -> EmbeddingBatchQuery:
+    def schedule(self) -> List[EmbeddingStream]:
         with self.lock_:
             self._remove_timeout_stream()
             new_streams: List[EmbeddingStream] = []
@@ -39,9 +35,8 @@ class EmbeddingScheduler(object):
                 total_len += stream.input.input_length
 
             for new_stream in new_streams:
-                self.waiting_streams_.remove(new_stream)
-        self.batch_query_.set_stream(new_streams)
-        return self.batch_query_
+                self.waiting_streams_.remove(new_stream)        
+            return new_streams
 
     def _remove_timeout_stream(self):
         pass

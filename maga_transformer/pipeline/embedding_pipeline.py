@@ -1,18 +1,14 @@
 import torch
 import asyncio
 from torch.nn.utils.rnn import pad_sequence
-from typing import Any, Iterator, List, Optional, AsyncGenerator, Dict, Union
-from maga_transformer.models.base_model import GenerateResponse
+from typing import Any, Iterator, List, Optional, Union
 from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 
-from maga_transformer.model_factory import ModelFactory
 from maga_transformer.config.base_model_config import PyDanticModelBase
 from maga_transformer.pipeline.pipeline import Pipeline
-from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.async_decoder_engine.embedding.embedding_stream import EmbeddingInput, EmbeddingOutput
+from maga_transformer.async_decoder_engine.embedding.embedding_stream import EmbeddingInput
 from maga_transformer.async_decoder_engine.embedding.embedding_decoder_engine import EmbeddingDecoderEngine
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 class EmbeddingResponse(PyDanticModelBase):
     sentence_embedding: List[Optional[torch.Tensor]]
@@ -60,14 +56,6 @@ class EmbeddingPipeline(Pipeline):
                                 sparse_embedding=[x.sparse_embedding for x in embedding_outputs],
                                 colbert_embedding=[x.colbert_embedding for x in embedding_outputs],
                                 prompt_tokens=total_length)
-        
-    # async def raw(self, input: Dict[str, Any]):
-    #     token_ids = input['token_ids']
-    #     token_type_ids = input['token_type_ids']
-    #     embedding_input = EmbeddingInput(token_ids=torch.Tensor(token_ids), 
-    #                            token_type_ids=torch.Tensor(token_type_ids), 
-    #                            generate_config=GenerateConfig())
-    #     return await self.generate_stream(embedding_input)
     
     def pipeline(self, prompt: Union[List[str], str], images: List[str] | None = None, **kwargs: Any) -> EmbeddingResponse:
         loop = asyncio.new_event_loop()

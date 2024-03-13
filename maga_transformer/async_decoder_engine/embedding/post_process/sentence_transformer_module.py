@@ -4,8 +4,7 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 from typing import List, Dict, Union
-from maga_transformer.utils.util import to_cuda
-from maga_transformer.async_decoder_engine.embedding.embedding_batch_query import EmbeddingBatchQuery, EmbeddingOutput
+from maga_transformer.async_decoder_engine.embedding.embedding_stream import EmbeddingBatchedInput, EmbeddingOutput
 
 from sentence_transformers.util import import_from_string
 from sentence_transformers.models import Transformer, Pooling, Normalize
@@ -36,22 +35,22 @@ class SentenceTransformerModule(PostProcessModule):
                 modules[module_config["name"]] = module
         self.model = nn.Sequential(modules).cuda().to(dtype)
         
-    def _reorder_input(self, all_hidden_states: torch.Tensor, batch_query: EmbeddingBatchQuery, attention_mask: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
+    def _reorder_input(self, all_hidden_states: torch.Tensor, batch_input: EmbeddingBatchedInput, attention_mask: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
         inputs: List[Dict[str, torch.Tensor]] = []
         start_idx = 0
         # attention mask: [batch_size, seq_len]
         # embedding: [batch_size, seq_len, hidden_size]
-        for idx, query in enumerate(batch_query.context_streams):
+        for idx in range(batch_input.batch_size):
             inputs.append({
-                "token_embeddings": all_hidden_states[start_idx: start_idx + query.input.input_length].unsqueeze_(0),
-                "attention_mask": attention_mask[idx][0][:query.input.input_length].unsqueeze_(0)
+                "token_embeddings": all_hidden_states[start_idx: start_idx + batch_input.context_lengths_list[idx]].unsqueeze_(0),
+                "attention_mask": attention_mask[idx][0][:batch_input.context_lengths_list[idx]].unsqueeze_(0)
             })
-            start_idx += query.input.input_length
+            start_idx += batch_input.context_lengths_list[idx]
         return inputs
 
     
-    def process(self, batch_query: EmbeddingBatchQuery, all_hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> List[EmbeddingOutput]:
-        batch_inputs = self._reorder_input(all_hidden_states, batch_query, attention_mask)
+    def process(self, batch_input: EmbeddingBatchedInput, all_hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> List[EmbeddingOutput]:
+        batch_inputs = self._reorder_input(all_hidden_states, batch_input, attention_mask)
         outputs: List[EmbeddingOutput] = []
         # 这里合并成batch算可能性能会更好，但是由于这部分占总时间1/1000，所以先不纠结
         for input in batch_inputs:
