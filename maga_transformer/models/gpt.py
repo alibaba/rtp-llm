@@ -74,7 +74,8 @@ class GPT(BaseModel):
         super().__init__()
 
         # 兼容逻辑
-        os.environ["REUSE_CACHE"] = os.environ.get('USE_BLOCK_CACHE')
+        if os.environ.get('USE_BLOCK_CACHE') is not None:
+            os.environ["REUSE_CACHE"] = os.environ.get('USE_BLOCK_CACHE')
 
         self.config = config
         compute_dtype = to_torch_dtype(self.config.data_type)
