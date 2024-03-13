@@ -202,10 +202,15 @@ class BatchQuery:
         if g_parallel_info.tp_rank > 0:
             return
         self.decode_streams.extend(self.context_streams)
-        # because the query thread will call set_stop. We check the status with a lock here, and the stopped stream is discarded directly.
-        self.context_streams = [stream for stream in new_streams if stream.set_running()]
+        self.context_streams = []
+        for stream in new_streams:
+            if not stream.set_running():
+                # because the query thread will call set_stop. We check the status with a lock here, and the stopped stream is discarded directly.
+                stream.release_resource()
+            else:
+                self.context_streams.append(stream)
         self.clear()
-
+        
         self.generate_batch_size = len(self.decode_streams)
         self.context_batch_size = len(self.context_streams)
 
