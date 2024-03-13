@@ -353,23 +353,11 @@ class Preprocess:
         images[i] = self.image_transform(image)
 
     def encode(self, image_paths: List[str]) -> torch.Tensor:
-        images = []
-        if os.environ.get("PARALLEL_PULL_IMAGE", "1") == "1" and len(image_paths) > 1:
-            images = [None]*len(image_paths)
-            thread_pool = ThreadPoolExecutor(len(image_paths))
-            for i, image_path in enumerate(image_paths):
-                thread_pool.submit(self.parallel_pull_image, image_path, images, i)
-            thread_pool.shutdown(wait=True)
-        else:
-            for image_path in image_paths:
-                if image_path.startswith("http://") or image_path.startswith("https://"):
-                    if os.environ.get("IMAGE_RESIZE_SUFFIX", "") != "" and "picasso" in image_path:
-                        image_path += os.environ.get("IMAGE_RESIZE_SUFFIX", "")
-                    image = Image.open(requests.get(image_path, stream=True).raw)
-                else:
-                    image = Image.open(image_path)
-                image = image.convert("RGB")
-                images.append(self.image_transform(image))
+        images = [None]*len(image_paths)
+        thread_pool = ThreadPoolExecutor(len(image_paths))
+        for i, image_path in enumerate(image_paths):
+            thread_pool.submit(self.parallel_pull_image, image_path, images, i)
+        thread_pool.shutdown(wait=True)
         images = torch.stack(images, dim=0)
         return images
 
