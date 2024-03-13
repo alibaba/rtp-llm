@@ -425,7 +425,7 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
                           attention_out);
 
     POP_RANGE;
-    print_bsd(layer_id, "attn out", attention_out, 1, h_token_num, local_hidden_units_);
+    // print_bsd(layer_id, "attn out", attention_out, 1, h_token_num, local_hidden_units_);
 }
 
 template<typename T>

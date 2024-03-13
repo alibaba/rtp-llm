@@ -534,6 +534,8 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                 &attention_output_tensors, &attention_input_tensors, &layer_weight->self_attention_weights);
         }
 
+        print_bsd(l, "attn out", self_attn_output_, 1, h_token_num, hidden_units);
+
         // the adapter after attention (only pre layernorm currently)
         PUSH_RANGE(stream_, "post_mha_ln");
         T* input_residual = nullptr;
@@ -607,6 +609,9 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                 Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expert_for_source_row_});
         }
         ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->ffn_weights);
+
+        print_bsd(l, "post ffn", ffn_output_ptr, 1, h_token_num, hidden_units);
+
         // the adapter after ffn (only pre layernorm currently)
         PUSH_RANGE(stream_, "post ffn");
         if (!use_moe) {
