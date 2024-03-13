@@ -51,7 +51,7 @@ class PerfTestScheduleStrategy:
     def __init__(self, config, stream_cache_manager):
         self._stream_cache_manager = stream_cache_manager
 
-    def schedule_new(self, streams: List[GenerateStream]) -> List[GenerateStream]:
+    def schedule_new(self, streams: List[GenerateStream], force: bool) -> List[GenerateStream]:
         return streams
 
     def schedule_current(self, streams: List[GenerateStream]) -> List[GenerateStream]:

@@ -13,8 +13,8 @@ from maga_transformer.model_factory_register import register_model
 class ChatGlm(GPT):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        if os.environ.get('REUSE_CACHE', None) is not None:
-            raise Exception("chatglm kvcache style not support block cache")
+        if os.environ.get('REUSE_CACHE', None) == "1":
+            raise Exception("chatglm kvcache style not support reuse block cache")
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
