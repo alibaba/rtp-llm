@@ -91,8 +91,8 @@ FtGpt<T>::~FtGpt()
 
 template<typename T>
 void FtGpt<T>::forward(th::Tensor&              decoder_output,
-                       th::Tensor&              key_cache,
-                       th::Tensor&              value_cache,
+                       th::optional<th::Tensor> key_cache,
+                       th::optional<th::Tensor> value_cache,
                        th::Tensor&              decoder_input,
                        th::Tensor&              input_lengths,
                        th::Tensor&              sequence_lengths,
@@ -140,12 +140,12 @@ void FtGpt<T>::forward(th::Tensor&              decoder_output,
     }
 
     ft::TensorMap output_tensors({{"decoder_output", convert_tensor<T>(decoder_output)}});
-    if (gpt_init_parameter_.int8_kv_cache_) {
-        output_tensors.insert("key_cache", convert_tensor<int8_t>(key_cache));
-        output_tensors.insert("value_cache", convert_tensor<int8_t>(value_cache));
-    } else {
-        output_tensors.insert("key_cache", convert_tensor<T>(key_cache));
-        output_tensors.insert("value_cache", convert_tensor<T>(value_cache));
+    if (gpt_init_parameter_.int8_kv_cache_ && key_cache.has_value() && value_cache.has_value()) {
+        output_tensors.insert("key_cache", convert_tensor<int8_t>(key_cache.value()));
+        output_tensors.insert("value_cache", convert_tensor<int8_t>(value_cache.value()));
+    } else if (key_cache.has_value() && value_cache.has_value()) {
+        output_tensors.insert("key_cache", convert_tensor<T>(key_cache.value()));
+        output_tensors.insert("value_cache", convert_tensor<T>(value_cache.value()));
     }
     if (key_cache_scale.has_value()) {
         output_tensors.insert("key_cache_scale", convert_tensor<float>(key_cache_scale.value()));
@@ -239,8 +239,8 @@ ParallelGptOp::~ParallelGptOp()
 }
 
 th::Tensor ParallelGptOp::forward(th::Tensor               decoder_input,
-                                  th::Tensor               key_cache,
-                                  th::Tensor               value_cache,
+                                  th::optional<th::Tensor> key_cache,
+                                  th::optional<th::Tensor> value_cache,
                                   th::Tensor               input_lengths,
                                   th::Tensor               sequence_lengths,
                                   th::Tensor               block_index_map,

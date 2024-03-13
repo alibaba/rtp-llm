@@ -88,7 +88,6 @@ public:
     bool use_fp32_to_compute_logit_  = false;
     bool add_bias_linear_            = false;
 
-    bool use_kvcache_                = true;
     bool is_causal_                  = true;
 
     std::string tokenizer_path_    = "";

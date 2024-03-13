@@ -15,7 +15,7 @@ class EmbeddingModelExecutor(object):
         self.gpt_op_ = GptOp.from_config(self.config_)
         self.gpt_op_.set_weight(self.model_.weight)
 
-        self.post_process_module_ = PostProcessFactory.create_post_process_module(self.config_)
+        self.post_process_module_ = PostProcessFactory.create_post_process_module(self.config_, self.model_.dtype)
         self.dummy_cache_ = torch.zeros([1,1,1,1]).cuda()
 
     def _pre_process(self, batch_query: EmbeddingBatchQuery):        
@@ -42,8 +42,8 @@ class EmbeddingModelExecutor(object):
         input_embeds, attention_mask, position_ids = self._pre_process(batch_query)
         hidden_states = self.gpt_op_.forward(
             decoder_input=input_embeds,
-            key_cache=self.dummy_cache_,
-            value_cache=self.dummy_cache_,
+            key_cache=None,
+            value_cache=None,
             key_cache_scale=None,
             value_cache_scale=None,
             input_lengths=torch.IntTensor(batch_query.context_lengths_list),

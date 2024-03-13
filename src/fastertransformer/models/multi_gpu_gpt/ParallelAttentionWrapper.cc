@@ -501,8 +501,8 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
                                                 TensorMap*                input_tensors,
                                                 const AttentionWeight<T>* attention_weights)
 {   
-    if (!params_.use_kvcache_) {
-        throw std::runtime_error("use_kvcahe_ == false should not do self attention!");
+    if (input_tensors->isExist("use_kvcache") && !input_tensors->getVal<bool>("use_kvcache")) {
+        throw std::runtime_error("use_kvcahe == false should not do self attention!");
     }
     const int  layer_id                = input_tensors->getVal<int>("layer_id");
     const int  generate_batch_size     = input_tensors->getVal<int>("generate_batch_size");
@@ -574,6 +574,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                                    TensorMap*                input_tensors,
                                                    const AttentionWeight<T>* attention_weights)
 {
+    const bool use_kvcache = !input_tensors->isExist("use_kvcache") || input_tensors->getVal<bool>("use_kvcache");
     const int  generate_batch_size      = input_tensors->getVal<int>("generate_batch_size");
     const int  h_token_num              = input_tensors->at("input_query").shape()[0];
     const int  context_h_token_num      = h_token_num - generate_batch_size;
@@ -616,7 +617,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
 
     KVBlockArray kv_block_array(context_batch_size, max_blocks_per_batch, params_.seq_size_per_block_, 0);
     KvCacheDataType cache_type = KvCacheDataType::BASE;
-    if (params_.use_kvcache_) {
+    if (use_kvcache) {
         kv_block_array.data        = const_cast<int64_t*>(block_pointers);        
         if (params_.int8_kv_cache_) {
             kv_block_array.scale     = const_cast<int64_t*>(block_scale_pointers);
@@ -712,7 +713,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     // length_base means some blocks is reused in kvcache and not need to copy
 
     PUSH_RANGE(stream_, "kv_cache");
-    if (params_.use_kvcache_) {
+    if (use_kvcache) {
         invokeTranspose4dBatchMajor(k_buf_2_,
                                     v_buf_2_,
                                     kv_block_array,

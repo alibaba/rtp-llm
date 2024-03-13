@@ -75,21 +75,3 @@ class EmbeddingPipeline(Pipeline):
         result = loop.run_until_complete(self.pipeline_async(prompt, images, **kwargs))
         return result
 
-if __name__ == '__main__':
-    from maga_transformer.model_factory import ModelConfig, ModelFactory, WEIGHT_TYPE
-    model_config = ModelConfig(model_type='bert',
-                               ckpt_path='/home/admin/baowending.bwd/playground-new/sentence_transformer/bert-base-uncased',
-                               tokenizer_path='/home/admin/baowending.bwd/playground-new/sentence_transformer/bert-base-uncased',
-                               weight_type=WEIGHT_TYPE.FP16,
-                               act_type=WEIGHT_TYPE.FP16)
-    model = ModelFactory.from_model_config(model_config)
-    pipeline = EmbeddingPipeline(model, model.tokenizer)
-    for i in range(100):
-        import time
-        start_time = time.time()
-        pipeline(["hello " * 126] * 128, max_new_tokens=1)
-        end_time = time.time()
-        print("cost: ", end_time - start_time)
-        pass
-        
-

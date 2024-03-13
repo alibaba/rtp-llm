@@ -138,7 +138,6 @@ static auto specialTokensTHS =
     DEF_PROPERTY(seq_size_per_block, seq_size_per_block_)                                                              \
     DEF_PROPERTY(int8_kv_cache, int8_kv_cache_)                                                                        \
     DEF_PROPERTY(use_medusa, use_medusa_)                                                                              \
-    DEF_PROPERTY(use_kvcache, use_kvcache_)                                                                            \
     DEF_PROPERTY(is_causal, is_causal_)
 
 static auto fasterTransformerGptInitParameterTHS =

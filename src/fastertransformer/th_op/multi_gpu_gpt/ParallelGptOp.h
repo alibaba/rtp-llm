@@ -14,8 +14,8 @@ class IFtGpt {
 public:
     virtual ~IFtGpt() {}
     virtual void forward(th::Tensor&              decoder_output,
-                         th::Tensor&              key_cache,
-                         th::Tensor&              value_cache,
+                         th::optional<th::Tensor> key_cache,
+                         th::optional<th::Tensor> value_cache,
                          th::Tensor&              decoder_input,
                          th::Tensor&              input_lengths,
                          th::Tensor&              sequence_lengths,
@@ -53,8 +53,8 @@ public:
 
     // bool initMem(ft::IAllocator* allocator);
     void forward(th::Tensor&              decoder_output,
-                 th::Tensor&              key_cache,
-                 th::Tensor&              value_cache,
+                 th::optional<th::Tensor> key_cache,
+                 th::optional<th::Tensor> value_cache,
                  th::Tensor&              decoder_input,
                  th::Tensor&              input_lengths,
                  th::Tensor&              sequence_lengths,
@@ -111,8 +111,8 @@ public:
     ~ParallelGptOp();
 
     th::Tensor forward(th::Tensor               decoder_input,
-                       th::Tensor               key_cache,
-                       th::Tensor               value_cache,
+                       th::optional<th::Tensor> key_cache,
+                       th::optional<th::Tensor> value_cache,
                        th::Tensor               input_lengths,
                        th::Tensor               sequence_lengths,
                        th::Tensor               block_index_map,

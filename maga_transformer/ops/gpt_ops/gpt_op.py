@@ -35,8 +35,8 @@ class GptOp(FTOPBase):
 
     def forward(self, # type: ignore
                 decoder_input: torch.Tensor,
-                key_cache: torch.Tensor,
-                value_cache: torch.Tensor,
+                key_cache: Optional[torch.Tensor],
+                value_cache: Optional[torch.Tensor],
                 key_cache_scale: Optional[torch.IntTensor],
                 value_cache_scale: Optional[torch.IntTensor],
                 lora_ids: torch.Tensor,
