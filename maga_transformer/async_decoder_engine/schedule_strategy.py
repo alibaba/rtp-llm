@@ -52,6 +52,15 @@ class PerfTestScheduleStrategy:
         self._stream_cache_manager = stream_cache_manager
 
     def schedule_new(self, streams: List[GenerateStream], force: bool) -> List[GenerateStream]:
+        for stream in streams:
+            try:
+                self._stream_cache_manager.init_kvcache(stream)
+                force = False
+            except Exception as e:
+                if force:
+                    stream.stop_and_release(str(e))
+                else:
+                    break
         return streams
 
     def schedule_current(self, streams: List[GenerateStream]) -> List[GenerateStream]:
