@@ -57,19 +57,36 @@ struct CopyParams {
     Buffer&       dst;
 };
 
+using OptionalConstBufferRef = std::optional<std::reference_wrapper<const Buffer>>;
+
+// The Layernorm Op also works as an AddBias Op
+// if gamma and beta are not provided, output = input * alpha + residual1 + bias if alpha is provided;
+// else output = input + residual1 + residual2 + bias
 struct LayernormParams {
+
+    // layernorm
     LayernormParams(const NormType norm_type, const Buffer& input,
-    const Buffer& gamma, const Buffer& beta, const float eps, Buffer& output):
+                    const Buffer& gamma, const Buffer& beta, const float eps, Buffer& output):
     norm_type(norm_type), input(input), gamma(gamma), beta(beta), eps(eps), norm_output(output) {}
 
-    const NormType norm_type;
+    // used for add bias
+    LayernormParams(const Buffer& input,
+                    const OptionalConstBufferRef& residual1,
+                    const OptionalConstBufferRef& bias,
+                    const std::optional<float> alpha, Buffer& output):
+    norm_type(NormType::add_bias), input(input), residual1(residual1),
+    bias(bias), alpha(alpha), norm_output(output) {}
+
+    const NormType norm_type = NormType::layernorm;
     const Buffer&  input;
     const std::optional<std::reference_wrapper<const Buffer>>  residual1;
     const std::optional<std::reference_wrapper<const Buffer>>  residual2;
     const std::optional<std::reference_wrapper<const Buffer>>  bias;
-    const Buffer&  gamma;
-    const Buffer&  beta;
-    const float    eps;
+    const std::optional<float> alpha;
+
+    const std::optional<std::reference_wrapper<const Buffer>>  gamma;
+    const std::optional<std::reference_wrapper<const Buffer>>  beta;
+    const float eps = 1e-6;
 
     const std::optional<std::reference_wrapper<const Buffer>> scale_inter;
     const std::optional<std::reference_wrapper<const Buffer>> scale_out;

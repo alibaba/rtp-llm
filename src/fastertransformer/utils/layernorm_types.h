@@ -8,14 +8,15 @@ namespace fastertransformer {
 enum class LayerNormType {
     pre_layernorm,
     post_layernorm,
-    InvalidType
+    invalid_type
 };
 
 enum class NormType {
     layernorm,
     rmsnorm,
     alphanorm,
-    InvalidType
+    add_bias,
+    invalid_type
 };
 
 inline LayerNormType getLayerNormType(std::string layernorm_type_str) {
@@ -26,7 +27,7 @@ inline LayerNormType getLayerNormType(std::string layernorm_type_str) {
     } else {
         FT_CHECK_WITH_INFO(false, "Layernorm Type: " + layernorm_type_str + " not supported !");
     }
-    return LayerNormType::InvalidType;
+    return LayerNormType::invalid_type;
 }
 
 inline NormType getNormType(std::string norm_type_str) {
@@ -39,7 +40,7 @@ inline NormType getNormType(std::string norm_type_str) {
     } else {
         FT_CHECK_WITH_INFO(false, "Norm Type: " + norm_type_str + " not supported !");
     }
-    return NormType::InvalidType;
+    return NormType::invalid_type;
 }
 
 } // namespace fastertransformer
