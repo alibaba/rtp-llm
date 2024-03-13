@@ -9,7 +9,7 @@ import requests
 import os
 from functools import partial
 from PIL import Image
-import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional, List, Any
 import numpy as np
 
@@ -330,26 +330,6 @@ class TransformerBlock(nn.Module):
         return x
 
 
-class PullImageThread(threading.Thread):
-    def __init__(self, image_path: str, images: List[Any], i: int, image_transform: transforms.Compose):
-        threading.Thread.__init__(self)
-        self.image_path = image_path
-        self.images = images
-        self.index = i
-        self.image_transform = image_transform
-    
-    def run(self):
-        if self.image_path.startswith("http://") or self.image_path.startswith("https://"):
-            if os.environ.get("IMAGE_RESIZE_SUFFIX", None) is not None and "picasso" in self.image_path:
-                self.image_path += os.environ.get("IMAGE_RESIZE_SUFFIX")
-            image = Image.open(requests.get(self.image_path, stream=True).raw)
-        else:
-            image = Image.open(self.image_path)
-        image = image.convert("RGB")
-        self.images[self.index] = self.image_transform(image)
-
-
-
 class Preprocess:
 
     def __init__(self, image_size: int):
@@ -361,21 +341,26 @@ class Preprocess:
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std),
         ])
+        
+    def parallel_pull_image(self, image_path: str, images: List[Any], i: int):
+        if image_path.startswith("http://") or image_path.startswith("https://"):
+            if os.environ.get("IMAGE_RESIZE_SUFFIX", "") != "" and "picasso" in image_path:
+                image_path += os.environ.get("IMAGE_RESIZE_SUFFIX", "")
+            image = Image.open(requests.get(image_path, stream=True).raw)
+        else:
+            image = Image.open(image_path)
+        image = image.convert("RGB")
+        images[i] = self.image_transform(image)
 
     def encode(self, image_paths: List[str]) -> torch.Tensor:
         images = []
         if os.environ.get("PARALLEL_PULL_IMAGE", "1") == "1" and len(image_paths) > 1:
             images = [None]*len(image_paths)
-            threads = []
+            thread_pool = ThreadPoolExecutor(len(image_paths))
             for i, image_path in enumerate(image_paths):
-                t = PullImageThread(image_path, images, i, self.image_transform)
-                t.setDaemon(True)
-                t.start()
-                threads.append(t)
-            for t in threads:
-                t.join(1)
+                thread_pool.submit(self.parallel_pull_image, image_path, images, i)
+            thread_pool.shutdown(wait=True)
         else:
-            images = []
             for image_path in image_paths:
                 if image_path.startswith("http://") or image_path.startswith("https://"):
                     if os.environ.get("IMAGE_RESIZE_SUFFIX", "") != "" and "picasso" in image_path:
