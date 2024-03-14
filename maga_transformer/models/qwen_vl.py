@@ -12,6 +12,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.models.qwen import QWen
 from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo, QwenVLVitWeight
 from maga_transformer.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
+from maga_transformer.models.qwen_vl_vit_engine import VITEngine
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal_mixin import MultiModalMixin, BaseImageEmbedding
 from maga_transformer.model_factory_register import register_model
@@ -60,7 +61,6 @@ class QWen_VL(QWen, MultiModalMixin):
         return weight_loader
     
     def init_vit_trt(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
-        from maga_transformer.models.qwen_vl_vit_engine import VITEngine
         os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
         if VITEngine.should_generate_engine():
             assert type(self.visual) == QwenVLImageEmbedding
@@ -89,11 +89,11 @@ class QWen_VL(QWen, MultiModalMixin):
         self.config.vit_related_params.vit_weights = None
     
     def load_vit_weight(self, ctype: str):
-        if type(self.visual) == QwenVLImageEmbedding:
-            super().load_vit_weight(ctype=ctype)
-        else:
+        if type(self.visual) == VITEngine:
             # No need to load weight for VITEngine, its weight is inside trt engine.
             return
+        else:
+            super().load_vit_weight(ctype=ctype)
     
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: str, **kwargs: Any) -> Tuple[str, List[Any]]:
