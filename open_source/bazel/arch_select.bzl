@@ -36,3 +36,21 @@ def whl_deps():
         "//:use_cuda12": ["torch==2.1.0+cu121"],
         "//conditions:default": ["torch==2.1.0+cu118"],
     })
+
+def cutlass_kernels_interface():
+    native.alias(
+        name = "cutlass_kernels_interface",
+        actual = select({
+            "//:use_cuda12": "//src/fastertransformer/cutlass:cutlass_kernels_impl",
+            "//conditions:default": "//src/fastertransformer/cutlass:cutlass_kernels_impl",
+        })
+    )
+
+    native.alias(
+        name = "cutlass_headers_interface",
+        actual = select({
+            "//:use_cuda12": "//src/fastertransformer/cutlass:cutlass_headers",
+            "//conditions:default": "//src/fastertransformer/cutlass:cutlass_headers",
+        })
+    )
+
