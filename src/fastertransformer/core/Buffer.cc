@@ -1,5 +1,8 @@
 #include "src/fastertransformer/core/Buffer.h"
 
+#include <numeric>
+#include <cassert>
+
 using namespace std;
 
 namespace fastertransformer {
@@ -47,8 +50,19 @@ size_t Buffer::size() const {
     return totalSize;
 }
 
+size_t Buffer::dim() const {
+    return shape_.size();
+}
+
 size_t Buffer::sizeBytes() const {
     return size() * getTypeSize(type_);
+}
+
+void Buffer::reshape(std::vector<size_t>& shape) {
+    int new_shape_size = std::accumulate(shape.begin(), shape.end(), 0);
+    int old_shape_size = std::accumulate(shape_.begin(), shape_.end(), 0);
+    assert(new_shape_size == old_shape_size);
+    shape_ = shape;
 }
 
 std::string Buffer::debugString() const {
@@ -66,6 +80,12 @@ std::string Buffer::debugString() const {
     debugStr += "data=" + std::to_string(reinterpret_cast<uintptr_t>(data_));
     debugStr += " )";
     return debugStr;
+}
+
+bool Buffer::operator==(const Buffer& other) {
+
+    return (other.data_ == data_) && (other.shape_ == shape_) &&
+           (other.type_ == type_) && (other.where_ == where_);
 }
 
 

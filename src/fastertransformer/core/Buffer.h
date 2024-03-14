@@ -25,6 +25,8 @@ public:
     Buffer& operator=(const Buffer& buffer) = delete;
     Buffer& operator=(Buffer&& buffer) = delete;
 
+    bool operator==(const Buffer& other);
+
     MemoryType                 where() const;
     DataType                   type() const;
     const std::vector<size_t>& shape() const;
@@ -32,6 +34,9 @@ public:
 
     size_t size() const;
     size_t sizeBytes() const;
+    size_t dim() const;
+
+    void reshape(std::vector<size_t>& shape);
 
     std::string debugString() const;
 
