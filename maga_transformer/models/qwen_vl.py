@@ -19,7 +19,7 @@ from maga_transformer.model_factory_register import register_model
 from maga_transformer.utils.util import get_device, to_torch_dtype, get_mem_info
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader
-from maga_transformer.utils.ckpt_database import CkptDatabase
+from maga_transformer.utils.database import CkptDatabase
 
 class QwenVLImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
