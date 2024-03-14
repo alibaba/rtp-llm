@@ -3,6 +3,7 @@ import torch
 import os
 import re
 import json
+import logging
 from typing import List, Any, Tuple, Dict, Optional, Union
 
 from transformers import AutoTokenizer
@@ -11,7 +12,6 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.models.qwen import QWen
 from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo, QwenVLVitWeight
 from maga_transformer.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
-from maga_transformer.models.qwen_vl_vit_engine import VITEngine
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal_mixin import MultiModalMixin, BaseImageEmbedding
 from maga_transformer.model_factory_register import register_model
@@ -42,9 +42,12 @@ class QWen_VL(QWen, MultiModalMixin):
         return True
     
     def load(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
-        if os.environ.get("VIT_TRT", "0") == "1":
-            os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
-            self.init_vit_trt()
+        if os.environ.get("VIT_TRT", "0") == "1": # 这里还需要判断有没有tensorrt
+            try:
+                import tensorrt
+                self.init_vit_trt()
+            except Exception as e:
+                logging.info(f"init vit trt error: {e}")
         super().load(device=device)
     
     def _prepare_model_weight_loader(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
@@ -57,6 +60,8 @@ class QWen_VL(QWen, MultiModalMixin):
         return weight_loader
     
     def init_vit_trt(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+        from maga_transformer.models.qwen_vl_vit_engine import VITEngine
+        os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
         if VITEngine.should_generate_engine():
             assert type(self.visual) == QwenVLImageEmbedding
             weight_loader = self._prepare_model_weight_loader(device=device)
@@ -84,11 +89,11 @@ class QWen_VL(QWen, MultiModalMixin):
         self.config.vit_related_params.vit_weights = None
     
     def load_vit_weight(self, ctype: str):
-        if type(self.visual) == VITEngine:
+        if type(self.visual) == QwenVLImageEmbedding:
+            super().load_vit_weight(ctype=ctype)
+        else:
             # No need to load weight for VITEngine, its weight is inside trt engine.
             return
-        else:
-            super().load_vit_weight(ctype=ctype)
     
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: str, **kwargs: Any) -> Tuple[str, List[Any]]:
