@@ -63,4 +63,4 @@ class Bert(GPT):
     def get_tokenizer(cls, config: GptInitModelParameters):
         return AutoTokenizer.from_pretrained(config.tokenizer_path, trust_remote_code=True)
     
-register_model('bert', Bert)
+register_model('bert', Bert, ['BertModel', 'BertForMaskedLM', 'BertForSequenceClassification'])
