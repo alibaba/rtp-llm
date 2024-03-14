@@ -277,6 +277,9 @@ class W:
         ffn_w2_lora_a: sp_0,
         ffn_w2_lora_b: sp_id,
         ffn_gate: sp_id,
+        post_ffn_ln_beta: sp_id,
+        post_ffn_ln_gamma: sp_id,
+        token_type_embedding: sp_id        
     }
 
     weights_list = [

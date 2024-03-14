@@ -1,6 +1,6 @@
 import torch
-import numpy
 from typing import Any, List, Optional
+from maga_transformer.utils.util import to_cuda, to_cpu
 
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
@@ -54,4 +54,29 @@ class EmbeddingBatchedInput(object):
         self.token_num = len(self.combo_tokens)
 
     def tp_sync(self):
-        pass
+        if g_parallel_info.tp_size <= 1:
+            return
+        check_num: int = 998244352
+        check_num2: int = 1000000008
+        shape_hints = torch.IntTensor([check_num, self.batch_size, self.token_num, check_num2])
+        shape_hints = to_cuda(shape_hints)
+        self.nccl_op_.broadcast_tp([shape_hints])
+        torch.cuda.current_stream().synchronize()
+        shape_hints = shape_hints.cpu().numpy()
+        assert shape_hints[0] == check_num and shape_hints[-1] == check_num2, 'check sum error'
+        
+        if g_parallel_info.tp_rank == 0:
+            context_length_tensor = to_cuda(torch.IntTensor(self.context_lengths_list))
+            combo_tokens_tensor = to_cuda(torch.IntTensor(self.combo_tokens))
+            combo_token_type_ids_tensor = to_cuda(torch.IntTensor(self.combo_token_type_ids))
+        else:
+            self.batch_size = shape_hints[1]            
+            self.token_num = shape_hints[2]
+            context_length_tensor = torch.zeros([self.batch_size], dtype=torch.int32, device="cuda:0")
+            combo_tokens_tensor = torch.zeros([self.token_num], dtype=torch.int32, device="cuda:0")
+            combo_token_type_ids_tensor = torch.zeros([self.token_num], dtype=torch.int32, device="cuda:0")
+        self.nccl_op_.broadcast_tp([context_length_tensor, combo_tokens_tensor, combo_token_type_ids_tensor])
+        if g_parallel_info.tp_rank > 0:
+            self.context_lengths_list = to_cpu(context_length_tensor).tolist()
+            self.combo_tokens = to_cpu(combo_tokens_tensor).tolist()
+            self.combo_token_type_ids = to_cpu(combo_token_type_ids_tensor).tolist()

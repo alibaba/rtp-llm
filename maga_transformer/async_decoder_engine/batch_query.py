@@ -103,7 +103,7 @@ class BatchQuery:
         self.nccl_op_.broadcast_tp([shape_hints])
         torch.cuda.current_stream().synchronize()
         shape_hints = shape_hints.cpu().numpy()
-        assert shape_hints[0] == check_num and shape_hints[-1] == check_num2
+        assert shape_hints[0] == check_num and shape_hints[-1] == check_num2, 'check sum error'
 
         if g_parallel_info.tp_rank == 0:
             seq_lengths_tensor = to_cuda(torch.IntTensor(self.seq_lengths_list))
