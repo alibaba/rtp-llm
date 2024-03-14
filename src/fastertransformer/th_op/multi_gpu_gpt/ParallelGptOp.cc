@@ -21,7 +21,7 @@ FtGpt<T>::FtGpt(const GptInitParameter&       gpt_init_parameter,
     int8_weights_(int8_weights),
     int8_scales_(int8_scales)
 {
-    ft::check_cuda_error(cublasLtCreate(&cublaslt_handle_));
+    check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     cublas_algo_map_      = new ft::cublasAlgoMap(GEMM_CONFIG);
     cublas_wrapper_mutex_ = new std::mutex();
 

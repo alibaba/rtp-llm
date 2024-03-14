@@ -36,7 +36,7 @@ FtGptContextDecoder<T>::FtGptContextDecoder(const GptInitParameter&       gpt_in
     gpt_init_parameter_(gpt_init_parameter),
     remove_padding_(remove_padding)
 {
-    ft::check_cuda_error(cublasLtCreate(&cublaslt_handle_));
+    check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     cublas_algo_map_      = new ft::cublasAlgoMap(GEMM_CONFIG);
     cublas_wrapper_mutex_ = new std::mutex();
 
@@ -168,7 +168,7 @@ void FtGptContextDecoder<T>::forward(th::Tensor&               decoder_output,
                         sizeof(T*) * batch_size,
                         cudaMemcpyDefault,
                         stream);
-        ft::sync_check_cuda_error();
+        sync_check_cuda_error();
 
         input_tensors.insert({"d_prefix_prompt_batch", ft::Tensor{ft::MEMORY_GPU, ft::getTensorType<T>(), {batch_size}, prompt_learning_weight_batch}});
         input_tensors.insert({"d_prefix_prompt_lengths", convert_tensor<T>(prefix_lengths_opt.value())});

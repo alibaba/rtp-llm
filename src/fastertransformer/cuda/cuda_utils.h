@@ -170,8 +170,8 @@ void check(T result, char const* const func, const char* const file, int const l
     }
 }
 
-#define check_cuda_error(val) check((val), #val, __FILE__, __LINE__)
-#define check_cuda_error_2(val, file, line) check((val), #val, file, line)
+#define check_cuda_error(val) fastertransformer::check((val), #val, __FILE__, __LINE__)
+#define check_cuda_error_2(val, file, line) fastertransformer::check((val), #val, file, line)
 
 inline void syncAndCheck(const char* const file, int const line) {
     // When FT_DEBUG_LEVEL=DEBUG, must check error
@@ -209,7 +209,7 @@ inline void CheckError(const char* const file, int const line) {
     }
 }
 
-#define sync_check_cuda_error() syncAndCheck(__FILE__, __LINE__)
+#define sync_check_cuda_error() fastertransformer::syncAndCheck(__FILE__, __LINE__)
 
 #define final_check_error() CheckError(__FILE__, __LINE__)
 

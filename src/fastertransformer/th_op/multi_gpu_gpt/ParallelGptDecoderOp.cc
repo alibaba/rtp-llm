@@ -33,7 +33,7 @@ FtGptDecoder<T>::FtGptDecoder(const GptInitParameter&       gpt_init_parameter,
                               const std::vector<std::unordered_map<std::string, th::Tensor>>& int8_scales):
     gpt_init_parameter_(gpt_init_parameter)
 {
-    ft::check_cuda_error(cublasLtCreate(&cublaslt_handle_));
+    check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     cublas_algo_map_      = new ft::cublasAlgoMap(GEMM_CONFIG);
     cublas_wrapper_mutex_ = new std::mutex();
 
