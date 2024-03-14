@@ -1,6 +1,10 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
+#include "src/fastertransformer/kernels/activation_kernels.h"
+#include "src/fastertransformer/cutlass/interface.h"
+#include "src/fastertransformer/utils/compiler_config.h"
+
 
 using namespace std;
 
@@ -46,10 +50,6 @@ void CudaDevice::layernorm(const LayernormParams& params) {
     // );
 }
 
-void CudaDevice::gemm(const GemmParams& params) {
-
-}
-
 void CudaDevice::groupedGemm(const GroupedGemmParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
@@ -58,19 +58,12 @@ void CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::contextAttention(const AttentionModuleParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
 
 void CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 void CudaDevice::attentionLayer(const AttentionLayerParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
-void CudaDevice::ffnLayer(const FfnLayerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

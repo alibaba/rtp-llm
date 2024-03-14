@@ -1,11 +1,16 @@
 #pragma once
 
 #include "src/fastertransformer/devices/Weights.h"
+#include "src/fastertransformer/devices/CommonDefines.h"
+#include "src/fastertransformer/utils/activation_types.h"
+#include "src/fastertransformer/utils/RopeTypes.h"
+
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/utils/layernorm_types.h"
 
 #include <optional>
+#include <functional>
 #include <sstream>
 #include <memory>
 
@@ -108,27 +113,58 @@ enum class TransposeOperation {
 // or [bs, m, k], [bs, k, n], [bs, m, n], [bs, m, n] where bs is batch_size
 // NOTE: caller needs to preallocate C
 struct GemmParams {
-    GemmParams(const Buffer& A, const Buffer& B, Buffer& C)
-    : A(A), B(B), C(C), D(C) {}
-    GemmParams(const Buffer& A, const Buffer& B, const Buffer& C, Buffer& D)
-    : A(A), B(B), C(C), D(D) {}
+
+    // Essential params
 
     const Buffer& A;
     const Buffer& B;
-    const Buffer& C;
     Buffer&       D;
 
-    const std::optional<const Buffer> A_scale = std::nullopt;
-    const std::optional<const Buffer> B_Scale = std::nullopt;
-    const std::optional<const Buffer> C_scale = std::nullopt;
+    GemmParams(const Buffer& A,
+               const Buffer& B,
+               Buffer& D):
+               A(A),
+               B(B),
+               D(D) {}
+    
+    GemmParams(TransposeOperation transA,
+               TransposeOperation transB,
+               const Buffer& A,
+               const Buffer& B,
+               Buffer& D):
+               transA(transA),
+               transB(transB),
+               A(A),
+               B(B),
+               D(D) {}
 
+    // Optional params
+
+    const std::optional<
+        std::reference_wrapper<const Buffer>> C = std::nullopt;
+    
+    GemmParams(const Buffer& A,
+               const Buffer& B,
+               const Buffer& C,
+               Buffer& D):
+               A(A),
+               B(B),
+               C(C),
+               D(D) {}
+
+    // Attribute
     const TransposeOperation transA = TransposeOperation::NONE;
     const TransposeOperation transB = TransposeOperation::NONE;
 
-    const float alpha = 1.0f;
-    const float beta  = 0.0f;
-    const std::optional<DataType> computation_type = std::nullopt;
+    float alpha = 1.0f;
+    float beta  = 0.0f;
+
+    void Check() const;
+
 };
+
+
+
 
 // D = alpha * op(A) * op(B) + beta * C
 // shapes of each A, B, C, D needs to be [m, k], [k, n], [m, n], [m, n]
@@ -227,14 +263,24 @@ struct AttentionLayerParams {
 
 struct FfnLayerParams {
     const Buffer& input;
+    const Buffer& gate_weight;
+    const Buffer& up_weight;
+    const Buffer& down_weight;
     Buffer& output;
+    ActivationType atype;
 
-    const FfnLayerWeights&       weights;
-
-    const ActivationType activation_type;
-
-    const std::optional<std::reference_wrapper<const Buffer>> lora_ids;
-    const std::optional<std::reference_wrapper<const Buffer>> lora_input_lengths;
+    FfnLayerParams(const Buffer& input,
+                   const Buffer& gate_weight,
+                   const Buffer& up_weight,
+                   const Buffer& down_weight,
+                   Buffer& output,
+                   ActivationType atype) : 
+                   input(input),
+                   gate_weight(gate_weight),
+                   up_weight(up_weight),
+                   down_weight(down_weight),
+                   output(output),
+                   atype(atype) {}
 };
 
 struct SamplerParams {
@@ -275,6 +321,119 @@ struct BroadcastParams {
 
 struct AllReduceParams {
     std::vector<Buffer>& buffers;
+};
+
+// output = act(input) + bias
+struct ActivationParams {
+    using OBuffer = const std::optional<std::reference_wrapper<const Buffer>>;
+    Buffer& output;
+    OBuffer input;
+    OBuffer bias;
+    OBuffer gate;
+    OBuffer gate_bias;
+
+    ActivationType atype;
+
+    ActivationParams(ActivationType atype,
+                     Buffer& output,
+                     OBuffer& bias = std::nullopt,
+                     OBuffer& gate = std::nullopt,
+                     OBuffer& gate_bias = std::nullopt) : 
+                     atype(atype),
+                     output(output),
+                     bias(bias),
+                     gate(gate),
+                     gate_bias(gate_bias) {}
+};
+
+
+struct ContextAttentionParams {
+
+    // shape[token_num, head_num + 2 * head_kv_num, head_size]
+    Buffer& qkv_input;
+    
+
+    // shape[batch_size, head_num, seq_len, head_size]
+    Buffer& q_output;
+    // shape[batch_size, head_kv_num, seq_len, head_size]
+    Buffer& k_output;
+    // shape[batch_size, head_kv_num, seq_len, head_size]
+    Buffer& v_output;
+    // shape[(head_num + 2 * head_kv_num) * head_size]
+    const Buffer& bias;
+    // shape[token_num]
+    const Buffer& position_ids;
+    // shape[token_num]
+    const Buffer& padding_offset;
+    // shape[batch_size]
+    const Buffer& cu_seqlens;
+    // shape[batch_size, seq_len, seq_len]
+    const Buffer& attention_mask;
+
+    const RopeConfig rope_config;
+
+    // tmp for test
+    Buffer& qk_output;
+    // Buffer& qk_softmax_output;
+    Buffer& softmax_qk_output;
+    Buffer& qkv_output;
+    Buffer& qkv_transpose_output;
+
+    ContextAttentionParams(Buffer& qkv_input,
+                           Buffer& q_output,
+                           Buffer& k_output,
+                           Buffer& v_output,
+                           const Buffer& bias,
+                           const Buffer& position_ids,
+                           const Buffer& padding_offset,
+                           const Buffer& cu_seqlens,
+                           const Buffer& attention_mask,
+                           const RopeConfig& rope_config,
+                           Buffer& qk_output,
+                           Buffer& softmax_qk_output,
+                           Buffer& qkv_output,
+                           Buffer& qkv_transpose_output) :
+                           qkv_input(qkv_input),
+                           q_output(q_output),
+                           k_output(k_output),
+                           v_output(v_output),
+                           bias(bias),
+                           position_ids(position_ids),
+                           padding_offset(padding_offset),
+                           cu_seqlens(cu_seqlens),
+                           attention_mask(attention_mask),
+                           rope_config(rope_config),
+                           qk_output(qk_output),
+                           softmax_qk_output(softmax_qk_output),
+                           qkv_output(qkv_output),
+                           qkv_transpose_output(qkv_transpose_output) {} 
+
+    void check() const;
+};
+
+struct SoftmaxParams{
+    
+    const Buffer& input;
+    Buffer& output;
+    const Buffer& mask;
+    float scale = 1.0f;
+
+    SoftmaxParams(const Buffer& input,
+                  Buffer& output,
+                  const Buffer& mask) : 
+                  input(input),
+                  output(output),
+                  mask(mask) {}
+    
+    SoftmaxParams(const Buffer& input,
+                  Buffer& output,
+                  const Buffer& mask,
+                  float scale) : 
+                  input(input),
+                  output(output),
+                  mask(mask),
+                  scale(scale) {}
+
 };
 
 }  // namespace fastertransformer

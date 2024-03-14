@@ -22,9 +22,11 @@ public:
     virtual void gemm(const GemmParams& params)                  = 0;
     virtual void groupedGemm(const GroupedGemmParams& params)    = 0;
     virtual void embeddingLookup(const EmbeddingLookupParams& params) = 0;
+    virtual void activation(const ActivationParams& params) = 0;
+    virtual void softmax(const SoftmaxParams& params) = 0;
 
     // dedicated attention ops
-    virtual void contextAttention(const AttentionModuleParams& params)     = 0;
+    virtual void contextAttention(const ContextAttentionParams& params)     = 0;
     virtual void decoderSelfAttention(const AttentionModuleParams& params) = 0;
 
     // Top level model ops

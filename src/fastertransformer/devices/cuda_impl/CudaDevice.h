@@ -23,7 +23,7 @@ public:
     void gemm(const GemmParams& params);
     void groupedGemm(const GroupedGemmParams& params);
     void embeddingLookup(const EmbeddingLookupParams& params);
-    void contextAttention(const AttentionModuleParams& params);
+    void contextAttention(const ContextAttentionParams& params);
     void decoderSelfAttention(const AttentionModuleParams& params);
     void attentionLayer(const AttentionLayerParams& params);
     void ffnLayer(const FfnLayerParams& params);
@@ -31,6 +31,9 @@ public:
     void sampleTopK(const SamplerParams& params);
     void broadcast(const BroadcastParams& params);
     void allReduceSum(const AllReduceParams& params);
+    void activation(const ActivationParams& params);
+    void softmax(const SoftmaxParams& params);
+
 
 private:
     std::unique_ptr<IAllocator> allocator_;

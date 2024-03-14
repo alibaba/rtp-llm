@@ -25,7 +25,7 @@ void CpuDevice::layernorm(const LayernormParams& params) {}
 void CpuDevice::gemm(const GemmParams& params) {}
 void CpuDevice::groupedGemm(const GroupedGemmParams& params) {}
 void CpuDevice::embeddingLookup(const EmbeddingLookupParams& params) {}
-void CpuDevice::contextAttention(const AttentionModuleParams& params) {}
+void CpuDevice::contextAttention(const ContextAttentionParams& params) {}
 void CpuDevice::decoderSelfAttention(const AttentionModuleParams& params) {}
 void CpuDevice::attentionLayer(const AttentionLayerParams& params) {}
 void CpuDevice::ffnLayer(const FfnLayerParams& params) {}
@@ -33,7 +33,9 @@ void CpuDevice::sampleTopP(const SamplerParams& params) {}
 void CpuDevice::sampleTopK(const SamplerParams& params) {}
 void CpuDevice::broadcast(const BroadcastParams& params) {}
 void CpuDevice::allReduceSum(const AllReduceParams& params) {}
-
+void CpuDevice::activation(const ActivationParams& params) {}
+void CpuDevice::softmax(const SoftmaxParams& params) {}
 RTP_LLM_REGISTER_DEVICE(Cpu);
+
 
 } // namespace fastertransformer
