@@ -6,7 +6,10 @@ from typing import List
 from maga_transformer.models.qwen_vl_vit import Preprocess
 
 import torch
-import tensorrt as trt
+try:
+    import tensorrt as trt
+except ImportError as e:
+    pass
 
 def torch_dtype_from_trt(dtype):
    if dtype == trt.int8:
@@ -61,7 +64,7 @@ class VITEngine(torch.nn.Module):
             self.generate_trt_engine(onnx_file_path, engine_file_path)
             VITEngine.get_check_done_file().touch()
 
-        self.engine = self.loadEngine2TensorRT(engine_file_path)
+        self.engine = self.load_trt_engine(engine_file_path)
         
         if self.engine is not None:
             self.input_names = ["input"]
@@ -134,7 +137,7 @@ class VITEngine(torch.nn.Module):
         with open(planFile, 'wb') as f:
             f.write(engineString)
     
-    def loadEngine2TensorRT(self, filepath: str):
+    def load_trt_engine(self, filepath: str):
         logging.info("Start loading TRT engine!")
         G_LOGGER = trt.Logger(trt.Logger.WARNING)
         with open(filepath, "rb") as f, trt.Runtime(G_LOGGER) as runtime:

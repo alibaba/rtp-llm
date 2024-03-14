@@ -260,8 +260,7 @@ py_wheel(
         "einops",
         "prettytable",
         "pydantic==2.5.3",
-        "timm==0.9.12",
-        "onnx"
+        "timm==0.9.12"
     ] + whl_deps(),
 )
 
