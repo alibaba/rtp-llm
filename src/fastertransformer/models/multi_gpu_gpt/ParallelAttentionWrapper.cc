@@ -57,8 +57,8 @@ bool ParallelAttentionWrapper<T>::CheckUseFMHA() const {
 template<typename T>
 bool ParallelAttentionWrapper<T>::UseOpenSourceFMHA() const {
     bool use_open_source_fmha = CheckUseFMHA();
-    if (!(is_sm8x() || is_sm90())){
-        FT_LOG_WARNING("FMHA is disabled for pre-ampere");
+    if (!(is_sm8x() || is_sm90())) {
+        FT_LOG_WARNING("opensource FMHA is disabled for sm %d", get_sm());
         use_open_source_fmha = false;
     }
     char* fmha_env = std::getenv("ENABLE_OPENSOURCE_FMHA");
@@ -73,8 +73,8 @@ bool ParallelAttentionWrapper<T>::UseOpenSourceFMHA() const {
 template<typename T>
 bool ParallelAttentionWrapper<T>::UseTRTFMHA() const {
     bool use_trt_fmha = CheckUseFMHA();
-    if (!(is_sm8x() || is_sm90())){
-        FT_LOG_WARNING("FMHA is disabled for pre-ampere");
+    if (!(is_sm8x() || is_sm90() || is_sm70())) {
+        FT_LOG_WARNING("TRT FMHA is disabled for sm %d", get_sm());
         use_trt_fmha = false;
     }
     if (params_.is_sparse_head_){

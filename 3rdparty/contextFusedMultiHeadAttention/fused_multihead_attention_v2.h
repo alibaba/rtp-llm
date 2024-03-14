@@ -148,8 +148,8 @@ protected:
 
     struct FusedMultiHeadAttentionKernelInfo
     {
-        unsigned int mMetaInfoIndex;
-        CUfunction mDeviceFunction;
+        unsigned int mMetaInfoIndex = 0;
+        CUfunction mDeviceFunction = 0;
     };
 
     std::unordered_map<uint64_t, FusedMultiHeadAttentionKernelInfo> mFunctions;
@@ -343,7 +343,9 @@ public:
             {
                 if (kernelMeta.mSharedMemBytes >= 48 * 1024)
                 {
-                    cudaFuncSetAttribute(func, cudaFuncAttributeMaxDynamicSharedMemorySize, kernelMeta.mSharedMemBytes);
+                    cuErrCheck(mDriver.cuFuncSetAttribute(func,
+                                                          CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, kernelMeta.mSharedMemBytes),
+                               mDriver);
                 }
                 cuErrCheck(mDriver.cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
                                kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),

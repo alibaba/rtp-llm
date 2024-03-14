@@ -213,35 +213,34 @@ inline void CheckError(const char* const file, int const line) {
 
 #define final_check_error() CheckError(__FILE__, __LINE__)
 
-inline bool is_sm70() {
-    static bool IS_SM70 = []() {
+inline int get_sm() {
+    static int sm = []() {
         int device;
         check_cuda_error(cudaGetDevice(&device));
         cudaDeviceProp deviceProp;
         check_cuda_error(cudaGetDeviceProperties(&deviceProp, device));
-        return deviceProp.major == 7 && deviceProp.minor == 0;
+        return deviceProp.major * 10 + deviceProp.minor;
+    }();
+    return sm;
+}
+
+inline bool is_sm70() {
+    static bool IS_SM70 = []() {
+        return get_sm() == 70;
     }();
     return IS_SM70;
 }
 
 inline bool is_sm8x() {
     static bool IS_SM8X = []() {
-        int device;
-        check_cuda_error(cudaGetDevice(&device));
-        cudaDeviceProp deviceProp;
-        check_cuda_error(cudaGetDeviceProperties(&deviceProp, device));
-        return deviceProp.major == 8 && deviceProp.minor >= 0;
+        return (get_sm() >= 80) && (get_sm() <= 89);
     }();
     return IS_SM8X;
 }
 
 inline bool is_sm90() {
     static bool IS_SM90 = []() {
-        int device;
-        check_cuda_error(cudaGetDevice(&device));
-        cudaDeviceProp deviceProp;
-        check_cuda_error(cudaGetDeviceProperties(&deviceProp, device));
-        return deviceProp.major == 9 && deviceProp.minor == 0;
+        return get_sm() == 90;
     }();
     return IS_SM90;
 }
