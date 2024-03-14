@@ -34,7 +34,7 @@ class EmbeddingDecoderEngine(object):
         finished: List[bool] = [False] * len(streams)
         while True:
             for index, stream in enumerate(streams):
-                if stream.error_info != "":
+                if stream.error_info != None:
                     raise Exception(stream.error_info)
                 if stream.finished:
                     finished[index] = True
@@ -54,7 +54,6 @@ class EmbeddingDecoderEngine(object):
                     torch.cuda.nvtx.range_pop()
                     time.sleep(0.001)
                     return
-
                 self.batch_input_.generate_model_input(streams)
                 self.batch_input_.tp_sync()
                 embedding_outputs = self.executor_.process(self.batch_input_)

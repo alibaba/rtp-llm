@@ -20,7 +20,7 @@ class EmbeddingOutput(PyDanticModelBase):
 class EmbeddingStream(PyDanticModelBase):
     input: EmbeddingInput
     output: EmbeddingOutput = EmbeddingOutput()
-    error_info: str = ""
+    error_info: Optional[str] = None
     finished: bool = False
 
     def set_error(self, error: str):

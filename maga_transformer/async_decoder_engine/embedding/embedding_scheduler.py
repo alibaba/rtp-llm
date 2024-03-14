@@ -24,7 +24,6 @@ class EmbeddingScheduler(object):
 
     def schedule(self) -> List[EmbeddingStream]:
         with self.lock_:
-            self._remove_timeout_stream()
             new_streams: List[EmbeddingStream] = []
             total_len = 0
 
@@ -37,6 +36,3 @@ class EmbeddingScheduler(object):
             for new_stream in new_streams:
                 self.waiting_streams_.remove(new_stream)        
             return new_streams
-
-    def _remove_timeout_stream(self):
-        pass
