@@ -2,8 +2,11 @@
 
 #include <string>
 #include <cstdint>
+
+#ifdef ENABLE_CUDA
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#endif
 
 namespace fastertransformer {
 
@@ -18,17 +21,23 @@ namespace fastertransformer {
     F(DataType::TYPE_INT16, int16_t); \
     F(DataType::TYPE_INT32, int32_t); \
     F(DataType::TYPE_INT64, int64_t); \
-    F(DataType::TYPE_FP16, half); \
     F(DataType::TYPE_FP32, float); \
     F(DataType::TYPE_FP64, double); \
     F(DataType::TYPE_BYTES, char); \
-    F(DataType::TYPE_BF16, __nv_bfloat16); \
     F(DataType::TYPE_STR, std::string);
+
+#ifdef ENABLE_CUDA
+#define FT_FOREACH_DEVICE_TYPE(F) \
+    F(DataType::TYPE_FP16, half); \
+    F(DataType::TYPE_BF16, __nv_bfloat16);
+#else
+#define FT_FOREACH_DEVICE_TYPE(F)
+#endif
 
 template<typename T>
 struct TypeTrait {
-  static const DataType type = TYPE_INVALID;
-  static const size_t size = 0;
+    static const DataType type = TYPE_INVALID;
+    static const size_t size = 0;
 };
 
 #define DEFINE_TYPE(DT, T) \
@@ -43,10 +52,11 @@ struct TypeTrait {
 
 template<typename T>
 DataType getTensorType() {
-  return TypeTrait<T>::type;
+    return TypeTrait<T>::type;
 }
 
 FT_FOREACH_TYPE(DEFINE_TYPE);
+FT_FOREACH_DEVICE_TYPE(DEFINE_TYPE);
 DEFINE_TYPE(DataType::TYPE_UINT64, unsigned long long int);
 
 size_t getTypeSize(DataType type) {
@@ -56,11 +66,12 @@ size_t getTypeSize(DataType type) {
     } \
 }
 
-  switch (type) {
-    FT_FOREACH_TYPE(CASE);
-    default:
-      return 0;
-  }
+    switch (type) {
+        FT_FOREACH_TYPE(CASE);
+        FT_FOREACH_DEVICE_TYPE(CASE);
+        default:
+            return 0;
+    }
 
 }
 

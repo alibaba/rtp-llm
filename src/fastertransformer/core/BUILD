@@ -15,8 +15,14 @@ cc_library(
     ],
     deps = [
         ":types_hdr",
-        "@local_config_cuda//cuda:cuda",
-    ],
+    ] + select({
+        "//:using_cuda": ["@local_config_cuda//cuda:cuda"],
+        "//conditions:default": [],
+    }),
+    copts = select({
+        "//:using_cuda": copts() + ["-DENABLE_CUDA"],
+        "//conditions:default": copts(),
+    }),
     visibility = ["//visibility:public"],
 )
 
@@ -30,8 +36,24 @@ cc_library(
     ],
     copts = copts(),
     deps = [
-        ":types_hdr",
+        ":types",
         "//src/fastertransformer/utils:logger"
+    ],
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cpu_allocator",
+    srcs = [
+        "cpu_allocator.cc"
+    ],
+    hdrs = [
+        "cpu_allocator.h"
+    ],
+    copts = copts(),
+    deps = [
+        ":allocator",
     ],
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -68,7 +90,7 @@ cc_library(
         "Tensor.h",
     ],
     deps = [
-        ":types_hdr",
+        ":types",
     ],
     visibility = ["//visibility:public"],
 )

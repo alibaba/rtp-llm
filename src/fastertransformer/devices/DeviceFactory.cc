@@ -1,32 +1,26 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
-#include "src/fastertransformer/devices/cpu_impl/CpuDevice.h"
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include <cassert>
+
+using namespace std;
 
 namespace fastertransformer {
 
-#define REGISTER_DEVICE(type) \
-    static DeviceBase* get##type##Device() { \
-        static DeviceBase* type##_device = nullptr; \
-        if (type##_device == nullptr) { \
-            type##_device = new type##Device(); \
-            type##_device->init(); \
-        } \
-        return type##_device; \
-    }
+unordered_map<DeviceType, function<DeviceBase*()>>& DeviceFactory::getRegistrationMap() {
+    static unordered_map<DeviceType, function<DeviceBase*()>> registrationMap;
+    return registrationMap;
+}
 
-REGISTER_DEVICE(Cpu);
-REGISTER_DEVICE(Cuda);
+DeviceBase* DeviceFactory::getDevice(DeviceType type, int device_id) {
+    auto& registrationMap = getRegistrationMap();
+    auto it = registrationMap.find(type);
+    assert(it != registrationMap.end());
+    return it->second();
+}
 
-DeviceBase* DeviceFactory::getDevice(DeviceType type) {
-    switch (type) {
-        case DeviceType::Cpu:
-            return getCpuDevice();
-        case DeviceType::Cuda:
-            return getCudaDevice();
-        default:
-            return nullptr;
-    }
+void DeviceFactory::registerDevice(DeviceType type, function<DeviceBase*()> creator) {
+    auto& registrationMap = getRegistrationMap();
+    assert(registrationMap.find(type) == registrationMap.end());
+    registrationMap[type] = creator;
 }
 
 } // namespace fastertransformer

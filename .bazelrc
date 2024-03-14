@@ -61,6 +61,8 @@ build:cuda12_2 --host_action_env TF_CUDA_VERSION="12.2"
 build:cuda12_2 --define=use_cuda12=true
 build:cuda12_2 --copt="-DUSE_CUDA12=1"
 
+build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false
+
 build:debug -c dbg
 build:debug --copt -g --copt -O0
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"

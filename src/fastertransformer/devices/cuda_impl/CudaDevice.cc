@@ -1,12 +1,14 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/cuda/allocator_cuda.h"
 
 namespace fastertransformer {
 
-CudaDevice::CudaDevice() : device_id_(getDevice()) {
+CudaDevice::CudaDevice() : DeviceBase(), device_id_(getDevice()) {
     allocator_.reset(new Allocator<AllocatorType::CUDA>(device_id_));
     host_allocator_.reset(new Allocator<AllocatorType::CUDA_HOST>(device_id_));
 
+    cudaSetDevice(device_id_);
     cudaStreamCreate(&stream_);
     cublasCreate(&cublas_handle_);
     cublasLtCreate(&cublaslt_handle_);
@@ -25,6 +27,8 @@ CudaDevice::~CudaDevice() {
     cublasDestroy(cublas_handle_);
     cublasLtDestroy(cublaslt_handle_);
 }
+
+RTP_LLM_REGISTER_DEVICE(Cuda);
 
 }; // namespace fastertransformer
 

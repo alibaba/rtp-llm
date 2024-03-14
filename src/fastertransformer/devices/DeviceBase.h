@@ -24,6 +24,7 @@ private:
     virtual IAllocator* getHostAllocator() = 0;
 
 private:
+    int device_id_;
     std::unique_ptr<BufferManager> buffer_manager_;
 };
 

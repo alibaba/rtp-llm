@@ -2,6 +2,11 @@ load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
 load("//bazel:arch_select.bzl", "th_transformer_so")
 
 config_setting(
+    name = "using_cuda",
+    values = {"define": "using_cuda=true"},
+)
+
+config_setting(
     name = "use_cuda12",
     values = {"define": "use_cuda12=true"},
 )
