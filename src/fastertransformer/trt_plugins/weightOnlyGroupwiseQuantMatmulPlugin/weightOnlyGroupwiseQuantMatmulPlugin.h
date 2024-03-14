@@ -17,9 +17,7 @@
 #pragma once
 
 #include "src/fastertransformer/utils/quantization.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
 #include "src/fastertransformer/kernels/preQuantScaleKernel.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h"
 #include "src/fastertransformer/trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 
 #include <cassert>

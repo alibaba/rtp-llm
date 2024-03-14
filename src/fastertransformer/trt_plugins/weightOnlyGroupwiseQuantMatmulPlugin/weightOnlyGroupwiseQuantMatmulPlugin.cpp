@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 #include "src/fastertransformer/trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/enabled.h"
 
 using namespace nvinfer1;
 using namespace tensorrt_llm::common;

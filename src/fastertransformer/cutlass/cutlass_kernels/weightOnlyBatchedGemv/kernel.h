@@ -518,7 +518,7 @@ __device__ void weight_only_batched_gemv_sm70(const uint8_t* qweight, const ActT
         reses[i] = static_cast<float>(accumulator[i]);
     }
 
-    Details::Layout::sync<Num, WarpSize>(reses, sm);
+    Details::Layout::template sync<Num, WarpSize>(reses, sm);
 
     // Each thread is responsible for the accumulation and store to global memory of one element
     for (int i = tid; i < Num; i += BlockSize)
@@ -667,7 +667,7 @@ __device__ void weight_only_batched_gemv(const uint8_t* qweight, const ActType* 
 
     // Each warp completes the internal reduce and writes the [Batch * NPerBlock * Interleave] results to the
     // corresponding address in shared memory
-    Details::Layout::sync<Num, WarpSize>(reses, sm);
+    Details::Layout::template sync<Num, WarpSize>(reses, sm);
 
     // Each thread is responsible for the accumulation and store to global memory of one element
     for (int i = tid; i < Num * Interleave; i += BlockSize)

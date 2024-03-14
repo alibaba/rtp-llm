@@ -1,4 +1,7 @@
 load("//:def.bzl", "copts", "cuda_copts")
+load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
+
+cutlass_kernels_interface()
 
 cc_library(
     name = "trt_plugins",
@@ -16,12 +19,11 @@ cc_library(
         "mixtureOfExperts/*.h",
     ]),
     deps = [
-        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/cutlass:cutlass_interface",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/kernels:kernels",
-        "@cutlass//:cutlass",
-        "@cutlass//:cutlass_utils",
+        "cutlass_kernels_interface",
+        "cutlass_headers_interface",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],

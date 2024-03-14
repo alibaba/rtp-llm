@@ -104,6 +104,15 @@ cc_library(
 )
 
 cc_library(
+    name = "cutlass_headers",
+    deps = [
+        "@cutlass//:cutlass",
+        "@cutlass//:cutlass_utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cutlass_kernels_impl",
     deps = [
         ":fpA_intB_cu",

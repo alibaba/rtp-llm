@@ -17,8 +17,7 @@
 #pragma once
 
 #include "src/fastertransformer/utils/quantization.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h"
+#include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/utils/trt_utils.h"
 
 #include <cassert>
@@ -29,7 +28,7 @@
 
 // The blank line here is to avoid clang-format -sort-includes option reordering these two cutlass header files and
 // breaking dependencies
-// #include "cutlass/integer_subbyte.h"
+#include "cutlass/numeric_types.h"
 
 namespace tensorrt_llm::plugins
 {
