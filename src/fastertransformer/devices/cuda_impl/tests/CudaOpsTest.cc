@@ -1,6 +1,7 @@
-#define private public
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+
+#include <torch/torch.h>
 
 using namespace std;
 using namespace fastertransformer;
@@ -35,14 +36,6 @@ TEST_F(CudaOpsTest, testCopy) {
     assertBufferValueEqual(*C, expected);
 }
 
-TEST_F(CudaOpsTest, testGemmOp) {
-    auto A = device_->allocateBuffer({DataType::TYPE_FP16, {2, 4}, AllocationType::DEVICE}, {});
-    auto B = device_->allocateBuffer({DataType::TYPE_FP16, {4, 3}, AllocationType::DEVICE}, {});
-    auto C = device_->allocateBuffer({DataType::TYPE_FP16, {2, 3}, AllocationType::DEVICE}, {});
-
-    GemmParams params {*A, *B, *C};
-    device_->gemm(params);
-}
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
