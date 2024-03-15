@@ -34,11 +34,8 @@ void CudaDevice::copy(const CopyParams& params) {
     cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_);
 }
 
-void CudaDevice::layernorm(const LayernormParams& params) {
-    RUNTIME_ASSERT_OP_ARG(params.input.shape() == params.norm_output.shape(),
-        "input and output shape mismatch: [%s] vs [%s]",
-        params.input.debugString().c_str(), params.norm_output.debugString().c_str()
-    );
+LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
+    auto output_buffer = move(params.bias_output.value());
 
     // invokeGeneralLayerNorm(
     //     params.norm_output.data(),
@@ -50,28 +47,23 @@ void CudaDevice::layernorm(const LayernormParams& params) {
     // );
 }
 
-void CudaDevice::groupedGemm(const GroupedGemmParams& params) {
+GroupedGemmOutput CudaDevice::groupedGemm(const GroupedGemmParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
+BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-
-void CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
+AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::attentionLayer(const AttentionLayerParams& params) {
+AttentionLayerOutput CudaDevice::attentionLayer(const AttentionLayerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::sampleTopP(const SamplerParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
-void CudaDevice::sampleTopK(const SamplerParams& params) {
+SamplerOutput CudaDevice::sample(const SamplerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

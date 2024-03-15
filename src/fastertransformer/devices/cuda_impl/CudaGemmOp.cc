@@ -28,16 +28,17 @@ cublasOperation_t convert_cublas(TransposeOperation op) {
 ///          D(array) : [m, n]
 ///          alpha(scalar)
 ///          beta(scalar)
-void CudaDevice::gemm(const GemmParams& params) {
-    
-    params.Check();
+BufferPtr CudaDevice::gemm(const GemmParams& params) {
+
+    params.check();
 
     const bool use_batch_gemm = (params.A.dim() > 2);
     auto a_op = convert_cublas(params.transA);
     auto b_op = convert_cublas(params.transB);
 
-    std::cout << "a_op is " << a_op << std::endl;
-    std::cout << "b_op is " << b_op << std::endl;
+    const auto output_type = (params.compute_type == DataType::TYPE_INVALID) ?
+                             params.A.type() : params.compute_type;
+    BufferPtr output;
 
     // select compute
     if (use_batch_gemm) {
@@ -46,47 +47,37 @@ void CudaDevice::gemm(const GemmParams& params) {
         // B [b, ..., k, n]
         // C [b, ..., m, n]
 
-        const int batch_size = std::accumulate(params.A.shape().begin(),
+        const auto batch_size = std::accumulate(params.A.shape().begin(),
                                                params.A.shape().end() - 2,
-                                               1.0, std::multiplies<int>());
+                                               (size_t)1, std::multiplies<size_t>());
 
-        const int m = params.D.shape()[params.D.shape().size() - 2];
+        const auto m = (a_op == cublasOperation_t::CUBLAS_OP_T) ?
+                      params.A.shape().end()[-1]:
+                      params.A.shape().end()[-2];
 
-        const int k = (a_op == cublasOperation_t::CUBLAS_OP_T) ? 
-                      params.A.shape()[params.D.shape().size() - 2] : 
-                      params.A.shape()[params.D.shape().size() - 1];
+        const auto k = (a_op == cublasOperation_t::CUBLAS_OP_T) ?
+                      params.A.shape().end()[-2]:
+                      params.A.shape().end()[-1];
 
-        const int n = params.D.shape()[params.D.shape().size() - 1];
+        const auto n = (a_op == cublasOperation_t::CUBLAS_OP_T) ?
+                      params.B.shape().end()[-2]:
+                      params.B.shape().end()[-1];
 
-        const int lda = k;
-        const int stride_a = m * k;
+        auto output_shape = vector<size_t>(params.A.shape().begin(), params.A.shape().end() - 2);
+        output_shape.insert(output_shape.end(), {m, n});
+        output = allocateBuffer({params.A.type(), output_shape, AllocationType::DEVICE}, {});
 
-        const int ldb = (b_op == cublasOperation_t::CUBLAS_OP_T) ? k : n;
+        const auto lda = k;
+        const auto stride_a = m * k;
+        const auto ldb = (b_op == cublasOperation_t::CUBLAS_OP_T) ? k : n;
+        const auto stride_b = k * n;
+        const auto ldc = n;
+        const auto stride_c = m * n;
 
-        const int stride_b = k * n;
-        
-        const int ldc = n;
-        const int stride_c = m * n;
-
-        for (auto size : params.A.shape()) {
-            std::cout << "A shape is " << size << std::endl;
-        }
-        for (auto size : params.B.shape()) {
-            std::cout << "B shape is " << size << std::endl;
-        }
-        for (auto size : params.D.shape()) {
-            std::cout << "D shape is " << size << std::endl;
-        }
-        
-
-        std::cout << "m is " << m << "\n" \
-                  << "n is " << n << "\n" \
-                  << "k is " << k << "\n" \
-                  << "b is " << batch_size << std::endl;
         // convert buffers to ptrs
-        const void* A = params.A.data();
-        const void* B = params.B.data();
-        void* D = params.D.data();
+        const auto A = params.A.data();
+        const auto B = params.B.data();
+        auto D = output->data();
 
         cudaDataType_t A_data_type = CUDA_R_16F;
         cudaDataType_t B_data_type = CUDA_R_16F;
@@ -96,8 +87,7 @@ void CudaDevice::gemm(const GemmParams& params) {
         const float alpha = 1.0f;
         const float beta  = 0.0f;
 
-        if (params.D.type() == DataType::TYPE_FP32) {
-            std::cout << "test" << std::endl;
+        if (output_type == DataType::TYPE_FP32) {
             cublas_mm_wrapper_->stridedBatchedGemm(b_op,
                                                    a_op,
                                                    n,
@@ -137,35 +127,31 @@ void CudaDevice::gemm(const GemmParams& params) {
             stride_c,
             batch_size);
         }
-        sync_check_cuda_error();
-        return;
     } else {
-        const int m = params.A.shape()[0];
-        const int k = params.A.shape()[1];
-        const int n = params.D.shape()[1];
+        const auto m = params.A.shape()[0];
+        const auto k = params.A.shape()[1];
+        const auto n = params.B.shape()[1];
+        output = allocateBuffer({output_type, {m, n}, AllocationType::DEVICE}, {});
 
         // convert buffers to ptrs
-        const void* A = params.A.data();
-        const void* B = params.B.data();
-        void* D = params.D.data();
+        const auto A = params.A.data();
+        const auto B = params.B.data();
+        auto D = output->data();
 
         cublas_mm_wrapper_->Gemm(a_op,
-                                 b_op, 
-                                 n, 
-                                 m, 
-                                 k, 
-                                 B, 
-                                 n, 
-                                 A, 
-                                 k, 
-                                 D, 
+                                 b_op,
+                                 n,
+                                 m,
+                                 k,
+                                 B,
+                                 n,
+                                 A,
+                                 k,
+                                 D,
                                  n);
-        sync_check_cuda_error();
-        return;
     }
 
-    return;
-
+    return move(output);
 }
 
 

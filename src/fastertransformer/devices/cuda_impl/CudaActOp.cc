@@ -66,11 +66,11 @@ namespace fastertransformer {
 } while(0)
 
 
-
 /// @brief   act op
 void CudaDevice::activation(const ActivationParams& params) {
-    size_t m = params.output.shape()[0];
-    size_t n = params.output.shape()[0];
+    const auto& states = params.states;
+    size_t m = states.shape()[0];
+    size_t n = states.shape()[0];
 
     void* bias = nullptr;
     void* gate = nullptr;
@@ -89,12 +89,10 @@ void CudaDevice::activation(const ActivationParams& params) {
     }
 
     DISPATCH(
-        params.output.type(), params.atype,
-        params.output.data(), bias,
+        states.type(), params.atype,
+        states.data(), bias,
         gate, gate_bias, m, n, stream_
     );
-
-    
 }
 
 

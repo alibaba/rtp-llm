@@ -19,21 +19,19 @@ public:
 
 public:
     void copy(const CopyParams& params);
-    void layernorm(const LayernormParams& params);
-    void gemm(const GemmParams& params);
-    void groupedGemm(const GroupedGemmParams& params);
-    void embeddingLookup(const EmbeddingLookupParams& params);
-    void contextAttention(const ContextAttentionParams& params);
-    void decoderSelfAttention(const AttentionModuleParams& params);
-    void attentionLayer(const AttentionLayerParams& params);
-    void ffnLayer(const FfnLayerParams& params);
-    void sampleTopP(const SamplerParams& params);
-    void sampleTopK(const SamplerParams& params);
+    LayernormOutput layernorm(const LayernormParams& params);
+    BufferPtr gemm(const GemmParams& params);
+    GroupedGemmOutput groupedGemm(const GroupedGemmParams& params);
+    BufferPtr embeddingLookup(const EmbeddingLookupParams& params);
+    void activation(const ActivationParams& params);
+    BufferPtr softmax(const SoftmaxParams& params);
+    AttentionModuleOutput contextAttention(const AttentionModuleParams& params);
+    AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);
+    AttentionLayerOutput attentionLayer(const AttentionLayerParams& params);
+    FfnLayerOutput ffnLayer(const FfnLayerParams& params);
+    SamplerOutput sample(const SamplerParams& params);
     void broadcast(const BroadcastParams& params);
     void allReduceSum(const AllReduceParams& params);
-    void activation(const ActivationParams& params);
-    void softmax(const SoftmaxParams& params);
-
 
 private:
     std::unique_ptr<IAllocator> allocator_;

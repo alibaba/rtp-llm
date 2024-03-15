@@ -14,15 +14,16 @@ namespace fastertransformer {
 
 
 /// @brief   softmax op
-void CudaDevice::softmax(const SoftmaxParams& params) {
-
+BufferPtr CudaDevice::softmax(const SoftmaxParams& params) {
+    const auto& input = params.input;
+    auto output = allocateBuffer({DataType::TYPE_FP16, input.shape(), AllocationType::DEVICE});
     MaskedSoftmaxParam<half, float> param;
     // (batch_size, head_num, q_length, k_length)
-    param.attention_score    = reinterpret_cast<half*>(params.output.data());
+    param.attention_score    = reinterpret_cast<half*>(output->data());
     // (batch_size, head_num, q_length, k_length)
     param.qk                 = reinterpret_cast<float*>(params.input.data());
     // (batch_size, q_length, k_length)
-    param.attention_mask     = reinterpret_cast<half*>(params.mask.data());  
+    param.attention_mask     = reinterpret_cast<half*>(params.mask.data());
     param.batch_size         = params.input.shape()[0];
     param.num_heads          = params.input.shape()[1];
     param.q_length           = params.input.shape()[2];
@@ -30,7 +31,7 @@ void CudaDevice::softmax(const SoftmaxParams& params) {
     param.qk_scale           = half(params.scale);
     param.linear_bias_slopes = nullptr;
     invokeMaskedSoftmax(param, stream_);
-    
+    return move(output);
 }
 
 

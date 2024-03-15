@@ -18,23 +18,22 @@ namespace fastertransformer {
 ///          W2(array) : [m, n]
 ///          b2(array)
 ///          output(array)
-void CudaDevice::ffnLayer(const FfnLayerParams& params) {
+FfnLayerOutput CudaDevice::ffnLayer(const FfnLayerParams& params) {
+    const auto& input = params.input;
+    const auto& gate_weight = *(params.weights.gate_weight->kernel);
+    const auto& up_weight = *(params.weights.up_weight->kernel);
+    const auto& down_weight = *(params.weights.down_weight->kernel);
 
-    size_t token_num = params.input.shape()[0];
-    size_t inter_size = params.gate_weight.shape()[1];
-    auto gate_buf = allocateBuffer({
-        params.input.type(), {token_num, inter_size}, AllocationType::DEVICE}, {});
-    gemm({params.input, params.gate_weight, *gate_buf});
+    const auto token_num = input.shape()[0];
+    const auto inter_size = gate_weight.shape()[1];
 
-    auto up_buf = allocateBuffer({
-        params.input.type(), {token_num, inter_size}, AllocationType::DEVICE}, {});
-    
-    gemm({params.input, params.up_weight, *up_buf});
+    auto gate_buf = gemm({params.input, gate_weight});
+    auto up_buf = gemm({params.input, up_weight});
 
-    activation({params.atype, *gate_buf, std::nullopt, *up_buf, std::nullopt});
+    activation({params.activation_type, *gate_buf, std::nullopt, *up_buf, std::nullopt});
+    auto output = gemm({*gate_buf, down_weight});
 
-    gemm({*gate_buf, params.down_weight, params.output});
-    
+    return FfnLayerOutput({move(output)});
 }
 
 } // namespace fastertransformer

@@ -32,7 +32,7 @@ void CudaActOpTest::BasicActTest(ActivationType atype, size_t m, size_t n) {
 
     ActivationParams params {atype, *input_device};
     device_->activation(params);
-    
+
     torch::Tensor output_host;
 
     if (atype == ActivationType::Silu) {
@@ -58,7 +58,7 @@ void CudaActOpTest::GateActTest(ActivationType atype, size_t m, size_t n) {
     ActivationParams params {atype, *input_device, std::nullopt, *gate_device, * gate_bias_device};
 
     device_->activation(params);
-    
+
     torch::Tensor output_host;
 
     if (atype == ActivationType::Silu) {
@@ -67,7 +67,7 @@ void CudaActOpTest::GateActTest(ActivationType atype, size_t m, size_t n) {
         output_host = torch::gelu(input_host);
     }
     output_host = output_host * gate_host;
-    
+
     auto output_device = CreateTensor(*input_device);
 
     ASSERT_TRUE(torch::allclose(output_host, output_device, rtol_, atol_));

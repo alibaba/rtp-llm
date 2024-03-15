@@ -57,48 +57,48 @@ private:
     OpStatus status_;
 };
 
+using OptionalConstBufferRef = std::optional<std::reference_wrapper<const Buffer>>;
+using OptionalBufferRef = std::optional<std::reference_wrapper<Buffer>>;
+
 struct CopyParams {
+    CopyParams(const Buffer& src, Buffer& dst) : src(src), dst(dst) {}
+
     const Buffer& src;
     Buffer&       dst;
+
+    const std::optional<std::vector<size_t>> src_offset;
+    const std::optional<std::vector<size_t>> dst_offset;
+    const std::optional<std::vector<size_t>> sizes;
 };
 
-using OptionalConstBufferRef = std::optional<std::reference_wrapper<const Buffer>>;
+struct LayernormOutput {
+    BufferPtr norm_output;
+    BufferPtr add_bias_output;
+};
 
-// The Layernorm Op also works as an AddBias Op
+// The Layernorm Op has fused Layernorm and AddBias functionality
 // if gamma and beta are not provided, output = input * alpha + residual1 + bias if alpha is provided;
 // else output = input + residual1 + residual2 + bias
 struct LayernormParams {
 
-    // layernorm
-    LayernormParams(const NormType norm_type, const Buffer& input,
-                    const Buffer& gamma, const Buffer& beta, const float eps, Buffer& output):
-    norm_type(norm_type), input(input), gamma(gamma), beta(beta), eps(eps), norm_output(output) {}
-
-    // used for add bias
-    LayernormParams(const Buffer& input,
-                    const OptionalConstBufferRef& residual1,
-                    const OptionalConstBufferRef& bias,
-                    const std::optional<float> alpha, Buffer& output):
-    norm_type(NormType::add_bias), input(input), residual1(residual1),
-    bias(bias), alpha(alpha), norm_output(output) {}
+    // for layernorm
+    LayernormParams(const NormType norm_type, const Buffer& input, OptionalBufferRef bias_output,
+                    OptionalConstBufferRef residual1, OptionalConstBufferRef bias,
+                    const LayerNormWeights& weights, double eps = 1e-6):
+    norm_type(norm_type), input(input), bias_output(bias_output),
+    residual1(residual1), bias(bias), weights(weights), eps(eps) {}
 
     const NormType norm_type = NormType::layernorm;
     const Buffer&  input;
-    const std::optional<std::reference_wrapper<const Buffer>>  residual1;
-    const std::optional<std::reference_wrapper<const Buffer>>  residual2;
-    const std::optional<std::reference_wrapper<const Buffer>>  bias;
-    const std::optional<float> alpha;
+    OptionalBufferRef bias_output;
 
-    const std::optional<std::reference_wrapper<const Buffer>>  gamma;
-    const std::optional<std::reference_wrapper<const Buffer>>  beta;
-    const float eps = 1e-6;
+    const OptionalConstBufferRef  residual1;
+    const OptionalConstBufferRef  residual2;
+    const OptionalConstBufferRef  bias;
+    const std::optional<double>   alpha;
 
-    const std::optional<std::reference_wrapper<const Buffer>> scale_inter;
-    const std::optional<std::reference_wrapper<const Buffer>> scale_out;
-    const std::optional<std::reference_wrapper<const Buffer>> scale;
-    const std::optional<std::reference_wrapper<const Buffer>> dynamic_scale;
-
-    Buffer& norm_output;
+    const std::optional<std::reference_wrapper<const LayerNormWeights>> weights;
+    const double eps;
 };
 
 // corresponds to cublasOperation_t
@@ -112,63 +112,46 @@ enum class TransposeOperation {
 // shapes of A, B, C, D have two options: [m, k], [k, n], [m, n], [m, n]
 // or [bs, m, k], [bs, k, n], [bs, m, n], [bs, m, n] where bs is batch_size
 // NOTE: caller needs to preallocate C
+// TODO: whether inplace ?
 struct GemmParams {
 
-    // Essential params
-
-    const Buffer& A;
-    const Buffer& B;
-    Buffer&       D;
-
     GemmParams(const Buffer& A,
                const Buffer& B,
-               Buffer& D):
-               A(A),
-               B(B),
-               D(D) {}
-    
-    GemmParams(TransposeOperation transA,
-               TransposeOperation transB,
-               const Buffer& A,
-               const Buffer& B,
-               Buffer& D):
-               transA(transA),
-               transB(transB),
-               A(A),
-               B(B),
-               D(D) {}
-
-    // Optional params
-
-    const std::optional<
-        std::reference_wrapper<const Buffer>> C = std::nullopt;
-    
-    GemmParams(const Buffer& A,
-               const Buffer& B,
-               const Buffer& C,
-               Buffer& D):
+               OptionalBufferRef C = std::nullopt,
+               const DataType compute_type = DataType::TYPE_INVALID,
+               TransposeOperation transA = TransposeOperation::NONE,
+               TransposeOperation transB = TransposeOperation::NONE):
                A(A),
                B(B),
                C(C),
-               D(D) {}
+               compute_type(compute_type),
+               transA(transA),
+               transB(transB) {}
 
-    // Attribute
+
+    const Buffer& A;
+    const Buffer& B;
+    OptionalBufferRef C;
+    const DataType compute_type = DataType::TYPE_INVALID; // If passed invalid type, op should infer type
+
     const TransposeOperation transA = TransposeOperation::NONE;
     const TransposeOperation transB = TransposeOperation::NONE;
 
-    float alpha = 1.0f;
-    float beta  = 0.0f;
+    const float alpha = 1.0f;
+    const float beta  = 0.0f;
 
-    void Check() const;
-
+    void check() const;
 };
 
-
-
+struct GroupedGemmOutput {
+    BufferPtr D;
+};
 
 // D = alpha * op(A) * op(B) + beta * C
 // shapes of each A, B, C, D needs to be [m, k], [k, n], [m, n], [m, n]
 struct GroupedGemmParams {
+    using OutputType = GroupedGemmOutput;
+
     GroupedGemmParams(
         const std::vector<Buffer>& A,
         const std::vector<Buffer>& B,
@@ -193,8 +176,6 @@ struct EmbeddingLookupParams {
 
     const std::optional<std::reference_wrapper<const Buffer>> position_ids;
     const std::optional<std::reference_wrapper<const Buffer>> position_table;
-
-    Buffer& embeddings;
 };
 
 struct AttentionCommonInputs {
@@ -238,10 +219,12 @@ struct AttentionConfigs {
     int64_t logn_seq_len  = 2048;
 };
 
-// Attention Module contains
+struct AttentionModuleOutput {
+    BufferPtr hidden_states;
+};
+
 struct AttentionModuleParams {
     const Buffer& input;
-    Buffer&       output;
 
     const AttentionConfigs&      configs;
     const AttentionLayerWeights& weights;
@@ -252,35 +235,47 @@ struct AttentionModuleParams {
     AttentionCommonInputs& common;
 };
 
+struct AttentionLayerOutput {
+    BufferPtr hidden_states;
+};
+
 struct AttentionLayerParams {
     const Buffer& input;
-    Buffer&       output;
 
     const AttentionConfigs&      configs;
     const AttentionLayerWeights& weights;
     AttentionCommonInputs& common;
 };
 
-struct FfnLayerParams {
-    const Buffer& input;
-    const Buffer& gate_weight;
-    const Buffer& up_weight;
-    const Buffer& down_weight;
-    Buffer& output;
-    ActivationType atype;
+struct FfnLayerOutput {
+    BufferPtr hidden_states;
+};
 
+struct FfnLayerParams {
     FfnLayerParams(const Buffer& input,
-                   const Buffer& gate_weight,
-                   const Buffer& up_weight,
-                   const Buffer& down_weight,
-                   Buffer& output,
-                   ActivationType atype) : 
+                   const FfnLayerWeights& weights,
+                   const ActivationType atype) :
                    input(input),
-                   gate_weight(gate_weight),
-                   up_weight(up_weight),
-                   down_weight(down_weight),
-                   output(output),
-                   atype(atype) {}
+                   weights(weights),
+                   activation_type(atype)
+                   {}
+
+    const Buffer& input;
+
+    const FfnLayerWeights&       weights;
+    const ActivationType         activation_type;
+
+    const OptionalConstBufferRef lora_ids;
+    const OptionalConstBufferRef lora_input_lengths;
+};
+
+struct SamplerConfig {
+    const size_t         num_beams;
+    const Buffer&        top_k;
+    const Buffer&        top_p;
+    const Buffer&        temperature;
+    const Buffer&        random_seed;
+    const Buffer&        repetition_penalty;
 };
 
 struct SamplerParams {
@@ -290,28 +285,17 @@ struct SamplerParams {
     const Buffer& input_lengths;     // shape: [batch_size]
     const Buffer& ite;               // shape: [1]
     const Buffer& eos_id;
+    Buffer& kv_cache_blocks;
 
-    Buffer& output_ids;
-    Buffer& sequence_length;
-    Buffer& finished;
-    Buffer& cum_log_probs;
-    Buffer& output_log_probs;
+    const SamplerConfig config;
 };
 
-struct TopPSamplerParams {
-    const SamplerParams& sampler_params;
-    const Buffer&        top_p;
-    const Buffer&        temperature;
-    const Buffer&        random_seed;
-    const Buffer&        repetition_penalty;
-};
-
-struct TopKSamplerParams {
-    const SamplerParams& sampler_params;
-    const Buffer&        top_k;
-    const Buffer&        temperature;
-    const Buffer&        random_seed;
-    const Buffer&        repetition_penalty;
+struct SamplerOutput {
+    BufferPtr output_ids;
+    BufferPtr sequence_length;
+    BufferPtr finished;
+    BufferPtr cum_log_probs;
+    BufferPtr output_log_probs;
 };
 
 struct BroadcastParams {
@@ -325,114 +309,36 @@ struct AllReduceParams {
 
 // output = act(input) + bias
 struct ActivationParams {
-    using OBuffer = const std::optional<std::reference_wrapper<const Buffer>>;
-    Buffer& output;
-    OBuffer input;
-    OBuffer bias;
-    OBuffer gate;
-    OBuffer gate_bias;
-
     ActivationType atype;
+    Buffer& states;
+    const OptionalConstBufferRef bias;
+    const OptionalConstBufferRef gate;
+    const OptionalConstBufferRef gate_bias;
 
     ActivationParams(ActivationType atype,
-                     Buffer& output,
-                     OBuffer& bias = std::nullopt,
-                     OBuffer& gate = std::nullopt,
-                     OBuffer& gate_bias = std::nullopt) : 
+                     Buffer& states,
+                     OptionalConstBufferRef bias = std::nullopt,
+                     OptionalConstBufferRef gate = std::nullopt,
+                     OptionalConstBufferRef gate_bias = std::nullopt) :
                      atype(atype),
-                     output(output),
+                     states(states),
                      bias(bias),
                      gate(gate),
                      gate_bias(gate_bias) {}
 };
 
-
-struct ContextAttentionParams {
-
-    // shape[token_num, head_num + 2 * head_kv_num, head_size]
-    Buffer& qkv_input;
-    
-
-    // shape[batch_size, head_num, seq_len, head_size]
-    Buffer& q_output;
-    // shape[batch_size, head_kv_num, seq_len, head_size]
-    Buffer& k_output;
-    // shape[batch_size, head_kv_num, seq_len, head_size]
-    Buffer& v_output;
-    // shape[(head_num + 2 * head_kv_num) * head_size]
-    const Buffer& bias;
-    // shape[token_num]
-    const Buffer& position_ids;
-    // shape[token_num]
-    const Buffer& padding_offset;
-    // shape[batch_size]
-    const Buffer& cu_seqlens;
-    // shape[batch_size, seq_len, seq_len]
-    const Buffer& attention_mask;
-
-    const RopeConfig rope_config;
-
-    // tmp for test
-    Buffer& qk_output;
-    // Buffer& qk_softmax_output;
-    Buffer& softmax_qk_output;
-    Buffer& qkv_output;
-    Buffer& qkv_transpose_output;
-
-    ContextAttentionParams(Buffer& qkv_input,
-                           Buffer& q_output,
-                           Buffer& k_output,
-                           Buffer& v_output,
-                           const Buffer& bias,
-                           const Buffer& position_ids,
-                           const Buffer& padding_offset,
-                           const Buffer& cu_seqlens,
-                           const Buffer& attention_mask,
-                           const RopeConfig& rope_config,
-                           Buffer& qk_output,
-                           Buffer& softmax_qk_output,
-                           Buffer& qkv_output,
-                           Buffer& qkv_transpose_output) :
-                           qkv_input(qkv_input),
-                           q_output(q_output),
-                           k_output(k_output),
-                           v_output(v_output),
-                           bias(bias),
-                           position_ids(position_ids),
-                           padding_offset(padding_offset),
-                           cu_seqlens(cu_seqlens),
-                           attention_mask(attention_mask),
-                           rope_config(rope_config),
-                           qk_output(qk_output),
-                           softmax_qk_output(softmax_qk_output),
-                           qkv_output(qkv_output),
-                           qkv_transpose_output(qkv_transpose_output) {} 
-
-    void check() const;
-};
-
 struct SoftmaxParams{
-    
-    const Buffer& input;
-    Buffer& output;
-    const Buffer& mask;
-    float scale = 1.0f;
 
     SoftmaxParams(const Buffer& input,
-                  Buffer& output,
-                  const Buffer& mask) : 
-                  input(input),
-                  output(output),
-                  mask(mask) {}
-    
-    SoftmaxParams(const Buffer& input,
-                  Buffer& output,
                   const Buffer& mask,
-                  float scale) : 
-                  input(input),
-                  output(output),
-                  mask(mask),
-                  scale(scale) {}
+                  float scale = 1.0f) :
+    input(input),
+    mask(mask),
+    scale(scale) {}
+
+    const Buffer& input;
+    const Buffer& mask;
+    float scale;
 
 };
 

@@ -46,17 +46,17 @@ struct AttentionLayerWeights {
 };
 
 struct FfnLayerWeights {
-    std::unique_ptr<const DenseWeights>     intermediate_weight;
-    std::unique_ptr<const LoraWeightsMap>   intermediate_lora_weights;
+    std::unique_ptr<const DenseWeights>     up_weight;
+    std::unique_ptr<const LoraWeightsMap>   up_lora_weights;
 
-    std::unique_ptr<const DenseWeights>     intermediate_weight2;
-    std::unique_ptr<const LoraWeightsMap>   intermediate_lora_weights2;
+    std::unique_ptr<const DenseWeights>     gate_weight;
+    std::unique_ptr<const LoraWeightsMap>   gate_lora_weights;
 
-    std::unique_ptr<const DenseWeights>     intermediate_weight3;
-    std::unique_ptr<const LoraWeightsMap>   intermediate_lora_weights3;
+    std::unique_ptr<const DenseWeights>     down_weight;
+    std::unique_ptr<const LoraWeightsMap>   down_lora_weights;
     std::unique_ptr<const LayerNormWeights> dense_layernorm;
 
-    std::unique_ptr<const DenseWeights>     gating_weights;
+    std::unique_ptr<const DenseWeights>     moe_gating_weight;
 };
 
 struct LayerWeights {
