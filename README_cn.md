@@ -45,7 +45,7 @@
 # 安装rtp-llm
 cd rtp-llm
 # cuda12的环境请使用 requirements_torch_gpu_cuda12.txt
-pip3 install -r ./open_source/deps/requirements_torch_gpu.txt 
+pip3 install -r ./open_source/deps/requirements_torch_gpu.txt
 # 使用release版本中对应的whl, 这里以0.1.0的cuda11版本为例子，cuda12的whl包请查看release发布页。
 pip3 install maga_transformer-0.0.1+cuda118-cp310-cp310-manylinux1_x86_64.whl
 # 启动 http 服务
@@ -55,7 +55,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 ```
 
 ## 文档
-* [在Deploy Docker中测试](docs/Deploy-Docker.md)
+* [在Deploy Docker中测试](docs/DeployDocker.md)
 * [启动服务样例](docs/OpenAI-Tutorial.md)
 * [RWKV-Runner 样例](docs/RWKV-Runner.md)
 * [Python Library 样例](docs/HF.md)
@@ -66,7 +66,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [多卡推理](docs/MultiGPU.md)
 * [LoRA](docs/LoRA-Tutorial.md)
 * [PTuning](docs/PTuning-Tutorial.md)
-* [SystemPrompt](docs/SystemPrompt-Tutorial)
+* [SystemPrompt](docs/SystemPrompt-Tutorial.md)
 * [多轮会话](docs/ReuseKVCache-Tutorial.md)
 * [多模态](docs/Multimodal-Tutorial.md)
 * [结构化剪枝](docs/Sparse-Tutorial.md)

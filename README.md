@@ -43,7 +43,7 @@ Applied in numerous LLM scenarios, such as:
 # Install rtp-llm
 cd rtp-llm
 # For cuda12 environment, please use requirements_torch_gpu_cuda12.txt
-pip3 install -r ./open_source/deps/requirements_torch_gpu.txt 
+pip3 install -r ./open_source/deps/requirements_torch_gpu.txt
 # Use the corresponding whl from the release version, here's an example for the cuda11 version 0.1.0, for the cuda12 whl package please check the release page.
 pip3 install maga_transformer-0.0.1+cuda118-cp310-cp310-manylinux1_x86_64.whl
 # start http service
@@ -53,7 +53,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 ```
 
 ## Documentation
-* [Test in Deploy Docker](docs/Deploy-Docker.md)
+* [Test in Deploy Docker](docs/DeployDocker.md)
 * [Serving Example](docs/OpenAI-Tutorial.md)
 * [RWKV-Runner Example](docs/RWKV-Runner.md)
 * [Python Library Example](docs/HF.md)
@@ -64,11 +64,11 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [Multi GPU Inference](docs/MultiGPU.md)
 * [LoRA](docs/LoRA-Tutorial.md)
 * [PTuning](docs/PTuning-Tutorial.md)
-* [SystemPrompt](docs/SystemPrompt-Tutorial)
+* [SystemPrompt](docs/SystemPrompt-Tutorial.md)
 * [ReuseKVCache](docs/ReuseKVCache-Tutorial.md)
 * [Multimodal](docs/Multimodal-Tutorial.md)
 * [Structured Pruning](docs/Sparse-Tutorial.md)
-* [Speculative Sampling](docs/SpeculativeDecoding-Tutorial.md)
+* [Speculative Sampling](docs/SpeculativeDecoding-Tutroial.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)
 * [Benchmark&Performance](benchmark/README.md)
