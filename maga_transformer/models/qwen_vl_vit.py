@@ -344,10 +344,11 @@ class Preprocess:
 
     def encode(self, images: List[Any]) -> torch.Tensor:
         images = DownloadEngine.get(images)
+        res = []
         for image in images:
-            image = self.image_transform(image.convert("RGB"))
-        images = torch.stack(images, dim=0)
-        return images
+            res.append(self.image_transform(image.convert("RGB")))
+        res = torch.stack(res, dim=0)
+        return res
 
 class VisionTransformer(nn.Module):
 
