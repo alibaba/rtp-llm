@@ -101,3 +101,19 @@ def pyc_wheel(name, package_name, src):
         ],
         visibility = ["//visibility:public"],
     )
+
+def rename_wheel(name, package_name, src):
+    native.genrule(
+        name = name,
+        srcs = [src],
+        outs = [package_name + "-cp310-cp310-manylinux1_x86_64.whl"],
+        cmd = "bash -c 'set -xe;" +
+            "cp $(locations %s) $(OUTS);" % (src) +
+            "chmod a+w $(OUTS);" +      
+            "'",
+        tags = [
+            "local",
+            "manual",
+        ],
+        visibility = ["//visibility:public"],
+    )

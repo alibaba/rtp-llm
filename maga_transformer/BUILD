@@ -1,7 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 load("@rules_python//experimental/python:wheel.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
-load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "pyc_wheel")
+load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel")
 load("//bazel:arch_select.bzl", "requirement", "whl_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
@@ -316,20 +316,20 @@ py_wheel(
         "kserve",
     ] + whl_deps(),
 )
- 
-pyc_wheel(
+
+rename_wheel(
     name = "maga_transformer",
     package_name = "maga_transformer-0.1.6",
     src = ":maga_transformer_whl",
 )
 
-pyc_wheel(
+rename_wheel(
     name = "maga_transformer_cuda11",
     package_name = "maga_transformer-0.1.6+cuda118",
     src = ":maga_transformer_whl",
 )
 
-pyc_wheel(
+rename_wheel(
     name = "maga_transformer_cuda12",
     package_name = "maga_transformer-0.1.6+cuda121",
     src = ":maga_transformer_whl",
