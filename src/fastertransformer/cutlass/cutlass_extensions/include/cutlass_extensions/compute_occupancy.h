@@ -36,10 +36,10 @@ inline int compute_occupancy_for_kernel()
         cudaFuncAttributes attr;
         int device = 0;
         int max_smem_per_block = 0;
-        fastertransformer::check_cuda_error(cudaGetDevice(&device));
-        fastertransformer::check_cuda_error(
+        check_cuda_error(cudaGetDevice(&device));
+        check_cuda_error(
             cudaDeviceGetAttribute(&max_smem_per_block, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
-        fastertransformer::check_cuda_error(cudaFuncGetAttributes(&attr, cutlass::Kernel<GemmKernel>));
+        check_cuda_error(cudaFuncGetAttributes(&attr, cutlass::Kernel<GemmKernel>));
         if (smem_size + attr.sharedSizeBytes >= static_cast<size_t>(max_smem_per_block))
         {
             // This should mean that
@@ -51,7 +51,7 @@ inline int compute_occupancy_for_kernel()
     }
 
     int max_active_blocks = -1;
-    fastertransformer::check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+    check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
         &max_active_blocks, cutlass::Kernel<GemmKernel>, GemmKernel::kThreadCount, smem_size));
 
     return max_active_blocks;

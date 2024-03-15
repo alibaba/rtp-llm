@@ -1054,7 +1054,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void*          inpu
                                     end_expert,
                                     stream);
 
-    ft::sync_check_cuda_error();
+    sync_check_cuda_error();
 
     sorter_.updateNumExperts(num_experts);
     const int sorter_ws_size_bytes = pad_to_multiple_of_16(sorter_.getWorkspaceSize(k * num_rows, num_experts));
@@ -1067,14 +1067,14 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void*          inpu
                 k * num_rows,
                 stream);
 
-    ft::sync_check_cuda_error();
+    sync_check_cuda_error();
 
     // Upper bound on number of expanded rows
     const int expanded_active_expert_rows = k * active_rows;
     computeTotalRowsBeforeExpert(
         permuted_experts_, expanded_active_expert_rows, num_experts_per_node, total_rows_before_expert_, stream);
 
-    ft::sync_check_cuda_error();
+    sync_check_cuda_error();
 
     const bool     needs_num_valid = finished || parallelism_config.ep_size > 1;
     const int64_t* num_valid_tokens_ptr =
@@ -1089,7 +1089,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void*          inpu
                                   k,
                                   stream);
 
-    ft::sync_check_cuda_error();
+    sync_check_cuda_error();
 
     if (!isGatedActivation(fc1_activation_type)) {
         moe_gemm_runner_.moeGemmBiasAct(permuted_data_,
@@ -1104,7 +1104,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void*          inpu
                                         num_experts_per_node,
                                         fc1_activation_type,
                                         stream);
-        ft::sync_check_cuda_error();
+        sync_check_cuda_error();
         ft::print_bsd(0, "moe fn1", fc1_result_, k, num_rows, inter_size);
     } else {
         // const size_t fc1_out_size = inter_size * 2;
@@ -1121,7 +1121,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void*          inpu
                                         num_experts_per_node,
                                         ft::ActivationType::Identity,
                                         stream);
-        ft::sync_check_cuda_error();
+        sync_check_cuda_error();
         ft::print_bsd(0, "moe fn1", fc1_result_, k, num_rows, inter_size);
         moe_gemm_runner_.moeGemm(permuted_data_,
                                  fc3_expert_weights,
@@ -1133,11 +1133,11 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void*          inpu
                                  hidden_size,
                                  num_experts_per_node,
                                  stream);
-        ft::sync_check_cuda_error();
+        sync_check_cuda_error();
         ft::print_bsd(0, "moe fn3", glu_inter_result_, k, num_rows, inter_size);
 
         doGatedActivation<T>(fc1_result_, glu_inter_result_, inter_size, num_rows * k, fc1_activation_type, stream);
-        ft::sync_check_cuda_error();
+        sync_check_cuda_error();
         ft::print_bsd(0, "moe fn1 * 3", fc1_result_, k, num_rows, inter_size);
     }
 
@@ -1152,7 +1152,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void*          inpu
                              num_experts_per_node,
                              stream);
 
-    ft::sync_check_cuda_error();
+    sync_check_cuda_error();
     ft::print_bsd(0, "moe fn2", fc2_result, k, num_rows, hidden_size);
 
     finalizeMoeRoutingKernelLauncher<T>(fc2_result,
@@ -1172,7 +1172,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void*          inpu
                                         normalization_mode,
                                         stream);
 
-    ft::sync_check_cuda_error();
+    sync_check_cuda_error();
     ft::print_bsd(0, "moe decoder_output", final_output, 1, num_rows, hidden_size);
 }
 
@@ -1223,7 +1223,7 @@ void makeLoadBalancedRoutingConfiguration(
     }
 #endif
 
-    ft::check_cuda_error(cudaMemsetAsync(data_void, 0x0, num_experts * num_tokens * item_size, stream));
+    check_cuda_error(cudaMemsetAsync(data_void, 0x0, num_experts * num_tokens * item_size, stream));
 
     int stride = ft::ceilDiv(num_experts, k);
 
@@ -1231,7 +1231,7 @@ void makeLoadBalancedRoutingConfiguration(
     int gridDim  = ft::ceilDiv(num_tokens, blockDim);
     func<<<gridDim, blockDim, 0, stream>>>(data_void, num_experts, num_tokens, k, stride);
 
-    ft::sync_check_cuda_error();
+    sync_check_cuda_error();
 }
 
 // ==================== Variable batched GEMM specializations ==================================

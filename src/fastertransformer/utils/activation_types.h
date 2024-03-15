@@ -58,8 +58,7 @@ inline ActivationType getActivationType(std::string activation_type_str) {
 }
 
 inline bool isGatedActivation(ActivationType activaiton_type) {
-    return activaiton_type == ActivationType::GeGLU || activaiton_type == ActivationType::ReGLU
-           || activaiton_type == ActivationType::SiGLU
+    return activaiton_type == ActivationType::Geglu || activaiton_type == ActivationType::Swiglu
            || activaiton_type == ActivationType::GeGluNoneApproximate;
 }
 

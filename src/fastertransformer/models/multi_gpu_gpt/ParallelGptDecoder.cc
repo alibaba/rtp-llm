@@ -60,8 +60,7 @@ void ParallelGptDecoder<T>::initialize()
     ffn_layer_.reset(new TensorParallelFfnLayer<T>(
                              max_batch_size_,
                              1,
-                             gpt_init_parameter_.head_num_,
-                             gpt_init_parameter_.size_per_head_,
+                             gpt_init_parameter_.hidden_size_,
                              gpt_init_parameter_.expert_num_,  // expert_num
                              gpt_init_parameter_.moe_k_,
                              gpt_init_parameter_.inter_size_,

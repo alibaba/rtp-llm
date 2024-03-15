@@ -322,8 +322,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
 template<typename T>
 FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
                       size_t                            max_seq_len,
-                      size_t                            head_num,
-                      size_t                            size_per_head,
+                      size_t                            hidden_units,
                       size_t                            expert_num,
                       size_t                            moe_k,
                       size_t                            inter_size,
@@ -343,7 +342,7 @@ FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
     max_token_num_(max_batch_size * max_seq_len),
     expert_num_(expert_num),
     moe_k_(moe_k),
-    hidden_units_(head_num * size_per_head),
+    hidden_units_(hidden_units),
     inter_size_(inter_size),
     inter_padding_size_(inter_padding_size),
     local_layer_inter_size_(local_layer_inter_size),
@@ -514,8 +513,14 @@ void FfnLayer<T>::genericActivation(int          layer_id,
             FT_CHECK_WITH_INFO(false, "not support activation type");
             break;
     }
+}
+
+#undef INVOKE_GENERIC_ACT
+
+template class FfnLayer<float>;
 template class FfnLayer<half>;
 #ifdef ENABLE_BF16
+template class FfnLayer<__nv_bfloat16>;
 #endif
 
 }  // namespace fastertransformer

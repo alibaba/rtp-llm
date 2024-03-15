@@ -38,7 +38,6 @@
 #include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 
-namespace tk = fastertransformer;
 namespace tkc = tensorrt_llm::cutlass_extensions;
 
 namespace tensorrt_llm
@@ -343,9 +342,9 @@ CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::CutlassFpAIntBGemmRunner()
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     int device{-1};
-    tk::check_cuda_error(cudaGetDevice(&device));
+    check_cuda_error(cudaGetDevice(&device));
     sm_ = fastertransformer::getSMVersion();
-    tk::check_cuda_error(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
+    check_cuda_error(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
 }
 
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>

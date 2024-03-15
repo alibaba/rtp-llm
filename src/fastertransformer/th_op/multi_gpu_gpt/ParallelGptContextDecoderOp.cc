@@ -30,9 +30,6 @@ FtGptContextDecoder<T>::FtGptContextDecoder(const GptInitParameter&       gpt_in
                                             const std::string&            master_ip,
                                             const int                     master_port,
                                             const std::vector<std::unordered_map<std::string, th::Tensor>>& weights,
-                                            // const std::vector<std::unordered_map<std::string, th::Tensor>>& quant_weights,
-                                            // const std::vector<std::unordered_map<std::string, th::Tensor>>& quant_scales,
-                                            // const std::vector<std::unordered_map<std::string, th::Tensor>>& quant_zeros,
                                             const bool                    remove_padding):
     gpt_init_parameter_(gpt_init_parameter),
     remove_padding_(remove_padding)
@@ -52,9 +49,6 @@ FtGptContextDecoder<T>::FtGptContextDecoder(const GptInitParameter&       gpt_in
                                         gpt_init_parameter_.int8_mode_,
                                         gpt_init_parameter_.int4_mode_,
                                         weights,
-                                        // quant_weights,
-                                        // quant_scales,
-                                        // quant_zeros,
                                         &gpt_lora_layer_weights_);
 }
 
