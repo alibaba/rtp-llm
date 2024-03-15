@@ -5,6 +5,7 @@ import re
 import json
 import logging
 from typing import List, Any, Tuple, Dict, Optional, Union
+from PIL import Image
 
 from transformers import AutoTokenizer
 
@@ -25,7 +26,7 @@ class QwenVLImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
         self.vit = QWen_VL_ViT(**config)
     
-    def image_embedding(self, images: List[str], device) -> torch.Tensor:
+    def image_embedding(self, images: List[Any], device) -> torch.Tensor:
         if len(images) != 0:
             images = self.vit.encode(images)
             assert images.shape[0] == len(images)
@@ -99,6 +100,8 @@ class QWen_VL(QWen, MultiModalMixin):
     def multimodal_modify_prompt_plugin(prompt: str, **kwargs: Any) -> Tuple[str, List[Any]]:
         prompt, images = MultiModalMixin.multimodal_modify_prompt_plugin(prompt, **kwargs)
         img_token: str = kwargs.get('img_token')
+        start_str = '<img>'
+        end_str = '</img>'
         if img_token in prompt:
             split_prompts = prompt.split(img_token)
             if len(split_prompts) - 1 != len(images):
@@ -106,14 +109,24 @@ class QWen_VL(QWen, MultiModalMixin):
             res = split_prompts[0]
             idx = 0
             for split_prompt in split_prompts[1:]:
-                res = res + '<img>' + images[idx] + '</img>' + split_prompt
+                res = res + start_str + images[idx] + end_str + split_prompt
                 idx = idx + 1
             return res, images
         else:
             prefix_prompt = ''
             if len(images) > 0:
                 for i in range(len(images)):
-                    prefix_prompt += 'Picture {i}:<img>'.format(i = i + 1) + images[i] + '</img>\n'
+                    prefix_prompt += 'Picture {i}:'.format(i = i + 1) + start_str + images[i] + end_str + '\n'
+            
+            tmp_prompt = prompt
+            while start_str in tmp_prompt:
+                start_idx = tmp_prompt.find(start_str)
+                end_idx = tmp_prompt.find(end_str)
+                if end_idx < start_idx:
+                    raise Exception(f'unclosed tag <img> pair in {prompt}')
+                images.append(tmp_prompt[start_idx + len(start_str): end_idx])
+                tmp_prompt = tmp_prompt[end_idx + len(end_str):]
+
             return prefix_prompt + prompt, images
     
     @classmethod
@@ -161,28 +174,24 @@ class QWen_VL(QWen, MultiModalMixin):
     def get_weight_cls():
         return QWenVLWeightInfo
 
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[str]]):
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
         inputs = inputs.reshape(1, -1)
-        return self.multimodal_embedding(inputs).squeeze(0)
+        return self.multimodal_embedding(inputs, images).squeeze(0)
 
-    def input_word_embedding(self, inputs: torch.Tensor, images: List[List[str]]):
-        return self.multimodal_embedding(inputs)
+    def input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
+        return self.multimodal_embedding(inputs, images)
     
     # QWen_VL tokenizer encode image urls into tokens, so that multimodal_embedding don't need images as input
-    def multimodal_embedding(self, input_ids: torch.Tensor):
+    def multimodal_embedding(self, input_ids: torch.Tensor, image_lists: List[List[Any]]):
         img_start_id: int = self.config.vit_related_params.vit_special_token_ids['image_start_id']
         img_end_id: int = self.config.vit_related_params.vit_special_token_ids['image_end_id']
-        img_pad_id: int = self.config.vit_related_params.vit_special_token_ids['image_pad_id']
         bos_pos = torch.where(input_ids == img_start_id)
         eos_pos = torch.where(input_ids == img_end_id)
         assert (bos_pos[0] == eos_pos[0]).all()
         img_pos = torch.stack((bos_pos[0], bos_pos[1], eos_pos[1]), dim=1)
         images = []
-        for i, a, b in img_pos:
-            image = input_ids[i][a + 1 : b].tolist()
-            if img_pad_id in image:
-                image = image[ : image.index(img_pad_id)]
-            images.append(bytes(image).decode('utf-8'))
+        for image_list in image_lists:
+            images.extend(image_list)
 
         if len(images) != 0:
             images = self.visual.image_embedding(images, self.device)

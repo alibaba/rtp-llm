@@ -176,7 +176,7 @@ class Llava(Llama, MultiModalMixin):
                               config.vit_related_params.vit_special_token_ids,
                               config.vit_related_params.vit_special_tokens)
     
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[str]]):
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
         inputs = inputs.reshape(1, -1)
         if g_parallel_info.tp_size <= 1:
             return self.multimodal_embedding(inputs, images).squeeze(0)
@@ -188,11 +188,11 @@ class Llava(Llama, MultiModalMixin):
         self.nccl_op_.broadcast_tp([embedding_tensor])
         return embedding_tensor
         
-    def input_word_embedding(self, inputs: torch.Tensor, images: List[List[str]]):
+    def input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
         return self.multimodal_embedding(inputs, images)
 
     def multimodal_embedding(
-        self, input_ids: torch.Tensor, images: List[List[str]]
+        self, input_ids: torch.Tensor, images: List[List[Any]]
     ):
         image_token_index = self.config.vit_related_params.vit_special_token_ids["image_token_index"]
         ignore_token_index = self.config.vit_related_params.vit_special_token_ids["ignore_token_index"]

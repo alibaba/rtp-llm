@@ -8,6 +8,7 @@ import pydantic
 from dataclasses import dataclass
 from pydantic import BaseModel as PyBaseModel
 from typing import Any, Dict, List, Optional, Union, Tuple, NamedTuple, AsyncGenerator
+from PIL import Image
 
 import torch.distributed as dist
 from transformers import PreTrainedTokenizerBase
@@ -46,7 +47,7 @@ def debug_print_hidden(name: str, t: torch.Tensor):
 # single batch prompt input
 class GenerateInput(PyBaseModel):
     token_ids: torch.Tensor
-    images: List[str] = []
+    images: List[Any] = []
     generate_config: GenerateConfig
     tokenizer: Any = None # TODO: remove this
     lora_id: int = -1
@@ -526,13 +527,13 @@ class BaseModel(object):
                 device=self.device)
         return input_embeds
 
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[str]]):
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
         return self.word_embedding(inputs)
 
-    def input_word_embedding(self, inputs: torch.Tensor, images: List[List[str]]):
+    def input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
         return self.word_embedding(inputs)
 
-    def _do_pipeline_multimodal_embed(self, inputs: torch.Tensor, images: List[List[str]] = [[]]):
+    def _do_pipeline_multimodal_embed(self, inputs: torch.Tensor, images: List[List[Any]] = [[]]):
         if g_parallel_info.is_pp_first:
             input_embeds = self.input_word_embedding(inputs, images)
             debug_print_hidden('ids', inputs)

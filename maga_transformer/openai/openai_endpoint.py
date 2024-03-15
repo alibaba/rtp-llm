@@ -21,11 +21,13 @@ from maga_transformer.openai.renderers.custom_renderer import RendererParams, \
     StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderer_factory import ChatRendererFactory
 from maga_transformer.config.generate_config import GenerateConfig
+from maga_transformer.utils.multimodal_download import DownloadEngine
 
 class OpenaiEndopoint():
     def __init__(self, model: Union[AsyncModel, BaseModel]):
         self.model = model
         self.max_seq_len = self.model.config.max_seq_len
+        self.download_engine = DownloadEngine()
 
         tokenizer = self.model.tokenizer
         if (tokenizer == None):
@@ -180,10 +182,12 @@ class OpenaiEndopoint():
         input_images = rendered_input.input_images
         generate_config = self._extract_generation_config(chat_request)
 
+        images = self.download_engine.submit(input_images)
+
         output_generator: AsyncGenerator[GenerateOutput, None] = self.model.enqueue(
             GenerateInput(
                 token_ids=input_id_tensor,
-                images=input_images,
+                images=images,
                 generate_config=generate_config,
                 tokenizer=self.tokenizer
             )

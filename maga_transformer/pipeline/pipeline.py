@@ -19,6 +19,7 @@ from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_s
 from maga_transformer.utils.tokenizer_utils import DecodingState
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from maga_transformer.utils.util import WEIGHT_TYPE
+from maga_transformer.utils.multimodal_download import DownloadEngine
 
 class Pipeline(object):
     def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[PreTrainedTokenizerBase]):
@@ -27,6 +28,7 @@ class Pipeline(object):
         self._special_tokens: int = self.model.config.special_tokens
         self._img_token: str = self.model.config.vit_related_params.vit_special_tokens.get('default_image_token', '')
         self.piple_funcs: PipelineCustomFunc = get_piple_custom_func(self.model)
+        self.download_engine: DownloadEngine = DownloadEngine()
 
     def stop(self):
         if isinstance(self.model, AsyncModel):
@@ -135,6 +137,9 @@ class Pipeline(object):
         kmonitor.report(GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.num_beams)
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
+
+        if self.model.is_multimodal() and len(images) > 0:
+            images = self.download_engine.submit(images)
 
         token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
         input = GenerateInput(token_ids=token_ids,

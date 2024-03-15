@@ -9,8 +9,7 @@ import requests
 import os
 from functools import partial
 from PIL import Image
-from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Optional, List, Any
+from typing import Callable, Optional, Sequence, Tuple, List, Any
 import numpy as np
 
 import torch
@@ -19,6 +18,7 @@ from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
+from maga_transformer.utils.multimodal_download import DownloadEngine
 
 
 def get_abs_pos(abs_pos, tgt_size):
@@ -341,26 +341,13 @@ class Preprocess:
             transforms.ToTensor(),
             transforms.Normalize(mean=mean, std=std),
         ])
-        
-    def parallel_pull_image(self, image_path: str, images: List[Any], i: int):
-        if image_path.startswith("http://") or image_path.startswith("https://"):
-            if os.environ.get("IMAGE_RESIZE_SUFFIX", "") != "" and "picasso" in image_path:
-                image_path += os.environ.get("IMAGE_RESIZE_SUFFIX", "")
-            image = Image.open(requests.get(image_path, stream=True).raw)
-        else:
-            image = Image.open(image_path)
-        image = image.convert("RGB")
-        images[i] = self.image_transform(image)
 
-    def encode(self, image_paths: List[str]) -> torch.Tensor:
-        images = [None]*len(image_paths)
-        thread_pool = ThreadPoolExecutor(len(image_paths))
-        for i, image_path in enumerate(image_paths):
-            thread_pool.submit(self.parallel_pull_image, image_path, images, i)
-        thread_pool.shutdown(wait=True)
+    def encode(self, images: List[Any]) -> torch.Tensor:
+        images = DownloadEngine.get(images)
+        for image in images:
+            image = self.image_transform(image.convert("RGB"))
         images = torch.stack(images, dim=0)
         return images
-
 
 class VisionTransformer(nn.Module):
 
@@ -436,6 +423,6 @@ class VisionTransformer(nn.Module):
 
         return x
 
-    def encode(self, image_paths: List[str]):
-        images = self.image_pre_obj.encode(image_paths)
+    def encode(self, images: List[Any]):
+        images = self.image_pre_obj.encode(images)
         return self(images)

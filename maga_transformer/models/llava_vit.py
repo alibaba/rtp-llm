@@ -1,8 +1,6 @@
 from typing import Dict, List, Any
 import os
 import re
-from io import BytesIO
-import requests
 
 import torch
 import torch.nn as nn
@@ -10,6 +8,7 @@ import torch.nn as nn
 from PIL import Image
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
+from maga_transformer.utils.multimodal_download import DownloadEngine
 
 class LlavaImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
@@ -19,13 +18,8 @@ class LlavaImageEmbedding(BaseImageEmbedding):
     
     def image_embedding(self, images: List[List[str]], device) -> torch.Tensor:
         image_data = []
-        for i in range(len(images)):
-            now_image_data = []
-            for image in images[i]:
-                if image.startswith('/'):
-                    now_image_data.append(Image.open(open(image, 'rb')))
-                else:
-                    now_image_data.append(Image.open(BytesIO(requests.get(image).content)))
+        for image_list in images:
+            now_image_data = DownloadEngine.get(image_list)
             image_data.append(now_image_data)
         
         images = process_batch_images(image_data, 
@@ -38,6 +32,7 @@ class LlavaImageEmbedding(BaseImageEmbedding):
             image_features.append(self.encode_images(query_images, device))
 
         return image_features
+    
     
     def encode_images(self, images, device):
         if images.shape[0] == 0:
@@ -84,7 +79,6 @@ class CLIPVisionTower(nn.Module):
         super().__init__()
 
         self.is_loaded = False
-        self.config = args
 
         self.vision_tower_name = vision_tower
         self.select_layer = args['mm_vision_select_layer']

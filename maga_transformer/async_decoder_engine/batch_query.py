@@ -5,6 +5,7 @@ import numpy as np
 from typing import Any, List, Optional, Tuple
 from threading import Lock
 from pydantic import BaseModel
+from PIL import Image
 
 from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -44,7 +45,7 @@ class BatchQuery:
         self.num_beams: int = 1
         self.cache_block_indice: torch.Tensor = torch.zeros((1,1), dtype=torch.int32)
         self.output_token_ids: torch.Tensor = torch.zeros((1,1), dtype=torch.int32)
-        self.images: List[str] = []
+        self.images: List[Any] = []
         self.generate_configs: List[GenerateConfig] = []
         self.merge_generate_config: GenerateConfig = GenerateConfig()
         self.seq_lengths_list: List[int] = []
