@@ -144,11 +144,17 @@ class ModelWeightsLoader:
         is_gated_activation = self._weights_info._is_gated_activation
         def convert_weight(weight_lists, apply_func):
             for weight_list in weight_lists: 
+                qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
+                qzero  = [weight for weight in layer_weights if weight.name == weight_list[1]]
+                qscale  = [weight for weight in layer_weights if weight.name == weight_list[2]]
+                if len(qweight) == 0:
+                    if self._weights_info._is_sparse_head:
+                        continue
+                    else:
+                        raise Exception(f"not found weight {weight_list[0]} in layer {layer_id}")
+                elif len(qweight) > 1:
+                    raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
                 try:
-                    qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
-                    qzero  = [weight for weight in layer_weights if weight.name == weight_list[1]]
-                    qscale  = [weight for weight in layer_weights if weight.name == weight_list[2]]
-                    assert len(qweight) == 1 and len(qzero) == 1 and len(qscale) == 1, "len error"
                     qweight_tensor = self._load_and_convert_tensor(qweight[0], ref_model=ref_model, layer_id=layer_id, datatype=torch.int32)
                     qzero_tensor = self._load_and_convert_tensor(qzero[0], ref_model=ref_model, layer_id=layer_id, datatype=torch.int32)
                     qscale_tensor = self._load_and_convert_tensor(qscale[0], ref_model=ref_model, layer_id=layer_id)
@@ -160,7 +166,7 @@ class ModelWeightsLoader:
                     results.append((layer_id, qzero[0].name, zero))
                     results.append((layer_id, qscale[0].name, scale))
                 except Exception as e:
-                    logging.error(f'load {qweight[0].name} in layer {layer_id} failed: {e}')
+                    logging.error(f'load int4 layer_weight in layer {layer_id} failed: {e}')
                     raise e
 
         convert_weight(W.int4_attn_weights, self.preprocess_groupwise_weight_params)
@@ -182,11 +188,17 @@ class ModelWeightsLoader:
         is_moe = self._weights_info.expert_num_ > 0
         is_gated_activation = self._weights_info._is_gated_activation
         def convert_weight(weight_lists, apply_func):
-            for weight_list in weight_lists:
+            for weight_list in weight_lists:  
+                qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
+                scale_name = weight_list[1]
+                if len(qweight) == 0:
+                    if self._weights_info._is_sparse_head:
+                        continue
+                    else:
+                        raise Exception(f"not found weight {weight_list[0]} in layer {layer_id}")
+                elif len(qweight) > 1:
+                    raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
                 try:
-                    qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
-                    scale_name = weight_list[1]
-
                     qweight_tensor = self._load_and_convert_tensor(qweight[0], ref_model=ref_model, layer_id=layer_id)
                     if self._merge_lora:
                         qweight_tensor = self.apply_lora(qweight_tensor, qweight[0], layer_id)
@@ -196,7 +208,7 @@ class ModelWeightsLoader:
                     results.append((layer_id, qweight[0].name, weight))
                     results.append((layer_id, scale_name, scale))
                 except Exception as e:
-                    logging.error(f'load {qweight[0].name} in layer {layer_id} failed: {e}')
+                    logging.error(f'load int8 layer_weight {weight_list[0]} in layer {layer_id} failed: {e}')
                     raise e
                 
         convert_weight(W.int8_attn_weights, self.apply_int8)
