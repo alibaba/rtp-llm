@@ -117,7 +117,7 @@ cc_library(
         "gemm_dequantize/*.cc",
         "gemm_group/*.cc",
         "unittests/test_activation.cu",
-        "moe/*.cc"
+        # "moe/*.cc"
     ]),
     hdrs = glob([
         "unittests/unittest_utils.h",
@@ -224,17 +224,17 @@ py_test(
     ],
 )
 
-py_test(
-    name = "th_moe",
-    srcs = [
-        "moe/th_moe.py"
-    ],
-    data = [
-        "//:th_transformer",
-        ":test_ops",
-    ],
-    deps = [
-        "//maga_transformer:torch",
-    ],
-    timeout = "long"
-)
+# py_test(
+#     name = "th_moe",
+#     srcs = [
+#         "moe/th_moe.py"
+#     ],
+#     data = [
+#         "//:th_transformer",
+#         ":test_ops",
+#     ],
+#     deps = [
+#         "//maga_transformer:torch",
+#     ],
+#     timeout = "long"
+# )

@@ -11,6 +11,7 @@ test_linkopts = [
     "-lcuda",
     "-lnccl",
     "-lnvToolsExt",
+    "-ldl"
 ]
 
 cc_binary(

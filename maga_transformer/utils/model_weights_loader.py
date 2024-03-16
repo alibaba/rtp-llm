@@ -361,7 +361,7 @@ class ModelWeightsLoader:
         return qweight_interleaved.contiguous().to(device),  zeros_x_scales_fp16.contiguous().to(device), scales_fp16.contiguous().to(device)
 
     
-    def load_tensor(self, name: str, datatype: str = torch.float16) -> List[torch.Tensor]:
+    def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
         self._weight_access_log.add(name)
         return self._database.load_tensor(name, datatype)
     

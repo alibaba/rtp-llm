@@ -129,7 +129,7 @@ class LoraConfig:
         return self.lora_alpha / self.rank
 
 class BaseDatabase:
-    def load_tensor(self, name: str) -> List[torch.Tensor]:
+    def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
         raise NotImplementedError
 
 class ModuleDatabase(BaseDatabase):
@@ -138,7 +138,7 @@ class ModuleDatabase(BaseDatabase):
     def __init__(self, ref_model: torch.nn.Module):
         self.ref_model = ref_model
 
-    def load_tensor(self, name: str) -> List[torch.Tensor]:
+    def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
         weight_name: str = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', name)
         try:
             return [eval('self.ref_model.' + weight_name)]
@@ -250,7 +250,7 @@ class CkptDatabase(BaseDatabase):
         else:
             return torch.load(file, pickle_module=meta_pickler)
 
-    def load_tensor(self, name: str, datatype: str = torch.float16) -> List[torch.Tensor]:
+    def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
         tensors = []
         for ckpt_file in self.PretrainFileList:
             if name in ckpt_file.get_tensor_names():
