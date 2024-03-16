@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "src/fastertransformer/utils/tllmException.h"
+#include "src/fastertransformer/utils/exception.h"
 
 #include <cstdlib>
 #if !defined(_MSC_VER)
@@ -24,7 +24,7 @@
 #endif
 #include <sstream>
 
-namespace tensorrt_llm::common
+namespace fastertransformer
 {
 
 namespace
@@ -34,7 +34,7 @@ int constexpr VOID_PTR_SZ = 2 + sizeof(void*) * 2;
 
 #if !defined(_MSC_VER)
 
-TllmException::TllmException(char const* file, std::size_t line, const std::string& msg)
+FTException::FTException(char const* file, std::size_t line, const std::string& msg)
     : std::runtime_error{""}
 {
     mNbFrames = backtrace(mCallstack.data(), MAX_FRAMES);
@@ -43,16 +43,16 @@ TllmException::TllmException(char const* file, std::size_t line, const std::stri
         std::runtime_error{fastertransformer::fmtstr("%s (%s:%zu)\n%s", msg.c_str(), file, line, trace.c_str())});
 }
 #else
-TllmException::TllmException(char const* file, std::size_t line, const std::string& msg)
+FTException::FTException(char const* file, std::size_t line, const std::string& msg)
     : mNbFrames{}
     , std::runtime_error{fmtstr("%s (%s:%zu)", msg.c_str(), file, line)}
 {
 }
 #endif
 
-TllmException::~TllmException() noexcept = default;
+FTException::~FTException() noexcept = default;
 
-std::string TllmException::getTrace() const
+std::string FTException::getTrace() const
 {
 #if defined(_MSC_VER)
     return "";
@@ -84,7 +84,7 @@ std::string TllmException::getTrace() const
 #endif
 }
 
-std::string TllmException::demangle(char const* name)
+std::string FTException::demangle(char const* name)
 {
 #if defined(_MSC_VER)
     return name;
@@ -101,4 +101,4 @@ std::string TllmException::demangle(char const* name)
 #endif
 }
 
-} // namespace tensorrt_llm::common
+} 

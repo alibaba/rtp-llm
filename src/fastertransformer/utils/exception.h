@@ -23,20 +23,20 @@
 #include <stdexcept>
 #include <string>
 
-#define NEW_TLLM_EXCEPTION(...)                                                                                        \
-    tensorrt_llm::common::TllmException(__FILE__, __LINE__, fastertransformer::fmtstr(__VA_ARGS__))
+#define NEW_FT_EXCEPTION(...)                                                                                        \
+    fastertransformer::FTException(__FILE__, __LINE__, fastertransformer::fmtstr(__VA_ARGS__))
 
-namespace tensorrt_llm::common
+namespace fastertransformer
 {
 
-class TllmException : public std::runtime_error
+class FTException : public std::runtime_error
 {
 public:
     static auto constexpr MAX_FRAMES = 128;
 
-    explicit TllmException(char const* file, std::size_t line, std::string const& msg);
+    explicit FTException(char const* file, std::size_t line, std::string const& msg);
 
-    ~TllmException() noexcept override;
+    ~FTException() noexcept override;
 
     [[nodiscard]] std::string getTrace() const;
 
@@ -47,4 +47,4 @@ private:
     int mNbFrames;
 };
 
-} // namespace tensorrt_llm::common
+} // namespace fastertransformer

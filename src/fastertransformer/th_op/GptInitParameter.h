@@ -125,4 +125,5 @@ public:
     void setLayerNormType();
     void setNormType();
     void setActivationType();
+    bool isGatedActivation();
 };

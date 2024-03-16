@@ -136,10 +136,12 @@ class ModelWeightsLoader:
 
         return results, self._weight_access_log
 
-    def _load_int4_layer_weight(self, layer_weights, layer_id: int, is_moe: bool, merge_lora: bool, device: str, ref_model: Optional[torch.nn.Module] = None):
-        if merge_lora:
+    def _load_int4_layer_weight(self, layer_weights, layer_id: int, device: str, ref_model: Optional[torch.nn.Module] = None):
+        if self._merge_lora:
             raise Exception("lora in int4 is not implemented yet")
         results = []
+        is_moe = self._weights_info.expert_num_ > 0
+        is_gated_activation = self._weights_info._is_gated_activation
         def convert_weight(weight_lists, apply_func):
             for weight_list in weight_lists: 
                 try:
@@ -160,16 +162,25 @@ class ModelWeightsLoader:
                 except Exception as e:
                     logging.error(f'load {qweight[0].name} in layer {layer_id} failed: {e}')
                     raise e
+
         convert_weight(W.int4_attn_weights, self.preprocess_groupwise_weight_params)
-        if is_moe:
-            convert_weight(W.int4_ffn_weights, self.preprocess_moe_groupwise_weight_params)
+
+        if is_gated_activation: 
+            ffn_weight_lists = W.int4_ffn_weights
         else:
-            convert_weight(W.int4_ffn_weights, self.preprocess_groupwise_weight_params)
+            ffn_weight_lists = W.int4_ffn_weights_2
+            
+        if is_moe:
+            convert_weight(ffn_weight_lists, self.preprocess_moe_groupwise_weight_params)
+        else:
+            convert_weight(ffn_weight_lists, self.preprocess_groupwise_weight_params)
 
         return results
     
-    def _load_int8_layer_weight(self, layer_weights, layer_id: int, is_moe: bool, merge_lora: bool, device: str, ref_model: Optional[torch.nn.Module] = None):
+    def _load_int8_layer_weight(self, layer_weights, layer_id: int, device: str, ref_model: Optional[torch.nn.Module] = None):
         results = []
+        is_moe = self._weights_info.expert_num_ > 0
+        is_gated_activation = self._weights_info._is_gated_activation
         def convert_weight(weight_lists, apply_func):
             for weight_list in weight_lists:
                 try:
@@ -187,11 +198,17 @@ class ModelWeightsLoader:
                 except Exception as e:
                     logging.error(f'load {qweight[0].name} in layer {layer_id} failed: {e}')
                     raise e
+                
         convert_weight(W.int8_attn_weights, self.apply_int8)
-        if is_moe:
-            convert_weight(W.int8_ffn_weights, self.moe_apply_int8)
+
+        if is_gated_activation: 
+            ffn_weight_lists = W.int8_ffn_weights
         else:
-            convert_weight(W.int8_ffn_weights, self.apply_int8)
+            ffn_weight_lists = W.int8_ffn_weights_2
+        if is_moe:
+            convert_weight(ffn_weight_lists, self.moe_apply_int8)
+        else:
+            convert_weight(ffn_weight_lists, self.apply_int8)
         return results
 
     def _load_layer_weight(self, layer_id: int, int8_mode: int, int4_mode: bool = False, ref_model: Optional[torch.nn.Module] = None, device: str = "cuda:0"):
@@ -206,6 +223,7 @@ class ModelWeightsLoader:
                 int8_flag = int8_mode == 1 and (weight.name in W.quant_w)
                 int4_flag = int4_mode == True and (weight.name in W.quant_w or weight.name in W.int4_quant_params)
                 is_moe = self._weights_info.expert_num_ > 0
+                is_gated_activation = self._weights_info._is_gated_activation
 
                 if int4_flag or int8_flag:
                     continue
@@ -225,9 +243,9 @@ class ModelWeightsLoader:
                 logging.error(f'load {weight.name} in layer {layer_id} failed: {e}')
                 raise e
         if int4_mode:
-            results.extend(self._load_int4_layer_weight(layer_weights, layer_id, is_moe, self._merge_lora, device, ref_model=ref_model))
+            results.extend(self._load_int4_layer_weight(layer_weights, layer_id=layer_id, devide=device, ref_model=ref_model))
         elif int8_mode:
-            results.extend(self._load_int8_layer_weight(layer_weights, layer_id, is_moe, self._merge_lora, device, ref_model=ref_model))
+            results.extend(self._load_int8_layer_weight(layer_weights, layer_id=layer_id, device=device, ref_model=ref_model))
 
         gc.collect()
         torch.cuda.empty_cache()

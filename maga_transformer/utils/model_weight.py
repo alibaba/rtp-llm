@@ -277,6 +277,11 @@ class W:
         [ffn_w2, ffn_s2], 
     ]
 
+    int8_ffn_weights_2 = [
+        [ffn_w1, ffn_s1],
+        [ffn_w2, ffn_s2], 
+    ]
+
     int4_attn_weights = [
         [attn_qkv_w, attn_qkv_z, attn_qkv_s],
         [attn_o_w, attn_o_z, attn_o_s],
@@ -285,6 +290,11 @@ class W:
     int4_ffn_weights = [
         [ffn_w1, ffn_z1, ffn_s1],
         [ffn_w3, ffn_z3, ffn_s3],
+        [ffn_w2, ffn_z2, ffn_s2], 
+    ]
+
+    int4_ffn_weights_2 = [
+        [ffn_w1, ffn_z1, ffn_s1],
         [ffn_w2, ffn_z2, ffn_s2], 
     ]
 
@@ -549,6 +559,7 @@ class ModelDeployWeightInfo:
         self._medusa_head_num = 0 if config.medusa_config is None else config.medusa_config.medusa_num_heads
         self._medusa_layer_num = 0 if config.medusa_config is None else config.medusa_config.medusa_num_layers
 
+        self._is_gated_activation = config.gpt_init_params.isGatedActivation()
         self.expert_num_ = config.gpt_init_params.expert_num
         self.moe_k_      = config.gpt_init_params.moe_k
         self._int4_mode = config.int4_mode

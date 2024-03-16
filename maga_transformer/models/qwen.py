@@ -158,7 +158,7 @@ class QWenWeight(ModelDeployWeightInfo):
                        identity),
         ]
         return layer_weights
-    
+
     def _get_hf_qptq_weight_info(self, layer_id):
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
         layer_quant_weights =[
@@ -184,7 +184,7 @@ class QWenWeight(ModelDeployWeightInfo):
                        identity),
             WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.scales', identity)],
                        identity),
-            WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qweight', identity)], 
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qweight', identity)],
                        identity),
             WeightInfo(W.ffn_z3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qzeros', identity)],
                        identity),
@@ -271,17 +271,17 @@ class QWenBase(GPT):
         config.rotary_embedding_base = int(config_json.get('rotary_emb_base', 10000))
         config.rotary_embedding_dim = config.size_per_head
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", config.special_tokens.eos_token_id)
-        # config.data_type = "fp16"
 
-        quant_config_path = os.path.join(ckpt_path, "quantize_config.json")
-        if os.path.exists(quant_config_path):
-            quant_config=json.loads(Path(quant_config_path).read_text())
+        quant_config = config_json.get("quantization_config", None)
+        if quant_config is not None:
             config.int4_mode = True
             group_size = quant_config.get("group_size", 0)
             assert group_size == 128 or group_size == 64, "int4 only support group size == 64 or 128"
             config.weight_only_group_size = group_size
-            config.has_pre_scale = os.environ.get("has_pre_scale", False)
-            config.has_zeros = os.environ.get("has_zeros", True)
+            quant_method = quant_config.get("quant_method", None)
+            if quant_method == 'gptq':
+                config.has_pre_scale = False
+                config.has_zeros = True
 
         use_dynamic_ntk = config_json.get("use_dynamic_ntk")
         use_logn_attn = config_json.get("use_logn_attn")

@@ -22,7 +22,7 @@
 #include <pthread.h>
 #include <string>
 
-#include "src/fastertransformer/utils/tllmException.h"
+#include "src/fastertransformer/utils/exception.h"
 #include "src/fastertransformer/utils/string_utils.h"
 
 namespace fastertransformer {

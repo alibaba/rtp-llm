@@ -4,12 +4,12 @@ cc_library(
     name = "logger",
     srcs = [
         "logger.cc",
-        "tllmException.cpp"
+        "exception.cc"
     ],
     hdrs = [
         "logger.h",
         "string_utils.h",
-        "tllmException.h"
+        "exception.h"
     ],
     deps = [],
     copts = copts(),

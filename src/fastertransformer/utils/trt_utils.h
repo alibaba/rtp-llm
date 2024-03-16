@@ -1,5 +1,5 @@
 #include "src/fastertransformer/utils/logger.h"
-#include "src/fastertransformer/utils/tllmException.h"
+#include "src/fastertransformer/utils/exception.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 
 #pragma once
@@ -17,7 +17,7 @@
 #define TLLM_THROW(...)                                                                                                \
     do                                                                                                                 \
     {                                                                                                                  \
-        throw NEW_TLLM_EXCEPTION(__VA_ARGS__);                                                                         \
+        throw NEW_FT_EXCEPTION(__VA_ARGS__);                                                                         \
     } while (0)
 
 namespace nvinfer1

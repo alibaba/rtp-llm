@@ -33,6 +33,10 @@ void GptInitParameter::setActivationType() {
     activation_type_ = ft::getActivationType(activation_type_str_);
 }
 
+bool GptInitParameter::isGatedActivation() {
+    return ft::isGatedActivation(activation_type_);
+}
+
 #define DEF_PROPERTY(name) .def_readwrite(#name, &RoleSpecialTokens::name##_)
 
 #define REGISTER_PROPERTYS                                                                                             \
@@ -159,4 +163,6 @@ static auto fasterTransformerGptInitParameterTHS =
         >())
         .def("setLayerNormType", &GptInitParameter::setLayerNormType)
         .def("setNormType", &GptInitParameter::setNormType)
-        .def("setActivationType", &GptInitParameter::setActivationType) REGISTER_PROPERTYS;
+        .def("setActivationType", &GptInitParameter::setActivationType)
+        .def("isGatedActivation", &GptInitParameter::isGatedActivation)  REGISTER_PROPERTYS;
+

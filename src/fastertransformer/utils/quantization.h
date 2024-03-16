@@ -17,7 +17,7 @@
 #pragma once
 
 #include "stdlib.h"
-#include "src/fastertransformer/core/Tensor.h"
+#include <cstdint>
 
 namespace tensorrt_llm {
 namespace common {
