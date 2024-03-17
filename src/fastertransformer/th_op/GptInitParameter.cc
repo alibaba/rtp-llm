@@ -8,7 +8,9 @@ SpecialTokens::SpecialTokens():
     assistant_(c10::intrusive_ptr<RoleSpecialTokens>::reclaim(new RoleSpecialTokens)),
     system_(c10::intrusive_ptr<RoleSpecialTokens>::reclaim(new RoleSpecialTokens)) {}
 
-GptInitParameter::GptInitParameter(): special_tokens_(c10::intrusive_ptr<SpecialTokens>::reclaim(new SpecialTokens)) {}
+GptInitParameter::GptInitParameter():
+    special_tokens_(c10::intrusive_ptr<SpecialTokens>::reclaim(new SpecialTokens)),
+    quant_algo_(c10::intrusive_ptr<QuantAlgo>::reclaim(new QuantAlgo)) {}
 
 GptInitParameter::GptInitParameter(
     int64_t head_num, int64_t size_per_head, int64_t num_layers,
@@ -19,7 +21,8 @@ GptInitParameter::GptInitParameter(
     max_seq_len_(max_seq_len),
     vocab_size_(vocab_size),
     hidden_size_(hidden_size),
-    special_tokens_(c10::intrusive_ptr<SpecialTokens>::reclaim(new SpecialTokens)) {}
+    special_tokens_(c10::intrusive_ptr<SpecialTokens>::reclaim(new SpecialTokens)),
+    quant_algo_(c10::intrusive_ptr<QuantAlgo>::reclaim(new QuantAlgo)) {}
 
 void GptInitParameter::setLayerNormType() {
     layernorm_type_ = ft::getLayerNormType(layernorm_type_str_);
@@ -37,6 +40,28 @@ bool GptInitParameter::isGatedActivation() {
     return ft::isGatedActivation(activation_type_);
 }
 
+// refister propertys for quant_algo
+#define DEF_PROPERTY(name) .def_readwrite(#name, &QuantAlgo::name##_)
+
+#define REGISTER_PROPERTYS                                                                                             \
+    DEF_PROPERTY(int8_mode)                                                                                            \
+    DEF_PROPERTY(int4_mode)                                                                                            \
+    DEF_PROPERTY(has_pre_scale)                                                                                        \
+    DEF_PROPERTY(has_zeros)                                                                                            \
+    DEF_PROPERTY(weight_only_group_size)
+
+static auto quantAlgoTHS =
+#ifdef LEGACY_THS
+    torch::jit::class_<QuantAlgo>("FasterTransformerQuantAlgo")
+#else
+    torch::jit::class_<QuantAlgo>("FasterTransformer", "QuantAlgo")
+#endif
+        .def(torch::jit::init<>()) REGISTER_PROPERTYS;
+
+#undef DEF_PROPERTY
+#undef REGISTER_PROPERTYS
+
+// refister propertys for role_special_tokens
 #define DEF_PROPERTY(name) .def_readwrite(#name, &RoleSpecialTokens::name##_)
 
 #define REGISTER_PROPERTYS                                                                                             \
@@ -54,6 +79,7 @@ static auto roleSpecialTokensTHS =
 #undef DEF_PROPERTY
 #undef REGISTER_PROPERTYS
 
+// refister propertys for special_tokens
 #define DEF_PROPERTY(name) .def_readwrite(#name, &SpecialTokens::name##_)
 
 #define REGISTER_PROPERTYS                                                                                             \
@@ -117,7 +143,6 @@ static auto specialTokensTHS =
     DEF_PROPERTY(input_embedding_scalar, input_embedding_scalar_)                                                      \
     DEF_PROPERTY(use_norm_input_residual, use_norm_input_residual_)                                                    \
     DEF_PROPERTY(use_norm_attn_out_residual, use_norm_attn_out_residual_)                                              \
-    DEF_PROPERTY(int8_mode, int8_mode_)                                                                                \
     DEF_PROPERTY(weights_data_type, weights_data_type_)                                                                \
     DEF_PROPERTY(data_type, data_type_)                                                                                \
     DEF_PROPERTY(has_positional_encoding, has_positional_encoding_)                                                    \
@@ -135,6 +160,7 @@ static auto specialTokensTHS =
     DEF_PROPERTY(max_generate_batch_size, max_generate_batch_size_)                                                    \
     DEF_PROPERTY(max_context_batch_size, max_context_batch_size_)                                                      \
     DEF_PROPERTY(special_tokens, special_tokens_)                                                                      \
+    DEF_PROPERTY(quant_algo, quant_algo_)                                                                              \
     DEF_PROPERTY(use_logn_attn, use_logn_attn_)                                                                        \
     DEF_PROPERTY(logn_seq_len, logn_seq_len_)                                                                          \
     DEF_PROPERTY(is_multimodal, is_multimodal_)                                                                        \
@@ -142,10 +168,6 @@ static auto specialTokensTHS =
     DEF_PROPERTY(seq_size_per_block, seq_size_per_block_)                                                              \
     DEF_PROPERTY(int8_kv_cache, int8_kv_cache_)                                                                        \
     DEF_PROPERTY(is_causal, is_causal_)                                                                                \
-    DEF_PROPERTY(int4_mode, int4_mode_)                                                                                \
-    DEF_PROPERTY(has_pre_scale, has_pre_scale_)                                                                        \
-    DEF_PROPERTY(has_zeros, has_zeros_)                                                                                \
-    DEF_PROPERTY(weight_only_group_size, weight_only_group_size_)                                                      \
     DEF_PROPERTY(use_medusa, use_medusa_)
 
 static auto fasterTransformerGptInitParameterTHS =

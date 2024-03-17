@@ -25,37 +25,41 @@ void ParallelGptDecoder<T>::initialize()
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
-    quant_algo_ = tc::QuantAlgo(gpt_init_parameter_.int8_mode_, gpt_init_parameter_.int4_mode_, gpt_init_parameter_.has_pre_scale_, gpt_init_parameter_.has_zeros_, gpt_init_parameter_.weight_only_group_size_);
+    quant_algo_ = tc::QuantAlgo(gpt_init_parameter_.quant_algo_->int8_mode_,
+                                gpt_init_parameter_.quant_algo_->int4_mode_,
+                                gpt_init_parameter_.quant_algo_->has_pre_scale_,
+                                gpt_init_parameter_.quant_algo_->has_zeros_,
+                                gpt_init_parameter_.quant_algo_->weight_only_group_size_);
     self_attention_layer_.reset(new TensorParallelDecoderSelfAttentionLayer<T>(
-                                        max_batch_size_,
-                                        gpt_init_parameter_.head_num_,
-                                        gpt_init_parameter_.head_num_kv_,
-                                        gpt_init_parameter_.size_per_head_,
-                                        gpt_init_parameter_.layer_head_num_,
-                                        gpt_init_parameter_.layer_head_num_kv_,
-                                        gpt_init_parameter_.rotary_embedding_dim_,
-                                        gpt_init_parameter_.rotary_embedding_style_,
-                                        gpt_init_parameter_.rotary_embedding_base_,
-                                        gpt_init_parameter_.dynamic_embedding_scalar_,
-                                        gpt_init_parameter_.dynamic_embedding_max_pos_,
-                                        gpt_init_parameter_.position_embeddings_scale_,
-                                        gpt_init_parameter_.base_scale_,
-                                        gpt_init_parameter_.head_num_ * gpt_init_parameter_.size_per_head_,
-                                        gpt_init_parameter_.logn_seq_len_,
-                                        1.0f,
-                                        tensor_para_,
-                                        stream_,
-                                        cublas_wrapper_,
-                                        allocator_,
-                                        gpt_init_parameter_.use_logn_attn_,
-                                        true,
-                                        is_free_buffer_after_forward_,
-                                        sparse_,
-                                        gpt_init_parameter_.is_sparse_head_,
-                                        gpt_init_parameter_.int8_mode_,
-                                        gpt_init_parameter_.int4_mode_,
-                                        custom_all_reduce_comm_,
-                                        enable_custom_all_reduce_));
+        max_batch_size_,
+        gpt_init_parameter_.head_num_,
+        gpt_init_parameter_.head_num_kv_,
+        gpt_init_parameter_.size_per_head_,
+        gpt_init_parameter_.layer_head_num_,
+        gpt_init_parameter_.layer_head_num_kv_,
+        gpt_init_parameter_.rotary_embedding_dim_,
+        gpt_init_parameter_.rotary_embedding_style_,
+        gpt_init_parameter_.rotary_embedding_base_,
+        gpt_init_parameter_.dynamic_embedding_scalar_,
+        gpt_init_parameter_.dynamic_embedding_max_pos_,
+        gpt_init_parameter_.position_embeddings_scale_,
+        gpt_init_parameter_.base_scale_,
+        gpt_init_parameter_.head_num_ * gpt_init_parameter_.size_per_head_,
+        gpt_init_parameter_.logn_seq_len_,
+        1.0f,
+        tensor_para_,
+        stream_,
+        cublas_wrapper_,
+        allocator_,
+        gpt_init_parameter_.use_logn_attn_,
+        true,
+        is_free_buffer_after_forward_,
+        sparse_,
+        gpt_init_parameter_.is_sparse_head_,
+        gpt_init_parameter_.quant_algo_->int8_mode_,
+        gpt_init_parameter_.quant_algo_->int4_mode_,
+        custom_all_reduce_comm_,
+        enable_custom_all_reduce_));
 
     ffn_layer_.reset(new TensorParallelFfnLayer<T>(
                              max_batch_size_,
@@ -266,7 +270,7 @@ void ParallelGptDecoder<T>::forward(std::unordered_map<std::string, Tensor>*    
     std::vector<size_t> self_v_cache_size(v_cache.shape().begin() + 2, v_cache.shape().end());
     self_v_cache_size.insert(self_v_cache_size.begin(), local_batch_size);
 
-    const auto activation_in_type  = gpt_init_parameter_.int8_mode_ == 2 ? TYPE_INT8 : data_type;
+    const auto activation_in_type  = gpt_init_parameter_.quant_algo_->int8_mode_ == 2 ? TYPE_INT8 : data_type;
     const auto activation_out_type = data_type;
 
     int seq_len = 1;
@@ -311,7 +315,7 @@ void ParallelGptDecoder<T>::forward(std::unordered_map<std::string, Tensor>*    
                                                 hidden_units,
                                                 const_cast<float*>(layer_weight->self_attention_weights.query_weight.scale),
                                                 nullptr,
-                                                gpt_init_parameter_.int8_mode_,
+                                                gpt_init_parameter_.quant_algo_->int8_mode_,
                                                 stream_);
         print_bsd(l, "pre ln", decoder_normed_input_, local_batch_size, seq_len, hidden_units);
 
@@ -325,7 +329,7 @@ void ParallelGptDecoder<T>::forward(std::unordered_map<std::string, Tensor>*    
                                                  hidden_units,
                                                  nullptr,
                                                  nullptr,
-                                                 gpt_init_parameter_.int8_mode_,
+                                                 gpt_init_parameter_.quant_algo_->int8_mode_,
                                                  stream_);
 
             print_bsd(l, "pre attn ln", attn_normed_input_, local_batch_size, seq_len, hidden_units);
@@ -429,7 +433,7 @@ void ParallelGptDecoder<T>::forward(std::unordered_map<std::string, Tensor>*    
                     nullptr,
                     const_cast<float*>(layer_weight->ffn_weights.intermediate_weight.scale),
                     nullptr,  // NOTE (perkzz): dynamic_quant_ ? ffn_intermediate_dynamic_scale_ : nullptr,
-                    gpt_init_parameter_.int8_mode_,
+                    gpt_init_parameter_.quant_algo_->int8_mode_,
                     stream_);
         }
 

@@ -43,7 +43,7 @@ class ModelWeihgtsLoaderTest(TestCase):
         database = CkptDatabase(ckpt_path)
         model_weights_loader = ModelWeightsLoader(weights_info, database)
         model_weights_loader.set_data_type(torch.float16)
-        weights = model_weights_loader.load_weights_from_scratch(config.int8_mode, config.int4_mode, device="cpu")
+        weights = model_weights_loader.load_weights_from_scratch(config.quant_algo, device="cpu")
         model_weights_loader.show_warns()
         return config, weights
     
@@ -57,7 +57,7 @@ class ModelWeihgtsLoaderTest(TestCase):
         database = ModuleDatabase(ref_model)
         model_weights_loader = ModelWeightsLoader(weights_info, database)
         model_weights_loader.set_data_type(torch.float16)
-        weights = model_weights_loader.load_weights_from_scratch(config.int8_mode, config.int4_mode, device="cpu")
+        weights = model_weights_loader.load_weights_from_scratch(config.quant_algo, device="cpu")
         model_weights_loader.show_warns()
         return config, weights
 

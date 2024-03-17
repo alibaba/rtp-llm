@@ -7,8 +7,6 @@ from maga_transformer.utils.model_weight import LoraResource
 class FTWeightsBase:
     def __init__(self):
         self.weights: Union[Dict[str, torch.Tensor], List[torch.Tensor]] = []
-        self.int8_mode = 0
-        self.int4_mode = False
         self.lora_resource: LoraResource = LoraResource()
 
     @abstractmethod

@@ -36,14 +36,7 @@ T *maybe_get(const std::unordered_map<std::string, th::Tensor> &m, const std::st
     if (it == m.end()) {
         return nullptr;
     }
-    // if ((it->second.count_nonzero().item<int>() == 0) &&
-    //     (name.find("bias") != std::string::npos) &&
-    //     (name.find("ffn_weights") != std::string::npos))
-    // {
-    //     it->second.resize_(0); // save memory
-    //     FT_LOG_INFO("bias tensor [%s] is all zero, not applied", name.c_str());
-    //     return nullptr;
-    // }
+
     return get_ptr<T>(it->second);
 }
 
@@ -52,8 +45,7 @@ std::vector<ft::ParallelGptDecoderLayerWeight<T>*>
 loadWeights(int                                                             pp_size,
             size_t                                                          pp_rank,
             size_t                                                          num_layers,
-            int                                                             int8_mode,
-            bool                                                            int4_mode,
+            c10::intrusive_ptr<QuantAlgo>                                   quant_algo,
             const std::vector<std::unordered_map<std::string, th::Tensor>>& weights,
             const std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*>*   lora_weights     = nullptr)
 {
@@ -61,7 +53,7 @@ loadWeights(int                                                             pp_s
 
     std::vector<ft::ParallelGptDecoderLayerWeight<T>*> gpt_layer_weights;
     for (size_t i = 0; i < (size_t)num_layers; i++) {
-        gpt_layer_weights.push_back(new ft::ParallelGptDecoderLayerWeight<T>(int8_mode));
+        gpt_layer_weights.push_back(new ft::ParallelGptDecoderLayerWeight<T>(quant_algo->int8_mode_));
 
         if (i / local_num_layers != pp_rank) {
             // Layer i is not in the current pipeline parallel group.
@@ -100,7 +92,7 @@ loadWeights(int                                                             pp_s
         gpt_layer_weights[i]->posf_ffn_layernorm_weights.gamma                     = maybe_get<T>(weights[i], W::post_ffn_ln_gamma);
         gpt_layer_weights[i]->posf_ffn_layernorm_weights.beta                      = maybe_get<T>(weights[i], W::post_ffn_ln_beta);
 
-        if (int8_mode == 1) {
+        if (quant_algo->int8_mode_) {
             gpt_layer_weights[i]->self_attention_weights.query_weight.int8_kernel            = maybe_get<int8_t>(weights[i], W::attn_qkv_w);
             gpt_layer_weights[i]->self_attention_weights.attention_output_weight.int8_kernel = maybe_get<int8_t>(weights[i], W::attn_o_w);
             gpt_layer_weights[i]->ffn_weights.intermediate_weight.int8_kernel                = get_ptr<int8_t>(weights[i].at(W::ffn_w1));
@@ -113,7 +105,7 @@ loadWeights(int                                                             pp_s
             gpt_layer_weights[i]->ffn_weights.intermediate_weight2.weight_only_quant_scale               = maybe_get<T>(weights[i], W::ffn_s3);
             gpt_layer_weights[i]->ffn_weights.output_weight.weight_only_quant_scale                      = get_ptr<T>(weights[i].at(W::ffn_s2));
         }
-        if(int4_mode == true){
+        if(quant_algo->int4_mode_){
             gpt_layer_weights[i]->self_attention_weights.query_weight.int4_kernel            = maybe_get<int8_t>(weights[i], W::attn_qkv_w);
             gpt_layer_weights[i]->self_attention_weights.attention_output_weight.int4_kernel = maybe_get<int8_t>(weights[i], W::attn_o_w);
             gpt_layer_weights[i]->ffn_weights.intermediate_weight.int4_kernel                = get_ptr<int8_t>(weights[i].at(W::ffn_w1));

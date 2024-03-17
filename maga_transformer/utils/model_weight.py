@@ -544,7 +544,8 @@ class ModelDeployWeightInfo:
         self._size_per_head = config.size_per_head
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
-        self._int8_mode = config.int8_mode
+        self._quant_algo = config.quant_algo
+        self._is_quant_mode = config.is_quant_mode
         self._num_layers = config.num_layers
         self._layer_head_num = config.layer_head_num
         self._layer_inter_padding_size = config.layer_inter_padding_size
@@ -562,10 +563,6 @@ class ModelDeployWeightInfo:
         self._is_gated_activation = config.gpt_init_params.isGatedActivation()
         self.expert_num_ = config.gpt_init_params.expert_num
         self.moe_k_      = config.gpt_init_params.moe_k
-        self._int4_mode = config.int4_mode
-        self._weight_only_group_size = config.weight_only_group_size
-        self._has_zeros = config.has_zeros
-        self._has_pre_scale = config.has_pre_scale
 
     def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:
         # auto create weight info based on exist tensor names
@@ -855,7 +852,7 @@ class LoraResource():
             lora_name = lora_config.name
             if self.lora_map.get_id(lora_name) != -1:
                 continue
-            lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name,  self.weights_info._int8_mode, 'cuda:0')
+            lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name,  self.weights_info._quant_algo.int8_mode, 'cuda:0')
             _ = self.add_lora_name(lora_name, lora_weights)
         for op in self.ft_op:
             op.update_lora()

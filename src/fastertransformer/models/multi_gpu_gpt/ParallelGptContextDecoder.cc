@@ -27,37 +27,41 @@ template<typename T>
 void ParallelGptContextDecoder<T>::initialize()
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    quant_algo_ = tc::QuantAlgo(gpt_init_parameter_.int8_mode_, gpt_init_parameter_.int4_mode_, gpt_init_parameter_.has_pre_scale_, gpt_init_parameter_.has_zeros_, gpt_init_parameter_.weight_only_group_size_);
-    self_attention_layer_.reset(new TensorParallelGptContextAttentionLayer<T>(
-                                        max_batch_size_,
-                                        max_seq_len_,
-                                        gpt_init_parameter_.head_num_,
-                                        gpt_init_parameter_.head_num_kv_,
-                                        gpt_init_parameter_.size_per_head_,
-                                        gpt_init_parameter_.layer_head_num_,
-                                        gpt_init_parameter_.layer_head_num_kv_,
-                                        gpt_init_parameter_.rotary_embedding_dim_,
-                                        gpt_init_parameter_.rotary_embedding_style_,
-                                        gpt_init_parameter_.rotary_embedding_base_,
-                                        gpt_init_parameter_.dynamic_embedding_scalar_,
-                                        gpt_init_parameter_.dynamic_embedding_max_pos_,
-                                        gpt_init_parameter_.position_embeddings_scale_,
-                                        gpt_init_parameter_.base_scale_,
-                                        gpt_init_parameter_.logn_seq_len_,
-                                        tensor_para_,
-                                        stream_,
-                                        cublas_wrapper_,
-                                        allocator_,
-                                        gpt_init_parameter_.use_logn_attn_,
-                                        true,
-                                        is_free_buffer_after_forward_,
-                                        is_qk_buf_float_,
-                                        sparse_,
-                                        gpt_init_parameter_.is_sparse_head_,
-                                        gpt_init_parameter_.int8_mode_,
-                                        gpt_init_parameter_.int4_mode_,
-                                        custom_all_reduce_comm_,
-                                        enable_custom_all_reduce_));
+    quant_algo_ = tc::QuantAlgo(gpt_init_parameter_.quant_algo_->int8_mode_,
+                                gpt_init_parameter_.quant_algo_->int4_mode_,
+                                gpt_init_parameter_.quant_algo_->has_pre_scale_,
+                                gpt_init_parameter_.quant_algo_->has_zeros_,
+                                gpt_init_parameter_.quant_algo_->weight_only_group_size_);
+    self_attention_layer_.reset(
+        new TensorParallelGptContextAttentionLayer<T>(max_batch_size_,
+                                                      max_seq_len_,
+                                                      gpt_init_parameter_.head_num_,
+                                                      gpt_init_parameter_.head_num_kv_,
+                                                      gpt_init_parameter_.size_per_head_,
+                                                      gpt_init_parameter_.layer_head_num_,
+                                                      gpt_init_parameter_.layer_head_num_kv_,
+                                                      gpt_init_parameter_.rotary_embedding_dim_,
+                                                      gpt_init_parameter_.rotary_embedding_style_,
+                                                      gpt_init_parameter_.rotary_embedding_base_,
+                                                      gpt_init_parameter_.dynamic_embedding_scalar_,
+                                                      gpt_init_parameter_.dynamic_embedding_max_pos_,
+                                                      gpt_init_parameter_.position_embeddings_scale_,
+                                                      gpt_init_parameter_.base_scale_,
+                                                      gpt_init_parameter_.logn_seq_len_,
+                                                      tensor_para_,
+                                                      stream_,
+                                                      cublas_wrapper_,
+                                                      allocator_,
+                                                      gpt_init_parameter_.use_logn_attn_,
+                                                      true,
+                                                      is_free_buffer_after_forward_,
+                                                      is_qk_buf_float_,
+                                                      sparse_,
+                                                      gpt_init_parameter_.is_sparse_head_,
+                                                      gpt_init_parameter_.quant_algo_->int8_mode_,
+                                                      gpt_init_parameter_.quant_algo_->int4_mode_,
+                                                      custom_all_reduce_comm_,
+                                                      enable_custom_all_reduce_));
 
     ffn_layer_.reset(new TensorParallelFfnLayer<T>(
                              max_batch_size_,
@@ -118,7 +122,7 @@ void ParallelGptContextDecoder<T>::allocateBuffer(size_t batch_size, size_t seq_
         attn_normed_input_ = reinterpret_cast<T*>(
                 allocator_->reMalloc(attn_normed_input_, sizeof(T) * batch_size * seq_len * hidden_units, false));
     }
-    if (gpt_init_parameter_.int8_mode_ == 2) {
+    if (gpt_init_parameter_.quant_algo_->int8_mode_ == 2) {
         FT_LOG_ERROR("int8_mode == 2 not support");
         abort();
     }
@@ -176,7 +180,7 @@ void ParallelGptContextDecoder<T>::freeBuffer()
             allocator_->free((void**)(&k_cache_layer_));
             allocator_->free((void**)(&v_cache_layer_));
         }
-        if (gpt_init_parameter_.int8_mode_ == 2) {
+        if (gpt_init_parameter_.quant_algo_->int8_mode_ == 2) {
             allocator_->free((void**)(&attention_query_dynamic_scale_));
             allocator_->free((void**)(&ffn_intermediate_dynamic_scale_));
         }
@@ -357,7 +361,7 @@ void ParallelGptContextDecoder<T>::forward(
     Tensor k_cache = output_tensors->at("key_cache");
     Tensor v_cache = output_tensors->at("value_cache");
 
-    const auto activation_in_type  = gpt_init_parameter_.int8_mode_ == 2 ? TYPE_INT8 : data_type;
+    const auto activation_in_type  = gpt_init_parameter_.quant_algo_->int8_mode_ == 2 ? TYPE_INT8 : data_type;
     const auto activation_out_type = data_type;
 
     // The resize of the key cache buffer by
@@ -377,7 +381,7 @@ void ParallelGptContextDecoder<T>::forward(
     }
 
     AttentionType attention_type =
-        (input_tensors->isExist("linear_bias_slopes") || gpt_init_parameter_.int8_mode_ == 2) ?
+        (input_tensors->isExist("linear_bias_slopes") || gpt_init_parameter_.quant_algo_->int8_mode_ == 2) ?
             getUnfusedAttentionType(attention_type_) :
             attention_type_;
     const bool is_unpadded_mha = isUnPaddedMHA(attention_type);
@@ -464,7 +468,7 @@ void ParallelGptContextDecoder<T>::forward(
                                                 hidden_units,
                                                 const_cast<float*>(layer_weight->self_attention_weights.query_weight.scale),
                                                 nullptr,
-                                                gpt_init_parameter_.int8_mode_,
+                                                gpt_init_parameter_.quant_algo_->int8_mode_,
                                                 stream_);
             if (gpt_init_parameter_.layernorm_type_ == LayerNormType::pre_layernorm) {
                 print_bsd(l, "pre ln", decoder_normed_input_, request_batch_size, seq_len, hidden_units);
@@ -480,7 +484,7 @@ void ParallelGptContextDecoder<T>::forward(
                                                          hidden_units,
                                                          nullptr,
                                                          nullptr,
-                                                         gpt_init_parameter_.int8_mode_,
+                                                         gpt_init_parameter_.quant_algo_->int8_mode_,
                                                          stream_);
                     print_bsd(l, "pre attn ln", attn_normed_input_, request_batch_size, seq_len, hidden_units);
             }
@@ -634,7 +638,7 @@ void ParallelGptContextDecoder<T>::forward(
                     nullptr,
                     const_cast<float*>(layer_weight->ffn_weights.intermediate_weight.scale),
                     nullptr,  // NOTE (perkzz): dynamic_quant_ ? ffn_intermediate_dynamic_scale_ : nullptr,
-                    gpt_init_parameter_.int8_mode_,
+                    gpt_init_parameter_.quant_algo_->int8_mode_,
                     stream_);
             }
             sync_check_cuda_error();

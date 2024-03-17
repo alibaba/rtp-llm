@@ -12,9 +12,11 @@ template<typename T>
 void ParallelGpt<T>::initialize()
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    // FT_LOG_WARNING("gpt: %d %d %d %d %d", params_.int8_mode_, params_.int4_mode_, params_.has_pre_scale_, params_.has_zeros_, params_.weight_only_group_size_);
-    quant_algo_ = tc::QuantAlgo(params_.int8_mode_, params_.int4_mode_, params_.has_pre_scale_, params_.has_zeros_, params_.weight_only_group_size_);
-    // FT_LOG_WARNING("gpt: %d %d %d %d %d", quant_algo_.int8Mode(), quant_algo_.int4Mode(), quant_algo_.usePreScales(), quant_algo_.useZeros(), quant_algo_.getGroupSize());
+    quant_algo_                 = tc::QuantAlgo(params_.quant_algo_->int8_mode_,
+                                params_.quant_algo_->int4_mode_,
+                                params_.quant_algo_->has_pre_scale_,
+                                params_.quant_algo_->has_zeros_,
+                                params_.quant_algo_->weight_only_group_size_);
     parallel_attention_wrapper_ = new ParallelAttentionWrapper<T>(params_,
                                                                   tensor_para_,
                                                                   stream_,
@@ -91,7 +93,7 @@ void ParallelGpt<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num,
     // only allocate additionl buffers when has adapters
     decoder_layer_output_ = reinterpret_cast<T*>(
         allocator_->reMalloc(decoder_layer_output_, sizeof(T) * h_token_num * hidden_units, false));
-    if (params_.int8_mode_ == 2) {
+    if (params_.quant_algo_->int8_mode_ == 2) {
         FT_LOG_ERROR("int8_mode == 2 not support");
         abort();
     }
@@ -147,7 +149,7 @@ void ParallelGpt<T>::freeBuffer()
         allocator_->free((void**)(&prefix_lengths_));
         allocator_->free((void**)(&block_pointers_));
         allocator_->free((void**)(&block_scale_pointers_));
-        if (params_.int8_mode_ == 2) {
+        if (params_.quant_algo_->int8_mode_ == 2) {
             allocator_->free((void**)(&attention_query_dynamic_scale_));
             allocator_->free((void**)(&ffn_intermediate_dynamic_scale_));
         }
@@ -366,7 +368,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             block_stride = total_batch_size * 2 * max_blocks_per_batch;
     }    
 
-    const auto activation_in_type  = params_.int8_mode_ == 2 ? TYPE_INT8 : data_type;
+    const auto activation_in_type  = params_.quant_algo_->int8_mode_ == 2 ? TYPE_INT8 : data_type;
     const auto activation_out_type = data_type;
 
     size_t context_h_token_num = h_token_num - batch_size;
@@ -424,7 +426,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                             hidden_units,
                                             const_cast<float*>(layer_weight->self_attention_weights.query_weight.scale),
                                             nullptr,
-                                            params_.int8_mode_,
+                                            params_.quant_algo_->int8_mode_,
                                             stream_);
         print_bsd(l, "pre ln", decoder_normed_input_, 1, h_token_num, hidden_units);
         sync_check_cuda_error();
@@ -439,7 +441,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                                  hidden_units,
                                                  nullptr,
                                                  nullptr,
-                                                 params_.int8_mode_,
+                                                 params_.quant_algo_->int8_mode_,
                                                  stream_);
             print_bsd(l, "pre attn ln", attn_normed_input_, 1, h_token_num, hidden_units);
         }
@@ -552,7 +554,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                 nullptr,
                 const_cast<float*>(layer_weight->ffn_weights.intermediate_weight.scale),
                 nullptr,  // NOTE (perkzz): dynamic_quant_ ? ffn_intermediate_dynamic_scale_ : nullptr,
-                params_.int8_mode_,
+                params_.quant_algo_->int8_mode_,
                 stream_);
         }
         sync_check_cuda_error();

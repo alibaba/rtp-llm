@@ -234,7 +234,7 @@ class GPT(BaseModel):
             load_parallel_num = estimate_load_parallel_num(
                 self.config, g_parallel_info.tp_size)
             model_weights_loader = get_model_weights_loader(weights_info, database, compute_dtype=compute_dtype)
-            self.weight = model_weights_loader.load_weights_from_scratch(weights_info._int8_mode, weights_info._int4_mode, num_process=load_parallel_num)
+            self.weight = model_weights_loader.load_weights_from_scratch(weights_info._quant_algo, num_process=load_parallel_num)
             model_weights_loader.show_warns()
 
             self.weight.lora_resource = LoraResource({}, database, weights_info, LoRAMap())

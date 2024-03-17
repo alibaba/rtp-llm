@@ -28,8 +28,7 @@ FtGpt<T>::FtGpt(const GptInitParameter&       gpt_init_parameter,
     gpt_layer_weights_ = loadWeights<T>(pipeline_para_.world_size_,
                                         pipeline_para_.rank_,
                                         gpt_init_parameter_.num_layers_,
-                                        gpt_init_parameter_.int8_mode_,
-                                        gpt_init_parameter_.int4_mode_,
+                                        gpt_init_parameter_.quant_algo_,
                                         weights,
                                         &gpt_lora_layer_weights_);
     
@@ -184,26 +183,9 @@ ParallelGptOp::ParallelGptOp(c10::intrusive_ptr<GptInitParameter>               
     scalar_type_(getScalarType(gpt_init_parameter->data_type_))
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    // for (auto layer_weght : weights) {
-    //     for (auto weight: layer_weght) {
-    //         CHECK_INPUT(weight.second, scalar_type_);
-    //     }
-    // }
-
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    // for (auto layer_weght : quant_scales) {
-    //     for (auto weight: layer_weght) {
-    //         CHECK_INPUT(weight.second, scalar_type_);
-    //     }
-    // }
 
 #define CREATE_INSTANCE(T_)                                                                                            \
-    gpt_        = new FtGpt<T_>(gpt_init_parameter_,                                                                   \
-                         tensor_para_size,                                                                      \
-                         pipeline_para_size,                                                                    \
-                         master_ip,                                                                             \
-                         master_port,                                                                           \
-                         weights);       \                                                                        
+    gpt_ = new FtGpt<T_>(gpt_init_parameter_, tensor_para_size, pipeline_para_size, master_ip, master_port, weights);  \
     chunk_size_ = 16 / sizeof(T_)
 
     switch (scalar_type_) {

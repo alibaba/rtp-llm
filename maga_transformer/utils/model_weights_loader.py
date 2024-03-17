@@ -5,7 +5,7 @@ import logging
 import multiprocessing
 import torch
 import torch.serialization
-from typing import List, Set, Optional, Tuple
+from typing import List, Set, Optional, Tuple, Any
 from itertools import repeat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
     WeightInfo, W, ModelWeights, LoRAWeights
@@ -53,7 +53,7 @@ class ModelWeightsLoader:
     def _process_ckpt_metas(self):
         self._weights_info.process_meta(self._ckpt_metas)
 
-    def load_weights_from_scratch(self, int8_mode: int, int4_mode: bool, ref_model: Optional[torch.nn.Module]=None, device: str='cuda:0', num_process=1):
+    def load_weights_from_scratch(self, quant_algo: Any, ref_model: Optional[torch.nn.Module]=None, device: str='cuda:0', num_process=1):
         weights = ModelWeights(self._num_layers)
         if num_process > 1:
             ctx = multiprocessing.get_context('spawn')
@@ -61,12 +61,11 @@ class ModelWeightsLoader:
                 all_results = pool.starmap(
                     self._load_layer_weight,
                     zip(range(self._num_layers),
-                        repeat(int8_mode),
+                        repeat(quant_algo),
                         repeat(ref_model),
-                        repeat(int4_mode),
                         repeat(device)))
         else:
-            all_results = [self._load_layer_weight(id, int8_mode, int4_mode, ref_model, device)
+            all_results = [self._load_layer_weight(id, quant_algo, ref_model, device)
                            for id in range(self._num_layers)]
         for results, logs in all_results:
             self._weight_access_log.update(logs)
@@ -223,7 +222,7 @@ class ModelWeightsLoader:
             convert_weight(ffn_weight_lists, self.apply_int8)
         return results
 
-    def _load_layer_weight(self, layer_id: int, int8_mode: int, int4_mode: bool = False, ref_model: Optional[torch.nn.Module] = None, device: str = "cuda:0"):
+    def _load_layer_weight(self, layer_id: int, quant_algo: Any, ref_model: Optional[torch.nn.Module] = None, device: str = "cuda:0"):
         use_fp32 = os.environ.get("USE_FLOAT32", None) is not None
         results = []
         if isinstance(self._model_weights_info.layer_weights[0], List):
@@ -232,8 +231,8 @@ class ModelWeightsLoader:
             layer_weights = self._model_weights_info.layer_weights
         for weight in layer_weights:
             try:
-                int8_flag = int8_mode == 1 and (weight.name in W.quant_w)
-                int4_flag = int4_mode == True and (weight.name in W.quant_w or weight.name in W.int4_quant_params)
+                int8_flag = quant_algo.int8_mode == True and (weight.name in W.quant_w)
+                int4_flag = quant_algo.int4_mode == True and (weight.name in W.quant_w or weight.name in W.int4_quant_params)
                 is_moe = self._weights_info.expert_num_ > 0
                 is_gated_activation = self._weights_info._is_gated_activation
 
@@ -254,9 +253,9 @@ class ModelWeightsLoader:
             except Exception as e:
                 logging.error(f'load {weight.name} in layer {layer_id} failed: {e}')
                 raise e
-        if int4_mode:
-            results.extend(self._load_int4_layer_weight(layer_weights, layer_id=layer_id, devide=device, ref_model=ref_model))
-        elif int8_mode:
+        if quant_algo.int4_mode:
+            results.extend(self._load_int4_layer_weight(layer_weights, layer_id=layer_id, device=device, ref_model=ref_model))
+        elif quant_algo.int8_mode:
             results.extend(self._load_int8_layer_weight(layer_weights, layer_id=layer_id, device=device, ref_model=ref_model))
 
         gc.collect()

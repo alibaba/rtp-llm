@@ -212,7 +212,7 @@ class QWenWeight(ModelDeployWeightInfo):
 
         layer_weights: List[List[WeightInfo]] = []
         for layer in range(self._num_layers):
-            if self._int4_mode:
+            if self._quant_algo.int4_mode:
                 logging.info("logging int4 weights")
                 w=self._get_hf_qptq_weight_info(layer)
                 layer_weights.append(w)
@@ -274,14 +274,14 @@ class QWenBase(GPT):
 
         quant_config = config_json.get("quantization_config", None)
         if quant_config is not None:
-            config.int4_mode = True
+            config.quant_algo.int4_mode = True
             group_size = quant_config.get("group_size", 0)
             assert group_size == 128 or group_size == 64, "int4 only support group size == 64 or 128"
-            config.weight_only_group_size = group_size
+            config.quant_algo.weight_only_group_size = group_size
             quant_method = quant_config.get("quant_method", None)
             if quant_method == 'gptq':
-                config.has_pre_scale = False
-                config.has_zeros = True
+                config.quant_algo.has_pre_scale = False
+                config.quant_algo.has_zeros = True
 
         use_dynamic_ntk = config_json.get("use_dynamic_ntk")
         use_logn_attn = config_json.get("use_logn_attn")

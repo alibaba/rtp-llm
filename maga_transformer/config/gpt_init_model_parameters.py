@@ -92,7 +92,8 @@ class GptInitModelParameters:
         "multi_task_prompt",
         "medusa_config",
         "normalize_lm_head_weight",
-        "ref_model"
+        "ref_model",
+        "is_quant_mode"
     }
 
     def __init__(self,
@@ -118,6 +119,7 @@ class GptInitModelParameters:
         self.tp_split_emb_and_lm_head = True
         self.medusa_config = None
 
+        self.is_quant_mode = False
         self.ptuning_path = None
         self.pre_seq_len = 0
         self.prefix_projection = False
@@ -191,10 +193,10 @@ class GptInitModelParameters:
             layer_inter_padding_size = []
             for idx in range(len(self.layer_inter_size)):
                 inter_size = self.layer_inter_size[idx]
-                layer_inter_padding_size.append(inter_size + (get_pad_size(inter_size, align_size) if self.int8_mode else 0))
+                layer_inter_padding_size.append(inter_size + (get_pad_size(inter_size, align_size) if self.is_quant_mode else 0))
             self.layer_inter_padding_size = layer_inter_padding_size
         self.inter_padding_size = \
-            self.inter_size + (get_pad_size(self.inter_size, align_size) if self.int8_mode else 0)
+            self.inter_size + (get_pad_size(self.inter_size, align_size) if self.is_quant_mode else 0)
         if self.head_num_kv <= 0:
             self.head_num_kv = self.head_num
         if self.inter_padding_size <= 0:
@@ -244,7 +246,8 @@ class GptInitModelParameters:
                       lora_infos: Optional[Dict[str, str]],
                       ptuning_path: Optional[str],
                       tokenizer_path: str,
-                      int8_mode: int,
+                      int8_mode: bool,
+                      int4_mode: bool,
                       data_type: WEIGHT_TYPE,
                       max_seq_len: int,
                       seq_size_per_block: int,
@@ -254,7 +257,9 @@ class GptInitModelParameters:
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path
-        self.int8_mode = int8_mode
+        self.quant_algo.int8_mode = int8_mode
+        self.quant_algo.int4_mode = int4_mode
+        self.is_quant_mode = int8_mode or int4_mode
         self.data_type = data_type.to_str()
         self.gen_num_per_circle = gen_num_per_circle
         self.ptuning_path = ptuning_path
@@ -340,9 +345,8 @@ class GptInitModelParameters:
         # other small tensor
         layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * 11
 
-
         word_emb_param_count =  self.vocab_size * hidden_size
-        layer_param_bytes = 2 - self.int8_mode
+        layer_param_bytes = 1 if self.quant_algo.int8_mode else 2
 
         model_size = word_emb_param_count * 2 + \
             layer_weight_param_count * layer_param_bytes + \

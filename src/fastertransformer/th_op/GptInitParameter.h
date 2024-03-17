@@ -16,6 +16,15 @@ public:
     std::vector<int64_t> eos_token_ids_;
 };
 
+struct QuantAlgo: public th::jit::CustomClassHolder {
+public:
+    bool    int8_mode_              = false;
+    bool    int4_mode_              = false;
+    bool    has_pre_scale_          = false;
+    bool    has_zeros_              = false;
+    int64_t weight_only_group_size_ = 0;
+};
+
 struct SpecialTokens: public th::jit::CustomClassHolder {
 public:
     SpecialTokens();
@@ -70,7 +79,6 @@ public:
     bool use_norm_input_residual_    = false;
     bool use_norm_attn_out_residual_ = false;
 
-    int64_t     int8_mode_         = 0;
     std::string weights_data_type_ = "fp16";
     std::string data_type_         = "fp16";
 
@@ -90,11 +98,6 @@ public:
     bool add_bias_linear_            = false;
 
     bool is_causal_                  = true;
-    // weight_only_int4_algo
-    bool    int4_mode_              = false;
-    bool    has_pre_scale_          = false;
-    bool    has_zeros_              = false;
-    int64_t weight_only_group_size_ = 0;
 
     std::string tokenizer_path_    = "";
     std::string ckpt_path_         = "";
@@ -103,6 +106,7 @@ public:
     bool        using_hf_sampling_ = false;
 
     c10::intrusive_ptr<SpecialTokens> special_tokens_;
+    c10::intrusive_ptr<QuantAlgo> quant_algo_;
 
     // async mode config
     int64_t max_generate_batch_size_ = 1;

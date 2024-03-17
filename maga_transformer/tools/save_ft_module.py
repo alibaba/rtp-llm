@@ -26,8 +26,6 @@ def load_as_ft_module(ckpt_path: str, model_type: str, **kwargs: Any) -> Any:
 
     config = model_cls.create_config(ckpt_path, **kwargs)
     weight_cls = model_cls.get_weight_cls()
-    int8_mode = 0
-    int4_mode = False
 
     weights_info = weight_cls(
         hidden_size=config.head_num * config.size_per_head,
@@ -47,7 +45,7 @@ def load_as_ft_module(ckpt_path: str, model_type: str, **kwargs: Any) -> Any:
                              weights_info=weights_info)
     weight = FTModelWeights(config.layer_num)
 
-    ckpt_loader.load_weights_from_scratch(weight, int8_mode, int4_mode, 'cpu')
+    ckpt_loader.load_weights_from_scratch(weight, config.quant_algo, 'cpu')
     return weight.model
 
 def save_ft_module(ckpt_path: str, save_dir: str, model_type:str):

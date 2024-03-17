@@ -376,7 +376,7 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
                                local_hidden_units_rt,
                                nullptr,
                                nullptr,
-                               params_.int8_mode_,
+                               params_.quant_algo_->int8_mode_,
                                stream_);
         qkv_buf_3_input = qkv_buf_;
         sync_check_cuda_error();
@@ -545,9 +545,9 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
         relative_attention_bias_stride,
         input_tensors->getPtr<T>("linear_bias_slopes", nullptr),
         input_tensors->getPtr<bool>("masked_tokens", nullptr),
-        params_.int8_mode_ == 2 ? attention_weights->query_weight.scale_out : nullptr,
-        params_.int8_mode_ == 2 ? attention_weights->attention_output_weight.scale : nullptr,
-        params_.int8_mode_,
+        params_.quant_algo_->int8_mode_ == 2 ? attention_weights->query_weight.scale_out : nullptr,
+        params_.quant_algo_->int8_mode_ == 2 ? attention_weights->attention_output_weight.scale : nullptr,
+        params_.quant_algo_->int8_mode_,
         multi_block_mode_,
         max_seq_len_tile_,
         partial_out_,
@@ -670,7 +670,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                    params_.logn_seq_len_,
                                    params_.use_logn_attn_,
                                    attention_weights->query_weight.scale_out,
-                                   params_.int8_mode_,
+                                   params_.quant_algo_->int8_mode_,
                                    stream_);
     POP_RANGE;
     print_bhsd(layer_id,
@@ -893,7 +893,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                local_head_num,
                                params_.size_per_head_,
                                attention_weights->attention_output_weight.scale,
-                               params_.int8_mode_,
+                               params_.quant_algo_->int8_mode_,
                                stream_);
             sync_check_cuda_error();
         }
@@ -907,7 +907,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                                      params_.size_per_head_,
                                                      padding_offset,
                                                      attention_weights->attention_output_weight.scale,
-                                                     params_.int8_mode_,
+                                                     params_.quant_algo_->int8_mode_,
                                                      stream_);
         }
         POP_RANGE;
@@ -985,7 +985,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     tensor_para_(tensor_para) {
     multi_block_mode_ = UseMultiBlockMode();
 
-    if (params_.int8_mode_ == 2) {
+    if (params_.quant_algo_->int8_mode_ == 2) {
         abort();
     }
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);

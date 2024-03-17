@@ -43,8 +43,7 @@ FtGptDecoder<T>::FtGptDecoder(const GptInitParameter&       gpt_init_parameter,
     gpt_layer_weights_ = loadWeights<T>(pipeline_para_.world_size_,
                                         pipeline_para_.rank_,
                                         gpt_init_parameter_.num_layers_,
-                                        gpt_init_parameter_.int8_mode_,
-                                        gpt_init_parameter_.int4_mode_,
+                                        gpt_init_parameter_.quant_algo_,
                                         weights,
                                         &gpt_lora_layer_weights_);
 
@@ -202,7 +201,7 @@ ParallelGptDecoderOp::ParallelGptDecoderOp(
         //     CHECK_INPUT(weight.second, scalar_type_);
         // }
 
-        if (gpt_init_parameter_.int8_mode_ == 1) {
+        if (gpt_init_parameter_.quant_algo_->int8_mode_ == 1) {
             TORCH_CHECK(scalar_type_ != torch::kFloat32, "Int8 weight only quant does not work for FP32.");
             // for (auto quant_weight : quant_weights[i]) {
             //     CHECK_INPUT(quant_weight.second, torch::kInt8);
