@@ -97,6 +97,7 @@ TensorParallelFfnLayer<T>::TensorParallelFfnLayer(size_t                        
                                                   bool                                is_sparse,
                                                   bool                                is_sparse_head,
                                                   ActivationType                      activation_type,
+                                                  bool                                has_moe_norm,
                                                   float                               layernorm_eps,
                                                   std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
                                                   int                                 enable_custom_all_reduce):
@@ -117,6 +118,7 @@ TensorParallelFfnLayer<T>::TensorParallelFfnLayer(size_t                        
                 is_sparse,
                 is_sparse_head,
                 activation_type,
+                has_moe_norm,
                 layernorm_eps),
     tensor_para_(tensor_para),
     custom_all_reduce_comm_(custom_all_reduce_comm),

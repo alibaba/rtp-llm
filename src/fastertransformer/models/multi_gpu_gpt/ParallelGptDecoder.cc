@@ -81,6 +81,7 @@ void ParallelGptDecoder<T>::initialize()
                              sparse_,
                              gpt_init_parameter_.is_sparse_head_,
                              gpt_init_parameter_.activation_type_,
+                             gpt_init_parameter_.has_moe_norm_,
                              gpt_init_parameter_.layernorm_eps_,
                              custom_all_reduce_comm_,
                              enable_custom_all_reduce_));

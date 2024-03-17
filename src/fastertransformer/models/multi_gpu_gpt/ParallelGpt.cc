@@ -47,6 +47,7 @@ void ParallelGpt<T>::initialize()
                                                sparse_,
                                                params_.is_sparse_head_,
                                                params_.activation_type_,
+                                               params_.has_moe_norm_,
                                                params_.layernorm_eps_,
                                                custom_all_reduce_comm_,
                                                enable_custom_all_reduce_);

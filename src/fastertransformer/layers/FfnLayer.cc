@@ -331,12 +331,13 @@ FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
                       std::vector<int64_t>              local_layer_inter_padding_size,
                       cudaStream_t                      stream,
                       cublasMMWrapper*                  cublas_wrapper,
-                      tc::QuantAlgo                    quant_algo,
+                      tc::QuantAlgo                     quant_algo,
                       IAllocator*                       allocator,
                       bool                              is_free_buffer_after_forward,
                       bool                              sparse,
                       bool                              is_sparse_head,
                       fastertransformer::ActivationType activation_type,
+                      bool                              has_moe_norm,
                       float                             layernorm_eps):
     BaseLayer(stream, cublas_wrapper, allocator, is_free_buffer_after_forward, nullptr, sparse),
     max_token_num_(max_batch_size * max_seq_len),
@@ -350,6 +351,7 @@ FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
     is_sparse_head_(is_sparse_head),
     activation_type_(activation_type),
     quant_algo_(quant_algo),
+    has_moe_norm_(has_moe_norm),
     layernorm_eps_(layernorm_eps) {
     use_gated_activation_ = isGatedActivation(activation_type_);
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -376,7 +378,10 @@ FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
         }
 
         tensorrt_llm::kernels::MOEExpertScaleNormalizationMode moe_norm_mode =
-        tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE;
+            tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::NONE;
+        if (has_moe_norm_) {
+            moe_norm_mode = tensorrt_llm::kernels::MOEExpertScaleNormalizationMode::RENORMALIZE;
+        }
 
         moe_plugin_ = std::make_shared<tensorrt_llm::plugins::MixtureOfExpertsPlugin>(expert_num,
                                                                                       moe_k,

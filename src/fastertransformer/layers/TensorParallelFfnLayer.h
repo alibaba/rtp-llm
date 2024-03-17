@@ -19,6 +19,7 @@
 #include "src/fastertransformer/layers/FfnLayer.h"
 #include "src/fastertransformer/cuda/custom_ar_comm.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
+#include "src/fastertransformer/utils/layernorm_types.h"
 
 namespace fastertransformer {
 
@@ -50,6 +51,7 @@ public:
                            bool                                is_sparse,
                            bool                                is_sparse_head,
                            ActivationType                      activation_type,
+                           bool                                has_moe_norm,
                            float                               layernorm_eps,
                            std::shared_ptr<AbstractCustomComm> custom_all_reduce_comm,
                            int                                 enable_custom_all_reduce);

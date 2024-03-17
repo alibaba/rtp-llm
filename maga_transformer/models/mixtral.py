@@ -119,6 +119,7 @@ class Mixtral(GPT):
             activation_type='SiGLU',
             norm_type='rmsnorm',
             rotary_embedding_dim=size_per_head,
+            has_moe_norm = True,
             rotary_embedding_style=1,
             has_post_decoder_layernorm=True,
             rotary_embedding_base = int(config_json.get('rope_theta', 10000)),

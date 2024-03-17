@@ -12,12 +12,13 @@ from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 
 from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateOutput, GenerateResponse
-from maga_transformer.model_factory import ModelFactory, AsyncModel
+from maga_transformer.model_factory import ModelFactory, AsyncModel, ModelConfig
 from maga_transformer.pipeline.pipeline_custom_func import PipelineCustomFunc, get_piple_custom_func
 from maga_transformer.async_decoder_engine.generate_stream import GenerateInput
 from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slice_list, truncate_response_with_stop_words
 from maga_transformer.utils.tokenizer_utils import DecodingState
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from maga_transformer.utils.util import WEIGHT_TYPE
 
 class Pipeline(object):
     def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[PreTrainedTokenizerBase]):
@@ -199,3 +200,35 @@ class Pipeline(object):
             kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
 
             yield GenerateResponse(generate_output=generate_output, generate_texts=generate_texts)
+
+
+if __name__=='__main__':
+    tokenizer_path = "/mnt/nas1/hf/Qwen-7B-Chat-Int4"
+    ckpt_path = "/mnt/nas1/hf/Qwen-7B-Chat-Int4"
+    # tokenizer_path = "/mnt/nas1/hf/models--microsoft--phi-1_5"
+    # ckpt_path = "/mnt/nas1/hf/models--microsoft--phi-1_5"
+    # tokenizer_path = "/mnt/nas1/hf/models--mistralai--Mixtral-8x7B-v0.1/snapshots/c56a162543a9560c9f352687e46c8416e6292da6/"
+    # ckpt_path = "/mnt/nas1/hf/models--mistralai--Mixtral-8x7B-v0.1/snapshots/c56a162543a9560c9f352687e46c8416e6292da6/"
+    model_type = "qwen"
+
+    model_config = ModelConfig(
+        model_type = model_type,
+        ckpt_path = ckpt_path,
+        tokenizer_path = tokenizer_path,
+        weight_type = WEIGHT_TYPE.INT4,
+        async_mode = True
+    )
+
+    model = ModelFactory.from_model_config(model_config)
+    if isinstance(model, AsyncModel):
+        tokenizer = model.model.tokenizer
+    else:
+        tokenizer = model.tokenizer
+    pipeline = Pipeline(model, tokenizer)
+    generate_config = {
+        "top_k": 1,
+        "max_new_tokens": 100,
+    }
+    for res in pipeline("<|im_start|>user\nhello, what's your name<|im_end|>\n<|im_start|>assistant\n", generate_config=generate_config):
+        print(res.generate_texts)
+    pipeline.stop()

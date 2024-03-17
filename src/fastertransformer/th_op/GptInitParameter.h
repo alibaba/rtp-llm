@@ -96,6 +96,7 @@ public:
     bool use_attention_linear_bias_  = false;
     bool use_fp32_to_compute_logit_  = false;
     bool add_bias_linear_            = false;
+    bool has_moe_norm_               = false;            
 
     bool is_causal_                  = true;
 

@@ -28,6 +28,7 @@
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
 #include "src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
+#include "src/fastertransformer/utils/layernorm_types.h"
 #include <stdint.h>
 #include <vector>
 
@@ -75,6 +76,7 @@ protected:
     tc::QuantAlgo quant_algo_;
 
     ActivationType activation_type_ = ActivationType::InvalidType;
+    bool has_moe_norm_ = false;
 
     bool use_gated_activation_ = false;
 
@@ -113,6 +115,7 @@ public:
              bool                 sparse,
              bool                 is_sparse_head,
              ActivationType       activation_type,
+             bool                 has_moe_norm,
              float                layernorm_eps);
 
     virtual ~FfnLayer();

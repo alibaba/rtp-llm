@@ -148,6 +148,7 @@ static auto specialTokensTHS =
     DEF_PROPERTY(has_positional_encoding, has_positional_encoding_)                                                    \
     DEF_PROPERTY(has_pre_decoder_layernorm, has_pre_decoder_layernorm_)                                                \
     DEF_PROPERTY(has_post_decoder_layernorm, has_post_decoder_layernorm_)                                              \
+    DEF_PROPERTY(has_moe_norm, has_moe_norm_)                                                                          \
     DEF_PROPERTY(has_lm_head, has_lm_head_)                                                                            \
     DEF_PROPERTY(use_attention_linear_bias, use_attention_linear_bias_)                                                \
     DEF_PROPERTY(use_fp32_to_compute_logit, use_fp32_to_compute_logit_)                                                \
