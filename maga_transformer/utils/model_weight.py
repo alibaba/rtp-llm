@@ -544,7 +544,8 @@ class ModelDeployWeightInfo:
         self._size_per_head = config.size_per_head
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
-        self._quant_algo = config.quant_algo
+        self._int8_mode = config.quant_algo.int8_mode
+        self._int4_mode = config.quant_algo.int4_mode
         self._is_quant_mode = config.is_quant_mode
         self._num_layers = config.num_layers
         self._layer_head_num = config.layer_head_num
@@ -852,7 +853,7 @@ class LoraResource():
             lora_name = lora_config.name
             if self.lora_map.get_id(lora_name) != -1:
                 continue
-            lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name,  self.weights_info._quant_algo.int8_mode, 'cuda:0')
+            lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name,  self.weights_info._int8_mode, 'cuda:0')
             _ = self.add_lora_name(lora_name, lora_weights)
         for op in self.ft_op:
             op.update_lora()

@@ -212,7 +212,7 @@ class QWenWeight(ModelDeployWeightInfo):
 
         layer_weights: List[List[WeightInfo]] = []
         for layer in range(self._num_layers):
-            if self._quant_algo.int4_mode:
+            if self._int4_mode:
                 logging.info("logging int4 weights")
                 w=self._get_hf_qptq_weight_info(layer)
                 layer_weights.append(w)
