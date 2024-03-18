@@ -134,14 +134,14 @@ class QwenRenderer(CustomChatRenderer):
             ((request.functions == None) or (len(request.functions) == 0)):
             return self.template_chat_renderer.render_chat(request)
 
-        query, history = self.parse_messages(request.messages, request.functions)
+        query, history, system = self.parse_messages(request.messages, request.functions)
+        print(f"parsed query: {query}, history: {history}, system: {system}")
         input_ids = []
         if (query == _TEXT_COMPLETION_CMD):
             input_ids = self.text_complete_last_message(history)
         else:
             assert (isinstance(query, str))
-            input_ids = make_context(self.tokenizer, query, history,
-                                system="You are a helpful assistant.")[1]
+            input_ids = make_context(self.tokenizer, query, history, system)[1]
         return RenderedInputs(input_ids=input_ids)
 
     def text_complete_last_message(self, history):
@@ -166,13 +166,10 @@ class QwenRenderer(CustomChatRenderer):
             raise ValueError("At least one message must be from user.")
 
         messages = copy.deepcopy(messages)
-        default_system = "You are a helpful assistant."
-        system = ""
-        if messages[0].role == "system":
-            system = messages.pop(0).content
-            if system == default_system:
-                system = ""
-        assert (system != None)
+        if messages[0].role == 'system':
+            system = messages.pop(0).content.lstrip('\n').rstrip()
+        else:
+            system = 'You are a helpful assistant.'
 
         if functions:
             tools_text = []
@@ -196,84 +193,71 @@ class QwenRenderer(CustomChatRenderer):
                 tools_name_text.append(name_m)
             tools_text = "\n\n".join(tools_text)
             tools_name_text = ", ".join(tools_name_text)
-            system += "\n\n" + REACT_INSTRUCTION.format(
+            instruction = (REACT_INSTRUCTION.format(
                 tools_text=tools_text,
                 tools_name_text=tools_name_text,
-            )
-            system = system.lstrip("\n").rstrip()
+            ).lstrip('\n').rstrip())
+        else:
+            instruction = ''
 
-        _messages = messages
+        messages_with_fncall = messages
         messages = []
-        for m_idx, m in enumerate(_messages):
+        for m_idx, m in enumerate(messages_with_fncall):
             role, content, func_call = m.role, m.content, m.function_call
             content = content or ""
+            content = content.lstrip("\n").rstrip()
             if role == "function":
                 if (len(messages) == 0) or (messages[-1].role != "assistant"):
-                    raise ValueError(
-                        f"Invalid request: Expecting role assistant before role function."
-                    )
-                messages[-1].content += f"\nObservation: {content}"
-                if m_idx == len(_messages) - 1:
-                    messages[-1].content += "\nThought:"
-            elif role == "assistant":
+                    raise ValueError(f"Invalid request: Expecting role assistant before role function.")
+                messages[-1].content += f'\nObservation: {content}'
+                if m_idx == len(messages_with_fncall) - 1:
+                    # add a prefix for text completion
+                    messages[-1].content += '\nThought:'
+            elif role == 'assistant':
                 if len(messages) == 0:
-                    raise ValueError(
-                        f"Invalid request: Expecting role user before role assistant.",
-                    )
-                last_msg = messages[-1].content
-                last_msg_has_zh = len(re.findall(r"[\u4e00-\u9fff]+", last_msg)) > 0
+                    raise ValueError(f"Invalid request: Expecting role user before role assistant.")
                 if func_call is None:
                     if functions:
-                        content = DUMMY_THOUGHT["zh" if last_msg_has_zh else "en"] + content
+                        content = f'Thought: I now know the final answer.\nFinal Answer: {content}'
                 else:
                     f_name, f_args = func_call.name, func_call.arguments
-                    if not content:
-                        if last_msg_has_zh:
-                            content = f"Thought: 我可以使用 {f_name} API。"
-                        else:
-                            content = f"Thought: I can use {f_name}."
-                    content = f"\n{content}\nAction: {f_name}\nAction Input: {f_args}"
-                if messages[-1].role == "user":
+                    if not content.startswith('Thought:'):
+                        content = f'Thought: {content}'
+                    content = f'{content}\nAction: {f_name}\nAction Input: {f_args}'
+                if messages[-1].role == 'user':
                     messages.append(
-                        ChatMessage(role=RoleEnum.assistant, content=content.lstrip("\n").rstrip())
+                        ChatMessage(role=RoleEnum.assistant, content=content.lstrip('\n').rstrip())
                     )
                 else:
-                    messages[-1].content += content
-            elif role == "user":
+                    messages[-1].content += '\n' + content
+            elif role == 'user':
                 messages.append(
-                    ChatMessage(role=RoleEnum.user, content=content.lstrip("\n").rstrip())
-                )
+                    ChatMessage(role='user',content=content.lstrip('\n').rstrip()))
             else:
                 raise ValueError(f"Invalid request: Incorrect role {role}.")
 
         query = _TEXT_COMPLETION_CMD
-        if messages[-1].role == "user":
+        if messages[-1].role == 'user':
             query = messages[-1].content
             messages = messages[:-1]
 
         history = []  # [(Q1, A1), (Q2, A2), ..., (Q_last_turn, A_last_turn)]
         for i in range(0, len(messages), 2):
-            if messages[i].role == "user" and messages[i + 1].role == "assistant":
-                usr_msg = messages[i].content.lstrip("\n").rstrip()
-                bot_msg = messages[i + 1].content.lstrip("\n").rstrip()
-                if system and (i == len(messages) - 2):
-                    usr_msg = f"{system}\n\nQuestion: {usr_msg}"
-                    system = ""
-                for t in DUMMY_THOUGHT.values():
-                    t = t.lstrip("\n")
-                    if bot_msg.startswith(t) and ("\nAction: " in bot_msg):
-                        bot_msg = bot_msg[len(t) :]
+            if messages[i].role == 'user' and messages[i + 1].role == 'assistant':
+                usr_msg = messages[i].content.lstrip('\n').rstrip()
+                bot_msg = messages[i + 1].content.lstrip('\n').rstrip()
+                if instruction and (i == len(messages) - 2):
+                    usr_msg = f'{instruction}\n\nQuestion: {usr_msg}'
+                    instruction = ''
                 history.append([usr_msg, bot_msg])
             else:
                 raise ValueError(
                     "Invalid request: Expecting exactly one user (or function) role before every assistant role."
                 )
-
-        if system:
+        if instruction:
             assert query is not _TEXT_COMPLETION_CMD
-            query = f"{system}\n\nQuestion: {query}"
-
-        return query, history
+            query = f'{instruction}\n\nQuestion: {query}'
+        return query, history, system
 
     def _parse_function_response(self, response: str) -> Optional[DeltaMessage]:
         func_name, func_args = "", ""

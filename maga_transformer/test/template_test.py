@@ -16,7 +16,7 @@ from maga_transformer.openai.renderer_factory import ChatRendererFactory, Render
     CustomChatRenderer, FastChatRenderer, LlamaTemplateRenderer
 from maga_transformer.openai.renderers.qwen_renderer import QwenRenderer
 
-class ChatapiTest(TestCase):
+class TemplateTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.test_data_path = os.path.join(
@@ -142,12 +142,13 @@ Begin!
 
 Question: 波士顿天气如何？<|im_end|>
 <|im_start|>assistant
-Thought: 我可以使用 get_current_weather API。
+Thought:
 Action: get_current_weather
 Action Input: {"location": "Boston, MA"}
 Observation: {"temperature": "22", "unit": "celsius", "description": "Sunny"}
 Thought:"""
         logging.info(f"expected prompt: \n{expected_prompt}\n-----------------------------------")
+        logging.info(f"actual prompt: \n{prompt}\n-----------------------------------")
         assert (prompt == expected_prompt)
 
     def test_qwen_vl(self):
@@ -346,6 +347,41 @@ Thought:"""
 你是小助手<|im_end|><|im_start|>user
 介绍一下自己<|im_end|><|im_start|>assistant
 template ends here""")
+
+    def test_qwen_default_system(self):
+        tokenizer = Qwen2Tokenizer.from_pretrained(f"{self.test_data_path}/tokenizer_test/testdata/qwen2_tokenizer")
+        tokenizer.chat_template = None
+        tokenizer.im_start_id = tokenizer.encode('<|im_start|>')[0]
+        tokenizer.im_end_id = tokenizer.encode('<|im_end|>')[0]
+        render_params = RendererParams(
+            model_type="qwen_2",
+            max_seq_len=1024,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        assert(isinstance(chat_renderer, QwenRenderer))
+        assert(chat_renderer.template_chat_renderer == None)
+        messages = [
+            ChatMessage(**{
+                "role": RoleEnum.system,
+                "content": "你是小助手",
+            }),
+            ChatMessage(**{
+                "role": RoleEnum.user,
+                "content": "介绍一下自己",
+            }),
+        ]
+        request = ChatCompletionRequest(messages=messages)
+        ids = chat_renderer.render_chat(request).input_ids
+        prompt = tokenizer.decode(ids)
+        logging.info(f"rendered prompt: \n{prompt}\n-----------------------------------")
+        assert(prompt == """<|im_start|>system
+你是小助手<|im_end|>
+<|im_start|>user
+介绍一下自己<|im_end|>
+<|im_start|>assistant
+""")
 
 if __name__ == '__main__':
     main()
