@@ -125,6 +125,8 @@ class QWenTokenizer(PreTrainedTokenizer):
         self.im_start_id = self.special_tokens[IMSTART]
         self.im_end_id = self.special_tokens[IMEND]
 
+        self.chat_template = kwargs.pop("chat_template", None)
+
     def __len__(self) -> int:
         return self.tokenizer.n_vocab
 

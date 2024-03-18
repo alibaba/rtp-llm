@@ -10,7 +10,7 @@ py_test(
     ],
     deps = [
         "//maga_transformer:testlib",
-    ]    
+    ]
 )
 
 py_test(
@@ -67,6 +67,7 @@ py_test(
     ],
     data = [
         "//maga_transformer/test/model_test/fake_test/testdata:testdata",
+        "//maga_transformer/test/tokenizer_test:testdata",
     ],
 )
 

@@ -202,6 +202,9 @@ class Qwen2Tokenizer(PreTrainedTokenizer):
                 f"{self.__class__.__name} does not support `add_prefix_space`, setting it to True has no effect."
             )
 
+        # Stores a Jinja template that formats chat histories into tokenizable strings
+        self.chat_template = kwargs.pop("chat_template", None)
+
         super().__init__(
             errors=errors,
             bos_token=bos_token,

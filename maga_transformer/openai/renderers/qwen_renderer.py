@@ -6,19 +6,18 @@ import torch
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 
-from transformers import PreTrainedTokenizer
-
 from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
-    ChatCompletionRequest, RoleEnum, FunctionCall
+    ChatCompletionRequest, RoleEnum, FunctionCall, ChatCompletionResponseStreamChoice, \
+    DeltaMessage, FinisheReason, UsageInfo, RendererInfo
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
-from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
-    ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
 from maga_transformer.openai.renderer_factory_register import register_renderer
+
+QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
 
 TOOL_DESC = """{name_for_model}: Call this tool to interact with the {name_for_human} API. What is the {name_for_human} API useful for? {description_for_model} Parameters: {parameters}"""
 
@@ -54,7 +53,7 @@ class ProcessedOutput:
 
 # TODO(wangyin): pass `max_window_size` to here.
 def make_context(
-    tokenizer: QWenTokenizer,
+    tokenizer: QwenTokenizerTypes,
     query: str,
     history: List[Tuple[str, str]] = [],
     system: str = "",
@@ -115,12 +114,26 @@ def make_context(
     return raw_text, context_tokens
 
 class QwenRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: QWenTokenizer, renderer_params: RendererParams):
+    def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.add_extra_stop_word_ids([[37763, 367, 25]]) # Observation:
 
+        self.template_chat_renderer: Optional[BasicRenderer] = None
+        try:
+            if tokenizer.chat_template != None:
+                logging.info(f"qwen model has chat_template [{tokenizer.chat_template}], "
+                             "which will be used for non-function call dialogue.")
+                self.template_chat_renderer = BasicRenderer(tokenizer, renderer_params)
+        except AttributeError:
+            pass
+
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        assert (isinstance(self.tokenizer, QWenTokenizer) or isinstance(self.tokenizer, Qwen2Tokenizer))
+        assert (isinstance(self.tokenizer, QwenTokenizerTypes))
+
+        if (self.template_chat_renderer != None) and \
+            ((request.functions == None) or (len(request.functions) == 0)):
+            return self.template_chat_renderer.render_chat(request)
+
         query, history = self.parse_messages(request.messages, request.functions)
         input_ids = []
         if (query == _TEXT_COMPLETION_CMD):
@@ -417,8 +430,15 @@ class QwenRenderer(CustomChatRenderer):
                 prompt_tokens=input_token_length,
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length
-            )
+            ),
+            aux_info=output.aux_info if request.aux_info else None
         )
+
+    def get_renderer_info(self) -> RendererInfo:
+        renderer_info = super().get_renderer_info()
+        if self.template_chat_renderer:
+            renderer_info.template = self.template_chat_renderer.chat_template
+        return renderer_info
 
 register_renderer('qwen', QwenRenderer)
 register_renderer('qwen_7b', QwenRenderer)

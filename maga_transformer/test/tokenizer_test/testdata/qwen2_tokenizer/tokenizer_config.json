@@ -28,7 +28,7 @@
   },
   "additional_special_tokens": ["<|im_start|>", "<|im_end|>"],
   "bos_token": null,
-  "chat_template": "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}",
+  "chat_template": "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}template ends here",
   "clean_up_tokenization_spaces": false,
   "eos_token": "<|endoftext|>",
   "errors": "replace",
