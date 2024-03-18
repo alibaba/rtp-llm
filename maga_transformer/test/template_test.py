@@ -99,7 +99,7 @@ Question: 波士顿天气如何？<|im_end|>
         messages.append(
             ChatMessage(**{
                 "role": RoleEnum.assistant,
-                "content": "",
+                "content": "我需要调用get_current_weather API来获取天气",
                 "function_call": {
                     "name": "get_current_weather",
                     "arguments": '{"location": "Boston, MA"}',
@@ -142,7 +142,7 @@ Begin!
 
 Question: 波士顿天气如何？<|im_end|>
 <|im_start|>assistant
-Thought:
+Thought: 我需要调用get_current_weather API来获取天气
 Action: get_current_weather
 Action Input: {"location": "Boston, MA"}
 Observation: {"temperature": "22", "unit": "celsius", "description": "Sunny"}
