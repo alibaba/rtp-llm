@@ -3,6 +3,7 @@ import uuid
 from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Union, Optional, List, Dict, Literal, Any
+from maga_transformer.models.base_model import AuxInfo
 
 class ModelCard(BaseModel):
     id: str
@@ -103,6 +104,7 @@ class ChatCompletionRequest(BaseModel):
     trace_id: Optional[str] = None
     chat_id: Optional[str] = None
     debug_info: Optional[bool] = False
+    aux_info: Optional[bool] = False
     extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
 
 class UsageInfo(BaseModel):
@@ -132,13 +134,11 @@ class DebugInfo(BaseModel):
     input_prompt: str
     input_ids: List[int]
     input_images: List[str]
-
     tokenizer_info: str
     max_seq_len: int
     eos_token_id: Optional[int]
     stop_word_ids_list: List[List[int]]
     stop_words_list: List[str]
-
     renderer_info: RendererInfo
 
 class ChatCompletionResponseChoice(BaseModel):
@@ -154,6 +154,7 @@ class ChatCompletionResponse(BaseModel):
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
     debug_info: Optional[DebugInfo] = None
+    aux_info: Optional[AuxInfo] = None
 
 class DeltaMessage(BaseModel):
     role: Optional[RoleEnum] = None
@@ -173,5 +174,5 @@ class ChatCompletionStreamResponse(BaseModel):
     model: Optional[str] = None
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
-
     debug_info: Optional[DebugInfo] = None
+    aux_info: Optional[AuxInfo] = None

@@ -95,6 +95,7 @@ class OpenaiEndopoint():
             debug_info: Optional[DebugInfo]) -> ChatCompletionResponse:
         all_choices = []
         usage = None
+        aux_info = None
         async for response in choice_generator:
             if len(response.choices) != len(all_choices):
                 if (all_choices == []):
@@ -119,6 +120,7 @@ class OpenaiEndopoint():
                     all_choices[i].message.function_call = response.choices[i].delta.function_call or all_choices[i].message.function_call
                     all_choices[i].finish_reason = response.choices[i].finish_reason or all_choices[i].finish_reason
             usage = response.usage or usage
+            aux_info = response.aux_info or aux_info
 
         if (usage == None):
             logging.warn(f"No usage returned from stream response. use empty value.")
@@ -130,6 +132,7 @@ class OpenaiEndopoint():
         return ChatCompletionResponse(
             choices=all_choices,
             usage=usage,
+            aux_info=aux_info,
             model=self.model.__class__.__name__,
             debug_info=debug_info,
         )
@@ -144,6 +147,7 @@ class OpenaiEndopoint():
                 yield ChatCompletionStreamResponse(
                     choices=response.choices,
                     usage=response.usage,
+                    aux_info=response.aux_info,
                     debug_info=debug_info if not debug_info_responded else None
                 )
                 debug_info_responded = True
