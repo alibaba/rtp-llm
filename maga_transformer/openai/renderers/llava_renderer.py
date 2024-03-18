@@ -6,7 +6,6 @@ import os
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 from enum import Enum, auto
 
-from transformers import PreTrainedTokenizer
 from dataclasses import dataclass
 
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase

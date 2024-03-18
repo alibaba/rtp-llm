@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from functools import partial
 
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerBase
 from transformers.generation.stopping_criteria import StoppingCriteria
 
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
@@ -30,10 +30,10 @@ class OpenaiEndopoint():
         tokenizer = self.model.tokenizer
         if (tokenizer == None):
             raise AttributeError(f"model [{model}] has no tokenizer!")
-        self.tokenizer: Union[PreTrainedTokenizer, TokenizerBase] = tokenizer
+        self.tokenizer: Union[PreTrainedTokenizerBase, TokenizerBase] = tokenizer
 
         self.eos_token_id = None
-        if (isinstance(tokenizer, PreTrainedTokenizer)):
+        if (isinstance(tokenizer, PreTrainedTokenizerBase)):
             self.eos_token_id = tokenizer.eos_token_id
         if (self.eos_token_id == None):
             self.eos_token_id = self.model.config.special_tokens.eos_token_id

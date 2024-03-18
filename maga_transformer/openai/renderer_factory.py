@@ -3,13 +3,14 @@ import logging
 import copy
 from typing import Optional, List, Dict, Any, Union, Callable
 
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderers.llama_template_renderer import LlamaTemplateRenderer
 from maga_transformer.openai.renderers.fast_chat_renderer import FastChatRenderer
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
+from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.openai.renderer_factory_register import _renderer_factory
 
@@ -19,10 +20,10 @@ class ChatRendererFactory():
 
     @staticmethod
     def try_get_imported_renderer(
-        tokenizer: Union[PreTrainedTokenizer, TokenizerBase],
+        tokenizer: Union[PreTrainedTokenizerBase, TokenizerBase],
         params: RendererParams,
     ) -> Optional[CustomChatRenderer]:
-        if not isinstance(tokenizer, PreTrainedTokenizer):
+        if not isinstance(tokenizer, PreTrainedTokenizerBase):
             return None
 
         model_type = params.model_type
@@ -42,7 +43,7 @@ class ChatRendererFactory():
 
     @staticmethod
     def get_renderer(
-        tokenizer: Union[PreTrainedTokenizer, TokenizerBase],
+        tokenizer: Union[PreTrainedTokenizerBase, TokenizerBase],
         params: RendererParams,
     ) -> CustomChatRenderer:
         # renderer priority:  `MODEL_TEMPLATE_TYPE` env for llama template or fastchat conversation
@@ -62,6 +63,11 @@ class ChatRendererFactory():
             else:
                 raise AttributeError(f"specified MODEL_TEMPLATE_TYPE {model_template_type} not supported.")
 
+        # qwen needs to deal with function call, so it has higher priority than simple template
+        global _renderer_factory
+        if 'qwen' in params.model_type:
+            return _renderer_factory[params.model_type](tokenizer, params)
+
         try:
             if tokenizer.chat_template != None:
                 logging.info(f"tokenizer has chat_template [{tokenizer.chat_template}], use it.")
@@ -69,8 +75,7 @@ class ChatRendererFactory():
         except AttributeError:
             # tokenizer may has no chat_template property
             pass
-        
-        global _renderer_factory
+
         if params.model_type in _renderer_factory:
             return _renderer_factory[params.model_type](tokenizer, params)
 

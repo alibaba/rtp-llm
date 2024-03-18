@@ -3,9 +3,9 @@ import torch
 import logging
 from dataclasses import dataclass, field
 
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerBase
 
-from maga_transformer.models.base_model import TokenizerBase, GenerateOutput
+from maga_transformer.models.base_model import TokenizerBase, GenerateOutput, AuxInfo
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
     RoleEnum, RendererInfo
@@ -14,6 +14,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
 class StreamResponseObject:
     choices: List[ChatCompletionResponseStreamChoice] = field(default_factory=list)
     usage: Optional[UsageInfo] = None
+    aux_info: Optional[AuxInfo] = None
 
 @dataclass
 class RendererParams:
@@ -29,7 +30,7 @@ class RenderedInputs:
 
 class CustomChatRenderer():
     def __init__(self,
-                 tokenizer: Union[PreTrainedTokenizer, TokenizerBase],
+                 tokenizer: Union[PreTrainedTokenizerBase, TokenizerBase],
                  renderer_params: RendererParams,
     ):
         self.tokenizer = tokenizer
@@ -74,7 +75,7 @@ class CustomChatRenderer():
     def tokenize_words(self, words: List[str]) -> List[List[int]]:
         ids_list = []
         for word in words:
-            if isinstance(self.tokenizer, PreTrainedTokenizer):
+            if isinstance(self.tokenizer, PreTrainedTokenizerBase):
                 token_id = self.tokenizer.convert_tokens_to_ids(word)
                 if isinstance(token_id, int):
                     ids_list.append([token_id])
@@ -126,7 +127,7 @@ class CustomChatRenderer():
             decoded_prev_token = self.tokenizer.decode(responded_output_ids[-last_token_length:])
             tokens_to_decode = responded_output_ids[-last_token_length:] + output_ids[len(responded_output_ids):]
             decoded_string = self.tokenizer.decode(tokens_to_decode)
-            if u'\uFFFD' == decoded_string[-1]:
+            if (len(decoded_string)) and (u'\uFFFD' == decoded_string[-1]):
                 continue
             delta_output_string = decoded_string[len(decoded_prev_token):]
 
@@ -164,7 +165,8 @@ class CustomChatRenderer():
                 prompt_tokens=input_token_length,
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length
-            )
+            ),
+            aux_info=output.aux_info if request.aux_info else None
         )
 
     def _check_finish_reason(self, token_ids: List[int], input_token_length: int) -> Optional[FinisheReason]:

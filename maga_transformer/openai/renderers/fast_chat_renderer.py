@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from .conversation import Conversation, get_conv_template
 
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
     ChatCompletionRequest, RoleEnum, RendererInfo
@@ -14,7 +14,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, ChatCompletionResponseStreamChoice
 
 class FastChatRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: PreTrainedTokenizer, renderer_params: RendererParams):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.conv_template = get_conv_template(renderer_params.model_type)
         self.roles_map = {

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizer
+    from transformers import PreTrainedTokenizerBase
 
 import logging
 logger = logging.getLogger()
@@ -30,7 +30,7 @@ class Template:
 
     def encode_oneturn(
         self,
-        tokenizer: "PreTrainedTokenizer",
+        tokenizer: "PreTrainedTokenizerBase",
         query: str,
         resp: str,
         history: Optional[List[Tuple[str, str]]] = None,
@@ -50,7 +50,7 @@ class Template:
 
     def encode_multiturn(
         self,
-        tokenizer: "PreTrainedTokenizer",
+        tokenizer: "PreTrainedTokenizerBase",
         query: str,
         resp: str,
         history: Optional[List[Tuple[str, str]]] = None,
@@ -80,7 +80,7 @@ class Template:
 
     def _get_special_ids(
         self,
-        tokenizer: "PreTrainedTokenizer"
+        tokenizer: "PreTrainedTokenizerBase"
     ) -> Tuple[List[int], List[int]]:
         if tokenizer.bos_token_id is not None and getattr(tokenizer, "add_bos_token", True):
             bos_ids = [tokenizer.bos_token_id]
@@ -99,7 +99,7 @@ class Template:
 
     def _encode(
         self,
-        tokenizer: "PreTrainedTokenizer",
+        tokenizer: "PreTrainedTokenizerBase",
         system: str,
         history: List[Tuple[str, str]]
     ) -> List[Tuple[List[int], List[int]]]:
@@ -128,7 +128,7 @@ class Template:
 
     def _convert_inputs_to_ids(
         self,
-        tokenizer: "PreTrainedTokenizer",
+        tokenizer: "PreTrainedTokenizerBase",
         context: List[Union[str, Dict[str, str]]],
         system: Optional[str] = None,
         query: Optional[str] = None,
@@ -163,7 +163,7 @@ class Llama2Template(Template):
 
     def _encode(
         self,
-        tokenizer: "PreTrainedTokenizer",
+        tokenizer: "PreTrainedTokenizerBase",
         system: str,
         history: List[Tuple[str, str]]
     ) -> List[Tuple[List[int], List[int]]]:
@@ -212,7 +212,7 @@ def register_template(
 
 def get_template_and_fix_tokenizer(
     name: str,
-    tokenizer: "PreTrainedTokenizer"
+    tokenizer: "PreTrainedTokenizerBase"
 ) -> Template:
     if tokenizer.eos_token_id is None:
         tokenizer.eos_token = "<|endoftext|>"

@@ -4,7 +4,7 @@ import re
 import logging
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerBase
 from dataclasses import dataclass
 
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
@@ -18,7 +18,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
 from maga_transformer.openai.renderer_factory_register import register_renderer
 
 class QwenVLRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: PreTrainedTokenizer, renderer_params: RendererParams):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithImages:

@@ -5,7 +5,7 @@ from functools import lru_cache
 from packaging import version
 import json
 
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizerBase
 from dataclasses import dataclass
 
 import jinja2
@@ -33,13 +33,13 @@ class PromptWithImages:
     prompt: str
     image_urls: List[str]
 
-# This class is designed to replace `PreTrainedTokenizer.apply_chat_template` functionality,
+# This class is designed to replace `PreTrainedTokenizerBase.apply_chat_template` functionality,
 # providing more capability to customize the template.
 # More specifically, this method allows template to use `functions` field, following openai chat api format.
-# Besides that, other template elements is compatible with `PreTrainedTokenizer.apply_chat_template`.
+# Besides that, other template elements is compatible with `PreTrainedTokenizerBase.apply_chat_template`.
 class BasicRenderer(CustomChatRenderer):
     def __init__(self,
-                 tokenizer: Union[PreTrainedTokenizer, TokenizerBase],
+                 tokenizer: Union[PreTrainedTokenizerBase, TokenizerBase],
                  renderer_params: RendererParams,
     ):
         super().__init__(tokenizer, renderer_params)
