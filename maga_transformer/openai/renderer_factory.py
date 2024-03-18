@@ -65,7 +65,7 @@ class ChatRendererFactory():
 
         # qwen needs to deal with function call, so it has higher priority than simple template
         global _renderer_factory
-        if 'qwen' in params.model_type:
+        if ('qwen' in params.model_type) and ('qwen_vl' not in params.model_type):
             return _renderer_factory[params.model_type](tokenizer, params)
 
         try:
