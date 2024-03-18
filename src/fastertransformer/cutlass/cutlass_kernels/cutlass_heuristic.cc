@@ -136,6 +136,7 @@ std::vector<CutlassTileConfig> get_candidate_tiles(
     if (sm >= 75)
     {
         base_configs.push_back(CutlassTileConfig::CtaShape128x128x64_WarpShape64x32x64);
+        base_configs.push_back(CutlassTileConfig::CtaShape128x128x64_WarpShape128x32x64);
     }
 
     switch (gemm_type)
@@ -143,8 +144,7 @@ std::vector<CutlassTileConfig> get_candidate_tiles(
     case CutlassGemmType::Simt: return {CutlassTileConfig::CtaShape128x128x8_WarpShape64x64x8};
     case CutlassGemmType::WeightOnly:
         return {CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64,
-            CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64,
-            CutlassTileConfig::CtaShape128x128x64_WarpShape128x32x64};
+            CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64};
     case CutlassGemmType::Int8:
         return {CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64,
             CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64,
