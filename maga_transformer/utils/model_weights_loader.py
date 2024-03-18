@@ -353,6 +353,9 @@ class ModelWeightsLoader:
     def preprocess_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str):
         UINT4_TO_INT4_FLAG = 1
         GPTQ_FLAG = 1
+        qweight_int32=qweight_int32.reshape(qweight_int32.shape[0], -1)
+        qzeros_int32=qzeros_int32.reshape(qzeros_int32.shape[0], -1)
+        scales_fp16=scales_fp16.reshape(scales_fp16.shape[0], -1)
         packer = torch.ops.fastertransformer.pack_int8_tensor_to_packed_int4
         preprocessor = torch.ops.fastertransformer.preprocess_weights_for_mixed_gemm
 

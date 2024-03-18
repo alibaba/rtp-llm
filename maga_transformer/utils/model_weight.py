@@ -65,18 +65,64 @@ def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.T
 # MQA layout: [D, head*size_per_head, kv_head*size_per_head, kv_head*size_per_head] (sp_head)
 def sp_head(t: torch.Tensor, tp: int, tp_rank: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
     hidden_size = t.shape[0]
-    if len(t.shape) == 2 and t.shape[1] != t.shape[0] * 3:
-        qk_hidden_size = (t.shape[1] - t.shape[0]) // 2
-        qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
-        if kv_broadcast:
-            ks = t[:,hidden_size:hidden_size + qk_hidden_size]
-            vs = t[:,hidden_size + qk_hidden_size:]
+    qkv_hidden_size = t.shape[1]
+    if t.dtype == torch.int32:
+        if len(t.shape) == 2 and qkv_hidden_size  != hidden_size * 3 * 8:
+            kv_hidden_size = (qkv_hidden_size - hidden_size) // 2
+            qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
+            if kv_broadcast:
+                ks = t[:,hidden_size:hidden_size + kv_hidden_size]
+                vs = t[:,hidden_size + kv_hidden_size:]
+            else:
+                ks = sp_neg1(t[:,hidden_size:hidden_size + kv_hidden_size], tp, tp_rank)
+                vs = sp_neg1(t[:,hidden_size + kv_hidden_size:], tp, tp_rank)
+            return torch.concat([qs, ks, vs], dim=1).contiguous()
         else:
-            ks = sp_neg1(t[:,hidden_size:hidden_size + qk_hidden_size], tp, tp_rank)
-            vs = sp_neg1(t[:,hidden_size + qk_hidden_size:], tp, tp_rank)
-        return torch.concat([qs, ks, vs], dim=1).contiguous()
+            return sp_neg1(t.reshape(hidden_size, 3, qkv_hidden_size // 3), tp, tp_rank)
+    else:     
+        if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
+            kv_hidden_size = (qkv_hidden_size - hidden_size) // 2
+            qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
+            if kv_broadcast:
+                ks = t[:,hidden_size:hidden_size + kv_hidden_size]
+                vs = t[:,hidden_size + kv_hidden_size:]
+            else:
+                ks = sp_neg1(t[:,hidden_size:hidden_size + kv_hidden_size], tp, tp_rank)
+                vs = sp_neg1(t[:,hidden_size + kv_hidden_size:], tp, tp_rank)
+            return torch.concat([qs, ks, vs], dim=1).contiguous()
+        else:
+            return sp_neg1(t.reshape(hidden_size, 3, hidden_size), tp, tp_rank)
+
+def sp_head_s(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+    qkv_hidden_size = t.shape[1]
+    if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
+            kv_hidden_size = (qkv_hidden_size - hidden_size) // 2
+            qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
+            if kv_broadcast:
+                ks = t[:,hidden_size:hidden_size + kv_hidden_size]
+                vs = t[:,hidden_size + kv_hidden_size:]
+            else:
+                ks = sp_neg1(t[:,hidden_size:hidden_size + kv_hidden_size], tp, tp_rank)
+                vs = sp_neg1(t[:,hidden_size + kv_hidden_size:], tp, tp_rank)
+            return torch.concat([qs, ks, vs], dim=1).contiguous()
     else:
-        return sp_neg1(t.reshape(hidden_size, 3, hidden_size), tp, tp_rank)
+        return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
+        
+
+def sp_head_z(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+    qkv_hidden_size = t.shape[1]
+    if len(t.shape) == 2 and qkv_hidden_size * 8 != hidden_size * 3:
+            kv_hidden_size = (qkv_hidden_size - hidden_size // 8) // 2
+            qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
+            if kv_broadcast:
+                ks = t[:,hidden_size // 8:hidden_size // 8 + kv_hidden_size]
+                vs = t[:,hidden_size // 8+ kv_hidden_size:]
+            else:
+                ks = sp_neg1(t[:,hidden_size//8:hidden_size//8 + kv_hidden_size], tp, tp_rank)
+                vs = sp_neg1(t[:,hidden_size//8 + kv_hidden_size:], tp, tp_rank)
+            return torch.concat([qs, ks, vs], dim=1).contiguous()
+    else:
+        return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
 
 def sp_head_b(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
     t = t.reshape(-1)
@@ -317,8 +363,8 @@ class W:
         pre_attn_ln_gamma: sp_id,
         pre_attn_ln_beta: sp_id,
         attn_qkv_w: sp_head,
-        attn_qkv_z: sp_head,
-        attn_qkv_s: sp_head,
+        attn_qkv_z: sp_head_z,
+        attn_qkv_s: sp_head_s,
         attn_qkv_p: sp_head,
         attn_qkv_b: sp_head_b,
         attn_o_w: sp_0,
