@@ -12,7 +12,7 @@ from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.decoder_engine import DecoderEngine
 from maga_transformer.async_decoder_engine.engine_creator import create_engine
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.models.base_model import GenerateOutput
+from maga_transformer.config.gpt_init_model_parameters import ModelType
 from maga_transformer.async_decoder_engine.ptuning import get_ptuning_params
 
 class AsyncModel:
@@ -40,6 +40,10 @@ class AsyncModel:
     @property
     def default_generate_config(self) -> GenerateConfig:
         return self.model.default_generate_config
+    
+    @property
+    def model_type(self) -> ModelType:
+        return self.model.model_type
 
     # just for perf test
     def enable_perf_test_schedule_strategy(self):

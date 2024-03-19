@@ -20,7 +20,7 @@ from maga_transformer.utils.stop_utils import create_stop_criteria_list
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig, RequestFormat
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ModelType
 from maga_transformer.utils.model_weight import LoRAMap
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 
@@ -224,6 +224,10 @@ class BaseModel(object):
     def dtype(self) -> Union[str, torch.dtype]:
         assert self.weight is not None
         return self.weight.dtype
+    
+    @property
+    def model_type(self) -> ModelType:
+        return self.config.model_type
 
     @property
     def device(self) -> Union[str, torch.device]:

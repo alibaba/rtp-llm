@@ -3,7 +3,7 @@ import logging
 from enum import Enum
 from typing import Iterator, List, Optional, Tuple, Union, Any, Dict
 from maga_transformer.utils.util import get_mem_info
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ModelType as BaseModelType
 from maga_transformer.async_decoder_engine.scheduler import Scheduler
 from maga_transformer.async_decoder_engine.cache_manager import CacheConfigGenerator, CacheManager, CacheConfig
 from maga_transformer.async_decoder_engine.stream_cache_manager import StreamCacheManager
@@ -34,8 +34,8 @@ def check_exeutor_type(model: BaseModel, config: GptInitModelParameters, specula
         assert speculative_config is not None and speculative_model is not None, "speculative_config should not be None"
         return ExecutorType.Speculative
     if model.medusa_head is not None:
-        return ExecutorType.Medusa
-    if os.environ.get('EMBEDDING_MODEL', None) == '1':
+        return ExecutorType.Medusa    
+    if model.model_type == BaseModelType.EMBEDDING:
         return ExecutorType.Embedding
     return ExecutorType.Normal
 

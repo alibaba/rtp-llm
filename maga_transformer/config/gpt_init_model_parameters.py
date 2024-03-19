@@ -5,6 +5,7 @@ import torch
 import logging
 # make sure so init
 from dataclasses import dataclass, field, fields
+from enum import Enum
 from maga_transformer.utils.util import WEIGHT_TYPE
 
 updated_params: Set[str] = set()
@@ -77,6 +78,10 @@ class VitParameters:
     vit_special_tokens: Dict[str, Any] = {}
     vit_weights = None
 
+class ModelType(Enum):
+    NORMAL = "normal"
+    EMBEDDING = "embedding"
+
 class GptInitModelParameters:
     __slots__ = {
         "gpt_init_params",
@@ -93,7 +98,8 @@ class GptInitModelParameters:
         "medusa_config",
         "normalize_lm_head_weight",
         "ref_model",
-        "is_quant_mode"
+        "is_quant_mode",
+        "model_type"
     }
 
     def __init__(self,
@@ -125,6 +131,8 @@ class GptInitModelParameters:
         self.prefix_projection = False
         self.vit_related_params: VitParameters = VitParameters()
         self.ref_model: Optional[torch.nn.Module] = None
+
+        self.model_type = ModelType.NORMAL
 
         for k, v in kwargs.items():
             setattr(self, k, v)
@@ -187,6 +195,20 @@ class GptInitModelParameters:
             self.medusa_config = medusa_config
             self.gpt_init_params.use_medusa = True
 
+    def update_embedding_config(self, ckpt_path: str):
+        def _check_is_sentence_transformer_repo() -> bool:
+            if os.path.exists(os.path.join(ckpt_path, "config_sentence_transformers.json")):
+                return True
+            module_file_path = os.path.join(ckpt_path, "modules.json")
+            if os.path.exists(module_file_path):
+                with open(module_file_path, 'r') as reader:
+                    content = reader.read()
+                    if 'sentence_transformers' in content:
+                        return True
+            return False
+        if os.environ.get('EMBEDDING_MODEL', '0') == '1' or _check_is_sentence_transformer_repo():
+            self.model_type = ModelType.EMBEDDING
+
     def update_inter_padding_size(self, tp_size: int):
         align_size = tp_size * 64
         if self.layer_inter_size:
@@ -218,7 +240,7 @@ class GptInitModelParameters:
         else:
             self.multi_task_prompt = json.loads(prompt_str, strict=False)
             return
-        
+
     def update_ptuning_config(self):
         if not self.ptuning_path:
             inner_ptuing_path = os.path.join(self.ckpt_path, 'ptuning')
@@ -275,6 +297,7 @@ class GptInitModelParameters:
         self.update_task_prompt_config()
         self.update_ptuning_config()
         self.update_medusa_config(ckpt_path)
+        self.update_embedding_config(ckpt_path)
 
         self.seq_size_per_block = seq_size_per_block
         logging.info(f'seq_size_per_block: {self.seq_size_per_block}')

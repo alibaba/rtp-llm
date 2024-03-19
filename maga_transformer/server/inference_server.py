@@ -30,6 +30,7 @@ from maga_transformer.embedding.api_datatype import OpenAIEmbeddingRequestFormat
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatCompletionStreamResponse
 from maga_transformer.server.inference_worker import InferenceWorker, BatchPipelineResponse, TokenizerEncodeResponse
+from maga_transformer.config.gpt_init_model_parameters import ModelType
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -56,10 +57,17 @@ class InferenceServer(object):
             self._inference_worker = None
         else:
             self._inference_worker = InferenceWorker()
-            self._openai_endpoint = OpenaiEndopoint(self._inference_worker.model)                        
-            if os.environ.get('EMBEDDING_MODEL', None) == '1':
+            self._openai_endpoint = None
+            self._embedding_endpoint = None
+            if self._inference_worker.model is not None and self._inference_worker.model.model_type == ModelType.EMBEDDING:
                 assert isinstance(self._inference_worker.model, AsyncModel), "only support embedding model in async mode"
                 self._embedding_endpoint = EmbeddingEndpoint(self._inference_worker.model)
+            else:
+                self._openai_endpoint = OpenaiEndopoint(self._inference_worker.model)
+
+    @property
+    def is_embedding(self):
+        return self._embedding_endpoint is not None
 
     def wait_all_worker_ready(self):
         # master需要等其他所有机器都ready以后才能起服务，挂vipserver
@@ -177,13 +185,21 @@ class InferenceServer(object):
             assert (isinstance(response, CompleteResponseAsyncGenerator)), f"error type: {type(response)}"
             return response
         return await self._infer_wrap(request.model_dump(), raw_request, generate_call)
-    
-    async def embedding(self, request: OpenAIEmbeddingRequestFormat, raw_request: Request):
+
+    async def embedding(self, request: Union[Dict[str, Any], str, OpenAIEmbeddingRequestFormat], raw_request: Request):
+        if isinstance(request, str):
+            request = json.loads(request)
+        if isinstance(request, dict):
+            request = OpenAIEmbeddingRequestFormat(**request)
+        if not isinstance(request, OpenAIEmbeddingRequestFormat):
+            raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, f"input_format {type(request)} is not correct")
+
         def generate_call():
             assert (self._embedding_endpoint != None)
             response = self._embedding_endpoint.sentence_embedding(request)
             assert (isinstance(response, CompleteResponseAsyncGenerator)), f"error type: {type(response)}"
             return response
+
         return await self._infer_wrap(request.model_dump(), raw_request, generate_call)
 
     async def _call_generate_with_report(self, generate_call: Callable[[], CompleteResponseAsyncGenerator]):

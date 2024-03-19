@@ -33,12 +33,12 @@ StreamObjectType = Union[Dict[str, Any], BaseModel]
 class InferenceApp(object):
     def __init__(self):
         self.inference_server = InferenceServer()
-        
+
     def start(self):
         self.inference_server.start()
         app = self.create_app()
         self.inference_server.wait_all_worker_ready()
-        
+
         timeout_keep_alive = int(os.environ.get("TIMEOUT_KEEP_ALIVE", 5))
         uvicorn.run(app, host="0.0.0.0", port=g_worker_info.server_port, log_config=UVICORN_LOGGING_CONFIG,
                     timeout_keep_alive = timeout_keep_alive, h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE)
@@ -96,7 +96,11 @@ class InferenceApp(object):
             if not g_parallel_info.is_master:
                 return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
                                     "gang worker should not access this / api directly!")
-            return await self.inference_server.inference(req, raw_request)
+            # compat for huggingface-pipeline request endpoint
+            if self.inference_server.is_embedding:
+                return await self.inference_server.embedding(req, raw_request)
+            else:
+                return await self.inference_server.inference(req, raw_request)
 
         # update for worker RANK != 0
         @app.post("/update_internal")
@@ -127,8 +131,8 @@ class InferenceApp(object):
                 return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
                                     "gang worker should not access this completions api directly!")
             return await self.inference_server.chat_completion(request, raw_request)
-        
-        
+
+
         # entry for worker RANK == 0
         @app.post("/v1/embeddings")
         async def sentence_embedding(request: OpenAIEmbeddingRequestFormat, raw_request: RawRequest):
