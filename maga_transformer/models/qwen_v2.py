@@ -61,6 +61,69 @@ class QWenV2Weight(ModelDeployWeightInfo):
                        identity),
         ]
         return layer_weights
+    
+    def _get_hf_qptq_weight_info(self, layer_id):
+        layer_quant_weights =[
+            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)],
+                       identity),
+            # quant_weight
+            WeightInfo(W.attn_qkv_w, [
+                    CkptWeightInfo('model.layers.{i}.self_attn.q_proj.qweight', transpose),
+                    CkptWeightInfo('model.layers.{i}.self_attn.k_proj.qweight', transpose),
+                    CkptWeightInfo('model.layers.{i}.self_attn.v_proj.qweight', transpose)
+                ],
+                functools.partial(merge_qkv_hf)),
+            WeightInfo(W.attn_qkv_z, [
+                    CkptWeightInfo('model.layers.{i}.self_attn.q_proj.qzeros', transpose),
+                    CkptWeightInfo('model.layers.{i}.self_attn.k_proj.qzeros', transpose),
+                    CkptWeightInfo('model.layers.{i}.self_attn.v_proj.qzeros', transpose)
+                ],
+                functools.partial(merge_qkv_hf)),
+            WeightInfo(W.attn_qkv_s, [
+                    CkptWeightInfo('model.layers.{i}.self_attn.q_proj.scales', transpose),
+                    CkptWeightInfo('model.layers.{i}.self_attn.k_proj.scales', transpose),
+                    CkptWeightInfo('model.layers.{i}.self_attn.v_proj.scales', transpose)
+                ],
+                functools.partial(merge_qkv_hf)),
+            WeightInfo(W.attn_qkv_b, [
+                    CkptWeightInfo('model.layers.{i}.self_attn.q_proj.bias', identity),
+                    CkptWeightInfo('model.layers.{i}.self_attn.k_proj.bias', identity),
+                    CkptWeightInfo('model.layers.{i}.self_attn.v_proj.bias', identity)
+                ], 
+                functools.partial(merge_qkv_b)),
+
+            WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.qweight', identity)],
+                       identity),
+            WeightInfo(W.attn_o_z, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.qzeros', identity)],
+                       identity),
+            WeightInfo(W.attn_o_s, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.scales', identity)],
+                       identity),
+
+            WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.qweight', identity)],
+                       identity),
+            WeightInfo(W.ffn_z1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.qzeros', identity)],
+                       identity),
+            WeightInfo(W.ffn_s1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.scales', identity)],
+                       identity),
+
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.qweight', identity)],
+                       identity),
+            WeightInfo(W.ffn_z3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.qzeros', identity)],
+                       identity),
+            WeightInfo(W.ffn_s3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.scales', identity)],
+                       identity),
+
+            WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.qweight', identity)],
+                       identity),
+            WeightInfo(W.ffn_z2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.qzeros', identity)],
+                       identity),
+            WeightInfo(W.ffn_s2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.scales', identity)],
+                       identity),
+
+            WeightInfo(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)],
+                       identity),
+        ]
+        return layer_quant_weights
 
     def _get_hf_weight_info(self):
         weights = [
@@ -72,8 +135,12 @@ class QWenV2Weight(ModelDeployWeightInfo):
 
         layer_weights: List[List[WeightInfo]] = []
         for layer in range(self._num_layers):
-            w = self._get_hf_layer_weight_info(layer)
-            layer_weights.append(w)
+            if self._int4_mode:
+                w=self._get_hf_qptq_weight_info(layer)
+                layer_weights.append(w)
+            else:
+                w = self._get_hf_layer_weight_info(layer)
+                layer_weights.append(w)
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
 
@@ -128,6 +195,17 @@ class QWenV2(QWen):
         config.rotary_embedding_base = int(config_json.get("rope_theta", config.rotary_embedding_base))
         config.vocab_size = config_json["vocab_size"]
         config.rotary_embedding_dim = config.size_per_head
+
+        quant_config = config_json.get("quantization_config", None)
+        if quant_config is not None:
+            config.quant_algo.int4_mode = True
+            group_size = quant_config.get("group_size", 0)
+            assert group_size == 128 or group_size == 64, "int4 only support group size == 64 or 128"
+            config.quant_algo.weight_only_group_size = group_size
+            quant_method = quant_config.get("quant_method", None)
+            if quant_method == 'gptq':
+                config.quant_algo.has_pre_scale = False
+                config.quant_algo.has_zeros = True
 
     
     @staticmethod

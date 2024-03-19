@@ -160,7 +160,6 @@ class QWenWeight(ModelDeployWeightInfo):
         return layer_weights
 
     def _get_hf_qptq_weight_info(self, layer_id):
-        inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
         layer_quant_weights =[
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_1.weight', identity)],
                        identity),
@@ -213,7 +212,6 @@ class QWenWeight(ModelDeployWeightInfo):
         layer_weights: List[List[WeightInfo]] = []
         for layer in range(self._num_layers):
             if self._int4_mode:
-                logging.info("logging int4 weights")
                 w=self._get_hf_qptq_weight_info(layer)
                 layer_weights.append(w)
             else:
