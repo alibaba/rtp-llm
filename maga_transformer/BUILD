@@ -147,13 +147,13 @@ py_library(
     name = "sdk",
     srcs = [
         '__init__.py',
-        'inference.py',
         'model_factory.py',
         'start_server.py',
         '_ft_pickler.py',
         'model_factory_register.py',
     ],
     deps = [
+        "//maga_transformer/server:server",
         ":models",
         ":uvicorn",
         ":fastapi",
