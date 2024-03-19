@@ -33,9 +33,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     // pre layernorm
     if (weights_.pre_decoder_layernorm) {
-        auto r = device_->layernorm(LayernormParams(
-            norm_type, *move(hidden), nullopt, nullopt, nullopt,
-            *(weights_.pre_decoder_layernorm), norm_eps));
+        auto result = device_->layernorm(LayernormParams(
+            norm_type, move(hidden), nullopt, nullopt, *(weights_.pre_decoder_layernorm), norm_eps));
+        hidden = move(result.norm_output);
     }
 
     // layers
@@ -69,10 +69,10 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         // TODO: maybe move this layernorm to attention layer
         auto normed_attn = device_->layernorm(LayernormParams(
-            norm_type, *attn_hidden, *attn_hidden, *hidden, nullopt,
+            norm_type, move(attn_hidden), *hidden, nullopt,
             *(layer.self_attention_weights.attention_layernorm), norm_eps));
 
-        attn_hidden.reset();
+        attn_hidden = move(normed_attn.add_bias_output);
         hidden = move(normed_attn.norm_output);
 
         auto ffn_output = device_->ffnLayer(FfnLayerParams({
@@ -84,16 +84,17 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         // TODO: maybe move this layernorm to ffn layer
         auto normed_ffn_hidden = device_->layernorm(LayernormParams(
-            norm_type, *ffn_hidden, *ffn_hidden, *hidden, nullopt,
+            norm_type, move(ffn_hidden), *attn_hidden, nullopt,
             *(layer.ffn_weights.dense_layernorm), norm_eps));
         hidden = move(normed_ffn_hidden.norm_output);
     }
 
     // final layernorm
     if (weights_.final_layernorm) {
-        hidden  = device_->layernorm(LayernormParams(
-            norm_type, *hidden, nullopt, nullopt, nullopt,
-            *(weights_.pre_decoder_layernorm), norm_eps)).norm_output;
+        auto result = device_->layernorm(LayernormParams(
+            norm_type, move(hidden), nullopt, nullopt,
+            *(weights_.pre_decoder_layernorm), norm_eps));
+        hidden = move(result.norm_output);
     }
 
     // lm head

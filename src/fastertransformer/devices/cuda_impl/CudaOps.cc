@@ -35,16 +35,7 @@ void CudaDevice::copy(const CopyParams& params) {
 }
 
 LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
-    auto output_buffer = move(params.bias_output.value());
-
-    // invokeGeneralLayerNorm(
-    //     params.norm_output.data(),
-    //     params.input.data(),
-    //     params.beta.data(),
-    //     params.gamma.data(),
-    //     params.eps,
-
-    // );
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 GroupedGemmOutput CudaDevice::groupedGemm(const GroupedGemmParams& params) {
@@ -63,8 +54,12 @@ AttentionLayerOutput CudaDevice::attentionLayer(const AttentionLayerParams& para
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-SamplerOutput CudaDevice::sample(const SamplerParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+void CudaDevice::sampleGreedy(const GreedyParams& params) {
+
+}
+
+void CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
+
 }
 
 void CudaDevice::broadcast(const BroadcastParams& params) {

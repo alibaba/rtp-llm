@@ -73,7 +73,7 @@ struct CopyParams {
 
 struct LayernormOutput {
     BufferPtr norm_output;
-    BufferPtr add_bias_output;
+    BufferPtr add_bias_output; // should be moved from input
 };
 
 // The Layernorm Op has fused Layernorm and AddBias functionality
@@ -82,15 +82,14 @@ struct LayernormOutput {
 struct LayernormParams {
 
     // for layernorm
-    LayernormParams(const NormType norm_type, const Buffer& input, OptionalBufferRef bias_output,
+    LayernormParams(const NormType norm_type, BufferPtr input,
                     OptionalConstBufferRef residual1, OptionalConstBufferRef bias,
                     const LayerNormWeights& weights, double eps = 1e-6):
-    norm_type(norm_type), input(input), bias_output(bias_output),
+    norm_type(norm_type), input(move(input)),
     residual1(residual1), bias(bias), weights(weights), eps(eps) {}
 
     const NormType norm_type = NormType::layernorm;
-    const Buffer&  input;
-    OptionalBufferRef bias_output;
+    BufferPtr  input;
 
     const OptionalConstBufferRef  residual1;
     const OptionalConstBufferRef  residual2;
@@ -112,7 +111,7 @@ enum class TransposeOperation {
 // shapes of A, B, C, D have two options: [m, k], [k, n], [m, n], [m, n]
 // or [bs, m, k], [bs, k, n], [bs, m, n], [bs, m, n] where bs is batch_size
 // NOTE: caller needs to preallocate C
-// TODO: whether inplace ?
+// TODO(dongjin): Make C a BufferPtr so that it can achieve in-place update
 struct GemmParams {
 
     GemmParams(const Buffer& A,
@@ -269,33 +268,37 @@ struct FfnLayerParams {
     const OptionalConstBufferRef lora_input_lengths;
 };
 
-struct SamplerConfig {
-    const size_t         num_beams;
-    const Buffer&        top_k;
-    const Buffer&        top_p;
-    const Buffer&        temperature;
-    const Buffer&        random_seed;
-    const Buffer&        repetition_penalty;
-};
-
-struct SamplerParams {
+struct GreedyParams {
     const Buffer& logits;
-    const Buffer& step;              // shape: [1]
-    const Buffer& max_input_length;  // shape: [1]
-    const Buffer& input_lengths;     // shape: [batch_size]
-    const Buffer& ite;               // shape: [1]
-    const Buffer& eos_id;
-    Buffer& kv_cache_blocks;
 
-    const SamplerConfig config;
+    const Buffer& top_k;
+    const Buffer& top_p;
+    const Buffer& temperature;
+    const Buffer& repetition_penalty;
+    const Buffer& length_penalty;
+
+    Buffer& token_ids;
+    OptionalBufferRef cum_log_probs;
+    OptionalBufferRef output_log_probs;
 };
 
-struct SamplerOutput {
-    BufferPtr output_ids;
-    BufferPtr sequence_length;
-    BufferPtr finished;
+struct BeamSearchParams {
+    const Buffer& logits;
+    const Buffer& sequence_lenghts;  // shape: [batch_size]
+    const size_t step;               // typically largest sequence length in the batch
+
+    const size_t num_beams;
+    const size_t batch_size;
+
+    Buffer& token_ids;
+    Buffer& kv_cache_blocks;
+    OptionalBufferRef cum_log_probs;
+    OptionalBufferRef output_log_probs;
+};
+
+struct BeamSearchOutput {
+    BufferPtr token_ids;
     BufferPtr cum_log_probs;
-    BufferPtr output_log_probs;
 };
 
 struct BroadcastParams {

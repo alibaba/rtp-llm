@@ -61,9 +61,14 @@ FfnLayerOutput CpuDevice::ffnLayer(const FfnLayerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-SamplerOutput CpuDevice::sample(const SamplerParams& params) {
+void CpuDevice::sampleGreedy(const GreedyParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
+
+void CpuDevice::sampleBeamSearch(const BeamSearchParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 
 void CpuDevice::broadcast(const BroadcastParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);

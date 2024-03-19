@@ -34,7 +34,8 @@ public:
     virtual FfnLayerOutput ffnLayer(const FfnLayerParams& params)             = 0;
 
     // for sampler
-    virtual SamplerOutput sample(const SamplerParams& params) = 0;
+    virtual void sampleGreedy(const GreedyParams& params) = 0;
+    virtual void sampleBeamSearch(const BeamSearchParams& params) = 0;
 
     // for device communication
     virtual void broadcast(const BroadcastParams& params) = 0;
