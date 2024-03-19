@@ -12,11 +12,11 @@ from maga_transformer.utils.multimodal_download import DownloadEngine
 
 class LlavaImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
-        self.vision_tower = LlavaImageEmbedding.build_vision_tower(config).to(device='cuda:0')
-        self.mm_projector = LlavaImageEmbedding.build_vision_projector(config)
+        self.vision_tower = self.build_vision_tower(config).to(device='cuda:0')
+        self.mm_projector = self.build_vision_projector(config)
         self.config = config
     
-    def image_embedding(self, images: List[List[str]], device) -> torch.Tensor:
+    def image_embedding(self, images: List[List[Any]], device):
         image_data = []
         for image_list in images:
             now_image_data = DownloadEngine.get(image_list)
@@ -33,7 +33,6 @@ class LlavaImageEmbedding(BaseImageEmbedding):
 
         return image_features
     
-    
     def encode_images(self, images, device):
         if images.shape[0] == 0:
             return images
@@ -41,8 +40,7 @@ class LlavaImageEmbedding(BaseImageEmbedding):
         image_features = self.mm_projector(image_features)
         return image_features
     
-    @staticmethod
-    def build_vision_tower(vision_tower_cfg: Dict[str, Any], **kwargs: Any):
+    def build_vision_tower(self, vision_tower_cfg: Dict[str, Any], **kwargs: Any):
         vision_tower = os.environ.get('LOCAL_EXTRA_DATA_PATH', None)
         if vision_tower is None:
             vision_tower = vision_tower_cfg['vit_tower_path']
@@ -52,8 +50,7 @@ class LlavaImageEmbedding(BaseImageEmbedding):
         
         raise ValueError(f'Unknown vision tower: {vision_tower}')
     
-    @staticmethod
-    def build_vision_projector(config, delay_load=False, **kwargs):
+    def build_vision_projector(self, config, delay_load=False, **kwargs):
         projector_type = config.get('mm_projector_type', 'linear')
 
         if projector_type == 'linear':
@@ -83,6 +80,7 @@ class CLIPVisionTower(nn.Module):
         self.vision_tower_name = vision_tower
         self.select_layer = args['mm_vision_select_layer']
         self.select_feature = args.get('mm_vision_select_feature', 'patch')
+        self.args = args
 
         if not delay_load:
             self.load_model()

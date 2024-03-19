@@ -60,7 +60,7 @@ class MultiModalMixin:
 
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str], 
-                                        img_token: str, **kwargs: Any) -> Tuple[str, List[Any]]:
+                                        img_token: str, **kwargs: Any) -> Tuple[str, List[str]]:
         # should delete after chatapi interface update
         if kwargs.get('generate_config', {})['request_format'] == RequestFormat.CHAT_API:
             if isinstance(prompt, str):
@@ -92,6 +92,12 @@ class MultiModalMixin:
         elif isinstance(prompt, List):
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "raw request format cannot accept dict prompt")
         return prompt, images
+    
+    def concat_embedding(self, token_ids, image_embeddings):
+        raise NotImplementedError()
+
+    def expand_token_id(self, token_ids, images):
+        raise NotImplementedError()
 
     def load_vit_weight(self, ctype: str):
         vit_weight = self.config.vit_related_params.vit_weights

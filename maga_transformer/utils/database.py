@@ -144,6 +144,7 @@ class ModuleDatabase(BaseDatabase):
             return [eval('self.ref_model.' + weight_name)]
         except AttributeError:
             raise Exception(f'No weight named {weight_name} in reference model')
+
 class CkptDatabase(BaseDatabase):
 
     PretrainFileList : List[CkptFileInfo]

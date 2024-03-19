@@ -1,11 +1,7 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed 
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import requests
-import asyncio
-from enum import Enum
 from PIL import Image
 from typing import Any, List, Dict, Optional
-from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
-from maga_transformer.utils.time_util import current_time_ms
 
 def download_image(url: str):
     try:
@@ -22,11 +18,11 @@ class DownloadEngine:
     def __init__(self, thread_num: Optional[int] = None):
         self.executor = ThreadPoolExecutor(max_workers = thread_num)
     
-    def submit(self, urls: List[str]) -> List[Any]:
+    def submit(self, urls: List[str]) -> List[Future[Image.Image]]:
         return [self.executor.submit(download_image, url) for url in urls]
         
     @staticmethod
-    def get(futures) -> List[Image.Image]:
+    def get(futures: List[Future[Image.Image]]) -> List[Image.Image]:
         result = []
 
         for future in as_completed(futures):
