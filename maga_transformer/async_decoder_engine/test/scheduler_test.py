@@ -5,9 +5,11 @@ from unittest import TestCase, main
 from maga_transformer.async_decoder_engine.scheduler import Scheduler
 from maga_transformer.async_decoder_engine.batch_query import ModelOutput
 from maga_transformer.async_decoder_engine.ptuning import PrefixParams, PrefixType
-from maga_transformer.async_decoder_engine.cache_manager import CacheConfigGenerator, CacheManager
+from maga_transformer.config.cache_config import CacheConfigGenerator
+from maga_transformer.async_decoder_engine.cache_manager import CacheManager
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 from maga_transformer.async_decoder_engine.stream_cache_manager import StreamCacheManager
+from maga_transformer.async_decoder_engine.ptuning.ptuning_utils import PtuningConstructor
 from maga_transformer.models.base_model import GenerateInput
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
@@ -52,7 +54,7 @@ class SchedulerTest(TestCase):
         config, cache_config = self._init_config()
         cache_manager = CacheManager(cache_config, None)
         stream_cache_manager = StreamCacheManager(
-            config, None, cache_manager, 1)
+            config, cache_manager, 1)
         scheduler = Scheduler(config, stream_cache_manager)
         self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 7)
         self.assertFalse(scheduler.have_streams())
@@ -104,8 +106,7 @@ class SchedulerTest(TestCase):
     def test_put_lack_mem(self):
         config, cache_config = self._init_config()
         cache_manager = CacheManager(cache_config, None)
-        stream_cache_manager = StreamCacheManager(
-            config, None, cache_manager, 1)
+        stream_cache_manager = StreamCacheManager(config, cache_manager, 1)
         scheduler = Scheduler(config, stream_cache_manager)
         self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 7)
         self.assertFalse(scheduler.have_streams())
@@ -127,7 +128,7 @@ class SchedulerTest(TestCase):
         config, cache_config = self._init_config()
         cache_manager = CacheManager(cache_config, None)
         stream_cache_manager = StreamCacheManager(
-            config, None, cache_manager, 1)
+            config, cache_manager, 1)
         scheduler = Scheduler(config, stream_cache_manager)
         self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 7)
         self.assertFalse(scheduler.have_streams())
@@ -167,7 +168,7 @@ class SchedulerTest(TestCase):
         config, cache_config = self._init_config()
         cache_manager = CacheManager(cache_config, None)
         stream_cache_manager = StreamCacheManager(
-            config, None, cache_manager, 1)
+            config, cache_manager, 1)
         scheduler = Scheduler(config, stream_cache_manager)
         self.assertTrue(scheduler._stream_cache_manager.reuse_cache_)
         self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 7)
@@ -228,11 +229,12 @@ class SchedulerTest(TestCase):
     def test_ptuning(self):
         config, cache_config = self._init_config()
         prefix_seq_len = 9
-        prefix_prompt = torch.zeros((config.layer_num * 2, config.head_num_kv, prefix_seq_len, config.size_per_head), dtype=torch.float16, device="cuda:0")
-        prefix_param = PrefixParams(prefix_prompt, PrefixType.PTuningV2, None)
+        prefix_prompt = torch.zeros((config.layer_num * 2, config.head_num_kv, prefix_seq_len, config.size_per_head), dtype=torch.float16, device="cuda:0")        
         cache_manager = CacheManager(cache_config, None)
+        prefix_params = PtuningConstructor.create_ptuning_v2_params(config, cache_manager, prefix_prompt)
         stream_cache_manager = StreamCacheManager(
-            config, prefix_param, cache_manager, 1)
+            config, cache_manager, 1)
+        stream_cache_manager.set_ptuning(prefix_params)
         scheduler = Scheduler(config, stream_cache_manager, 1)
         self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 5)
         self.assertFalse(scheduler._stream_cache_manager.reuse_cache_)

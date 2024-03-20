@@ -28,6 +28,9 @@ class LruDict(object):
     def poplast(self) -> Tuple[Any, Any]:
         return self._dict.popitem()
     
+    def len(self):
+        return len(self._dict)
+    
     def items(self) -> Iterator[Tuple[Any, Any]]:
         return self._dict.items()
     

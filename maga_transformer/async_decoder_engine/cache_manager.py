@@ -4,26 +4,25 @@ import time
 import logging
 import hashlib
 from threading import Lock, Thread
-from typing import List, Set, Tuple, NamedTuple, Any, Optional
+from typing import List, Set, Tuple, NamedTuple, Any, Dict
 
 from maga_transformer.utils.lru_dict import LruDict
 from maga_transformer.utils.concurrency_controller import ConcurrencyException
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.config.cache_config import CacheConfig, CacheConfigGenerator
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.cache_config import CacheConfig
 
 class SeqPosition(NamedTuple):
     indice: int
     offset: int
     
 class BlockRefCounter:
-    def __init__(self, block_nums):
-        self.ref_counter = {}
+    def __init__(self, block_nums: int):
+        self.ref_counter: Dict[int, int] = {}
         for i in range(1, block_nums):
             self.ref_counter[i] = 0
             
-    def get_ref_counter(self, block_index):
+    def get_ref_counter(self, block_index: int) -> int:
         return self.ref_counter[block_index]
     
     def increment_ref_counter(self, block_indice: List[int]):
@@ -35,6 +34,8 @@ class BlockRefCounter:
             self.ref_counter[index] -= 1
             
 class CacheManager:
+    k_blocks: torch.Tensor
+    v_blocks: torch.Tensor
     def __init__(self, config: CacheConfig, nccl_op: Any) -> None:
         self.config = config
         self.seq_size_per_block = config.seq_size_per_block
@@ -43,7 +44,7 @@ class CacheManager:
         self.lock = Lock()
         self.start()
 
-    def __init_free_block(self, config, nccl_op):
+    def __init_free_block(self, config: CacheConfig, nccl_op: Any):
         block_nums = config.block_nums
         
         if g_parallel_info.tp_size > 1:
@@ -51,7 +52,7 @@ class CacheManager:
             nccl_op.broadcast_tp([block_nums_t])
             block_nums = int(block_nums_t[0])
         logging.info(f"block num: {block_nums}")
-        self.block_nums = block_nums
+        self.block_nums: int = block_nums
         self.free_blocks_index: Set[int] = set()
         # block 0 is reserved for tmp or padding use
         for i in range(1, block_nums):
@@ -60,7 +61,7 @@ class CacheManager:
         self.block_ref_counter = BlockRefCounter(block_nums)
         self.block_cache = BlockCache()
         
-    def __init_kv_cache(self, config):
+    def __init_kv_cache(self, config: CacheConfig):
         # block num not use config when tp, use sync block num
         # block_nums = config.block_nums
         self.k_blocks = torch.zeros((config.layer_num, self.block_nums, config.local_head_num_kv,
@@ -103,7 +104,7 @@ class CacheManager:
             self._maybe_free_block_from_cache(nums)
             return self.__malloc(nums)
 
-    def reserve_blocks(self, nums):
+    def reserve_blocks(self, nums: int):
         with self.lock:
             self._maybe_free_block_from_cache(nums)
 
@@ -135,7 +136,7 @@ class CacheManager:
     def insert_resident_cache(self, block_indice: List[int], token_ids: List[int]):
         self._insert_into_cache([block_indice], token_ids, is_resident=True)
         
-    def _insert_into_cache(self, block_indice: List[List[int]], token_ids: List[int], is_resident) -> None:
+    def _insert_into_cache(self, block_indice: List[List[int]], token_ids: List[int], is_resident: bool) -> None:
         with self.lock:
             # the kvcache length is 1 less than the output token length.
             if len(token_ids) > 1:
@@ -201,15 +202,15 @@ class CacheManager:
         self.v_blocks[:, dst_seq_position.indice, :, dst_seq_position.offset, :].copy_(self.v_blocks[:, src_seq_position.indice, :, src_seq_position.offset, :], non_blocking=True)
 
     @property
-    def free_block_nums(self):
+    def free_block_nums(self) -> int:
         return len(self.free_blocks_index)
 
     @property
     def cache_item_num(self):
         return self.block_cache.item_num()
 
-    def _block_used_ratio(self):
-        return 100 * (1 - (self.free_block_nums / self.block_nums))
+    def block_used_ratio(self) -> float:
+        return 100.0 * (1 - (self.free_block_nums / self.block_nums))
 
     def start(self):
         self._running = True
@@ -224,19 +225,19 @@ class CacheManager:
     def _report_metrics(self):
         while self._running:
             with self.lock:
-                kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self._block_used_ratio())
+                kmonitor.report(GaugeMetrics.KV_CACHE_MEM_USED_RATIO_METRIC, self.block_used_ratio())
                 kmonitor.report(GaugeMetrics.KV_CACHE_ITEM_NUM_METRIC, self.cache_item_num)
             time.sleep(1)
 
     def clean_cache(self):
         del self.k_blocks, self.v_blocks, self.k_scale, self.v_scale
-        self.k_blocks = self.v_blocks = self.k_scale = self.v_scale = None
+        self.k_blocks = self.v_blocks = self.k_scale = self.v_scale = torch.empty([1,0])
         torch.cuda.empty_cache()
 
 class CacheItem(NamedTuple):
     token_list: List[int] = []
     block_indice: List[int] = []
-    cache_key: int = None
+    cache_key: str = ""
     is_resident: bool = False
 
 class BlockCache(object):
@@ -271,7 +272,7 @@ class BlockCache(object):
         return self.cache.empty()
 
     def item_num(self) -> int:
-        return len(self.cache.items())
+        return self.cache.len()
 
     def pop(self) -> List[int]:
         return_cache_item = CacheItem()
@@ -290,10 +291,10 @@ class BlockCache(object):
     
         return return_cache_item.block_indice
 
-    def hash_key(self, token_list: List[int]):
+    def hash_key(self, token_list: List[int]) -> str:
         return hashlib.md5(str(token_list).encode()).hexdigest()
     
-    def put(self, token_list: List[int], block_indice: List[int], is_resident) -> List[int]:    
+    def put(self, token_list: List[int], block_indice: List[int], is_resident: bool) -> List[int]:    
         assert len(token_list) > 0, f"token_list shoud not be empty"
         
         if len(block_indice) == 0:
@@ -308,11 +309,11 @@ class BlockCache(object):
         self.cache[cache_key] = cache_item
         return []
     
-    def has_key(self, token_list):
+    def has_key(self, token_list: List[int]):
         cache_key = self.hash_key(token_list)
         return cache_key in self.cache
     
-    def is_resident(self, token_list):
+    def is_resident(self, token_list: List[int]):
         if not self.has_key(token_list):
             return False
         cache_key = self.hash_key(token_list)

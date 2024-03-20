@@ -9,11 +9,9 @@ from maga_transformer.utils.time_util import Timer
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateInput
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.async_decoder_engine.decoder_engine import DecoderEngine
 from maga_transformer.async_decoder_engine.engine_creator import create_engine
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.gpt_init_model_parameters import ModelType
-from maga_transformer.async_decoder_engine.ptuning import get_ptuning_params
 
 class AsyncModel:
     def __init__(self, model: BaseModel, sp_model: Optional[BaseModel] = None) -> None:
@@ -21,14 +19,13 @@ class AsyncModel:
         self.sp_model = sp_model
         self.config = model.config
         assert self.config.max_seq_len > 0
-        self.tokenizer = model.tokenizer
-        ptuning_args = get_ptuning_params(self.model, self.tokenizer)
+        self.tokenizer = model.tokenizer        
         logging.info(f'first mem info: used:{get_mem_info().used} free: {get_mem_info().free}')
-        if self.sp_model is not None:
-            assert ptuning_args is None, "speculative don't support ptuning yet"
-            self.decoder_engine_ = create_engine(self.model, self.config, None, self.sp_model, self.sp_model.config)
+        if self.sp_model is not None:            
+            self.decoder_engine_ = create_engine(self.model, self.config, self.sp_model, self.sp_model.config)
         else:
-            self.decoder_engine_ = create_engine(model, self.config, ptuning_args)
+            self.decoder_engine_ = create_engine(model, self.config)
+        self.decoder_engine_.start()
 
     def is_multimodal(self) -> bool:
         return self.model.is_multimodal()

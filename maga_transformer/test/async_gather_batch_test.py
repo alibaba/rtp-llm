@@ -12,7 +12,6 @@ from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.async_decoder_engine.decoder_engine import DecoderEngine
 from maga_transformer.utils.util import get_mem_info
-from maga_transformer.async_decoder_engine.ptuning import get_ptuning_params
 
 class query_thread(threading.Thread):
     def __init__(self, id: int, pipeline: Pipeline):

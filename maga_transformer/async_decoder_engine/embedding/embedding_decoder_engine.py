@@ -6,7 +6,7 @@ import threading
 import traceback
 import asyncio
 from enum import Enum
-from typing import Iterator, List, Optional, Tuple, Union, Any, Dict, AsyncGenerator
+from typing import List
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.metrics import GaugeMetrics, kmonitor
@@ -24,7 +24,6 @@ class EmbeddingDecoderEngine(object):
         self.batch_input_ = EmbeddingBatchedInput(NcclOp())
         self.scheduler_ = EmbeddingScheduler(self.config_)
         self.executor_ = EmbeddingModelExecutor(model, config)
-        self.start()
 
     async def decode(self, input: List[EmbeddingInput]) -> List[EmbeddingOutput]:
         streams = self.scheduler_.enqueue(input)

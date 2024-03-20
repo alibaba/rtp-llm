@@ -34,12 +34,12 @@ class GenerateStream(BaseModel):
     _max_seq_len: int = PrivateAttr(default_factory=int)
     _block_indice : List[List[int]] = PrivateAttr(default_factory=list)
     _reuse_length : int = PrivateAttr(default_factory=int)
-    _resource_dtors: List = []
+    _resource_dtors: List[Any] = []
     medusa_state: Any = None
     _stream_id: int = PrivateAttr(default_factory=int)
     _released: bool = PrivateAttr(default_factory=bool)
 
-    def __init__(self, input, max_seq_len=2048):
+    def __init__(self, input: GenerateInput, max_seq_len: int=2048):
         super().__init__()
         self._input = input
         self._max_seq_len = max_seq_len
@@ -61,19 +61,27 @@ class GenerateStream(BaseModel):
         global stream_counter
         self._stream_id = stream_counter.increment()
         self._released = False
+        # for mulit_task_prompt
+        self._require_release = True
 
-    def add_resource_dtor(self, dtor):
+    def add_resource_dtor(self, dtor: Any):
         self._resource_dtors.append(dtor)
+        
+    def set_require_release(self, require_release: bool):
+        self._require_release = require_release
+        
+    def clear_resource_dtor(self):
+        self._resource_dtors.clear()
 
-    def release_resource(self):
-        if self._released:
+    def release_resource(self):        
+        if self._released or not self._require_release:
             return
         for dtor in self._resource_dtors:
             dtor()
         self._resource_dtors.clear()
         self._released = True
 
-    def update_prefix(self, ptuning_info):
+    def update_prefix(self, ptuning_info: PrefixInfo):
         self._ptuning_info = ptuning_info
         if ptuning_info.prefix_tensors is not None:
             self._input.update_prefix(ptuning_info.prefix_tensors)
@@ -181,7 +189,7 @@ class GenerateStream(BaseModel):
     def _report_first_token_rt(self):
         kmonitor.report(GaugeMetrics.FT_FIRST_TOKEN_RT_METRIC, current_time_ms() - self._begin_time)
 
-    def set_kvcache(self, block_indice, reuse_length: int):
+    def set_kvcache(self, block_indice: List[List[int]], reuse_length: int):
         self._block_indice = block_indice
         self._reuse_length = reuse_length
 

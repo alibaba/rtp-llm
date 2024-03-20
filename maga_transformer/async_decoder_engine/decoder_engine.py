@@ -5,14 +5,11 @@ import time
 import threading
 import traceback
 import asyncio
-from enum import Enum
-from typing import Iterator, List, Optional, Tuple, Union, Any, Dict, AsyncGenerator
+from typing import AsyncGenerator
 from maga_transformer.utils.util import get_mem_info, AtomicCounter
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.models.base_model import GenerateInput, GenerateOutput
 from maga_transformer.async_decoder_engine.scheduler import Scheduler
-from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.metrics import GaugeMetrics, kmonitor
@@ -27,7 +24,6 @@ class DecoderEngine:
         self.scheduler_ = scheduler
         self.config_ = config
         self.wait_decode_counter_ = AtomicCounter()
-        self.start()
         logging.info(f'last mem info:{get_mem_info().used} {get_mem_info().free}')
 
     def start(self):
@@ -42,26 +38,12 @@ class DecoderEngine:
         logging.info("decoder engine stop done")
 
     def decode(self, input: GenerateInput) -> AsyncGenerator[GenerateOutput, None]:
-        if input.prompt_length <= 0:
-            raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
-                                     f"model tokens can not be empty, request length is {input.prompt_length}")
-        max_new_tokens = min(self.config_.max_seq_len - input.prompt_length, input.generate_config.max_new_tokens)
-        if max_new_tokens <= 0:
-            raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
-                                     f"model max tokens is {self.config_.max_seq_len}, request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}")
-        stream = GenerateStream(input=input,
-                                max_seq_len=self.config_.max_seq_len)
-        if input.generate_config.adapter_name is not None:
-            lora_resource_holder = LoraResourceHolder(self.executor_.base_model_ops.gpt_op.weight.lora_resource,
-                                     input.generate_config.adapter_name)
-            input.lora_id = lora_resource_holder.lora_id
-            stream.add_resource_dtor(lambda: lora_resource_holder.release())
-        self.scheduler_.enqueue(stream)
+        stream = self.create_stream(input)        
         # 保证性能测试时能凑批到一起，都用一个起始 counter
         init_counter = self.wait_decode_counter_.get()
         return self._generator_loop_wrap(stream, init_counter)
 
-    async def _generator_loop_wrap(self, stream, init_counter):
+    async def _generator_loop_wrap(self, stream: GenerateStream, init_counter: int):
         try:
             async for output in self._generate_loop(stream, init_counter):
                 yield output
@@ -73,7 +55,7 @@ class DecoderEngine:
             stream.set_stop(error_msg)
             raise e
 
-    async def _generate_loop(self, stream, init_counter):
+    async def _generate_loop(self, stream: GenerateStream, init_counter: int):
         counter = init_counter
         while True:
             while True:
@@ -96,6 +78,25 @@ class DecoderEngine:
         kmonitor.report(GaugeMetrics.ASYNC_WAIT_QUERY_SIZE_METRIC,
                         self.scheduler_.wait_stream_size())
         kmonitor.report(GaugeMetrics.ASYNC_ITERATE_LANTENCY, cost_ms)
+    
+    # public for ptuning
+    def create_stream(self, input: GenerateInput) -> GenerateStream:
+        if input.prompt_length <= 0:
+            raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
+                                     f"model tokens can not be empty, request length is {input.prompt_length}")
+        max_new_tokens = min(self.config_.max_seq_len - input.prompt_length, input.generate_config.max_new_tokens)
+        if max_new_tokens <= 0:
+            raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
+                                     f"model max tokens is {self.config_.max_seq_len}, request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}")
+        stream = GenerateStream(input=input,
+                                max_seq_len=self.config_.max_seq_len)
+        if input.generate_config.adapter_name is not None:
+            lora_resource_holder = LoraResourceHolder(self.executor_.base_model_ops.gpt_op.weight.lora_resource,
+                                     input.generate_config.adapter_name)
+            input.lora_id = lora_resource_holder.lora_id
+            stream.add_resource_dtor(lambda: lora_resource_holder.release())
+        self.scheduler_.enqueue(stream)
+        return stream
 
     # 这个后台任务一直在跑，应该用线程实现，用 Python 自己的线程切换机制。
     # 如果用协程的话对外返回的 decode 协程会因为 run_engine 协程一直运行被饿死。
@@ -118,7 +119,7 @@ class DecoderEngine:
                 self.executor_.process(batch_query)
 
                 torch.cuda.nvtx.range_push('update')
-                if g_parallel_info.tp_rank == 0:
+                if g_parallel_info.tp_rank == 0:                    
                     self.scheduler_.prepare_next_step()
                 torch.cuda.nvtx.range_pop()
 

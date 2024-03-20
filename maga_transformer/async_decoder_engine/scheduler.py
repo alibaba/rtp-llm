@@ -8,6 +8,7 @@ from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery
 from maga_transformer.async_decoder_engine.schedule_strategy import PerfTestScheduleStrategy, create_schedule_strategy
+from maga_transformer.async_decoder_engine.stream_cache_manager import StreamCacheManager
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
 from maga_transformer.metrics import kmonitor, AccMetrics
@@ -16,7 +17,7 @@ from maga_transformer.utils.thread_safe_deque import ThreadSafeDeque
 class Scheduler:
     def __init__(self,
                  config: GptInitModelParameters,
-                 stream_cache_manager,
+                 stream_cache_manager: StreamCacheManager,
                  gen_num_per_circle: int = 1,
                  nccl_op: Any = None):
         self.gen_num_per_circle = gen_num_per_circle

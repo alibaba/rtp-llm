@@ -10,34 +10,29 @@ from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 
 class StreamCacheManager:
-    def __init__(self, config: GptInitModelParameters, prefix_params: PrefixParams,
-                 cache_manger: CacheManager, gen_num_per_circle: int) -> None:
+    def __init__(self, config: GptInitModelParameters, cache_manger: CacheManager, gen_num_per_circle: int) -> None:
         self.config_ = config
         self.cache_manager_ = cache_manger
         self.gen_num_per_circle = gen_num_per_circle
-        self.seq_size_per_block_ = config.seq_size_per_block
-        self.construct_ptuning(prefix_params)
-        logging.info(f"reuse_cache: {self.reuse_cache_}")
-        logging.info(f"block_num after Ptuning: {self.cache_manager_.free_block_nums}")
+        self.seq_size_per_block_ = config.seq_size_per_block        
+        self.ptuning_ = None        
+        self.reuse_cache_ = os.environ.get('REUSE_CACHE', None) == '1'
 
-    def construct_ptuning(self, prefix_params: PrefixParams):
-        if prefix_params is None:
-            self.ptuning_ = None
-            self.reuse_cache_ = os.environ.get('REUSE_CACHE', None) == '1'
-            return
-
-        if isinstance(prefix_params.prefix_kvcache, dict):
+    def set_ptuning(self, prefix_params: Optional[Union[PrefixParams, Dict[int, PrefixParams]]]):
+        if isinstance(prefix_params, dict):
             # reuse cache must be true in system prompt case
             self.reuse_cache_ = True
-            assert prefix_params.prefix_tensor is not None
-            self.ptuning_ = MultiTaskPtuning(self.config_, self.cache_manager_,
-                                             prefix_params.prefix_kvcache, prefix_params.prefix_type, prefix_params.prefix_tensor)
-        else:
+            self.ptuning_ = MultiTaskPtuning(self.config_, self.cache_manager_, prefix_params)
+        elif isinstance(prefix_params, PrefixParams):
             self.reuse_cache_ = False
-            assert isinstance(prefix_params.prefix_kvcache, torch.Tensor)
-            self.ptuning_ = Ptuning(self.config_, self.cache_manager_, prefix_params.prefix_kvcache, torch.zeros([0]), prefix_params.prefix_type)
+            self.ptuning_ = Ptuning(self.config_, self.cache_manager_, prefix_params)
+        else:
+            assert prefix_params is None, f"prefix params type {type(prefix_params)} unknown"
+            
+        logging.info(f"reuse_cache: {self.reuse_cache_}")        
+        logging.info(f"block_num after Ptuning: {self.cache_manager_.free_block_nums}")
 
-    def update_prefix(self, stream):
+    def update_prefix(self, stream: GenerateStream):
         if not self.ptuning_:
             ptuning_info = PrefixInfo()
         else:
@@ -61,7 +56,7 @@ class StreamCacheManager:
         stream.set_kvcache([block_indice], reuse_length)
         stream.add_resource_dtor(lambda: self.free_block_cache(stream))
 
-    def incr_kvcache(self, streams):
+    def incr_kvcache(self, streams: List[GenerateStream]):
         malloc_sizes = self._collect_malloc_sizes(streams)
         for stream, malloc_size in malloc_sizes.items():
             try:
@@ -72,12 +67,12 @@ class StreamCacheManager:
                 stream.stop_and_release('LACK_MEM')
                 logging.warning(f"lack of mem, finished. err: {str(e)}")
 
-    def enough_kvcache(self, streams):
+    def enough_kvcache(self, streams: List[GenerateStream]):
         malloc_sizes = self._collect_malloc_sizes(streams)
         sum_size = sum(malloc_sizes.values())
         return self.cache_manager_.free_block_nums >= sum_size
 
-    def reserve_enough_kvcache(self, streams):
+    def reserve_enough_kvcache(self, streams: List[GenerateStream]):
         malloc_sizes = self._collect_malloc_sizes(streams)
         sum_size = sum(malloc_sizes.values())
         self.cache_manager_.reserve_blocks(sum_size)
@@ -88,8 +83,8 @@ class StreamCacheManager:
     def free_kvcache_count(self):
         return self.cache_manager_.free_block_nums
 
-    def _collect_malloc_sizes(self, streams):
-        malloc_sizes = {}
+    def _collect_malloc_sizes(self, streams: List[GenerateStream]) -> Dict[GenerateStream, int]:
+        malloc_sizes: Dict[GenerateStream, int] = {}
         for stream in streams:
             malloc_size = self._calc_malloc_size(stream)
             if malloc_size > 0:
@@ -119,4 +114,4 @@ class StreamCacheManager:
         return self.cache_manager_.get_kv_cache_base()
 
     def block_used_ratio(self) -> float:
-        return self.cache_manager_.block_used_ratio()
+        return self.cache_manager_._block_used_ratio()
