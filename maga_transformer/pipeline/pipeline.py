@@ -176,7 +176,7 @@ class Pipeline(object):
     async def generate_stream(self, token_ids: List[int], images: List[Future[Image.Image]], generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         # TODO(xinfei.sxf) stop words etc 直接带入raw query中去
 
-        if self.model.is_multimodal():
+        if self.model.is_multimodal() and len(images) > 0:
             async with self.vit_expand_token_id_lock:
                 token_ids, images = self.model.expand_token_id(token_ids, images)
 

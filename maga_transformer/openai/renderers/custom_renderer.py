@@ -104,11 +104,10 @@ class CustomChatRenderer():
             input_ids: List[int],
             images: List[Future[Image.Image]],
             generate_config: GenerateConfig,
-            tokenizer: Union[PreTrainedTokenizer, TokenizerBase],
             model: Union[AsyncModel, BaseModel],
             request: ChatCompletionRequest
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        if model.is_multimodal():
+        if model.is_multimodal() and len(images) > 0:
             input_ids, images = model.expand_token_id(input_ids, images)
         
         input_token_length = len(input_ids)

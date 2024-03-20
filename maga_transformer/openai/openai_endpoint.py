@@ -191,7 +191,6 @@ class OpenaiEndopoint():
             input_ids,
             images,
             generate_config,
-            self.tokenizer,
             self.model,
             chat_request
         )
