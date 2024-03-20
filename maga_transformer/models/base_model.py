@@ -47,7 +47,7 @@ def debug_print_hidden(name: str, t: torch.Tensor):
 # single batch prompt input
 class GenerateInput(PyBaseModel):
     token_ids: torch.Tensor
-    images: Union[torch.Tensor, List[torch.Tensor]] = []
+    images: Union[torch.Tensor, List[Any]] = []
     generate_config: GenerateConfig
     tokenizer: Any = None # TODO: remove this
     lora_id: int = -1

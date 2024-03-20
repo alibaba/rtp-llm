@@ -183,8 +183,9 @@ class QWen_VL(QWen, MultiModalMixin):
         return self.multimodal_embedding(inputs, images)
     
     def expand_token_id(self, token_ids: List[int], images: List[Future[Image.Image]]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
-        image_features = self.visual.image_embedding(images, self.device)
-        return token_ids, image_features
+        # if len(images) > 0:
+        #     image_features = self.visual.image_embedding(images, self.device)
+        return token_ids, images
     
     # QWen_VL tokenizer encode image urls into tokens, so that multimodal_embedding don't need images as input
     def multimodal_embedding(self, input_ids: torch.Tensor, images: List[List[Any]]):
@@ -194,6 +195,14 @@ class QWen_VL(QWen, MultiModalMixin):
         eos_pos = torch.where(input_ids == img_end_id)
         assert (bos_pos[0] == eos_pos[0]).all()
         img_pos = torch.stack((bos_pos[0], bos_pos[1], eos_pos[1]), dim=1)
+
+        image_data = []
+        for image in images:
+            image_data.extend(image)
+
+        if len(image_data) != 0:
+            images = self.visual.image_embedding(image_data, self.device)
+            assert images.shape[0] == len(images)
 
         input_embeds = self.word_embedding(input_ids)
 
