@@ -5,7 +5,7 @@ import re
 
 from typing import List, Any, Dict, Tuple, Union
 from PIL import Image
-from io import BytesIO
+from concurrent.futures import Future
 from transformers.models.llama.tokenization_llama import LlamaTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -19,13 +19,13 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.llava_vit import LlavaImageEmbedding
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.model_factory_register import register_model
+from maga_transformer.utils.multimodal_download import DownloadEngine
 
 class LlavaTokenizer(TokenizerBase):
     def __init__(self, 
                  tokenzier_path: str, 
                  mm_use_im_patch_token: bool,
                  mm_use_im_start_end: bool, 
-                 image_expand: int, 
                  vit_special_token_ids: Dict[str, Any],
                  vit_special_tokens: Dict[str, Any]):
         self.tokenizer = LlamaTokenizer.from_pretrained(tokenzier_path)
@@ -39,7 +39,6 @@ class LlavaTokenizer(TokenizerBase):
             extra_tokens.extend(["<im_start>", "<im_end>"])
         self.tokenizer.add_tokens(extra_tokens, special_tokens=True)
 
-        self.image_expand = image_expand
         self.image_token_index: int = vit_special_token_ids["image_token_index"]
         self.ignore_token_index: int = vit_special_token_ids["ignore_token_index"]
         self.default_image_token = vit_special_tokens["default_image_token"]
@@ -69,8 +68,6 @@ class LlavaTokenizer(TokenizerBase):
 
         for x in insert_separator(prompt_chunks, [self.image_token_index] * (offset + 1)):
             t.extend(x[offset:])
-
-        t.extend([self.ignore_token_index] * images * (self.image_expand - 1))
 
         return t
 
@@ -156,6 +153,7 @@ class Llava(Llama, MultiModalMixin):
             "default_im_start_token": "<im_start>", 
             "default_im_end_token": "<im_end>"
         })
+        config.vit_related_params.image_expand_token = -100
 
         vis_tower_name = config_json.get("mm_vision_tower", config_json.get("vision_tower", None))
         img_expand_match = re.search("patch(\d+)-(\d+)", vis_tower_name)
@@ -164,7 +162,6 @@ class Llava(Llama, MultiModalMixin):
             img_size = int(img_expand_match.group(2))
             config.vit_related_params.config["patch_size"] = patch_size
             config.vit_related_params.config["image_size"] = img_size
-            config.vit_related_params.config["img_expand_len"] = (img_size // patch_size) ** 2
         config.vit_related_params.config["vit_tower_path"] = vis_tower_name
 
     @classmethod
@@ -172,11 +169,10 @@ class Llava(Llama, MultiModalMixin):
         return LlavaTokenizer(config.tokenizer_path,
                               config.vit_related_params.config["mm_use_im_patch_token"],
                               config.vit_related_params.config["mm_use_im_start_end"],
-                              config.vit_related_params.config["img_expand_len"],
                               config.vit_related_params.vit_special_token_ids,
                               config.vit_related_params.vit_special_tokens)
     
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[Union[torch.Tensor, List[torch.Tensor]]]):
         inputs = inputs.reshape(1, -1)
         if g_parallel_info.tp_size <= 1:
             return self.multimodal_embedding(inputs, images).squeeze(0)
@@ -188,22 +184,35 @@ class Llava(Llama, MultiModalMixin):
         self.nccl_op_.broadcast_tp([embedding_tensor])
         return embedding_tensor
         
-    def input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
+    def input_word_embedding(self, inputs: torch.Tensor, images: List[Union[torch.Tensor, List[torch.Tensor]]]):
         return self.multimodal_embedding(inputs, images)
 
+    def expand_token_id(self, token_ids: List[int], images: List[Future[Image.Image]]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+        assert self.config.vit_related_params.image_expand_token is not None
+        image_token_index = self.config.vit_related_params.vit_special_token_ids["image_token_index"]
+        if token_ids.count(image_token_index) != len(images):
+            raise ValueError("Number of images does not match number of <image> tokens in prompt")
+
+        image_expand_token: int = self.config.vit_related_params.image_expand_token
+        image_num = len(images)
+        image_features = self.visual.image_embedding(images, self.device)
+
+        total_image_tokens = 0
+        if isinstance(image_features, torch.Tensor):
+            total_image_tokens += image_features.shape[0] * image_features.shape[1]
+        elif isinstance(image_features, list):
+            total_image_tokens += sum([image_feature.shape[0] for image_feature in image_features])
+        else:
+            raise Exception("Unknown image features data type")
+
+        token_ids.extend([image_expand_token] * (total_image_tokens - image_num))
+        return token_ids, image_features
+    
     def multimodal_embedding(
-        self, input_ids: torch.Tensor, images: List[List[Any]]
+        self, input_ids: torch.Tensor, image_features: List[List[Any]]
     ):
         image_token_index = self.config.vit_related_params.vit_special_token_ids["image_token_index"]
         ignore_token_index = self.config.vit_related_params.vit_special_token_ids["ignore_token_index"]
-
-        assert isinstance(images, list) and isinstance(images[0], list)
-
-        for i in range(input_ids.shape[0]):
-            if (input_ids[i] == image_token_index).sum() != len(images[i]):
-                raise ValueError("Number of images does not match number of <image> tokens in prompt")
-
-        image_features = self.visual.image_embedding(images, self.device)
 
         new_input_embeds = []
 

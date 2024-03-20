@@ -11,7 +11,7 @@ from transformers import PreTrainedTokenizerBase
 from transformers.generation.stopping_criteria import StoppingCriteria
 
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
-from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateOutput, GenerateResponse, GenerateInput
+from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateOutput, GenerateResponse
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessage, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, UsageInfo, \
@@ -176,29 +176,24 @@ class OpenaiEndopoint():
     ) -> CompleteResponseAsyncGenerator:
         rendered_input = self.chat_renderer.render_chat(chat_request)
         input_ids = rendered_input.input_ids
-        input_length = len(input_ids)
 
-        input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
         input_images = rendered_input.input_images
         generate_config = self._extract_generation_config(chat_request)
 
-        images = self.download_engine.submit(input_images)
-
-        output_generator: AsyncGenerator[GenerateOutput, None] = self.model.enqueue(
-            GenerateInput(
-                token_ids=input_id_tensor,
-                images=images,
-                generate_config=generate_config,
-                tokenizer=self.tokenizer
-            )
-        )
+        if self.model.is_multimodal():
+            images = self.download_engine.submit(input_images)
+        else:
+            images = []        
 
         debug_info = self._get_debug_info(rendered_input) if chat_request.debug_info else None
 
         choice_generator = self.chat_renderer.render_response_stream(
-            output_generator,
-            chat_request,
-            input_length
+            input_ids,
+            images,
+            generate_config,
+            self.tokenizer,
+            self.model,
+            chat_request
         )
 
         return self._complete_stream_response(choice_generator, debug_info)

@@ -6,6 +6,7 @@ import json
 import logging
 from typing import List, Any, Tuple, Dict, Optional, Union
 from PIL import Image
+from concurrent.futures import Future
 
 from transformers import AutoTokenizer
 
@@ -181,21 +182,18 @@ class QWen_VL(QWen, MultiModalMixin):
     def input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
         return self.multimodal_embedding(inputs, images)
     
+    def expand_token_id(self, token_ids: List[int], images: List[Future[Image.Image]]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+        image_features = self.visual.image_embedding(images, self.device)
+        return token_ids, image_features
+    
     # QWen_VL tokenizer encode image urls into tokens, so that multimodal_embedding don't need images as input
-    def multimodal_embedding(self, input_ids: torch.Tensor, image_lists: List[List[Any]]):
+    def multimodal_embedding(self, input_ids: torch.Tensor, images: List[List[Any]]):
         img_start_id: int = self.config.vit_related_params.vit_special_token_ids['image_start_id']
         img_end_id: int = self.config.vit_related_params.vit_special_token_ids['image_end_id']
         bos_pos = torch.where(input_ids == img_start_id)
         eos_pos = torch.where(input_ids == img_end_id)
         assert (bos_pos[0] == eos_pos[0]).all()
         img_pos = torch.stack((bos_pos[0], bos_pos[1], eos_pos[1]), dim=1)
-        images = []
-        for image_list in image_lists:
-            images.extend(image_list)
-
-        if len(images) != 0:
-            images = self.visual.image_embedding(images, self.device)
-            assert images.shape[0] == len(images)
 
         input_embeds = self.word_embedding(input_ids)
 

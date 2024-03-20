@@ -2,8 +2,11 @@ import gc
 import torch
 import logging
 import traceback
-from typing import Optional, Iterator, List, Any, Generator, AsyncGenerator, Dict, Union
+from typing import Optional, Iterator, List, Any, Generator, AsyncGenerator, Dict, Union, Tuple
+from PIL import Image
+from concurrent.futures import Future
 from transformers import PreTrainedTokenizer
+
 from maga_transformer.utils.util import get_mem_info
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
@@ -29,6 +32,10 @@ class AsyncModel:
 
     def is_multimodal(self) -> bool:
         return self.model.is_multimodal()
+
+    def expand_token_id(self, token_ids: List[int], images: List[Future[Image.Image]]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+        assert self.is_multimodal()
+        return self.model.expand_token_id(token_ids, images)
 
     def load(self, ref_model: Optional[torch.nn.Module] = None):
         self.model.load(ref_model)

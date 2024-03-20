@@ -5,8 +5,12 @@ import threading
 import queue
 import json
 from typing import Any, List, Union, Iterator, Tuple, Callable, Optional, Dict, Generator, AsyncGenerator
-from maga_transformer.utils.time_util import current_time_ms
+from PIL import Image
+from concurrent.futures import Future
 from torch.nn.utils.rnn import pad_sequence
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.metrics import kmonitor, GaugeMetrics
@@ -17,7 +21,6 @@ from maga_transformer.pipeline.pipeline_custom_func import PipelineCustomFunc, g
 from maga_transformer.async_decoder_engine.generate_stream import GenerateInput
 from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slice_list, truncate_response_with_stop_words
 from maga_transformer.utils.tokenizer_utils import DecodingState
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.utils.multimodal_download import DownloadEngine
 
@@ -29,6 +32,7 @@ class Pipeline(object):
         self._img_token: str = self.model.config.vit_related_params.vit_special_tokens.get('default_image_token', '')
         self.piple_funcs: PipelineCustomFunc = get_piple_custom_func(self.model)
         self.download_engine: DownloadEngine = DownloadEngine()
+        self.vit_expand_token_id_lock = asyncio.Lock()
 
     def stop(self):
         if isinstance(self.model, AsyncModel):
@@ -127,6 +131,8 @@ class Pipeline(object):
         if self.model.is_multimodal():
             prompt, images = self.piple_funcs.multimodal_modify_prompt_func(prompt, images=images, img_token=self._img_token,
                                                                             generate_config=generate_config.model_dump(), **kwargs)
+            if len(images) > 0:
+                images = self.download_engine.submit(images)
 
         token_ids = self.piple_funcs.process_encode_func(prompt,
                                              generate_config=generate_config.model_dump(),
@@ -138,17 +144,7 @@ class Pipeline(object):
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.num_beams)
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
 
-        if self.model.is_multimodal() and len(images) > 0:
-            images = self.download_engine.submit(images)
-
-        token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
-        input = GenerateInput(token_ids=token_ids,
-                              images=images,
-                              generate_config=generate_config,
-                              tokenizer=self.tokenizer)
-        stream = self.model.enqueue(input)
-        return self.generate_stream(input, stream, **kwargs)
-
+        return self.generate_stream(token_ids, images, generate_config, **kwargs)
 
     def decode_tokens(self,
                       generate_output: GenerateOutput,
@@ -177,8 +173,21 @@ class Pipeline(object):
         return texts, output_lens
 
     @torch.inference_mode()
-    async def generate_stream(self, input: GenerateInput, stream: AsyncGenerator[GenerateOutput, None], **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
+    async def generate_stream(self, token_ids: List[int], images: List[Future[Image.Image]], generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         # TODO(xinfei.sxf) stop words etc 直接带入raw query中去
+
+        if self.model.is_multimodal():
+            async with self.vit_expand_token_id_lock:
+                token_ids, images = self.model.expand_token_id(token_ids, images)
+
+        token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
+
+        input = GenerateInput(token_ids=token_ids,
+                              images=images,
+                              generate_config=generate_config,
+                              tokenizer=self.tokenizer)
+        stream = self.model.enqueue(input)
+
         stop_word_strs = self._get_stop_word_strs(self.tokenizer, input.generate_config)
         stop_word_str_slices = get_stop_word_slice_list(stop_word_strs)
         num_beams = input.generate_config.num_beams

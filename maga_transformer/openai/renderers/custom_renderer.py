@@ -2,13 +2,18 @@ from typing import Optional, List, Dict, Any, Union, Callable, AsyncGenerator
 import torch
 import logging
 from dataclasses import dataclass, field
+from PIL import Image
+from concurrent.futures import Future
 
 from transformers import PreTrainedTokenizerBase
 
-from maga_transformer.models.base_model import TokenizerBase, GenerateOutput, AuxInfo
+from maga_transformer.models.base_model import TokenizerBase, GenerateOutput, BaseModel, GenerateInput, AuxInfo
+from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
     RoleEnum, RendererInfo
+from maga_transformer.async_decoder_engine.async_model import AsyncModel
+
 
 @dataclass
 class StreamResponseObject:
@@ -96,10 +101,29 @@ class CustomChatRenderer():
 
     async def render_response_stream(
             self,
-            output_generator: AsyncGenerator[GenerateOutput, None],
-            request: ChatCompletionRequest,
-            input_token_length: int,
+            input_ids: List[int],
+            images: List[Future[Image.Image]],
+            generate_config: GenerateConfig,
+            tokenizer: Union[PreTrainedTokenizer, TokenizerBase],
+            model: Union[AsyncModel, BaseModel],
+            request: ChatCompletionRequest
     ) -> AsyncGenerator[StreamResponseObject, None]:
+        if model.is_multimodal():
+            input_ids, images = model.expand_token_id(input_ids, images)
+        
+        input_token_length = len(input_ids)
+
+        input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
+
+        output_generator: AsyncGenerator[GenerateOutput, None] = model.enqueue(
+            GenerateInput(
+                token_ids=input_id_tensor,
+                images=images,
+                generate_config=generate_config,
+                tokenizer=self.tokenizer
+            )
+        )
+    
         index = 0
         output_token_length = 0
         responded_output_ids = []

@@ -9,6 +9,7 @@ import requests
 import os
 from functools import partial
 from PIL import Image
+from concurrent.futures import Future
 from typing import Callable, Optional, Sequence, Tuple, List, Any
 import numpy as np
 
@@ -19,7 +20,6 @@ from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from maga_transformer.utils.multimodal_download import DownloadEngine
-
 
 def get_abs_pos(abs_pos, tgt_size):
     # abs_pos: L, C
@@ -405,25 +405,40 @@ class VisionTransformer(nn.Module):
             dtype=self.transformer.get_cast_dtype(),
             device=self.transformer.get_cast_device(),
         )
+        print(1)
+        import sys
+        sys.stdout.flush()
         # to patches
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
 
+        print(2)
+        import sys
+        sys.stdout.flush()
         x = x + get_abs_pos(self.positional_embedding, x.size(1))
 
         x = self.ln_pre(x)
 
+        print(3, self.transformer, x.shape)
+        import sys
+        sys.stdout.flush()
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
+        print(4)
+        import sys
+        sys.stdout.flush()
         x = self.attn_pool(x)
         x = self.ln_post(x)
         x = x @ self.proj
 
         return x
 
-    def encode(self, images: List[Any]):
+    def encode(self, images: List[Future[Image.Image]]):
+        print(images)
+        import sys
+        sys.stdout.flush()
         images = self.image_pre_obj.encode(images)
         return self(images)

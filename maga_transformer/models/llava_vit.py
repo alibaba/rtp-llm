@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from PIL import Image
+from concurrent.futures import Future
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
 from maga_transformer.utils.multimodal_download import DownloadEngine
@@ -16,24 +17,19 @@ class LlavaImageEmbedding(BaseImageEmbedding):
         self.mm_projector = self.build_vision_projector(config)
         self.config = config
     
-    def image_embedding(self, images: List[List[Any]], device):
-        image_data = []
-        for image_list in images:
-            now_image_data = DownloadEngine.get(image_list)
-            image_data.append(now_image_data)
+    def image_embedding(self, images: List[Future[Image.Image]], device):
+        image_data = DownloadEngine.get(images)
         
-        images = process_batch_images(image_data, 
-                                      self.config.get('image_aspect_ratio', None), 
-                                      self.vision_tower.image_processor, 
-                                      device)
+        processed_images = process_images(image_data, 
+                                          self.config.get('image_aspect_ratio', None), 
+                                          self.vision_tower.image_processor, 
+                                          device)
 
-        image_features = []
-        for query_images in images:
-            image_features.append(self.encode_images(query_images, device))
+        image_features = self.encode_images(processed_images)
 
         return image_features
     
-    def encode_images(self, images, device):
+    def encode_images(self, images):
         if images.shape[0] == 0:
             return images
         image_features = self.vision_tower(images)

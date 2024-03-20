@@ -76,6 +76,7 @@ class VitParameters:
     config: Dict[str, Any] = {}
     vit_special_token_ids: Dict[str, Any] = {}
     vit_special_tokens: Dict[str, Any] = {}
+    image_expand_token: Optional[int] = None
     vit_weights = None
 
 class ModelType(Enum):

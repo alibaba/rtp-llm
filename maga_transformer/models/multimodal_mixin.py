@@ -2,14 +2,17 @@ import json
 import torch
 import re
 from typing import Any, Dict, List, Union, Tuple, Optional
+from PIL import Image
+from concurrent.futures import Future
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import RequestFormat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity
+from maga_transformer.utils.multimodal_download import DownloadEngine
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 class BaseImageEmbedding:
-    def image_embedding(self, images, device) -> torch.Tensor:
+    def image_embedding(self, images, device):
         raise NotImplementedError()
 
 class BaseVitWeights:
@@ -49,6 +52,7 @@ class BaseMultiModalWeightInfo:
 
 class MultiModalMixin:
     visual: BaseImageEmbedding
+    image_expand_token: int
 
     @staticmethod
     def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], tokenizer: Any, **kwargs: Any) -> List[int]:
@@ -93,10 +97,7 @@ class MultiModalMixin:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "raw request format cannot accept dict prompt")
         return prompt, images
     
-    def concat_embedding(self, token_ids, image_embeddings):
-        raise NotImplementedError()
-
-    def expand_token_id(self, token_ids, images):
+    def expand_token_id(self, token_ids: List[int], images: List[Future[Image.Image]]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
         raise NotImplementedError()
 
     def load_vit_weight(self, ctype: str):
