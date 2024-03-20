@@ -1,24 +1,22 @@
 #include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 
-#include <torch/torch.h>
-
 using namespace std;
 using namespace fastertransformer;
 
-class CudaActOpTest: public DeviceTestBase<DeviceType::Cuda> {
+class CudaActOpTest: public CudaDeviceTestBase {
 public:
 
     double rtol_;
     double atol_;
 
     void SetUp() override {
-        DeviceTestBase<DeviceType::Cuda>::SetUp();
+        CudaDeviceTestBase::SetUp();
         rtol_ = 1e-03;
         atol_ = 1e-03;
     }
     void TearDown() override {
-        DeviceTestBase<DeviceType::Cuda>::TearDown();
+        CudaDeviceTestBase::TearDown();
     }
 
     void BasicActTest(ActivationType atype, size_t m, size_t n);

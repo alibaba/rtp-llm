@@ -22,12 +22,12 @@ cc_library(
     srcs = glob([
         "*.cc",
     ]),
-
     hdrs = glob([
         "*.h",
     ]),
     deps = torch_deps() + [
         ":logger",
+        "//src/fastertransformer/core:buffer"
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

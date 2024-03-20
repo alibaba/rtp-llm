@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/utils/WeightsUtils.h"
-#include "maga_transformer/cpp/utils/BufferUtils.h"
+#include "src/fastertransformer/utils/BufferUtils.h"
 #include "src/fastertransformer/models/W.h"
 
 using namespace std;

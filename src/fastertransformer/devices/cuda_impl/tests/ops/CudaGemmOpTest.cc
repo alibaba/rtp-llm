@@ -4,19 +4,19 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CudaGemmOpTest: public DeviceTestBase<DeviceType::Cuda> {
+class CudaGemmOpTest: public CudaDeviceTestBase {
 public:
 
     double rtol_;
     double atol_;
 
     void SetUp() override {
-        DeviceTestBase<DeviceType::Cuda>::SetUp();
+        CudaDeviceTestBase::SetUp();
         rtol_ = 1e-03;
         atol_ = 1e-03;
     }
     void TearDown() override {
-        DeviceTestBase<DeviceType::Cuda>::TearDown();
+        CudaDeviceTestBase::TearDown();
     }
 
     void BasicGemmOP(size_t m, size_t n, size_t k);

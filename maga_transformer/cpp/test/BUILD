@@ -35,14 +35,31 @@ test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
 
+cc_library(
+    name = "test_utils",
+    hdrs = [
+        "ModelTestUtil.h"
+    ],
+    srcs = [
+        "ModelTestUtil.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    alwayslink = 1,
+)
+
 cc_test(
     name = "gpt_model_test",
     srcs = [
         "GptModelTest.cc",
     ],
-    data = [],
+    data = [
+        "//maga_transformer/test/model_test/fake_test/testdata:testdata"
+    ],
     copts = test_copts,
     linkopts = test_linkopts,
-    deps = test_deps,
+    deps = test_deps + [
+        ":test_utils",
+    ],
 )
 

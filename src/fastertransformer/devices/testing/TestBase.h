@@ -37,10 +37,23 @@ public:
 
 protected:
     template <typename T>
-    std::shared_ptr<Buffer> createHostBuffer(const std::vector<size_t>& shape, const std::vector<T>& data) {
+    std::unique_ptr<Buffer> createHostBuffer(const std::vector<size_t>& shape, const T* data) {
+        return createHostBuffer<T>(shape, static_cast<const void*>(data));
+    }
+
+    template <typename T>
+    std::unique_ptr<Buffer> createHostBuffer(const std::vector<size_t>& shape, const void* data) {
         auto buffer = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::HOST}, {});
-        memcpy(buffer->data(), data.data(), data.size() * sizeof(T));
+        memcpy(buffer->data(), data, sizeof(T) * buffer->size());
         return buffer;
+    }
+
+    template <typename T>
+    std::unique_ptr<Buffer> createDeviceBuffer(const std::vector<size_t>& shape, const void* data) {
+        auto host_buffer = createHostBuffer<T>(shape, data);
+        auto buffer = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::DEVICE}, {});
+        device_->copy(CopyParams(*buffer, *host_buffer));
+        return move(buffer);
     }
 
     template<typename T>
