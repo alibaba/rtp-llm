@@ -198,6 +198,9 @@ class QWenV2(QWen):
 
         quant_config = config_json.get("quantization_config", None)
         if quant_config is not None:
+            quant_bits = quant_config.get("bits", 0)
+            if quant_bits != 4:
+                raise ValueError("Unsupported quant bits: %s" % (quant_bits))
             config.quant_algo.int4_mode = True
             group_size = quant_config.get("group_size", 0)
             assert group_size == 128 or group_size == 64, "int4 only support group size == 64 or 128"
@@ -206,6 +209,8 @@ class QWenV2(QWen):
             if quant_method == 'gptq':
                 config.quant_algo.has_pre_scale = False
                 config.quant_algo.has_zeros = True
+            else: 
+                raise ValueError("Unsupported quant method: %s" % (quant_method))
 
     
     @staticmethod

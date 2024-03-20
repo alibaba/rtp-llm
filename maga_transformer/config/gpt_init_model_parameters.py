@@ -369,7 +369,11 @@ class GptInitModelParameters:
         layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * 11
 
         word_emb_param_count =  self.vocab_size * hidden_size
-        layer_param_bytes = 1 if self.quant_algo.int8_mode else 2
+        layer_param_bytes = 2
+        if self.quant_algo.int8_mode:
+            layer_param_bytes = 1
+        elif self.quant_algo.int4_mode:
+            layer_param_bytes = 0.54
 
         model_size = word_emb_param_count * 2 + \
             layer_weight_param_count * layer_param_bytes + \

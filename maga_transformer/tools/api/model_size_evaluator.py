@@ -41,8 +41,13 @@ def calc_hf_model_size(req: Dict[str, Any]):
 
     param_count =  hf_model_info.param_count
     if param_count :
-        int8_mode =  1 if get_weight_type_from_env(env_params) == WEIGHT_TYPE.INT8 else 0
-        return param_count * (2 - int8_mode)
+        weight_type = get_weight_type_from_env(env_params)
+        if weight_type == WEIGHT_TYPE.INT8:
+            return param_count
+        elif weight_type == WEIGHT_TYPE.INT4:
+            return param_count * 0.54
+        else:
+            return param_count * 2
     return None
 
 def cacl_ft_model_size(req: Dict[str, Any]) -> int:
