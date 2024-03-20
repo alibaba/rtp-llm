@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
+import os
 import requests
 from PIL import Image
 from typing import Any, List, Dict, Optional
@@ -11,8 +12,8 @@ def download_image(url: str):
             return Image.open(requests.get(url, stream=True).raw)
         else:
             return Image.open(url)
-    except:
-        raise Exception(f"cannot download image from {url}")
+    except Exception as e:
+        raise Exception(f"cannot download image from {url}, exception {e}")
 
 class DownloadEngine:
     def __init__(self, thread_num: Optional[int] = None):
