@@ -37,5 +37,8 @@ DataType getTensorType();
 
 size_t getTypeSize(DataType type);
 
+bool isQuantify(DataType type);
+bool isFloat(DataType type);
+
 } // namespace fastertransformer
 

@@ -75,5 +75,17 @@ size_t getTypeSize(DataType type) {
 
 }
 
+
+bool isFloat(DataType type) {
+    return (type == DataType::TYPE_BF16) ||
+           (type == DataType::TYPE_FP16) ||
+           (type == DataType::TYPE_FP32) ||
+           (type == DataType::TYPE_FP64);
+}
+
+bool isQuantify(DataType type) {
+    return (type == DataType::TYPE_INT8);
+}
+
 } // namespace fastertransformer
 

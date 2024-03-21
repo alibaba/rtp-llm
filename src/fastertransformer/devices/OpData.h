@@ -104,7 +104,6 @@ struct LayernormParams {
 enum class TransposeOperation {
     NONE                = 0,
     TRANSPOSE           = 1,
-    CONJUGATE_TRANSPOSE = 2,
 };
 
 // D = alpha * op(A) * op(B) + beta * C
