@@ -1456,7 +1456,7 @@ struct Vec_t<__nv_bfloat16> {
 };
 #endif
 
-template<typename T, bool PREFIX_PROMPT>
+template<typename T, typename Tcache, bool PREFIX_PROMPT>
 __global__ void add_fusedQKV_bias_transpose_kernel(T*                               q_buf,
                                                    T*                               k_buf,
                                                    T*                               v_buf,
@@ -1493,6 +1493,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     // NOTE: QKV src shape (batch_size, seq_len, 3, head_num, size_per_head)
     //  QKV dst shape (3, batch_size, head_num, seq_len, size_per_head)
     extern __shared__ __align__(sizeof(float2)) char smem_[];  // align on largest vector type
+
+    static constexpr bool ENABLE_8BITS_CACHE = sizeof(Tcache) == 1;
 
     constexpr int vec_size         = Vec_t<T>::size;
     using Vec_t                    = typename Vec_t<T>::Type;
@@ -1540,16 +1542,23 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                 }
                 else if (param.kv_block_array.mMaxSeqs > 0) {
                     if (!is_masked) {
-                        T* k_cache =
-                            reinterpret_cast<T*>(param.kv_block_array.getKBlockPtr(prompt_batch_idx, prompt_seq_idx));
-                        T* v_cache =
-                            reinterpret_cast<T*>(param.kv_block_array.getVBlockPtr(prompt_batch_idx, prompt_seq_idx));
+                        Tcache* k_cache = reinterpret_cast<Tcache*>(param.kv_block_array.getKBlockPtr(prompt_batch_idx, prompt_seq_idx));
+                        Tcache* v_cache = reinterpret_cast<Tcache*>(param.kv_block_array.getVBlockPtr(prompt_batch_idx, prompt_seq_idx));
                         const int inBlockIdx = param.kv_block_array.getKVLocalIdx(
                             prompt_seq_idx, head_idx, size_per_head, tidx * vec_size);
-                        *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) =
-                            *reinterpret_cast<const Vec_t*>(&k_cache[inBlockIdx]);
-                        *reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]) =
-                            *reinterpret_cast<const Vec_t*>(&v_cache[inBlockIdx]);
+ 
+                        if constexpr (ENABLE_8BITS_CACHE) {
+                            float* k_scale_ptr = reinterpret_cast<float*>(param.kv_block_array.getKScalePtr(prompt_batch_idx, prompt_seq_idx));
+                            float* v_scale_ptr = reinterpret_cast<float*>(param.kv_block_array.getVScalePtr(prompt_batch_idx, prompt_seq_idx));
+                            int    inScaleIdx  = param.kv_block_array.getKVScaleLocalIdx(prompt_seq_idx, head_idx);
+                            load_8bits_kv_cache_vec(reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]), k_cache, inBlockIdx, k_scale_ptr[inScaleIdx]);
+                            load_8bits_kv_cache_vec(reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]), v_cache, inBlockIdx, v_scale_ptr[inScaleIdx]);
+                        } else  {
+                            *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) =
+                                *reinterpret_cast<const Vec_t*>(&k_cache[inBlockIdx]);
+                            *reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]) =
+                                *reinterpret_cast<const Vec_t*>(&v_cache[inBlockIdx]);
+                        }
                     }
                 }
             }
@@ -1646,8 +1655,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     }
 }
 
-#define FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, PREFIX_PROMPT)                                                              \
-    add_fusedQKV_bias_transpose_kernel<T, PREFIX_PROMPT>                                                               \
+#define FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, Tcache, PREFIX_PROMPT)                                                      \
+    add_fusedQKV_bias_transpose_kernel<T, Tcache, PREFIX_PROMPT>                                                       \
         <<<grid, block, smem_size, stream>>>(q_buf,                                                                    \
                                              k_buf,                                                                    \
                                              v_buf,                                                                    \
@@ -1754,10 +1763,18 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
         //      q_buf, k_buf, v_buf, param, QKV, qkv_bias, batch_size, seq_len, head_num, size_per_head,
         //      rotary_embedding_dim);
         if (param.max_prefix_prompt_length == 0) {
-            FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, false);
+            if (param.kv_block_array.int8_mode) {
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, int8_t, false);
+            } else {
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, T, false);
+            }
         }
         else {
-            FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, true);
+            if (param.kv_block_array.int8_mode) {
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, int8_t, true);
+            } else {
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, T, true);
+            }
         }
     }
 }
@@ -2005,7 +2022,8 @@ __global__ void transpose4dBatchMajorKVCache(const T*      kSrc,
     const int tokenIdx = idx / sizePerHeadDivX;
     // Get channel index
     const int channelIdx = idx % sizePerHeadDivX;
-    if (tokenIdx >= (sequence_length + prefix_legnth)) {
+    // return in idx < prefix_legnth branch: avoid to write the reuse block
+    if (tokenIdx < prefix_legnth || tokenIdx >= (sequence_length + prefix_legnth)) {
         return;
     }
 

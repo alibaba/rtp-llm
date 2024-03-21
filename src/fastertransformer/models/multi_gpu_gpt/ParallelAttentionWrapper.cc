@@ -618,6 +618,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
 
     T*                                attention_mask = input_tensors->at("attention_mask").getPtr<T>();
     PrefixPromptBatchWeightsParam<T>* param          = new PrefixPromptBatchWeightsParam<T>();
+
     if (d_prefix_prompt_lengths && d_prefix_prompt_batch) {
         throw std::runtime_error("not support both prefix_prompt and repeat_prompt");
     }

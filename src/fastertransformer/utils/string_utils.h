@@ -52,7 +52,7 @@ inline std::string fmtstr(const std::string& format, Args... args) {
 }
 
 template<typename T>
-inline std::string vec2str(std::vector<T> vec) {
+inline std::string vec2str(const std::vector<T> vec) {
     std::stringstream ss;
     ss << "(";
     if (!vec.empty()) {
