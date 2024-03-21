@@ -7,8 +7,8 @@ class Glm130B(ChatGlm):
     def __init__(self, config: GptInitModelParameters):
         super().__init__(config)
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=96,
             size_per_head=128,

@@ -1,3 +1,5 @@
+import sys
+sys.path.append("../..")
 import torch
 import asyncio
 from torch.nn.utils.rnn import pad_sequence
@@ -67,4 +69,3 @@ class EmbeddingPipeline(Pipeline):
         asyncio.set_event_loop(loop)
         result = loop.run_until_complete(self.pipeline_async(prompt, images, **kwargs))
         return result
-

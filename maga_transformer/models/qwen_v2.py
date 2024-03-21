@@ -145,8 +145,8 @@ class QWenV2Weight(ModelDeployWeightInfo):
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
 
 class QWenV2(QWen):
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=0,
             head_num_kv=0,

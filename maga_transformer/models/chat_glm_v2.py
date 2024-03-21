@@ -85,8 +85,8 @@ class ChatGlmV2(GPT):
         
         return config
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict is not None:
             config = ChatGlmV2.from_huggingface(ChatGlmV2, config_dict)

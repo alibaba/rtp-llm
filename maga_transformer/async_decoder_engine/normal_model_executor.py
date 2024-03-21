@@ -3,10 +3,10 @@ import torch
 import logging
 import random
 from enum import Enum
-from typing import List, Optional, Tuple, Union, Any
+from typing import List, Optional, Tuple, Any
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.model_weight import LoRAMap
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery, ModelOutput
+from maga_transformer.async_decoder_engine.cache_manager import CacheManager
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.sample_utils import BaseSampler, SamplerSetupParams, SamplingParams
 from maga_transformer.utils.dump_config_utils import dump_engine_to_table
@@ -37,7 +37,7 @@ class ExecutorBase(object):
         raise NotImplementedError()
 
 class NormalModelExecutor(ExecutorBase):
-    def __init__(self, model_ops: ModelOps, cache_manager):
+    def __init__(self, model_ops: ModelOps, cache_manager: CacheManager):
         self.model_ops = model_ops
         self.cache_manager_ = cache_manager
         dump_engine_to_table(self.create_config_json())

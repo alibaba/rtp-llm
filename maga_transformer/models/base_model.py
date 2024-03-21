@@ -640,6 +640,9 @@ class BaseModel(object):
                     break
 
         return self.do_broadcast(sampler, output_token_ids, step, finished, sequence_lengths)
+    
+    def create_context_position_ids(self, input_lengths: List[int]):
+        return torch.concat([torch.arange(input_length) for input_length in input_lengths], dim=0)
 
     def create_context_decoder_mask(self, input_lengths: List[int]):
         batch_size = len(input_lengths)

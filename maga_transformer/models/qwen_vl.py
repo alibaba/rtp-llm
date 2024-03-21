@@ -116,8 +116,8 @@ class QWen_VL(QWen, MultiModalMixin):
                     prefix_prompt += 'Picture {i}:<img>'.format(i = i + 1) + images[i] + '</img>\n'
             return prefix_prompt + prompt, images
     
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=0,
             size_per_head=0,

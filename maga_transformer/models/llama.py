@@ -25,8 +25,8 @@ class Llama(GPT):
     def get_weight_cls():
         return LlamaWeightInfo
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=0,
             size_per_head=0,
@@ -119,8 +119,8 @@ class Llama(GPT):
             return LlamaTokenizer.from_pretrained(config.tokenizer_path)
 
 class Baichuan(Llama):
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = Llama._create_config(ckpt_path)
         if config.layer_num == 40: # 13B
             config.rotary_embedding_style = 0
@@ -134,8 +134,8 @@ class Baichuan(Llama):
         return config
 
 class Baichuan2(Baichuan):
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = Baichuan._create_config(ckpt_path)
         config.normalize_lm_head_weight = True
         return config
@@ -156,8 +156,8 @@ class Gemma(Llama):
         tokenizer = GemmaTokenizer.from_pretrained(config.tokenizer_path, verbose = False)
         return tokenizer
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = Llama._create_config(ckpt_path)
         config.has_post_decoder_layernorm = True
         config.input_embedding_scalar = (config.hidden_size ** 0.5)

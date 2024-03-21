@@ -35,8 +35,8 @@ class Mpt(GPT):
     def get_weight_cls():
         return MptWeightInfo
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_path = os.path.join(ckpt_path, 'config.json')
         with open(config_path) as f:
             config_json = json.load(f)

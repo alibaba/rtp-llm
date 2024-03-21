@@ -12,8 +12,8 @@ class ChatGlmV3(ChatGlmV2):
     def get_tokenizer(cls, config: GptInitModelParameters):
         return ChatGLMTokenizer.from_pretrained(config.tokenizer_path, encode_special_tokens=True)
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict is not None:
             config = ChatGlmV3.from_huggingface(ChatGlmV3, config_dict)

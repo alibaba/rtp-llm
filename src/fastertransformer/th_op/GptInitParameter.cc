@@ -89,7 +89,8 @@ static auto roleSpecialTokensTHS =
     DEF_PROPERTY(assistant)                                                                                            \
     DEF_PROPERTY(system)                                                                                               \
     DEF_PROPERTY(stop_words_list)                                                                                      \
-    DEF_PROPERTY(stop_words_str)
+    DEF_PROPERTY(stop_words_str)                                                                                       \
+    DEF_PROPERTY(pad_token_id)
 
 static auto specialTokensTHS =
 #ifdef LEGACY_THS

@@ -34,8 +34,8 @@ class Phi(GPT):
     def get_weight_cls():
         return PhiWeightInfo
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         size_per_head = int(config_dict.get('n_embd', 2048) / config_dict.get('n_head', 32))
         config = GptInitModelParameters(

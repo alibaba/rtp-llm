@@ -83,8 +83,8 @@ class StarCoder(GPT):
         config.has_post_decoder_layernorm = True
         return config
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict:
             config = StarCoder.from_huggingface(config_dict)

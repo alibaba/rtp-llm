@@ -12,18 +12,14 @@ class EmbeddingModelExecutor(object):
     def __init__(self, model: BaseModel, config: GptInitModelParameters):
         self.model_ = model
         self.config_ = config
-        self.gpt_op_ = GptOp.from_config(self.config_)
+        self.gpt_op_ = GptOp(self.config_, False)
         self.gpt_op_.set_weight(self.model_.weight)
 
         self.post_process_module_ = PostProcessFactory.create_post_process_module(self.config_, self.model_.dtype)
 
     def _pre_process(self, batch_input: EmbeddingBatchedInput):        
-        combo_tokens_tensor = to_cuda(torch.IntTensor(batch_input.combo_tokens))
-        position_ids: List[int] = []
-        for len in batch_input.context_lengths_list:
-            position_ids.extend(range(len))
-        position_ids_tensor = to_cuda(torch.IntTensor(position_ids))
-        
+        combo_tokens_tensor = to_cuda(torch.IntTensor(batch_input.combo_tokens))        
+        position_ids_tensor = to_cuda(self.model_.create_context_position_ids(batch_input.context_lengths_list))
         input_embeds = self.model_.async_input_word_embedding(combo_tokens_tensor, [])
         if self.model_.position_encoding is not None:
             input_embeds += self.model_.position_encoding(position_ids_tensor)

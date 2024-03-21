@@ -299,8 +299,8 @@ class QWenBase(GPT):
         return QWenTokenizer.from_pretrained(config.tokenizer_path)
 
 class QWen(QWenBase):
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=0,
             head_num_kv=0,
@@ -314,8 +314,8 @@ class QWen(QWenBase):
         return config
 
 class QWen_7B(QWenBase):
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=32,
             head_num_kv=32,
@@ -328,8 +328,8 @@ class QWen_7B(QWenBase):
         return config
 
 class QWen_13B(QWenBase):
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=40,
             head_num_kv=40,
@@ -342,8 +342,8 @@ class QWen_13B(QWenBase):
         return config
 
 class QWen_1B8(QWenBase):
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
             head_num=16,
             head_num_kv=16,

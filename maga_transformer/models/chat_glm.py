@@ -24,8 +24,8 @@ class ChatGlm(GPT):
     def get_weight_cls():
         return GlmWeightInfo
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict is not None:
             config = ChatGlm.from_huggingface(ChatGlm, config_dict)

@@ -11,8 +11,8 @@ class GPTNeox(GPT):
     def get_weight_cls():
         return GPTNeoxWeight
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict:
             config = GPTNeox.from_huggingface(config_dict)
@@ -72,8 +72,8 @@ class GPTNeox13B(GPTNeox):
     def get_weight_cls():
         return GPTNeox13BWeight
 
-    @staticmethod
-    def _create_config(ckpt_path: str):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict:
             config = GPTNeox13B.from_huggingface(config_dict)
