@@ -346,7 +346,7 @@ class Preprocess:
         images = DownloadEngine.get(images)
         res = []
         for image in images:
-            res.append(self.image_transform(image.convert("RGB")))
+            res.append(self.image_transform(image))
         res = torch.stack(res, dim=0)
         return res
 

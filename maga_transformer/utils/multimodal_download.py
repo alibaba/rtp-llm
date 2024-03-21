@@ -28,7 +28,7 @@ class DownloadEngine:
 
         for future in as_completed(futures):
             try:
-                result.append(future.result())
+                result.append(future.result().convert("RGB"))
             except Exception as e:
                 raise e
 
