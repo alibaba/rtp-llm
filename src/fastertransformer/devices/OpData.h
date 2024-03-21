@@ -49,7 +49,7 @@ public:
     const char* what() const noexcept override {
         std::stringstream ss;
         ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message;
-        return status_.error_message.c_str();
+        return ss.str().c_str();
     }
 
     const OpStatus& status() const { return status_; }

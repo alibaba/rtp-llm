@@ -43,6 +43,9 @@ void* Buffer::data() const {
 }
 
 size_t Buffer::size() const {
+    if (shape_.empty()) {
+        return 0;
+    }
     size_t totalSize = 1;
     for (size_t dim : shape_) {
         totalSize *= dim;

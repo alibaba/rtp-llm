@@ -16,6 +16,9 @@ void CudaDevice::copy(const CopyParams& params) {
     RUNTIME_ASSERT_OP_ARG(src.size() == dst.size(),
         "src and dst size mismatch: [%s] vs [%s]", src.debugString().c_str(), dst.debugString().c_str());
 
+    if (src.size() == 0) {
+        return;
+    }
     if (src.data() == dst.data()) {
         return;
     }

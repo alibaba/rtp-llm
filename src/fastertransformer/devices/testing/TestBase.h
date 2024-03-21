@@ -6,6 +6,8 @@
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/logger.h"
 
+#include <numeric>
+
 using namespace fastertransformer;
 
 template <DeviceType device_type>
@@ -37,19 +39,34 @@ public:
 
 protected:
     template <typename T>
-    std::unique_ptr<Buffer> createHostBuffer(const std::vector<size_t>& shape, const T* data) {
+    BufferPtr createBuffer(const std::vector<size_t>& shape, const std::vector<T>& data,
+                           AllocationType alloc_type = AllocationType::DEVICE)
+    {
+        const auto num_elements = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
+        assert(num_elements == data.size());
+        if (alloc_type == AllocationType::DEVICE) {
+            return createDeviceBuffer<T>(shape, data.data());
+        } else {
+            return createHostBuffer<T>(shape, data.data());
+        }
+    }
+
+    template <typename T>
+    BufferPtr createHostBuffer(const std::vector<size_t>& shape, const T* data) {
         return createHostBuffer<T>(shape, static_cast<const void*>(data));
     }
 
     template <typename T>
-    std::unique_ptr<Buffer> createHostBuffer(const std::vector<size_t>& shape, const void* data) {
+    BufferPtr createHostBuffer(const std::vector<size_t>& shape, const void* data) {
         auto buffer = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::HOST}, {});
-        memcpy(buffer->data(), data, sizeof(T) * buffer->size());
+        if (buffer->size() > 0) {
+            memcpy(buffer->data(), data, sizeof(T) * buffer->size());
+        }
         return buffer;
     }
 
     template <typename T>
-    std::unique_ptr<Buffer> createDeviceBuffer(const std::vector<size_t>& shape, const void* data) {
+    BufferPtr createDeviceBuffer(const std::vector<size_t>& shape, const void* data) {
         auto host_buffer = createHostBuffer<T>(shape, data);
         auto buffer = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::DEVICE}, {});
         device_->copy(CopyParams(*buffer, *host_buffer));

@@ -26,14 +26,14 @@ struct GptModelInitParams {
 
 // A batch includes two parts: context batch and decoder batch.
 // context batch is request for initial word, decoder batch is request for incremental word.
+// ids and lengths are int32_t
 struct GptModelInputs {
-    const Buffer& input_ids;                   // [batch_size, seq_len]
     const Buffer& combo_tokens;                // [cumulated_seq_len]
     const Buffer& input_lengths;               // [batch_size]
     const Buffer& sequence_lengths;            // [decoder_batch_size]
 
-    const Buffer& attention_mask;              // [batch_size, seq_len, seq_len]
-    const Buffer& position_ids;                // [batch_size, seq_len]
+    OptionalConstBufferRef attention_mask;     // [batch_size, seq_len, seq_len]
+    OptionalConstBufferRef position_ids;       // [batch_size, seq_len]
 
     const Buffer& kv_cache_blocks;             // [batch_size, block_length], int64 block pointers
 };

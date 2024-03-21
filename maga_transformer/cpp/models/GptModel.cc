@@ -20,11 +20,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto norm_type = description_.norm_type;
     const auto norm_eps = description_.layernorm_eps;
 
-    const auto& input_ids = inputs.input_ids;
-    const auto batch_size = input_ids.shape()[0];
-
+    const auto batch_size = inputs.input_lengths.shape()[0];
     const auto& combo_tokens = inputs.combo_tokens;
-    const auto cumulated_seq_len = combo_tokens.shape()[0];
     const auto& embedding_table = weights_.embedding->kernel;
     const auto hidden_size = embedding_table->shape()[1];
 
