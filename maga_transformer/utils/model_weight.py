@@ -791,9 +791,16 @@ class LoRAMap():
             self.name_id_map[name] = id
 
     def get_id(self, name: str) -> int:
-        if name not in self.name_id_map:
+        if name == "":
             return -1
+        if name not in self.name_id_map:
+            raise Exception(f"lora map has no adapter model: {name}")
         return self.name_id_map[name]
+
+    def has_id(self, name: str) -> bool:
+        if name not in self.name_id_map:
+            return False
+        return True
 
     def add_lora_name(self, name: str, weights: LoRAWeights) -> int:
         self._create_id(name)
@@ -897,7 +904,7 @@ class LoraResource():
         self.clear_for_update()
         for lora_config in self.database.LoraFileList.keys():
             lora_name = lora_config.name
-            if self.lora_map.get_id(lora_name) != -1:
+            if self.lora_map.has_id(lora_name):
                 continue
             lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name,  self.weights_info._int8_mode, 'cuda:0')
             _ = self.add_lora_name(lora_name, lora_weights)
@@ -916,8 +923,6 @@ class LoraResource():
     def get_id(self, name: str) -> int:
         if self.lora_map != None:
             return self.lora_map.get_id(name)
-        else:
-            return -1
 
     def read_acquire(self, lora_name: str):
         if lora_name in self.rlock_map:
