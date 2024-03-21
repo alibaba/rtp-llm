@@ -121,6 +121,7 @@ class MasterInfo:
     gpt_nccl_port: int
     dynamic_decoder_nccl_port: int
     nccl_op_port: int
+    sp_gpt_nccl_port: int
 
 g_master_info = MasterInfo(
     ip='',
@@ -129,7 +130,8 @@ g_master_info = MasterInfo(
     decoder_nccl_port=0,
     gpt_nccl_port = 0,
     dynamic_decoder_nccl_port=0,
-    nccl_op_port=0)
+    nccl_op_port=0,
+    sp_gpt_nccl_port=0)
 
 def update_master_info(ip, base_port):
     g_master_info.ip = ip
@@ -139,3 +141,4 @@ def update_master_info(ip, base_port):
     g_master_info.gpt_nccl_port = base_port - 4
     g_master_info.dynamic_decoder_nccl_port = base_port - 5
     g_master_info.nccl_op_port = base_port - 6
+    g_master_info.sp_gpt_nccl_port = base_port - 7

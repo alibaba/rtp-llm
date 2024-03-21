@@ -91,67 +91,47 @@ class GPT(BaseModel):
         all_gather = self.config.tp_split_emb_and_lm_head and g_parallel_info.tp_size > 1
         assert(hidden_dim != 0)
 
-        self.register_param(
-            'context_decoder',
-            self.get_context_decoder_cls(config))
-        self.register_param('decoder', self.get_decoder_cls(config))
 
         self.prefix_encoder = None
         if config.pre_seq_len is not None and config.pre_seq_len > 0:
             self.prefix_tokens = torch.arange(config.pre_seq_len).long()
-            self.register_param(
-                'prefix_encoder',
-                PrefixEncoder(config))
+            self.prefix_encoder = PrefixEncoder(config)
 
         self.medusa_head: Optional[torch.nn.Module] = None
         if config.gpt_init_params.use_medusa:
-            self.register_param(
-                'medusa_head',
-                MedusaHead(config))
+            self.medusa_head = MedusaHead(config)
 
         if g_parallel_info.is_pp_first:
-            self.register_param('word_embedding', Embedding(all_gather))
+            self.word_embedding = Embedding(all_gather)
             if self.config.has_positional_encoding:
-                self.register_param(
-                    'position_encoding',
-                    torch.nn.Embedding(self.config.max_seq_len, hidden_dim, dtype=compute_dtype, device='cuda:0'))
+                self.position_encoding =torch.nn.Embedding(self.config.max_seq_len, hidden_dim, dtype=compute_dtype, device='cuda:0')
             else:
                 self.position_encoding = None
 
             if self.config.type_vocab_size > 0:
-                self.register_param(
-                    'token_type_embeddings',
-                    torch.nn.Embedding(self.config.type_vocab_size, hidden_dim)
-                )
+                self.token_type_embeddings = torch.nn.Embedding(self.config.type_vocab_size, hidden_dim)
             else:
                 self.token_type_embeddings = None
 
             if self.config.has_pre_decoder_layernorm:
                 if self.config.norm_type == 'layernorm' or self.config.norm_type == 'alphanorm':
-                    self.register_param(
-                        'pre_decoder_layernorm',
-                        torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=compute_dtype).to('cuda:0'))
+                    self.pre_decoder_layernorm = torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=compute_dtype).to('cuda:0')
                 elif self.config.norm_type == 'rmsnorm':
-                    self.register_param(
-                        'pre_decoder_layernorm',
-                        RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0'))
+
+                    self.pre_decoder_layernorm = RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0')
             else:
                 self.pre_decoder_layernorm = None
 
         if g_parallel_info.is_pp_last:
             if self.config.has_post_decoder_layernorm:
                 if self.config.norm_type == 'layernorm' or self.config.norm_type == 'alphanorm':
-                    self.register_param(
-                        'post_decoder_layernorm',
-                        torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=compute_dtype).to('cuda:0'))
+                    self.post_decoder_layernorm = torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=compute_dtype).to('cuda:0')
                 elif self.config.norm_type == 'rmsnorm':
-                    self.register_param(
-                        'post_decoder_layernorm',
-                        RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0'))
+                    self.post_decoder_layernorm = RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0')
             else:
                 self.post_decoder_layernorm = None
             if self.config.has_lm_head:
-                self.register_param('lm_head', Linear(all_gather))
+                self.lm_head = Linear(all_gather)
             else:
                 self.lm_head = None
 
@@ -218,8 +198,6 @@ class GPT(BaseModel):
         device = device or get_device()
         compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
 
-        assert(self.context_decoder)
-        assert(self.decoder)
 
         with Timer() as timer:
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
@@ -239,7 +217,6 @@ class GPT(BaseModel):
 
             self.weight.lora_resource = LoraResource({}, database, weights_info, LoRAMap())
             self.weight.lora_resource.model_weights_loader = model_weights_loader
-            self.weight.lora_resource.ft_op = [self.context_decoder, self.decoder]
             if self.config.lora_infos is not None and len(self.config.lora_infos) > 1:
                 self.update(self.config.lora_infos)
 
@@ -248,9 +225,7 @@ class GPT(BaseModel):
     def _initialize_from_weight(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
         
-        self.context_decoder.set_weight(self.weight)
-        self.decoder.set_weight(self.weight)
-
+        assert self.word_embedding is not None
         self.word_embedding.set_weight(self.weight.steal_pytorch_weight(W.embedding))
         if (self.config.input_embedding_scalar - 1 > 1e-6):
             self.word_embedding.set_scalar(self.config.input_embedding_scalar)

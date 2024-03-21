@@ -111,7 +111,6 @@ class DynamicDecodeOp(FTOPBase):
                  vocab_size: int,
                  vocab_size_padded: int=0):
         super().__init__()
-        torch.cuda.set_device(0)
         self.vocab_size = vocab_size
         self.vocab_size_padded = vocab_size_padded
         self.ft_op = torch.classes.FasterTransformer.DynamicDecodeOp( # type: ignore

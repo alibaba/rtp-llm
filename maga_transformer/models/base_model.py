@@ -190,7 +190,6 @@ class BaseModel(object):
 
     def __init__(self) -> None:
         self.weight = None
-        self._parameters: Dict[str, Any] = {}
         self.word_embedding: Optional[torch.nn.Module] = None
         self.prefix_encoder: Optional[torch.nn.Module] = None
         self.position_encoding: Optional[torch.nn.Module] = None
@@ -214,12 +213,6 @@ class BaseModel(object):
 
         self.default_generate_config: GenerateConfig = GenerateConfig()
 
-    def register_param(self, name: str, p: torch.nn.Module, force_update: bool=False):
-        if not force_update and name in self._parameters:
-            return
-        self._parameters[name] = p
-        setattr(self, name, p)
-
     @property
     def dtype(self) -> Union[str, torch.dtype]:
         assert self.weight is not None
@@ -233,11 +226,6 @@ class BaseModel(object):
     def device(self) -> Union[str, torch.device]:
         assert self.weight is not None
         return 'cuda:0'
-
-    def to(self, device: Optional[str]=None):
-        for name, param in self._parameters.items():
-            setattr(self, name, param.to(device))
-        return self
 
     def dup_dim0_for_beam_search(self, t: torch.Tensor, beam_width: int) -> torch.Tensor:
         shape = list(t.shape)

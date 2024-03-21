@@ -9,9 +9,10 @@ from maga_transformer.distribute.worker_info import g_parallel_info, g_master_in
 
 
 class GptOp(FTOPBase):
-    def __init__(self, config: GptInitModelParameters):
+    def __init__(self, config: GptInitModelParameters, is_sp: bool):
         super().__init__()
         self.config = config
+        self.is_sp = is_sp
         self.lock = Lock()
 
     def _initialize_op(self, force_init: bool=False):
@@ -25,7 +26,7 @@ class GptOp(FTOPBase):
             g_parallel_info.tp_size,
             g_parallel_info.pp_size,
             g_master_info.ip,
-            g_master_info.gpt_nccl_port,
+            g_master_info.gpt_nccl_port if not self.is_sp else g_master_info.sp_gpt_nccl_port,
             self.weight.weights)
         
         for id, lora_weight in self.weight.lora_resource.lora_map.weights_map.items():

@@ -73,7 +73,7 @@ def _create_normal_engine(model: BaseModel, config: GptInitModelParameters) -> D
 
 def _create_sp_engine(model: BaseModel, config: GptInitModelParameters, sp_model: BaseModel, sp_config: GptInitModelParameters) -> DecoderEngine:
     model_ops = _create_ops(ModelType.Normal, model, config)
-    sp_model_ops = _create_ops(ModelType.Speculative, sp_model, sp_config)
+    sp_model_ops = _create_ops(ModelType.Speculative, sp_model, sp_config, True)
     assert model.prefix_encoder is None and sp_model.prefix_encoder is None, "speculative not support prefix yet"
     nccl_op = NcclOp()
     cache_config, sp_cache_config = CacheConfigGenerator.create_sp_config(config, sp_config)
@@ -107,8 +107,8 @@ def _create_medusa_engine(model: BaseModel, config: GptInitModelParameters, **kw
 def _create_embedding_engine(model: BaseModel, config: GptInitModelParameters) -> EmbeddingDecoderEngine:
     return EmbeddingDecoderEngine(config, model)
 
-def _create_ops(type: ModelType, model: BaseModel, config: GptInitModelParameters) -> ModelOps:
-    gpt_op = GptOp.from_config(config)
+def _create_ops(type: ModelType, model: BaseModel, config: GptInitModelParameters, is_sp: bool = False) -> ModelOps:
+    gpt_op = GptOp(config, is_sp)
     gpt_op.set_weight(model.weight)
     generate_config = GenerateConfig(
         using_hf_sampling=False
