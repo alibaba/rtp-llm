@@ -33,6 +33,7 @@ cc_library(
         ":dataclass",
         "//:gpt_init_params",
         "//src/fastertransformer/devices:devices_base",
+        "//src/fastertransformer/devices:device_utils",
         "//src/fastertransformer/models:weights_define",
     ],
 )

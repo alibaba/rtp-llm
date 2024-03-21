@@ -17,3 +17,18 @@ cc_library(
     copts = copts(),
 )
 
+cc_library(
+    name = "device_utils",
+    hdrs = glob([
+        "utils/*.h",
+    ]),
+    srcs = glob([
+        "utils/*.cc",
+    ]),
+    deps = [
+        "devices_base",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+

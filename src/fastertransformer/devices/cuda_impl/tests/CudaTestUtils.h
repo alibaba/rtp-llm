@@ -6,7 +6,7 @@
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/logger.h"
-#include "src/fastertransformer/utils/BufferUtils.h"
+#include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 
 #include <gtest/gtest.h>

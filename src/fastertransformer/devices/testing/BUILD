@@ -10,6 +10,7 @@ cc_library(
     ]),
     deps = [
         "@com_google_googletest//:gtest",
+        "//src/fastertransformer/devices:device_utils",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

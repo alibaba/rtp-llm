@@ -13,6 +13,7 @@ enum class DeviceType {
 class DeviceFactory {
 public:
     static DeviceBase* getDevice(DeviceType type, int device_id = 0);
+    static DeviceBase* getDefaultDevice();
     static void registerDevice(DeviceType type, std::function<DeviceBase*()> creator);
 
 private:

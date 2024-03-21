@@ -17,6 +17,16 @@ DeviceBase* DeviceFactory::getDevice(DeviceType type, int device_id) {
     return it->second();
 }
 
+DeviceBase* DeviceFactory::getDefaultDevice() {
+    DeviceBase* device = nullptr;
+    device = getDevice(DeviceType::Cuda);
+    if (!device) {
+        device = getDevice(DeviceType::Cpu);
+    }
+    assert(device);
+    return device;
+}
+
 void DeviceFactory::registerDevice(DeviceType type, function<DeviceBase*()> creator) {
     auto& registrationMap = getRegistrationMap();
     assert(registrationMap.find(type) == registrationMap.end());

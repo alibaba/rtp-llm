@@ -30,7 +30,6 @@ void CudaDevice::copy(const CopyParams& params) {
     } else {
         copyType = cudaMemcpyHostToHost;
     }
-    std::cout << "copy " << src.sizeBytes() << " bytes to " << dst.data() << std::endl;
     cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_);
 }
 

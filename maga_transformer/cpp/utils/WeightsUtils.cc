@@ -1,5 +1,6 @@
 #include "maga_transformer/cpp/utils/WeightsUtils.h"
-#include "src/fastertransformer/utils/BufferUtils.h"
+#include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/models/W.h"
 
 using namespace std;
@@ -7,19 +8,24 @@ using namespace fastertransformer;
 
 namespace rtp_llm {
 
-ConstBufferPtr mayFindTensor2Buffer(unordered_map<string, th::Tensor> tensor_map, const string& key) {
+ConstBufferPtr WeightsConverter::mayFindTensor2Buffer(
+    unordered_map<string, th::Tensor> tensor_map, const string& key)
+{
     if (tensor_map.count(key) > 0) {
-        return torchTensor2Buffer(tensor_map.at(key));
+        auto buffer = torchTensor2Buffer(tensor_map.at(key));
+        if (need_copy_) {
+            auto new_buffer = device_->allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE});
+            device_->copy({*buffer, *new_buffer});
+            return new_buffer;
+        } else {
+            return buffer;
+        }
     }
     return nullptr;
 }
 
-ConstBufferPtr tensorKey2Buffer(unordered_map<string, th::Tensor> tensor_map, const string& key) {
-    return torchTensor2Buffer(tensor_map.at(key));
-}
-
-LayerNormWeightsPtr mayCreateLayerNormWeights(unordered_map<string, th::Tensor> tensor_map,
-                                              const string& gamma_key, const string& beta_key)
+LayerNormWeightsPtr WeightsConverter::mayCreateLayerNormWeights(
+    unordered_map<string, th::Tensor> tensor_map, const string& gamma_key, const string& beta_key)
 {
     if (tensor_map.count(gamma_key) > 0) {
         const auto layer_norm_weights = new LayerNormWeights();
@@ -30,11 +36,11 @@ LayerNormWeightsPtr mayCreateLayerNormWeights(unordered_map<string, th::Tensor> 
     return nullptr;
 }
 
-DenseWeightsPtr mayCreateDenseWeights(unordered_map<string, th::Tensor> tensor_map,
-                                      const string& kernel_key, const string& bias_key = "") {
+DenseWeightsPtr WeightsConverter::mayCreateDenseWeights(
+    unordered_map<string, th::Tensor> tensor_map, const string& kernel_key, const string& bias_key) {
     if (tensor_map.count(kernel_key) > 0) {
         const auto dense_weights = new DenseWeights();
-        dense_weights->kernel = tensorKey2Buffer(tensor_map, kernel_key);
+        dense_weights->kernel = mayFindTensor2Buffer(tensor_map, kernel_key);
         if (!bias_key.empty()) {
             dense_weights->bias = mayFindTensor2Buffer(tensor_map, bias_key);
         }
@@ -43,14 +49,14 @@ DenseWeightsPtr mayCreateDenseWeights(unordered_map<string, th::Tensor> tensor_m
     return nullptr;
 }
 
-DenseWeightsPtr createDenseWeights(unordered_map<string, th::Tensor> tensor_map,
-                                   const string& kernel_key, const string& bias_key = "") {
+DenseWeightsPtr WeightsConverter::createDenseWeights(unordered_map<string, th::Tensor> tensor_map,
+                                   const string& kernel_key, const string& bias_key) {
     auto weights = mayCreateDenseWeights(tensor_map, kernel_key, bias_key);
     assert(weights);
     return move(weights);
 }
 
-std::unique_ptr<const Weights> convertPythonWeights(const PyModelWeights& py_weights) {
+unique_ptr<const Weights> WeightsConverter::convertPythonWeights(const PyModelWeights& py_weights) {
     const auto weights = new Weights();
 
     const auto global_weights = py_weights.model_global_weights_;
