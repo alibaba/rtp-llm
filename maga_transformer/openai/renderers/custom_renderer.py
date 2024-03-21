@@ -99,7 +99,7 @@ class CustomChatRenderer():
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
 
-    async def render_response_stream(
+    async def generate_choice(
             self,
             input_ids: List[int],
             images: List[Future[Image.Image]],
@@ -122,7 +122,18 @@ class CustomChatRenderer():
                 tokenizer=self.tokenizer
             )
         )
-    
+
+        async for response in self.render_response_stream(output_generator, 
+                                                          request, 
+                                                          input_token_length):
+            yield response
+
+    async def render_response_stream(
+            self,
+            output_generator: AsyncGenerator[GenerateOutput, None],
+            request: ChatCompletionRequest,
+            input_token_length: int
+    ) -> AsyncGenerator[StreamResponseObject, None]:
         index = 0
         output_token_length = 0
         responded_output_ids = []

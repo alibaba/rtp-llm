@@ -187,7 +187,7 @@ class OpenaiEndopoint():
 
         debug_info = self._get_debug_info(rendered_input) if chat_request.debug_info else None
 
-        choice_generator = self.chat_renderer.render_response_stream(
+        choice_generator = self.chat_renderer.generate_choice(
             input_ids,
             images,
             generate_config,
