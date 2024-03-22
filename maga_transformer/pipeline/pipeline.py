@@ -15,7 +15,7 @@ from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 
-from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateOutput, GenerateResponse
+from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateResponse
 from maga_transformer.model_factory import ModelFactory, AsyncModel, ModelConfig
 from maga_transformer.pipeline.pipeline_custom_func import PipelineCustomFunc, get_piple_custom_func
 from maga_transformer.async_decoder_engine.generate_stream import GenerateInput
@@ -53,7 +53,7 @@ class Pipeline(object):
 
     @staticmethod
     def create_generate_config(generate_config: Union[GenerateConfig, Dict[str, Any]], vocab_size: int,
-                               special_tokens: Any, tokenizer: TokenizerBase, **kwargs: Any) -> GenerateConfig:
+                               special_tokens: Any, tokenizer: PreTrainedTokenizerBase, **kwargs: Any) -> GenerateConfig:
         if isinstance(generate_config, dict):
             config = GenerateConfig.create_generate_config(generate_config, **kwargs)
         else:
@@ -63,7 +63,7 @@ class Pipeline(object):
         config.convert_select_tokens(vocab_size, tokenizer)
         return config
 
-    def _get_stop_word_strs(self, tokenizer: TokenizerBase, generate_config: GenerateConfig) -> List[str]:
+    def _get_stop_word_strs(self, tokenizer: PreTrainedTokenizerBase, generate_config: GenerateConfig) -> List[str]:
         return generate_config.stop_words_str + [self.piple_funcs.process_decode_func(ids, tokenizer=self.tokenizer) for ids in generate_config.stop_words_list]
 
     def __call__(self, prompt: List[str], images: Optional[List[List[str]]] = None, **kwargs: Any) -> Iterator[GenerateResponse]:

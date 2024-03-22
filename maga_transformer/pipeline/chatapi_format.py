@@ -1,14 +1,14 @@
 
 import json
 from typing import List, Dict, Union, Any
-from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
+from transformers import PreTrainedTokenizerBase
 
 def _format_tokens(content_tokens: List[int], role_special_tokens: Any) -> List[int]:
     content_tokens = role_special_tokens.token_ids + content_tokens + role_special_tokens.eos_token_ids
     return content_tokens
 
  # from modeling_baichuan.py
-def encode_chatapi(messages: List[Dict[str, str]], special_tokens: Any, tokenizer: TokenizerBase) -> List[int]:
+def encode_chatapi(messages: List[Dict[str, str]], special_tokens: Any, tokenizer: PreTrainedTokenizerBase) -> List[int]:
     max_input_tokens = 2 ** 32 # int max, maybe support max_history_len in generate_config
     total_input: List[int] = []
     round_input: List[int] = []

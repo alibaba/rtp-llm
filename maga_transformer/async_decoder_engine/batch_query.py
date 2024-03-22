@@ -15,7 +15,6 @@ from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 from maga_transformer.utils.util import to_cuda, to_cpu
 from maga_transformer.metrics import kmonitor, GaugeMetrics
-from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 
 class ModelOutput(BaseModel):
     finished: Optional[torch.Tensor] = None

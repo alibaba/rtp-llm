@@ -11,7 +11,6 @@ from transformers.models.llama.tokenization_llama import LlamaTokenizer
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.llava_weight import LlavaWeightInfo
 from maga_transformer.models.llama import Llama
-from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal_mixin import MultiModalMixin, BaseVitWeights
 from maga_transformer.ops.comm.nccl_op import NcclOp
@@ -21,7 +20,7 @@ from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.utils.multimodal_download import DownloadEngine
 
-class LlavaTokenizer(TokenizerBase):
+class LlavaTokenizer(object):
     def __init__(self, 
                  tokenzier_path: str, 
                  mm_use_im_patch_token: bool,

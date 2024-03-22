@@ -11,7 +11,6 @@ from maga_transformer.openai.renderers.llama_template_renderer import LlamaTempl
 from maga_transformer.openai.renderers.fast_chat_renderer import FastChatRenderer
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer
-from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.openai.renderer_factory_register import _renderer_factory
 
 class ChatRendererFactory():
@@ -20,7 +19,7 @@ class ChatRendererFactory():
 
     @staticmethod
     def try_get_imported_renderer(
-        tokenizer: Union[PreTrainedTokenizerBase, TokenizerBase],
+        tokenizer: PreTrainedTokenizerBase,
         params: RendererParams,
     ) -> Optional[CustomChatRenderer]:
         if not isinstance(tokenizer, PreTrainedTokenizerBase):
@@ -43,7 +42,7 @@ class ChatRendererFactory():
 
     @staticmethod
     def get_renderer(
-        tokenizer: Union[PreTrainedTokenizerBase, TokenizerBase],
+        tokenizer: PreTrainedTokenizerBase,
         params: RendererParams,
     ) -> CustomChatRenderer:
         # renderer priority:  `MODEL_TEMPLATE_TYPE` env for llama template or fastchat conversation

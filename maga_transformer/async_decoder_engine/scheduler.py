@@ -5,7 +5,6 @@ from typing import Any, List, Optional, Union, Dict
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery
 from maga_transformer.async_decoder_engine.schedule_strategy import PerfTestScheduleStrategy, create_schedule_strategy
 from maga_transformer.async_decoder_engine.stream_cache_manager import StreamCacheManager

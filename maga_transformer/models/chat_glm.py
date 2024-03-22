@@ -7,7 +7,6 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.tokenizer.tokenization_chatglm import ChatGLMTokenizer
 from maga_transformer.models.glm_weight import GlmWeightInfo
 from maga_transformer.models.gpt import GPT
-from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.model_factory_register import register_model
 
 class ChatGlm(GPT):

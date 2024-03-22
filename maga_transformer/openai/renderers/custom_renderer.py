@@ -7,7 +7,7 @@ from concurrent.futures import Future
 
 from transformers import PreTrainedTokenizerBase
 
-from maga_transformer.models.base_model import TokenizerBase, GenerateOutput, BaseModel, GenerateInput, AuxInfo
+from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, AuxInfo
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
@@ -35,7 +35,7 @@ class RenderedInputs:
 
 class CustomChatRenderer():
     def __init__(self,
-                 tokenizer: Union[PreTrainedTokenizerBase, TokenizerBase],
+                 tokenizer: PreTrainedTokenizerBase,
                  renderer_params: RendererParams,
     ):
         self.tokenizer = tokenizer

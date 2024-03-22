@@ -11,7 +11,8 @@ from transformers import PreTrainedTokenizerBase
 from transformers.generation.stopping_criteria import StoppingCriteria
 
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
-from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateOutput, GenerateResponse
+from transformers import PreTrainedTokenizerBase
+from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateResponse, GenerateInput
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessage, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, UsageInfo, \
@@ -32,7 +33,7 @@ class OpenaiEndopoint():
         tokenizer = self.model.tokenizer
         if (tokenizer == None):
             raise AttributeError(f"model [{model}] has no tokenizer!")
-        self.tokenizer: Union[PreTrainedTokenizerBase, TokenizerBase] = tokenizer
+        self.tokenizer: PreTrainedTokenizerBase = tokenizer
 
         self.eos_token_id = None
         if (isinstance(tokenizer, PreTrainedTokenizerBase)):

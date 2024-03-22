@@ -5,10 +5,10 @@ import logging
 import os
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 from enum import Enum, auto
+from transformers import PreTrainedTokenizerBase
 
 from dataclasses import dataclass
 
-from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
     ChatCompletionRequest, RoleEnum, FunctionCall
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
@@ -78,7 +78,7 @@ conv_templates = {
 }
 
 class LlavaRenderer(CustomChatRenderer):
-    def __init__(self, tokenizer: TokenizerBase, renderer_params: RendererParams):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
 
     def _get_conv_template(self, model_name: str) -> Conversation:

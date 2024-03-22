@@ -1,9 +1,9 @@
 from typing import Any, List, Union, Iterator, Tuple, Callable, Optional, Dict
-from maga_transformer.models.base_model import TokenizerBase
 from transformers import PreTrainedTokenizerBase
 from maga_transformer.utils.tokenizer_utils import DecodingState, IncrementDecodingUtils
 from maga_transformer.config.generate_config import RequestFormat
 from maga_transformer.pipeline.chatapi_format import encode_chatapi
+from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 
 class DefaultPlugin(object):
     @staticmethod
@@ -23,7 +23,7 @@ class DefaultPlugin(object):
         return False
 
     @staticmethod
-    def process_encode_func(prompt: str, generate_config: Dict[str, Any], special_tokens: Any, tokenizer: TokenizerBase, **kwargs: Any) -> List[int]:
+    def process_encode_func(prompt: str, generate_config: Dict[str, Any], special_tokens: Any, tokenizer: PreTrainedTokenizerBase, **kwargs: Any) -> List[int]:
         if len(prompt) == 0:
             raise FtRuntimeException(ExceptionType.EMPTY_PROMPT_ERROR, "prompt should have at least one token!")
         if generate_config['request_format'] == RequestFormat.CHAT_API:
@@ -33,7 +33,7 @@ class DefaultPlugin(object):
         return tokenizer.encode(prompt)
 
     @staticmethod
-    def tokenids_decode_func(tokens: List[int], tokenizer: Union[TokenizerBase, PreTrainedTokenizerBase],
+    def tokenids_decode_func(tokens: List[int], tokenizer: PreTrainedTokenizerBase,
                              decoding_state: Optional[DecodingState] = None, return_incremental: bool = False, **kwargs: Any) -> str:
         if decoding_state is None:
             return tokenizer.decode(tokens)

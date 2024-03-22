@@ -10,7 +10,7 @@ from transformers import PreTrainedTokenizer
 from maga_transformer.utils.util import get_mem_info
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
-from maga_transformer.models.base_model import BaseModel, TokenizerBase, GenerateInput
+from maga_transformer.models.base_model import BaseModel, GenerateInput
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.engine_creator import create_engine
 from maga_transformer.distribute.worker_info import g_parallel_info
