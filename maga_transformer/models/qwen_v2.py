@@ -12,7 +12,6 @@ from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
     concat_0, concat_1, identity, zeros, transpose, trans_qkv, trans_qkv_b, trans_lora_qkv
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.tokenizer.tokenizer_base import TokenizerBase
-from maga_transformer.models.gpt import GptContextDecoder
 from maga_transformer.models.qwen import QWen, transpose_pad
 from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer as QWen2Tokenizer
 from maga_transformer.model_factory_register import register_model

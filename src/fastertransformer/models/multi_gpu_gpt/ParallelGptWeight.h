@@ -18,7 +18,6 @@
 
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 
-#include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoder.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLayerWeight.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/utils/prompt_learning.h"
