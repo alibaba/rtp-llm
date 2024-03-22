@@ -134,6 +134,7 @@ class BatchQuery:
             reuse_lengths_tensor, context_lengths_tensor, lora_ids_tensor,
             calculate_loss_tensor
         ])
+        torch.cuda.current_stream().synchronize()
         if g_parallel_info.tp_rank > 0:
             self.cache_block_indice = to_cpu(cache_block_indice)
             self.output_token_ids = to_cpu(output_token_ids)

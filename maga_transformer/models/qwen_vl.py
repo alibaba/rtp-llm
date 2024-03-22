@@ -19,6 +19,7 @@ from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal_mixin import MultiModalMixin, BaseImageEmbedding
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.utils.util import get_device, to_torch_dtype, get_mem_info
+from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader
 from maga_transformer.utils.database import CkptDatabase
@@ -36,6 +37,7 @@ class QwenVLImageEmbedding(BaseImageEmbedding):
 class QWen_VL(QWen, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         self.visual = QwenVLImageEmbedding(config.vit_related_params.config)
+        self.nccl_op_ = NcclOp()
         config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.visual.vit})
         
         QWen.__init__(self, config)
@@ -176,11 +178,10 @@ class QWen_VL(QWen, MultiModalMixin):
         return QWenVLWeightInfo
 
     def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
-        inputs = inputs.reshape(1, -1)
-        return self.multimodal_embedding(inputs, images).squeeze(0)
+        return MultiModalMixin.async_input_word_embedding(self, inputs, images)
 
     def input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
-        return self.multimodal_embedding(inputs, images)
+        return MultiModalMixin.input_word_embedding(self, inputs, images)
     
     def expand_token_id(self, token_ids: List[int], images: List[Future[Image.Image]]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
         # if len(images) > 0:

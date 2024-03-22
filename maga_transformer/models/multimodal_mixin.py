@@ -10,6 +10,8 @@ from maga_transformer.config.generate_config import RequestFormat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity
 from maga_transformer.utils.multimodal_download import DownloadEngine
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.ops.comm.nccl_op import NcclOp
+from maga_transformer.distribute.worker_info import g_parallel_info
 
 class BaseImageEmbedding:
     def image_embedding(self, images, device):
@@ -53,6 +55,7 @@ class BaseMultiModalWeightInfo:
 class MultiModalMixin:
     visual: BaseImageEmbedding
     image_expand_token: int
+    nccl_op_: NcclOp
 
     @staticmethod
     def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], tokenizer: Any, **kwargs: Any) -> List[int]:
@@ -114,3 +117,28 @@ class MultiModalMixin:
             w_name = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', w_name)
             param = eval(w_name)
             _safe_load_from_module(param, ckpt_prefix + w, ctype)
+
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[Union[torch.Tensor, List[torch.Tensor]]]):
+        inputs = inputs.reshape(1, -1)
+        if g_parallel_info.tp_size <= 1:
+            return self.multimodal_embedding(inputs, images).squeeze(0)
+
+        if g_parallel_info.tp_rank == 0:
+            embedding_tensor = self.multimodal_embedding(inputs, images).squeeze(0)
+        else:
+            embedding_tensor = torch.zeros((inputs.shape[1], self.config.head_num * self.config.size_per_head), dtype=torch.float16, device=self.device)
+        self.nccl_op_.broadcast_tp([embedding_tensor])
+        torch.cuda.current_stream().synchronize()
+        return embedding_tensor
+        
+    def input_word_embedding(self, inputs: torch.Tensor, images: List[Union[torch.Tensor, List[torch.Tensor]]]):
+        if g_parallel_info.tp_size <= 1:
+            return self.multimodal_embedding(inputs, images)
+
+        if g_parallel_info.tp_rank == 0:
+            embedding_tensor = self.multimodal_embedding(inputs, images)
+        else:
+            embedding_tensor = torch.zeros((inputs.shape[1], self.config.head_num * self.config.size_per_head), dtype=torch.float16, device=self.device)
+        self.nccl_op_.broadcast_tp([embedding_tensor])
+        torch.cuda.current_stream().synchronize()
+        return embedding_tensor
