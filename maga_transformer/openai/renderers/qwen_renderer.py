@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 
 from maga_transformer.models.base_model import GenerateOutput
+from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
@@ -16,6 +17,7 @@ from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer
     StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderer_factory_register import register_renderer
+from maga_transformer.utils.word_util import get_stop_word_slice_list, truncate_response_with_stop_words
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
 
@@ -305,6 +307,7 @@ class QwenRenderer(CustomChatRenderer):
             self,
             output_generator: AsyncGenerator[GenerateOutput, None],
             request: ChatCompletionRequest,
+            generate_config: GenerateConfig,
             input_token_length: int,
     ) -> AsyncGenerator[StreamResponseObject, None]:
         index = 0
@@ -315,6 +318,7 @@ class QwenRenderer(CustomChatRenderer):
         output_token_length = 0
         finish_reason: Optional[FinisheReason] = None
         generating_function_call = False
+        stop_word_slice_list = get_stop_word_slice_list(generate_config.stop_words_str)
 
         async for output in output_generator:
             if output_token_length == 0:
@@ -343,6 +347,9 @@ class QwenRenderer(CustomChatRenderer):
 
             if (output_length > responded_length + len('\nAction:')):
                 delta_string = output_string[responded_length : output_length - len('\nAction:')]
+                trunc_string = truncate_response_with_stop_words(delta_string, stop_word_slice_list)
+                if trunc_string != delta_string:
+                    continue
                 responded_string = output_string[: output_length - len('\nAction:')]
                 responded_length = len(responded_string)
 
@@ -392,7 +399,7 @@ class QwenRenderer(CustomChatRenderer):
                 choices=[ChatCompletionResponseStreamChoice(
                     index=index,
                     delta=DeltaMessage(
-                        content=output_string[responded_length:],
+                        content=truncate_response_with_stop_words(output_string[responded_length:], generate_config.stop_words_str),
                     ),
                 )],
                 usage=UsageInfo(

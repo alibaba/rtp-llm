@@ -152,7 +152,8 @@ class Pipeline(object):
                       stop_word_str_list: List[str],
                       stop_word_str_slice_list: List[str],
                       decoding_state: Optional[DecodingState],
-                      **kwargs: Any) -> Tuple[List[Any], List[List[int]]]:
+                      token_buffer: List[str],
+                      **kwargs: Any) -> Tuple[List[Any], List[List[int]], List[str]]:
         tokens = generate_output.output_ids.cpu()
         tokens = remove_padding_eos(tokens, self._special_tokens.eos_token_id)
         output_lens = [t.nelement() for t in tokens]
@@ -164,13 +165,28 @@ class Pipeline(object):
                                           **kwargs) \
                  for tokens in tokens]
         # custom stop logic, update origin finsihed tensor
+        if len(token_buffer) == 0:
+            token_buffer = [""] * len(texts)
+
         generate_output.finished = self.piple_funcs.stop_generate_func(texts[0], **kwargs) or generate_output.finished
         if not generate_config.print_stop_words:
-            if not generate_output.finished and not generate_config.return_incremental:
-                texts = [truncate_response_with_stop_words(text, stop_word_str_slice_list) for text in texts]
+            if not generate_config.return_incremental:
+                if not generate_output.finished:
+                    texts = [truncate_response_with_stop_words(text, stop_word_str_slice_list) for text in texts]
+                else:
+                    texts = [truncate_response_with_stop_words(text, stop_word_str_list) for text in texts]
             else:
-                texts = [truncate_response_with_stop_words(text, stop_word_str_list) for text in texts]
-        return texts, output_lens
+                if not generate_output.finished:
+                    new_texts = []
+                    for i in range(len(texts)):
+                        text = token_buffer[i] + texts[i]
+                        trunc_text = truncate_response_with_stop_words(text, stop_word_str_slice_list)
+                        token_buffer[i] = text[len(trunc_text):]
+                        new_texts.append(trunc_text)
+                    texts = new_texts
+                else:
+                    texts = [truncate_response_with_stop_words(token_buffer[i] + texts[i], stop_word_str_list) for i in range(len(texts))]
+        return texts, output_lens, token_buffer
 
     @torch.inference_mode()
     async def generate_stream(self, token_ids: List[int], images: List[Future[Image.Image]], generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
@@ -193,12 +209,14 @@ class Pipeline(object):
         num_beams = input.generate_config.num_beams
         decoding_state = DecodingState() if num_beams == 1 else None
 
+        token_buffer: List[str] = []
+
         async for generate_output in stream:
             begin_time = current_time_ms()
-            generate_texts, output_lens = self.decode_tokens(
+            generate_texts, output_lens, token_buffer = self.decode_tokens(
                 generate_output,
                 input.generate_config,
-                stop_word_strs, stop_word_str_slices, decoding_state, **kwargs)
+                stop_word_strs, stop_word_str_slices, decoding_state, token_buffer, **kwargs)
 
             hidden_states = generate_output.hidden_states
             if num_beams == 1:

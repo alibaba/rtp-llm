@@ -13,7 +13,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
     RoleEnum, RendererInfo
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
-
+from maga_transformer.utils.word_util import get_stop_word_slice_list, truncate_response_with_stop_words
 
 @dataclass
 class StreamResponseObject:
@@ -125,6 +125,7 @@ class CustomChatRenderer():
 
         async for response in self.render_response_stream(output_generator, 
                                                           request, 
+                                                          generate_config,
                                                           input_token_length):
             yield response
 
@@ -132,6 +133,7 @@ class CustomChatRenderer():
             self,
             output_generator: AsyncGenerator[GenerateOutput, None],
             request: ChatCompletionRequest,
+            generate_config: GenerateConfig,
             input_token_length: int
     ) -> AsyncGenerator[StreamResponseObject, None]:
         index = 0
@@ -140,6 +142,23 @@ class CustomChatRenderer():
         responded_string = ""
         finish_reason = None
         last_token_length = 0
+        delta_output_string = ""
+        stop_word_slice_list = get_stop_word_slice_list(generate_config.stop_words_str)
+
+        def generate_stream_response(index: int, output_str: str, input_token_length: int, output_token_length: int):
+            return StreamResponseObject(
+                    choices=[ChatCompletionResponseStreamChoice(
+                        index=index,
+                        delta=DeltaMessage(
+                            content=output_str,
+                        ),
+                    )],
+                    usage=UsageInfo(
+                        prompt_tokens=input_token_length,
+                        total_tokens=input_token_length + output_token_length,
+                        completion_tokens=output_token_length
+                    )
+                )
 
         async for output in output_generator:
             if index == 0:
@@ -164,24 +183,20 @@ class CustomChatRenderer():
             if (len(decoded_string)) and (u'\uFFFD' == decoded_string[-1]):
                 continue
             delta_output_string = decoded_string[len(decoded_prev_token):]
+            trunc_string = truncate_response_with_stop_words(delta_output_string, stop_word_slice_list)
 
-            if len(delta_output_string) > 0:
+            if len(delta_output_string) > 0 and trunc_string == delta_output_string:
                 last_token_length = len(output_ids) - len(responded_output_ids)
                 responded_output_ids = output_ids
                 responded_string += delta_output_string
-                yield StreamResponseObject(
-                    choices=[ChatCompletionResponseStreamChoice(
-                        index=index,
-                        delta=DeltaMessage(
-                            content=delta_output_string,
-                        ),
-                    )],
-                    usage=UsageInfo(
-                        prompt_tokens=input_token_length,
-                        total_tokens=input_token_length + output_token_length,
-                        completion_tokens=output_token_length
-                    )
-                )
+                stream_response = generate_stream_response(index, delta_output_string, input_token_length, output_token_length)
+                delta_output_string = ""
+                yield stream_response
+
+        trunc_string = truncate_response_with_stop_words(delta_output_string, generate_config.stop_words_str)
+        if len(delta_output_string) > 0 and trunc_string == delta_output_string:
+            responded_string += delta_output_string
+            yield generate_stream_response(index, delta_output_string, input_token_length, output_token_length)
 
         if finish_reason == None:
             logging.debug(f"output [{responded_string}] found no stop reason! use stop as default.")
