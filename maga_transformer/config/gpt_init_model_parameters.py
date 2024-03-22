@@ -358,13 +358,17 @@ class GptInitModelParameters:
             layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * hidden_size
 
         # ffn w1, w2, w3
+        ffn_export_num = self.expert_num if self.expert_num > 0 else 1
         ffn_w_count = 2 if self.activation_type == 'gelu' else 3
         if self.layer_inter_size and isinstance(self.layer_inter_size, list):
             for layer_inter_size in self.layer_inter_size:
-                layer_weight_param_count = layer_weight_param_count + layer_inter_size * hidden_size * ffn_w_count
+                layer_weight_param_count = layer_weight_param_count + layer_inter_size * hidden_size * ffn_w_count * ffn_export_num
 
         else:
-            layer_weight_param_count = layer_weight_param_count + self.layer_num * self.inter_size * hidden_size * ffn_w_count
+            layer_weight_param_count = layer_weight_param_count + self.layer_num * self.inter_size * hidden_size * ffn_w_count * ffn_export_num
+
+        if ffn_export_num > 1:
+            layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * ffn_export_num
 
         # other small tensor
         layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * 11
