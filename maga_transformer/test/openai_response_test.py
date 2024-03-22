@@ -14,6 +14,7 @@ from maga_transformer.tokenizer.tokenization_chatglm3 import ChatGLMTokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, RoleEnum, FinisheReason, \
     ChatCompletionRequest, GPTFunctionDefinition, ContentPart, ContentPartTypeEnum, RendererInfo
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
+from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.openai.renderer_factory import ChatRendererFactory, CustomChatRenderer, RendererParams
 
 async def fake_output_generator(
@@ -67,7 +68,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
         request = ChatCompletionRequest(messages=[])
         id_generator = fake_output_generator(test_ids, 1024, tokenizer.eos_token_id or 0)
-        stream_generator = chat_renderer.render_response_stream(id_generator, request, 314)
+        stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig(), 314)
         generate = self.endpoint._complete_stream_response(stream_generator, None)
         response = [x async for x in generate][-1]
         response = await generate.gen_complete_response_once()
@@ -103,7 +104,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         request = ChatCompletionRequest(messages=[])
         id_generator = fake_output_generator(test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0)
         input_length = 1018
-        stream_generator = chat_renderer.render_response_stream(id_generator, request, input_length)
+        stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig(), input_length)
         generate = self.endpoint._complete_stream_response(stream_generator, None)
         response = [x async for x in generate][-1]
         response = await generate.gen_complete_response_once()
