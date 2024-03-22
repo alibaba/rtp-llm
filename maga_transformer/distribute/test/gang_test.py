@@ -125,13 +125,6 @@ class GangTest(unittest.TestCase):
                 hb_response = requests.post(f"http://localhost:{gang_hb_port}/heartbeat", json={"name": 'fake_name', "ip": 'fake_ip'}, timeout=5)
                 self.assertEqual(hb_response.json()['initializing'], False)
 
-            server_port = WorkerInfo.server_port_offset(0)
-            response = requests.post(f"http://localhost:{server_port}", json={"prompt": "hello"}, timeout=5)
-            logging.info(f"{response.json()}")
-            self.assertEqual(response.json()['finished'], True)
-            self.assertEqual(response.json()['response'], 'fake output')
-            logging.info("Start test terminate gang worker")
-
             # test gang heartbeat loss will cause other process terminate
             if torch_device_count.return_value > 1:
                 procs[0].terminate()

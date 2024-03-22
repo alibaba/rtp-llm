@@ -2,13 +2,14 @@ import os
 import logging
 import json
 import torch
+from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.model_factory import ModelConfig, ModelFactory
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 
 class FakeModelLoader(object):
-    def __init__(self, model_type: str, tokenizer_path: str, ckpt_path: str, weight_type: torch.dtype, max_seq_len: int=0) -> None:
+    def __init__(self, model_type: str, tokenizer_path: str, ckpt_path: str, weight_type: WEIGHT_TYPE, max_seq_len: int=0) -> None:
         self.model_type = model_type
         self.tokenizer_path = tokenizer_path
         self.ckpt_path = ckpt_path

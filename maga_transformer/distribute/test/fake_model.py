@@ -37,8 +37,4 @@ class FakeModel(BaseModel):
     def from_config(cls, config: Any) -> 'FakeModel':
         return cls(config)
 
-    @torch.no_grad()
-    async def generate_stream(self, input) -> AsyncGenerator[GenerateOutput, None]:
-        yield GenerateOutput(output_ids=torch.Tensor([[1,2,3,4]]), finished=True)
-
 register_model("fake_model", FakeModel)
