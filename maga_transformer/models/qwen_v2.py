@@ -161,7 +161,6 @@ class QWenV2(QWen):
         config.has_pre_decoder_layernorm = False
         config.has_post_decoder_layernorm = True
         config.norm_type = 'rmsnorm'
-        config.layernorm_eps = 1e-5
         config.special_tokens.bos_token_id = -1
         config.special_tokens.eos_token_id = 151643
         # <|im_start|> and <|im_end|>
@@ -195,6 +194,7 @@ class QWenV2(QWen):
         config.rotary_embedding_base = int(config_json.get("rope_theta", config.rotary_embedding_base))
         config.vocab_size = config_json["vocab_size"]
         config.rotary_embedding_dim = config.size_per_head
+        config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
 
         quant_config = config_json.get("quantization_config", None)
         if quant_config is not None:
