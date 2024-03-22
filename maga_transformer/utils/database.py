@@ -163,12 +163,6 @@ class CkptDatabase(BaseDatabase):
         self.FinetuneFileList = []
         self.LoraFileList = {}
 
-        if os.path.isfile(path) and path.endswith('adapter_model.bin'):
-            ckpt = CkptFileInfo(file_name=str(path))
-            ckpt.set_metadata(self._load_meta(ckpt.file_name))
-            self.PretrainFileList.append(ckpt)
-            return
-
         if os.path.isfile(path):
             raise Exception(f"CkptDatabase needs directory contains checkpoint files")
 
