@@ -9,13 +9,11 @@ from maga_transformer.pipeline import Pipeline
 from maga_transformer.model_factory import ModelFactory, ModelConfig
 
 # gen_num_per_circle控制投机采样时每轮的最大token数
-# async_mode需要设置true才能生效
 model_config = ModelConfig(
     model_type = "MODEL_TYPE",
     ckpt_path = "/path/to/ckpt",
     tokenizer_path = "/path/to/tokenizer",
-    weight_type = "WEIGHT_TYPE"
-    async_mode = True,
+    weight_type = "WEIGHT_TYPE"    
     gen_num_per_circle = 5
 )
 

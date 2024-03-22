@@ -11,22 +11,20 @@ class FakeModelTest(ModelTestBase):
                         tokenizer_path: str = "",
                         ckpt_path: str = "",
                         weight_type: torch.dtype = torch.float16,
-                        async_mode: bool = False,
                         test_loss: bool = False,
                         fake_name: str = "") -> None:
-        super().__init__(methodName, model_type, tokenizer_path, ckpt_path, weight_type, async_mode, test_loss, fake_name)
+        super().__init__(methodName, model_type, tokenizer_path, ckpt_path, weight_type, test_loss, fake_name)
 
     def _load_model(self):
-        fake_model_loader = FakeModelLoader(self.model_type, self.tokenizer_path, self.ckpt_path, self.weight_type, self.async_mode)
+        fake_model_loader = FakeModelLoader(self.model_type, self.tokenizer_path, self.ckpt_path, self.weight_type)
         return fake_model_loader.load_model()
 
-def single_fake_test(name: str, fake_name: str, model_config: Dict[str, Any], async_mode: bool, test_loss: bool):
+def single_fake_test(name: str, fake_name: str, model_config: Dict[str, Any], test_loss: bool):
     model_test = FakeModelTest("runTest",
                                 model_config["model_type"],
                                 model_config["tokenizer_path"],
                                 model_config["ckpt_path"],
-                                model_config["weight_type"],
-                                async_mode=async_mode,
+                                model_config["weight_type"],                                
                                 test_loss=test_loss,
                                 fake_name=fake_name)
     model_test.simple_test(is_fake=True)

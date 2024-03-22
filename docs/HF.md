@@ -23,7 +23,6 @@ model = ModelFactory.from_huggingface("/path/to/dir")
 from maga_transformer.utils.util import WEIGHT_TYPE
 
 model_config = ModelConfig(
-    async_mode=True,
     weight_type=WEIGHT_TYPE.INT8,
     max_seq_len=2000,
     ...
@@ -36,7 +35,6 @@ model_config = ModelConfig(
     model_type='chatglm',
     ckpt_path='/path/to/ckpt',
     tokenizer_path='/path/to/tokenizer',
-    async_mode=True,
     weight_type=WEIGHT_TYPE.INT8,
     max_seq_len=2000,
     ...

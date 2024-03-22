@@ -69,7 +69,7 @@ class ModelFactory:
     @staticmethod
     def from_model_config(model_config: ModelConfig, sp_model_config: Optional[ModelConfig] = None) -> Union[AsyncModel, BaseModel]:
         model = ModelFactory._create_model(model_config)
-        if model_config.async_mode and model_config.model_type != 'fake_model': # for test
+        if model_config.model_type != 'fake_model': # for test
             sp_model = None if sp_model_config is None else ModelFactory._create_model(sp_model_config)
             model = AsyncModel(model, sp_model)
         return model
@@ -120,7 +120,6 @@ class ModelFactory:
         model_config = ModelConfig(model_type=model_type,
                                    ckpt_path=ckpt_path,
                                    tokenizer_path=tokenizer_path,
-                                   async_mode=True,
                                    weight_type=weight_type,
                                    act_type=act_type,
                                    max_seq_len=max_seq_len,
@@ -151,7 +150,6 @@ class ModelFactory:
                                           ckpt_path=sp_ckpt_path,
                                           tokenizer_path=tokenizer_path,
                                           lora_infos=None,
-                                          async_mode=False,
                                           weight_type=sp_weight_type,
                                           act_type=sp_act_type,
                                           max_seq_len=max_seq_len,

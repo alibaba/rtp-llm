@@ -90,7 +90,6 @@ class ModelConfigBase:
     model_type: str = ""
     ckpt_path: str = ""
     tokenizer_path: str = ""
-    async_mode: bool = True
     weight_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16
     act_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16
     max_seq_len: int = 0

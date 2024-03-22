@@ -38,7 +38,6 @@ class InferenceWorkerTest(TestCase):
                                                  tokenizer_path=self.tokenizer_path,
                                                  ckpt_path=self.ckpt_path,
                                                  weight_type=WEIGHT_TYPE.FP16,
-                                                 async_mode=True,
                                                  max_seq_len=2048)
         model: AsyncModel = self.fake_model_loader.load_model()
         pipeline = Pipeline(model, model.tokenizer)

@@ -22,8 +22,7 @@ class ModelWeihgtsLoaderTest(TestCase):
         model_cls = ModelFactory.get_model_cls(model_type)
         model_config = ModelConfig(model_type=model_type,
             ckpt_path=ckpt_path,
-            tokenizer_path=tokenizer_path,
-            async_mode=1,
+            tokenizer_path=tokenizer_path,            
             weight_type=weight_type,
             max_seq_len=max_seq_len,
             seq_size_per_block=seq_size_per_block,

@@ -8,12 +8,11 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 
 
 class FakeModelLoader(object):
-    def __init__(self, model_type: str, tokenizer_path: str, ckpt_path: str, weight_type: torch.dtype, async_mode: bool, max_seq_len: int=0) -> None:
+    def __init__(self, model_type: str, tokenizer_path: str, ckpt_path: str, weight_type: torch.dtype, max_seq_len: int=0) -> None:
         self.model_type = model_type
         self.tokenizer_path = tokenizer_path
         self.ckpt_path = ckpt_path
         self.weight_type = weight_type
-        self.async_mode = async_mode
         self.max_seq_len = max_seq_len
 
         logging.info(f"tokenizer path: {self.tokenizer_path}")
@@ -32,7 +31,6 @@ class FakeModelLoader(object):
         model_config = ModelConfig(ckpt_path=self.ckpt_path,
             model_type=self.model_type,
             tokenizer_path=self.tokenizer_path,
-            async_mode=self.async_mode,
             weight_type=self.weight_type,
             max_seq_len=64,
             seq_size_per_block=8,
@@ -67,7 +65,6 @@ class FakeModelLoader(object):
         )
 
         model = model_cls.from_config(raw_config)
-        if self.async_mode:
-            model = AsyncModel(model)
+        model = AsyncModel(model)
 
         return model
