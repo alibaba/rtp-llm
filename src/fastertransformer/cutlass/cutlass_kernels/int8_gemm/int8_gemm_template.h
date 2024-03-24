@@ -310,9 +310,9 @@ CutlassInt8GemmRunner<T>::CutlassInt8GemmRunner()
 {
     TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int device{-1};
-    ft::check_cuda_error(cudaGetDevice(&device));
+    check_cuda_error(cudaGetDevice(&device));
     mSm = ft::getSMVersion();
-    ft::check_cuda_error(cudaDeviceGetAttribute(&mMultiProcessorCount, cudaDevAttrMultiProcessorCount, device));
+    check_cuda_error(cudaDeviceGetAttribute(&mMultiProcessorCount, cudaDevAttrMultiProcessorCount, device));
 }
 
 template <typename T>
@@ -355,13 +355,13 @@ void CutlassInt8GemmRunner<T>::dispatchToArch(const int8_t* A, const int8_t* B, 
 }
 
 template <typename T>
-void CutlassInt8GemmRunner<T>::gemm(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,
+void CutlassInt8GemmRunner<T>::gemm(const void* A, const void* B, tk::QuantMode quantOption, const float* alphaCol,
     const float* alphaRow, void* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
     const size_t workspaceBytes, cudaStream_t stream)
 {
     TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
-    dispatchToArch(A, B, quantOption, alphaCol, alphaRow, reinterpret_cast<T*>(C), m, n, k, gemmConfig, workspacePtr,
-        workspaceBytes, stream);
+    dispatchToArch(reinterpret_cast<const int8_t*>(A), reinterpret_cast<const int8_t*>(B), quantOption, alphaCol,
+        alphaRow, reinterpret_cast<T*>(C), m, n, k, gemmConfig, workspacePtr, workspaceBytes, stream);
 }
 
 template <typename T>
@@ -372,6 +372,38 @@ std::vector<tkc::CutlassGemmConfig> CutlassInt8GemmRunner<T>::getConfigs() const
         = get_candidate_configs(mSm, isWeightOnly, mSm <= 70, /* SIMT configs */
             true, SPLIT_K_LIMIT);                             /* INT8 configs */
     return candidateConfigs;
+}
+
+template <typename T>
+tkc::CutlassGemmConfig CutlassInt8GemmRunner<T>::getChosenConfig(const void* A, const void* B, tk::QuantMode quantOption,
+        const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
+        const size_t workspaceBytes, cudaStream_t stream)
+{
+    // Standard GEMM, so 1 "expert". We use the same function for MoE and regular FFN.
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+
+    std::vector<tkc::CutlassGemmConfig> candidate_configs = getConfigs();
+    std::vector<int>               occupancies(candidate_configs.size());
+
+    for (size_t ii = 0; ii < candidate_configs.size(); ++ii)
+    {
+        dispatchToArch(reinterpret_cast<const int8_t*>(A), reinterpret_cast<const int8_t*>(B), quantOption, alphaCol,
+            alphaRow, reinterpret_cast<T*>(C), m, n, k, candidate_configs[ii], workspacePtr, workspaceBytes, stream,
+            &(occupancies[ii]));
+    }
+    static constexpr int num_experts = 1;
+    static constexpr int is_weight_only = false;
+    tkc::CutlassGemmConfig chosen_config  = estimate_best_config_from_occupancies(candidate_configs,
+                                                                                 occupancies,
+                                                                                 m,
+                                                                                 n,
+                                                                                 k,
+                                                                                 num_experts,
+                                                                                 SPLIT_K_LIMIT,
+                                                                                 workspaceBytes,
+                                                                                 mMultiProcessorCount,
+                                                                                 is_weight_only);
+    return chosen_config;
 }
 
 template <typename T>

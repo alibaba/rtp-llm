@@ -10,6 +10,7 @@ cc_library(
         "weightOnlyQuantMatmulPlugin/*.cpp",
         "weightOnlyGroupwiseQuantMatmulPlugin/*.cpp",
         "mixtureOfExperts/*.cpp",
+        "smoothQuantGemmPlugin/*.cpp",
     ]), 
     hdrs = glob([
         "*.h",
@@ -17,6 +18,7 @@ cc_library(
         "weightOnlyQuantMatmulPlugin/*.h",
         "weightOnlyGroupwiseQuantMatmulPlugin/*.h",
         "mixtureOfExperts/*.h",
+        "smoothQuantGemmPlugin/*.h",
     ]),
     deps = [
         "//src/fastertransformer/cutlass:cutlass_interface",

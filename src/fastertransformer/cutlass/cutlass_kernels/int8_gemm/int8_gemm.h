@@ -47,7 +47,7 @@ public:
 
     virtual ~CutlassInt8GemmRunnerInterface() {}
 
-    virtual void gemm(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,
+    virtual void gemm(const void* A, const void* B, tk::QuantMode quantOption, const float* alphaCol,
         const float* alphaRow, void* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream)
         = 0;
@@ -56,6 +56,11 @@ public:
     virtual size_t getWorkspaceSize(const int m, const int n, const int k) = 0;
 
     virtual std::vector<tkc::CutlassGemmConfig> getConfigs() const = 0;
+
+    virtual tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, tk::QuantMode quantOption,
+        const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
+        const size_t workspaceBytes, cudaStream_t stream)
+        = 0;
 
 protected:
     static constexpr int SPLIT_K_LIMIT = 7;
@@ -70,7 +75,7 @@ public:
     CutlassInt8GemmRunner();
     ~CutlassInt8GemmRunner();
 
-    void gemm(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol, const float* alphaRow,
+    void gemm(const void* A, const void* B, tk::QuantMode quantOption, const float* alphaCol, const float* alphaRow,
         void* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream) override;
 
@@ -78,6 +83,10 @@ public:
     size_t getWorkspaceSize(const int m, const int n, const int k) override;
 
     std::vector<tkc::CutlassGemmConfig> getConfigs() const override;
+
+    tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, tk::QuantMode quantOption,
+        const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
+        const size_t workspaceBytes, cudaStream_t stream);
 
 private:
     void dispatchToArch(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,

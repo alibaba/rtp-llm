@@ -116,19 +116,9 @@ public:
 
     std::vector<tkc::CutlassGemmConfig> getConfigs() const override;
 
-    tkc::CutlassGemmConfig getChosenConfig(const void*          A,
-                                           const void* B,
-                                           const void*          weight_scales,
-                                           const void*          weight_zero_points,
-                                           const void*          biases,
-                                           void*                C,
-                                           int               m,
-                                           int               n,
-                                           int               k,
-                                           const int         group_size,
-                                           char*             workspace_ptr,
-                                           const size_t      workspace_bytes,
-                                           cudaStream_t      stream) override;
+    tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, const void* weight_scales,
+        const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
+        char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream) override;
 
 private:
     template <typename EpilogueTag>
@@ -162,19 +152,9 @@ public:
 
     std::vector<tkc::CutlassGemmConfig> getConfigs() const;
 
-    tkc::CutlassGemmConfig getChosenConfig(const void*  A,
-                                           const void*  B,
-                                           const void*  weight_scales,
-                                           const void*  weight_zero_points,
-                                           const void*  biases,
-                                           void*        C,
-                                           int          m,
-                                           int          n,
-                                           int          k,
-                                           const int    group_size,
-                                           char*        workspace_ptr,
-                                           const size_t workspace_bytes,
-                                           cudaStream_t stream);
+    tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, const void* weight_scales,
+        const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
+        char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream);
 };
 
 } // namespace cutlass_kernels
