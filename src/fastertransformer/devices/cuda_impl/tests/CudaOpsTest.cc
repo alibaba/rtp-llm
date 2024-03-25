@@ -29,8 +29,8 @@ TEST_F(CudaOpsTest, testCopy) {
     auto A = createHostBuffer({2, 3}, expected.data());
     auto B = device_->allocateBuffer({DataType::TYPE_FP32, {2, 3}, AllocationType::DEVICE}, {});
     auto C = device_->allocateBuffer({DataType::TYPE_FP32, {2, 3}, AllocationType::HOST}, {});
-    device_->copy({*A, *B});
-    device_->copy({*B, *C});
+    device_->copy({*B, *A});
+    device_->copy({*C, *B});
 
     syncCudaAndCheckError();
     assertBufferValueEqual(*C, expected);

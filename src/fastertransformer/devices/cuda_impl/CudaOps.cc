@@ -34,6 +34,7 @@ void CudaDevice::copy(const CopyParams& params) {
         copyType = cudaMemcpyHostToHost;
     }
     cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_);
+    sync_check_cuda_error();
 }
 
 LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {

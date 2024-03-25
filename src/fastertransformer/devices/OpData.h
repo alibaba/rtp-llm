@@ -61,10 +61,10 @@ using OptionalConstBufferRef = std::optional<std::reference_wrapper<const Buffer
 using OptionalBufferRef = std::optional<std::reference_wrapper<Buffer>>;
 
 struct CopyParams {
-    CopyParams(const Buffer& src, Buffer& dst) : src(src), dst(dst) {}
+    CopyParams(Buffer& dst, const Buffer& src) : dst(dst), src(src)  {}
 
-    const Buffer& src;
     Buffer&       dst;
+    const Buffer& src;
 
     const std::optional<std::vector<size_t>> src_offset;
     const std::optional<std::vector<size_t>> dst_offset;

@@ -71,7 +71,7 @@ protected:
     BufferPtr createDeviceBuffer(const std::vector<size_t>& shape, const void* data) {
         auto host_buffer = createHostBuffer<T>(shape, data);
         auto buffer = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::DEVICE}, {});
-        device_->copy(CopyParams(*host_buffer, *buffer));
+        device_->copy(CopyParams(*buffer, *host_buffer));
         return move(buffer);
     }
 
@@ -89,7 +89,7 @@ protected:
         std::vector<T> values(buffer.size());
         if (buffer.where() == MemoryType::MEMORY_GPU) {
             auto host_buffer = createHostBuffer<T>(buffer.shape(), nullptr);
-            device_->copy(CopyParams(buffer, *host_buffer));
+            device_->copy(CopyParams(*host_buffer, buffer));
             memcpy(values.data(), host_buffer->data(), sizeof(T) * buffer.size());
         } else {
             memcpy(values.data(), buffer.data(), sizeof(T) * buffer.size());

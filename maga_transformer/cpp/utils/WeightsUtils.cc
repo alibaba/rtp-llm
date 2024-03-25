@@ -15,7 +15,7 @@ ConstBufferPtr WeightsConverter::mayFindTensor2Buffer(
         auto buffer = torchTensor2Buffer(tensor_map.at(key));
         if (need_copy_) {
             auto new_buffer = device_->allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE});
-            device_->copy({*buffer, *new_buffer});
+            device_->copy({*new_buffer, *buffer});
             return new_buffer;
         } else {
             return buffer;
