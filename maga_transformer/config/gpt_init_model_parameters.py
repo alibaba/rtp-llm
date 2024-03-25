@@ -270,7 +270,6 @@ class GptInitModelParameters:
                       ptuning_path: Optional[str],
                       tokenizer_path: str,
                       int8_mode: bool,
-                      int4_mode: bool,
                       data_type: WEIGHT_TYPE,
                       max_seq_len: int,
                       seq_size_per_block: int,
@@ -281,8 +280,7 @@ class GptInitModelParameters:
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path
         self.quant_algo.int8_mode = int8_mode
-        self.quant_algo.int4_mode = int4_mode
-        self.is_quant_mode = int8_mode or int4_mode
+        self.is_quant_mode = int8_mode or self.quant_algo.int4_mode
         self.data_type = data_type.to_str()
         self.gen_num_per_circle = gen_num_per_circle
         self.ptuning_path = ptuning_path

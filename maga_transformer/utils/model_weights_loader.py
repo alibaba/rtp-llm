@@ -159,7 +159,7 @@ class ModelWeightsLoader:
                     qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor)
                     qzero_tensor = self._split_tensor(qzero[0].name, qzero_tensor)
                     qscale_tensor = self._split_tensor(qscale[0].name, qscale_tensor)
-                    weight, zero, scale = apply_func(qweight_tensor, qzero_tensor, qscale_tensor, device)
+                    weight, zero, scale = apply_func(qweight_tensor, qzero_tensor, qscale_tensor, device, self._weights_info._is_gptq, self._weights_info._is_awq)
                     results.append((layer_id, qweight[0].name, weight))
                     results.append((layer_id, qzero[0].name, zero))
                     results.append((layer_id, qscale[0].name, scale))
@@ -329,7 +329,7 @@ class ModelWeightsLoader:
         w_unpacked[:, 1::2] = w_packed_int4x2 // 16
         return w_unpacked.contiguous()
 
-    def preprocess_moe_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str):
+    def preprocess_moe_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str, gptq: bool, awq: bool):
         assert qweight_int32.dim() == 3
         qweight_list = torch.chunk(tensor, qweight_int32.shape[0], dim=0)
         qzeros_list = torch.chunk(tensor, qzeros_int32.shape[0], dim=0)
@@ -341,7 +341,7 @@ class ModelWeightsLoader:
             w = torch.squeeze(w)
             z = torch.squeeze(z)
             s = torch.squeeze(s)
-            p_w, p_z, p_s = self.preprocess_groupwise_weight_params(w, z, s, device)
+            p_w, p_z, p_s = self.preprocess_groupwise_weight_params(w, z, s, device, gptq, awq)
             processed_weights.append(p_w)
             processed_zeros.append(p_z)
             processed_scalses.append(p_s)
@@ -349,22 +349,38 @@ class ModelWeightsLoader:
         processed_zeros = torch.stack(processed_zeros, dim=0)
         processed_scalses = torch.stack(processed_scalses, dim=0)
         return processed_weights, processed_zeros, processed_scalses
-        
-    def preprocess_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str):
+    
+    def reverse_awq_order(self, ori_tensor: torch.Tensor):
+        # AWQ_REVERSE_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
+
+        assert ori_tensor.shape[-1] % 8 == 0
+        reorder_tensor = ori_tensor.reshape(-1, 2,4).transpose(2,1).reshape(ori_tensor.shape)
+    
+        return reorder_tensor
+    
+    def preprocess_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str, gptq: bool, awq: bool):
         UINT4_TO_INT4_FLAG = 1
-        GPTQ_FLAG = 1
+        GPTQ_FLAG = 1 if gptq == True else 0
         qweight_int32=qweight_int32.reshape(qweight_int32.shape[0], -1)
         qzeros_int32=qzeros_int32.reshape(qzeros_int32.shape[0], -1)
         scales_fp16=scales_fp16.reshape(scales_fp16.shape[0], -1)
         packer = torch.ops.fastertransformer.pack_int8_tensor_to_packed_int4
         preprocessor = torch.ops.fastertransformer.preprocess_weights_for_mixed_gemm
 
-        qweight_unpacked_int8 = (
-            self.unpack_int32_into_int8(qweight_int32.T).T.contiguous() - 8)
+        if awq:
+            qweight_unpacked_int8 = (
+                self.unpack_int32_into_int8(qweight_int32).contiguous() - 8)
+            qweight_unpacked_int8 = self.reverse_awq_order(qweight_unpacked_int8)
+        elif gptq:
+            qweight_unpacked_int8 = (
+                self.unpack_int32_into_int8(qweight_int32.T).T.contiguous() - 8)
+            
         qweight_interleaved = preprocessor(packer(qweight_unpacked_int8),
                                            torch.quint4x2)
         # zeros = zeros * scales
         qzeros_unpacked_int32 = self.unpack_int32_into_int8(qzeros_int32)
+        if awq:
+            qzeros_unpacked_int32 = self.reverse_awq_order(qzeros_unpacked_int32)
 
         zeros_x_scales_fp16 = (-qzeros_unpacked_int32 + 8 * UINT4_TO_INT4_FLAG -
                                GPTQ_FLAG) * scales_fp16

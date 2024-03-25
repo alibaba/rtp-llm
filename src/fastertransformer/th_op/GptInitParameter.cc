@@ -48,7 +48,8 @@ bool GptInitParameter::isGatedActivation() {
     DEF_PROPERTY(int4_mode)                                                                                            \
     DEF_PROPERTY(has_pre_scale)                                                                                        \
     DEF_PROPERTY(has_zeros)                                                                                            \
-    DEF_PROPERTY(weight_only_group_size)
+    DEF_PROPERTY(weight_only_group_size)                                                                               \
+    DEF_PROPERTY(quant_method)                                                                               
 
 static auto quantAlgoTHS =
 #ifdef LEGACY_THS

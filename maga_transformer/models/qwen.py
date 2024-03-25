@@ -284,6 +284,7 @@ class QWenBase(GPT):
                 config.quant_algo.has_zeros = True
             else: 
                 raise ValueError("Unsupported quant method: %s" % (quant_method))
+            config.quant_algo.int8_mode = False
 
         use_dynamic_ntk = config_json.get("use_dynamic_ntk")
         use_logn_attn = config_json.get("use_logn_attn")

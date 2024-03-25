@@ -55,7 +55,6 @@ class FakeModelLoader(object):
             lora_infos=None,
             tokenizer_path=self.tokenizer_path,
             int8_mode=model_config.int8_mode,
-            int4_mode=model_config.int4_mode,
             data_type=model_config.act_type,
             max_seq_len=self.max_seq_len,
             seq_size_per_block=8,

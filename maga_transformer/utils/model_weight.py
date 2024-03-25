@@ -593,6 +593,8 @@ class ModelDeployWeightInfo:
         self._int8_mode = config.quant_algo.int8_mode
         self._int4_mode = config.quant_algo.int4_mode
         self._is_quant_mode = config.is_quant_mode
+        self._is_gptq = config.quant_algo.quant_method == 'gptq'
+        self._is_awq = config.quant_algo.quant_method == 'awq'
         self._num_layers = config.num_layers
         self._layer_head_num = config.layer_head_num
         self._layer_inter_padding_size = config.layer_inter_padding_size

@@ -23,6 +23,7 @@ public:
     bool    has_pre_scale_          = false;
     bool    has_zeros_              = false;
     int64_t weight_only_group_size_ = 0;
+    std::string quant_method_       = "";
 };
 
 struct SpecialTokens: public th::jit::CustomClassHolder {
