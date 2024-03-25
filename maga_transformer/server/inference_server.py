@@ -203,6 +203,7 @@ class InferenceServer(object):
             except BaseException as e:
                 return self._handle_exception(request, e, id)
 
+
     def _handle_exception(self, request: Union[Dict[str, Any], str, BaseModel], e: Exception, id: int):
         self._access_logger.log_exception_access(request, e, id)
         if isinstance(e, ConcurrencyException):
