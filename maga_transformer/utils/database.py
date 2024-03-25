@@ -337,7 +337,26 @@ class CkptDatabase(BaseDatabase):
         ckpt = CkptFileInfo(file_name=str(lora_ckpt_paths[0]), finetune_type=FinetuneType.lora)
         ckpt.set_metadata(self._load_meta(ckpt.file_name))
         self.LoraFileList[lora_config] = [ckpt]
+        self.lora_check()
+    
+    def lora_tensor_check(self, tensor_name: str):
+        # check lora tensor names. the lora tensor name should match 
+        # the format which is "base_model.model.{}.{}.weight"
+        pattern = r'base_model\.model\.(.*)\.(lora_A|lora_B)\.weight'
+        if re.fullmatch(pattern, tensor_name) == None:
+            raise Exception(f"invalid lora tensor name : {tensor_name}")
+        return None
+
+    def lora_check(self) -> None:
+        if len(self.LoraFileList) == 0:
+            logging.info("The database has no lora ckpts")
+            return
         
+        for key, _ in self.LoraFileList.items():
+            tensor_names = self.get_lora_tensor_names(key.name)
+            for name in tensor_names:
+                self.lora_tensor_check(name)
+                
 
     def remove_lora(self, name:str):
         for key, _ in self.LoraFileList.items():

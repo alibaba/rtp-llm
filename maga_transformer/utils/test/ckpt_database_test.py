@@ -147,9 +147,24 @@ class LoraTest(unittest.TestCase):
         self.assertEqual(0.0, lora_config.lora_dropout)
         self.assertEqual(['c_proj', 'w2', 'c_attn', 'w1'], lora_config.target_modules)
         self.assertEqual(1, len(database.get_lora("test_name")))
-        self.assertEqual(28, len(database.get_lora_tensor_names("test_name")))
+        self.assertEqual(12, len(database.get_lora_tensor_names("test_name")))
 
+    def test_lora_tensor_name_check(self):
+        database = CkptDatabase(None)
+        test_valid_names = ["base_model.model.x.lora_A.weight",
+                            "base_model.model.x.lora_B.weight",]
 
+        test_invalid_names = ["base_model.model.x.x.weight",
+                              "base_model.x.lora_B.weight",
+                              "base_model.model.x.lora_A.default.weight",
+                              "base_model.model.x.lora_A.default.weight.x"]
+
+        for name in test_valid_names:
+            self.assertEqual(None, database.lora_tensor_check(name))
+
+        for name in test_invalid_names:
+            self.assertRaises(Exception, database.lora_tensor_check, name)
+            
 
 if __name__ == '__main__':
     unittest.main()
