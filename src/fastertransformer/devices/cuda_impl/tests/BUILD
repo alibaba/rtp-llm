@@ -86,3 +86,15 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
 )
+
+cc_test(
+    name = "cuda_sampler_test",
+    srcs = [
+        "CudaSamplerTest.cc",
+    ],
+    data = [],
+    copts = cuda_copts() + copts() + torch_deps(),
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
+

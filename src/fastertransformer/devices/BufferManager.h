@@ -30,6 +30,18 @@ struct BufferHints {
 };
 
 struct BufferParams {
+    BufferParams(DataType type, const std::vector<size_t>& dims,
+                 AllocationType allocation = AllocationType::DEVICE)
+    : type(type), dims(dims), allocation(allocation) {}
+
+    // for allocating pure buffer space
+    BufferParams(const std::vector<size_t>& dims,
+                 AllocationType allocation = AllocationType::DEVICE)
+    : type(DataType::TYPE_UINT8), dims(dims), allocation(allocation) {}
+    BufferParams(const size_t size_bytes,
+                 AllocationType allocation = AllocationType::DEVICE)
+    : type(DataType::TYPE_UINT8), dims({size_bytes}), allocation(allocation) {}
+
     DataType type;
     std::vector<size_t> dims;
     AllocationType allocation;

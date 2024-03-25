@@ -2,6 +2,7 @@
 
 #include "Types.h"
 
+#include <cassert>
 #include <memory>
 #include <vector>
 #include <string>
@@ -31,6 +32,19 @@ public:
     DataType                   type() const;
     const std::vector<size_t>& shape() const;
     void*                      data() const;
+    void*                      dataWithOffset(size_t offset) const;
+
+    template<typename T>
+    inline T* data() const {
+        assert(type_ == getTensorType<T>());
+        return static_cast<T*>(data_);
+    }
+
+    template<typename T>
+    inline T* dataWithOffset(size_t offset) const {
+        assert(type_ == getTensorType<T>());
+        return static_cast<T*>(dataWithOffset(offset));
+    }
 
     size_t size() const;
     size_t sizeBytes() const;

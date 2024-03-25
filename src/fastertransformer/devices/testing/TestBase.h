@@ -7,6 +7,7 @@
 #include "src/fastertransformer/utils/logger.h"
 
 #include <numeric>
+#include <stdlib.h>
 
 using namespace fastertransformer;
 
@@ -14,6 +15,7 @@ template <DeviceType device_type>
 class DeviceTestBase : public ::testing::Test {
 public:
     void SetUp() override {
+        setenv("FT_DEBUG_LEVEL", "DEBUG", 1);
         device_ = DeviceFactory::getDevice(device_type);
         const char* test_src_dir = std::getenv("TEST_SRCDIR");
         const char* test_work_space = std::getenv("TEST_WORKSPACE");
@@ -59,7 +61,7 @@ protected:
     template <typename T>
     BufferPtr createHostBuffer(const std::vector<size_t>& shape, const void* data) {
         auto buffer = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::HOST}, {});
-        if (buffer->size() > 0) {
+        if (data && (buffer->size() > 0)) {
             memcpy(buffer->data(), data, sizeof(T) * buffer->size());
         }
         return buffer;
@@ -69,7 +71,7 @@ protected:
     BufferPtr createDeviceBuffer(const std::vector<size_t>& shape, const void* data) {
         auto host_buffer = createHostBuffer<T>(shape, data);
         auto buffer = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::DEVICE}, {});
-        device_->copy(CopyParams(*buffer, *host_buffer));
+        device_->copy(CopyParams(*host_buffer, *buffer));
         return move(buffer);
     }
 
@@ -80,6 +82,19 @@ protected:
             printf("i=%ld, buffer[i] = %f, expected[i] = %f\n", i, ((T*)buffer.data())[i], expected[i]);
             ASSERT_EQ(((T*)buffer.data())[i], expected[i]);
         }
+    }
+
+    template<typename T>
+    std::vector<T> getBufferValues(const Buffer& buffer) {
+        std::vector<T> values(buffer.size());
+        if (buffer.where() == MemoryType::MEMORY_GPU) {
+            auto host_buffer = createHostBuffer<T>(buffer.shape(), nullptr);
+            device_->copy(CopyParams(buffer, *host_buffer));
+            memcpy(values.data(), host_buffer->data(), sizeof(T) * buffer.size());
+        } else {
+            memcpy(values.data(), buffer.data(), sizeof(T) * buffer.size());
+        }
+        return values;
     }
 
 protected:

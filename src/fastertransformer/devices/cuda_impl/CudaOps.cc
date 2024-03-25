@@ -56,10 +56,6 @@ AttentionLayerOutput CudaDevice::attentionLayer(const AttentionLayerParams& para
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::sampleGreedy(const GreedyParams& params) {
-
-}
-
 void CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
 
 }

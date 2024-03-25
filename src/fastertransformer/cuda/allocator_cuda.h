@@ -79,6 +79,10 @@ public:
     Allocator(int device_id);
     ~Allocator();
 
+    MemoryType memoryType() const override {
+        return MEMORY_CPU_PINNED;
+    }
+
     void* malloc(size_t size, const bool is_set_zero = false) override;
     void free(void** ptr) const override;
 };
