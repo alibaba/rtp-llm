@@ -20,6 +20,7 @@ bool ParallelAttentionWrapper<T>::CheckUseFMHA() const {
     bool  not_prefix_prompt =
         params_.pre_seq_len_ == 0 && (block_cache_env == nullptr || std::string(block_cache_env) != "1");
     char* multi_task_prompt_env = std::getenv("MULTI_TASK_PROMPT");
+    char* multi_task_prompt_str_env = std::getenv("MULTI_TASK_PROMPT_STR");
     bool use_medusa = params_.use_medusa_;
     char* sp_model_env = std::getenv("SP_MODEL_TYPE");
 
@@ -46,6 +47,10 @@ bool ParallelAttentionWrapper<T>::CheckUseFMHA() const {
     }
     if (multi_task_prompt_env != nullptr) {
         FT_LOG_WARNING("FMHA not support multi_task_prompt");
+        return false;
+    }
+    if (multi_task_prompt_str_env != nullptr) {
+        FT_LOG_WARNING("FMHA not support multi_task_prompt_str");
         return false;
     }
     if (use_medusa) {
