@@ -3,12 +3,10 @@ import torch
 import re
 from typing import Any, Dict, List, Union, Tuple, Optional
 from PIL import Image
-from concurrent.futures import Future
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import RequestFormat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity
-from maga_transformer.utils.multimodal_download import DownloadEngine
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -100,7 +98,7 @@ class MultiModalMixin:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "raw request format cannot accept dict prompt")
         return prompt, images
     
-    def expand_token_id(self, token_ids: List[int], images: List[Future[Image.Image]]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+    def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
         raise NotImplementedError()
 
     def load_vit_weight(self, ctype: str):

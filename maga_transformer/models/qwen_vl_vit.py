@@ -9,7 +9,6 @@ import requests
 import os
 from functools import partial
 from PIL import Image
-from concurrent.futures import Future
 from typing import Callable, Optional, Sequence, Tuple, List, Any
 import numpy as np
 
@@ -19,7 +18,6 @@ from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
-from maga_transformer.utils.multimodal_download import DownloadEngine
 
 def get_abs_pos(abs_pos, tgt_size):
     # abs_pos: L, C
@@ -343,7 +341,6 @@ class Preprocess:
         ])
 
     def encode(self, images: List[Any]) -> torch.Tensor:
-        images = DownloadEngine.get(images)
         res = []
         for image in images:
             res.append(self.image_transform(image))
@@ -424,6 +421,6 @@ class VisionTransformer(nn.Module):
 
         return x
 
-    def encode(self, images: List[Future[Image.Image]]):
+    def encode(self, images: List[Image.Image]):
         images = self.image_pre_obj.encode(images)
         return self(images)

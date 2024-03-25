@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 import os
 import requests
 from PIL import Image
+import asyncio
 from typing import Any, List, Dict, Optional
 
 def download_image(url: str):
@@ -21,14 +22,17 @@ class DownloadEngine:
     
     def submit(self, urls: List[str]) -> List[Future[Image.Image]]:
         return [self.executor.submit(download_image, url) for url in urls]
-        
+
     @staticmethod
-    def get(futures: List[Future[Image.Image]]) -> List[Image.Image]:
+    async def get(futures: List[Future[Image.Image]]) -> List[Image.Image]:
         result = []
 
-        for future in as_completed(futures):
+        asyncio_futures = [asyncio.wrap_future(future) for future in futures]
+
+        for future in asyncio_futures:
             try:
-                result.append(future.result().convert("RGB"))
+                image = await future
+                result.append(image.convert("RGB"))
             except Exception as e:
                 raise e
 

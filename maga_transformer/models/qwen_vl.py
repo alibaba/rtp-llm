@@ -6,7 +6,6 @@ import json
 import logging
 from typing import List, Any, Tuple, Dict, Optional, Union
 from PIL import Image
-from concurrent.futures import Future
 
 from transformers import AutoTokenizer
 
@@ -183,7 +182,7 @@ class QWen_VL(QWen, MultiModalMixin):
     def input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
         return MultiModalMixin.input_word_embedding(self, inputs, images)
     
-    def expand_token_id(self, token_ids: List[int], images: List[Future[Image.Image]]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+    def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
         # if len(images) > 0:
         #     image_features = self.visual.image_embedding(images, self.device)
         return token_ids, images

@@ -9,6 +9,7 @@ from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, AuxInfo
 from maga_transformer.config.generate_config import GenerateConfig
+from maga_transformer.utils.multimodal_download import DownloadEngine
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
     RoleEnum, RendererInfo
@@ -108,6 +109,7 @@ class CustomChatRenderer():
             request: ChatCompletionRequest
     ) -> AsyncGenerator[StreamResponseObject, None]:
         if model.is_multimodal() and len(images) > 0:
+            images = await DownloadEngine.get(images)
             input_ids, images = model.expand_token_id(input_ids, images)
         
         input_token_length = len(input_ids)

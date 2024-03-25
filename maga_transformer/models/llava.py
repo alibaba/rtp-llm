@@ -5,7 +5,6 @@ import re
 
 from typing import List, Any, Dict, Tuple, Union
 from PIL import Image
-from concurrent.futures import Future
 from transformers.models.llama.tokenization_llama import LlamaTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -18,7 +17,6 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.llava_vit import LlavaImageEmbedding
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.utils.multimodal_download import DownloadEngine
 
 class LlavaTokenizer(object):
     def __init__(self, 
@@ -177,7 +175,7 @@ class Llava(Llama, MultiModalMixin):
     def input_word_embedding(self, inputs: torch.Tensor, images: List[Union[torch.Tensor, List[torch.Tensor]]]):
         return MultiModalMixin.input_word_embedding(self, inputs, images)
 
-    def expand_token_id(self, token_ids: List[int], images: List[Future[Image.Image]]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+    def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
         assert self.config.vit_related_params.image_expand_token is not None
         image_token_index = self.config.vit_related_params.vit_special_token_ids["image_token_index"]
         if token_ids.count(image_token_index) != len(images):
