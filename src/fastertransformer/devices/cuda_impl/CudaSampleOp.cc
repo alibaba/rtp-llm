@@ -19,6 +19,8 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
 
     // 1. confirm buffer sizes
     auto& top_k = params.top_k;
+    auto& random_seed = params.random_seed;
+
     auto default_top_k = 1;
     auto runtime_top_k_size = batch_size;
     auto max_top_k = *max_element(top_k.data<int32_t>(), top_k.dataWithOffset<int32_t>(top_k.size()));
@@ -75,10 +77,21 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     // TODO: integrate TopPSamplingLayer
 
     // 3. prepare kernel inputs
+    copy({*runtime_top_k_buf, top_k});
 
-    // TODO: integrate curand from BaseSamplingLayer.cc:141
-    invokeCurandInitialize((curandState_t *)curandstate_buf->data(), batch_size, 0, stream_);
-
+    if (random_seed) {
+        auto& seeds = random_seed.value().get();
+        if (seeds.size() == 1) {
+            invokeCurandInitialize(
+                (curandState_t *)curandstate_buf->data(), batch_size,
+                seeds.data<int64_t>()[0], stream_);
+        } else {
+            copy({*random_seeds_buf, seeds});
+            invokeCurandBatchInitialize(
+                (curandState_t *)curandstate_buf->data(), batch_size,
+                (unsigned long long *)random_seeds_buf->data(), stream_);
+        }
+    }
     invokeSetupTopKRuntimeArgs(batch_size,
                                 default_top_k,
                                 (uint *)runtime_top_k_buf->data(),

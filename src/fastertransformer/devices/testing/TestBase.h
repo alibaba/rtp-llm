@@ -41,6 +41,15 @@ public:
 
 protected:
     template <typename T>
+    void printBuffer(const Buffer& buffer, const std::string& hint = "") {
+        auto values = getBufferValues<T>(buffer);
+        for (size_t i = 0; i < values.size(); i++) {
+            std::cout << values[i] << " ";
+        }
+        std::cout << " " << hint << std::endl;
+    }
+
+    template <typename T>
     BufferPtr createBuffer(const std::vector<size_t>& shape, const std::vector<T>& data,
                            AllocationType alloc_type = AllocationType::DEVICE)
     {
