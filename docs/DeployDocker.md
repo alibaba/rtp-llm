@@ -11,7 +11,7 @@ git clone https://github.com/alibaba/rtp-llm.git
 cd docker
 # 注意：以下两条指令，不要使用sudo执行
 # 如果是cuda11的环境，CONTAINER_NAME为registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:deploy_image_cuda11
-# 如果是cuda11的环境，CONTAINER_NAME为registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:deploy_image_cuda12
+# 如果是cuda12的环境，CONTAINER_NAME为registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:deploy_image_cuda12
 sh ./create_container.sh <CONTAINER_NAME>
 sh  CONTAINER_NAME/sshme.sh
 ```
