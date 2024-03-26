@@ -1,4 +1,5 @@
 import gc
+import asyncio
 import torch
 import logging
 import traceback
@@ -20,6 +21,8 @@ class AsyncModel:
         self.model = model
         self.sp_model = sp_model
         self.config = model.config
+        self.vit_expand_token_id_lock = asyncio.Lock()
+
         assert self.config.max_seq_len > 0
         self.tokenizer = model.tokenizer        
         logging.info(f'first mem info: used:{get_mem_info().used} free: {get_mem_info().free}')
@@ -32,9 +35,10 @@ class AsyncModel:
     def is_multimodal(self) -> bool:
         return self.model.is_multimodal()
 
-    def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+    async def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
         assert self.is_multimodal()
-        return self.model.expand_token_id(token_ids, images)
+        async with self.vit_expand_token_id_lock:
+            return self.model.expand_token_id(token_ids, images)
 
     def load(self, ref_model: Optional[torch.nn.Module] = None):
         self.model.load(ref_model)

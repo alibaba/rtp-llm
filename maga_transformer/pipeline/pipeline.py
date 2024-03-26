@@ -32,7 +32,6 @@ class Pipeline(object):
         self._img_token: str = self.model.config.vit_related_params.vit_special_tokens.get('default_image_token', '')
         self.piple_funcs: PipelineCustomFunc = get_piple_custom_func(self.model)
         self.download_engine: DownloadEngine = DownloadEngine()
-        self.vit_expand_token_id_lock = asyncio.Lock()
 
     def stop(self):
         if isinstance(self.model, AsyncModel):
@@ -194,8 +193,7 @@ class Pipeline(object):
 
         if self.model.is_multimodal() and len(images) > 0:
             images = await self.download_engine.get(images)
-            async with self.vit_expand_token_id_lock:
-                token_ids, images = self.model.expand_token_id(token_ids, images)
+            token_ids, images = await self.model.expand_token_id(token_ids, images)
 
         token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
 

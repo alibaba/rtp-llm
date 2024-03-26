@@ -2,7 +2,6 @@ from fastapi import Request
 import torch
 from typing import Union, Optional, List, Dict, Generator, Coroutine, AsyncGenerator, Any, Iterator
 import os
-import asyncio
 import logging
 from dataclasses import dataclass
 from functools import partial

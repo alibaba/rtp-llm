@@ -110,7 +110,7 @@ class CustomChatRenderer():
     ) -> AsyncGenerator[StreamResponseObject, None]:
         if model.is_multimodal() and len(images) > 0:
             images = await DownloadEngine.get(images)
-            input_ids, images = model.expand_token_id(input_ids, images)
+            input_ids, images = await model.expand_token_id(input_ids, images)
         
         input_token_length = len(input_ids)
 
