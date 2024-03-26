@@ -17,17 +17,19 @@ test_linkopts = [
 cc_binary(
     name = "gemm_perf",
     srcs = [
-        # "fpa_intb_perf.cu",
-        "weight_only_batched_gemv.cu"
+        "fpa_intb_perf.cu",
+        # "weight_only_batched_gemv.cu"
     ],
     deps = [
         "//src/fastertransformer/cutlass:cutlass_kernels_impl",
-        "//src/fastertransformer/cutlass:cutlass_interface",
+        # "//src/fastertransformer/cutlass:cutlass_interface",
+        "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/utils:utils",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
+    linkopts = test_linkopts,
     visibility = ["//visibility:public"],
 )
 

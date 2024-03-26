@@ -32,24 +32,64 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     deviceMalloc(&out_ptr, m * n, false);
     check_cuda_error(cudaMemset(out_ptr, 0xdc, m * n * sizeof(half)));
 
-    cublasStatus_t status = CUBLAS_STATUS_SUCCESS;
-
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunner<half, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY> runner;
-    char*                                   ws_ptr = nullptr;
-    deviceMalloc(&ws_ptr, runner.getWorkspaceSize(m, n, k));
+    tensorrt_llm::kernels::cutlass_kernels::
+        CutlassFpAIntBGemmRunner<half, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>
+            runner;
+    char*   ws_ptr = nullptr;
 
-    // warm up
-    runner.gemm(in_ptr, w_ptr, s_ptr, out_ptr, m, n, k, ws_ptr, m * n * k, stream);
+    const int ws_size = runner.getWorkspaceSize(m, n, k);
+    deviceMalloc(&ws_ptr, ws_size);
+    const auto bestTactic = runner.getChosenConfig(reinterpret_cast<const void*>(in_ptr),
+                                                   reinterpret_cast<const void*>(w_ptr),
+                                                   reinterpret_cast<const void*>(s_ptr),
+                                                   nullptr,
+                                                   nullptr,
+                                                   reinterpret_cast<void*>(out_ptr),
+                                                   m,
+                                                   n,
+                                                   k,
+                                                   k,
+                                                   reinterpret_cast<char*>(ws_ptr),
+                                                   ws_size,
+                                                   stream);
+
+    FT_CHECK_WITH_INFO(
+        &bestTactic,
+        "No valid weight only per-channel GEMM tactic(It is usually caused by the failure to execute all candidate "
+        "configurations of the CUTLASS kernel, please pay attention to the warning information when building the "
+        "engine.)");
+
+    runner.gemm(reinterpret_cast<const void*>(in_ptr),
+                reinterpret_cast<const void*>(w_ptr),
+                reinterpret_cast<const void*>(s_ptr),
+                reinterpret_cast<void*>(out_ptr),
+                m,
+                n,
+                k,
+                bestTactic,
+                reinterpret_cast<char*>(ws_ptr),
+                ws_size,
+                stream);
 
     cudaEventRecord(start, stream);
 
     int iterations = 10;
     for (int iter = 0; iter < iterations; iter++) {
-        runner.gemm(in_ptr, w_ptr, s_ptr, out_ptr, m, n, k, ws_ptr, m * n * k, stream);
+            runner.gemm(reinterpret_cast<const void*>(in_ptr),
+                reinterpret_cast<const void*>(w_ptr),
+                reinterpret_cast<const void*>(s_ptr),
+                reinterpret_cast<void*>(out_ptr),
+                m,
+                n,
+                k,
+                bestTactic,
+                reinterpret_cast<char*>(ws_ptr),
+                ws_size,
+                stream);
     }
     cudaEventRecord(stop, stream);
     cudaEventSynchronize(stop);
@@ -59,7 +99,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     float avg_time = total_time_ms / float(iterations);
     printf("m=%d n=%d k=%d time=%.6f\n", m, n, k, avg_time);
 
-    check_cuda_error(status);
+    sync_check_cuda_error();
 
     deviceFree(in_ptr);
     deviceFree(w_ptr);
