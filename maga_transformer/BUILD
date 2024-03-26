@@ -244,7 +244,7 @@ py_wheel(
         "//deps:extension_package",
     ],
     requires=[
-        "filelock",
+        "filelock==3.13.1",
         "jinja2",
         "sympy",
         "typing-extensions",
@@ -286,7 +286,7 @@ py_wheel(
         "//deps:extension_package",
     ],
     requires=[
-        "filelock",
+        "filelock==3.13.1",
         "jinja2",
         "sympy",
         "typing-extensions",

@@ -1,4 +1,4 @@
-filelock
+filelock==3.13.1
 jinja2
 sympy
 typing-extensions
