@@ -18,6 +18,7 @@
 
 #include "src/fastertransformer/utils/assert_utils.h"
 #include "src/fastertransformer/utils/logger.h"
+#include "src/fastertransformer/core/Types.h"
 
 #include <cublasLt.h>
 #include <cublas_v2.h>
@@ -814,6 +815,25 @@ template<typename T>
 void setCudaValue(T* ptr, int index, T value) {
     check_cuda_error(cudaMemcpy(ptr + index, &value, sizeof(T), cudaMemcpyHostToDevice));
 }
+
+/* **************************** type dispatch ***************************** */
+
+#define DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, function, ...)                              \
+    do {                                                                                        \
+        switch (data_type) {                                                                    \
+            case DataType::TYPE_FP32:                                                           \
+                function<float>(__VA_ARGS__);                                                   \
+                break;                                                                          \
+            case DataType::TYPE_FP16:                                                           \
+                function<half>(__VA_ARGS__);                                                    \
+                break;                                                                          \
+            case DataType::TYPE_BF16:                                                           \
+                function<__nv_bfloat16>(__VA_ARGS__);                                           \
+                break;                                                                          \
+            default:                                                                            \
+                FT_CHECK(false);                                                                \
+        }                                                                                       \
+    } while (0)
 
 /* ************************** end of common utils ************************** */
 }  // namespace fastertransformer

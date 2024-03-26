@@ -7,18 +7,6 @@ using namespace fastertransformer;
 class CudaGemmOpTest: public CudaDeviceTestBase {
 public:
 
-    double rtol_;
-    double atol_;
-
-    void SetUp() override {
-        CudaDeviceTestBase::SetUp();
-        rtol_ = 1e-03;
-        atol_ = 1e-03;
-    }
-    void TearDown() override {
-        CudaDeviceTestBase::TearDown();
-    }
-
     void BasicGemmOP(size_t m, size_t n, size_t k);
     void BatchGemmOP(size_t b, size_t m, size_t n, size_t k);
 
@@ -41,10 +29,10 @@ void CudaGemmOpTest::BasicGemmOP(size_t m, size_t n, size_t k) {
     GemmParams params {*A_device, *B_device};
     auto C_device = device_->gemm(params);
 
-    C_host = torch::matmul(A_host, B_host);
-    auto A     = CreateTensor(*A_device);
-    auto B     = CreateTensor(*B_device);
-    auto C     = CreateTensor(*C_device);
+    C_host = torch::matmul(A_host, B_host).to(torch::kHalf);
+    auto A     = bufferToTensor(*A_device);
+    auto B     = bufferToTensor(*B_device);
+    auto C     = bufferToTensor(*C_device);
 
     ASSERT_TRUE(torch::allclose(C, C_host, rtol_, atol_));
 }
@@ -63,10 +51,10 @@ void CudaGemmOpTest::BatchGemmOP(size_t b, size_t m, size_t n, size_t k) {
     GemmParams params {*A_device, *B_device};
     auto C_device = device_->gemm(params);
 
-    C_host = torch::matmul(A_host, B_host);
-    auto A     = CreateTensor(*A_device);
-    auto B     = CreateTensor(*B_device);
-    auto C     = CreateTensor(*C_device);
+    C_host = torch::matmul(A_host, B_host).to(torch::kHalf);
+    auto A     = bufferToTensor(*A_device);
+    auto B     = bufferToTensor(*B_device);
+    auto C     = bufferToTensor(*C_device);
 
     ASSERT_TRUE(torch::allclose(C, C_host, rtol_, atol_));
 }
@@ -96,10 +84,10 @@ void CudaGemmOpTest::TransposeBatchGemmOP(TransposeOperation op_a,
     if (op_b == TransposeOperation::TRANSPOSE) {
         B_host = B_host.transpose(1, 2);
     }
-    C_host = torch::matmul(A_host, B_host);
-    auto A     = CreateTensor(*A_device);
-    auto B     = CreateTensor(*B_device);
-    auto C     = CreateTensor(*C_device);
+    C_host = torch::matmul(A_host, B_host).to(torch::kHalf);
+    auto A     = bufferToTensor(*A_device);
+    auto B     = bufferToTensor(*B_device);
+    auto C     = bufferToTensor(*C_device);
     std::cout << C_host.sizes() << std::endl;
     std::cout << C_host[0] << std::endl;
     std::cout << C.sizes() << std::endl;

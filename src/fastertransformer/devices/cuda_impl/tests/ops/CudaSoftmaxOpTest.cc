@@ -8,19 +8,6 @@ using namespace fastertransformer;
 
 class CudaSoftmaxOpTest: public CudaDeviceTestBase {
 public:
-
-    double rtol_;
-    double atol_;
-
-    void SetUp() override {
-        CudaDeviceTestBase::SetUp();
-        rtol_ = 1e-03;
-        atol_ = 1e-03;
-    }
-    void TearDown() override {
-        CudaDeviceTestBase::TearDown();
-    }
-
     void BasicSoftmaxTest(size_t b,
                           size_t head_num,
                           size_t q_len,
@@ -56,9 +43,9 @@ void CudaSoftmaxOpTest::BasicSoftmaxTest(size_t b,
     mask_host = mask_host.reshape({(int)b, 1, (int)q_len, (int)k_len});
     auto result_ref = torch::softmax(input_host + mask_host, -1);
 
-    auto result = CreateTensor(*output_device);
+    auto result = bufferToTensor(*output_device);
 
-    ASSERT_TRUE(torch::allclose(result, result_ref, rtol_, atol_));
+    assertTensorClose(result, result_ref);
 }
 
 void CudaSoftmaxOpTest::ScaleSoftmaxTest(float scale,
@@ -85,9 +72,9 @@ void CudaSoftmaxOpTest::ScaleSoftmaxTest(float scale,
     mask_host = mask_host.reshape({(int)b, 1, (int)q_len, (int)k_len});
     auto result_ref = torch::softmax((input_host + mask_host) * scale, -1);
 
-    auto result = CreateTensor(*output_device);
+    auto result = bufferToTensor(*output_device);
 
-    ASSERT_TRUE(torch::allclose(result, result_ref, rtol_, atol_));
+    assertTensorClose(result, result_ref);
 }
 
 

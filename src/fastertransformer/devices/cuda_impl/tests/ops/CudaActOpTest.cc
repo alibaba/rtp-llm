@@ -6,19 +6,6 @@ using namespace fastertransformer;
 
 class CudaActOpTest: public CudaDeviceTestBase {
 public:
-
-    double rtol_;
-    double atol_;
-
-    void SetUp() override {
-        CudaDeviceTestBase::SetUp();
-        rtol_ = 1e-03;
-        atol_ = 1e-03;
-    }
-    void TearDown() override {
-        CudaDeviceTestBase::TearDown();
-    }
-
     void BasicActTest(ActivationType atype, size_t m, size_t n);
     void GateActTest(ActivationType atype, size_t m, size_t n);
 
@@ -38,7 +25,7 @@ void CudaActOpTest::BasicActTest(ActivationType atype, size_t m, size_t n) {
     } else if (atype == ActivationType::Gelu) {
         output_host = torch::gelu(input_host);
     }
-    auto output_device = CreateTensor(*input_device);
+    auto output_device = bufferToTensor(*input_device).to(output_host.dtype());
 
     ASSERT_TRUE(torch::allclose(output_host, output_device, rtol_, atol_));
 }
@@ -66,7 +53,7 @@ void CudaActOpTest::GateActTest(ActivationType atype, size_t m, size_t n) {
     }
     output_host = output_host * gate_host;
 
-    auto output_device = CreateTensor(*input_device);
+    auto output_device = bufferToTensor(*input_device).to(output_host.dtype());
 
     ASSERT_TRUE(torch::allclose(output_host, output_device, rtol_, atol_));
 }

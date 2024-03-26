@@ -29,35 +29,52 @@ size_t calcTensorBytes(torch::Tensor tensor) {
     return tensor.numel() * torch::elementSize(torch::typeMetaToScalarType(tensor.dtype()));
 }
 
+#define FOREACH_BUFFER_TORCH_TYPE_MAP(F) \
+    F(TYPE_UINT8, torch::kByte) \
+    F(TYPE_INT8, torch::kChar) \
+    F(TYPE_INT16, torch::kShort) \
+    F(TYPE_INT32, torch::kInt) \
+    F(TYPE_INT64, torch::kLong) \
+    F(TYPE_FP16, torch::kHalf) \
+    F(TYPE_FP32, torch::kFloat) \
+    F(TYPE_FP64, torch::kDouble) \
+    F(TYPE_BOOL, torch::kBool) \
+    F(TYPE_BF16, torch::kBFloat16) \
+    F(TYPE_FP8_E4M3, torch::kFloat8_e4m3fn)
+
 inline DataType torchDTypeToDataType(caffe2::TypeMeta dtype) {
+#define TYPE_CASE(type, torch_type) \
+    case torch_type: { \
+        return type;   \
+    }
+
     switch (dtype.toScalarType()) {
-    case torch::ScalarType::Byte:
-        return DataType::TYPE_UINT8;
-    case torch::ScalarType::Char:
-        return DataType::TYPE_INT8;
-    case torch::ScalarType::Short:
-        return DataType::TYPE_INT16;
-    case torch::ScalarType::Int:
-        return DataType::TYPE_INT32;
-    case torch::ScalarType::Long:
-        return DataType::TYPE_INT64;
-    case torch::ScalarType::Half:
-        return DataType::TYPE_FP16;
-    case torch::ScalarType::Float:
-        return DataType::TYPE_FP32;
-    case torch::ScalarType::Double:
-        return DataType::TYPE_FP64;
-    case torch::ScalarType::Bool:
-        return DataType::TYPE_BOOL;
-    case torch::ScalarType::BFloat16:
-        return DataType::TYPE_BF16;
-    case torch::ScalarType::Float8_e4m3fn:
-        return DataType::TYPE_FP8_E4M3;
+        FOREACH_BUFFER_TORCH_TYPE_MAP(TYPE_CASE);
     default:
         FT_LOG_ERROR("Unsupported data type: [%d]%s", dtype.toScalarType(), dtype.name().data());
         throw std::runtime_error("Unsupported data type " + std::to_string((int8_t)(dtype.toScalarType())));
     }
+
+#undef TYPE_CASE
 }
+
+inline c10::ScalarType dataTypeToTorchType(DataType data_type) {
+#define TYPE_CASE(type, torch_type) \
+    case type: { \
+        return torch_type;   \
+    }
+
+    switch (data_type) {
+        FOREACH_BUFFER_TORCH_TYPE_MAP(TYPE_CASE);
+    default:
+        FT_LOG_ERROR("Unsupported data type: [%d]", data_type);
+        throw std::runtime_error("Unsupported data type " + std::to_string((int8_t)data_type));
+    }
+
+#undef TYPE_CASE
+}
+
+#undef FOREACH_BUFFER_TORCH_TYPE_MAP
 
 MemoryType torchDeviceToMemoryType(const c10::Device& device ) {
     return device.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;

@@ -63,27 +63,6 @@ protected:
         return move(buffer);
     }
 
-    torch::Tensor CreateTensor(const Buffer& buffer) {
-        EXPECT_EQ(buffer.where(), MemoryType::MEMORY_GPU);
-        size_t bytes_size = buffer.size() * sizeof(float);
-        float* result = reinterpret_cast<float*>(malloc(bytes_size));
-        if (buffer.type() == DataType::TYPE_FP16) {
-            half* data = reinterpret_cast<half*>(buffer.data());
-            half* tmp = reinterpret_cast<half*>(malloc(buffer.size() * sizeof(half)));
-            check_cuda_error(cudaMemcpy(tmp, data, sizeof(half) * buffer.size(), cudaMemcpyDeviceToHost));
-            cudaDeviceSynchronize();
-            auto half2float = [](half x) { return float(x); };
-            std::transform(tmp, tmp + buffer.size(), result, half2float);
-            free(tmp);
-        } else if (buffer.type() == DataType::TYPE_FP32) {
-            float* data = reinterpret_cast<float*>(buffer.data());
-            check_cuda_error(cudaMemcpy(result, data, sizeof(float) * buffer.size(), cudaMemcpyDeviceToHost));
-            cudaDeviceSynchronize();
-        }
-        auto tensor = torch::from_blob(
-            (void*)result, bufferShapeToTorchShape(buffer), torch::Device(torch::kCPU)).to(torch::kFloat);
-        return tensor;
-    }
 
 };
 

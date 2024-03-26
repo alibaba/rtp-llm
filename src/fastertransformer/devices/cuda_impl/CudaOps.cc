@@ -45,10 +45,6 @@ GroupedGemmOutput CudaDevice::groupedGemm(const GroupedGemmParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
 AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

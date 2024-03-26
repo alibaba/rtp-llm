@@ -7,19 +7,6 @@ using namespace std;
 using namespace fastertransformer;
 
 class CudaFFnOpTest: public CudaDeviceTestBase {
-public:
-
-    double rtol_;
-    double atol_;
-
-    void SetUp() override {
-        CudaDeviceTestBase::SetUp();
-        rtol_ = 1e-03;
-        atol_ = 1e-03;
-    }
-    void TearDown() override {
-        CudaDeviceTestBase::TearDown();
-    }
 };
 
 struct MLPImpl : torch::nn::Module {
@@ -74,15 +61,15 @@ TEST_F(CudaFFnOpTest, testFFNOp) {
     auto down_proj_device = CreateDeviceBuffer<half>(down_proj_host);
     auto output_device = CreateDeviceBuffer<half>(output_host);
 
-    auto input      = CreateTensor(*input_device);
-    auto gate_proj  = CreateTensor(*gate_proj_device);
-    auto up_proj    = CreateTensor(*up_proj_device);
-    auto down_proj  = CreateTensor(*down_proj_device);
+    auto input      = bufferToTensor(*input_device);
+    auto gate_proj  = bufferToTensor(*gate_proj_device);
+    auto up_proj    = bufferToTensor(*up_proj_device);
+    auto down_proj  = bufferToTensor(*down_proj_device);
 
-    ASSERT_TRUE(torch::allclose(input, input_host, rtol_, atol_));
-    ASSERT_TRUE(torch::allclose(gate_proj, gate_proj_host, rtol_, atol_));
-    ASSERT_TRUE(torch::allclose(up_proj, up_proj_host, rtol_, atol_));
-    ASSERT_TRUE(torch::allclose(down_proj, down_proj_host, rtol_, atol_));
+    assertTensorClose(input, input_host);
+    assertTensorClose(gate_proj, gate_proj_host);
+    assertTensorClose(up_proj, up_proj_host);
+    assertTensorClose(down_proj, down_proj_host);
 
     ActivationType atype = ActivationType::Silu;
 
@@ -94,7 +81,7 @@ TEST_F(CudaFFnOpTest, testFFNOp) {
     //                       atype);
     // device_->ffnLayer(params);
 
-    // auto result     = CreateTensor(*output_device);
+    // auto result     = bufferToTensor(*output_device);
 
     // auto result_host = mlp->forward(input_host);
 

@@ -6,13 +6,6 @@ using namespace fastertransformer;
 
 class CudaSamplerTest: public CudaDeviceTestBase {
 public:
-
-    void SetUp() override {
-        CudaDeviceTestBase::SetUp();
-    }
-    void TearDown() override {
-        CudaDeviceTestBase::TearDown();
-    }
 };
 
 TEST_F(CudaSamplerTest, testTopK) {

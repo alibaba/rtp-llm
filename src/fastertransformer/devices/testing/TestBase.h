@@ -1,8 +1,10 @@
 #pragma once
 
 #include <gtest/gtest.h>
+#include <torch/torch.h>
 
 #include "src/fastertransformer/devices/DeviceFactory.h"
+#include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/logger.h"
 
@@ -37,7 +39,12 @@ public:
         std::cout << "test_binary [" << test_binary << "]" << std::endl;
         std::cout << "test using data path [" << test_data_path_ << "]" << std::endl;
     }
+
     void TearDown() override {}
+
+protected:
+    double rtol_ = 1e-03;
+    double atol_ = 1e-03;
 
 protected:
     template <typename T>
@@ -104,6 +111,34 @@ protected:
             memcpy(values.data(), buffer.data(), sizeof(T) * buffer.size());
         }
         return values;
+    }
+
+    torch::Tensor bufferToTensor(const Buffer& buffer) {
+        auto host_buffer = device_->allocateBuffer(
+            {buffer.type(), buffer.shape(), AllocationType::HOST}
+        );
+        device_->copy(CopyParams(*host_buffer, buffer));
+
+        return torch::from_blob(
+            host_buffer->data(), bufferShapeToTorchShape(buffer),
+            c10::TensorOptions().device(torch::Device(torch::kCPU))
+                                .dtype(dataTypeToTorchType(buffer.type()))
+        ).clone();
+    }
+
+    void assertTensorClose(const torch::Tensor& a, const torch::Tensor& b) {
+        auto a_cmp = a;
+        auto b_cmp = b;
+        ASSERT_TRUE(a.is_floating_point() == b.is_floating_point());
+
+        if (a_cmp.dtype() != b_cmp.dtype()) {
+            auto cmp_type = (a_cmp.dtype().itemsize() > b_cmp.dtype().itemsize()) ?
+                            a_cmp.dtype() : b_cmp.dtype();
+            a_cmp = a_cmp.to(cmp_type);
+            b_cmp = b_cmp.to(cmp_type);
+        }
+
+        ASSERT_TRUE(torch::allclose(a_cmp, b_cmp, rtol_, atol_));
     }
 
 protected:

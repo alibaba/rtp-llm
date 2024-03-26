@@ -8,20 +8,6 @@ using namespace fastertransformer;
 
 class CudaOpsTest: public DeviceTestBase<DeviceType::Cuda> {
 public:
-    void SetUp() override {
-        DeviceTestBase<DeviceType::Cuda>::SetUp();
-    }
-    void TearDown() override {
-        DeviceTestBase<DeviceType::Cuda>::TearDown();
-    }
-
-    void syncCudaAndCheckError() {
-        cudaDeviceSynchronize();
-        cudaError_t result = cudaGetLastError();
-        if (result) {
-            throw std::runtime_error(std::string("CUDA runtime error: ") + (_cudaGetErrorEnum(result)));
-        }
-    }
 };
 
 TEST_F(CudaOpsTest, testCopy) {
@@ -32,7 +18,7 @@ TEST_F(CudaOpsTest, testCopy) {
     device_->copy({*B, *A});
     device_->copy({*C, *B});
 
-    syncCudaAndCheckError();
+    sync_check_cuda_error();
     assertBufferValueEqual(*C, expected);
 }
 

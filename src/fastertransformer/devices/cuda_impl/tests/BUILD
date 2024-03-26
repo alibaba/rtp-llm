@@ -98,3 +98,14 @@ cc_test(
     deps = test_deps,
 )
 
+cc_test(
+    name = "embedding_lookup_test",
+    srcs = [
+        "EmbeddingLookupTest.cc",
+    ],
+    data = [],
+    copts = cuda_copts() + copts() + torch_deps(),
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
+
