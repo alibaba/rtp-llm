@@ -26,10 +26,9 @@ class QuantAlgo{
 
 public:
     QuantAlgo() = default;
-    QuantAlgo(int int8_mode, bool int4_mode, bool use_pre_scales, bool use_zeros, int64_t group_size):
+    QuantAlgo(int int8_mode, bool int4_mode, bool use_zeros, int64_t group_size):
         int8_mode_(int8_mode),
         int4_mode_(int4_mode),
-        use_pre_scales_(use_pre_scales),
         use_zeros_(use_zeros),
         group_size_(group_size) {
         }
@@ -37,7 +36,6 @@ public:
     QuantAlgo(const QuantAlgo& quant_algo):
         int8_mode_(quant_algo.int8Mode()),
         int4_mode_(quant_algo.int4Mode()),
-        use_pre_scales_(quant_algo.usePreScales()),
         use_zeros_(quant_algo.useZeros()),
         group_size_(quant_algo.getGroupSize()) {
         }
@@ -53,10 +51,6 @@ public:
         return int4_mode_;
     }
 
-    constexpr bool usePreScales() const {
-        return use_pre_scales_;
-    }
-
     constexpr bool useZeros() const {
         return use_zeros_;
     }
@@ -69,7 +63,6 @@ public:
 private:
     int     int8_mode_      = 0;
     bool    int4_mode_      = false;
-    bool    use_pre_scales_ = false;
     bool    use_zeros_      = false;
     int64_t group_size_     = -1;
 

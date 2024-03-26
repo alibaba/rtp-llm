@@ -307,7 +307,7 @@ static auto fasterTransformerGptTHS =
                               int64_t,                  // pipeline_para_size
                               std::string,              // master_ip
                               int64_t,                  // master_port
-                              std::vector<std::unordered_map<std::string, th::Tensor>>>())  // quant_pre_scales
+                              std::vector<std::unordered_map<std::string, th::Tensor>>>()) 
         .def("forward", &torch_ext::ParallelGptOp::forward)
         .def("add_lora", &torch_ext::ParallelGptOp::addLoRA)
         .def("remove_lora", &torch_ext::ParallelGptOp::removeLoRA);

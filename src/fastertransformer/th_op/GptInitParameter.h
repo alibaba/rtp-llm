@@ -20,10 +20,10 @@ struct QuantAlgo: public th::jit::CustomClassHolder {
 public:
     bool    int8_mode_              = false;
     bool    int4_mode_              = false;
-    bool    has_pre_scale_          = false;
     bool    has_zeros_              = false;
     int64_t weight_only_group_size_ = 0;
-    std::string quant_method_       = "";
+    bool    is_gptq_                = false;
+    bool    is_awq_                 = false;
 };
 
 struct SpecialTokens: public th::jit::CustomClassHolder {

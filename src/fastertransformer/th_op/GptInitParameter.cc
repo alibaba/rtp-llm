@@ -46,10 +46,10 @@ bool GptInitParameter::isGatedActivation() {
 #define REGISTER_PROPERTYS                                                                                             \
     DEF_PROPERTY(int8_mode)                                                                                            \
     DEF_PROPERTY(int4_mode)                                                                                            \
-    DEF_PROPERTY(has_pre_scale)                                                                                        \
     DEF_PROPERTY(has_zeros)                                                                                            \
     DEF_PROPERTY(weight_only_group_size)                                                                               \
-    DEF_PROPERTY(quant_method)                                                                               
+    DEF_PROPERTY(is_gptq)                                                                                              \
+    DEF_PROPERTY(is_awq)
 
 static auto quantAlgoTHS =
 #ifdef LEGACY_THS

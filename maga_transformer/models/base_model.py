@@ -103,10 +103,6 @@ class ModelConfig(ModelConfigBase):
     @property
     def int8_mode(self):
         return True if self.weight_type == WEIGHT_TYPE.INT8 else False
-    
-    @property
-    def int4_mode(self):
-        return True if self.weight_type == WEIGHT_TYPE.INT4 else False
 
     def add_ref_model(self, ref_model: Optional[torch.nn.Module]):
         self.ref_model = ref_model
@@ -127,10 +123,13 @@ class BaseModel(object):
         config: GptInitModelParameters = cls._create_config(model_config.ckpt_path)
         if config.hidden_size == 0:
             config.hidden_size = config.size_per_head * config.head_num
+        int8_mode = model_config.int8_mode
+        if config.quant_algo.int4_mode:
+            int8_mode = False
         config.update_common(
             ckpt_path=model_config.ckpt_path,
             tokenizer_path=model_config.tokenizer_path,
-            int8_mode=model_config.int8_mode,
+            int8_mode=int8_mode,
             data_type=model_config.act_type,
             max_seq_len=model_config.max_seq_len,
             seq_size_per_block=model_config.seq_size_per_block,

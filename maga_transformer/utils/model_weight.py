@@ -274,19 +274,14 @@ class W:
     # gptq
     attn_qkv_z = 'self_attention_weights.query_weight.zero'
     attn_qkv_s = 'self_attention_weights.query_weight.weight_only_quant_scale'
-    attn_qkv_p = 'self_attention_weights.query_weight.pre_scale'
     attn_o_z = 'self_attention_weights.attention_output_weight.zero'
     attn_o_s = 'self_attention_weights.attention_output_weight.weight_only_quant_scale'
-    attn_o_p = 'self_attention_weights.attention_output_weight.pre_scale'
     ffn_z1 = 'ffn_weights.intermediate_weight.zero'
     ffn_s1 = 'ffn_weights.intermediate_weight.weight_only_quant_scale'
-    ffn_p1 = 'ffn_weights.intermediate_weight.pre_scale'
     ffn_z3 = 'ffn_weights.intermediate_weight3.zero'
     ffn_s3 = 'ffn_weights.intermediate_weight3.weight_only_quant_scale'
-    ffn_p3 = 'ffn_weights.intermediate_weight3.pre_scale'
     ffn_z2 = 'ffn_weights.intermediate_weight2.zero'
     ffn_s2 = 'ffn_weights.intermediate_weight2.weight_only_quant_scale'
-    ffn_p2 = 'ffn_weights.intermediate_weight2.pre_scale'
 
     # medusa lm_head
     medusa_head = 'medusa_head'
@@ -365,27 +360,22 @@ class W:
         attn_qkv_w: sp_head,
         attn_qkv_z: sp_head_z,
         attn_qkv_s: sp_head_s,
-        attn_qkv_p: sp_head,
         attn_qkv_b: sp_head_b,
         attn_o_w: sp_0,
         attn_o_z: sp_0,
         attn_o_s: sp_0,
-        attn_o_p: sp_0,
         attn_o_b: sp_id,
         ffn_w1: sp_neg1,
         ffn_z1: sp_neg1,
         ffn_s1: sp_neg1,
-        ffn_p1: sp_neg1,
         ffn_b1: sp_neg1,
         ffn_w3: sp_neg1,
         ffn_z3: sp_neg1,
         ffn_s3: sp_neg1,
-        ffn_p3: sp_neg1,
         ffn_b3: sp_neg1,
         ffn_w2: sp_0,
         ffn_z2: sp_0,
         ffn_s2: sp_0,
-        ffn_p2: sp_0,
         ffn_b2: sp_id,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
@@ -593,8 +583,8 @@ class ModelDeployWeightInfo:
         self._int8_mode = config.quant_algo.int8_mode
         self._int4_mode = config.quant_algo.int4_mode
         self._is_quant_mode = config.is_quant_mode
-        self._is_gptq = config.quant_algo.quant_method == 'gptq'
-        self._is_awq = config.quant_algo.quant_method == 'awq'
+        self._is_gptq = config.quant_algo.is_gptq
+        self._is_awq = config.quant_algo.is_awq
         self._num_layers = config.num_layers
         self._layer_head_num = config.layer_head_num
         self._layer_inter_padding_size = config.layer_inter_padding_size

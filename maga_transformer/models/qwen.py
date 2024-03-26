@@ -280,11 +280,10 @@ class QWenBase(GPT):
             config.quant_algo.weight_only_group_size = group_size
             quant_method = quant_config.get("quant_method", None)
             if quant_method == 'gptq':
-                config.quant_algo.has_pre_scale = False
+                config.quant_algo.is_gptq = True
                 config.quant_algo.has_zeros = True
             else: 
                 raise ValueError("Unsupported quant method: %s" % (quant_method))
-            config.quant_algo.int8_mode = False
 
         use_dynamic_ntk = config_json.get("use_dynamic_ntk")
         use_logn_attn = config_json.get("use_logn_attn")

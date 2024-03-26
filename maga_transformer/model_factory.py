@@ -54,10 +54,11 @@ class ModelFactory:
     #TODO: remove model_config, get all info from gpt_config
     @staticmethod
     def model_config_json(model_cls: Type[Any], model_config: ModelConfig, config: GptInitModelParameters) -> Dict[str, Any]:
+        weight_type = model_config.weight_type if config.quant_algo.int4_mode==False else WEIGHT_TYPE.INT4
         config_json = {
             "model_type": model_cls.__name__,
             "act_type": str(model_config.act_type),
-            "weight_type": str(model_config.weight_type),
+            "weight_type": str(weight_type),
             "max_seq_len": config.max_seq_len,
             "use_sparse_head": config.is_sparse_head,
             "use_multi_task_prompt": config.multi_task_prompt,

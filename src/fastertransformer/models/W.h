@@ -43,19 +43,14 @@ static const std::string post_ffn_ln_beta      = "post_ffn_layernorm_weights.bet
 
 static const std::string attn_qkv_z = "self_attention_weights.query_weight.zero";
 static const std::string attn_qkv_s = "self_attention_weights.query_weight.weight_only_quant_scale";
-static const std::string attn_qkv_p = "self_attention_weights.query_weight.pre_scale";
 static const std::string attn_o_z = "self_attention_weights.attention_output_weight.zero";
 static const std::string attn_o_s = "self_attention_weights.attention_output_weight.weight_only_quant_scale";
-static const std::string attn_o_p = "self_attention_weights.attention_output_weight.pre_scale";
 static const std::string ffn_z1 = "ffn_weights.intermediate_weight.zero";
 static const std::string ffn_s1 = "ffn_weights.intermediate_weight.weight_only_quant_scale";
-static const std::string ffn_p1 = "ffn_weights.intermediate_weight.pre_scale";
 static const std::string ffn_z3 = "ffn_weights.intermediate_weight3.zero";
 static const std::string ffn_s3 = "ffn_weights.intermediate_weight3.weight_only_quant_scale";
-static const std::string ffn_p3 = "ffn_weights.intermediate_weight3.pre_scale";
 static const std::string ffn_z2 = "ffn_weights.intermediate_weight2.zero";
 static const std::string ffn_s2 = "ffn_weights.intermediate_weight2.weight_only_quant_scale";
-static const std::string ffn_p2 = "ffn_weights.intermediate_weight2.pre_scale";
 
 }
 }

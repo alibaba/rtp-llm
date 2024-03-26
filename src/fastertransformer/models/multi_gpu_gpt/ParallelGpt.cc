@@ -11,7 +11,6 @@ void ParallelGpt<T>::initialize()
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     quant_algo_                 = tc::QuantAlgo(params_.quant_algo_->int8_mode_,
                                 params_.quant_algo_->int4_mode_,
-                                params_.quant_algo_->has_pre_scale_,
                                 params_.quant_algo_->has_zeros_,
                                 params_.quant_algo_->weight_only_group_size_);
     parallel_attention_wrapper_ = new ParallelAttentionWrapper<T>(params_,

@@ -45,7 +45,6 @@ void GemmRunner<T>::Gemm(int m, int n, int k, const T* inputs, const DenseWeight
                                                       reinterpret_cast<const void*>(weights->weight_only_quant_scale),
                                                       reinterpret_cast<const void*>(weights->int4_zeros),
                                                       nullptr,
-                                                      nullptr,
                                                       reinterpret_cast<void*>(outputs),
                                                       reinterpret_cast<void*>(workspace_),
                                                       m,

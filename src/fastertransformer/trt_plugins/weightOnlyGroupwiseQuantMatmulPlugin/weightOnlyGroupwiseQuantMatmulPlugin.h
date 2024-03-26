@@ -37,7 +37,7 @@ class WeightOnlyGroupwiseQuantMatmulPlugin
 public:
     WeightOnlyGroupwiseQuantMatmulPlugin() = delete;
 
-    WeightOnlyGroupwiseQuantMatmulPlugin(nvinfer1::DataType type, bool has_pre_scale, bool has_zeros, int group_size);
+    WeightOnlyGroupwiseQuantMatmulPlugin(nvinfer1::DataType type, bool has_zeros, int group_size);
 
     ~WeightOnlyGroupwiseQuantMatmulPlugin() = default;
 
@@ -46,7 +46,6 @@ public:
                    const void*  weights,
                    const void*  scales,
                    const void*  zeros,
-                   const void*  pre_scales,
                    const void*  biases,
                    void*        outputs,
                    void*        workspace,
@@ -57,7 +56,7 @@ public:
 
 private:
     // group_size: 64, 128
-    void init(nvinfer1::DataType type, bool has_pre_scale, bool has_zeros,int group_size);
+    void init(nvinfer1::DataType type, bool has_zeros,int group_size);
 
     void configGemm();
 
@@ -67,7 +66,6 @@ private:
     size_t m_workspaceMaxSize;
     nvinfer1::DataType mType;
     bool mCudaKernelEnabled;
-    bool mHasPreScale;
     bool mHasZeros;
 
     int mGroupSize;

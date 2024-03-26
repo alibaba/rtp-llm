@@ -172,9 +172,6 @@ def get_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
         int8_mode = int(env_param.get("INT8_MODE", "0"))
         if int8_mode == 1:
             return WEIGHT_TYPE.INT8
-        int4_mode = int(env_param.get("INT4_MODE", "0"))
-        if int4_mode == 1:
-            return WEIGHT_TYPE.INT4
         return WEIGHT_TYPE.FP16
 
 def get_sp_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:

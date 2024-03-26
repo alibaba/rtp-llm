@@ -23,17 +23,16 @@ using tensorrt_llm::plugins::WeightOnlyGroupwiseQuantMatmulPlugin;
 
 static constexpr int PRE_QUANT_SCALE = int(1) << 2;
 
-WeightOnlyGroupwiseQuantMatmulPlugin::WeightOnlyGroupwiseQuantMatmulPlugin(nvinfer1::DataType type, bool has_pre_scale, bool has_zeros,
+WeightOnlyGroupwiseQuantMatmulPlugin::WeightOnlyGroupwiseQuantMatmulPlugin(nvinfer1::DataType type, bool has_zeros,
     int group_size)
 {
-    init(type, has_pre_scale, has_zeros, group_size);
+    init(type, has_zeros, group_size);
 }
 
-void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type, bool has_pre_scale, bool has_zeros,int group_size)
+void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type, bool has_zeros,int group_size)
 {
     mType = type;
     mGroupSize = group_size;
-    mHasPreScale = has_pre_scale;
     mHasZeros = has_zeros;
 
     if (mType == nvinfer1::DataType::kHALF)
@@ -88,7 +87,6 @@ int WeightOnlyGroupwiseQuantMatmulPlugin::enqueue(const void*  inputs,
                                                   const void*  weights,
                                                   const void*  scales,
                                                   const void*  zeros,
-                                                  const void*  pre_scales,
                                                   const void*  biases,
                                                   void*        outputs,
                                                   void*        workspace,
@@ -99,11 +97,10 @@ int WeightOnlyGroupwiseQuantMatmulPlugin::enqueue(const void*  inputs,
 {
     // inputs
     //   0 activations      [M, K]
-    //   1 pre-quant scales [K]
-    //   2 weights          [K, N/2]
-    //   3 scales           [K // group_size, N]
-    //   4 zeros            [K // group_size, N]
-    //   5 biases           [M]
+    //   1 weights          [K, N/2]
+    //   2 scales           [K // group_size, N]
+    //   3 zeros            [K // group_size, N]
+    //   4 biases           [M]
     // outputs
     //   mat                [M, N]
 
