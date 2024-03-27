@@ -8,6 +8,7 @@ namespace fastertransformer {
 enum class DeviceType {
     Cpu  = 0,
     Cuda = 1,
+    Yitian = 2,
 };
 
 class DeviceFactory {

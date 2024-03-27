@@ -13,7 +13,10 @@ unordered_map<DeviceType, function<DeviceBase*()>>& DeviceFactory::getRegistrati
 DeviceBase* DeviceFactory::getDevice(DeviceType type, int device_id) {
     auto& registrationMap = getRegistrationMap();
     auto it = registrationMap.find(type);
-    assert(it != registrationMap.end());
+    if (it == registrationMap.end()) {
+        FT_LOG_ERROR("Device type %d is not registered !", static_cast<int>(type));
+        abort();
+    }
     return it->second();
 }
 
