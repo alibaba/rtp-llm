@@ -136,7 +136,7 @@ rm $DIR/$FILE_NAME -f
 cp $WHL_FILE $DIR/
 
 docker build --build-arg REQUIREMENT_FILE=$REQUIREMENT_FILE --build-arg WHL_FILE=$FILE_NAME \
-       -f /tmp/nvidia_maga_deploy.Dockerfile --network=host -t $MAGA_DEPLOY_IMAGE:$· $DIR
+       -f /tmp/nvidia_maga_deploy.Dockerfile --network=host -t $MAGA_DEPLOY_IMAGE:$VERSION_TAG $DIR
 docker tag $MAGA_DEPLOY_IMAGE:$VERSION_TAG $MAGA_DEPLOY_IMAGE:latest
 docker push $MAGA_DEPLOY_IMAGE:$VERSION_TAG
 docker push $MAGA_DEPLOY_IMAGE:latest
