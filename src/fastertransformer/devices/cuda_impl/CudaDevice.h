@@ -29,6 +29,7 @@ public:
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);
     AttentionLayerOutput attentionLayer(const AttentionLayerParams& params);
     FfnLayerOutput ffnLayer(const FfnLayerParams& params);
+    LoraLinearOutput loraLinear(const LoraLinearParams& params);
     void sampleGreedy(const GreedyParams& params);
     void sampleBeamSearch(const BeamSearchParams& params);
     void broadcast(const BroadcastParams& params);

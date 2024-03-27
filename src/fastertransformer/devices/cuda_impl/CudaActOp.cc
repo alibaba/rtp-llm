@@ -42,6 +42,8 @@ namespace fastertransformer {
         KERNEL(SiluActivation, Dtype, __VA_ARGS__);             \
     } else if (Atype == ActivationType::Gelu) {                 \
         KERNEL(GeluActivation, Dtype, __VA_ARGS__);             \
+    } else if (Atype == ActivationType::Swiglu) {               \
+        KERNEL(SiluActivation, Dtype, __VA_ARGS__);             \
     } else {                                                    \
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);    \
     }                                                           \
@@ -70,7 +72,7 @@ namespace fastertransformer {
 void CudaDevice::activation(const ActivationParams& params) {
     const auto& states = params.states;
     size_t m = states.shape()[0];
-    size_t n = states.shape()[0];
+    size_t n = states.shape()[1];
 
     void* bias = nullptr;
     void* gate = nullptr;

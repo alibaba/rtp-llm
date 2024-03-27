@@ -8,6 +8,7 @@
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/utils/layernorm_types.h"
+#include "src/fastertransformer/utils/EnumUtils.h"
 
 #include <optional>
 #include <functional>
@@ -57,8 +58,10 @@ private:
     OpStatus status_;
 };
 
-using OptionalConstBufferRef = std::optional<std::reference_wrapper<const Buffer>>;
-using OptionalBufferRef = std::optional<std::reference_wrapper<Buffer>>;
+using OptionalConstBufferRef    = std::optional<std::reference_wrapper<const Buffer>>;
+using OptionalBufferRef         = std::optional<std::reference_wrapper<Buffer>>;
+
+using OptionalConstLoraMapRef    = std::optional<std::reference_wrapper<const LoraWeightsMap>>;
 
 struct CopyParams {
     CopyParams(Buffer& dst, const Buffer& src) : dst(dst), src(src)  {}
@@ -100,11 +103,7 @@ struct LayernormParams {
     const double eps;
 };
 
-// corresponds to cublasOperation_t
-enum class TransposeOperation {
-    NONE                = 0,
-    TRANSPOSE           = 1,
-};
+
 
 // D = alpha * op(A) * op(B) + beta * C
 // shapes of A, B, C, D have two options: [m, k], [k, n], [m, n], [m, n]
@@ -344,6 +343,27 @@ struct SoftmaxParams{
     const Buffer& mask;
     float scale;
 
+};
+
+struct LoraLinearOutput {
+    BufferPtr output;
+};
+
+struct LoraLinearParams {
+
+    LoraLinearParams(const Buffer&              input,
+                     OptionalConstBufferRef     lora_ids,
+                     const DenseWeights&        weight,
+                     OptionalConstLoraMapRef    lora_map) :
+                     input(input),
+                     lora_ids(lora_ids),
+                     weight(weight),
+                     lora_map(lora_map) {}
+    
+    const Buffer&                           input;
+    OptionalConstBufferRef                  lora_ids;
+    const DenseWeights&                     weight;
+    OptionalConstLoraMapRef                 lora_map;
 };
 
 }  // namespace fastertransformer

@@ -13,6 +13,11 @@ public:
     std::unique_ptr<Buffer> allocateBuffer(const BufferParams& params, const BufferHints& hints = {});
     virtual std::string type() const = 0;
 
+public:
+    // target independence ops
+    FfnLayerOutput ffnLayer(const FfnLayerParams& params);
+    LoraLinearOutput loraLinear(const LoraLinearParams& params);
+
 private:
     DeviceBase(const DeviceBase&) = delete;
     DeviceBase& operator=(const DeviceBase&) = delete;

@@ -49,6 +49,14 @@ AttentionLayerOutput CudaDevice::attentionLayer(const AttentionLayerParams& para
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+FfnLayerOutput CudaDevice::ffnLayer(const FfnLayerParams& params) {
+    return DeviceBase::ffnLayer(params);
+}
+
+LoraLinearOutput CudaDevice::loraLinear(const LoraLinearParams& params) {
+    return DeviceBase::loraLinear(params);
+}
+
 void CudaDevice::sampleBeamSearch(const BeamSearchParams& params) {
 
 }

@@ -18,8 +18,19 @@ struct LayerNormWeights {
 typedef std::unique_ptr<const LayerNormWeights> LayerNormWeightsPtr;
 
 struct DenseWeights {
-    ConstBufferPtr kernel;
-    ConstBufferPtr bias;
+    ConstBufferPtr kernel = nullptr;
+    ConstBufferPtr bias = nullptr;
+
+    DenseWeights() = default;
+
+    DenseWeights(BufferPtr& kernel) : kernel(std::move(kernel)) {};
+
+    DenseWeights(ConstBufferPtr& kernel) : kernel(std::move(kernel)) {};
+    DenseWeights(ConstBufferPtr& kernel,
+                 ConstBufferPtr& bias) : 
+                 kernel(std::move(kernel)),
+                 bias(std::move(bias)) {};
+
 };
 
 typedef std::unique_ptr<const DenseWeights> DenseWeightsPtr;
@@ -57,6 +68,15 @@ struct FfnLayerWeights {
     std::unique_ptr<const LayerNormWeights> dense_layernorm;
 
     std::unique_ptr<const DenseWeights>     moe_gating_weight;
+
+    FfnLayerWeights() = default;
+
+    FfnLayerWeights(std::unique_ptr<const DenseWeights> up_weight,
+                    std::unique_ptr<const DenseWeights> gate_weight,
+                    std::unique_ptr<const DenseWeights> down_weight) :
+                    up_weight(std::move(up_weight)),
+                    gate_weight(std::move(gate_weight)),
+                    down_weight(std::move(down_weight)) {}
 };
 
 struct LayerWeights {

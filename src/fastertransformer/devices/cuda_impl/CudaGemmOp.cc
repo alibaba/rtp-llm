@@ -38,7 +38,7 @@ struct CudaGemmDispatch {
         invalid,
     };
 
-    static GemmImplementType Dispatch(const GemmParams& params) {
+    static GemmImplementType dispatch(const GemmParams& params) {
         size_t dim = params.A.dim();
         if (params.A.type() == DataType::TYPE_FP16 &&
             params.B.type() == DataType::TYPE_FP16 &&
@@ -173,13 +173,13 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     using GemmImplementType = CudaGemmDispatch::GemmImplementType;
     CudaGemmArguments arguments(params);
 
-    if (CudaGemmDispatch::Dispatch(params) == GemmImplementType::invalid) {
+    if (CudaGemmDispatch::dispatch(params) == GemmImplementType::invalid) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 
     auto output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {});
 
-    if (CudaGemmDispatch::Dispatch(params) == GemmImplementType::cublas_basic_gemm) {
+    if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_basic_gemm) {
         const auto A = params.A.data();
         const auto B = params.B.data();
         auto D = output->data();
@@ -198,7 +198,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
                                  arguments.n);
         sync_check_cuda_error();
         return move(output);
-    } else if (CudaGemmDispatch::Dispatch(params) == GemmImplementType::cublas_batch_gemm) {
+    } else if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_batch_gemm) {
 
         const auto A = params.A.data();
         const auto B = params.B.data();
@@ -223,7 +223,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
                                                 arguments.batch_size);
         sync_check_cuda_error();
         return move(output);
-    } else if (CudaGemmDispatch::Dispatch(params) == GemmImplementType::cublas_batch_gemm_float32) {
+    } else if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_batch_gemm_float32) {
         // convert buffers to ptrs
         const auto A = params.A.data();
         const auto B = params.B.data();

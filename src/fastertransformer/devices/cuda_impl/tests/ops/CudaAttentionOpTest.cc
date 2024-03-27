@@ -9,17 +9,6 @@ using namespace fastertransformer;
 class CudaAttentionOpTest: public DeviceTestBase<DeviceType::Cuda> {
 public:
 
-    double rtol_;
-    double atol_;
-
-    void SetUp() override {
-        DeviceTestBase<DeviceType::Cuda>::SetUp();
-        rtol_ = 1e-03;
-        atol_ = 1e-03;
-    }
-    void TearDown() override {
-        DeviceTestBase<DeviceType::Cuda>::TearDown();
-    }
 };
 
 struct RotaryEmbeddingImpl : torch::nn::Module {

@@ -11,14 +11,6 @@
 
 namespace fastertransformer {
 
-std::string TransposeOperationView(TransposeOperation op) {
-    if (op == TransposeOperation::NONE) {
-        return "None";
-    } else {
-        return "Transpose";
-    }
-}
-
 
 // target independence params check
 void GemmParams::check() const {
@@ -67,9 +59,9 @@ void GemmParams::check() const {
 
     FT_CHECK_WITH_INFO((k_a == k_b), 
                         "Gemm op A (%s) [%s] need compact with B (%s) [%s]!",
-                        TransposeOperationView(transA),
+                        enumToString(transA),
                         ShapeStringView(A.shape()),
-                        TransposeOperationView(transB),
+                        enumToString(transB),
                         ShapeStringView(B.shape()));
     
     if (C != std::nullopt) {
@@ -78,9 +70,9 @@ void GemmParams::check() const {
 
         FT_CHECK_WITH_INFO((m_a == m_c) && (n_c == n_b), 
                           "Gemm op A (%s) [%s] and B (%s) [%s] need compact with C [%s]!",
-                          TransposeOperationView(transA),
+                          enumToString(transA),
                           ShapeStringView(A.shape()),
-                          TransposeOperationView(transB),
+                          enumToString(transB),
                           ShapeStringView(B.shape()),
                           ShapeStringView(C.value().get().shape()));
     }

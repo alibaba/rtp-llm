@@ -62,8 +62,10 @@ void CudaActOpTest::GateActTest(ActivationType atype, size_t m, size_t n) {
 TEST_F(CudaActOpTest, testSiluOp) {
     BasicActTest(ActivationType::Silu, 100, 100);
     BasicActTest(ActivationType::Silu, 1024, 1024);
+    BasicActTest(ActivationType::Silu, 1024, 4096);
     GateActTest(ActivationType::Silu, 100, 100);
     GateActTest(ActivationType::Silu, 1024, 1024);
+    GateActTest(ActivationType::Silu, 1024, 4096);
 }
 
 
