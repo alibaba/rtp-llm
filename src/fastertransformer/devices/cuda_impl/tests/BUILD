@@ -109,3 +109,14 @@ cc_test(
     deps = test_deps,
 )
 
+cc_test(
+    name = "layernorm_test",
+    srcs = [
+        "LayernormTest.cc",
+    ],
+    data = [],
+    copts = cuda_copts() + copts() + torch_deps(),
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
+

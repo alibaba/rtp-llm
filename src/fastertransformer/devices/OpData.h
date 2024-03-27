@@ -73,23 +73,23 @@ struct CopyParams {
 
 struct LayernormOutput {
     BufferPtr norm_output;
-    BufferPtr add_bias_output; // should be moved from input
 };
 
-// The Layernorm Op has fused Layernorm and AddBias functionality
+// The Layernorm Op has two functionalities: general layernorm and add residual
+// for general layernorm,
 // if gamma and beta are not provided, output = input * alpha + residual1 + bias if alpha is provided;
 // else output = input + residual1 + residual2 + bias
 struct LayernormParams {
 
     // for layernorm
-    LayernormParams(const NormType norm_type, BufferPtr input,
+    LayernormParams(const NormType norm_type, Buffer& input,
                     OptionalConstBufferRef residual1, OptionalConstBufferRef bias,
                     const LayerNormWeights& weights, double eps = 1e-6):
-    norm_type(norm_type), input(move(input)),
+    norm_type(norm_type), input(input),
     residual1(residual1), bias(bias), weights(weights), eps(eps) {}
 
     const NormType norm_type = NormType::layernorm;
-    BufferPtr  input;
+    Buffer&  input;
 
     const OptionalConstBufferRef  residual1;
     const OptionalConstBufferRef  residual2;

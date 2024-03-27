@@ -37,10 +37,6 @@ void CudaDevice::copy(const CopyParams& params) {
     sync_check_cuda_error();
 }
 
-LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
 GroupedGemmOutput CudaDevice::groupedGemm(const GroupedGemmParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
