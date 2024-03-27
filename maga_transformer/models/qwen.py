@@ -279,7 +279,10 @@ class QWenBase(GPT):
             assert group_size == 128 or group_size == 64, "int4 only support group size == 64 or 128"
             config.quant_algo.weight_only_group_size = group_size
             quant_method = quant_config.get("quant_method", None)
-            if quant_method == 'gptq':
+            if quant_method == 'awq':
+                config.quant_algo.is_awq = True
+                config.quant_algo.has_zeros = True
+            elif quant_method == 'gptq':
                 config.quant_algo.is_gptq = True
                 config.quant_algo.has_zeros = True
             else: 
