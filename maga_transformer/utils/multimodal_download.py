@@ -5,12 +5,17 @@ from PIL import Image
 import asyncio
 from typing import Any, List, Dict, Optional
 
+headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.121 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+}
+
 def download_image(url: str):
     try:
         if url.startswith("http://") or url.startswith("https://"):
             if os.environ.get("IMAGE_RESIZE_SUFFIX", "") != "" and "picasso" in url:
                 url += os.environ.get("IMAGE_RESIZE_SUFFIX", "")
-            return Image.open(requests.get(url, stream=True).raw)
+            return Image.open(requests.get(url, stream=True, headers=headers).raw)
         else:
             return Image.open(url)
     except Exception as e:
