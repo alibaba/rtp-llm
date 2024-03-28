@@ -216,6 +216,8 @@ class BaseModel(object):
         attention_mask = attention_mask.unsqueeze_(0).tile(batch_size, 1, 1).to(self.dtype)
         for b, input_length in enumerate(input_lengths):
             attention_mask[b, input_length:, ...] = 0
+            if not self.config.is_causal:
+                attention_mask[b, :, input_length: ]= 0
         return attention_mask
 
     @staticmethod

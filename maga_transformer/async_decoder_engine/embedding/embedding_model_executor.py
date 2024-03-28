@@ -6,7 +6,7 @@ from maga_transformer.models.base_model import BaseModel
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.ops.gpt_ops.gpt_op import GptOp
 from maga_transformer.async_decoder_engine.embedding.embedding_stream import EmbeddingBatchedInput, EmbeddingOutput
-from maga_transformer.async_decoder_engine.embedding.post_process.post_process_factory import PostProcessFactory
+from maga_transformer.async_decoder_engine.embedding.post_process.post_process_module import PostProcessModule
 
 class EmbeddingModelExecutor(object):
     def __init__(self, model: BaseModel, config: GptInitModelParameters):
@@ -15,10 +15,10 @@ class EmbeddingModelExecutor(object):
         self.gpt_op_ = GptOp(self.config_, False)
         self.gpt_op_.set_weight(self.model_.weight)
 
-        self.post_process_module_ = PostProcessFactory.create_post_process_module(self.config_, self.model_.dtype)
+        self.post_process_module_ = PostProcessModule(self.config_, self.model_.dtype, self.model_.tokenizer)
 
-    def _pre_process(self, batch_input: EmbeddingBatchedInput):        
-        combo_tokens_tensor = to_cuda(torch.IntTensor(batch_input.combo_tokens))        
+    def _pre_process(self, batch_input: EmbeddingBatchedInput):
+        combo_tokens_tensor = to_cuda(torch.IntTensor(batch_input.combo_tokens))
         position_ids_tensor = to_cuda(self.model_.create_context_position_ids(batch_input.context_lengths_list))
         input_embeds = self.model_.async_input_word_embedding(combo_tokens_tensor, [])
         if self.model_.position_encoding is not None:
@@ -29,7 +29,7 @@ class EmbeddingModelExecutor(object):
 
         if self.model_.pre_decoder_layernorm is not None:
             input_embeds = self.model_.pre_decoder_layernorm(input_embeds)
-        
+
         attention_mask = self.model_.create_context_decoder_mask(batch_input.context_lengths_list)
         return input_embeds, attention_mask, position_ids_tensor
 
@@ -50,6 +50,6 @@ class EmbeddingModelExecutor(object):
             prefix_lengths=torch.IntTensor([0] * batch_input.batch_size),
             count_length=torch.BoolTensor([True]),
             max_prefix_length=torch.IntTensor([0]),
-            lora_ids=torch.IntTensor([-1] * batch_input.batch_size))    
-        output = self.post_process_module_.process(batch_input, hidden_states, attention_mask)        
+            lora_ids=torch.IntTensor([-1] * batch_input.batch_size))
+        output = self.post_process_module_.process(batch_input, hidden_states, attention_mask, batch_input.embedding_config)
         return output

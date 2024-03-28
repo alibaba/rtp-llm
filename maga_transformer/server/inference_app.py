@@ -18,7 +18,7 @@ from anyio import CapacityLimiter
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatCompletionStreamResponse
-from maga_transformer.embedding.api_datatype import OpenAIEmbeddingRequestFormat, OpenAIEmbeddingResponseFormat
+from maga_transformer.embedding.embedding_app import register_embedding_api
 from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from maga_transformer.models.base_model import BaseModel
@@ -132,22 +132,13 @@ class InferenceApp(object):
                                     "gang worker should not access this completions api directly!")
             return await self.inference_server.chat_completion(request, raw_request)
 
-
-        # entry for worker RANK == 0
-        @app.post("/v1/embeddings")
-        async def sentence_embedding(request: OpenAIEmbeddingRequestFormat, raw_request: RawRequest):
-            if not g_parallel_info.is_master:
-                return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
-                                    "gang worker should not access this completions api directly!")
-            return await self.inference_server.embedding(request, raw_request)
-
-
         # entry for worker RANK == 0
         @app.post("/tokenizer/encode")
         async def encode(req: Union[str,Dict[Any, Any]]):
             if not g_parallel_info.is_master:
                 return InferenceServer.format_exception(ExceptionType.UNSUPPORTED_OPERATION,
                                     "gang worker should not access this completions api directly!")
-            return self.inference_server.tokenizer_encode(req)
+            return self.inference_server.tokenizer_encode(req)        
 
+        register_embedding_api(app, self.inference_server)
         return app

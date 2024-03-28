@@ -40,7 +40,6 @@ class EmbeddingDecoderEngine(object):
             if all(finished):
                 break
             await asyncio.sleep(0.001)
-
         return [stream.output for stream in streams]
 
     @torch.inference_mode()
@@ -57,7 +56,9 @@ class EmbeddingDecoderEngine(object):
                 self.batch_input_.tp_sync()
                 embedding_outputs = self.executor_.process(self.batch_input_)
             if g_parallel_info.tp_rank == 0:
-                for idx, stream in enumerate(streams):
+                # do synchronize before update result
+                torch.cuda.synchronize()
+                for idx, stream in enumerate(streams):                    
                     stream.update(embedding_outputs[idx])
                 self.report_metric(len(streams), t.cost_ms())
 

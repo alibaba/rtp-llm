@@ -30,6 +30,9 @@ class EmbeddingScheduler(object):
             for stream in copy.copy(self.waiting_streams_):
                 if total_len + stream.input.input_length > self.config_.max_context_batch_size * self.config_.max_seq_len:
                     break
+                # make sure embedding config is the same
+                if len(new_streams) > 0 and stream.input.embedding_config != new_streams[0].input.embedding_config:
+                    break
                 new_streams.append(stream)
                 total_len += stream.input.input_length
 

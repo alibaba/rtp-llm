@@ -26,10 +26,10 @@ from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.access_logger.access_logger import AccessLogger
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.embedding.embedding_endpoint import EmbeddingEndpoint
-from maga_transformer.embedding.api_datatype import OpenAIEmbeddingRequestFormat
+from maga_transformer.embedding.api_datatype import OpenAIEmbeddingRequest, SimilarityRequest
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
-from maga_transformer.openai.api_datatype import ChatCompletionRequest, ChatCompletionStreamResponse
-from maga_transformer.server.inference_worker import InferenceWorker, BatchPipelineResponse, TokenizerEncodeResponse
+from maga_transformer.openai.api_datatype import ChatCompletionRequest
+from maga_transformer.server.inference_worker import InferenceWorker, TokenizerEncodeResponse
 from maga_transformer.config.gpt_init_model_parameters import ModelType
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
@@ -186,21 +186,27 @@ class InferenceServer(object):
             return response
         return await self._infer_wrap(request.model_dump(), raw_request, generate_call)
 
-    async def embedding(self, request: Union[Dict[str, Any], str, OpenAIEmbeddingRequestFormat], raw_request: Request):
-        if isinstance(request, str):
-            request = json.loads(request)
-        if isinstance(request, dict):
-            request = OpenAIEmbeddingRequestFormat(**request)
-        if not isinstance(request, OpenAIEmbeddingRequestFormat):
-            raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, f"input_format {type(request)} is not correct")
-
-        def generate_call():
-            assert (self._embedding_endpoint != None)
-            response = self._embedding_endpoint.sentence_embedding(request)
-            assert (isinstance(response, CompleteResponseAsyncGenerator)), f"error type: {type(response)}"
-            return response
-
-        return await self._infer_wrap(request.model_dump(), raw_request, generate_call)
+    async def embedding(self, request: Union[Dict[str, Any], str, OpenAIEmbeddingRequest], raw_request: Request):
+        with self._controller:
+            try:
+                assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
+                result = await self._embedding_endpoint.embedding(request)
+                return JSONResponse(result.model_dump(exclude_none=True))
+            except FtRuntimeException:
+                raise
+            except Exception as e:
+                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, str(e))
+            
+    async def similarity(self, request: Union[Dict[str, Any], str, SimilarityRequest], raw_request: Request):
+        with self._controller:
+            try:
+                assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
+                result = await self._embedding_endpoint.similarity(request)
+                return JSONResponse(result.model_dump(exclude_none=True))
+            except FtRuntimeException:
+                raise
+            except Exception as e:
+                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, str(e))
 
     async def _call_generate_with_report(self, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
         async def __gen_response_with_report(start_time, response_generator):
