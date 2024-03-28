@@ -21,12 +21,12 @@ generate_config = {
     "max_new_tokens": 100,
 }
 
-for res in pipeline(["hello, what's your name"], generate_config = generate_config):
+for res in pipeline("hello, what's your name", generate_config = generate_config):
     print(res.batch_response)
 
 # 这个query就可以复用前面query对应的kv cache。
 # 在response的aux info的reuse len指示出复用了多长的kv cache。reuse len必定是SEQ_SIZE_PER_BLOCK的整数倍。
-for res in pipeline(["hello, what's your name? how old are you?"], generate_config = generate_config):
+for res in pipeline("hello, what's your name? how old are you?", generate_config = generate_config):
     print(res.batch_response)
 
 pipeline.stop()

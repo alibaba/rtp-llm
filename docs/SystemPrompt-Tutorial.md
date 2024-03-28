@@ -34,7 +34,7 @@ generate_config = {
     "task_id": "1"
 }
 
-for res in pipeline(["hello, what's your name"], generate_config = generate_config):
+for res in pipeline("hello, what's your name", generate_config = generate_config):
     print(res.batch_response)
 
 # 不使用system prompt
@@ -43,7 +43,7 @@ generate_config = {
     "max_new_tokens": 100,
 }
 
-for res in pipeline(["hello, what's your name"], generate_config = generate_config):
+for res in pipeline("hello, what's your name", generate_config = generate_config):
     print(res.batch_response)
 
 pipeline.stop()

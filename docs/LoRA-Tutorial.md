@@ -20,7 +20,7 @@ generate_config = {
 }
 pipeline = Pipeline(model, model.tokenizer)
 
-for res in pipeline(["hello, what's your name"], max_new_tokens = 
+for res in pipeline("hello, what's your name", max_new_tokens = 
 generate_config):
     print(res.batch_response)
 pipeline.stop()
@@ -52,7 +52,7 @@ generate_config = {
     "top_k":1,
     "adapter_name": "lora_1"
 }
-results = [res for res in pipline([prompt], generate_config=generate_config)]
+results = [res for res in pipline(prompt, generate_config=generate_config)]
 print(results[-1])
 
 # 不指定LoRA的adpater名，访问底座模型
@@ -60,7 +60,7 @@ prompt = "你是谁？"
 generate_config = {
     "top_k":1
 }
-results = [res for res in pipeline([prompt], generate_config=generate_config)]
+results = [res for res in pipeline(prompt, generate_config=generate_config)]
 print(results[-1])
 ```
 LORA_INFO 为json字符串，其内容是一个dict，key 为adapter名字，value 为LoRA ckpt文件所在的地址。元素个数>`1`generate_config 指定LoRA的adpater名。当不指定adapter_name的时候则返回底座模型预测结果.
