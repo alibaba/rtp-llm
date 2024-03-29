@@ -1,5 +1,8 @@
 load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
 load("//bazel:arch_select.bzl", "th_transformer_so")
+load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
+
+cutlass_kernels_interface()
 
 config_setting(
     name = "using_cuda",
@@ -74,7 +77,7 @@ cc_library(
 cc_binary(
     name = "th_transformer",
     deps = [
-        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
+        "cutlass_kernels_interface",
         "//3rdparty/flash_attention2:flash_attention2_impl",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
         ":th_transformer_lib",

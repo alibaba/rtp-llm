@@ -1,4 +1,7 @@
 load("//:def.bzl", "copts", "cuda_copts")
+load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
+
+cutlass_kernels_interface()
 
 cc_library(
     name = "cuda_impl",
@@ -14,7 +17,7 @@ cc_library(
         "//src/fastertransformer/cuda:allocator_cuda",
         "//src/fastertransformer/layers:layers",
         "//src/fastertransformer/kernels:kernels",
-        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
+        "cutlass_kernels_interface",
         "//3rdparty/flash_attention2:flash_attention2_impl",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
     ],

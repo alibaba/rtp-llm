@@ -1,5 +1,7 @@
 load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
+load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
 
+cutlass_kernels_interface()
 ################################ cpp test ################################
 
 test_copts = [
@@ -24,7 +26,7 @@ cc_library(
     hdrs = ["unittests/unittest_utils.h", "unittests/gtest_utils.h"],
     deps = torch_deps() + [
         "//src/fastertransformer/cuda:allocator_cuda",
-        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
+        "cutlass_kernels_interface",
         "//src/fastertransformer/kernels:kernels",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/cuda:cuda",
@@ -125,7 +127,7 @@ cc_library(
     deps = torch_deps() + [
         "//src/fastertransformer/kernels:kernels",
 	    "//:th_utils",
-        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
+        "cutlass_kernels_interface",
     ],
     copts = cuda_copts(),
     alwayslink = True,

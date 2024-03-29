@@ -1,4 +1,7 @@
 load("//:def.bzl", "cuda_copts")
+load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
+
+cutlass_kernels_interface()
 
 test_linkopts = [
     "-lpython3.10",
@@ -21,8 +24,7 @@ cc_binary(
         # "weight_only_batched_gemv.cu"
     ],
     deps = [
-        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
-        # "//src/fastertransformer/cutlass:cutlass_interface",
+        "cutlass_kernels_interface",
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/utils:utils",
         "@local_config_cuda//cuda:cuda",
