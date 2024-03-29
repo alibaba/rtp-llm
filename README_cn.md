@@ -41,12 +41,13 @@
 * NVIDIA GPU: Compute Capability 7.0 或者更高 (e.g., RTX20xx, RTX30xx, RTX40xx, V100, T4, A10/A30/A100, L4, H100, etc.)
 
 ### 安装和启动
-1. docker
+#### 从docker启动
+docker版本见[镜像发布历史](docs/DockerHistory.md)
 ```bash
 cd rtp-llm/docker
 # IMAGE_NAME =
-# if cuda11: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:deploy_image_cuda11
-# if cuda12: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:deploy_image_cuda12
+# if cuda11: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:{version}_cuda11
+# if cuda12: registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:{version}_cuda12
 sh ./create_container.sh <CONTAINER_NAME> <IMAGE_NAME>
 sh CONTAINER_NAME/sshme.sh
 
@@ -57,7 +58,7 @@ TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your
 curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 
 ```
-2. whl
+#### 从wheel包启动
 ```bash
 # Install rtp-llm
 cd rtp-llm
@@ -72,6 +73,8 @@ TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your
 # request to server
 curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 ```
+#### 从源码构建并启动
+见 [源码构建](docs/Build.md)
 
 ### 常见问题
 1. libcufft.so
@@ -95,13 +98,12 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
      2. 手动安装python的依赖包，尤其是对于pytorch，因为bazel build默认的600秒超时对于pytorch的下载可能是不够的
 
 ## 文档
-* [在Deploy Docker中测试](docs/DeployDocker.md)
+* [镜像发布历史](docs/DockerHistory.md)
 * [启动服务样例](docs/OpenAI-Tutorial.md)
 * [RWKV-Runner 样例](docs/RWKV-Runner.md)
 * [Python Library 样例](docs/HF.md)
 * [在Aliyun Ecs中使用RTP-LLm](https://zhuanlan.zhihu.com/p/679610919)
 * [配置参数](docs/Config.md)
-* [源码构建](docs/Build.md)
 * [内置请求格式](docs/Request.md)
 * [多卡推理](docs/MultiGPU.md)
 * [LoRA](docs/LoRA-Tutorial.md)

@@ -7,6 +7,7 @@
 # 进入docker
 如果接下来是准备使用whl包来安装，那么进入docker是可选的。如果是从源代码构建，那么进入docker是必选的。
 如果本机环境比较复杂，建议进入docker，环境比较干净。
+镜像地址见: [镜像发布历史](./DockerHistory.md)
 ```bash
 git clone https://github.com/alibaba/rtp-llm.git
 cd docker
