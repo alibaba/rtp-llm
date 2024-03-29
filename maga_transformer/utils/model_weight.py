@@ -174,10 +174,15 @@ def trans_lora_qkv(ts: List[torch.Tensor], head_num: int, head_size: int):
     r = ts[0].shape[1]
     return ts[0].T.reshape(r, head_num, split, head_size).permute(0, 2, 1, 3).reshape(r, split, head_num * head_size).contiguous()
 
-def merge_qkv_lora_A(ts: torch.Tensor):
+def merge_qkv_lora_A(ts: List[torch.Tensor]):
+    assert(len(ts) == 3), f"merge_qkv_lora_A expect 3 tensor list but get {len(ts)}"
     q, k, v = ts
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
-    return qkv_weight
+    try:
+        qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+        return qkv_weight
+    except:
+        raise Exception(
+            f"merge_qkv_lora_A failed: q shape {q.shape}, k shape {k.shape}, v shape {v.shape}")
 
 def merge_qkv_lora_B(ts: List[torch.Tensor]):
     q, k, v = ts
@@ -591,18 +596,14 @@ class ModelDeployWeightInfo:
                                weights=weights,
                                tp_strategy=W.gpt_style_tp_strategy)
 
-    def get_weight_info(self, preprocessed: bool, all_names: Set[str]) -> ModelWeightInfo:
-        if preprocessed:
-            logging.info("Using preprocessed weight info")
-            return self.get_preprocessed_weight_info(all_names)
-        else:
-            weight_info = self._get_weight_info()
-            if self._is_sparse_head:
-                logging.info("Skiping load empty weight for head_num == 0")
-                weight_info = self._process_sparse_weight(weight_info)
-            if self._is_medusa_model:
-                weight_info = self._add_medusa_head_info(weight_info)
-            return weight_info
+    def get_weight_info(self) -> ModelWeightInfo:
+        weight_info = self._get_weight_info()
+        if self._is_sparse_head:
+            logging.info("Skiping load empty weight for head_num == 0")
+            weight_info = self._process_sparse_weight(weight_info)
+        if self._is_medusa_model:
+            weight_info = self._add_medusa_head_info(weight_info)
+        return weight_info
 
     def _process_sparse_weight(self, origin_weight_info: ModelWeightInfo) -> ModelWeightInfo:
         if not isinstance(origin_weight_info.layer_weights[0], list):

@@ -22,23 +22,20 @@ class ModelWeightsLoader:
         self._tp_split_emb_and_lm_head = weights_info.tp_split_emb_and_lm_head
         self._weights_info = weights_info
         self._weight_access_log: Set[str] = set([])
-        self._ckpt_metas: List[CkptFileInfo] = []
         self._all_tensor_names: Set[str] = set([])
-        for ckpt in self._ckpt_metas:
-            self._all_tensor_names.update(ckpt.get_tensor_names())
-        self.preprocessed = 'ft_module' in self._all_tensor_names
         self._database: BaseDatabase = database
 
         if isinstance(self._database, CkptDatabase):
             self._weights_info.process_meta(self._database.PretrainFileList)
             self._weights_info.process_meta(self._database.FinetuneFileList)
-            self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info(self.preprocessed, self._all_tensor_names)
+            self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
             self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
         elif isinstance(self._database, ModuleDatabase):
-            self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info(self.preprocessed, self._all_tensor_names)
+            self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
             self._merge_lora = False
         else:
             raise Exception("Unknown database class")
+        logging.info(f"merge lora info : {self._merge_lora}")
         
     def set_data_type(self, data_type):
         self._data_type = data_type
@@ -49,9 +46,6 @@ class ModelWeightsLoader:
             logging.warning('weights not access: %s', str(not_access_set))
         else:
             logging.info("all weights have been accessed")
-
-    def _process_ckpt_metas(self):
-        self._weights_info.process_meta(self._ckpt_metas)
 
     def load_weights_from_scratch(self, ref_model: Optional[torch.nn.Module]=None, device: str='cuda:0', num_process=1):
         weights = ModelWeights(self._num_layers)
@@ -400,9 +394,58 @@ class ModelWeightsLoader:
     def _load_and_convert_lora_tensor(self, weight_info: WeightInfo, lora_name:str, layer_id: Optional[int] = None):
         before_merge_tensors = []
         for ckpt_weight in weight_info.weights:
-            tensor = self.load_lora_tensor(lora_name, ckpt_weight.tensor_name(layer_id))
-            if tensor == []:
+            logging.info(f"_load_and_convert_lora_tensor ckpt_weight : {ckpt_weight}")
+            ckpt_tensor_name = ckpt_weight.tensor_name(layer_id)
+            ckpt_tensor = self.load_lora_tensor(lora_name, ckpt_tensor_name)
+
+            hidden_size = self._weights_info._hidden_size
+            rank = self._database.get_lora_config(lora_name).rank
+            num_heads = self._weights_info._head_num
+            num_key_value_heads = self._weights_info._head_num_kv
+            head_dim = self._weights_info._size_per_head
+            
+            logging.info(f"lora infos: rank is {rank}, \
+                         num_heads is {num_heads},\
+                         num_key_value_heads is {num_key_value_heads},\
+                         hidden_size is {hidden_size}\
+                         head_dim is {head_dim}\
+                         ")
+            tensor= []
+            # q
+            if ckpt_tensor == [] and "q_proj" in ckpt_tensor_name:
+                logging.info(f"q_proj miss")
+                if (ckpt_weight.name.count("lora_A")):
+                    # [head_num * head_dim, rank]
+                    tensor.append(torch.zeros(rank, hidden_size))
+                elif (ckpt_weight.name.count("lora_B")):
+                     # [rank, kv_head_num * head_dim]
+                    tensor.append(torch.zeros(num_heads*head_dim, rank))
+                else:
+                    raise Exception(f"invalid ckpt tensor name :{ckpt_weight.name}")
+            # k
+            elif ckpt_tensor == [] and "k_proj" in ckpt_tensor_name:
+                logging.info(f"k_proj miss")
+                if (ckpt_weight.name.count("lora_A")):
+                    tensor.append(torch.zeros(rank, hidden_size))
+                elif (ckpt_weight.name.count("lora_B")):
+                    tensor.append(torch.zeros(num_key_value_heads*head_dim, rank))
+                else:
+                    raise Exception(f"invalid ckpt tensor name :{ckpt_weight.name}")
+            # v
+            elif ckpt_tensor == [] and "v_proj" in ckpt_tensor_name:
+                logging.info(f"v_proj miss")
+                if (ckpt_weight.name.count("lora_A")):
+                    tensor.append(torch.zeros(rank, hidden_size))
+                elif (ckpt_weight.name.count("lora_B")):
+                    tensor.append(torch.zeros(num_key_value_heads*head_dim, rank))
+                else:
+                    raise Exception(f"invalid ckpt tensor name :{ckpt_weight.name}")
+            
+            elif ckpt_tensor == []:
                 return None
+            
+            else:
+                tensor = tensor + ckpt_tensor
             before_merge_tensors.append(ckpt_weight.merge_fun(tensor))
             
         after_merge_tensor = weight_info.process_fun(before_merge_tensors)
