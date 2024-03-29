@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import copy
 import logging
 import logging.config
 import traceback
@@ -60,7 +61,6 @@ class InferenceServer(object):
             self._openai_endpoint = None
             self._embedding_endpoint = None
             if self._inference_worker.model is not None and self._inference_worker.model.model_type == ModelType.EMBEDDING:
-                assert isinstance(self._inference_worker.model, AsyncModel), "only support embedding model in async mode"
                 self._embedding_endpoint = EmbeddingEndpoint(self._inference_worker.model)
             else:
                 self._openai_endpoint = OpenaiEndopoint(self._inference_worker.model)
@@ -111,25 +111,25 @@ class InferenceServer(object):
             self._access_logger.log_exception_access(request, e, id)
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
             yield response_data_prefix + \
-                json.dumps(InferenceServer.handler_exceptions(e), ensure_ascii=False) + "\r\n\r\n"
+                json.dumps(InferenceServer.format_exception(e), ensure_ascii=False) + "\r\n\r\n"
 
     @staticmethod
-    def format_exception(errcode: int, message: str) -> Dict[str, Any]:
-        return {'error_code': errcode, "message": message}
+    def format_exception(e: Exception):
+        @staticmethod
+        def _format(errcode: int, message: str) -> Dict[str, Any]:
+            return {'error_code': errcode, "message": message}
 
-    @staticmethod
-    def handler_exceptions(e: Exception):
         if isinstance(e, FtRuntimeException):
-            return InferenceServer.format_exception(e.expcetion_type, e.message)
+            return _format(e.expcetion_type, e.message)
         elif isinstance(e, ConcurrencyException):
-            return InferenceServer.format_exception(ExceptionType.CONCURRENCY_LIMIT_ERROR, str(e))
+            return _format(ExceptionType.CONCURRENCY_LIMIT_ERROR, str(e))
         elif isinstance(e, LoraCountException) or isinstance(e, LoraPathException):
-            return InferenceServer.format_exception(ExceptionType.UPDATE_ERROR, str(e))
+            return _format(ExceptionType.UPDATE_ERROR, str(e))
         elif isinstance(e, Exception):
             error_msg = f'ErrorMsg: {str(e)} \n Traceback: {traceback.format_exc()}'
-            return InferenceServer.format_exception(ExceptionType.UNKNOWN_ERROR, error_msg)
+            return _format(ExceptionType.UNKNOWN_ERROR, error_msg)
         else:
-            return InferenceServer.format_exception(ExceptionType.UNKNOWN_ERROR, str(e))
+            return _format(ExceptionType.UNKNOWN_ERROR, str(e))
 
     def update(self, version_info: VersionInfo):
         id = self._atomic_count.increment()
@@ -146,7 +146,7 @@ class InferenceServer(object):
             self._access_logger.log_exception_access(version_info.__dict__, e, id)
             kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
             error_code = 500
-            rep = JSONResponse(self.handler_exceptions(e), status_code=error_code)
+            rep = JSONResponse(self.format_exception(e), status_code=error_code)
         return rep
 
     async def inference(self, req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
@@ -165,17 +165,7 @@ class InferenceServer(object):
         try:
             rep = await self._infer_impl(req, id, raw_request, generate_call)
         except Exception as e:
-            self._access_logger.log_exception_access(req, e, id)
-            if isinstance(e, ConcurrencyException):
-                kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
-                error_code = 409
-            elif isinstance(e, asyncio.CancelledError):
-                kmonitor.report(AccMetrics.CANCAL_QPS_METRIC, 1)
-                error_code = 499
-            else:
-                error_code = 500
-                kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
-            rep = JSONResponse(self.handler_exceptions(e), status_code=error_code)
+            rep = self._handle_exception(req, e, id)
         return rep
 
     async def chat_completion(self, request: ChatCompletionRequest, raw_request: Request):
@@ -187,26 +177,45 @@ class InferenceServer(object):
         return await self._infer_wrap(request.model_dump(), raw_request, generate_call)
 
     async def embedding(self, request: Union[Dict[str, Any], str, OpenAIEmbeddingRequest], raw_request: Request):
+        id = self._atomic_count.increment()
+        kmonitor.report(AccMetrics.QPS_METRIC, 1)
         with self._controller:
             try:
                 assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
                 result = await self._embedding_endpoint.embedding(request)
+                log_result = copy.copy(result)
+                # do not log result since too big
+                log_result.data = []
+                self._access_logger.log_success_access(request, log_result, id)
                 return JSONResponse(result.model_dump(exclude_none=True))
-            except FtRuntimeException:
-                raise
             except Exception as e:
-                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, str(e))
-            
+                self._handle_exception(request, e, id)
+
     async def similarity(self, request: Union[Dict[str, Any], str, SimilarityRequest], raw_request: Request):
+        id = self._atomic_count.increment()
+        kmonitor.report(AccMetrics.QPS_METRIC, 1)
         with self._controller:
             try:
                 assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
                 result = await self._embedding_endpoint.similarity(request)
+                self._access_logger.log_success_access(request, result.model_dump(exclude_none=True), id)
                 return JSONResponse(result.model_dump(exclude_none=True))
-            except FtRuntimeException:
-                raise
             except Exception as e:
-                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, str(e))
+                self._handle_exception(request, e, id)
+
+    def _handle_exception(self, request: Union[Dict[str, Any], str, BaseModel], e: Exception, id: int):
+        self._access_logger.log_exception_access(request, e, id)
+        if isinstance(e, ConcurrencyException):
+            kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
+            error_code = 409
+        elif isinstance(e, asyncio.CancelledError):
+            kmonitor.report(AccMetrics.CANCAL_QPS_METRIC, 1)
+            error_code = 499
+        else:
+            error_code = 500
+            kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
+        rep = JSONResponse(self.format_exception(e), status_code=error_code)
+        return rep
 
     async def _call_generate_with_report(self, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
         async def __gen_response_with_report(start_time, response_generator):
@@ -283,4 +292,4 @@ class InferenceServer(object):
             response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
             return JSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
-            return JSONResponse(self.handler_exceptions(e), status_code=500)
+            return JSONResponse(self.format_exception(e), status_code=500)

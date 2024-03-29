@@ -1,5 +1,6 @@
 import os
 import logging
+from pydantic import BaseModel
 from typing import Any, Union, Dict
 
 from maga_transformer.access_logger.json_util import dump_json
@@ -57,14 +58,18 @@ class AccessLogger():
             access_log = PyAccessLog(request = request_log, response = response_log, id = id)
             self.query_logger.info(dump_json(access_log))
 
-    def log_success_access(self, request: Union[Dict[str, Any], str], response: Any, id: int) -> None:
+    def log_success_access(self, request: Union[Dict[str, Any], str, BaseModel], response: Any, id: int) -> None:
+        if isinstance(request, BaseModel):
+            request = request.model_dump()
         if not self.is_private_request(request):
             response_log = ResponseLog()
             if LOG_RESPONSE:
                 response_log.add_response(response)
             self.log_access(request, response_log, id)
 
-    def log_exception_access(self, request: Union[Dict[str, Any], str], exception: BaseException, id: int) -> None:
+    def log_exception_access(self, request: Union[Dict[str, Any], str, BaseModel], exception: BaseException, id: int) -> None:
+        if isinstance(request, BaseModel):
+            request = request.model_dump()
         response_log = ResponseLog()
         response_log.add_exception(exception)
         if not self.is_private_request(request):

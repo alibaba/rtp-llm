@@ -18,7 +18,7 @@ from maga_transformer.utils.complete_response_async_generator import CompleteRes
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.models.base_model import GenerateResponse, GenerateConfig
 from maga_transformer.model_factory import ModelFactory, AsyncModel
-from maga_transformer.structure.request_extractor import RequestExtractor
+from maga_transformer.structure.request_extractor import RequestExtractor, Request
 
 from pydantic import BaseModel
 
@@ -52,7 +52,7 @@ class InferenceWorker():
         if not torch.cuda.is_available():
             raise Exception("GPU not found")
 
-        self.model = ModelFactory.create_from_env()
+        self.model: AsyncModel = ModelFactory.create_from_env()
         self.pipeline = Pipeline(self.model, self.model.tokenizer)
         logging.info("Load model done.")
 
@@ -78,7 +78,7 @@ class InferenceWorker():
         return CompleteResponseAsyncGenerator(response_generator, complete_response_collect_func)
 
 
-    def _inference(self, request, **kwargs):
+    def _inference(self, request: Request, **kwargs: Any):
         if len(request.input_texts) > 1 or request.batch_infer or request.num_return_sequences > 0:
             num_return_sequences = request.generate_configs[0].num_return_sequences
             generators = [self._yield_generate(text, images, generate_config=generate_config, **kwargs)
@@ -127,7 +127,7 @@ class InferenceWorker():
         return RequestExtractor.is_streaming(req) or req.get('stream', False)
 
     def update(self, version_info: VersionInfo):
-        lora_infos = dict()
+        lora_infos: Dict[str, Any] = dict()
         if version_info.peft_info != None:
             lora_infos = version_info.peft_info.get("lora_info", {})
         return self.model.update(lora_infos)

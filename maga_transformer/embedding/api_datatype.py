@@ -5,7 +5,7 @@ from maga_transformer.embedding.embedding_config import EmbeddingGenerateConfig,
 
 class OpenAIEmbeddingRequest(PyDanticModelBase):
     input: Union[str, List[str]]
-    model: str
+    model: str = ""
     encoding_format: str = 'float'
     user: str = ""
     embedding_config: EmbeddingGenerateConfig = EmbeddingGenerateConfig()
