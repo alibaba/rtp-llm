@@ -104,10 +104,17 @@ index b2cb0a8..5da37b9 100644
              doc = "A 'requirements.txt' pip requirements file.",
          ),
 diff --git python/pip_install/repositories.bzl python/pip_install/repositories.bzl
-index 828ab53..dc216c9 100644
+index 828ab53..2067e1e 100644
 --- python/pip_install/repositories.bzl
 +++ python/pip_install/repositories.bzl
-@@ -16,13 +16,13 @@ _RULE_DEPS = [
+@@ -11,18 +11,18 @@ _RULE_DEPS = [
+     ),
+     (
+         "pypi__pkginfo",
+-        "https://files.pythonhosted.org/packages/4f/3c/535287349af1b117e082f8e77feca52fbe2fdf61ef1e6da6bcc2a72a3a79/pkginfo-1.6.1-py2.py3-none-any.whl",
+-        "ce14d7296c673dc4c61c759a0b6c14bae34e34eb819c0017bb6ca5b7292c56e9",
++        "https://files.pythonhosted.org/packages/56/09/054aea9b7534a15ad38a363a2bd974c20646ab1582a387a95b8df1bfea1c/pkginfo-1.10.0-py3-none-any.whl",
++        "889a6da2ed7ffc58ab5b900d888ddce90bce912f2d2de1dc1c26f4cb9fe65097",
      ),
      (
          "pypi__setuptools",

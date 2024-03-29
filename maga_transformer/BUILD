@@ -27,7 +27,8 @@ requirement([
     "aiohttp",
     "tensorrt",
     "onnx",
-    "sentence-transformers"
+    "sentence-transformers",
+    "orjson"
 ])
 
 py_library(

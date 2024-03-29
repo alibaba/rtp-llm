@@ -29,3 +29,4 @@ tensorrt>=8.6.1
 onnx
 aiohttp
 sentence-transformers==2.3.1
+orjson
