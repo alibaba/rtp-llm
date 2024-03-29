@@ -239,7 +239,7 @@ py_wheel(
     distribution = "maga_transformer",
     python_tag = "py3",
     tags = ["manual", "local"],
-    version = "0.0.1",
+    version = "0.1.9",
     deps = [
         ":maga_transformer_package",
         "//deps:extension_package",
@@ -281,7 +281,7 @@ py_wheel(
     distribution = "maga_transformer",
     python_tag = "py3",
     tags = ["manual", "local"],
-    version = "0.0.1",
+    version = "0.1.9",
     deps = [
         ":maga_transformer_package",
         "//deps:extension_package",

@@ -10,9 +10,9 @@ deploy docker安装了依赖和我们的程序的whl包，进入docker环境，�
 git clone https://github.com/alibaba/rtp-llm.git
 cd docker
 # 注意：以下两条指令，不要使用sudo执行
-# 如果是cuda11的环境，CONTAINER_NAME为registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:deploy_image_cuda11
-# 如果是cuda12的环境，CONTAINER_NAME为registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:deploy_image_cuda12
-sh ./create_container.sh <CONTAINER_NAME>
+# 如果是cuda11的环境，IMAGE_NAME为registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:deploy_image_cuda11
+# 如果是cuda12的环境，IMAGE_NAME为registry.cn-hangzhou.aliyuncs.com/havenask/rtp_llm:deploy_image_cuda12
+sh ./create_container.sh <CONTAINER_NAME> <IMAGE_NAME>
 sh  CONTAINER_NAME/sshme.sh
 ```
 
