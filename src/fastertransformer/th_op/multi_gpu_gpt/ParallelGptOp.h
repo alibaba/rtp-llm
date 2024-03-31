@@ -35,6 +35,7 @@ public:
                         const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights)=0;
 
     virtual void removeLoRA(const int lora_id)=0;
+    virtual bool UseFMHA()=0;
 };
 
 template<typename T>
@@ -73,6 +74,8 @@ public:
 
     virtual void removeLoRA(const int lora_id) override;
 
+    virtual bool UseFMHA() override;
+
 private:
     const GptInitParameter& gpt_init_parameter_;
 
@@ -84,7 +87,7 @@ private:
     cublasLtHandle_t      cublaslt_handle_;
     std::mutex*           cublas_wrapper_mutex_;
     ft::cublasAlgoMap*    cublas_algo_map_;
-    ft::ParallelGpt<T>*   gpt_context_decoder_;
+    ft::ParallelGpt<T>*   parallel_gpt_;
     ft::Allocator<ft::AllocatorType::TH>* allocator_;
     ft::cublasMMWrapper* cublas_wrapper_;
     struct cudaDeviceProp prop_;
@@ -125,6 +128,8 @@ public:
                          const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_a_weights,
                          const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights);
     void removeLoRA(const int64_t lora_id);
+
+    bool UseFMHA();
 
 private:
     GptInitParameter        gpt_init_parameter_;

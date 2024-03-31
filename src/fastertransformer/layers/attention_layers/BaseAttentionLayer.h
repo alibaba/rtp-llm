@@ -93,6 +93,8 @@ public:
     virtual void
     forward(TensorMap* output_tensors, TensorMap* input_tensors, const AttentionWeight<T>* attention_weights) = 0;
 
+    virtual bool UseFMHA() = 0;
+
     BaseAttentionLayer(cudaStream_t     stream,
                        cublasMMWrapper* cublas_wrapper,
                        IAllocator*      allocator,

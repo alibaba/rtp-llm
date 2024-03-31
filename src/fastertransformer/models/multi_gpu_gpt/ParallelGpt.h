@@ -88,6 +88,7 @@ public:
 
     ~ParallelGpt();
     void preAllocate();
+    bool UseFMHA();
 
     void convert_to_block_pointers(TensorMap*                                            output_tensors,
                                    const TensorMap*                                      input_tensors,

@@ -211,6 +211,13 @@ ParallelGpt<T>::ParallelGpt(const GptInitParameter&             gpt_init_paramet
 }
 
 template<typename T>
+bool ParallelGpt<T>::UseFMHA()
+{
+    FT_CHECK_WITH_INFO(parallel_attention_wrapper_ != nullptr, "parallel_attention_wrapper_ should not be nullptr");
+    return parallel_attention_wrapper_->UseFMHA();
+}
+
+template<typename T>
 ParallelGpt<T>::~ParallelGpt()
 {
     delete parallel_attention_wrapper_;
@@ -332,7 +339,9 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     size_t step             = 0;
     if (context_batch_size) {
         max_context_seq_length = *std::max_element(input_lengths + batch_size, input_lengths + total_batch_size);
-        FT_CHECK(input_tensors->at("attention_mask").shape()[0] == context_batch_size);
+        if (input_tensors->isExist("attention_mask")) {
+            FT_CHECK(input_tensors->at("attention_mask").shape()[0] == context_batch_size);
+        }
     }
     if (batch_size) {
         int* sequence_lengths = input_tensors->getPtr<int>("sequence_lengths");
@@ -478,14 +487,16 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             {"lora_input_lengths", input_tensors->at("lora_input_lengths")}};
 
         if (context_batch_size) {
-            const T* attention_ptr    = input_tensors->at("attention_mask").getPtr<T>();
-            auto     attention_tensor = input_tensors->at("attention_mask");
-            attention_input_tensors.insert(
-                "attention_mask",
-                Tensor{MEMORY_GPU,
-                       data_type,
-                       {context_batch_size, 1, attention_tensor.shape()[1], attention_tensor.shape()[2]},
-                       attention_ptr});
+            if (input_tensors->isExist("attention_mask")) {
+                const T* attention_ptr    = input_tensors->at("attention_mask").getPtr<T>();
+                auto     attention_tensor = input_tensors->at("attention_mask");
+                attention_input_tensors.insert(
+                    "attention_mask", 
+                    Tensor{MEMORY_GPU,
+                    data_type,
+                    {context_batch_size, 1, attention_tensor.shape()[1], attention_tensor.shape()[2]},attention_ptr}
+                );
+            }
             attention_input_tensors.insert("padding_offset",
                                            Tensor{MEMORY_GPU, TYPE_INT32, {context_h_token_num}, padding_offset_});
             attention_input_tensors.insert(

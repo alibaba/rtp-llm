@@ -569,10 +569,11 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     const int  h_token_num              = input_tensors->at("input_query").shape()[0];
     const int  context_h_token_num      = h_token_num - generate_batch_size;
     const int  layer_id                 = input_tensors->getVal<int>("layer_id");
-    const int  context_batch_size       = input_tensors->at("attention_mask").shape()[0];
-    const int  context_seq_len          = input_tensors->at("attention_mask").shape()[2];
+    const int  context_batch_size       = input_tensors->getVal<int>("context_batch_size");
+    const int  max_context_seq_length   = input_tensors->getVal<int>("max_context_seq_length");
     const int  min_prefix_length        = input_tensors->getVal<int>("min_prefix_length", 0);
     const T**  d_prefix_prompt_batch    = input_tensors->getPtr<const T*>("d_prefix_prompt_batch", nullptr);
+    const T*   attention_mask           = input_tensors->getPtr<const T>("attention_mask", nullptr);
     const int* d_prefix_prompt_lengths_ = input_tensors->getPtr<int>("d_prefix_prompt_lengths", nullptr);
     const int* d_prefix_prompt_lengths =
         d_prefix_prompt_lengths_ ? d_prefix_prompt_lengths_ + generate_batch_size : d_prefix_prompt_lengths_;
@@ -592,10 +593,11 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                               block_scale_pointers_ + generate_batch_size * 2 * max_blocks_per_batch :
                                               block_scale_pointers_;
 
-    const int max_prompt_length =
-        input_tensors->at("attention_mask").shape()[3] - input_tensors->at("attention_mask").shape()[2];
-    const bool count_prefix_length  = input_tensors->getVal<bool>("count_prefix_length", false);
-    const int* input_lengths        = input_tensors->getPtr<int>("input_lengths");
+    const int  max_prompt_length   = attention_mask == nullptr ? 0 :
+                                                                 input_tensors->at("attention_mask").shape()[3]
+                                                                  - input_tensors->at("attention_mask").shape()[2];
+    const bool count_prefix_length = input_tensors->getVal<bool>("count_prefix_length", false);
+    const int* input_lengths       = input_tensors->getPtr<int>("input_lengths");
 
     const int local_head_num        = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
     const int local_head_num_kv     = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
@@ -616,7 +618,6 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         }
     }
 
-    T*                                attention_mask = input_tensors->at("attention_mask").getPtr<T>();
     PrefixPromptBatchWeightsParam<T>* param          = new PrefixPromptBatchWeightsParam<T>();
 
     if (d_prefix_prompt_lengths && d_prefix_prompt_batch) {
@@ -640,7 +641,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         // q_buf_2_, k_buf_2_ and v_buf_2_ are continuousd
         cudaMemsetAsync(q_buf_2_,
                         0,
-                        context_batch_size * (context_seq_len + max_prompt_length)
+                        context_batch_size * (max_context_seq_length + max_prompt_length)
                             * (local_hidden_units_rt + 2 * local_hidden_units_kv_rt) * sizeof(T),
                         stream_);
     }
@@ -656,7 +657,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                    padding_offset,
                                    cu_seqlens,
                                    context_batch_size,
-                                   context_seq_len,
+                                   max_context_seq_length,
                                    context_h_token_num,
                                    local_head_num,
                                    local_head_num_kv,
@@ -679,21 +680,21 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                q_buf_2_,
                context_batch_size,
                local_head_num,
-               context_seq_len,
+               max_context_seq_length,
                params_.size_per_head_);
     print_bhsd(layer_id,
                "k bias rotary",
                k_buf_2_,
                context_batch_size,
                local_head_num_kv,
-               context_seq_len + max_prompt_length,
+               max_context_seq_length + max_prompt_length,
                params_.size_per_head_);
     print_bhsd(layer_id,
                "v bias rotary",
                v_buf_2_,
                context_batch_size,
                local_head_num_kv,
-               context_seq_len + max_prompt_length,
+               max_context_seq_length + max_prompt_length,
                params_.size_per_head_);
 
     sync_check_cuda_error();
@@ -709,7 +710,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                     v_buf_2_,
                                     kv_block_array,
                                     context_batch_size,
-                                    max_prompt_length + context_seq_len,  // max input length + prefix prompt length
+                                    max_prompt_length + max_context_seq_length,  // max input length + prefix prompt length
                                     params_.size_per_head_,
                                     local_head_num_kv,
                                     cache_type,
@@ -725,10 +726,9 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
 
     // NOTE: qkv buffer shape (batch_size, num_heads,L or prompt_len + L, Dh)
     const cudaDataType_t gemm_data_type      = getCudaDataType<T>();
-    const int            attention_seq_len_1 = context_seq_len;                      // q length
-    const int            attention_seq_len_2 = max_prompt_length + context_seq_len;  // kv length
+    const int            attention_seq_len_1 = max_context_seq_length;                      // q length
+    const int            attention_seq_len_2 = max_prompt_length + max_context_seq_length;  // kv length
     const T              qk_scale               = static_cast<T>(1.0f / sqrtf(params_.size_per_head_ * 1.0f));
-    const int            max_context_seq_length = input_tensors->getVal<int>("max_context_seq_length");
     if (use_trt_fmha_) {
         ContextAttentionParams context_attention_params{qkv_buf,                 // attention_input
                                                         max_context_seq_length,  // max_context_q_len
@@ -759,6 +759,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         sync_check_cuda_error();
     }
     else {
+        FT_CHECK_WITH_INFO(attention_mask != nullptr, "attention mask should not be nullptr when not use flash attention");
         if (is_qk_buf_float_ == true && gemm_data_type != CUDA_R_32F) {
             PUSH_RANGE(stream_, "Q*K");
             cublas_wrapper_->stridedBatchedGemm(
@@ -935,8 +936,13 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
     const int* lora_input_lengths = input_tensors->getPtr<int>("lora_input_lengths", nullptr);
 
     if (context_batch_size) {
-        max_context_seq_len_with_prefix = input_tensors->at("attention_mask").shape()[3];
-        max_context_seq_len             = input_tensors->at("attention_mask").shape()[2];
+        if (input_tensors->isExist("attention_mask")) {
+            max_context_seq_len_with_prefix = input_tensors->at("attention_mask").shape()[3];
+            max_context_seq_len             = input_tensors->at("attention_mask").shape()[2];
+        } else {
+            max_context_seq_len = input_tensors->getVal<int>("max_context_seq_length");
+            max_context_seq_len_with_prefix = max_context_seq_len;
+        }
     }
     PUSH_RANGE(stream_, "attention_buffer_alloc");
     allocateBuffer(h_token_num, context_batch_size, generate_batch_size, max_context_seq_len, max_context_seq_len_with_prefix, !(use_open_source_fmha_||use_trt_fmha_), multi_block_mode_);
@@ -1022,6 +1028,12 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     if (use_open_source_fmha_) {
         FT_LOG_INFO("use open source fmha");
     }
+}
+
+template<typename T>
+bool ParallelAttentionWrapper<T>::UseFMHA()
+{
+    return use_open_source_fmha_ || use_trt_fmha_; 
 }
 
 template<typename T>

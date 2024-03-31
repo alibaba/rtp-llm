@@ -53,7 +53,7 @@ FtGpt<T>::FtGpt(const GptInitParameter&       gpt_init_parameter,
         cublas_wrapper_->setFP32GemmConfig();
     }
 
-    gpt_context_decoder_ = new ft::ParallelGpt<T>(gpt_init_parameter_,
+    parallel_gpt_ = new ft::ParallelGpt<T>(gpt_init_parameter_,
                                            tensor_para_,
                                            pipeline_para_,
                                            stream,
@@ -65,7 +65,7 @@ FtGpt<T>::FtGpt(const GptInitParameter&       gpt_init_parameter,
                                            nullptr,
                                            0);
     if (gpt_init_parameter_.pre_allocate_op_mem_) {
-        gpt_context_decoder_->preAllocate();
+        parallel_gpt_->preAllocate();
     }
 }
 
@@ -77,7 +77,7 @@ FtGpt<T>::~FtGpt()
     cublasLtDestroy(cublaslt_handle_);
     delete cublas_algo_map_;
     delete cublas_wrapper_mutex_;
-    delete gpt_context_decoder_;
+    delete parallel_gpt_;
     delete cublas_wrapper_;
     delete allocator_;
 }
@@ -154,7 +154,7 @@ void FtGpt<T>::forward(th::Tensor&              decoder_output,
         input_tensors.insert("position_ids", convert_tensor<int>(position_ids.value()));
     }
     
-    gpt_context_decoder_->forward(&output_tensors, &input_tensors, &gpt_layer_weights_);
+    parallel_gpt_->forward(&output_tensors, &input_tensors, &gpt_layer_weights_);
 }
 
 template<typename T>
@@ -169,6 +169,12 @@ template<typename T>
 void FtGpt<T>::removeLoRA(const int lora_id)
 {
     removeLoRAWeights(lora_id, gpt_lora_layer_weights_);
+}
+template<typename T>
+bool FtGpt<T>::UseFMHA()
+{
+    FT_CHECK_WITH_INFO(parallel_gpt_ != nullptr, "parallel_gpt_ should not be nullptr");
+    return parallel_gpt_->UseFMHA();
 }
 
 ParallelGptOp::ParallelGptOp(c10::intrusive_ptr<GptInitParameter>                            gpt_init_parameter,
@@ -252,10 +258,6 @@ th::Tensor ParallelGptOp::forward(th::Tensor               decoder_input,
     int batch_size       = sequence_lengths.size(0);
     int hidden_units     = decoder_input.size(1);
     int context_batch_size = input_lengths.size(0) - batch_size;
-    if (context_batch_size > 0) {
-        TORCH_CHECK(attention_mask.has_value(), "when context decoder has value, attention mask also needed");
-        CHECK_INPUT(attention_mask.value(), scalar_type_);
-    }
 
     // CHECK_INPUT(block_index_map, torch::kInt32);
     TORCH_CHECK(batch_size + context_batch_size > 0, "must input context decoder or decoder input");
@@ -293,6 +295,10 @@ void ParallelGptOp::removeLoRA(const int64_t lora_id)
 {
     gpt_->removeLoRA(lora_id);
 }
+bool ParallelGptOp::UseFMHA()
+{
+    return gpt_->UseFMHA();
+}
 
 }  // namespace torch_ext
 
@@ -309,5 +315,6 @@ static auto fasterTransformerGptTHS =
                               int64_t,                  // master_port
                               std::vector<std::unordered_map<std::string, th::Tensor>>>()) 
         .def("forward", &torch_ext::ParallelGptOp::forward)
+        .def("use_fmha", &torch_ext::ParallelGptOp::UseFMHA)
         .def("add_lora", &torch_ext::ParallelGptOp::addLoRA)
         .def("remove_lora", &torch_ext::ParallelGptOp::removeLoRA);

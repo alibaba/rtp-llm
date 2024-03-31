@@ -164,6 +164,8 @@ public:
                         T*           linear_bias_slopes,
                         T*           out,
                         cudaStream_t stream);
+    
+    bool UseFMHA();
 };
 
 }  // namespace fastertransformer

@@ -14,6 +14,7 @@ class GptOp(FTOPBase):
         self.config = config
         self.is_sp = is_sp
         self.lock = Lock()
+        self.use_fmha: bool = False
 
     def _initialize_op(self, force_init: bool=False):
         assert self.weight
@@ -28,7 +29,7 @@ class GptOp(FTOPBase):
             g_master_info.ip,
             g_master_info.gpt_nccl_port if not self.is_sp else g_master_info.sp_gpt_nccl_port,
             self.weight.weights)
-        
+        self.use_fmha = self.ft_op.use_fmha()
         for id, lora_weight in self.weight.lora_resource.lora_map.weights_map.items():
             self.ft_op.add_lora(id, lora_weight.lora_a_weights, lora_weight.lora_b_weights)
 
@@ -70,8 +71,6 @@ class GptOp(FTOPBase):
         # Returns
             IntTensor, (decoder_batch + context_decoder_batch, hidden_dim) hidden_states
         """
-
-        self._initialize_op()
         assert self.ft_op is not None
         with self.lock:            
             outputs = self.ft_op.forward(decoder_input,

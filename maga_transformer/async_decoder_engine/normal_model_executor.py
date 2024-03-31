@@ -166,7 +166,10 @@ class NormalModelExecutor(ExecutorBase):
         if self.model_ops.model.pre_decoder_layernorm is not None:
             input_embeds = model.pre_decoder_layernorm(input_embeds)
 
-        attention_mask = self._create_context_attention_mask(batch_query)
+        if self.model_ops.gpt_op.use_fmha:
+            attention_mask = None
+        else:
+            attention_mask = self._create_context_attention_mask(batch_query)
 
         return input_embeds, attention_mask, position_ids
 
