@@ -47,7 +47,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     //      seq_len [1], int32, (optional), only used for ia3
 
     // output tensors:
-    //      ffn_output [token_num, hidden_dimension] or [moe_k * token_num, hidden_dimension] if use_moe
+    //      ffn_output [token_num, hidden_dimension]
     //      expert_scales [token_num, moe_k] (optional)
     //      expanded_source_row_to_expanded_dest_row [token_num, moe_k] (optional)
     //      expert_for_source_row [token_num, moe_k] (optional)
