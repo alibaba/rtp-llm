@@ -14,10 +14,11 @@
 * 更多的多模态模型。
 
 ## 量化
-* GPTQ 和 AWQ 的原生支持
-* INT4 支持
+* SmoothQuant支持（W8A8, W4A8）
 
 ## 性能优化
 * 在 Continuous Batching 上的细致性能调优。
 * Lora/和激活上更细致的显存管理。
+* MGMN的性能分析与优化。
+* 长sequence length的进一步优化。
 
