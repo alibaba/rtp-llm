@@ -61,44 +61,50 @@ def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch
 def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.Tensor]:
     return t
 
+def get_sp_tensor(t: torch.Tensor, qkv_hidden_size: int, hidden_size: int, tp: int, tp_rank: int, kv_broadcast: bool):
+    kv_hidden_size = (qkv_hidden_size - hidden_size) // 2
+    if len(t.shape) == 1:
+        t = t.unsqueeze(0)
+    qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
+    if kv_broadcast:
+        ks = t[:,hidden_size:hidden_size + kv_hidden_size]
+        vs = t[:,hidden_size + kv_hidden_size:]
+    else:
+        ks = sp_neg1(t[:,hidden_size:hidden_size + kv_hidden_size], tp, tp_rank)
+        vs = sp_neg1(t[:,hidden_size + kv_hidden_size:], tp, tp_rank)
+    return torch.concat([qs, ks, vs], dim=1).contiguous()
+
 # MHA layout: [D, head*size_per_head, head*size_per_head, head*size_per_head] == [D, 3, D] (sp_neg)
 # MQA layout: [D, head*size_per_head, kv_head*size_per_head, kv_head*size_per_head] (sp_head)
 def sp_head(t: torch.Tensor, tp: int, tp_rank: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
     hidden_size = t.shape[0]
     qkv_hidden_size = t.shape[1]
     if t.dtype == torch.int32:
-        return sp_neg1(t.reshape(hidden_size, 3, qkv_hidden_size // 3), tp, tp_rank)
-    else:     
-        if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
-            kv_hidden_size = (qkv_hidden_size - hidden_size) // 2
-            qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
-            if kv_broadcast:
-                ks = t[:,hidden_size:hidden_size + kv_hidden_size]
-                vs = t[:,hidden_size + kv_hidden_size:]
-            else:
-                ks = sp_neg1(t[:,hidden_size:hidden_size + kv_hidden_size], tp, tp_rank)
-                vs = sp_neg1(t[:,hidden_size + kv_hidden_size:], tp, tp_rank)
-            return torch.concat([qs, ks, vs], dim=1).contiguous()
-        else:
-            return sp_neg1(t.reshape(hidden_size, 3, hidden_size), tp, tp_rank)
+        hidden_size = hidden_size * 8
+    if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
+        return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
+    else:
+        return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
 
 def sp_head_s(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
-    return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
+    qkv_hidden_size = t.shape[1]
+    if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
+        return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
+    else:
+        return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
 
 def sp_head_z(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
-    return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
+    qkv_hidden_size = t.shape[1]
+    hidden_size = hidden_size // 8
+    if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
+        return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
+    else:
+        return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
 
 def sp_head_b(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
     t = t.reshape(-1)
-    qk_hidden_size = (t.shape[0] - hidden_size) // 2
-    qs = sp_neg1(t[:hidden_size], tp, tp_rank)
-    if kv_broadcast:
-        ks = t[hidden_size:hidden_size + qk_hidden_size]
-        vs = t[hidden_size + qk_hidden_size:]
-    else:
-        ks = sp_neg1(t[hidden_size:hidden_size + qk_hidden_size], tp, tp_rank)
-        vs = sp_neg1(t[hidden_size + qk_hidden_size:], tp, tp_rank)
-    return torch.concat([qs, ks, vs], dim=0).contiguous()
+    qkv_hidden_size = t.shape[0]
+    return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
 
 def sp_head_lora(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
     # lora_b[dim0, 3*hidden_size]
@@ -121,13 +127,13 @@ def trans_qkv(ts: List[torch.Tensor], hidden_size: int, head_num: int, size_per_
         size_per_head = hidden_size // head_num
     return ts[0].T.reshape(hidden_size, head_num, 3, size_per_head)\
         .permute(0, 2, 1, 3)\
-        .reshape(hidden_size, 3, head_num * size_per_head)\
+        .reshape(hidden_size, 3 * head_num * size_per_head)\
         .contiguous()
 
 def trans_qkv_b(ts: List[torch.Tensor], hidden_size: int, head_num: int) -> torch.Tensor:
     return ts[0].reshape(head_num, 3, hidden_size // head_num)\
         .permute(1, 0, 2)\
-        .reshape(3, hidden_size)\
+        .reshape(3 * hidden_size)\
         .contiguous()
 
 def qkv_gather(ts: List[torch.Tensor], dim0, head_num: int, head_num_kv: int, size_per_head: int = -1) -> torch.Tensor:
