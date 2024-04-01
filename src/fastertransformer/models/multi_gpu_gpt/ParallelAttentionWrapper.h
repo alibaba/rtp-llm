@@ -48,7 +48,8 @@ private:
                         size_t seq_len,
                         size_t seq_len_with_prefix,
                         bool   allocate_qk_buf,
-                        bool   multi_block_mode);
+                        bool   multi_block_mode,
+                        bool   use_kvcache);
     void freeBuffer() override;
 
     using BaseAttentionLayer<T>::is_free_buffer_after_forward_;

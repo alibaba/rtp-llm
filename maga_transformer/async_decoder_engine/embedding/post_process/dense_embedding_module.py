@@ -25,12 +25,12 @@ class NormalModule(DenseEmbeddingModule):
     def __init__(self, is_casual: bool):
         self.is_casual = is_casual
 
-    def __call__(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor, input_lengths: List[int], do_normalize: bool) -> torch.Tensor:
-        batch_size = len(input_lengths)
+    def __call__(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor, input_length: List[int], do_normalize: bool) -> torch.Tensor:
+        batch_size = len(input_length)
         if self.is_casual:
-            ts =  torch.stack([hidden_states[idx][pos - 1] for idx, pos in enumerate(input_lengths)])
+            ts =  torch.stack([hidden_states[idx][pos - 1] for idx, pos in enumerate(input_length)])
         else:
-            ts = torch.stack([hidden_states[idx][0] for idx, pos in enumerate(input_lengths)])
+            ts = torch.stack([hidden_states[idx][0] for idx, pos in enumerate(input_length)])
 
         if do_normalize:
             ts = torch.nn.functional.normalize(ts, dim=1)

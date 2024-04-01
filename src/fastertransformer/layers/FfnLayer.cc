@@ -426,7 +426,7 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe) {
                 inter_buf_2_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, false);
         }
         inter_buf_normed_ = (T*)(allocator_->reMalloc(
-            inter_buf_normed_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, true));
+            inter_buf_normed_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, inter_size_ != inter_padding_size_));
     }
     is_allocate_buffer_ = true;
 }

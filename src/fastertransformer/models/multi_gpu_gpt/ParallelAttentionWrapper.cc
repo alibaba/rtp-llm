@@ -2,6 +2,7 @@
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
+#include "src/fastertransformer/kernels/activation_kernels.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
@@ -312,7 +313,8 @@ void ParallelAttentionWrapper<T>::preAllocate()
                    params_.max_seq_len_,
                    params_.max_seq_len_,
                    !(use_open_source_fmha_ || use_trt_fmha_),
-                   multi_block_mode_);
+                   multi_block_mode_,
+                   true);
 }
 
 template<typename T>
@@ -403,7 +405,7 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
                        qkv_buf_3_input,
                        &attention_weights->attention_output_weight,
                        attention_out);
-    
+
     // lora
     lora_gemm_->applyLoRA(h_token_num,
                           batch_size,
@@ -451,7 +453,7 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
                        attention_input,
                        &attention_weights->query_weight,
                        qkv_buf_);
-    
+
     // lora
 
     lora_gemm_->applyLoRA(h_token_num,
@@ -490,7 +492,7 @@ template<typename T>
 void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output_tensors,
                                                 TensorMap*                input_tensors,
                                                 const AttentionWeight<T>* attention_weights)
-{   
+{
     if (input_tensors->isExist("use_kvcache") && !input_tensors->getVal<bool>("use_kvcache")) {
         throw std::runtime_error("use_kvcahe == false should not do self attention!");
     }
@@ -610,7 +612,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     KVBlockArray kv_block_array(context_batch_size, max_blocks_per_batch, params_.seq_size_per_block_, 0);
     KvCacheDataType cache_type = KvCacheDataType::BASE;
     if (use_kvcache) {
-        kv_block_array.data        = const_cast<int64_t*>(block_pointers);        
+        kv_block_array.data        = const_cast<int64_t*>(block_pointers);
         if (params_.int8_kv_cache_) {
             kv_block_array.scale     = const_cast<int64_t*>(block_scale_pointers);
             kv_block_array.int8_mode = true;
@@ -637,43 +639,48 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
             d_prefix_prompt_lengths, max_prompt_length, count_prefix_length, kv_block_array, ContinuousCacheParam<T>{}};
     }
 
-    if (padding_offset != nullptr) {
-        // q_buf_2_, k_buf_2_ and v_buf_2_ are continuousd
-        cudaMemsetAsync(q_buf_2_,
-                        0,
-                        context_batch_size * (max_context_seq_length + max_prompt_length)
-                            * (local_hidden_units_rt + 2 * local_hidden_units_kv_rt) * sizeof(T),
-                        stream_);
-    }
-
     PUSH_RANGE(stream_, "qkv_bias_add");
-    invokeAddFusedQKVBiasTranspose(q_buf_2_,
-                                   k_buf_2_,
-                                   v_buf_2_,
-                                   *param,  // prefix prompt
-                                   qkv_buf,
-                                   position_ids,
-                                   attention_weights->query_weight.bias,
-                                   padding_offset,
-                                   cu_seqlens,
-                                   context_batch_size,
-                                   max_context_seq_length,
-                                   context_h_token_num,
-                                   local_head_num,
-                                   local_head_num_kv,
-                                   params_.size_per_head_,
-                                   params_.rotary_embedding_dim_,
-                                   params_.rotary_embedding_style_,
-                                   params_.rotary_embedding_base_,
-                                   params_.dynamic_embedding_scalar_,
-                                   params_.dynamic_embedding_max_pos_,
-                                   params_.position_embeddings_scale_,
-                                   params_.base_scale_,
-                                   params_.logn_seq_len_,
-                                   params_.use_logn_attn_,
-                                   attention_weights->query_weight.scale_out,
-                                   params_.quant_algo_->int8_mode_,
-                                   stream_);
+    if (!use_kvcache && params_.rotary_embedding_style_ == 0) {
+        invokeAddBias(qkv_buf, attention_weights->query_weight.bias, h_token_num, local_hidden_units_rt + local_hidden_units_kv_rt * 2, stream_);
+    } else {
+        if (padding_offset != nullptr) {
+            // q_buf_2_, k_buf_2_ and v_buf_2_ are continuousd
+            cudaMemsetAsync(q_buf_2_,
+                            0,
+                            context_batch_size * (max_context_seq_length + max_prompt_length)
+                                * (local_hidden_units_rt + 2 * local_hidden_units_kv_rt) * sizeof(T),
+                            stream_);
+        }
+
+        invokeAddFusedQKVBiasTranspose(q_buf_2_,
+                                       k_buf_2_,
+                                       v_buf_2_,
+                                       *param,  // prefix prompt
+                                       qkv_buf,
+                                       position_ids,
+                                       attention_weights->query_weight.bias,
+                                       padding_offset,
+                                       cu_seqlens,
+                                       context_batch_size,
+                                       max_context_seq_length,
+                                       context_h_token_num,
+                                       local_head_num,
+                                       local_head_num_kv,
+                                       params_.size_per_head_,
+                                       params_.rotary_embedding_dim_,
+                                       params_.rotary_embedding_style_,
+                                       params_.rotary_embedding_base_,
+                                       params_.dynamic_embedding_scalar_,
+                                       params_.dynamic_embedding_max_pos_,
+                                       params_.position_embeddings_scale_,
+                                       params_.base_scale_,
+                                       params_.logn_seq_len_,
+                                       params_.use_logn_attn_,
+                                       attention_weights->query_weight.scale_out,
+                                       params_.quant_algo_->int8_mode_,
+                                       stream_);
+
+    }
     POP_RANGE;
     print_bhsd(layer_id,
                "q bias rotary",
@@ -926,6 +933,7 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
 
     const int           generate_batch_size = input_tensors->getVal<int>("generate_batch_size");
     const int           context_batch_size  = input_tensors->getVal<int>("context_batch_size");
+    const bool          use_kvcache = !input_tensors->isExist("use_kvcache") || input_tensors->getVal<bool>("use_kvcache");
     int                 max_context_seq_len = 0;
     int                 max_context_seq_len_with_prefix = 0;
     const int           layer_id            = input_tensors->getVal<int>("layer_id");
@@ -945,7 +953,7 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
         }
     }
     PUSH_RANGE(stream_, "attention_buffer_alloc");
-    allocateBuffer(h_token_num, context_batch_size, generate_batch_size, max_context_seq_len, max_context_seq_len_with_prefix, !(use_open_source_fmha_||use_trt_fmha_), multi_block_mode_);
+    allocateBuffer(h_token_num, context_batch_size, generate_batch_size, max_context_seq_len, max_context_seq_len_with_prefix, !(use_open_source_fmha_||use_trt_fmha_), multi_block_mode_, use_kvcache);
     POP_RANGE;
     sync_check_cuda_error();
 
@@ -1033,7 +1041,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
 template<typename T>
 bool ParallelAttentionWrapper<T>::UseFMHA()
 {
-    return use_open_source_fmha_ || use_trt_fmha_; 
+    return use_open_source_fmha_ || use_trt_fmha_;
 }
 
 template<typename T>
@@ -1051,7 +1059,7 @@ void ParallelAttentionWrapper<T>::allocateBuffer()
 
 template<typename T>
 void ParallelAttentionWrapper<T>::allocateBuffer(
-    size_t h_token_num, size_t context_batch_size, size_t generate_batch_size, size_t seq_len, size_t seq_len_with_prefix, bool allocate_qk_buf, bool multi_block_mode)
+    size_t h_token_num, size_t context_batch_size, size_t generate_batch_size, size_t seq_len, size_t seq_len_with_prefix, bool allocate_qk_buf, bool multi_block_mode, bool use_kvcache)
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
@@ -1061,12 +1069,16 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
     const auto qkv_merged_size = qkv_hidden_size + 2 * local_head_num_kv_ * params_.size_per_head_;
     qkv_buf_   = (T*)allocator_->reMalloc(qkv_buf_,
                                         sizeof(T) * h_token_num * qkv_merged_size,
-                                        true);
-    q_buf_2_   = (T*)allocator_->reMalloc(q_buf_2_,
+                                        false);
+
+    if (use_kvcache) {
+        q_buf_2_   = (T*)allocator_->reMalloc(q_buf_2_,
                                         sizeof(T) * context_batch_size * seq_len_with_prefix * qkv_merged_size,
                                         false);
-    k_buf_2_   = q_buf_2_ + context_batch_size * seq_len_with_prefix * local_head_num_ * params_.size_per_head_;
-    v_buf_2_   = k_buf_2_ + context_batch_size * seq_len_with_prefix * local_head_num_kv_ * params_.size_per_head_;
+        k_buf_2_   = q_buf_2_ + context_batch_size * seq_len_with_prefix * local_head_num_ * params_.size_per_head_;
+        v_buf_2_   = k_buf_2_ + context_batch_size * seq_len_with_prefix * local_head_num_kv_ * params_.size_per_head_;
+
+    }
     qkv_buf_2_ = (T*)allocator_->reMalloc(qkv_buf_2_, sizeof(T) * h_token_num * qkv_hidden_size, false);
 
     // save memory usage when using fmha
