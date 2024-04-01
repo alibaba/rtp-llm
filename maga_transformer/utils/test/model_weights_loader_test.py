@@ -81,7 +81,7 @@ class ModelWeihgtsLoaderTest(TestCase):
         self.assertEqual(config.num_layers, len(weights.weights))
         self.assertEqual([4, 5120], list(weights.steal_pytorch_weight(W.embedding).shape))
         self.assertEqual([4, 5120], list(weights.steal_pytorch_weight(W.lm_head).shape))
-        self.assertEqual([3, 640], list(weights.weights[0][W.attn_qkv_w][0].shape))
+        self.assertEqual([1920], list(weights.weights[0][W.attn_qkv_w][0].shape))
 
 
     def test_qwen_megatron_pp_model_load(self):
@@ -91,8 +91,8 @@ class ModelWeihgtsLoaderTest(TestCase):
         self.assertEqual(config.num_layers, len(weights.weights))
         self.assertEqual([1, 5120], list(weights.steal_pytorch_weight(W.embedding).shape))
         self.assertEqual([1, 5120], list(weights.steal_pytorch_weight(W.lm_head).shape))
-        self.assertEqual([3, 640], list(weights.weights[0][W.attn_qkv_w][0].shape))
-        self.assertEqual([3, 640], list(weights.weights[1][W.attn_qkv_w][0].shape))
+        self.assertEqual([1920], list(weights.weights[0][W.attn_qkv_w][0].shape))
+        self.assertEqual([1920], list(weights.weights[1][W.attn_qkv_w][0].shape))
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO,

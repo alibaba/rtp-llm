@@ -23,9 +23,9 @@ class ChatGlmTest(TestCase):
         config.tokenizer_path=ChatGlmTest._tokenizer_path()
         model = ChatGlm(config)
         self.assertEqual([128], list(model.weight.weights[1][W.post_ln_beta].shape))
-        self.assertEqual([128, 3, 128],  list(model.weight.weights[1][W.attn_qkv_w].shape))
-        self.assertAlmostEqual(-0.05078125, model.weight.weights[1][W.attn_qkv_w][0][0][0].item())
-        self.assertAlmostEqual(0.006118, model.weight.weights[1][W.attn_qkv_b][0][0].item(), delta = 0.0001)
+        self.assertEqual([128, 384],  list(model.weight.weights[1][W.attn_qkv_w].shape))
+        self.assertAlmostEqual(-0.05078125, model.weight.weights[1][W.attn_qkv_w][0][0].item())
+        self.assertAlmostEqual(0.006118, model.weight.weights[1][W.attn_qkv_b][0].item(), delta = 0.0001)
         
 
 if __name__ == '__main__':
