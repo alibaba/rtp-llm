@@ -42,7 +42,7 @@ FtGpt<T>::FtGpt(const GptInitParameter&       gpt_init_parameter,
         cublas_handle, cublaslt_handle_, stream, cublas_algo_map_, cublas_wrapper_mutex_, allocator_);
 
     if (std::is_same<T, half>::value) {
-        cublas_wrapper_->setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);
+        cublas_wrapper_->setFP16GemmConfig();
     }
 
     else if constexpr (std::is_same<T, __nv_bfloat16>::value && CompileConfig::enable_bf16) {

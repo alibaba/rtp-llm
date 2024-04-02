@@ -1,5 +1,13 @@
 load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
 
+test_linkopts = [
+    "-lpython3.10",
+    "-ltorch",
+    "-L/usr/local/cuda/lib64",
+    "-lcudart",
+    "-lcuda",
+]
+
 cc_library(
     name = "weights_define",
     hdrs = [
@@ -42,9 +50,7 @@ cc_binary(
         "//src/fastertransformer/kernels:kernels",
         "//src/fastertransformer/cuda:gemm_test_utils",
     ],
-    copts = copts(),
-    linkopts = [
-        "-ldl"
-    ],
+    copts = cuda_copts() + copts() + torch_deps(),
+    linkopts = test_linkopts + ["-ldl"],
     visibility = ["//visibility:public"],
 )

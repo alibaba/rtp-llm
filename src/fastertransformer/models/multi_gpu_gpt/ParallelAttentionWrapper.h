@@ -134,7 +134,8 @@ public:
                  const AttentionWeight<T>* attention_weights,
                  int*                      lora_ids,
                  int                       batch_size,
-                 const int*                input_lengths);
+                 const int*                input_lengths,
+                 bool                      use_kvcache);
     void
     ContextAttention(TensorMap* output_tensors, TensorMap* input_tensors, const AttentionWeight<T>* attention_weights);
     void

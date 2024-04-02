@@ -89,6 +89,7 @@ public:
     void freeBuffer();
 
     void Gemm(int m, int n, int k, const T* inputs, const DenseWeight<T, T>* weights, T* outputs);
+    void GemmWithBias(int m, int n, int k, const T* inputs, const DenseWeight<T, T>* weights, T* outputs);
 
 private:
     void allocateWorkspace(size_t s);

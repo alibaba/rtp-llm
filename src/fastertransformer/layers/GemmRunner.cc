@@ -59,6 +59,16 @@ void GemmRunner<T>::Gemm(int m, int n, int k, const T* inputs, const DenseWeight
     freeBuffer();
 }
 
+template<typename T>
+void GemmRunner<T>::GemmWithBias(int m, int n, int k, const T* inputs, const DenseWeight<T, T>* weights, T* outputs) {
+    // input: [m, k]
+    // weight: [k, n]
+    // bias: [n]
+    // output: [m, n]
+    cublas_wrapper_->Gemm(CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, weights->kernel, n, inputs, k, weights->bias, outputs, n);
+    // cublas_wrapper_->Gemm(CUBLAS_OP_N, CUBLAS_OP_N, m, n, k, inputs, k, weights->kernel, n, bias, outputs, n);
+}
+
 template class GemmRunner<float>;
 template class GemmRunner<half>;
 #ifdef ENABLE_BF16

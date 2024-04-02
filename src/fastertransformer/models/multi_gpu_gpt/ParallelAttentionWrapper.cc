@@ -424,7 +424,8 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
                                           const AttentionWeight<T>* attention_weights,
                                           int *                     lora_ids,
                                           int                       batch_size,
-                                          const int*                lora_input_lengths)
+                                          const int*                lora_input_lengths,
+                                          bool                      use_kvcache)
 {
     const int local_head_num        = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
     const int local_head_num_kv     = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
@@ -443,13 +444,22 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
 #endif
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
-    gemm_runner_->Gemm(h_token_num,
-                       local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
-                       hidden_units_,
-                       attention_input,
-                       &attention_weights->query_weight,
-                       qkv_buf_);
 
+    if (!use_kvcache && params_.rotary_embedding_style_ == 0) {
+        gemm_runner_->GemmWithBias(h_token_num,
+                    local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
+                    hidden_units_,
+                    attention_input,
+                    &attention_weights->query_weight,
+                    qkv_buf_);
+    } else {
+        gemm_runner_->Gemm(h_token_num,
+                        local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
+                        hidden_units_,
+                        attention_input,
+                        &attention_weights->query_weight,
+                        qkv_buf_);
+    }
     // lora
 
     lora_gemm_->applyLoRA(h_token_num,
@@ -636,9 +646,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     }
 
     PUSH_RANGE(stream_, "qkv_bias_add");
-    if (!use_kvcache && params_.rotary_embedding_style_ == 0) {
-        invokeAddBias(qkv_buf, attention_weights->query_weight.bias, h_token_num, local_hidden_units_rt + local_hidden_units_kv_rt * 2, stream_);
-    } else {
+    if (use_kvcache || params_.rotary_embedding_style_ != 0) {
         if (padding_offset != nullptr) {
             // q_buf_2_, k_buf_2_ and v_buf_2_ are continuousd
             cudaMemsetAsync(q_buf_2_,
@@ -954,7 +962,7 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
     sync_check_cuda_error();
 
     QKVGemm(h_token_num, layer_id, input_tensors->at("input_query").getPtr<T>(), attention_weights,
-            lora_ids, batch_size, lora_input_lengths);
+            lora_ids, batch_size, lora_input_lengths, use_kvcache);
     if (context_batch_size) {
         ContextAttention(output_tensors, input_tensors, attention_weights);
     }
