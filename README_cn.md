@@ -15,7 +15,7 @@
 
 ### 高性能
 * 使用高性能的 CUDA kernel, 包括 PagedAttention、FlashAttention、FlashDecoding 等
-* WeightOnly INT8 量化，加载时自动量化
+* WeightOnly INT8 量化，加载时自动量化; WeightOnly INT4量化，支持[GPTQ](https://github.com/AutoGPTQ/AutoGPTQ)/[AWQ](https://github.com/casper-hansen/AutoAWQ)
 * 自适应 KVCache 量化
 * 框架上对动态凑批的 overhead 进行了细致优化
 * 对 V100 进行了特别优化
@@ -112,6 +112,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [多轮会话](docs/ReuseKVCache-Tutorial.md)
 * [多模态](docs/Multimodal-Tutorial.md)
 * [结构化剪枝](docs/Sparse-Tutorial.md)
+* [量化](docs/Quantization.md)
 * [投机采样](docs/SpeculativeDecoding-Tutroial.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)

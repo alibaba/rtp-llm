@@ -14,7 +14,7 @@ Applied in numerous LLM scenarios, such as:
 
 ### High Performance
 * Utilizes high-performance CUDA kernels, including PagedAttention, FlashAttention, FlashDecoding, etc.
-* Implements WeightOnly INT8 Quantization with automatic quantization at load time
+* Implements WeightOnly INT8 Quantization with automatic quantization at load time; Support WeightOnly INT4 Quantization with [GPTQ](https://github.com/AutoGPTQ/AutoGPTQ) and [AWQ](https://github.com/casper-hansen/AutoAWQ)
 * Adaptive KVCache Quantization
 * Detailed optimization of dynamic batching overhead at the framework level
 * Specially optimized for the V100 GPU
@@ -108,6 +108,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [ReuseKVCache](docs/ReuseKVCache-Tutorial.md)
 * [Multimodal](docs/Multimodal-Tutorial.md)
 * [Structured Pruning](docs/Sparse-Tutorial.md)
+* [Quantization](docs/Quantization.md)
 * [Speculative Sampling](docs/SpeculativeDecoding-Tutroial.md)
 * [Roadmap](docs/Roadmap.md)
 * [Contributing](docs/Contributing.md)
