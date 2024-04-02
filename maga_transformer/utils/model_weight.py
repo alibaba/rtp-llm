@@ -870,6 +870,7 @@ class LoraResource():
             if self.lora_map.has_id(lora_name):
                 continue
             lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name,  self.weights_info._int8_mode, 'cuda:0')
+            self.model_weights_loader.show_warns(lora_name=lora_name, only_dump_lora=True)
             _ = self.add_lora_name(lora_name, lora_weights)
         for op in self.ft_op:
             op.update_lora()
@@ -882,6 +883,7 @@ class LoraResource():
             self.remove_old_lora(lora_infos)
             self.add_new_lora(lora_infos)
         self.lora_infos = lora_infos
+        self.database.dump_lora_summary()
 
     def get_id(self, name: str) -> int:
         if self.lora_map != None:

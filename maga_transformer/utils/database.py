@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Union, Optional
+from typing import Any, Dict, List, Set, Union, Optional, NamedTuple
 from pathlib import PosixPath, Path
 import json
 import enum
@@ -11,6 +11,7 @@ import torch
 from safetensors import safe_open
 
 from maga_transformer.utils.time_util import Timer
+from maga_transformer.utils.dump_config_utils import dump_lora_infos_to_table
 import maga_transformer.utils.meta_pickler as meta_pickler
 
 
@@ -76,6 +77,10 @@ class CkptFileInfo:
         return [name for name in self.metadata.keys()]
 
     @property
+    def tensor_num(self) -> int:
+        return len(self.metadata.keys())
+
+    @property
     def pretrain_pp_tp(self):
         if self.finetune_type == FinetuneType.pretrain:
             return (self.pp_size, self.tp_size)
@@ -128,7 +133,42 @@ class LoraConfig:
     def get_scale(self):
         return self.lora_alpha / self.rank
 
+
+class LoraInfos:
+
+    class LoraInfo(NamedTuple):
+        lora_name: str
+        path: str
+        target_modules: Union[List[str], str]
+        tensor_nums: int
+
+
+    lora_infos: List[LoraInfo]
+
+    def __init__(self) -> None:
+        self.lora_infos = []
+    
+    def add_lora_infos(self, LoraFileList : Dict[LoraConfig, List[CkptFileInfo]]):
+        for key, value in LoraFileList.items():
+            lora_name       = key.name
+            path            = key.path
+            target_modules  = key.target_modules
+            tensor_nums     = sum([ckpt_file.tensor_num for ckpt_file in value])
+            lora_info       = LoraInfos.LoraInfo(lora_name, path, target_modules, tensor_nums)
+            self.lora_infos.append(lora_info)
+
+    def dump(self):
+        dump_lora_infos_to_table("DATABASE LORA INFOS", self.lora_infos)
+
+
 class BaseDatabase:
+
+    def get_pretrain_tensor_names(self) -> List[str]:
+        raise NotImplementedError
+
+    def get_lora_tensor_names(self, name: str) -> List[str]:
+        raise NotImplementedError
+    
     def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
         raise NotImplementedError
 
@@ -222,7 +262,7 @@ class CkptDatabase(BaseDatabase):
             
         return tensor_names
 
-    def get_lora_tensor_names(self, name: str) -> List[Any]:
+    def get_lora_tensor_names(self, name: str) -> List[str]:
         tensor_names = []
         for key, value in self.LoraFileList.items():
             if key.name == name:
@@ -351,7 +391,6 @@ class CkptDatabase(BaseDatabase):
             for name in tensor_names:
                 self.lora_tensor_check(name)
                 
-
     def remove_lora(self, name:str):
         for key, _ in self.LoraFileList.items():
             if key.name == name:
@@ -478,3 +517,8 @@ class CkptDatabase(BaseDatabase):
             if pretrainfile.finetune_type == FinetuneType.pretrain:
                 return (pretrainfile.pp_size, pretrainfile.tp_size)
         return (1,1)
+
+    def dump_lora_summary(self) -> None:
+        lora_infos = LoraInfos()
+        lora_infos.add_lora_infos(self.LoraFileList)
+        lora_infos.dump()

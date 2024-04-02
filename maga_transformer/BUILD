@@ -41,6 +41,7 @@ py_library(
         ":torchvision",
         ":lru-dict",
         ":cpm_kernels",
+        ":prettytable",
     ]
 )
 

@@ -6,12 +6,56 @@ import multiprocessing
 import torch
 import torch.serialization
 from typing import List, Set, Optional, Tuple, Any
+from typing_extensions import Self
 from itertools import repeat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
     WeightInfo, W, ModelWeights, LoRAWeights
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.database import BaseDatabase, CkptFileInfo, ModuleDatabase, CkptDatabase
 from maga_transformer.utils.util import get_mem_info
+
+class WeightLog:
+    """
+    record how many tensor had been loaded, accessed and missed.
+    """
+    accessed_tensors:   Set[str]
+    loaded_tensors:     Set[str]
+    missed_tensors:     Set[str]
+
+    def __init__(self) -> None:
+
+        self.accessed_tensors   = set([])
+        self.loaded_tensors     = set([])
+        self.missed_tensors     = set([])
+    
+    def record_accessed_tensor(self, name: str) -> None:
+        self.accessed_tensors.add(name)
+    
+    def record_loaded_tensor(self, name: str) -> None:
+        self.loaded_tensors.add(name)
+
+    def record_missed_tensor(self, names: Set[str]) -> None:
+        self.missed_tensors.update(names - self.accessed_tensors)
+    
+    def update(self, other: Self) -> None:
+        self.loaded_tensors.update(other.loaded_tensors)
+        self.accessed_tensors.update(other.accessed_tensors)
+        self.missed_tensors.update(other.missed_tensors)
+
+    def dump(self) -> None:
+
+        logging.info(f"""
+            You have loaded {len(self.loaded_tensors)} tensors
+            The loaded tensor is:
+            {self.loaded_tensors}
+            You have accessed {len(self.accessed_tensors)} tensors
+            The accessed tensor is:
+            {self.accessed_tensors}
+            You have missed {len(self.missed_tensors)} tensors
+            The missed tensor is:
+            {self.missed_tensors}
+        """)
+
 
 class ModelWeightsLoader:
 
@@ -21,8 +65,8 @@ class ModelWeightsLoader:
         self._tp_rank = weights_info.tp_rank
         self._tp_split_emb_and_lm_head = weights_info.tp_split_emb_and_lm_head
         self._weights_info = weights_info
-        self._weight_access_log: Set[str] = set([])
-        self._all_tensor_names: Set[str] = set([])
+        self._weight_log: WeightLog = WeightLog()
+        self._lora_log: WeightLog = WeightLog()
         self._database: BaseDatabase = database
 
         if isinstance(self._database, CkptDatabase):
@@ -35,17 +79,24 @@ class ModelWeightsLoader:
             self._merge_lora = False
         else:
             raise Exception("Unknown database class")
-        logging.info(f"merge lora info : {self._merge_lora}")
+        logging.info(f"merge lora is enable ? : {self._merge_lora}")
         
     def set_data_type(self, data_type):
         self._data_type = data_type
 
-    def show_warns(self):
-        not_access_set = self._all_tensor_names - self._weight_access_log
-        if len(not_access_set) > 0:
-            logging.warning('weights not access: %s', str(not_access_set))
-        else:
-            logging.info("all weights have been accessed")
+    def show_warns(self, lora_name: str = "", only_dump_lora: bool = False):
+        if isinstance(self._database, ModuleDatabase):
+            return
+        if not only_dump_lora:
+            self._weight_log.record_missed_tensor(
+                set(self._database.get_pretrain_tensor_names()))
+            self._weight_log.dump()
+
+        if lora_name != "":
+            self._lora_log.record_missed_tensor(
+                set(self._database.get_lora_tensor_names(lora_name)))
+
+            self._lora_log.dump()
 
     def load_weights_from_scratch(self, ref_model: Optional[torch.nn.Module]=None, device: str='cuda:0', num_process=1):
         weights = ModelWeights(self._num_layers)
@@ -60,8 +111,10 @@ class ModelWeightsLoader:
         else:
             all_results = [self._load_layer_weight(id, ref_model, device)
                            for id in range(self._num_layers)]
-        for results, logs in all_results:
-            self._weight_access_log.update(logs)
+        for results, logs, lora_logs in all_results:
+            self._weight_log.update(logs)
+            if self._merge_lora:
+                self._lora_log.update(lora_logs)
             for (layer_id, name, tensor) in results:
                 weights.append_layer_weight(layer_id, name, tensor)
         for weight in self._model_weights_info.weights:
@@ -85,7 +138,7 @@ class ModelWeightsLoader:
             results.append((name, self.load_tensor(name)[0]))
         return results
             
-    def load_lora_weights_from_scratch(self, lora_name: str, int8_mode: int, device: str='cuda:0'):
+    def load_lora_weights_from_scratch(self, lora_name: str, int8_mode: int, device: str='cuda:0', num_process=1):
         lora_weights = LoRAWeights(self._num_layers)
         # set lora rank
         lora_alpha = self._database.get_lora_config(lora_name).lora_alpha
@@ -95,7 +148,7 @@ class ModelWeightsLoader:
         all_results = [self._load_lora_layer_weight(id, lora_name, device)
                         for id in range(self._num_layers)]
         for results, logs in all_results:
-            self._weight_access_log.update(logs)
+            self._lora_log.update(logs)
             for (int8_flag, layer_id, name, tensor) in results:
                 lora_weights.append_layer_weight(
                     int8_flag, layer_id, name, tensor)
@@ -126,8 +179,8 @@ class ModelWeightsLoader:
                 logging.error(f'load {weight.name} in layer {layer_id} failed: {e}')
                 raise e
 
-        return results, self._weight_access_log
-
+        return results, self._lora_log
+    
     def _load_int4_layer_weight(self, layer_weights, layer_id: int, device: str, ref_model: Optional[torch.nn.Module] = None):
         if self._merge_lora:
             raise Exception("lora in int4 is not implemented yet")
@@ -253,7 +306,7 @@ class ModelWeightsLoader:
 
         gc.collect()
         torch.cuda.empty_cache()
-        return results, self._weight_access_log
+        return results, self._weight_log, self._lora_log
 
     def apply_lora(self, tensor: torch.Tensor, weight: WeightInfo, layer_id: int):
 
@@ -385,16 +438,17 @@ class ModelWeightsLoader:
 
     
     def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
-        self._weight_access_log.add(name)
+        self._weight_log.record_accessed_tensor(name)
         return self._database.load_tensor(name, datatype)
     
     def load_lora_tensor(self, lora_name: str, tensor_name: str) -> List[torch.Tensor]:
+        self._lora_log.record_accessed_tensor(tensor_name)
         return self._database.load_lora_tensor(lora_name, tensor_name)
 
     def _load_and_convert_lora_tensor(self, weight_info: WeightInfo, lora_name:str, layer_id: Optional[int] = None):
         before_merge_tensors = []
+        self._lora_log.record_loaded_tensor(weight_info.name)
         for ckpt_weight in weight_info.weights:
-            logging.info(f"_load_and_convert_lora_tensor ckpt_weight : {ckpt_weight}")
             ckpt_tensor_name = ckpt_weight.tensor_name(layer_id)
             ckpt_tensor = self.load_lora_tensor(lora_name, ckpt_tensor_name)
 
@@ -404,16 +458,9 @@ class ModelWeightsLoader:
             num_key_value_heads = self._weights_info._head_num_kv
             head_dim = self._weights_info._size_per_head
             
-            logging.info(f"lora infos: rank is {rank}, \
-                         num_heads is {num_heads},\
-                         num_key_value_heads is {num_key_value_heads},\
-                         hidden_size is {hidden_size}\
-                         head_dim is {head_dim}\
-                         ")
             tensor= []
             # q
             if ckpt_tensor == [] and "q_proj" in ckpt_tensor_name:
-                logging.info(f"q_proj miss")
                 if (ckpt_weight.name.count("lora_A")):
                     # [head_num * head_dim, rank]
                     tensor.append(torch.zeros(rank, hidden_size))
@@ -424,7 +471,6 @@ class ModelWeightsLoader:
                     raise Exception(f"invalid ckpt tensor name :{ckpt_weight.name}")
             # k
             elif ckpt_tensor == [] and "k_proj" in ckpt_tensor_name:
-                logging.info(f"k_proj miss")
                 if (ckpt_weight.name.count("lora_A")):
                     tensor.append(torch.zeros(rank, hidden_size))
                 elif (ckpt_weight.name.count("lora_B")):
@@ -433,7 +479,6 @@ class ModelWeightsLoader:
                     raise Exception(f"invalid ckpt tensor name :{ckpt_weight.name}")
             # v
             elif ckpt_tensor == [] and "v_proj" in ckpt_tensor_name:
-                logging.info(f"v_proj miss")
                 if (ckpt_weight.name.count("lora_A")):
                     tensor.append(torch.zeros(rank, hidden_size))
                 elif (ckpt_weight.name.count("lora_B")):
@@ -454,6 +499,7 @@ class ModelWeightsLoader:
 
     def _load_and_convert_tensor(self, weight_info: WeightInfo, ref_model: Optional[torch.nn.Module] = None, layer_id: Optional[int] = None, datatype: str = torch.float16):
         before_merge_tensors = []
+        self._weight_log.record_loaded_tensor(weight_info.name)
         for ckpt_weight in weight_info.weights:
             before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(ckpt_weight.tensor_name(layer_id), datatype)))
             

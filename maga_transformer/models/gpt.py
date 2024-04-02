@@ -204,14 +204,22 @@ class GPT(BaseModel):
             else:
                 database = CkptDatabase(self.config.ckpt_path)
                 database.load_ptuning(self.config.ptuning_path)
-            if self.config.lora_infos is not None and len(self.config.lora_infos) == 1:
+            # static lora load
+            static_lora: bool = self.config.lora_infos is not None and len(self.config.lora_infos) == 1
+            if static_lora:
                 for name, path in self.config.lora_infos.items():
                     database.load_lora(name, path)
+                database.dump_lora_summary()
+
             load_parallel_num = estimate_load_parallel_num(
                 self.config, g_parallel_info.tp_size)
             model_weights_loader = get_model_weights_loader(weights_info, database, compute_dtype=compute_dtype)
             self.weight = model_weights_loader.load_weights_from_scratch(num_process=load_parallel_num)
-            model_weights_loader.show_warns()
+            if static_lora:
+                lora_name = list(self.config.lora_infos.keys())[0]
+                model_weights_loader.show_warns(lora_name=lora_name)
+            else:
+                model_weights_loader.show_warns()
 
             self.weight.lora_resource = LoraResource({}, database, weights_info, LoRAMap())
             self.weight.lora_resource.model_weights_loader = model_weights_loader
