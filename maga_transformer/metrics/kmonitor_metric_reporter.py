@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Dict, Any, Union
 
 class AccMetrics(Enum):
-    CANCAL_QPS_METRIC = "py_rtp_cancal_qps_metric"
+    CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"
     QPS_METRIC = "py_rtp_framework_qps"
     ERROR_QPS_METRIC = "py_rtp_framework_error_qps"
     CONFLICT_QPS_METRIC = "py_rtp_framework_concurrency_exception_qps"    

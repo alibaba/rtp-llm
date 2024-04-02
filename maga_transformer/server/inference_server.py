@@ -106,7 +106,7 @@ class InferenceServer(object):
             await self._collect_complete_response_and_record_access_log(request, id, response)
         except asyncio.CancelledError as e:
             self._access_logger.log_exception_access(request, e, id)
-            kmonitor.report(AccMetrics.CANCAL_QPS_METRIC, 1)
+            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1)
         except Exception as e:
             self._access_logger.log_exception_access(request, e, id)
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
@@ -164,7 +164,7 @@ class InferenceServer(object):
         id = self._atomic_count.increment()
         try:
             rep = await self._infer_impl(req, id, raw_request, generate_call)
-        except Exception as e:
+        except BaseException as e:
             rep = self._handle_exception(req, e, id)
         return rep
 
@@ -188,8 +188,8 @@ class InferenceServer(object):
                 log_result.data = []
                 self._access_logger.log_success_access(request, log_result, id)
                 return JSONResponse(result.model_dump(exclude_none=True))
-            except Exception as e:
-                self._handle_exception(request, e, id)
+            except BaseException as e:
+                return self._handle_exception(request, e, id)
 
     async def similarity(self, request: Union[Dict[str, Any], str, SimilarityRequest], raw_request: Request):
         id = self._atomic_count.increment()
@@ -200,8 +200,8 @@ class InferenceServer(object):
                 result = await self._embedding_endpoint.similarity(request)
                 self._access_logger.log_success_access(request, result.model_dump(exclude_none=True), id)
                 return JSONResponse(result.model_dump(exclude_none=True))
-            except Exception as e:
-                self._handle_exception(request, e, id)
+            except BaseException as e:
+                return self._handle_exception(request, e, id)
 
     def _handle_exception(self, request: Union[Dict[str, Any], str, BaseModel], e: Exception, id: int):
         self._access_logger.log_exception_access(request, e, id)
@@ -209,7 +209,7 @@ class InferenceServer(object):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
             error_code = 409
         elif isinstance(e, asyncio.CancelledError):
-            kmonitor.report(AccMetrics.CANCAL_QPS_METRIC, 1)
+            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1)
             error_code = 499
         else:
             error_code = 500
