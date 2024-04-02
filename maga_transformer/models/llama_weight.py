@@ -146,19 +146,11 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
         layer_weights = [
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo(self._names.ATTEN_NORM, identity)], identity),
 
-            WeightInfo(W.attn_qkv_b, [], functools.partial(zeros, shape=[self._hidden_size * 3])),
-
             WeightInfo(W.attn_o_w, [CkptWeightInfo(self._names.WO, concat_1)], transpose),
-
-            WeightInfo(W.attn_o_b, [], functools.partial(zeros, shape=[self._hidden_size])),
 
             WeightInfo(W.ffn_w1, [CkptWeightInfo(self._names.FFW1, concat_0)], transpose),
 
-            WeightInfo(W.ffn_b1, [], functools.partial(zeros, shape=[self._inter_size])),
-
             WeightInfo(W.ffn_w3, [CkptWeightInfo(self._names.FFW3, concat_0)], transpose),
-
-            WeightInfo(W.ffn_b3, [], functools.partial(zeros, shape=[self._inter_size])),
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo(self._names.FFW2, concat_1)], transpose),
 

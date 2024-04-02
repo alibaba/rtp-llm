@@ -48,7 +48,6 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 functools.partial(merge_qkv_hf)),
             WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight', identity)],
                        transpose),
-            WeightInfo(W.attn_o_b, [], functools.partial(zeros, shape=[self._hidden_size])),
             WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)],
                        functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
             WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight', identity)],

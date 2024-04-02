@@ -25,11 +25,7 @@ class FalconWeightInfo(ModelDeployWeightInfo):
 
         layer_weights = [
 
-            WeightInfo(W.attn_qkv_b, [], functools.partial(zeros, shape=self._hidden_size * 3)),
-
             WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.self_attention.dense.weight', identity)], transpose),
-
-            WeightInfo(W.attn_o_b, [], functools.partial(zeros, shape=self._hidden_size)),
 
             WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.dense_h_to_4h.weight', identity)], transpose),
 
