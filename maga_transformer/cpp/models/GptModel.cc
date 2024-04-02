@@ -8,11 +8,7 @@ GptModel::GptModel(const GptModelInitParams& params)
     : device_(params.device)
     , weights_(params.weights)
     , description_(params.description)
-    , attention_configs_(AttentionConfigs({
-        (PositionEmbeddingStyle)description_.rotary_embedding_style,
-        description_.rotary_embedding_dim,
-        description_.rotary_embedding_base,
-    }))
+    , attention_configs_(AttentionConfigs({}))
     {};
 
 GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
@@ -46,19 +42,19 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             mayGetRef(layer.self_attention_weights.pre_attention_layernorm), norm_eps));
 
         AttentionCommonInputs attention_inputs({
-            inputs.kv_cache_blocks,
-            nullopt,
-            inputs.input_lengths,
-            inputs.sequence_lengths,
-            nullopt,
-            nullopt,
-            nullopt,
-            nullopt,
-            nullopt,
-            nullopt,
-            nullopt,
-            nullopt,
-            nullopt
+            // inputs.kv_cache_blocks,
+            // nullopt,
+            // inputs.input_lengths,
+            // inputs.sequence_lengths,
+            // nullopt,
+            // nullopt,
+            // nullopt,
+            // nullopt,
+            // nullopt,
+            // nullopt,
+            // nullopt,
+            // nullopt,
+            // nullopt
         });
 
         auto attn_output = device_->attentionLayer(AttentionLayerParams({
