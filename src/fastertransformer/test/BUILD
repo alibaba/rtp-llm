@@ -18,15 +18,33 @@ test_linkopts = [
 ]
 
 cc_binary(
-    name = "gemm_perf",
+    name = "long_seq_perf",
     srcs = [
-        "fpa_intb_perf.cu",
-        # "weight_only_batched_gemv.cu"
+        "long_seq.cu",
     ],
     deps = [
         "cutlass_kernels_interface",
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/cuda:allocator_cuda",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    linkopts = test_linkopts,
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "gemm_perf",
+    srcs = [
+        "fpa_intb_perf.cu"
+    ],
+    deps = [
+        "cutlass_kernels_interface",
+        "//src/fastertransformer/cuda:cuda",
+        "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/cuda:allocator_cuda",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
