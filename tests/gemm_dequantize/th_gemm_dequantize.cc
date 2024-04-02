@@ -22,11 +22,8 @@
 #include <torch/custom_class.h>
 #include <torch/script.h>
 
-#include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
+#include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/th_op/th_utils.h"
-
-#include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/enabled.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h"
 
 #include "cutlass/numeric_types.h"
 
@@ -35,12 +32,91 @@ using torch::Tensor;
 namespace torch_ext {
 
 namespace tkk = tensorrt_llm::kernels::cutlass_kernels;
-namespace tc = tensorrt_llm::cutlass_extensions;
+namespace tc  = tensorrt_llm::cutlass_extensions;
+
+template<typename T, typename WeightType>
+Tensor fused_gemm_dq_helper(Tensor        input_activations,
+                            Tensor        weight,
+                            Tensor        scales,
+                            Tensor        zeros,
+                            const float   group_size,
+                            const int64_t timing_iterations,
+                            float&        avg_time) {
+    const at::ScalarType _st    = input_activations.scalar_type();
+    const int            m      = input_activations.size(0);
+    const int            n      = scales.size(1);
+    const int            k      = input_activations.size(1);
+    auto                 stream = at::cuda::getCurrentCUDAStream().stream();
+
+    const T*          input_act_ptr = get_ptr<const T>(input_activations);
+    const WeightType* weight_ptr    = get_ptr<const WeightType>(weight);
+    const T*          scales_ptr    = get_ptr<const T>(scales);
+    const T*          zeros_ptr     = get_ptr<const T>(zeros);
+
+    auto output_tensor = torch::empty({m, n}, torch::dtype(_st).device(torch::kCUDA).requires_grad(false));
+
+    using WeightOnlyGemmRunner    = tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunnerInterface;
+    using WeightOnlyGemmRunnerPtr = std::shared_ptr<WeightOnlyGemmRunner>;
+
+    WeightOnlyGemmRunnerPtr runner;
+
+    if (std::is_same<WeightType, cutlass::uint4b_t>::value) {
+        runner =
+            std::make_shared<tkk::CutlassFpAIntBGemmRunner<T,
+                                                           cutlass::uint4b_t,
+                                                           cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>>();
+    }
+    const int ws_bytes = runner->getWorkspaceSize(m, n, k);
+    auto ws_tensor     = torch::empty({ws_bytes}, torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
+
+    T*                     output_tensor_ptr = get_ptr<T>(output_tensor);
+    char*                  ws_ptr            = get_ptr<char>(ws_tensor);
+    tkc::CutlassGemmConfig config            = runner->getChosenConfig(input_act_ptr,
+                                                            weight_ptr,
+                                                            scales_ptr,
+                                                            zeros_ptr,
+                                                            nullptr,
+                                                            output_tensor_ptr,
+                                                            m,
+                                                            n,
+                                                            k,
+                                                            group_size,
+                                                            ws_ptr,
+                                                            ws_bytes,
+                                                            stream);
+    cudaEvent_t            start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start, stream);
+    for (int64_t iter = 0; iter < timing_iterations; ++iter) {
+        runner->gemm(input_act_ptr,
+                     weight_ptr,
+                     scales_ptr,
+                     zeros_ptr,
+                     nullptr,
+                     output_tensor_ptr,
+                     m,
+                     n,
+                     k,
+                     group_size,
+                     config,
+                     ws_ptr,
+                     ws_bytes,
+                     stream);
+    }
+    cudaEventRecord(stop, stream);
+    cudaEventSynchronize(stop);
+    float total_time_ms = 0;
+    cudaEventElapsedTime(&total_time_ms, start, stop);
+    avg_time = total_time_ms / float(timing_iterations);
+
+    return output_tensor;
+}
 
 template<typename T, typename WeightType>
 Tensor fused_gemm_dq_helper(
-    Tensor input_activations, Tensor weight, Tensor scales, const int64_t timing_iterations, float& avg_time)
-{
+    Tensor input_activations, Tensor weight, Tensor scales, const int64_t timing_iterations, float& avg_time) {
     const at::ScalarType _st    = input_activations.scalar_type();
     const int            m      = input_activations.size(0);
     const int            n      = scales.size(0);
@@ -51,36 +127,41 @@ Tensor fused_gemm_dq_helper(
     const WeightType* weight_ptr    = get_ptr<const WeightType>(weight);
     const T*          scales_ptr    = get_ptr<const T>(scales);
 
-    tkk::CutlassFpAIntBGemmRunner<T, WeightType, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>
-                          fused_gemm_dq_runner;
-    tc::CutlassGemmConfig config;
-    const int             ws_bytes = fused_gemm_dq_runner.getWorkspaceSize(m, n, k);
-
     auto output_tensor = torch::empty({m, n}, torch::dtype(_st).device(torch::kCUDA).requires_grad(false));
+
+    using WeightOnlyGemmRunner    = tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunnerInterface;
+    using WeightOnlyGemmRunnerPtr = std::shared_ptr<WeightOnlyGemmRunner>;
+    WeightOnlyGemmRunnerPtr runner;
+
+    if (std::is_same<WeightType, uint8_t>::value) {
+        runner = std::make_shared<
+            tkk::CutlassFpAIntBGemmRunner<T, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>>();
+    }
+    const int ws_bytes = runner->getWorkspaceSize(m, n, k);
     auto ws_tensor     = torch::empty({ws_bytes}, torch::dtype(torch::kInt8).device(torch::kCUDA).requires_grad(false));
 
-    T*    output_tensor_ptr = get_ptr<T>(output_tensor);
-    char* ws_ptr            = get_ptr<char>(ws_tensor);
-    config                  = fused_gemm_dq_runner.getChosenConfig(input_act_ptr,
-                                                  weight_ptr,
-                                                  scales_ptr,
-                                                  nullptr,
-                                                  nullptr,
-                                                  output_tensor_ptr,
-                                                  m,
-                                                  n,
-                                                  k,
-                                                  k,
-                                                  ws_ptr,
-                                                  ws_bytes,
-                                                  stream);
-    cudaEvent_t start, stop;
+    T*                     output_tensor_ptr = get_ptr<T>(output_tensor);
+    char*                  ws_ptr            = get_ptr<char>(ws_tensor);
+    tkc::CutlassGemmConfig config            = runner->getChosenConfig(input_act_ptr,
+                                                            weight_ptr,
+                                                            scales_ptr,
+                                                            nullptr,
+                                                            nullptr,
+                                                            output_tensor_ptr,
+                                                            m,
+                                                            n,
+                                                            k,
+                                                            k,
+                                                            ws_ptr,
+                                                            ws_bytes,
+                                                            stream);
+    cudaEvent_t            start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
     cudaEventRecord(start, stream);
     for (int64_t iter = 0; iter < timing_iterations; ++iter) {
-        fused_gemm_dq_runner.gemm(
+        runner->gemm(
             input_act_ptr, weight_ptr, scales_ptr, output_tensor_ptr, m, n, k, config, ws_ptr, ws_bytes, stream);
     }
     cudaEventRecord(stop, stream);
@@ -94,8 +175,7 @@ Tensor fused_gemm_dq_helper(
 
 template<typename T, typename WeightType>
 Tensor fused_gemv_dq_helper(
-    Tensor input_activations, Tensor weight, Tensor scales, const int64_t timing_iterations, float& avg_time)
-{
+    Tensor input_activations, Tensor weight, Tensor scales, const int64_t timing_iterations, float& avg_time) {
     const at::ScalarType _st    = input_activations.scalar_type();
     const int            m      = input_activations.size(0);
     const int            n      = scales.size(0);
@@ -108,7 +188,7 @@ Tensor fused_gemv_dq_helper(
 
     auto output_tensor = torch::empty({m, n}, torch::dtype(_st).device(torch::kCUDA).requires_grad(false));
 
-    T*   output_tensor_ptr = get_ptr<T>(output_tensor);
+    T* output_tensor_ptr = get_ptr<T>(output_tensor);
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
@@ -145,15 +225,19 @@ Tensor fused_gemv_dq_helper(
     return output_tensor;
 }
 
-Tensor
-_fused_gemm_dq(Tensor input_activations, Tensor weight, Tensor scales, int64_t timing_iterations, float& avg_time, bool use_tensor_core)
-{
+Tensor _fused_gemm_dq(Tensor  input_activations,
+                      Tensor  weight,
+                      Tensor  scales,
+                      Tensor  zeros,
+                      int64_t group_size,
+                      int64_t timing_iterations,
+                      float&  avg_time,
+                      bool    use_tensor_core) {
     const at::ScalarType _st = input_activations.scalar_type();
     CHECK_INPUT(scales, _st);
 
     TORCH_CHECK(input_activations.dim() == 2, "Invalid rank for activations");
     TORCH_CHECK(weight.dim() == 2, "Invalid rank for weight");
-    TORCH_CHECK(scales.dim() == 1, "Invalid rank for scales");
 
     TORCH_CHECK(input_activations.size(1) == weight.size(0), "dim 1 of act and dim 0 of weight must be equal");
 
@@ -162,8 +246,7 @@ _fused_gemm_dq(Tensor input_activations, Tensor weight, Tensor scales, int64_t t
     torch::ScalarType quant_type = weight.scalar_type();
     if (weight.size(-1) == scales.size(-1) / 2) {
         quant_type = at::ScalarType::QUInt4x2;
-    }
-    else {
+    } else {
         TORCH_CHECK(weight.size(-1) == scales.size(-1),
                     "Last dim of weight and scales must be equal for int8 "
                     "or last dim of scale must be 2x last dim of weight for int4.");
@@ -176,16 +259,14 @@ _fused_gemm_dq(Tensor input_activations, Tensor weight, Tensor scales, int64_t t
                 if (use_tensor_core) {
                     output_tensor = fused_gemm_dq_helper<half, uint8_t>(
                         input_activations, weight, scales, timing_iterations, avg_time);
-                } else{
+                } else {
                     output_tensor = fused_gemv_dq_helper<half, uint8_t>(
                         input_activations, weight, scales, timing_iterations, avg_time);
                 }
-            }
-            // else if (quant_type == at::ScalarType::QUInt4x2) {
-            //     output_tensor = fused_gemm_dq_helper<half, cutlass::uint4b_t>(
-            //         input_activations, weight, scales, timing_iterations, avg_time);
-            // }
-            else {
+            } else if (quant_type == at::ScalarType::QUInt4x2) {
+                output_tensor = fused_gemm_dq_helper<half, cutlass::uint4b_t>(
+                    input_activations, weight, scales, zeros, group_size, timing_iterations, avg_time);
+            } else {
                 std::string err_msg = "Unsupported weight type " + std::string(at::toString(quant_type));
                 throw std::runtime_error(err_msg);
             }
@@ -196,12 +277,10 @@ _fused_gemm_dq(Tensor input_activations, Tensor weight, Tensor scales, int64_t t
             if (quant_type == torch::kInt8) {
                 output_tensor = fused_gemm_dq_helper<__nv_bfloat16, uint8_t>(
                     input_activations, weight, scales, timing_iterations, avg_time);
-            }
-            // else if (quant_type == at::ScalarType::QUInt4x2) {
-            //     output_tensor = fused_gemm_dq_helper<__nv_bfloat16, cutlass::uint4b_t>(
-            //         input_activations, weight, scales, timing_iterations, avg_time);
-            // }
-            else {
+            } else if (quant_type == at::ScalarType::QUInt4x2) {
+                output_tensor = fused_gemm_dq_helper<__nv_bfloat16, cutlass::uint4b_t>(
+                    input_activations, weight, scales, zeros, group_size, timing_iterations, avg_time);
+            } else {
                 std::string err_msg = "Unsupported weight type " + std::string(at::toString(quant_type));
                 throw std::runtime_error(err_msg);
             }
@@ -214,15 +293,14 @@ _fused_gemm_dq(Tensor input_activations, Tensor weight, Tensor scales, int64_t t
     return output_tensor;
 }
 
-Tensor fused_gemm_dq(Tensor input_activations, Tensor weight, Tensor scales, bool use_tensor_core)
-{
+Tensor fused_gemm_dq(
+    Tensor input_activations, Tensor weight, Tensor scales, Tensor zeros, int64_t group_size, bool use_tensor_core) {
     float dummy = 0.f;
-    return _fused_gemm_dq(input_activations, weight, scales, 1, dummy, use_tensor_core);
+    return _fused_gemm_dq(input_activations, weight, scales, zeros, group_size, 1, dummy, use_tensor_core);
 }
 
 Tensor
-bench_cublas(Tensor input_activations, Tensor weight_dequantized, const int64_t timing_iterations, float& avg_time)
-{
+bench_cublas(Tensor input_activations, Tensor weight_dequantized, const int64_t timing_iterations, float& avg_time) {
     using namespace fastertransformer;
     const int m = input_activations.size(0);
     const int n = weight_dequantized.size(1);
@@ -290,14 +368,16 @@ bench_cublas(Tensor input_activations, Tensor weight_dequantized, const int64_t 
 std::vector<std::vector<Tensor>> benchmark_against_cublas_fp(Tensor        input_activations,
                                                              Tensor        weight_quantized,
                                                              Tensor        scales,
+                                                             Tensor        zeros,
                                                              Tensor        weight_dequantized,
+                                                             int64_t       group_size,
                                                              const int64_t timing_iterations,
-                                                             bool          use_tensor_core)
-{
+                                                             bool          use_tensor_core) {
     float  cublas_time   = 0.f;
     float  ft_time       = 0.f;
     Tensor cublas_result = bench_cublas(input_activations, weight_dequantized, timing_iterations, cublas_time);
-    Tensor ft_result     = _fused_gemm_dq(input_activations, weight_quantized, scales, timing_iterations, ft_time, use_tensor_core);
+    Tensor ft_result     = _fused_gemm_dq(
+        input_activations, weight_quantized, scales, zeros, group_size, timing_iterations, ft_time, use_tensor_core);
 
     auto timing_tensor =
         torch::empty({2}, torch::dtype(at::ScalarType::Float).device(torch::kCPU).requires_grad(false));
@@ -307,8 +387,7 @@ std::vector<std::vector<Tensor>> benchmark_against_cublas_fp(Tensor        input
     return {{timing_tensor}, {cublas_result, ft_result}};
 }
 
-TORCH_LIBRARY(gemm_dq_unit_ops, m)
-{
+TORCH_LIBRARY(gemm_dq_unit_ops, m) {
     m.def("fused_gemm_dq", fused_gemm_dq);
     m.def("benchmark_against_cublas_fp", benchmark_against_cublas_fp);
 }

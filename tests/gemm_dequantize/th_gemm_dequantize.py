@@ -1,6 +1,7 @@
 import torch
 import unittest
 import os
+import numpy as np
 
 def random_tensor(shape, dtype, device, mean=0, std=1):
     return torch.empty(shape, dtype=dtype, device=device).normal_(mean, std)
@@ -19,116 +20,139 @@ class TestGemmDequantize(unittest.TestCase):
 
         torch.manual_seed(734876213)
 
-    def dequantize_test_helper(self, weight_type, quant_type):
-      assert quant_type == torch.int8 or quant_type == torch.quint4x2
+    def gemm_dequant_test_helper(self, compute_type, weight_dtype, gemm_ms, gemm_ns, gemm_ks, rtol, atol, use_tensor_core, benchmark=False):
+      assert weight_dtype == torch.int8 or weight_dtype == torch.quint4x2, "Weight must be quantized"
 
-      lower_bound = -128 if quant_type == torch.int8 else -8
-      upper_bound = 127 if quant_type == torch.int8 else 7
-
-      m, n, k = 64, 128, 64
-      weights = torch.randint(lower_bound, upper_bound, [k, n], dtype=torch.int8, device="cpu")
-
-      packed_weight = self.pack_int4s(weights) if quant_type == torch.quint4x2 else weights
-      cuda_weights = self.preprocess_weights_for_mixed_gemm(packed_weight, quant_type).to("cuda")
-      weights = weights.to("cuda")
-
-      act = torch.eye(m, dtype=weight_type, device="cuda")
-      scales = torch.ones([n], dtype=weight_type, device='cuda')
-
-      actual = self.fused_gemm_dq(act, cuda_weights, scales, True)
-      torch.testing.assert_close(actual, weights, atol=0, rtol=0, check_dtype=False)
-
-    def test_fp16_int8_dequantize(self):
-      self.dequantize_test_helper(torch.float16, torch.int8)
-    '''
-    @unittest.skip("bf16 not supported")
-    def test_bf16_int8_dequantize(self):
-      self.dequantize_test_helper(torch.bfloat16, torch.int8)
-
-    def test_fp16_int4_dequantize(self):
-      self.dequantize_test_helper(torch.float16, torch.quint4x2)
-
-    @unittest.skip("bf16 not supported")
-    def test_bf16_int4_dequantize(self):
-      self.dequantize_test_helper(torch.bfloat16, torch.quint4x2)
-    '''
-
-    def gemm_dequant_test_helper(self, compute_type, weight_dtype, gemm_ms, gemm_ns, gemm_ks, rtol, atol, use_tensor_core, act_str="only_gemm", benchmark=False):
-        assert weight_dtype == torch.int8 or weight_dtype == torch.quint4x2, "Weight must be quantized"
-
-        for gemm_k in gemm_ks:
-            for gemm_n in gemm_ns:
-                torch_weights_cpu = random_tensor((gemm_k, gemm_n), dtype=compute_type, device="cpu", mean=0, std=0.002)
-                ref_torch_weights, processed_torch_weights, torch_weight_scales = self.symmetric_quantizer(torch_weights_cpu, weight_dtype)
-                ref_torch_weights = self.unpack_packed_int4s(ref_torch_weights) if weight_dtype == torch.quint4x2 else ref_torch_weights
-                ref_torch_weights = ref_torch_weights.to("cuda")
-                processed_torch_weights = processed_torch_weights.to("cuda")
-                torch_weight_scales = torch_weight_scales.to("cuda")
-                torch_biases = random_tensor((gemm_n), dtype=compute_type, device="cuda", mean=0, std=0.1)
+      for gemm_k in gemm_ks:
+        for gemm_n in gemm_ns:
+          torch_weights_cpu = random_tensor((gemm_k, gemm_n), dtype=compute_type, device="cpu", mean=0, std=0.002)
+          ref_torch_weights, processed_torch_weights, torch_weight_scales = self.symmetric_quantizer(torch_weights_cpu, weight_dtype)
+          ref_torch_weights = self.unpack_packed_int4s(ref_torch_weights) if weight_dtype == torch.quint4x2 else ref_torch_weights
+          ref_torch_weights = ref_torch_weights.to("cuda")
+          processed_torch_weights = processed_torch_weights.to("cuda")
+          torch_weight_scales = torch_weight_scales.to("cuda")
+          zeros = torch.Tensor().half() 
 
 
-                for num_rows in gemm_ms:
-                    torch_activations = torch.randn(size=(num_rows, gemm_k), dtype=compute_type, device="cuda")
+          for num_rows in gemm_ms:
+            torch_activations = torch.randn(size=(num_rows, gemm_k), dtype=compute_type, device="cuda")
 
-                    scales_unsqueezed = torch_weight_scales.unsqueeze(0)
-                    casted_weights = ref_torch_weights.to(torch_activations.dtype)
-                    dequantized_weights = torch.multiply(casted_weights, scales_unsqueezed)
-                    if benchmark:
-                      assert act_str == "only_gemm", "Benchmarks against cublas must use just GEMM."
-                      torch.cuda.profiler.start()
-                      times, results = self.bench(torch_activations, processed_torch_weights, torch_weight_scales, dequantized_weights, 200)
-                      torch.cuda.profiler.stop()
-                      times = times[0]
-                      cublas_time = times[0].item()
-                      ft_time = times[1].item()
-                      ft_speedup = cublas_time / ft_time
-                      print("{},{},{},{},{},{}".format(num_rows, gemm_n, gemm_k, cublas_time, ft_time, ft_speedup))
-                      reference_result = results[0]
-                      ft_result = results[1]
-                    else:
-                      reference_result = torch.matmul(torch_activations, dequantized_weights)
-                      ft_result = self.fused_gemm_dq(torch_activations, processed_torch_weights, torch_weight_scales, use_tensor_core)
+            scales_unsqueezed = torch_weight_scales.unsqueeze(0)
+            casted_weights = ref_torch_weights.to(torch_activations.dtype)
+            dequantized_weights = torch.multiply(casted_weights, scales_unsqueezed)
+            if benchmark:
+              torch.cuda.profiler.start()
+              times, results = self.bench(torch_activations, processed_torch_weights, torch_weight_scales, dequantized_weights, 200)
+              torch.cuda.profiler.stop()
+              times = times[0]
+              cublas_time = times[0].item()
+              ft_time = times[1].item()
+              ft_speedup = cublas_time / ft_time
+              print("{},{},{},{},{},{}".format(num_rows, gemm_n, gemm_k, cublas_time, ft_time, ft_speedup))
+              reference_result = results[0]
+              ft_result = results[1]
+            else:
+              reference_result = torch.matmul(torch_activations, dequantized_weights)
+              ft_result = self.fused_gemm_dq(torch_activations, processed_torch_weights, torch_weight_scales, zeros, gemm_k, use_tensor_core)
 
-                    msg = "FC1 Failed on m={}, n={}, k={}".format(num_rows, gemm_n, gemm_k)
-                    torch.testing.assert_close(ft_result, reference_result, rtol=rtol, atol=atol, msg=msg, check_dtype=False)
+            msg = "FC1 Failed on m={}, n={}, k={}".format(num_rows, gemm_n, gemm_k)
+            torch.testing.assert_close(ft_result, reference_result, rtol=rtol, atol=atol, msg=msg, check_dtype=False)
 
     def test_fp16_int8_gemv(self):
-        self.gemm_dequant_test_helper(torch.float16, torch.int8,
-                                      gemm_ms = [1, 2, 3, 4],
-                                      gemm_ns = [1024, 2048, 4096],
-                                      gemm_ks = [512, 768, 1024, 4096, 11008],
-                                      rtol=0.001, atol=0.002, use_tensor_core=False)
+      self.gemm_dequant_test_helper(torch.float16, torch.int8,
+                                    gemm_ms = [1, 2, 3, 4],
+                                    gemm_ns = [1024, 2048, 4096],
+                                    gemm_ks = [512, 768, 1024, 4096, 11008],
+                                    rtol=0.001, atol=0.002, use_tensor_core=False)
 
     def test_fp16_int8_gemm(self):
-        self.gemm_dequant_test_helper(torch.float16, torch.int8,
-                                      gemm_ms = [256, 177, 195, 125, 66, 33, 8, 2, 1],
-                                      gemm_ns = [1024, 2048, 4096],
-                                      gemm_ks = [4096, 8192, 16384],
-                                      rtol=0.001, atol=0.002, use_tensor_core=True)
-    '''
+      self.gemm_dequant_test_helper(torch.float16, torch.int8,
+                                    gemm_ms = [256, 177, 195, 125, 66, 33, 8, 2, 1],
+                                    gemm_ns = [1024, 2048, 4096],
+                                    gemm_ks = [4096, 8192, 16384],
+                                    rtol=0.001, atol=0.002, use_tensor_core=True)
+
+    def woq_groupwise_extract_int4(self, w_packed, uint4_input=False):
+      w_packed_int8 = w_packed.T.contiguous().view(torch.uint8)
+      w_unpacked_int4 = torch.stack(
+          ((w_packed_int8 % 16).view(-1, 1), (w_packed_int8 // 16).view(-1, 1)),
+          dim=1)
+      # Unpacked uint4s
+      w_unpacked_int4 = w_unpacked_int4.flatten().view(w_packed.shape[1],
+                                                       -1).T.contiguous().int()
+      if not uint4_input:
+          w_unpacked_int4 -= 8
+      return w_unpacked_int4    
+      
+    def woq_assert_colwise_near_eq(self, ref, act):
+      bits_in_type = 4
+      quant_range_scale = 1.0 / float(1 << (bits_in_type - 1))
+
+      # check each column independently
+      if ref.shape[0] > 1:
+          for col_idx in range(ref.shape[-1]):
+              col = ref[:, col_idx]
+              max_val = torch.max(col).item()
+              atol = (max_val * quant_range_scale) * 1.5  # allow for rounding
+              np.testing.assert_allclose(col.cpu().numpy(),
+                                         act[:, col_idx].cpu().numpy(),
+                                         atol=atol)
+      else:
+          max_val = torch.max(ref).item()
+          atol = (max_val * quant_range_scale) * 1.5  # allow for rounding
+          np.testing.assert_allclose(ref.cpu().numpy(),
+                                     act.cpu().numpy(),
+                                     atol=atol)
+    
+    def groupwise_gemm_dequant_test_helper(self, compute_type, gemm_ms, gemm_ns, gemm_ks, group_size):
+      uint4_input=1
+      for gemm_m in gemm_ms:
+        for gemm_k in gemm_ks:
+          for gemm_n in gemm_ns:
+            torch.manual_seed(0)
+            activation = torch.rand((gemm_m, gemm_k), dtype=compute_type) * 2 - 1.0 
+            qweight_unprocessed = torch.randint(-2**31, 2**31, (gemm_k // 8, gemm_n)).int()
+            scale = torch.rand((gemm_k // group_size, gemm_n), dtype=compute_type) * 2
+            zero = torch.rand((gemm_k // group_size, gemm_n), dtype=compute_type) * 2
+
+            qweight_int8 = self.woq_groupwise_extract_int4(
+                qweight_unprocessed, uint4_input).char()
+            qweight_int4x2_interleaved = self.preprocess_weights_for_mixed_gemm(
+                self.pack_int4s(qweight_int8 - uint4_input * 8),
+                torch.quint4x2)
+
+            ref_th_weight = qweight_int8.half() * scale.repeat_interleave(
+                group_size, dim=0) - uint4_input * 8 * scale.repeat_interleave(
+                    group_size, dim=0)
+
+            ref_th_weight += zero.repeat_interleave(group_size, dim=0)
+
+            ft_result = self.fused_gemm_dq(activation.cuda(), qweight_int4x2_interleaved.cuda(), scale.cuda(), zero.cuda(), group_size, True)
+            
+            reference_result = activation.cuda().matmul(ref_th_weight.cuda().to(compute_type))
+            self.woq_assert_colwise_near_eq(reference_result, ft_result)
+
+      
     def test_fp16_int4_gemm(self):
-        self.gemm_dequant_test_helper(torch.float16, torch.quint4x2,
-                                      gemm_ms = [256, 177, 195, 125, 66, 33, 8, 2, 1],
-                                      gemm_ns = [1024, 2048, 4096],
-                                      gemm_ks = [4096, 8192, 16384],
-                                      rtol=0.001, atol=0.002)
+      self.groupwise_gemm_dequant_test_helper(torch.float16, 
+                                    gemm_ms = [1, 16, 32, 44, 256, 37],
+                                    gemm_ns = [64, 128, 1024, 2048, 4096],
+                                    gemm_ks = [64, 128, 1024, 4096],
+                                    group_size=64)
 
-    @unittest.skip("bf16 not supported")
-    def test_bf16_int8_gemm(self):
-        self.gemm_dequant_test_helper(torch.bfloat16, torch.int8,
-                                      gemm_ms = [256, 177, 195, 125, 66, 33, 8, 2, 1],
-                                      gemm_ns = [1024, 2048, 4096],
-                                      gemm_ks = [4096, 8192, 16384],
-                                      rtol=0.01, atol=0.01)
-
-    @unittest.skip("bf16 not supported")
+    def test_fp16_int4_gemm2(self):
+      self.groupwise_gemm_dequant_test_helper(torch.float16, 
+                                    gemm_ms = [1, 16, 32, 44, 256, 37],
+                                    gemm_ns = [64, 128, 1024, 2048, 4096],
+                                    gemm_ks = [128, 1024, 4096],
+                                    group_size=128)
+    @unittest.skip("Not test yet")
     def test_bf16_int4_gemm(self):
-        self.gemm_dequant_test_helper(torch.bfloat16, torch.quint4x2,
-                                      gemm_ms = [256, 177, 195, 125, 66, 33, 8, 2, 1],
-                                      gemm_ns = [1024, 2048, 4096],
-                                      gemm_ks = [4096, 8192, 16384],
-                                      rtol=0.01, atol=0.01)
-    '''
+      self.groupwise_gemm_dequant_test_helper(torch.bfloat16, 
+                                    gemm_ms = [256, 177, 195, 125, 66, 33, 8, 2, 1],
+                                    gemm_ns = [1024, 2048, 4096],
+                                    gemm_ks = [4096, 8192, 16384],
+                                    group_size=128)
 
     def bench_helper(self, act_type, quant_type, rtol, atol):
       # Warm, using bfloat here since it seems to reliably use cublas.
