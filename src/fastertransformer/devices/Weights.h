@@ -26,9 +26,20 @@ struct DenseWeights {
     DenseWeights(BufferPtr& kernel) : kernel(std::move(kernel)) {};
 
     DenseWeights(ConstBufferPtr& kernel) : kernel(std::move(kernel)) {};
+
     DenseWeights(ConstBufferPtr& kernel,
                  ConstBufferPtr& bias) :
                  kernel(std::move(kernel)),
+                 bias(std::move(bias)) {};
+    
+    DenseWeights(std::nullptr_t kernel,
+                 ConstBufferPtr& bias) : 
+                 kernel(nullptr),
+                 bias(std::move(bias)) {};
+
+    DenseWeights(std::nullptr_t kernel,
+                 BufferPtr& bias) : 
+                 kernel(nullptr),
                  bias(std::move(bias)) {};
 
 };
@@ -52,6 +63,11 @@ struct AttentionLayerWeights {
 
     std::unique_ptr<const DenseWeights>     output_weight;
     std::unique_ptr<const LoraWeightsMap>   output_lora_weights;
+
+    AttentionLayerWeights() = default;
+
+    AttentionLayerWeights(std::unique_ptr<const DenseWeights> qkv_weight) :
+                          qkv_weight(std::move(qkv_weight)) {};
 };
 
 struct FfnLayerWeights {

@@ -16,6 +16,7 @@ public:
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return host_allocator_.get(); }
     int getDeviceId() const { return device_id_; }
+    cudaStream_t getStream() {return stream_;}
 
 public:
     void copy(const CopyParams& params);

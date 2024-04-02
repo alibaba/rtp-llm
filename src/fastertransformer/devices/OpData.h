@@ -202,49 +202,61 @@ struct EmbeddingLookupParams {
     const Buffer& combo_tokens;
     const Buffer& embedding_table;
 
-    const std::optional<std::reference_wrapper<const Buffer>> position_ids;
-    const std::optional<std::reference_wrapper<const Buffer>> position_table;
+    OptionalConstBufferRef position_ids;
+    OptionalConstBufferRef position_table;
 };
 
 struct AttentionCommonInputs {
-    const Buffer& kv_cache_blocks; // [batch_size, block_length], int64 block pointers
-    const std::optional<std::reference_wrapper<const Buffer>> kv_cache_scales;
+    // [batch_size, block_length], int64 block pointers
+    OptionalConstBufferRef kv_cache_blocks; 
+    OptionalConstBufferRef kv_cache_scales;
 
-    const Buffer& input_lengths;
-    const Buffer& sequence_lengths;
+    OptionalConstBufferRef input_lengths;
+    OptionalConstBufferRef sequence_lengths;
+    OptionalConstBufferRef cu_seqlens;
 
-    const std::optional<std::reference_wrapper<const Buffer>> padding_offset;
-    const std::optional<std::reference_wrapper<const Buffer>> position_ids;
-    const std::optional<std::reference_wrapper<const Buffer>> attention_mask;
-    const std::optional<std::reference_wrapper<const Buffer>> linear_bias_slopes;
-    const std::optional<std::reference_wrapper<const Buffer>> prefix_prompt_lengths;
-    const std::optional<bool>         count_prefix_length;
-    const std::optional<uint32_t>     max_prefix_length;
+    OptionalConstBufferRef padding_offset;
+    OptionalConstBufferRef position_ids;
+    OptionalConstBufferRef attention_mask;
+    OptionalConstBufferRef linear_bias_slopes;
+    OptionalConstBufferRef prefix_prompt_lengths;
+    
+    OptionalConstBufferRef lora_ids;
+    OptionalConstBufferRef lora_input_lengths;
 
-    const std::optional<std::reference_wrapper<const Buffer>> lora_ids;
-    const std::optional<std::reference_wrapper<const Buffer>> lora_input_lengths;
-};
-
-// TODO(wangyin): figure out these styles and doc them.
-enum class PositionEmbeddingStyle {
-    BaseRotaryEmbedding          = 0,
-    LinearScalar  = 1,
-    NTKScalar     = 2,
-    DynamicNTKS   = 3,
-    GLM           = 4,
+    AttentionCommonInputs() = default;
+    
+    // context attention
+    AttentionCommonInputs(const Buffer& position_ids,
+                          const Buffer& attention_mask,
+                          const Buffer& padding_offset,
+                          const Buffer& cu_seqlens) :
+                          position_ids(position_ids),
+                          attention_mask(attention_mask),
+                          padding_offset(padding_offset),
+                          cu_seqlens(cu_seqlens) {}
 };
 
 struct AttentionConfigs {
-    PositionEmbeddingStyle position_embedding_style;
-    int64_t rotary_embedding_dim      = 0;
-    int64_t rotary_embedding_base     = 10000;
-    double  dynamic_embedding_scalar  = 0.0;
-    int64_t dynamic_embedding_max_pos = 0;
-    int64_t position_embeddings_scale = 1;
-    int64_t base_scale                = 1;
 
+    size_t      token_num;
+    size_t      batch_size;
+    size_t      head_num;
+    size_t      kv_head_num;
+    size_t      seq_len;
+    size_t      size_per_head;
+    
+    // rotary embending config
+    RopeConfig rope_config;
+
+    // prefix params
+    bool        count_prefix_length = false;
+    size_t      max_prefix_length   = 0;
+
+    // log attention
     bool    use_logn_attn = false;
     int64_t logn_seq_len  = 2048;
+    
 };
 
 struct AttentionModuleOutput {
@@ -252,14 +264,11 @@ struct AttentionModuleOutput {
 };
 
 struct AttentionModuleParams {
-    const Buffer& input;
-
-    const AttentionConfigs&      configs;
-
-    uint32_t batch_size;
-    uint32_t max_seq_length;
-
-    AttentionCommonInputs& common;
+    // qkv shape[token_num * (head_num + 2 * kv_head_num), size_per_head]
+    const Buffer&                   input;
+    AttentionCommonInputs&          common;
+    const AttentionLayerWeights&    weights;
+    const AttentionConfigs&         configs;
 };
 
 struct AttentionLayerOutput {
@@ -267,11 +276,10 @@ struct AttentionLayerOutput {
 };
 
 struct AttentionLayerParams {
-    const Buffer& input;
-
-    const AttentionConfigs&      configs;
-    const AttentionLayerWeights& weights;
-    AttentionCommonInputs& common;
+    const Buffer&                   input;
+    const AttentionConfigs&         configs;
+    const AttentionLayerWeights&    weights;
+    AttentionCommonInputs&          common;
 };
 
 struct FfnLayerOutput {
@@ -364,14 +372,18 @@ struct SoftmaxParams{
 
     SoftmaxParams(const Buffer& input,
                   const Buffer& mask,
-                  float scale = 1.0f) :
-    input(input),
-    mask(mask),
-    scale(scale) {}
+                  float scale = 1.0f,
+                  const DataType output_t = DataType::TYPE_INVALID) :
+                  input(input),
+                  mask(mask),
+                  scale(scale),
+                  output_t(output_t) {}
+    
 
     const Buffer& input;
     const Buffer& mask;
     float scale;
+    const DataType output_t;
 
 };
 
