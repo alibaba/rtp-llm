@@ -13,7 +13,6 @@ from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.gpt import GPT
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer as QwenTokenizerOrigin
-from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer as QWen2Tokenizer
 from maga_transformer.model_factory_register import register_model
 from pathlib import Path
 import logging

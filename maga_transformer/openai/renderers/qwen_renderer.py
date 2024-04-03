@@ -9,7 +9,7 @@ from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGener
 from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
-from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer
+from maga_transformer.models.qwen_v2 import Qwen2Tokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, \
     ChatCompletionRequest, RoleEnum, FunctionCall, ChatCompletionResponseStreamChoice, \
     DeltaMessage, FinisheReason, UsageInfo, RendererInfo

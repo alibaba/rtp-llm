@@ -9,7 +9,6 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.models.llama_weight import LlamaWeightInfo, GemmaWeightInfo
 from maga_transformer.models.gpt import GPT
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.tokenizer.tokenization_gemma import GemmaTokenizer
 
 def compute_intermediate_size(n, ffn_dim_multiplier=1, multiple_of=256):
     return multiple_of * ((int(ffn_dim_multiplier * int(8 * n / 3)) + multiple_of - 1) // multiple_of)
@@ -150,11 +149,6 @@ class Gemma(Llama):
     @staticmethod
     def get_weight_cls():
         return GemmaWeightInfo
-
-    @classmethod
-    def get_tokenizer(cls, config: GptInitModelParameters):
-        tokenizer = GemmaTokenizer.from_pretrained(config.tokenizer_path, verbose = False)
-        return tokenizer
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
