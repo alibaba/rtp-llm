@@ -14,6 +14,8 @@ from maga_transformer.server.inference_worker import InferenceWorker, BatchPipel
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.test.model_test.test_util.fake_model_loader import FakeModelLoader
 
+os.environ['KV_CACHE_MEM_MB'] = '100'
+
 class MockMemInfo:
     free: int  = 12 * 1024 * 1024 # byte
     used: int  = 0

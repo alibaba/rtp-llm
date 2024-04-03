@@ -343,8 +343,10 @@ Thought:"""
         prompt = tokenizer.decode(ids)
         logging.info(f"rendered prompt: \n{prompt}\n-----------------------------------")
         assert(prompt == """<|im_start|>system
-你是小助手<|im_end|><|im_start|>user
-介绍一下自己<|im_end|><|im_start|>assistant
+你是小助手<|im_end|>
+<|im_start|>user
+介绍一下自己<|im_end|>
+<|im_start|>assistant
 template ends here""")
 
     def test_qwen_default_system(self):

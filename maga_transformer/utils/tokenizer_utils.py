@@ -38,10 +38,14 @@ def _convert_tokens_to_string_with_added_encoders(
     sub_texts = []
     current_sub_text = []
     all_special_tokens = set(tokenizer.all_special_tokens)
+    legacy_added_tokens = set(tokenizer._added_tokens_encoder.keys()) - set(tokenizer.all_special_tokens) | {
+    token for token in tokenizer.additional_special_tokens if tokenizer.convert_tokens_to_ids(token) >= tokenizer.vocab_size
+    }
+
     for token in output_tokens:
         if skip_special_tokens and token in all_special_tokens:
             continue
-        if token in tokenizer.get_added_vocab():
+        if token in legacy_added_tokens:
             if current_sub_text:
                 sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
                 sub_texts.append(sub_text)

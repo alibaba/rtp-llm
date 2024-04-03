@@ -9,6 +9,8 @@ from maga_transformer.pipeline.pipeline import Pipeline
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
+os.environ['KV_CACHE_MEM_MB'] = '100'
+
 class MockMemInfo:
     free: int  = 2 * 1024 * 1024 # byte
     used: int  = 0
