@@ -28,11 +28,7 @@ void NormWrapper<T>::initDecoderLayerNorm(T* output,
                                    beta,
                                    eps,
                                    m,
-                                   n,
-                                   scale,
-                                   dynamic_scale,
-                                   int8_mode,
-                                   stream);
+                                   n);
         }
     }
 }
@@ -45,7 +41,7 @@ void NormWrapper<T>::preAttentionLayerNorm(T*           output,
                                            const float  eps,
                                            const size_t m,
                                            const size_t n,
-                                           float*       scale,
+                                           const float* scale,
                                            float*       dynamic_scale,
                                            const int    int8_mode,
                                            cudaStream_t stream)
@@ -57,11 +53,7 @@ void NormWrapper<T>::preAttentionLayerNorm(T*           output,
                                beta,
                                eps,
                                m,
-                               n,
-                               scale,
-                               dynamic_scale,
-                               int8_mode,
-                               stream);
+                               n);
     }
 }
 
@@ -76,9 +68,7 @@ void NormWrapper<T>::attentionAddBiasResidualLayerNorm(T*           output,
                                                        const float  eps,
                                                        const size_t m,
                                                        const size_t n,
-                                                       const float* scale_inter,
-                                                       const float* scale_out,
-                                                       float*       scale,
+                                                       const float* scale,
                                                        float*       dynamic_scale,
                                                        const int    int8_mode,
                                                        cudaStream_t stream)
@@ -86,23 +76,17 @@ void NormWrapper<T>::attentionAddBiasResidualLayerNorm(T*           output,
     if (layernorm_type_ == LayerNormType::pre_layernorm) {
         if (norm_type_ == NormType::layernorm) {
             // norm_output = layernorm(input + residual1 + residual2 + bias) * gamma + beta
-            invokeGeneralAddBiasResidualPreLayerNorm(
+            invokeGeneralAddBiasResidualLayerNorm(
                 output,
                 norm_output,
                 input,
+                bias,
                 residual1,
                 gamma,
                 beta,
-                bias,
                 eps,
                 m,
-                n,
-                scale_inter,
-                scale_out,
-                scale,
-                dynamic_scale,
-                int8_mode,
-                stream);
+                n);
         } else if (norm_type_ == NormType::alphanorm) {
             // norm_output = layernorm(input + residual1 * alpha + bias) * gamma + beta
             // won't support W8A8 since it's only implemented in ChatGLM

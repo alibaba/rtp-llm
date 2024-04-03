@@ -31,7 +31,7 @@ public:
                                const float  eps,
                                const size_t m,
                                const size_t n,
-                               float*       scale,
+                               const float* scale,
                                float*       dynamic_scale,
                                const int    int8_mode,
                                cudaStream_t stream);
@@ -46,9 +46,7 @@ public:
                                            const float  eps,
                                            const size_t m,
                                            const size_t n,
-                                           const float* scale_inter,
-                                           const float* scale_out,
-                                           float*       scale,
+                                           const float* scale,
                                            float*       dynamic_scale,
                                            const int    int8_mode,
                                            cudaStream_t stream);

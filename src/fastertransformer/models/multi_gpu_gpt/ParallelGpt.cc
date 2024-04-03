@@ -559,8 +559,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                 params_.layernorm_eps_,
                 h_token_num,
                 hidden_units,
-                nullptr,
-                nullptr,
                 const_cast<float*>(layer_weight->ffn_weights.intermediate_weight.scale),
                 nullptr,  // NOTE (perkzz): dynamic_quant_ ? ffn_intermediate_dynamic_scale_ : nullptr,
                 params_.quant_algo_->int8_mode_,
