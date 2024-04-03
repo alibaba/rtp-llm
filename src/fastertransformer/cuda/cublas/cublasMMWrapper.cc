@@ -413,6 +413,54 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
         beta        = &beta_half;
     }
 
+    int findAlgo = cublas_algo_map_->isExist(1, m, n, k, getCublasDataType(Atype_));
+    cublasLtMatmulAlgo_info info = cublas_algo_map_->getAlgo(1, m, n, k, getCublasDataType(Atype_));
+    cublasLtMatmulAlgo_t algo;
+
+    void*                workSpace     = cublas_workspace_;
+    int                  workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;    
+
+    if (findAlgo && info.stages != -1 && info.workspaceSize <= workspaceSize) {
+        cublasLtMatmulAlgoInit(cublaslt_handle_, computeType, scaleType, Atype_,
+                             Btype_, Ctype_, Ctype_, info.algoId, &algo);
+        cublasLtMatmulAlgoConfigSetAttribute(
+          &algo, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, &(info.customOption),
+          sizeof(info.customOption));
+        cublasLtMatmulAlgoConfigSetAttribute(&algo, CUBLASLT_ALGO_CONFIG_TILE_ID,
+                                           &(info.tile), sizeof(info.tile));
+        cublasLtMatmulAlgoConfigSetAttribute(
+          &algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &(info.splitK_val),
+          sizeof(info.splitK_val));
+        cublasLtMatmulAlgoConfigSetAttribute(
+          &algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, &(info.swizzle),
+          sizeof(info.swizzle));
+        cublasLtMatmulAlgoConfigSetAttribute(
+          &algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &(info.reductionScheme),
+          sizeof(info.reductionScheme));
+#if (CUDART_VERSION >= 11000)
+                cublasLtMatmulAlgoConfigSetAttribute(
+                    &algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &(info.stages), sizeof(info.stages));
+#endif
+
+#if (CUBLAS_VER_MAJOR == 11 && CUBLAS_VER_MINOR == 11 && CUBLAS_VER_PATCH >= 3)
+                cublasLtMatmulAlgoConfigSetAttribute(
+                    &algo, CUBLASLT_ALGO_CONFIG_INNER_SHAPE_ID, &(info.inner_shapeId), sizeof(info.inner_shapeId));
+                cublasLtMatmulAlgoConfigSetAttribute(&algo,
+                                                     CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID,
+                                                     &(info.cluster_shapeId),
+                                                     sizeof(info.cluster_shapeId));
+#elif (CUBLAS_VER_MAJOR == 11 && CUBLAS_VER_MINOR == 11 && CUBLAS_VER_PATCH < 3)
+                cublasLtMatmulAlgoConfigSetAttribute(
+                    &algo, CUBLASLT_ALGO_CONFIG_MMA_SHAPE_ID, &(info.mma_shapeId), sizeof(info.mma_shapeId));
+                cublasLtMatmulAlgoConfigSetAttribute(
+                    &algo, CUBLASLT_ALGO_CONFIG_CGA_SHAPE_ID, &(info.cga_shapeId), sizeof(info.cga_shapeId));
+                cublasLtMatmulAlgoConfigSetAttribute(
+                    &algo, CUBLASLT_ALGO_CONFIG_SCHEDULING_MODE, &(info.sche_mode), sizeof(info.sche_mode));
+#endif
+    } else {
+        findAlgo = false;
+    }
+
     cublasLtMatmulDesc_t   operationDesc = NULL;
     cublasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL;
     cublasLtEpilogue_t     epi = CUBLASLT_EPILOGUE_BIAS;
@@ -425,12 +473,14 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(cublasOperation_t));
     cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE, &epi, sizeof(cublasLtEpilogue_t));
     cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(const void*));
-    check_cuda_error(cublasLtMatmul(
-        cublaslt_handle_, operationDesc, alpha, A, Adesc, B, Bdesc, beta, C, Cdesc, C, Cdesc, NULL, NULL, 0, stream_));
+    check_cuda_error(cublasLtMatmul(cublaslt_handle_, operationDesc, alpha, A,
+                                    Adesc, B, Bdesc, beta, C, Cdesc, C, Cdesc,
+                                    (findAlgo == 1 ? (&algo) : NULL), workSpace, workspaceSize, stream_));
     cublasLtMatrixLayoutDestroy(Adesc);
     cublasLtMatrixLayoutDestroy(Bdesc);
     cublasLtMatrixLayoutDestroy(Cdesc);
     cublasLtMatmulDescDestroy(operationDesc);
+    sync_check_cuda_error();
 }
 #endif
 void cublasMMWrapper::setStream(cudaStream_t stream) {
