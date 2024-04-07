@@ -91,7 +91,8 @@ class DecoderEngineTest(TestCase):
             await asyncio.sleep(0.01)
             
         try:
-            asyncio.run(_run())
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_run())
             self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
             remain_block = pipeline.model.decoder_engine_.scheduler_._stream_cache_manager.cache_manager_.free_block_nums
             self.assertEqual(origin_block, remain_block)
