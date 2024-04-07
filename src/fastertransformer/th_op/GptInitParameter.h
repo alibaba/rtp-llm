@@ -42,14 +42,15 @@ public:
 class GptInitParameter: public th::jit::CustomClassHolder {
 public:
     // model variant params used in ft
-    int64_t head_num_           = 0;
-    int64_t head_num_kv_        = -1;
-    int64_t size_per_head_      = 0;
-    int64_t inter_size_         = 0;
-    int64_t inter_padding_size_ = -1;
-    int64_t num_layers_         = 0;
-    int64_t num_valid_layer_    = 0;
-    int64_t hidden_size_        = 0;
+    int64_t head_num_               = 0;
+    int64_t head_num_kv_            = -1;
+    int64_t size_per_head_          = 0;
+    int64_t inter_size_             = 0;
+    int64_t inter_padding_size_     = -1;
+    int64_t moe_inter_padding_size_ = -1;
+    int64_t num_layers_             = 0;
+    int64_t num_valid_layer_        = 0;
+    int64_t hidden_size_            = 0;
 
     // in sparse, those params might vary among layers
     bool                 is_sparse_head_           = false;
@@ -89,6 +90,7 @@ public:
     int64_t              type_vocab_size_ = 0;
     int64_t              expert_num_      = 0;
     int64_t              moe_k_           = 0;
+    int64_t              moe_style_       = 0; // 0 for no moe; 1 for all layer moe; 2 for partial layer moe
     std::vector<int64_t> moe_layer_index_ = {};
 
     bool has_positional_encoding_    = false;

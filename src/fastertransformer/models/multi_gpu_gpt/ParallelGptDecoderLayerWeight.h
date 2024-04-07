@@ -74,6 +74,7 @@ public:
     AttentionWeight<T> self_attention_weights;
     LayerNormWeight<T> self_attn_layernorm_weights;
     FfnWeight<T>       ffn_weights;
+    FfnWeight<T>       partial_moe_weights;
     FfnWeight<T>       after_attention_adapter_weights;
     FfnWeight<T>       after_ffn_adapter_weights;
     LayerNormWeight<T> posf_ffn_layernorm_weights;

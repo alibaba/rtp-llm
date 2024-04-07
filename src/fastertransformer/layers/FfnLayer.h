@@ -43,6 +43,7 @@ private:
     // meta data
     size_t expert_num_    = 0;
     size_t moe_k_         = 0;
+    size_t moe_style_     = 0;
 
     // calculated data
     size_t hidden_units_ = 0;
@@ -66,8 +67,9 @@ protected:
     char*  mixed_gemm_workspace_ = nullptr;
     size_t mixed_gemm_ws_bytes_  = 0;
 
-    size_t inter_size_         = 0;
-    size_t inter_padding_size_ = 0;
+    size_t inter_size_             = 0;
+    size_t inter_padding_size_     = 0;
+    size_t moe_inter_padding_size_ = 0;
 
     const bool                 is_sparse_head_ = false;
     const std::vector<int64_t> local_layer_inter_size_;
@@ -103,8 +105,10 @@ public:
              size_t               hidden_units,
              size_t               expert_num,
              size_t               moe_k,
+             size_t               moe_style,
              size_t               inter_size,
              size_t               inter_padding_size,
+             size_t               moe_inter_padding_size,
              std::vector<int64_t> local_layer_inter_size,
              std::vector<int64_t> local_layer_inter_padding_size,
              cudaStream_t         stream,
@@ -122,8 +126,9 @@ public:
 
     virtual void forward(std::vector<fastertransformer::Tensor>*       output_tensors,
                          const std::vector<fastertransformer::Tensor>* input_tensors,
-                         const FfnWeight<T>*                           ffn_weights);
-    virtual void forward(TensorMap* output_tensors, TensorMap* input_tensors, const FfnWeight<T>* ffn_weights);
+                         const FfnWeight<T>*                           ffn_weights,
+                         const bool                                    use_moe = false);
+    virtual void forward(TensorMap* output_tensors, TensorMap* input_tensors, const FfnWeight<T>* ffn_weights, const bool use_moe = false);
     virtual void preAllocate();
 };
 

@@ -41,6 +41,14 @@ static const std::string ffn_gate     = "ffn_weights.gate.kernel"; // for moe
 static const std::string post_ffn_ln_gamma     = "post_ffn_layernorm_weights.gamma";
 static const std::string post_ffn_ln_beta      = "post_ffn_layernorm_weights.beta";
 
+static const std::string moe_w1   = "partial_moe_weights.intermediate_weight.kernel";
+static const std::string moe_b1   = "partial_moe_weights.intermediate_weight.bias";
+static const std::string moe_w3   = "partial_moe_weights.intermediate_weight3.kernel";
+static const std::string moe_b3   = "partial_moe_weights.intermediate_weight3.bias";
+static const std::string moe_w2   = "partial_moe_weights.intermediate_weight2.kernel";
+static const std::string moe_b2   = "partial_moe_weights.intermediate_weight2.bias";
+static const std::string moe_gate = "partial_moe_weights.gate.kernel";
+
 static const std::string attn_qkv_z = "self_attention_weights.query_weight.zero";
 static const std::string attn_qkv_s = "self_attention_weights.query_weight.weight_only_quant_scale";
 static const std::string attn_o_z = "self_attention_weights.attention_output_weight.zero";
@@ -51,6 +59,12 @@ static const std::string ffn_z3 = "ffn_weights.intermediate_weight3.zero";
 static const std::string ffn_s3 = "ffn_weights.intermediate_weight3.weight_only_quant_scale";
 static const std::string ffn_z2 = "ffn_weights.intermediate_weight2.zero";
 static const std::string ffn_s2 = "ffn_weights.intermediate_weight2.weight_only_quant_scale";
+static const std::string moe_z1 = "partial_moe_weights.intermediate_weight.zero";
+static const std::string moe_s1 = "partial_moe_weights.intermediate_weight.weight_only_quant_scale";
+static const std::string moe_z3 = "partial_moe_weights.intermediate_weight3.zero";
+static const std::string moe_s3 = "partial_moe_weights.intermediate_weight3.weight_only_quant_scale";
+static const std::string moe_z2 = "partial_moe_weights.intermediate_weight2.zero";
+static const std::string moe_s2 = "partial_moe_weights.intermediate_weight2.weight_only_quant_scale";
 
 }
 }

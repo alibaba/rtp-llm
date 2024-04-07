@@ -226,6 +226,8 @@ class GptInitModelParameters:
             self.head_num_kv = self.head_num
         if self.inter_padding_size <= 0:
             self.inter_padding_size = self.inter_size
+        if self.moe_inter_padding_size <= 0:
+            self.moe_inter_padding_size = self.inter_size
 
     def update_task_prompt_config(self):
         prompt_file_path =  os.environ.get('MULTI_TASK_PROMPT', None)

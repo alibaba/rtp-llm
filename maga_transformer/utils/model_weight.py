@@ -248,6 +248,15 @@ class W:
     post_ffn_ln_gamma = "post_ffn_layernorm_weights.gamma"
     post_ffn_ln_beta = "post_ffn_layernorm_weights.beta"
 
+    # partial moe
+    moe_w1   = 'partial_moe_weights.intermediate_weight.kernel'
+    moe_b1   = 'partial_moe_weights.intermediate_weight.bias'
+    moe_w3   = 'partial_moe_weights.intermediate_weight3.kernel'
+    moe_b3   = 'partial_moe_weights.intermediate_weight3.bias'
+    moe_w2   = 'partial_moe_weights.intermediate_weight2.kernel'
+    moe_b2   = 'partial_moe_weights.intermediate_weight2.bias'
+    moe_gate = 'partial_moe_weights.gate.kernel'
+
     # lora
     attn_qkv_w_lora_a = 'self_attention_weights.query_weight.kernel.lora_A'
     attn_qkv_w_lora_b = 'self_attention_weights.query_weight.kernel.lora_B'
@@ -271,9 +280,25 @@ class W:
     ffn_s3 = 'ffn_weights.intermediate_weight3.weight_only_quant_scale'
     ffn_z2 = 'ffn_weights.intermediate_weight2.zero'
     ffn_s2 = 'ffn_weights.intermediate_weight2.weight_only_quant_scale'
+    moe_z1 = 'partial_moe_weights.intermediate_weight.zero'
+    moe_s1 = 'partial_moe_weights.intermediate_weight.weight_only_quant_scale'
+    moe_z3 = 'partial_moe_weights.intermediate_weight3.zero'
+    moe_s3 = 'partial_moe_weights.intermediate_weight3.weight_only_quant_scale'
+    moe_z2 = 'partial_moe_weights.intermediate_weight2.zero'
+    moe_s2 = 'partial_moe_weights.intermediate_weight2.weight_only_quant_scale'
 
     # medusa lm_head
     medusa_head = 'medusa_head'
+
+    partial_moe_w = set([
+        moe_w1,
+        moe_b1,
+        moe_w2,
+        moe_b2,
+        moe_w3,
+        moe_b3,
+        moe_gate
+    ])
 
     quant_w = set([
         attn_qkv_w,
@@ -281,6 +306,9 @@ class W:
         ffn_w1,
         ffn_w2,
         ffn_w3,
+        moe_w1,
+        moe_w2,
+        moe_w3
     ])
 
     int4_quant_params = set([
@@ -294,6 +322,12 @@ class W:
         ffn_s2,
         ffn_z3,
         ffn_s3,
+        moe_z1,
+        moe_s1,
+        moe_z2,
+        moe_s2,
+        moe_z3,
+        moe_s3
     ])
 
     int8_attn_weights = [
@@ -312,6 +346,12 @@ class W:
         [ffn_w2, ffn_s2], 
     ]
 
+    int8_partial_moe_weights = [
+        [moe_w1, moe_s1],
+        [moe_w3, moe_s3],
+        [moe_w2, moe_s2]
+    ]
+
     int4_attn_weights = [
         [attn_qkv_w, attn_qkv_z, attn_qkv_s],
         [attn_o_w, attn_o_z, attn_o_s],
@@ -328,10 +368,10 @@ class W:
         [ffn_w2, ffn_z2, ffn_s2], 
     ]
 
-    moe_int8_quant_weights = [
-        [ffn_w1, ffn_s1],
-        [ffn_w3, ffn_s3],
-        [ffn_w2, ffn_s2], 
+    int4_partial_moe_weights = [
+        [moe_w1, moe_z1, moe_s1],
+        [moe_w3, moe_z3, moe_s3],
+        [moe_w2, moe_z2, moe_s2] 
     ]
 
     gpt_style_tp_strategy: Dict[str, Any] = {
@@ -366,6 +406,18 @@ class W:
         ffn_z2: sp_0,
         ffn_s2: sp_0,
         ffn_b2: sp_id,
+        moe_w1: sp_neg1,
+        moe_z1: sp_neg1,
+        moe_s1: sp_neg1,
+        moe_b1: sp_neg1,
+        moe_w3: sp_neg1,
+        moe_z3: sp_neg1,
+        moe_s3: sp_neg1,
+        moe_b3: sp_neg1,
+        moe_w2: sp_0,
+        moe_z2: sp_0,
+        moe_s2: sp_0,
+        moe_b2: sp_id,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
         positional_embedding: sp_id,
@@ -380,6 +432,7 @@ class W:
         ffn_w2_lora_a: sp_0,
         ffn_w2_lora_b: sp_id,
         ffn_gate: sp_id,
+        moe_gate: sp_id,
         post_ffn_ln_beta: sp_id,
         post_ffn_ln_gamma: sp_id,
         token_type_embedding: sp_id        
@@ -591,6 +644,8 @@ class ModelDeployWeightInfo:
         self._is_gated_activation = config.gpt_init_params.isGatedActivation()
         self.expert_num_ = config.gpt_init_params.expert_num
         self.moe_k_      = config.gpt_init_params.moe_k
+        self.moe_layer_index_ = config.gpt_init_params.moe_layer_index
+        self.moe_style_ = config.gpt_init_params.moe_style
 
         self.tie_word_embeddings = config.tie_word_embeddings
 

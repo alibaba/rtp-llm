@@ -30,11 +30,7 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
         ]
         layer_weights = [
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)], identity),
-            WeightInfo(W.attn_qkv_b, [], functools.partial(zeros, shape=[self._hidden_size * 3])),
             WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight', concat_1)], transpose),
-            WeightInfo(W.attn_o_b, [], functools.partial(zeros, shape=[self._hidden_size])),
-            WeightInfo(W.ffn_b1, [], functools.partial(zeros, shape=[self.expert_num_, self._inter_size])),
-            WeightInfo(W.ffn_b2, [], functools.partial(zeros, shape=[self.expert_num_, self._hidden_size])),
             WeightInfo(W.ffn_gate, [CkptWeightInfo('model.layers.{i}.block_sparse_moe.gate.weight', concat_0)], transpose),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)], identity),
         ]
@@ -125,6 +121,7 @@ class Mixtral(GPT):
             rotary_embedding_base = int(config_json.get('rope_theta', 10000)),
             expert_num = config_json['num_local_experts'],
             moe_k = config_json['num_experts_per_tok'],
+            moe_style = 1,
             moe_layer_index = [i for i in range(config_json['num_hidden_layers'])])
         config.special_tokens.eos_token_id = 2
         config.special_tokens.bos_token_id = 1

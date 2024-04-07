@@ -185,7 +185,7 @@ class ModelWeightsLoader:
         if self._merge_lora:
             raise Exception("lora in int4 is not implemented yet")
         results = []
-        is_moe = self._weights_info.expert_num_ > 0
+        is_moe = self._weights_info.expert_num_ > 0 and layer_id in self._weights_info.moe_layer_index_
         is_gated_activation = self._weights_info._is_gated_activation
         def convert_weight(weight_lists, apply_func):
             for weight_list in weight_lists: 
@@ -221,16 +221,21 @@ class ModelWeightsLoader:
         else:
             ffn_weight_lists = W.int4_ffn_weights_2
             
-        if is_moe:
-            convert_weight(ffn_weight_lists, self.preprocess_moe_groupwise_weight_params)
-        else:
+        if self._weights_info.moe_style_ == 2:
+            if is_moe:
+                convert_weight(W.int4_partial_moe_weights, self.preprocess_moe_groupwise_weight_params)
             convert_weight(ffn_weight_lists, self.preprocess_groupwise_weight_params)
+        else:
+            if is_moe:
+                convert_weight(ffn_weight_lists, self.preprocess_moe_groupwise_weight_params)
+            else:
+                convert_weight(ffn_weight_lists, self.preprocess_groupwise_weight_params)
 
         return results
     
     def _load_int8_layer_weight(self, layer_weights, layer_id: int, device: str, ref_model: Optional[torch.nn.Module] = None):
         results = []
-        is_moe = self._weights_info.expert_num_ > 0
+        is_moe = self._weights_info.expert_num_ > 0 and layer_id in self._weights_info.moe_layer_index_
         is_gated_activation = self._weights_info._is_gated_activation
         def convert_weight(weight_lists, apply_func):
             for weight_list in weight_lists:  
@@ -262,10 +267,17 @@ class ModelWeightsLoader:
             ffn_weight_lists = W.int8_ffn_weights
         else:
             ffn_weight_lists = W.int8_ffn_weights_2
-        if is_moe:
-            convert_weight(ffn_weight_lists, self.moe_apply_int8)
-        else:
+
+        if self._weights_info.moe_style_ == 2:
+            if is_moe:
+                convert_weight(W.int8_partial_moe_weights, self.moe_apply_int8)
             convert_weight(ffn_weight_lists, self.apply_int8)
+        else:
+            if is_moe:
+                convert_weight(ffn_weight_lists, self.moe_apply_int8)
+            else:
+                convert_weight(ffn_weight_lists, self.apply_int8)
+                
         return results
 
     def _load_layer_weight(self, layer_id: int, ref_model: Optional[torch.nn.Module] = None, device: str = "cuda:0"):
@@ -275,16 +287,15 @@ class ModelWeightsLoader:
             layer_weights = self._model_weights_info.layer_weights[layer_id]
         else:
             layer_weights = self._model_weights_info.layer_weights
+        if self._weights_info.moe_style_ == 2 and layer_id not in self._weights_info.moe_layer_index_:
+            layer_weights = self._trunc_layer_weights_for_partial_moe(layer_weights)
         for weight in layer_weights:
             try:
                 int8_flag = self._weights_info._int8_mode == True and (weight.name in W.quant_w)
                 int4_flag = self._weights_info._int4_mode == True and (weight.name in W.quant_w or weight.name in W.int4_quant_params)
-                is_moe = self._weights_info.expert_num_ > 0
-                is_gated_activation = self._weights_info._is_gated_activation
 
                 if int4_flag or int8_flag:
                     continue
-
                 tensor = self._load_and_convert_tensor(weight, ref_model=ref_model, layer_id=layer_id)
                 
                 if self._merge_lora:
@@ -307,6 +318,13 @@ class ModelWeightsLoader:
         gc.collect()
         torch.cuda.empty_cache()
         return results, self._weight_log, self._lora_log
+    
+    def _trunc_layer_weights_for_partial_moe(self, layer_weights: List[WeightInfo]):
+        truncated_layer_weights = []
+        for weight in layer_weights:
+            if weight.name not in W.partial_moe_w:
+                truncated_layer_weights.append(weight)
+        return truncated_layer_weights
 
     def apply_lora(self, tensor: torch.Tensor, weight: WeightInfo, layer_id: int):
 

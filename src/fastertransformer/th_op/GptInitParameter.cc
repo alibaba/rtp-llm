@@ -117,6 +117,7 @@ static auto specialTokensTHS =
     DEF_PROPERTY(gen_num_per_circle, gen_num_per_circle_)                                                              \
     DEF_PROPERTY(inter_size, inter_size_)                                                                              \
     DEF_PROPERTY(inter_padding_size, inter_padding_size_)                                                              \
+    DEF_PROPERTY(moe_inter_padding_size, moe_inter_padding_size_)                                                      \
     DEF_PROPERTY(is_sparse_head, is_sparse_head_)                                                                      \
     DEF_PROPERTY(layer_head_num, layer_head_num_)                                                                      \
     DEF_PROPERTY(layer_head_num_kv, layer_head_num_kv_)                                                                \
@@ -127,6 +128,7 @@ static auto specialTokensTHS =
     DEF_PROPERTY(num_valid_layer, num_valid_layer_)                                                                    \
     DEF_PROPERTY(expert_num, expert_num_)                                                                              \
     DEF_PROPERTY(moe_k, moe_k_)                                                                                        \
+    DEF_PROPERTY(moe_style, moe_style_)                                                                                \
     DEF_PROPERTY(moe_layer_index, moe_layer_index_)                                                                    \
     DEF_PROPERTY(layernorm_eps, layernorm_eps_)                                                                        \
     /* In python, the following types use strings for branch condition */                                              \

@@ -55,6 +55,8 @@ private:
     T*      self_attn_output_        = nullptr;
     T*      normed_self_attn_output_ = nullptr;
     T*      decoder_layer_output_    = nullptr;
+    T*      partial_moe_output_      = nullptr;
+    T*      ffn_output_              = nullptr;
     size_t* h_pinned_token_num_ptr_  = nullptr;
     int*    padding_offset_          = nullptr;
     int*    cu_seqlens_              = nullptr;

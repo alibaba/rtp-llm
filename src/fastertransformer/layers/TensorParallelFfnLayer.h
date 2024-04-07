@@ -37,8 +37,10 @@ public:
                            size_t                              hidden_units,
                            size_t                              expert_num,
                            size_t                              moe_k,
+                           size_t                              moe_style,
                            size_t                              inter_size,
                            size_t                              inter_padding_size,
+                           size_t                              moe_inter_padding_size,
                            std::vector<int64_t>                layer_inter_size,
                            std::vector<int64_t>                layer_inter_padding_size,
                            NcclParam                           tensor_para,
@@ -58,15 +60,17 @@ public:
 
     void forward(std::vector<fastertransformer::Tensor>*       output_tensors,
                  const std::vector<fastertransformer::Tensor>* input_tensors,
-                 const FfnWeight<T>*                           ffn_weights) override;
-    void forward(TensorMap* output_tensors, TensorMap* input_tensors, const FfnWeight<T>* ffn_weights) override;
+                 const FfnWeight<T>*                           ffn_weights,
+                 const bool                                    use_moe = false) override;
+    void forward(TensorMap* output_tensors, TensorMap* input_tensors, const FfnWeight<T>* ffn_weights, const bool use_moe = false) override;
     void forward(Tensor&             ffn_output,
                  const Tensor&       ffn_input,
                  const int           layer_id,
                  const Tensor&       lora_ids,
                  const Tensor&       lora_input_lengths,
                  const int           ffn_batch_size_lora,
-                 const FfnWeight<T>* ffn_weights);
+                 const FfnWeight<T>* ffn_weights,
+                 const bool          use_moe = false);
 };
 
 }  // namespace fastertransformer

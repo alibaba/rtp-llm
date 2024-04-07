@@ -22,7 +22,8 @@ namespace fastertransformer {
 template<typename T>
 void TensorParallelFfnLayer<T>::forward(std::vector<fastertransformer::Tensor>*       output_tensors,
                                         const std::vector<fastertransformer::Tensor>* input_tensors,
-                                        const FfnWeight<T>*                           ffn_weights) {
+                                        const FfnWeight<T>*                           ffn_weights,
+                                        const bool                                    use_moe) {
     TensorMap input_tensor({{"ffn_input", input_tensors->at(0)}});
     TensorMap output_tensor({{"ffn_output", output_tensors->at(0)}});
     forward(&output_tensor, &input_tensor, ffn_weights);
@@ -35,20 +36,22 @@ void TensorParallelFfnLayer<T>::forward(Tensor&             ffn_output,
                                         const Tensor&       lora_ids,
                                         const Tensor&       lora_input_lengths,
                                         int                 ffn_batch_size_lora,
-                                        const FfnWeight<T>* ffn_weights) {
+                                        const FfnWeight<T>* ffn_weights,
+                                        const bool          use_moe) {
     TensorMap input_tensor({{"ffn_input", ffn_input},
                             {"layer_id", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &layer_id}},
                             {"lora_ids", lora_ids},
                             {"lora_input_lengths", lora_input_lengths},
                             {"batch_size", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &ffn_batch_size_lora}}});
     TensorMap output_tensor({{"ffn_output", ffn_output}});
-    forward(&output_tensor, &input_tensor, ffn_weights);
+    forward(&output_tensor, &input_tensor, ffn_weights, use_moe);
 }
 
 template<typename T>
 void TensorParallelFfnLayer<T>::forward(TensorMap*          output_tensors,
                                         TensorMap*          input_tensors,
-                                        const FfnWeight<T>* ffn_weights) {
+                                        const FfnWeight<T>* ffn_weights,
+                                        const bool          use_moe) {
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     Tensor       out_tensor   = output_tensors->at("ffn_output");
     const size_t token_num    = out_tensor.shape()[0];
@@ -62,7 +65,7 @@ void TensorParallelFfnLayer<T>::forward(TensorMap*          output_tensors,
             custom_all_reduce_comm_->swapInternalBuffer(&swap_tensors, token_num * hidden_units);
     }
 
-    FfnLayer<T>::forward(output_tensors, input_tensors, ffn_weights);
+    FfnLayer<T>::forward(output_tensors, input_tensors, ffn_weights, use_moe);
 
     // PUSH_RANGE(stream_, "FFN all reduce sum");
     T* ffn_out = out_tensor.getPtr<T>();
@@ -83,8 +86,10 @@ TensorParallelFfnLayer<T>::TensorParallelFfnLayer(size_t                        
                                                   size_t                              hidden_units,
                                                   size_t                              expert_num,
                                                   size_t                              moe_k,
+                                                  size_t                              moe_style,
                                                   size_t                              inter_size,
                                                   size_t                              inter_padding_size,
+                                                  size_t                              moe_inter_padding_size,
                                                   std::vector<int64_t>                layer_inter_size,
                                                   std::vector<int64_t>                layer_inter_padding_size,
                                                   NcclParam                           tensor_para,
@@ -106,8 +111,10 @@ TensorParallelFfnLayer<T>::TensorParallelFfnLayer(size_t                        
                 hidden_units,
                 expert_num,
                 moe_k,
+                moe_style,
                 inter_size / tensor_para.world_size_,
                 inter_padding_size / tensor_para.world_size_,
+                moe_inter_padding_size / tensor_para.world_size_,
                 getLocalParameter(layer_inter_size, tensor_para.world_size_),
                 getLocalParameter(layer_inter_padding_size, tensor_para.world_size_),
                 stream,

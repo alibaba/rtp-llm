@@ -29,8 +29,10 @@ void ParallelGpt<T>::initialize()
                                                params_.hidden_size_,
                                                params_.expert_num_,  // expert_num
                                                params_.moe_k_,
+                                               params_.moe_style_,
                                                params_.inter_size_,
                                                params_.inter_padding_size_,
+                                               params_.moe_inter_padding_size_,
                                                params_.layer_inter_size_,
                                                params_.layer_inter_padding_size_,
                                                tensor_para_,
@@ -120,6 +122,12 @@ void ParallelGpt<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num,
         allocator_->reMalloc(expert_for_source_row_, sizeof(int) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num), false));
     fc2_result_ = reinterpret_cast<T*>(
         allocator_->malloc(sizeof(T) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num * hidden_units), false));
+    if (params_.moe_style_ == 2) {
+        partial_moe_output_ = reinterpret_cast<T*>(
+            allocator_->reMalloc(partial_moe_output_, sizeof(T) * h_token_num * hidden_units, false));
+        ffn_output_ = reinterpret_cast<T*>(
+            allocator_->reMalloc(ffn_output_, sizeof(T) * h_token_num * hidden_units, false));
+    }
 
     is_allocate_buffer_ = true;
 }
@@ -154,6 +162,10 @@ void ParallelGpt<T>::freeBuffer()
         allocator_->free((void**)(&expanded_source_row_to_expanded_dest_row_));
         allocator_->free((void**)(&expert_for_source_row_));
         allocator_->free((void**)(&fc2_result_));
+        if(params_.moe_style_ == 2) {
+            allocator_->free((void**)(&partial_moe_output_));
+            allocator_->free((void**)(&ffn_output_));
+        }
         is_allocate_buffer_ = false;
     }
 }
@@ -567,7 +579,13 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         sync_check_cuda_error();
         POP_RANGE;
 
-        T* ffn_output_ptr =  params_.layernorm_type_ == LayerNormType::pre_layernorm ? decoder_normed_input_ : decoder_output;
+        T* ffn_output_ptr = nullptr;
+        if (params_.moe_style_ == 2) {
+            ffn_output_ptr = ffn_output_;
+        }
+        else { 
+            ffn_output_ptr =  params_.layernorm_type_ == LayerNormType::pre_layernorm ? decoder_normed_input_ : decoder_output;
+        }
 
         int ffn_batch_size_lora = batch_size + context_batch_size;
         const int* lora_input_lengths = input_tensors->getPtr<int>("lora_input_lengths", nullptr);;
@@ -589,7 +607,8 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         size_t    moe_k = params_.moe_k_;
         ffn_output_tensors.insert("ffn_output",
                                   Tensor{MEMORY_GPU, activation_out_type, {h_token_num, hidden_units}, ffn_output_ptr});
-        if (use_moe) {
+        bool use_moe_instead_ffn = params_.moe_style_ != 2 && use_moe;
+        if (use_moe_instead_ffn) {
             ffn_output_tensors.insert(
                 "fc2_result",
                 Tensor{MEMORY_GPU, activation_out_type, {moe_k * h_token_num, hidden_units}, fc2_result_});
@@ -601,9 +620,31 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             ffn_output_tensors.insert("expert_for_source_row",
                                       Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expert_for_source_row_});
         }
-        ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->ffn_weights);
+        ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->ffn_weights, use_moe_instead_ffn);
 
         print_bsd(l, "post ffn", ffn_output_ptr, 1, h_token_num, hidden_units);
+
+        if (params_.moe_style_ == 2 && use_moe) {
+            print_bsd(l, "before moe", params_.layernorm_type_ == LayerNormType::pre_layernorm ? normed_self_attn_output_ : self_attn_output_, 1, h_token_num, hidden_units);
+
+            TensorMap partial_moe_tensors;
+            partial_moe_tensors.insert("ffn_output",
+                    Tensor{MEMORY_GPU, activation_out_type, {h_token_num, hidden_units}, partial_moe_output_});
+            partial_moe_tensors.insert(
+                "fc2_result",
+                Tensor{MEMORY_GPU, activation_out_type, {moe_k * h_token_num, hidden_units}, fc2_result_});
+            partial_moe_tensors.insert("expert_scales",
+                                      Tensor{MEMORY_GPU, activation_out_type, {h_token_num, moe_k}, expert_scales_});
+            partial_moe_tensors.insert(
+                "expanded_source_row_to_expanded_dest_row",
+                Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expanded_source_row_to_expanded_dest_row_});
+            partial_moe_tensors.insert("expert_for_source_row",
+                                      Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expert_for_source_row_});
+            
+            ffn_layer_->forward(&partial_moe_tensors, &ffn_input_tensors, &layer_weight->partial_moe_weights, true);
+
+            print_bsd(l, "after partial moe", partial_moe_output_, 1, h_token_num, hidden_units);            
+        }
 
         // the adapter after ffn (only pre layernorm currently)
         PUSH_RANGE(stream_, "post ffn");
@@ -613,7 +654,8 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                                                                          self_attn_output_,
                                                    ffn_output_ptr,
                                                    input_residual,
-                                                   layer_weight->ffn_weights.output_weight.bias,
+                                                   params_.moe_style_ == 2 && use_moe? \
+                                                            partial_moe_output_: layer_weight->ffn_weights.output_weight.bias,
                                                    layer_weight->posf_ffn_layernorm_weights.gamma,
                                                    layer_weight->posf_ffn_layernorm_weights.beta,
                                                    params_.layernorm_eps_,

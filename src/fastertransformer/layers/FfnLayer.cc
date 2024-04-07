@@ -31,14 +31,15 @@ void FfnLayer<T>::preAllocate() {
 template<typename T>
 void FfnLayer<T>::forward(std::vector<fastertransformer::Tensor>*       output_tensors,
                           const std::vector<fastertransformer::Tensor>* input_tensors,
-                          const FfnWeight<T>*                           ffn_weights) {
+                          const FfnWeight<T>*                           ffn_weights,
+                          const bool                                    use_moe) {
     TensorMap input_tensor({{"ffn_input", input_tensors->at(0)}});
     TensorMap output_tensor({{"ffn_output", output_tensors->at(0)}});
-    forward(&output_tensor, &input_tensor, ffn_weights);
+    forward(&output_tensor, &input_tensor, ffn_weights, use_moe);
 }
 
 template<typename T>
-void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, const FfnWeight<T>* ffn_weights) {
+void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, const FfnWeight<T>* ffn_weights, const bool use_moe) {
     // input tensors:
     //      ffn_input [token_num, hidden_dimension],
     //      ia3_tasks [batch_size] (optional)
@@ -55,8 +56,6 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     FT_CHECK(input_tensors->size() >= 1 && input_tensors->size() <= 9);
     FT_CHECK(output_tensors->size() >= 1 || output_tensors->size() <= 4);
-
-    const bool use_moe = expert_num_ > 0;
 
     allocateBuffer(input_tensors->at("ffn_input").shape()[0], moe_k_, use_moe);
 
@@ -121,7 +120,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                               CUDA_R_32F,
                               cublasGemmAlgo_t(-1));
 
-        print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_);        
+        print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_); 
 
         if (quant_algo_.int8Mode() == 1) {
 
@@ -152,7 +151,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                                  ffn_weights->intermediate_weight.kernel,
                                  nullptr,
                                  ffn_weights->intermediate_weight.bias,
-                                 ffn_weights->output_weight.int8_kernel,
+                                 ffn_weights->output_weight.kernel,
                                  nullptr,
                                  ffn_weights->output_weight.bias,
                                  ffn_weights->intermediate_weight2.kernel,
@@ -325,8 +324,10 @@ FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
                       size_t                            hidden_units,
                       size_t                            expert_num,
                       size_t                            moe_k,
+                      size_t                            moe_style,
                       size_t                            inter_size,
                       size_t                            inter_padding_size,
+                      size_t                            moe_inter_padding_size,
                       std::vector<int64_t>              local_layer_inter_size,
                       std::vector<int64_t>              local_layer_inter_padding_size,
                       cudaStream_t                      stream,
@@ -343,9 +344,11 @@ FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
     max_token_num_(max_batch_size * max_seq_len),
     expert_num_(expert_num),
     moe_k_(moe_k),
+    moe_style_(moe_style),
     hidden_units_(hidden_units),
     inter_size_(inter_size),
     inter_padding_size_(inter_padding_size),
+    moe_inter_padding_size_(moe_inter_padding_size),
     local_layer_inter_size_(local_layer_inter_size),
     local_layer_inter_padding_size_(local_layer_inter_padding_size),
     is_sparse_head_(is_sparse_head),
@@ -386,7 +389,7 @@ FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
         moe_plugin_ = std::make_shared<tensorrt_llm::plugins::MixtureOfExpertsPlugin>(expert_num,
                                                                                       moe_k,
                                                                                       hidden_units_,
-                                                                                      inter_padding_size,
+                                                                                      moe_style == 2 ? moe_inter_padding_size : inter_padding_size,
                                                                                       activation_type,
                                                                                       data_type,
                                                                                       weight_type,
