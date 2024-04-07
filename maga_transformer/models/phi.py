@@ -50,7 +50,8 @@ class Phi(GPT):
             activation_type='gelu',
             has_positional_encoding=False,
             has_post_decoder_layernorm=True,
-            has_lm_head_bias=True)
+            has_lm_head_bias=True,
+            tie_word_embeddings = config_dict.get('tie_word_embeddings', False))
         config.head_num_kv = config.head_num
         return config
 

@@ -81,6 +81,7 @@ class StarCoder(GPT):
         # config.activation_type = config_json['activation_function']
         config.has_positional_encoding = True
         config.has_post_decoder_layernorm = True
+        config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         return config
 
     @classmethod

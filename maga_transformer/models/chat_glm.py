@@ -84,6 +84,7 @@ class ChatGlm(GPT):
         config.special_tokens.bos_token_id = config_json.get('bos_token_id', config.special_tokens.bos_token_id)
         config.special_tokens.eos_token_id = config_json.get('eos_token_id', config.special_tokens.eos_token_id)
         config.src_quantization_bit = config_json.get('quantization_bit', 0)
+        config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         return config
 
     # override

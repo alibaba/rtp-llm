@@ -193,6 +193,7 @@ class QWenV2(QWen):
         config.vocab_size = config_json["vocab_size"]
         config.rotary_embedding_dim = config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
+        config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
 
         quant_config = config_json.get("quantization_config", None)
         if quant_config is not None:

@@ -4,6 +4,7 @@ import os
 from functools import reduce
 import torch
 import torch.serialization
+import functools
 from typing import Any, NamedTuple, Callable, List, Dict, Set, Tuple, Optional, Union
 from maga_transformer.utils.database import FinetuneType, TrainType, CkptFileInfo, LoraConfig
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -44,6 +45,19 @@ def identity(ts: List[torch.Tensor], allow_empty=False) -> torch.Tensor:
     if len(ts) == 0 and allow_empty:
         return None
     return ts[0].contiguous()
+
+def tolerate_failed(ts: List[torch.Tensor], origin_func: Callable[[List[torch.Tensor]], torch.Tensor]) -> torch.Tensor:
+    try:
+        return origin_func(ts)
+    except Exception as _:
+        return None
+
+def choose_available(ts: List[torch.Tensor], origin_func_list: List[Callable[[List[torch.Tensor]], torch.Tensor]]) -> torch.Tensor:
+    for t, func in zip(ts, origin_func_list):
+        if t is not None and len(ts) > 0:
+            return func([t])
+    raise ValueError(f"all tensor is empty, but not allow empty")
+    
 
 def shift_one(ts: List[torch.Tensor], allow_empty=False) -> torch.Tensor:
     if len(ts) == 0 and allow_empty:
@@ -578,6 +592,8 @@ class ModelDeployWeightInfo:
         self.expert_num_ = config.gpt_init_params.expert_num
         self.moe_k_      = config.gpt_init_params.moe_k
 
+        self.tie_word_embeddings = config.tie_word_embeddings
+
     def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:
         # auto create weight info based on exist tensor names
         weights: List[WeightInfo] = []
@@ -598,12 +614,38 @@ class ModelDeployWeightInfo:
 
     def get_weight_info(self) -> ModelWeightInfo:
         weight_info = self._get_weight_info()
+        if self.tie_word_embeddings:
+            logging.info("fix tie_word_embeddings")
+            weight_info = self._fix_tie_lm_head(weight_info)
         if self._is_sparse_head:
             logging.info("Skiping load empty weight for head_num == 0")
             weight_info = self._process_sparse_weight(weight_info)
         if self._is_medusa_model:
             weight_info = self._add_medusa_head_info(weight_info)
         return weight_info
+
+    def _fix_tie_lm_head(self, origin_weight_info: ModelWeightInfo) -> ModelWeightInfo:
+        word_emb_idx = -1
+        word_emb = None
+        lm_head_idx = -1
+        lm_head = None
+        for idx, weight in enumerate(origin_weight_info.weights):
+            if weight.name == W.embedding:
+                word_emb_idx = idx
+                word_emb = weight
+            elif weight.name == W.lm_head:
+                lm_head = weight
+                lm_head_idx = idx
+        if not lm_head or not word_emb:
+            return origin_weight_info
+
+        assert len(lm_head.weights) == 1 and len(word_emb.weights) == 1
+        lm_head_ckpt_weigth_infos = [CkptWeightInfo(w.name, functools.partial(tolerate_failed, origin_func=w.merge_fun)) for w in lm_head.weights]
+        lm_head_ckpt_weigth_infos.extend([CkptWeightInfo(w.name, functools.partial(tolerate_failed, origin_func=w.merge_fun)) for w in word_emb.weights])
+        lm_head_merge_funcs = [lm_head.process_fun, word_emb.process_fun]
+        lm_head = WeightInfo(W.lm_head, lm_head_ckpt_weigth_infos, functools.partial(choose_available, origin_func_list = lm_head_merge_funcs))
+        origin_weight_info.weights[lm_head_idx] = lm_head
+        return origin_weight_info
 
     def _process_sparse_weight(self, origin_weight_info: ModelWeightInfo) -> ModelWeightInfo:
         if not isinstance(origin_weight_info.layer_weights[0], list):

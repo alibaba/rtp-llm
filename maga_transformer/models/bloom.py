@@ -107,6 +107,7 @@ class Bloom(GPT):
         config.layernorm_eps = config_json['layer_norm_epsilon']
         config.inter_size = hidden_size * 4
         config.special_tokens.eos_token_id = config_json['eos_token_id']
+        config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         return config
 
     @classmethod

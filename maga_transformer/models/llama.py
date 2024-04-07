@@ -75,6 +75,7 @@ class Llama(GPT):
         config.inter_size = config_json['intermediate_size']
         config.rotary_embedding_base = int(config_json.get('rope_theta', 10000))
         config.rotary_embedding_dim = config.size_per_head
+        config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         if config_json.get('rope_scaling', None):
             if config_json['rope_scaling']['type'] == 'dynamic':
                 config.dynamic_embedding_scalar = config_json['rope_scaling']['factor']
@@ -105,6 +106,7 @@ class Llama(GPT):
             params_json['multiple_of'])
         config.special_tokens.eos_token_id = 2
         config.rotary_embedding_dim = config.size_per_head
+        config.tie_word_embeddings = params_json.get('tie_word_embeddings', False)
         return config
 
     @classmethod

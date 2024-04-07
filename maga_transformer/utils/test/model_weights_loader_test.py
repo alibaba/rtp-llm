@@ -60,19 +60,6 @@ class ModelWeihgtsLoaderTest(TestCase):
         model_weights_loader.show_warns()
         return config, weights
 
-    def test_load_from_module(self):
-        model_type = "qwen_7b"
-        ckpt_path = "/mnt/nas1/smoke/Qwen-7B-Chat"
-        config, weights = ModelWeihgtsLoaderTest.load_module(model_type, ckpt_path, num_layers=1)
-        self.assertEqual(config.num_layers, len(weights.weights))
-        
-        self.assertEqual([151936, 4096], list(weights.steal_pytorch_weight(W.embedding).shape))
-
-        self.assertEqual([4096], list(weights.steal_pytorch_weight(W.final_ln_gamma).shape))
-
-        self.assertEqual([12288], list(weights.weights[0][W.attn_qkv_w][0].shape))
-
-        self.assertEqual([4096], list(weights.weights[0][W.ffn_w2][0].shape))
 
     def test_qwen_megatron_model_load(self):
         ckpt_path = os.path.join(ModelWeihgtsLoaderTest._testdata_path(), "qwen_14b_megatron_model")

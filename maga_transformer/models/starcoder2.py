@@ -146,6 +146,7 @@ class StarCoder2(GPT):
         config.rotary_embedding_base = int(
             config_json.get('rope_theta', 1000000))
         config.rotary_embedding_dim = config.size_per_head
+        config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         return config
 
     @classmethod

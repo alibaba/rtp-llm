@@ -100,7 +100,8 @@ class GptInitModelParameters:
         "normalize_lm_head_weight",
         "ref_model",
         "is_quant_mode",
-        "model_type"
+        "model_type",
+        "tie_word_embeddings"
     }
 
     def __init__(self,
@@ -134,6 +135,7 @@ class GptInitModelParameters:
         self.ref_model: Optional[torch.nn.Module] = None
 
         self.model_type = ModelType.NORMAL
+        self.tie_word_embeddings = False
 
         for k, v in kwargs.items():
             setattr(self, k, v)

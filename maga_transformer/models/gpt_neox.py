@@ -64,6 +64,7 @@ class GPTNeox(GPT):
         config.has_post_decoder_layernorm = True
         config.norm_type = 'layernorm'
         config.use_norm_input_residual = True
+        config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         
         return config
 

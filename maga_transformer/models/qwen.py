@@ -267,6 +267,7 @@ class QWenBase(GPT):
         config.rotary_embedding_base = int(config_json.get('rotary_emb_base', 10000))
         config.rotary_embedding_dim = config.size_per_head
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", config.special_tokens.eos_token_id)
+        config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
 
         quant_config = config_json.get("quantization_config", None)
         if quant_config is not None:

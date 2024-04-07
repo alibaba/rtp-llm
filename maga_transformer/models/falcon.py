@@ -81,6 +81,7 @@ class Falcon(GPT):
         config.special_tokens.bos_token_id = config_json['bos_token_id']
         config.special_tokens.eos_token_id = config_json['eos_token_id']
         config.rotary_embedding_dim = config.size_per_head
+        config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         return config
 
 register_model('falcon', Falcon, ["FalconForCausalLM"])

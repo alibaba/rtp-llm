@@ -52,6 +52,7 @@ class ChatGlmV2(GPT):
         config.special_tokens.eos_token_id = config_json['eos_token_id']
         config.src_quantization_bit = config_json.get('quantization_bit', 0)
         config.rotary_embedding_dim = config.size_per_head
+        config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         config = cls.get_rotary_embedding_scale(config, config_json)
         return config
     
