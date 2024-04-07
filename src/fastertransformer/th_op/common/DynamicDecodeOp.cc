@@ -488,7 +488,7 @@ void DynamicDecodeOp::broadcastFromLastPipeline(std::vector<th::Tensor> tensors)
 }
 }  // namespace torch_ext
 
-static auto fasterTransformerGptContextDecoderTHS =
+static auto fasterTransformerGptDynamicDecoderTHS =
 #ifdef LEGACY_THS
     torch::jit::class_<torch_ext::DynamicDecodeOp>("FasterTransformerDynamicDecodeOp")
 #else

@@ -30,7 +30,7 @@ def all_gather(output):
     return output
 
 class Embedding(torch.nn.Module):
-    def __init__(self, all_gather):
+    def __init__(self, all_gather: bool):
         super().__init__()
         self._emb = None
         self._scalar: Optional[float] = None
@@ -102,12 +102,12 @@ class GPT(BaseModel):
         if g_parallel_info.is_pp_first:
             self.word_embedding = Embedding(all_gather)
             if self.config.has_positional_encoding:
-                self.position_encoding =torch.nn.Embedding(self.config.max_seq_len, hidden_dim, dtype=compute_dtype, device='cuda:0')
+                self.position_encoding = Embedding(all_gather)
             else:
                 self.position_encoding = None
 
             if self.config.type_vocab_size > 0:
-                self.token_type_embeddings = torch.nn.Embedding(self.config.type_vocab_size, hidden_dim)
+                self.token_type_embeddings = Embedding(all_gather)
             else:
                 self.token_type_embeddings = None
 
@@ -140,14 +140,6 @@ class GPT(BaseModel):
         local_head_num = 1 if self.config.head_num == 1 else self.config.head_num // g_parallel_info.tp_size
         start_pos = local_head_num * g_parallel_info.tp_rank
         return slopes[start_pos: start_pos + local_head_num]
-
-    @staticmethod
-    def get_context_decoder_cls(config: GptInitModelParameters):
-        return GptContextDecoder.from_config(config)
-
-    @staticmethod
-    def get_decoder_cls(config: GptInitModelParameters):
-        return GptDecoder.from_config(config)
 
     @staticmethod
     def get_slopes(n: int) -> List[float]:
@@ -230,7 +222,7 @@ class GPT(BaseModel):
 
     def _initialize_from_weight(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
-        
+
         assert self.word_embedding is not None
         self.word_embedding.set_weight(self.weight.steal_pytorch_weight(W.embedding))
         if (self.config.input_embedding_scalar - 1 > 1e-6):
@@ -283,11 +275,14 @@ class GPT(BaseModel):
             if self.is_multimodal():
                 self.load_vit_weight(compute_dtype)
             if self.position_encoding is not None:
-                self.position_encoding.weight.data = \
-                    (self.weight.steal_pytorch_weight(W.positional_embedding))[:self.config.max_seq_len].reshape(self.position_encoding.weight.data.shape).to('cuda:0')
+                pos_weight = self.weight.steal_pytorch_weight(W.positional_embedding)
+                assert pos_weight is not None, "positional embedding weight not found"
+                pos_weight = pos_weight[:self.config.max_seq_len].cuda()
+                self.position_encoding.set_weight(pos_weight)
             if self.token_type_embeddings is not None:
-                self.token_type_embeddings.weight.data = \
-                    (self.weight.steal_pytorch_weight(W.token_type_embedding)).reshape(self.token_type_embeddings.weight.data.shape).to('cuda:0')
+                token_type_weight = self.weight.steal_pytorch_weight(W.token_type_embedding)
+                assert token_type_weight is not None, "token_type embedding weight not found"                
+                self.token_type_embeddings.set_weight(token_type_weight.cuda())
             if self.pre_decoder_layernorm is not None:
                 _safe_load_from_module(self.pre_decoder_layernorm.weight, W.pre_decoder_ln_gamma)
                 _safe_load_from_module(self.pre_decoder_layernorm.bias, W.pre_decoder_ln_beta)

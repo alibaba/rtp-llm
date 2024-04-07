@@ -77,6 +77,18 @@ template<typename T>
 void invokeEmebeddingLookup(T*           from_tensor,
                             const T*     embedding_table,
                             const T*     pos_table,
+                            const T*     type_table,
+                            const int*   input_ids,
+                            const int*   input_pos,
+                            const int*   input_type,
+                            const int    token_num,
+                            const int    hidden_units,
+                            cudaStream_t stream);
+
+template<typename T>
+void invokeEmebeddingLookup(T*           from_tensor,
+                            const T*     embedding_table,
+                            const T*     pos_table,
                             const int*   input_ids,
                             const int*   input_pos,
                             const int    token_num,

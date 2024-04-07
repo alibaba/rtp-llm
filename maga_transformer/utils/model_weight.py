@@ -420,7 +420,7 @@ class W:
         moe_b2: sp_id,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
-        positional_embedding: sp_id,
+        positional_embedding: sp_neg1,
         attn_qkv_w_lora_a: sp_id,
         attn_qkv_w_lora_b: sp_head_lora,
         attn_o_w_lora_a: sp_0,
@@ -435,7 +435,7 @@ class W:
         moe_gate: sp_id,
         post_ffn_ln_beta: sp_id,
         post_ffn_ln_gamma: sp_id,
-        token_type_embedding: sp_id        
+        token_type_embedding: sp_neg1        
     }
 
     weights_list = [

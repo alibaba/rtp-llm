@@ -204,7 +204,7 @@ class BaseModel(object):
         return self.word_embedding(inputs)
 
     def create_context_position_ids(self, input_lengths: List[int]):
-        return torch.concat([torch.arange(input_length) for input_length in input_lengths], dim=0)
+        return torch.concat([torch.arange(input_length, dtype=torch.int32) for input_length in input_lengths], dim=0)
 
     def create_context_decoder_mask(self, input_lengths: List[int]):
         batch_size = len(input_lengths)

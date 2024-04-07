@@ -531,7 +531,7 @@ class ModelWeightsLoader:
         if self._tp_size <= 1:
             return tensor
         if (not self._tp_split_emb_and_lm_head and
-            name in [W.lm_head, W.lm_head_b, W.embedding]):
+            name in [W.lm_head, W.lm_head_b, W.embedding, W.positional_embedding, W.token_type_embedding]):
             return tensor
         if not self._model_weights_info.tp_strategy:
             raise Exception('this model not support TP')

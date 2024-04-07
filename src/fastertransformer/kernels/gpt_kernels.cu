@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <assert.h>
 #include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
@@ -27,12 +28,14 @@
 
 namespace fastertransformer {
 
-template<typename T>
+template<typename T, bool USE_POS_EMB, bool USE_TYPE_ID_EMB>
 __global__ void embedding_lookup_kernel(T*                    from_tensor,
                                         const T*              embedding_table,
                                         const T*              pos_table,
+                                        const T*              type_table,
                                         const int*            input_ids,
                                         const int*            input_pos,
+                                        const int*            input_type,
                                         const int             token_num,
                                         const int64_t         hidden_units)
 {
@@ -42,33 +45,75 @@ __global__ void embedding_lookup_kernel(T*                    from_tensor,
         const int col_index       = index % hidden_units;
         const int input_id        = input_ids[token_index];
         T         embedding       = (T)0.0f;
+        T         pos_embed       = (T)0.0f;
+        T         type_embed      = (T)0.0f;
         embedding = embedding_table[input_id * hidden_units + col_index];
-        T pos_embed        = pos_table == nullptr ? (T)0.0f : pos_table[input_pos[token_index] * hidden_units + col_index];
-        from_tensor[index] = embedding + pos_embed;
+
+        if constexpr(USE_POS_EMB) {
+            assert(pos_table != nullptr);
+            pos_embed = pos_table[input_pos[token_index] * hidden_units + col_index];
+        }
+        if constexpr(USE_TYPE_ID_EMB) {
+            assert(type_table != nullptr);
+            type_embed = type_table[input_type[token_index] * hidden_units + col_index];
+        }
+        from_tensor[index] = embedding + pos_embed + type_embed;
     }
 }
+
+#define INVOKE_WORD_EMBED_LOOKUP(USE_POS, USE_YPE) \
+        embedding_lookup_kernel<T, USE_POS, USE_YPE><<<grid, block, 0, stream>>>(from_tensor, \
+                                                        embedding_table, \
+                                                        pos_table, \
+                                                        type_table, \
+                                                        input_ids,  \
+                                                        input_pos,  \
+                                                        input_type, \
+                                                        token_num,  \
+                                                        hidden_units);
 
 template<typename T>
 void invokeEmebeddingLookup(T*                    from_tensor,
                             const T*              embedding_table,
                             const T*              pos_table,
+                            const T*              type_table,
                             const int*            input_ids,
                             const int*            input_pos,
+                            const int*            input_type,
                             const int             token_num,
                             const int             hidden_units,
                             cudaStream_t          stream)
 {
-    dim3       grid(min(token_num, 65536));
-    dim3       block(min(hidden_units, 1024));
-    embedding_lookup_kernel<<<grid, block, 0, stream>>>(from_tensor,
-                                                        embedding_table,
-                                                        pos_table,
-                                                        input_ids,
-                                                        input_pos,
-                                                        token_num,
-                                                        hidden_units);
+    dim3       grid(std::min(token_num, 65536));
+    dim3       block(std::min(hidden_units, 1024));
+    if (!pos_table) {
+        if (!type_table) {
+            INVOKE_WORD_EMBED_LOOKUP(false, false);
+        } else {
+            INVOKE_WORD_EMBED_LOOKUP(false, true);
+        }
+    } else {
+        if (!type_table) {
+            INVOKE_WORD_EMBED_LOOKUP(true, false);
+        } else {
+            INVOKE_WORD_EMBED_LOOKUP(true, true);
+        }
+    }
 }
+#undef INVOKE_WORD_EMBED_LOOKUP
 
+template<typename T>
+void invokeEmebeddingLookup(T*                    from_tensor,
+                            const T*              embedding_table,
+                            const T*              pos_table,                            
+                            const int*            input_ids,
+                            const int*            input_pos,                            
+                            const int             token_num,
+                            const int             hidden_units,
+                            cudaStream_t          stream) {
+    invokeEmebeddingLookup(from_tensor, embedding_table, pos_table, (T*)nullptr, input_ids, input_pos, nullptr, token_num, hidden_units, stream);
+
+}
 
 // PROMPT_SRC: 0 --> no prompts, 1 --> from loaded prompts, 2 --> from request prompts
 template<typename T, bool OUTPUT_ID, int PROMPT_SRC>
