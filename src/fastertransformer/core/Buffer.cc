@@ -43,6 +43,7 @@ void* Buffer::data() const {
 }
 
 void* Buffer::dataWithOffset(size_t offset) const {
+    assert(type_ != DataType::TYPE_INVALID);
     return static_cast<char*>(data_) + offset * getTypeSize(type_);
 }
 

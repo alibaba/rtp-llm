@@ -63,7 +63,6 @@ protected:
         return move(buffer);
     }
 
-
 };
 
 } // namespace fastertransformer

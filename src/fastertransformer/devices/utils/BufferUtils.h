@@ -80,12 +80,12 @@ MemoryType torchDeviceToMemoryType(const c10::Device& device ) {
     return device.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
 }
 
-ConstBufferPtr torchTensor2Buffer(const torch::Tensor& tensor) {
+BufferPtr torchTensor2Buffer(const torch::Tensor& tensor) {
     const auto& data = tensor.data_ptr();
     const auto& shape = torchShapeToBufferShape(tensor.sizes());
     const auto& dtype = torchDTypeToDataType(tensor.dtype());
     const auto& memory_type = torchDeviceToMemoryType(tensor.device());
-    return std::make_unique<const Buffer>(memory_type, dtype, shape, data);
+    return std::make_unique<Buffer>(memory_type, dtype, shape, data);
 }
 
 }

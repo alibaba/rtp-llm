@@ -57,18 +57,18 @@ void GemmParams::check() const {
     auto k_b = (transB == TransposeOperation::NONE) ? B.shape()[dim -2] : B.shape()[dim -1];
     auto n_b = (transB == TransposeOperation::NONE) ? B.shape()[dim -1] : B.shape()[dim -2];
 
-    FT_CHECK_WITH_INFO((k_a == k_b), 
+    FT_CHECK_WITH_INFO((k_a == k_b),
                         "Gemm op A (%s) [%s] need compact with B (%s) [%s]!",
                         enumToString(transA),
                         ShapeStringView(A.shape()),
                         enumToString(transB),
                         ShapeStringView(B.shape()));
-    
+
     if (C != std::nullopt) {
         auto m_c = C.value().get().shape()[dim - 2];
         auto n_c = C.value().get().shape()[dim - 1];
 
-        FT_CHECK_WITH_INFO((m_a == m_c) && (n_c == n_b), 
+        FT_CHECK_WITH_INFO((m_a == m_c) && (n_c == n_b),
                           "Gemm op A (%s) [%s] and B (%s) [%s] need compact with C [%s]!",
                           enumToString(transA),
                           ShapeStringView(A.shape()),

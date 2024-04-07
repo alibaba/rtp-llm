@@ -63,10 +63,15 @@ using OptionalBufferRef         = std::optional<std::reference_wrapper<Buffer>>;
 
 using OptionalConstLoraMapRef    = std::optional<std::reference_wrapper<const LoraWeightsMap>>;
 
-struct CopyParams {
-    CopyParams(Buffer& dst, const Buffer& src) : dst(dst), src(src)  {}
+template <typename T>
+inline std::optional<std::reference_wrapper<T>> mayGetRef(const std::unique_ptr<T>& ptr) {
+    return ptr ? std::optional<std::reference_wrapper<T>>(*ptr) : std::nullopt;
+}
 
-    Buffer&       dst;
+struct CopyParams {
+    CopyParams(const Buffer& dst, const Buffer& src) : dst(dst), src(src)  {}
+
+    const Buffer& dst;
     const Buffer& src;
 
     const std::optional<std::vector<size_t>> src_offset;
@@ -74,35 +79,45 @@ struct CopyParams {
     const std::optional<std::vector<size_t>> sizes;
 };
 
-struct LayernormOutput {
-    BufferPtr norm_output;
-};
+using LayernormOutput = void;
 
-// The Layernorm Op has two functionalities: general layernorm and add residual
-// for general layernorm,
-// if gamma and beta are not provided, output = input * alpha + residual1 + bias if alpha is provided;
-// else output = input + residual1 + residual2 + bias
 struct LayernormParams {
+    LayernormParams(
+        const Buffer& input,
+        const Buffer& norm_output,
+        const OptionalBufferRef add_bias_output,
 
-    // for layernorm
-    LayernormParams(const NormType norm_type, Buffer& input,
-                    OptionalConstBufferRef residual1, OptionalConstBufferRef bias,
-                    const LayerNormWeights& weights, double eps = 1e-6):
-    norm_type(norm_type), input(input),
-    residual1(residual1), bias(bias), weights(weights), eps(eps) {}
+        const NormType norm_type,
+        const std::optional<std::reference_wrapper<const LayerNormWeights>> weights = std::nullopt,
+        const std::optional<double> eps = std::nullopt,
+        const OptionalConstBufferRef residual1 = std::nullopt,
+        const OptionalConstBufferRef residual2 = std::nullopt,
+        const OptionalConstBufferRef bias = std::nullopt,
+        const std::optional<double> alpha = std::nullopt
+    ) : input(input),
+        norm_output(norm_output),
+        add_bias_output(add_bias_output),
+        norm_type(norm_type),
+        weights(weights),
+        eps(eps.value_or(1e-6)),
+        residual1(residual1),
+        residual2(residual2),
+        bias(bias),
+        alpha(alpha) {}
 
-    const NormType norm_type = NormType::layernorm;
-    Buffer&  input;
+    const Buffer&  input;
 
+    const Buffer& norm_output;
+    const OptionalBufferRef add_bias_output;
+
+    const NormType norm_type;
+    const std::optional<std::reference_wrapper<const LayerNormWeights>> weights;
+    const double eps;
     const OptionalConstBufferRef  residual1;
     const OptionalConstBufferRef  residual2;
     const OptionalConstBufferRef  bias;
     const std::optional<double>   alpha;
-
-    const std::optional<std::reference_wrapper<const LayerNormWeights>> weights;
-    const double eps;
 };
-
 
 
 // D = alpha * op(A) * op(B) + beta * C
@@ -224,7 +239,6 @@ struct AttentionModuleParams {
     const Buffer& input;
 
     const AttentionConfigs&      configs;
-    const AttentionLayerWeights& weights;
 
     uint32_t batch_size;
     uint32_t max_seq_length;
@@ -359,7 +373,7 @@ struct LoraLinearParams {
                      lora_ids(lora_ids),
                      weight(weight),
                      lora_map(lora_map) {}
-    
+
     const Buffer&                           input;
     OptionalConstBufferRef                  lora_ids;
     const DenseWeights&                     weight;

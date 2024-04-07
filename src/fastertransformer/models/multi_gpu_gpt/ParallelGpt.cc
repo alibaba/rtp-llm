@@ -245,7 +245,7 @@ void ParallelGpt<T>::convert_to_block_pointers(TensorMap* output_tensors,
     Tensor k_cache         = output_tensors->at("key_cache");
     Tensor v_cache         = output_tensors->at("value_cache");
     size_t kv_cache_offset = 1;
-    
+
     for (auto t = k_cache.shape().begin() + 1; t != k_cache.shape().end(); ++t) {
         kv_cache_offset *= *t;
     };
@@ -385,7 +385,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         }
         max_blocks_per_batch = (uint)(input_tensors->at("block_index_map").shape()[1]);
         block_stride = total_batch_size * 2 * max_blocks_per_batch;
-    }    
+    }
 
     const auto activation_in_type  = params_.quant_algo_->int8_mode_ == 2 ? TYPE_INT8 : data_type;
     const auto activation_out_type = data_type;
@@ -467,7 +467,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
 
         sync_check_cuda_error();
         POP_RANGE;
-        
+
         size_t   cache_offset = (l - getFirstLayerParallelId()) * kv_cache_offset;
         const T* input_query  = nullptr;
         if (pre_attn_ln) {
@@ -503,7 +503,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                 const T* attention_ptr    = input_tensors->at("attention_mask").getPtr<T>();
                 auto     attention_tensor = input_tensors->at("attention_mask");
                 attention_input_tensors.insert(
-                    "attention_mask", 
+                    "attention_mask",
                     Tensor{MEMORY_GPU,
                     data_type,
                     {context_batch_size, 1, attention_tensor.shape()[1], attention_tensor.shape()[2]},attention_ptr}
@@ -649,6 +649,10 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         // the adapter after ffn (only pre layernorm currently)
         PUSH_RANGE(stream_, "post ffn");
 
+        // NOTE: here input and residual1 args are reversed,
+        // This is for ChatGLM, which uses alpha norm and the alpha is multiplied at residual:
+        // `output = mlp_input * alpha + mlp_output`
+        // see https://huggingface.co/THUDM/chatglm-6b/blob/8b7d33596d18c5e83e2da052d05ca4db02e60620/modeling_chatglm.py#L651
         norm_wrapper_->ffnAddBiasResidualLayerNorm(decoder_output,
                                                    params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ :
                                                                                          self_attn_output_,

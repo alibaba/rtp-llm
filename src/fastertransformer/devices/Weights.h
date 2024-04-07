@@ -27,7 +27,7 @@ struct DenseWeights {
 
     DenseWeights(ConstBufferPtr& kernel) : kernel(std::move(kernel)) {};
     DenseWeights(ConstBufferPtr& kernel,
-                 ConstBufferPtr& bias) : 
+                 ConstBufferPtr& bias) :
                  kernel(std::move(kernel)),
                  bias(std::move(bias)) {};
 
@@ -45,7 +45,6 @@ struct LoraWeights {
 typedef std::unordered_map<std::string, LoraWeights> LoraWeightsMap;
 
 struct AttentionLayerWeights {
-    std::unique_ptr<const LayerNormWeights> pre_layernorm;
     std::unique_ptr<const LayerNormWeights> pre_attention_layernorm;
     std::unique_ptr<const DenseWeights>     qkv_weight;
     std::unique_ptr<const LoraWeightsMap>   query_lora_weights;
@@ -53,7 +52,6 @@ struct AttentionLayerWeights {
 
     std::unique_ptr<const DenseWeights>     output_weight;
     std::unique_ptr<const LoraWeightsMap>   output_lora_weights;
-    std::unique_ptr<const LayerNormWeights> post_layernorm;
 };
 
 struct FfnLayerWeights {
@@ -80,8 +78,11 @@ struct FfnLayerWeights {
 };
 
 struct LayerWeights {
+    std::unique_ptr<const LayerNormWeights> pre_layernorm;
     AttentionLayerWeights self_attention_weights;
+    std::unique_ptr<const LayerNormWeights> post_layernorm;
     FfnLayerWeights       ffn_weights;
+    std::unique_ptr<const LayerNormWeights> post_ffn_layernorm;
 };
 
 // TODO: This Weights class might be refactor into a complete model description

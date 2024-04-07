@@ -36,12 +36,14 @@ public:
 
     template<typename T>
     inline T* data() const {
+        static_assert(!std::is_same<T, void>::value);
         assert(type_ == getTensorType<T>());
         return static_cast<T*>(data_);
     }
 
     template<typename T>
     inline T* dataWithOffset(size_t offset) const {
+        static_assert(!std::is_same<T, void>::value);
         assert(type_ == getTensorType<T>());
         return static_cast<T*>(dataWithOffset(offset));
     }

@@ -42,6 +42,8 @@ TEST_F(GptModelTest, testSimple) {
         auto outputs = model.forward(inputs);
     } catch (const OpException& e) {
         cout << e.what() << endl;
+    } catch (const exception& e) {
+        cout << e.what() << endl;
     }
 }
 

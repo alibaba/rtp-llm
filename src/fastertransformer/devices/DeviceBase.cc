@@ -51,7 +51,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     const auto& down_weight = *(params.weights.down_weight->kernel);
 
     auto up_buf = gemm({params.input, up_weight});
-    
+
     auto up_output = loraLinear({params.input,
                                  std::nullopt,
                                  *(params.weights.up_weight),
@@ -63,7 +63,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                        *(params.weights.gate_weight),
                                        std::nullopt});
 
-        activation({params.activation_type, 
+        activation({params.activation_type,
                     *(gate_output.output),
                     std::nullopt,
                     *(up_output.output),
@@ -82,7 +82,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     }
 
     else if (FFNDispatch::dispatch(params) == FFNDispatch::FFNType::NoGate) {
-        activation({params.activation_type, 
+        activation({params.activation_type,
                     *(up_output.output),
                     std::nullopt,
                     std::nullopt,
@@ -98,7 +98,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         // auto output = gemm({*up_buf, down_weight});
         // return FfnLayerOutput({move(output)});
     }
-    
+
     else if (FFNDispatch::dispatch(params) == FFNDispatch::FFNType::Moe) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }

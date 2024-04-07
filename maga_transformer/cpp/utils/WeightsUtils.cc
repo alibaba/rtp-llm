@@ -73,9 +73,10 @@ unique_ptr<const Weights> WeightsConverter::convertPythonWeights(const PyModelWe
         const auto py_layer_weights = py_weights.layer_weights_[layer_id];
         LayerWeights layer_weights;
 
-        auto& attention_weights = layer_weights.self_attention_weights;
-        attention_weights.pre_layernorm = mayCreateLayerNormWeights(
+        layer_weights.pre_layernorm = mayCreateLayerNormWeights(
             py_layer_weights, W::pre_ln_gamma, W::pre_ln_beta);
+
+        auto& attention_weights = layer_weights.self_attention_weights;
         attention_weights.pre_attention_layernorm = mayCreateLayerNormWeights(
             py_layer_weights, W::pre_attn_ln_gamma, W::pre_attn_ln_beta);
         attention_weights.qkv_weight = createDenseWeights(
@@ -84,7 +85,8 @@ unique_ptr<const Weights> WeightsConverter::convertPythonWeights(const PyModelWe
             py_layer_weights, W::attn_ln_gamma, W::attn_ln_beta);
         attention_weights.output_weight = createDenseWeights(
             py_layer_weights, W::attn_o_w, W::attn_o_b);
-        attention_weights.post_layernorm = mayCreateLayerNormWeights(
+
+        layer_weights.post_layernorm = mayCreateLayerNormWeights(
             py_layer_weights, W::post_ln_gamma, W::post_ln_beta);
 
         auto& ffn_weights = layer_weights.ffn_weights;

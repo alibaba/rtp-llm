@@ -56,6 +56,16 @@ protected:
         std::cout << " " << hint << std::endl;
     }
 
+    BufferPtr createBuffer(const std::vector<size_t>& shape, DataType type,
+                           AllocationType alloc_type = AllocationType::DEVICE)
+    {
+        if (alloc_type == AllocationType::DEVICE) {
+            return device_->allocateBuffer({type, shape, AllocationType::DEVICE}, {});
+        } else {
+            return device_->allocateBuffer({type, shape, AllocationType::HOST}, {});
+        }
+    }
+
     template <typename T>
     BufferPtr createBuffer(const std::vector<size_t>& shape, const std::vector<T>& data,
                            AllocationType alloc_type = AllocationType::DEVICE)
@@ -87,16 +97,23 @@ protected:
     BufferPtr createDeviceBuffer(const std::vector<size_t>& shape, const void* data) {
         auto host_buffer = createHostBuffer<T>(shape, data);
         auto buffer = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::DEVICE}, {});
-        device_->copy(CopyParams(*buffer, *host_buffer));
+        if (data && (buffer->size() > 0)) {
+            device_->copy(CopyParams(*buffer, *host_buffer));
+        }
         return move(buffer);
     }
 
     template<typename T>
     void assertBufferValueEqual(const Buffer& buffer, const std::vector<T>& expected) {
         ASSERT_EQ(buffer.size(), expected.size());
+        auto comp_buffer = device_->allocateBuffer(
+            {buffer.type(), buffer.shape(), AllocationType::HOST}
+        );
+        device_->copy(CopyParams(*comp_buffer, buffer));
         for (size_t i = 0; i < buffer.size(); i++) {
-            printf("i=%ld, buffer[i] = %f, expected[i] = %f\n", i, ((T*)buffer.data())[i], expected[i]);
-            ASSERT_EQ(((T*)buffer.data())[i], expected[i]);
+            printf("i=%ld, buffer[i] = %f, expected[i] = %f\n", i,
+                    (comp_buffer->data<T>())[i], expected[i]);
+            ASSERT_EQ((comp_buffer->data<T>())[i], expected[i]);
         }
     }
 
@@ -111,6 +128,23 @@ protected:
             memcpy(values.data(), buffer.data(), sizeof(T) * buffer.size());
         }
         return values;
+    }
+
+    std::unique_ptr<Buffer> tensorToBuffer(const torch::Tensor& tensor,
+                                           AllocationType alloc_type = AllocationType::DEVICE)
+    {
+        assert(tensor.is_cpu());
+        auto buffer = torchTensor2Buffer(tensor);
+        if (alloc_type == AllocationType::DEVICE) {
+            auto device_buffer = device_->allocateBuffer(
+                {buffer->type(), buffer->shape(), AllocationType::DEVICE}
+            );
+            device_->copy(CopyParams(*device_buffer, *buffer));
+            printf("created device buffer from tensor at %p with data=%p\n", device_buffer.get(), device_buffer->data());
+            return move(device_buffer);
+        } else {
+            return move(buffer);
+        }
     }
 
     torch::Tensor bufferToTensor(const Buffer& buffer) {
@@ -138,7 +172,13 @@ protected:
             b_cmp = b_cmp.to(cmp_type);
         }
 
-        ASSERT_TRUE(torch::allclose(a_cmp, b_cmp, rtol_, atol_));
+        const auto close = torch::allclose(a_cmp, b_cmp, rtol_, atol_);
+        if (!close) {
+            std::cout << "assert tensor close failed!" << std::endl;
+            std::cout << "a: " << a << std::endl;
+            std::cout << "b: " << b << std::endl;
+            ASSERT_TRUE(false);
+        }
     }
 
 protected:

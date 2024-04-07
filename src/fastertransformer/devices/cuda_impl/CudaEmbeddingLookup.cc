@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/cuda_impl/Dispatch.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 
@@ -6,27 +7,6 @@ using namespace std;
 
 namespace fastertransformer {
 
-template<typename T>
-void invokeEmebeddingLookup(void*           from_tensor,
-                            const void*     embedding_table,
-                            const void*     pos_table,
-                            const void*   input_ids,
-                            const void*   input_pos,
-                            const int    token_num,
-                            const int    hidden_units,
-                            cudaStream_t stream)
-{
-    invokeEmebeddingLookup(
-        (T*)from_tensor,
-        (const T*)embedding_table,
-        (const T*)pos_table,
-        (const int*)input_ids,
-        (const int*)input_pos,
-        token_num,
-        hidden_units,
-        stream
-    );
-}
 
 BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     const auto& tokens = params.combo_tokens;
@@ -38,9 +18,9 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     const auto hidden_size = embedding_table.shape()[1];
     const auto data_type = embedding_table.type();
 
-    auto embeddings = allocateBuffer({embedding_table.type(), {token_num, hidden_size}});
+    auto embeddings = allocateBuffer({data_type, {token_num, hidden_size}});
 
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(embedding_table.type(), invokeEmebeddingLookup,
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeEmebeddingLookup,
         embeddings->data(),
         embedding_table.data(),
         postition_table.has_value() ? postition_table.value().get().data() : nullptr,
