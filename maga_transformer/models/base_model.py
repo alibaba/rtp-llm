@@ -13,6 +13,8 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ModelType
 
+from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
+
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
 # single batch prompt input
@@ -107,7 +109,7 @@ class ModelConfig(ModelConfigBase):
     def add_ref_model(self, ref_model: Optional[torch.nn.Module]):
         self.ref_model = ref_model
 
-    def _replace(self, **kwargs):
+    def _replace(self, **kwargs: Any):
         for k, v in kwargs.items():
             if k in self.__dict__:
                 self.__dict__[k] = v
@@ -159,14 +161,14 @@ class BaseModel(object):
 
     def __init__(self) -> None:
         self.weight = None
-        self.word_embedding: Optional[torch.nn.Module] = None
+        self.word_embedding: Optional[ParallelEmbedding] = None
         self.prefix_encoder: Optional[torch.nn.Module] = None
-        self.position_encoding: Optional[torch.nn.Module] = None
-        self.token_type_embeddings: Optional[torch.nn.Module] = None
+        self.position_encoding: Optional[ParallelEmbedding] = None
+        self.token_type_embeddings: Optional[ParallelEmbedding] = None
         self.pre_decoder_layernorm: Optional[torch.nn.Module] = None
         self.post_decoder_layernorm: Optional[torch.nn.Module] = None
 
-        self.lm_head: Optional[torch.nn.Module] = None
+        self.lm_head: Optional[ParallelLinear] = None
         self.config: GptInitModelParameters = None
         self.context_decoder: Optional[FTOPBase] = None
         self.decoder: Optional[FTOPBase] = None

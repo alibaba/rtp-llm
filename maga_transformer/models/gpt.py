@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from maga_transformer.utils.util import get_device, to_torch_dtype
 from maga_transformer.models.gpt_util.rms import RMSNorm
+from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader, estimate_load_parallel_num
 from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, LoRAModelWeightInfo, LoRAMap
 from maga_transformer.utils.time_util import Timer
@@ -21,51 +22,6 @@ from maga_transformer.models.gpt_util.medusa_head import MedusaHead
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.distribute.worker_info import g_parallel_info
 from transformers import AutoTokenizer
-
-def all_gather(output):
-    tensor_list = [torch.empty_like(output) for _ in range(g_parallel_info.tp_size)]
-    tensor_list[g_parallel_info.tp_rank] = output
-    torch.distributed.all_gather(tensor_list, output)
-    output = torch.cat(tensor_list, dim=output.dim() - 1).contiguous()
-    return output
-
-class Embedding(torch.nn.Module):
-    def __init__(self, all_gather: bool):
-        super().__init__()
-        self._emb = None
-        self._scalar: Optional[float] = None
-        self._all_gather = all_gather
-
-    def set_weight(self, emb):
-        self._emb = emb
-
-    def set_scalar(self, scalar):
-        self._scalar = scalar
-
-    def forward(self, input):
-        output = F.embedding(input, self._emb)
-        if self._scalar:
-            output = output * self._scalar
-        if self._all_gather:
-            return all_gather(output)
-        return output
-
-class Linear(torch.nn.Module):
-    def __init__(self, all_gather):
-        super().__init__()
-        self._w = None
-        self._b = None
-        self._all_gather = all_gather
-
-    def set_weight(self, w, b):
-        self._w = w
-        self._b = b
-
-    def forward(self, input):
-        output = F.linear(input, self._w, self._b)
-        if self._all_gather:
-            return all_gather(output)
-        return output
 
 class GPT(BaseModel):
     def __init__(self, config: GptInitModelParameters):
@@ -100,16 +56,9 @@ class GPT(BaseModel):
             self.medusa_head = MedusaHead(config)
 
         if g_parallel_info.is_pp_first:
-            self.word_embedding = Embedding(all_gather)
-            if self.config.has_positional_encoding:
-                self.position_encoding = Embedding(all_gather)
-            else:
-                self.position_encoding = None
-
-            if self.config.type_vocab_size > 0:
-                self.token_type_embeddings = Embedding(all_gather)
-            else:
-                self.token_type_embeddings = None
+            self.word_embedding = ParallelEmbedding(all_gather)
+            self.position_encoding = ParallelEmbedding(all_gather) if self.config.has_positional_encoding else None
+            self.token_type_embeddings = ParallelEmbedding(all_gather) if self.config.type_vocab_size else None
 
             if self.config.has_pre_decoder_layernorm:
                 if self.config.norm_type == 'layernorm' or self.config.norm_type == 'alphanorm':
@@ -128,10 +77,7 @@ class GPT(BaseModel):
                     self.post_decoder_layernorm = RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0')
             else:
                 self.post_decoder_layernorm = None
-            if self.config.has_lm_head:
-                self.lm_head = Linear(all_gather)
-            else:
-                self.lm_head = None
+            self.lm_head = ParallelLinear(all_gather) if self.config.has_lm_head else None
 
         self.load_tokenizer()
         self.load()

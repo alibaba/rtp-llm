@@ -163,7 +163,7 @@ class NormalModelExecutor(ExecutorBase):
         if model.position_encoding is not None:
             input_embeds += model.position_encoding(position_ids)
 
-        if self.model_ops.model.pre_decoder_layernorm is not None:
+        if model.pre_decoder_layernorm is not None:
             input_embeds = model.pre_decoder_layernorm(input_embeds)
 
         if self.model_ops.gpt_op.use_fmha:
