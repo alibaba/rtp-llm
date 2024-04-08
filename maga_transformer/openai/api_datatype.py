@@ -4,6 +4,7 @@ from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Union, Optional, List, Dict, Literal, Any
 from maga_transformer.models.base_model import AuxInfo
+from maga_transformer.config.generate_config import GenerateConfig
 
 class ModelCard(BaseModel):
     id: str
@@ -140,6 +141,7 @@ class DebugInfo(BaseModel):
     stop_word_ids_list: List[List[int]]
     stop_words_list: List[str]
     renderer_info: RendererInfo
+    generate_config: GenerateConfig
 
 class ChatCompletionResponseChoice(BaseModel):
     index: int

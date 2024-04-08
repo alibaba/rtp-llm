@@ -157,7 +157,7 @@ class OpenaiEndopoint():
         complete_response_collect_func = partial(self._collect_complete_response, debug_info=debug_info)
         return CompleteResponseAsyncGenerator(response_generator(), complete_response_collect_func)
 
-    def _get_debug_info(self, renderered_input: RenderedInputs) -> Optional[DebugInfo]:
+    def _get_debug_info(self, renderered_input: RenderedInputs, gen_config: GenerateConfig) -> Optional[DebugInfo]:
         prompt = self.tokenizer.decode(renderered_input.input_ids)
         return DebugInfo(
             input_prompt=prompt,
@@ -169,6 +169,7 @@ class OpenaiEndopoint():
             stop_word_ids_list=self.stop_word_ids_list,
             stop_words_list=self.stop_words_list,
             renderer_info=self.chat_renderer.get_renderer_info(),
+            generate_config=gen_config
         )
 
     def chat_completion(
@@ -183,9 +184,9 @@ class OpenaiEndopoint():
         if self.model.is_multimodal():
             images = self.download_engine.submit(input_images)
         else:
-            images = []        
+            images = []
 
-        debug_info = self._get_debug_info(rendered_input) if chat_request.debug_info else None
+        debug_info = self._get_debug_info(rendered_input, generate_config) if chat_request.debug_info else None
 
         choice_generator = self.chat_renderer.generate_choice(
             input_ids,
