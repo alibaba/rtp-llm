@@ -10,39 +10,6 @@ using namespace std;
 
 namespace fastertransformer {
 
-template<typename T>
-void invokeAddBiasResidualHelper(
-    T*           output,
-    const T*     input,
-    const T*     residual1,
-    const T*     residual2,
-    const T*     bias,
-    const float* scale_inter,
-    const float* scale_out,
-    const int    m,
-    const int    n,
-    cudaStream_t stream)
-{
-    invokeAddBiasResidual(
-        output, input, residual1, residual2, bias, scale_inter, scale_out, m, n, stream);
-}
-
-template<typename T>
-void invokeAlphaAddBiasResidualHelper(
-    T*           output,
-    const T*     input,
-    const T*     residual1,
-    const T*     bias,
-    const T      alpha,
-    const int    m,
-    const int    n,
-    cudaStream_t stream)
-{
-    invokeAlphaAddBiasResidual(
-        output, input, residual1, bias, alpha, m, n, stream);
-}
-
-
 LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     const auto& input = params.input;
     auto& output = params.norm_output;
@@ -60,7 +27,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
         assert(!params.add_bias_output.has_value());
         if (params.alpha.has_value() || (norm_type == NormType::alphanorm)) {
             const auto alpha = params.alpha.value_or(1.0f);
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAlphaAddBiasResidualHelper,
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAlphaAddBiasResidual,
                 output.data(),
                 input.data(),
                 params.residual1 ? params.residual1.value().get().data() : nullptr,
@@ -71,7 +38,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 stream_
             );
         } else if (params.bias.has_value()) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAddBiasResidualHelper,
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAddBiasResidual,
                 output.data(),
                 input.data(),
                 params.residual1 ? params.residual1.value().get().data() : nullptr,

@@ -106,13 +106,6 @@ void invokeAddBiasResidual(T*           output,
 }
 
 template<typename T>
-void invokeAddBiasResidual(
-    T* output, const T* residual1, const T* residual2, const T* bias, const int m, const int n, cudaStream_t stream)
-{
-    invokeAddBiasResidual(output, output, residual1, residual2, bias, nullptr, nullptr, m, n, stream);
-}
-
-template<typename T>
 __global__ void alphaAddBiasResidual(T* output, const T* input, const T* bias, const T alpha, const int m, const int n)
 {
     const int col_index = blockIdx.y * blockDim.x + threadIdx.x;
@@ -121,16 +114,6 @@ __global__ void alphaAddBiasResidual(T* output, const T* input, const T* bias, c
         output[blockIdx.x * n + col_index] =
             output[blockIdx.x * n + col_index] + input[blockIdx.x * n + col_index] * alpha + bias_val;
     }
-}
-
-template<typename T>
-void invokeAlphaAddBiasResidual(
-    T* output, const T* input, const T* bias, const T alpha, const int m, const int n, cudaStream_t stream)
-{
-    int  blocks_per_row = ceil(float(n) / 1024);
-    dim3 grid(m, blocks_per_row);
-    dim3 block(min(n, 1024));
-    alphaAddBiasResidual<<<grid, block, 0, stream>>>(output, input, bias, alpha, m, n);
 }
 
 template<typename T>
@@ -151,7 +134,11 @@ void invokeAlphaAddBiasResidual(
     int  blocks_per_row = ceil(float(n) / 1024);
     dim3 grid(m, blocks_per_row);
     dim3 block(min(n, 1024));
-    alphaAddBiasResidual<<<grid, block, 0, stream>>>(output, input, residual, bias, alpha, m, n);
+    if (residual) {
+        alphaAddBiasResidual<<<grid, block, 0, stream>>>(output, input, residual, bias, alpha, m, n);
+    } else {
+        alphaAddBiasResidual<<<grid, block, 0, stream>>>(output, input, bias, alpha, m, n);
+    }
 }
 
 template<typename T>
@@ -235,38 +222,6 @@ INSTANTIATE_INVOKE_ADD_BIAS_RESIDUAL(__nv_bfloat16);
 #endif
 #undef INSTANTIATE_INVOKE_ADD_BIAS_RESIDUAL
 
-template void invokeAddBiasResidual(float*       output,
-                                    const float* residual1,
-                                    const float* residual2,
-                                    const float* bias,
-                                    const int    m,
-                                    const int    n,
-                                    cudaStream_t stream);
-
-template void invokeAddBiasResidual(half*        output,
-                                    const half*  residual1,
-                                    const half*  residual2,
-                                    const half*  bias,
-                                    const int    m,
-                                    const int    n,
-                                    cudaStream_t stream);
-
-template void invokeAlphaAddBiasResidual(float*       output,
-                                         const float* input,
-                                         const float* bias,
-                                         const float  alpha,
-                                         const int    m,
-                                         const int    n,
-                                         cudaStream_t stream);
-
-template void invokeAlphaAddBiasResidual(half* output, 
-                                         const half* input, 
-                                         const half* bias, 
-                                         const half alpha, 
-                                         const int m, 
-                                         const int n, 
-                                         cudaStream_t stream);
-
 template void invokeAlphaAddBiasResidual(float*       output,
                                          const float* input,
                                          const float* residual,
@@ -276,30 +231,16 @@ template void invokeAlphaAddBiasResidual(float*       output,
                                          const int    n,
                                          cudaStream_t stream);
 
-template void invokeAlphaAddBiasResidual(half* output, 
-                                         const half* input, 
-                                         const half* residual, 
-                                         const half* bias, 
-                                         const half alpha, 
-                                         const int m, 
-                                         const int n, 
+template void invokeAlphaAddBiasResidual(half* output,
+                                         const half* input,
+                                         const half* residual,
+                                         const half* bias,
+                                         const half alpha,
+                                         const int m,
+                                         const int n,
                                          cudaStream_t stream);
 
 #ifdef ENABLE_BF16
-template void invokeAddBiasResidual(__nv_bfloat16*       output,
-                                    const __nv_bfloat16* residual1,
-                                    const __nv_bfloat16* residual2,
-                                    const __nv_bfloat16* bias,
-                                    const int            m,
-                                    const int            n,
-                                    cudaStream_t         stream);
-template void invokeAlphaAddBiasResidual(__nv_bfloat16* output,
-                                    const __nv_bfloat16* input,
-                                    const __nv_bfloat16* bias,
-                                    const __nv_bfloat16 alpha,
-                                    const int m,
-                                    const int n,
-                                    cudaStream_t stream);
 template void invokeAlphaAddBiasResidual(__nv_bfloat16* output,
                                     const __nv_bfloat16* input,
                                     const __nv_bfloat16* residual,
@@ -342,114 +283,6 @@ template void invokeAddBiasAttentionFfnResidual(__nv_bfloat16*       block_outpu
                                                 cudaStream_t         stream);
 #endif
 
-template<typename T>
-__global__ void T5addResidual(T* output, const T* input, const int m, const int n)
-{
-    const int col_index = blockIdx.y * blockDim.x + threadIdx.x;
-    if (col_index < n) {
-        float out_val = (float)output[blockIdx.x * n + col_index] + (float)input[blockIdx.x * n + col_index];
-        output[blockIdx.x * n + col_index] =
-            (T)((std::is_same<T, half>::value && (out_val > 64512 || out_val < -64512)) ?
-                    (out_val > 0 ? 64512 : -64512) :
-                    out_val);
-    }
-}
-
-template<typename T>
-__global__ void T5addResidual(T* output, const T* input_1, const T* input_2, const int m, const int n)
-{
-    const int col_index = blockIdx.y * blockDim.x + threadIdx.x;
-    if (col_index < n) {
-        float out_val = (float)input_1[blockIdx.x * n + col_index] + (float)input_2[blockIdx.x * n + col_index];
-        output[blockIdx.x * n + col_index] =
-            (T)((std::is_same<T, half>::value && (out_val > 64512 || out_val < -64512)) ?
-                    (out_val > 0 ? 64512 : -64512) :
-                    out_val);
-    }
-}
-
-template<typename T>
-void invokeT5AddResidual(T* output, const T* input, const int m, const int n, cudaStream_t stream)
-{
-    int  blocks_per_row = ceil(float(n) / 1024);
-    dim3 grid(m, blocks_per_row);
-    dim3 block(min(n, 1024));
-    T5addResidual<<<grid, block, 0, stream>>>(output, input, m, n);
-}
-
-template void invokeT5AddResidual(float* output, const float* input, const int m, const int n, cudaStream_t stream);
-template void invokeT5AddResidual(half* output, const half* input, const int m, const int n, cudaStream_t stream);
-#ifdef ENABLE_BF16
-template void
-invokeT5AddResidual(__nv_bfloat16* output, const __nv_bfloat16* input, const int m, const int n, cudaStream_t stream);
-#endif
-
-template<typename T>
-void invokeT5AddResidual(T* output, const T* input_1, const T* input_2, const int m, const int n, cudaStream_t stream)
-{
-    int  blocks_per_row = ceil(float(n) / 1024);
-    dim3 grid(m, blocks_per_row);
-    dim3 block(min(n, 1024));
-    T5addResidual<<<grid, block, 0, stream>>>(output, input_1, input_2, m, n);
-}
-
-template void invokeT5AddResidual(float* output, const float* input_1, const float* input_2, const int m, const int n, cudaStream_t stream);
-template void invokeT5AddResidual(half* output, const half* input_1, const half* input_2, const int m, const int n, cudaStream_t stream);
-#ifdef ENABLE_BF16
-template void
-invokeT5AddResidual(__nv_bfloat16* output, const __nv_bfloat16* input_1, const __nv_bfloat16* input_2, const int m, const int n, cudaStream_t stream);
-#endif
-
-template<typename T>
-void invokeT5AddBiasResidual(T* output, const T* input, const T* bias, const int m, const int n, cudaStream_t stream)
-{
-    if (bias != nullptr) {
-        invokeAddBiasResidual(output, input, bias, m, n, stream);
-    }
-    else {
-        invokeT5AddResidual(output, input, m, n, stream);
-    }
-    return;
-}
-
-template void invokeT5AddBiasResidual(
-    float* output, const float* input, const float* bias, const int m, const int n, cudaStream_t stream);
-template void invokeT5AddBiasResidual(
-    half* output, const half* input, const half* bias, const int m, const int n, cudaStream_t stream);
-#ifdef ENABLE_BF16
-template void invokeT5AddBiasResidual(__nv_bfloat16*       output,
-                                      const __nv_bfloat16* input,
-                                      const __nv_bfloat16* bias,
-                                      const int            m,
-                                      const int            n,
-                                      cudaStream_t         stream);
-#endif
-
-template<typename T>
-void invokeT5AddBiasResidual(T* output, const T* input_1, const T* input_2, const T* bias, const int m, const int n, cudaStream_t stream)
-{
-    if (bias != nullptr) {
-        invokeAddBiasResidual(output, input_1, input_2, bias, m, n, stream);
-    }
-    else {
-        invokeT5AddResidual(output, input_1, input_2, m, n, stream);
-    }
-    return;
-}
-
-template void invokeT5AddBiasResidual(
-    float* output, const float* input_1, const float* input_2, const float* bias, const int m, const int n, cudaStream_t stream);
-template void invokeT5AddBiasResidual(
-    half* output, const half* input_1, const half* input_2, const half* bias, const int m, const int n, cudaStream_t stream);
-#ifdef ENABLE_BF16
-template void invokeT5AddBiasResidual(__nv_bfloat16*       output,
-                                      const __nv_bfloat16* input_1,
-                                      const __nv_bfloat16* input_2,
-                                      const __nv_bfloat16* bias,
-                                      const int            m,
-                                      const int            n,
-                                      cudaStream_t         stream);
-#endif
 
 /*******************  invokeAddBiasResidualCol32  ***********************/
 // input1/input2/out matrix with layout of cublasLt CUBLASLT_ORDER_COL32 (m*n)

@@ -139,9 +139,12 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                 for (size_t i = 0; i < repeat_time; i++) {
                     invokeAddBiasResidual(
                         (TestType*)input->data(),
-                        (TestType*)input->data(),
-                        (TestType*)residual->data(),
-                        (TestType*)bias->data(),
+                        (const TestType*)input->data(),
+                        (const TestType*)residual->data(),
+                        (const TestType*)nullptr,
+                        (const TestType*)bias->data(),
+                        nullptr,
+                        nullptr,
                         batch_size,
                         hidden_size,
                         stream
