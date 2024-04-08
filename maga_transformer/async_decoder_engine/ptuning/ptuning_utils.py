@@ -8,6 +8,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixParams, PrefixType
 from maga_transformer.async_decoder_engine.decoder_engine import DecoderEngine
 from maga_transformer.async_decoder_engine.cache_manager import CacheManager
+from maga_transformer.distribute.worker_info import g_parallel_info
 
 class PtuningConstructor(object):
     def __init__(self, model: BaseModel, tokenizer: PreTrainedTokenizerBase, cache_manager: CacheManager, decoder_engine: DecoderEngine):
@@ -26,7 +27,7 @@ class PtuningConstructor(object):
             return self._create_multi_task_prompt_params(self.model.config.multi_task_prompt)
         else:
             return None
-    
+
     # static for ut
     @staticmethod
     def create_ptuning_v2_params(config:GptInitModelParameters, cache_manager: CacheManager, prefix_prompt: torch.Tensor):
@@ -47,14 +48,19 @@ class PtuningConstructor(object):
             prompt: str = info['prompt']
             input_tokens = torch.IntTensor(self.tokenizer.encode(prompt))
             input = GenerateInput(token_ids=input_tokens, generate_config=GenerateConfig(max_new_tokens=1))
-            stream = self.decoder_engine.create_stream(input)
-            # clear _resource_dtors to avoid relese block
-            stream.set_require_release(False)
+            stream = None
+            if g_parallel_info.tp_rank == 0:
+                stream = self.decoder_engine.create_stream(input)
+                # clear _resource_dtors to avoid relese block
+                stream.set_require_release(False)
             self.decoder_engine.step()
+            if g_parallel_info.tp_rank > 0:
+                return None
+            assert stream is not None, "stram should not be none"
             assert stream.output.hidden_states is not None, "stream should be run once"
             assert len(stream.block_indice[0]) > 0, "stream should have block indice"
             multi_task_prompt_args[id] = PrefixParams(prefix_type=PrefixType.PromptTuning, prefix_length=len(input_tokens), block_cache=stream.block_indice[0], prefix_tensor=input_tokens)
-        return multi_task_prompt_args
+            return multi_task_prompt_args
 
     # input shape [layer_num, pre_seq_len, head_num, size_per_head]
     # dest k shape [layer_num, block_nums, head_num, seq_num_block, size_per_head]
