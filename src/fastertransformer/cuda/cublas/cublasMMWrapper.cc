@@ -404,13 +404,13 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
         alpha       = &alpha_float;
         beta        = &beta_float;
     } else {
-        computeType = CUBLAS_COMPUTE_16F;
+        computeType = CUBLAS_COMPUTE_32F;
         Atype       = CUDA_R_16F;
         Btype       = CUDA_R_16F;
         Ctype       = CUDA_R_16F;
-        scaleType   = CUDA_R_16F;
-        alpha       = &alpha_half;
-        beta        = &beta_half;
+        scaleType   = CUDA_R_32F;
+        alpha       = &alpha_float;
+        beta        = &beta_float;
     }
 
     int findAlgo = cublas_algo_map_->isExist(1, m, n, k, getCublasDataType(Atype_));
