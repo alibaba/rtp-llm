@@ -19,46 +19,78 @@
 namespace fastertransformer {
 
 template<typename T>
-struct function_traits;
+struct FunctionTraits;
 
 template<typename R, typename ...Args>
-struct function_traits<std::function<R(Args...)>> {
+struct FunctionTraits<std::function<R(Args...)>> {
 public:
     static const size_t nargs = sizeof...(Args);
     typedef std::tuple<Args...> args;
 };
 
-template<typename ...DstTs, typename ...SrcTs, std::size_t...Is>
-void cast_tuple(std::tuple<DstTs...> &dst, const std::tuple<SrcTs...> &src, std::index_sequence<Is...>) {
+template<typename SrcT, typename DstT, typename WorkT>
+constexpr bool IsCastingVoidPtrToWorkTPtr =
+    std::is_pointer_v<SrcT> &&
+    std::is_void_v<std::remove_pointer_t<SrcT>> &&
+    std::is_pointer_v<DstT> &&
+    std::is_same_v<std::remove_cv_t<std::remove_pointer_t<DstT>>, WorkT>;
+
+template<typename SrcT, typename DstT, typename WorkT>
+constexpr bool IsCastingFloatToWorkT =
+    std::is_floating_point_v<SrcT> &&
+    std::is_same_v<DstT, WorkT> &&
+    std::is_convertible_v<SrcT, DstT>;
+
+template<typename SrcT, typename DstT, std::enable_if_t<std::is_same<SrcT, DstT>::value, bool> = 0>
+inline DstT simpleCast(SrcT src) {
+    return src;
+}
+
+template<typename SrcT, typename DstT,
+         std::enable_if_t<(!std::is_same_v<SrcT, DstT>) && std::is_convertible_v<SrcT, DstT>, bool> = 0>
+inline DstT simpleCast(SrcT src) {
+    return (DstT)src;
+}
+
+template<typename SrcT, typename DstT, typename WorkT,
+         std::enable_if_t<IsCastingVoidPtrToWorkTPtr<SrcT, DstT, WorkT>, bool> = 0>
+inline DstT cast(SrcT src) {
+    return static_cast<DstT>(src);
+}
+
+template<typename SrcT, typename DstT, typename WorkT,
+         std::enable_if_t<IsCastingFloatToWorkT<SrcT, DstT, WorkT>, bool> = 0>
+inline DstT cast(SrcT src) {
+    return (DstT)src;
+}
+
+template<typename SrcT, typename DstT, typename WorkT,
+         std::enable_if_t<(!IsCastingVoidPtrToWorkTPtr<SrcT, DstT, WorkT>) &&
+                          (!IsCastingFloatToWorkT<SrcT, DstT, WorkT>), bool> = 0>
+inline DstT cast(SrcT src) {
+    return simpleCast<SrcT, DstT>(src);
+}
+
+template<typename WorkT, typename ...DstTs, typename ...SrcTs, std::size_t ...Idx>
+void castTuple(std::tuple<DstTs...> &dst, const std::tuple<SrcTs...> &src, std::index_sequence<Idx...>) {
     int unused_expander[] = { 0,
     ((void)[&] {
-        using SrcT = std::tuple_element_t<Is, std::tuple<SrcTs...>>;
-        using DstT = std::tuple_element_t<Is, std::tuple<DstTs...>>;
-        if constexpr (std::is_same_v<SrcT, DstT>) {
-            std::get<Is>(dst) = std::get<Is>(src);
-        } else if constexpr (std::is_pointer_v<SrcT> && std::is_void_v<std::remove_pointer_t<SrcT>>) {
-            std::get<Is>(dst) = static_cast<DstT>(std::get<Is>(src));
-        } else {
-            std::get<Is>(dst) = (DstT)std::get<Is>(src);
-        }
+        using SrcT = std::tuple_element_t<Idx, std::tuple<SrcTs...>>;
+        using DstT = std::tuple_element_t<Idx, std::tuple<DstTs...>>;
+        std::get<Idx>(dst) = cast<SrcT, DstT, WorkT>(std::get<Idx>(src));
     }(), 0) ... };
 }
 
-template<typename ...DstTs, typename ...SrcTs>
-void cast_tuple(std::tuple<DstTs...> &dst, const std::tuple<SrcTs...> &src) {
-    cast_tuple(dst, src, std::make_index_sequence<sizeof...(DstTs)>());
-}
-
-template<typename CastedTuple, typename CastT, typename ...Args>
-CastedTuple cast_args(const std::tuple<Args...>& args) {
+template<typename CastedTuple, typename WorkT, typename ...Args>
+CastedTuple castArgs(const std::tuple<Args...>& args) {
     auto ret = CastedTuple();
-    cast_tuple(ret, args);
+    castTuple<WorkT>(ret, args, std::make_index_sequence<std::tuple_size_v<CastedTuple>>());
     return ret;
 }
 
 #define ARG_CASTED_FUNC_CALL(T, func_name, ...) {                                           \
-    using target_args_type = function_traits<std::function<decltype(func_name<T>)>>::args;  \
-    auto typed_args = cast_args<target_args_type, T>(std::make_tuple(__VA_ARGS__));         \
+    using target_args_type = FunctionTraits<std::function<decltype(func_name<T>)>>::args;   \
+    auto typed_args = castArgs<target_args_type, T>(std::make_tuple(__VA_ARGS__));          \
     std::apply(func_name<T>, typed_args);                                                   \
 }
 

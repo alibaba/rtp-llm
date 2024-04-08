@@ -191,14 +191,14 @@ TEST_F(LayerNormTest, testAddBiasResidual) {
     const auto residual = createBuffer<float>({2, 3}, {0.01, 0.02, 0.03, 0.04, 0.05, 0.06});
 
     device_->layernorm(LayernormParams(
-        *input, *norm_output, nullopt, NormType::add_bias, nullopt, nullopt,
+        *input, *norm_output, *norm_output, NormType::add_bias, nullopt, nullopt,
         *residual, nullopt, *bias));
 
     assertBufferValueEqual(*input, vector<float>({0.1, 0.2, 0.3, 0.4, 0.5, 0.6}));
     assertBufferValueEqual(*norm_output, vector<float>({1.11, 2.22, 3.33, 1.44, 2.55, 3.66}));
 
     device_->layernorm(LayernormParams(
-        *input, *input, nullopt, NormType::add_bias, nullopt, nullopt,
+        *input, *input, *input, NormType::add_bias, nullopt, nullopt,
         *residual, nullopt, *bias));
 
     assertBufferValueEqual(*input, vector<float>({1.11, 2.22, 3.33, 1.44, 2.55, 3.66}));

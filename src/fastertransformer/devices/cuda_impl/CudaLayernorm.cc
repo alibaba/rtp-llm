@@ -24,7 +24,10 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     const auto eps = params.eps;
 
     if (!weights.has_value()) {
-        assert(!params.add_bias_output.has_value());
+        if (!params.add_bias_output.has_value()) {
+            throw OpException({OpErrorType::ERROR_UNIMPLEMENTED,
+                               "Layernorm without weight must provide bias output."});
+        }
         if (params.alpha.has_value() || (norm_type == NormType::alphanorm)) {
             const auto alpha = params.alpha.value_or(1.0f);
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAlphaAddBiasResidual,
@@ -51,13 +54,15 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 stream_
             );
         } else {
-            assert(false);
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
         sync_check_cuda_error();
         return;
     }
 
-    assert(norm_type == NormType::layernorm || norm_type == NormType::rmsnorm);
+    if (!(norm_type == NormType::layernorm || norm_type == NormType::rmsnorm)) {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
     if (params.residual1.has_value() || params.bias.has_value()) {
         const auto& add_bias_output = params.add_bias_output ? params.add_bias_output.value().get() : output;
         if (params.norm_type == NormType::layernorm) {

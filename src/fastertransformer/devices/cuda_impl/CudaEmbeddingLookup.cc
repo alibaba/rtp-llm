@@ -24,8 +24,8 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
         embeddings->data(),
         embedding_table.data(),
         postition_table.has_value() ? postition_table.value().get().data() : nullptr,
-        tokens.data(),
-        position_ids.has_value() ? position_ids.value().get().data() : nullptr,
+        tokens.data<int>(),
+        position_ids.has_value() ? position_ids.value().get().data<int>() : nullptr,
         token_num,
         hidden_size,
         stream_
