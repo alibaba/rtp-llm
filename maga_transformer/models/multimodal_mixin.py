@@ -18,15 +18,20 @@ class BaseImageEmbedding:
 class BaseVitWeights:
     def __init__(self, vit_part: Dict[str, Any], with_prefix: bool = False):
         self.weight_names: List[str] = []
+        self._set_weight_prefix()
         self._get_vit_params(vit_part, with_prefix)
+    
+    def _set_weight_prefix(self):
+        self._ckpt_prefix = "model."
+        self._ft_prefix = "self.visual."
     
     @property
     def ckpt_prefix(self) -> str:
-        return "model."
+        return self._ckpt_prefix
     
     @property
     def ft_prefix(self) -> str:
-        return "self.visual."
+        return self._ft_prefix
     
     def _get_vit_params(self, vit_part: Dict[str, Any], with_prefix: bool = False):
         if len(vit_part) >= 2 or with_prefix:

@@ -8,13 +8,9 @@ from maga_transformer.models.qwen import QWenWeight
 from maga_transformer.models.multimodal_mixin import BaseVitWeights, BaseMultiModalWeightInfo
 
 class QwenVLVitWeight(BaseVitWeights):
-    @property
-    def ckpt_prefix(self) -> str:
-        return "transformer.visual."
-
-    @property
-    def ft_prefix(self) -> str:
-        return "self.visual.vit."
+    def _set_weight_prefix(self):
+        self._ckpt_prefix = "transformer.visual."
+        self._ft_prefix = "self.visual.vit."
 
 class QWenVLWeightInfo(QWenWeight, BaseMultiModalWeightInfo):
     
