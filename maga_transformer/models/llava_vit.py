@@ -38,7 +38,10 @@ class LlavaImageEmbedding(BaseImageEmbedding):
             vision_tower = vision_tower_cfg['vit_tower_path']
         is_absolute_path_exists = os.path.exists(vision_tower)
         if is_absolute_path_exists or vision_tower.startswith("openai") or vision_tower.startswith("laion"):
-            return CLIPVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
+            return CLIPVisionTower(vision_tower,
+                                   select_layer=vision_tower_cfg.get("mm_vision_select_layer", -2),
+                                   select_feature=vision_tower_cfg.get("mm_vision_select_feature", "patch"),
+                                   **kwargs)
         
         raise ValueError(f'Unknown vision tower: {vision_tower}')
     
@@ -64,15 +67,14 @@ class LlavaImageEmbedding(BaseImageEmbedding):
 
 # ViT
 class CLIPVisionTower(nn.Module):
-    def __init__(self, vision_tower, args, delay_load=False):
+    def __init__(self, vision_tower, select_layer=-2, select_feature="patch", delay_load=False):
         super().__init__()
 
         self.is_loaded = False
 
         self.vision_tower_name = vision_tower
-        self.select_layer = args['mm_vision_select_layer']
-        self.select_feature = args.get('mm_vision_select_feature', 'patch')
-        self.args = args
+        self.select_layer = select_layer
+        self.select_feature = select_feature
 
         if not delay_load:
             self.load_model()
