@@ -32,16 +32,10 @@ struct DenseWeights {
                  kernel(std::move(kernel)),
                  bias(std::move(bias)) {};
     
-    DenseWeights(std::nullptr_t kernel,
-                 ConstBufferPtr& bias) : 
-                 kernel(nullptr),
+    DenseWeights(BufferPtr& kernel,
+                 BufferPtr& bias) :
+                 kernel(std::move(kernel)),
                  bias(std::move(bias)) {};
-
-    DenseWeights(std::nullptr_t kernel,
-                 BufferPtr& bias) : 
-                 kernel(nullptr),
-                 bias(std::move(bias)) {};
-
 };
 
 typedef std::unique_ptr<const DenseWeights> DenseWeightsPtr;

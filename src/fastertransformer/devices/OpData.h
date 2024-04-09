@@ -209,8 +209,11 @@ struct EmbeddingLookupParams {
 struct AttentionCommonInputs {
     // [batch_size, block_length], int64 block pointers
     OptionalConstBufferRef kv_cache_blocks; 
-    OptionalConstBufferRef kv_cache_scales;
 
+    // cross attention
+    OptionalConstBufferRef cache_indir;
+
+    OptionalConstBufferRef finished;
     OptionalConstBufferRef input_lengths;
     OptionalConstBufferRef sequence_lengths;
     OptionalConstBufferRef cu_seqlens;
@@ -235,6 +238,14 @@ struct AttentionCommonInputs {
                           attention_mask(attention_mask),
                           padding_offset(padding_offset),
                           cu_seqlens(cu_seqlens) {}
+    
+    // self attention
+    AttentionCommonInputs (const Buffer& kv_cache_blocks,
+                           const Buffer& sequence_lengths,
+                           const Buffer& input_lengths) :
+                           kv_cache_blocks(kv_cache_blocks),
+                           sequence_lengths(sequence_lengths),
+                           input_lengths(input_lengths) {}
 };
 
 struct AttentionConfigs {
@@ -248,6 +259,16 @@ struct AttentionConfigs {
     
     // rotary embending config
     RopeConfig rope_config;
+
+    //kv cache block
+    size_t mMaxBlocksPerSeq;
+    size_t mTokensPerBlock;
+
+    // step
+    size_t step;
+
+    // beam search
+    size_t beam_width = 1;
 
     // prefix params
     bool        count_prefix_length = false;
@@ -370,21 +391,20 @@ struct ActivationParams {
 
 struct SoftmaxParams{
 
-    SoftmaxParams(const Buffer& input,
+    SoftmaxParams(BufferPtr input,
                   const Buffer& mask,
                   float scale = 1.0f,
                   const DataType output_t = DataType::TYPE_INVALID) :
-                  input(input),
+                  input(std::move(input)),
                   mask(mask),
                   scale(scale),
                   output_t(output_t) {}
     
-
-    const Buffer& input;
+    // inplace
+    BufferPtr input = nullptr;
     const Buffer& mask;
     float scale;
     const DataType output_t;
-
 };
 
 struct LoraLinearOutput {

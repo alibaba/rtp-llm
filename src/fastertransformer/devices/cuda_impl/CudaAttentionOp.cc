@@ -18,10 +18,14 @@ using namespace std;
 namespace fastertransformer {
 
 template<typename T>
-AttentionModuleOutput contextAttentionwrapper(const AttentionModuleParams& params, CudaDevice* self) {
+void addFusedQKVBiasTransposeWrapper(const AttentionModuleParams& params,
+                                     const Buffer& q_output,
+                                     const Buffer& k_output,
+                                     const Buffer& v_output,
+                                     cudaStream_t stream) {
     
     //  qkv input shape [token_num, head_num + 2 * kv_head_num, size_per_head]
-    T* qkv_input_ptr = params.input.data<T>();
+    T* qkv_input_ptr    = params.input.data<T>();
 
     auto token_num      = params.input.shape()[0];
     auto batch_size     = params.configs.batch_size;
@@ -30,26 +34,9 @@ AttentionModuleOutput contextAttentionwrapper(const AttentionModuleParams& param
     auto kv_head_num    = params.configs.kv_head_num;
     auto size_per_head  = params.configs.size_per_head;
 
-
-    auto q_output = self->allocateBuffer({params.input.type(),
-                                         {batch_size, head_num, seq_len, size_per_head},
-                                         AllocationType::DEVICE},
-                                         {});
-
-    auto k_output = self->allocateBuffer({params.input.type(),
-                                         {batch_size, kv_head_num, seq_len, size_per_head},
-                                         AllocationType::DEVICE},
-                                         {});
-
-
-    auto v_output = self->allocateBuffer({params.input.type(),
-                                         {batch_size, kv_head_num, seq_len, size_per_head},
-                                         AllocationType::DEVICE},
-                                         {});
-
-    T* q_output_ptr  = q_output->data<T>();
-    T* k_output_ptr  = k_output->data<T>();
-    T* v_output_ptr  = v_output->data<T>();
+    T* q_output_ptr     = q_output.data<T>();
+    T* k_output_ptr     = k_output.data<T>();
+    T* v_output_ptr     = v_output.data<T>();
 
     const int* position_ids     = params.common.position_ids.value().get().data<int>();
     const T*   bias_ptr         = params.weights.qkv_weight->bias->data<T>();
@@ -102,35 +89,26 @@ AttentionModuleOutput contextAttentionwrapper(const AttentionModuleParams& param
                                    use_logn_attention,
                                    scale_out_ptr,
                                    int8_mode,
-                                   self->getStream());
+                                   stream);
     sync_check_cuda_error();
 
-    // TODO(lidongjin): Only support float32 gemm output.
-    auto qk_output = self->gemm({*q_output,
-                                 *k_output,
-                                 std::nullopt,
-                                 DataType::TYPE_FP32,
-                                 TransposeOperation::NONE,
-                                 TransposeOperation::TRANSPOSE});
+}
 
-    float scale = (1.0f / sqrtf(size_per_head* 1.0f));
+template<typename T>
+void transposeQKVWrapper(const AttentionModuleParams& params,
+                         const Buffer& qkv_output,
+                         const Buffer& qkv_transpose_output,
+                         cudaStream_t stream) {
 
-    // TODO(lidongjin): Only support float32(in)\float16(output).
-    auto softmax_qk_output = self->softmax({*qk_output,
-                                            params.common.attention_mask.value().get(),
-                                            scale,
-                                            DataType::TYPE_FP16});
+    auto token_num      = params.input.shape()[0];
+    auto batch_size     = params.configs.batch_size;
+    auto seq_len        = params.configs.seq_len;
+    auto head_num       = params.configs.head_num;
+    auto kv_head_num    = params.configs.kv_head_num;
+    auto size_per_head  = params.configs.size_per_head;
 
-    auto qkv_output = self->gemm({*softmax_qk_output, *v_output});
-
-    T* qkv_ptr = qkv_output->data<T>();
-
-    auto qkv_transpose_output = self->allocateBuffer({params.input.type(),
-                                                     {batch_size, seq_len, head_num, size_per_head},
-                                                     AllocationType::DEVICE},
-                                                     {});
-
-    T* qkv_transpose_ptr = qkv_transpose_output->data<T>();
+    T* qkv_transpose_ptr = qkv_transpose_output.data<T>();
+    T* qkv_ptr = qkv_output.data<T>();
 
     invokeTransposeQKV(qkv_transpose_ptr,
                        qkv_ptr,
@@ -140,25 +118,258 @@ AttentionModuleOutput contextAttentionwrapper(const AttentionModuleParams& param
                        size_per_head,
                        nullptr,
                        0,
-                       self->getStream());
+                       stream);
 
     sync_check_cuda_error();
-
-    return AttentionModuleOutput({std::move(qkv_transpose_output)});
 }
 
 
 /// @brief   Context Attention ops
 /// @details
 AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& params) {
-    if (params.input.type() == DataType::TYPE_FP16) {
-        return contextAttentionwrapper<half>(params, this);
-    } else if (params.input.type() == DataType::TYPE_FP32) {
-        return contextAttentionwrapper<float>(params, this);
-    } else {
+
+    auto datatype = params.input.type();
+    if (datatype != DataType::TYPE_FP16 &&
+        datatype != DataType::TYPE_FP32) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
     
+
+    auto token_num      = params.input.shape()[0];
+    auto batch_size     = params.configs.batch_size;
+    auto seq_len        = params.configs.seq_len;
+    auto head_num       = params.configs.head_num;
+    auto kv_head_num    = params.configs.kv_head_num;
+    auto size_per_head  = params.configs.size_per_head;
+
+
+    auto q_output = allocateBuffer({params.input.type(),
+                                    {batch_size, head_num, seq_len, size_per_head},
+                                    AllocationType::DEVICE},
+                                    {});
+
+    auto k_output = allocateBuffer({params.input.type(),
+                                    {batch_size, kv_head_num, seq_len, size_per_head},
+                                    AllocationType::DEVICE},
+                                    {});
+
+
+    auto v_output = allocateBuffer({params.input.type(),
+                                    {batch_size, kv_head_num, seq_len, size_per_head},
+                                    AllocationType::DEVICE},
+                                    {});
+
+    if (datatype == DataType::TYPE_FP16) {
+        addFusedQKVBiasTransposeWrapper<half>(params, *q_output, *k_output, *v_output, stream_);
+    } else if (datatype == DataType::TYPE_FP32) {
+        addFusedQKVBiasTransposeWrapper<float>(params, *q_output, *k_output, *v_output, stream_);
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+
+    // TODO(lidongjin): Only support float32 gemm output.
+    auto qk_output = gemm({*q_output,
+                            *k_output,
+                            std::nullopt,
+                            DataType::TYPE_FP32,
+                            TransposeOperation::NONE,
+                            TransposeOperation::TRANSPOSE});
+
+    float scale = (1.0f / sqrtf(size_per_head* 1.0f));
+
+    // TODO(lidongjin): Only support float32(in)\float16(output).
+    auto softmax_qk_output = softmax({std::move(qk_output),
+                                      params.common.attention_mask.value().get(),
+                                      scale,
+                                      DataType::TYPE_FP16});
+
+    auto qkv_output = gemm({*softmax_qk_output, *v_output});
+
+
+    auto qkv_transpose_output = allocateBuffer({params.input.type(),
+                                                {batch_size, seq_len, head_num, size_per_head},
+                                                AllocationType::DEVICE},
+                                                {});
+
+    if (datatype == DataType::TYPE_FP16) {
+        transposeQKVWrapper<half>(params, *qkv_output, *qkv_transpose_output, stream_);
+    } else if (datatype == DataType::TYPE_FP32) {
+        transposeQKVWrapper<float>(params, *qkv_output, *qkv_transpose_output, stream_);
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+
+    return AttentionModuleOutput({std::move(qkv_transpose_output)});
+    
+}
+
+template<typename T>
+void selfAttentionwrapper(const AttentionModuleParams& params,
+                          const Buffer& output,
+                          cudaStream_t stream) {
+
+    size_t token_num            = params.configs.token_num;
+    size_t batch_size           = params.configs.batch_size;
+    size_t beam_width           = params.configs.beam_width;
+    size_t local_head_num       = params.configs.head_num;
+    size_t local_head_num_kv    = params.configs.kv_head_num;
+    size_t size_per_head        = params.configs.size_per_head;
+    size_t step                 = params.configs.step;
+
+    const T* qkv_buf_ptr = params.input.data<T>();
+    T* qkv_buf_2_ = output.data<T>();
+    
+    const T* bias_ptr = (params.weights.qkv_weight->bias == nullptr) ?
+                         nullptr :
+                         params.weights.qkv_weight->bias->data<T>();
+
+    // TODO(lidongjin) support relative attention
+    const T* relative_attention_bias_ptr = nullptr;
+
+    int* cache_indir = nullptr;
+    if (params.common.cache_indir.has_value()) {
+        cache_indir = params.common.cache_indir.value().get().data<int>();
+    }
+    bool* finished = nullptr;
+    if (params.common.finished.has_value()) {
+        finished = params.common.finished.value().get().data<bool>();
+    }
+
+    int* sequence_lengths = nullptr;
+    if (params.common.sequence_lengths.has_value()) {
+        sequence_lengths = params.common.sequence_lengths.value().get().data<int>();
+    }
+
+    // rope
+    int rotary_embedding_dim = params.configs.rope_config.embedding_dim;
+    int rotary_embedding_style = (int)params.configs.rope_config.embedding_style;
+    int rotary_embedding_base  = params.configs.rope_config.embedding_base;
+    float dynamic_embedding_scale = params.configs.rope_config.dynamic_embedding_scale;
+    int dynamic_embedding_max_pos = params.configs.rope_config.dynamic_embedding_max_pos;
+    int position_embeddings_scale = params.configs.rope_config.position_embeddings_scale;
+    int base_scale = params.configs.rope_config.base_scale;
+
+    // logn attention
+    int logn_seq_len    = params.configs.logn_seq_len;
+    bool use_logn_attn  = params.configs.use_logn_attn;
+
+    // prefix prompt
+
+    int* prefix_prompt_lengths = nullptr;
+    if (params.common.prefix_prompt_lengths.has_value()) {
+        prefix_prompt_lengths = params.common.prefix_prompt_lengths.value().get().data<int>();
+    }
+
+    int max_prefix_prompt_length = 0;
+    bool count_prefix_length = false;
+
+    const int* input_lengths = nullptr;
+    if (params.common.input_lengths.has_value()) {
+        input_lengths = params.common.input_lengths.value().get().data<int>();
+    }
+
+    float q_scaling = 1.f;
+    int relative_attention_bias_stride = 0;
+    const T* linear_bias_slopes = nullptr;
+    const bool* masked_tokens = nullptr;
+
+    // TODO(lidongjin) support int8
+    const float* query_weight_scale_out = nullptr;
+    const float* attention_output_weight_scale_out = nullptr;
+    int int8_mode = 0;
+    // TODO(lidongjin) support multi block
+    bool multi_block_mode = false;
+    int max_seq_len_tile = 0;
+    T* partial_out = nullptr;
+    float* partial_sum = nullptr;
+    float* partial_max = nullptr;
+    int* block_counter = nullptr;
+
+    KVBlockArray kv_block_array(batch_size,
+                                params.configs.mMaxBlocksPerSeq,
+                                params.configs.mTokensPerBlock, 0);
+    if (!params.common.kv_cache_blocks.has_value()) {
+        throw std::runtime_error("kv cache block pointers can not be null");
+    }
+
+    kv_block_array.data = reinterpret_cast<int64_t*>(params.common.kv_cache_blocks.value().get().data());
+
+    fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
+        qkv_buf_ptr,
+        bias_ptr,
+        relative_attention_bias_ptr,
+        cache_indir,
+        qkv_buf_2_,
+        finished,
+        sequence_lengths,
+        batch_size,
+        beam_width,
+        local_head_num,
+        local_head_num_kv,
+        size_per_head,
+        rotary_embedding_dim,
+        rotary_embedding_style,
+        rotary_embedding_base,
+        logn_seq_len,
+        use_logn_attn,
+        dynamic_embedding_scale,
+        dynamic_embedding_max_pos,
+        position_embeddings_scale,
+        base_scale,
+        step,
+        prefix_prompt_lengths,
+        max_prefix_prompt_length,
+        count_prefix_length,
+        input_lengths,
+        step,
+        q_scaling,
+        relative_attention_bias_stride,
+        linear_bias_slopes,
+        masked_tokens,
+        query_weight_scale_out,
+        attention_output_weight_scale_out,
+        int8_mode,
+        multi_block_mode,
+        max_seq_len_tile,
+        partial_out,
+        partial_sum,
+        partial_max,
+        block_counter,
+        kv_block_array,
+        stream);
+
+    sync_check_cuda_error();
+}
+
+/// @brief   Self Attention ops
+/// @details
+AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
+
+    auto datatype = params.input.type();
+    if (datatype != DataType::TYPE_FP16 &&
+        datatype != DataType::TYPE_FP32) {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+    
+    size_t token_num            = params.configs.token_num;
+    size_t batch_size           = params.configs.batch_size;
+    size_t beam_width           = params.configs.beam_width;
+    size_t local_head_num       = params.configs.head_num;
+    size_t local_head_num_kv    = params.configs.kv_head_num;
+    size_t size_per_head        = params.configs.size_per_head;
+    size_t step                 = params.configs.step;
+
+    auto output = allocateBuffer({params.input.type(), 
+                                {token_num, local_head_num, size_per_head}});
+
+    if (params.input.type() == DataType::TYPE_FP16) {
+        selfAttentionwrapper<half>(params, *output, stream_);
+    } else if (params.input.type() == DataType::TYPE_FP32) {
+        selfAttentionwrapper<float>(params, *output, stream_);
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+    return AttentionModuleOutput({std::move(output)});
 }
 
 

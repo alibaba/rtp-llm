@@ -44,13 +44,14 @@ void CudaSoftmaxOpTest::BasicSoftmaxTest(size_t b,
     auto input_device = CreateDeviceBuffer<input_t>(input_host);
     auto mask_device = CreateDeviceBuffer<input_t>(mask_host);
 
-    auto output_device = device_->softmax({*input_device, *mask_device, scale});
-    assert(output_device == nullptr);
+    auto output_device = device_->softmax({std::move(input_device),
+                                          *mask_device,
+                                          scale});
     
     mask_host = mask_host.reshape({(int)b, 1, (int)q_len, (int)k_len});
     auto result_ref = torch::softmax((input_host + mask_host) * scale, -1);
 
-    auto result = bufferToTensor(*input_device);
+    auto result = bufferToTensor(*output_device);
 
     assertTensorClose(result, result_ref.to(result.dtype()));
 }
@@ -77,19 +78,10 @@ void CudaSoftmaxOpTest::MixFloatSoftmaxTest(size_t b,
     auto mask_device = CreateDeviceBuffer<input_t>(mask_host);
 
     BufferPtr output_device = nullptr;
-    output_device = device_->softmax({*input_device,
+    output_device = device_->softmax({std::move(input_device),
                                       *mask_device,
                                       scale,
                                       getTensorType<output_t>()});
-
-    // if constexpr (std::is_same<output_t, half>::value) {
-        
-    // } else if constexpr (std::is_same<output_t, float>::value) {
-    //     output_device = device_->softmax({*input_device,
-    //                                        *mask_device,
-    //                                        scale,
-    //                                        DataType::TYPE_FP32});
-    // }
 
     assert(output_device != nullptr);
     

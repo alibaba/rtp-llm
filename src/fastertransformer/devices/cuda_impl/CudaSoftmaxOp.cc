@@ -12,62 +12,79 @@ using namespace std;
 
 namespace fastertransformer {
 
-template<typename In, typename Out>
-BufferPtr softmaxDispatch(const SoftmaxParams& params, CudaDevice* self) {
-    const auto& input = params.input;
-    MaskedSoftmaxParam<Out, In> param;
-    if constexpr (std::is_same<In, Out>::value) {
-        // inplace ops
-        // (batch_size, head_num, q_length, k_length)
-        param.attention_score    = reinterpret_cast<Out*>(params.input.data());
-        // (batch_size, head_num, q_length, k_length)
-        param.qk                 = reinterpret_cast<In*>(params.input.data());
-        // (batch_size, q_length, k_length)
-        param.attention_mask     = reinterpret_cast<Out*>(params.mask.data());
-        param.batch_size         = params.input.shape()[0];
-        param.num_heads          = params.input.shape()[1];
-        param.q_length           = params.input.shape()[2];
-        param.k_length           = params.input.shape()[3];
-        param.qk_scale           = half(params.scale);
-        param.linear_bias_slopes = nullptr;
-        invokeMaskedSoftmax(param, self->getStream());
-        return nullptr;
-    } else {
-        auto output = self->allocateBuffer({getTensorType<Out>(),
-                                            input.shape(),
-                                            AllocationType::DEVICE});
-        // (batch_size, head_num, q_length, k_length)
-        param.attention_score    = reinterpret_cast<Out*>(output->data());
-        // (batch_size, head_num, q_length, k_length)
-        param.qk                 = reinterpret_cast<In*>(params.input.data());
-        // (batch_size, q_length, k_length)
-        param.attention_mask     = reinterpret_cast<Out*>(params.mask.data());
-        param.batch_size         = params.input.shape()[0];
-        param.num_heads          = params.input.shape()[1];
-        param.q_length           = params.input.shape()[2];
-        param.k_length           = params.input.shape()[3];
-        param.qk_scale           = half(params.scale);
-        param.linear_bias_slopes = nullptr;
-        invokeMaskedSoftmax(param, self->getStream());
-        return std::move(output);
-    }
-    
+template<typename In>
+void inplaceSoftmaxWrapper(const SoftmaxParams& params,
+                           cudaStream_t stream) {
+    MaskedSoftmaxParam<In, In> param;
+    // inplace ops
+    // (batch_size, head_num, q_length, k_length)
+    param.attention_score    = params.input->data<In>();
+    // (batch_size, head_num, q_length, k_length)
+    param.qk                 = params.input->data<In>();
+    // (batch_size, q_length, k_length)
+    param.attention_mask     = params.mask.data<In>();
+    param.batch_size         = params.input->shape()[0];
+    param.num_heads          = params.input->shape()[1];
+    param.q_length           = params.input->shape()[2];
+    param.k_length           = params.input->shape()[3];
+    param.qk_scale           = half(params.scale);
+    param.linear_bias_slopes = nullptr;
+    invokeMaskedSoftmax(param, stream);
+    return;
 }
 
+template<typename In, typename Out>
+void mixFloatSoftmaxWrapper(const SoftmaxParams& params,
+                            const Buffer& output,
+                            cudaStream_t stream) {
+    MaskedSoftmaxParam<Out, In> param;
+    auto& input = params.input;
+   
+    // (batch_size, head_num, q_length, k_length)
+    param.attention_score    = output.data<Out>();
+    // (batch_size, head_num, q_length, k_length)
+    param.qk                 = input->data<In>();
+    // (batch_size, q_length, k_length)
+    param.attention_mask     = params.mask.data<Out>();
+    param.batch_size         = input->shape()[0];
+    param.num_heads          = input->shape()[1];
+    param.q_length           = input->shape()[2];
+    param.k_length           = input->shape()[3];
+    param.qk_scale           = half(params.scale);
+    param.linear_bias_slopes = nullptr;
+    invokeMaskedSoftmax(param, stream);
+    return;
+}
 
 /// @brief   softmax op
 BufferPtr CudaDevice::softmax(const SoftmaxParams& params) {
-    if (params.input.type() == DataType::TYPE_FP16) {
-        if (params.output_t == DataType::TYPE_INVALID) {
-            return softmaxDispatch<half, half>(params, this);
+    if (params.input == nullptr) {
+        throw std::runtime_error("softmax input can not be nullptr");
+    }
+    auto type = params.input->type();
+    // inplace
+    if (type == params.output_t) {
+        if (type == DataType::TYPE_FP16) {
+            inplaceSoftmaxWrapper<half>(params, stream_);
+        } else if (type == DataType::TYPE_FP32) {
+            inplaceSoftmaxWrapper<float>(params, stream_);
+        } else {
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
-    } else if (params.input.type() == DataType::TYPE_FP32) {
-        if (params.output_t == DataType::TYPE_INVALID ||
-            params.output_t == DataType::TYPE_FP32) {
-            return softmaxDispatch<float, float>(params, this);
-        } else if (params.output_t == DataType::TYPE_FP16) {
-            return softmaxDispatch<float, half>(params, this);
+        auto output =  const_cast<SoftmaxParams&>(params).input.release();
+        return unique_ptr<Buffer>(output);
+
+    } else {
+        if (type == DataType::TYPE_FP32 && params.output_t == DataType::TYPE_FP16) {
+            auto output = allocateBuffer({params.output_t,
+                                          params.input->shape(),
+                                          AllocationType::DEVICE});
+            mixFloatSoftmaxWrapper<float, half>(params, *output, stream_);
+            return std::move(output);
+        } else {
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
+        
     }
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     

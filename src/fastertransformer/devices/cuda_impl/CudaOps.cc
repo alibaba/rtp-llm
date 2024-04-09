@@ -75,9 +75,6 @@ GroupedGemmOutput CudaDevice::groupedGemm(const GroupedGemmParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
 
 AttentionLayerOutput CudaDevice::attentionLayer(const AttentionLayerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);

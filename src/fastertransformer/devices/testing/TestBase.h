@@ -160,9 +160,12 @@ protected:
         ).clone();
     }
 
-    void assertTensorClose(const torch::Tensor& a, const torch::Tensor& b) {
+    void assertTensorClose(const torch::Tensor& a, const torch::Tensor& b,
+                           double rtol = 0, double atol = 0) {
         auto a_cmp = a;
         auto b_cmp = b;
+        rtol = rtol ? rtol : rtol_;
+        atol = atol ? atol : rtol_;
         ASSERT_TRUE(a.is_floating_point() == b.is_floating_point());
 
         if (a_cmp.dtype() != b_cmp.dtype()) {
@@ -172,9 +175,11 @@ protected:
             b_cmp = b_cmp.to(cmp_type);
         }
 
-        const auto close = torch::allclose(a_cmp, b_cmp, rtol_, atol_);
+        const auto close = torch::allclose(a_cmp, b_cmp, rtol, atol);
         if (!close) {
             std::cout << "assert tensor close failed!" << std::endl;
+            std::cout << "rtol: " << rtol << std::endl;
+            std::cout << "atol: " << atol << std::endl;
             std::cout << "a: " << a << std::endl;
             std::cout << "b: " << b << std::endl;
             ASSERT_TRUE(false);
