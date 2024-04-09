@@ -27,7 +27,3 @@ TEST_F(CpuOpsTest, testCopy) {
 TEST_F(CpuOpsTest, testGemmOp) {
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

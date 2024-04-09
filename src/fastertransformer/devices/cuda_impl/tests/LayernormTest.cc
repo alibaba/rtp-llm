@@ -216,8 +216,3 @@ TEST_F(LayerNormTest, testSimpleLayernorm) {
         }
     }
 }
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

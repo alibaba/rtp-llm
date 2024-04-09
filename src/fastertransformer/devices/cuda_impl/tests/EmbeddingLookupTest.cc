@@ -33,8 +33,3 @@ TEST_F(EmbeddingLookupTest, testEmbeddingLookup) {
 
     sync_check_cuda_error();
 }
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

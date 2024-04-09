@@ -13,17 +13,17 @@ public:
                    size_t hidden_size,
                    size_t inter_size,
                    ActivationType act_t);
-    
+
     void FFNLoraOpTest(size_t token_num,
                        size_t hidden_size,
                        size_t inter_size,
                        ActivationType act_t);
-    
+
     void MoeOpTest(size_t token_num,
                    size_t hidden_size,
                    size_t inter_size,
                    ActivationType act_t);
-    
+
     void MoeLoraOpTest(size_t token_num,
                        size_t hidden_size,
                        size_t inter_size,
@@ -39,7 +39,7 @@ torch::Tensor gelu(const torch::Tensor& tensor) {
 }
 
 
-std::unordered_map<ActivationType, 
+std::unordered_map<ActivationType,
                    std::function<torch::Tensor(const torch::Tensor&)>> ACT2FUN {
     {ActivationType::Geglu , gelu},
     {ActivationType::GeGluNoneApproximate , GeGluNoneApproximate},
@@ -135,11 +135,11 @@ void CudaFFnOpTest::FFNOpTest(size_t token_num,
     FfnLayerParams params(*input_device,
                           weights,
                           act_t);
-    
+
     auto output_device  = device_->ffnLayer(params);
     auto result         = bufferToTensor(*(output_device.hidden_states));
     auto result_host    = mlp->forward(input_host).to(result.dtype());;
-    
+
     ASSERT_TRUE(torch::allclose(result_host, result, rtol_, atol_));
 
 }
@@ -160,9 +160,4 @@ TEST_F(CudaFFnOpTest, FfnNoGatedActivationOp) {
     FFNOpTest(1000, 2048, 128, ActivationType::Silu);
     FFNOpTest(1, 2, 4096, ActivationType::Silu);
     FFNOpTest(1000, 2048, 128, ActivationType::Silu);
-}
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

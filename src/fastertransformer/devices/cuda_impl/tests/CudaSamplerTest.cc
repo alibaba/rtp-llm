@@ -119,7 +119,3 @@ TEST_F(CudaSamplerTest, testTopP) {
     ASSERT_NEAR(cum_log_probs_host[3], -5.26996, 1e-3);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

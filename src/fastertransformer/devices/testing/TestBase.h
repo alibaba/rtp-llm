@@ -190,3 +190,8 @@ protected:
     DeviceBase* device_;
     std::string test_data_path_;
 };
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}

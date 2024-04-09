@@ -63,3 +63,17 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "sampler_test",
+    srcs = [
+        "SamplerTest.cc",
+    ],
+    data = [
+        "//maga_transformer/test/model_test/fake_test/testdata:testdata"
+    ],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps + [
+        ":test_utils",
+    ],
+)

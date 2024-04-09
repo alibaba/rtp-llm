@@ -76,7 +76,3 @@ TEST_F(CudaActOpTest, testGeluOp) {
     GateActTest(ActivationType::Gelu, 1024, 1024);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

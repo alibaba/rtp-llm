@@ -85,9 +85,3 @@ TEST_F(CudaSoftmaxOpTest, SoftmaxOpTest) {
     ScaleSoftmaxTest(2.0f, 16, 32, 128, 128);
 }
 
-
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
