@@ -28,92 +28,6 @@
 
 namespace fastertransformer {
 
-static __global__ void set_topp_runtime_args(int             batch_size,
-                                             uint            top_k,
-                                             uint*           top_ks,
-                                             int             top_ks_size,
-                                             float           top_p,
-                                             float*          top_ps,
-                                             int             top_ps_size,
-                                             bool*           skip_decode,
-                                             float*          initial_top_p_buf,
-                                             float*          top_p_decay_buf,
-                                             const float*    top_p_decay,
-                                             float*          top_p_min_buf,
-                                             const float*    top_p_min,
-                                             int32_t*        top_p_reset_ids_buf,
-                                             const uint32_t* top_p_reset_ids)
-{
-    /**
-     * @brief Setup the runtime arguments for topp, broadcasting top_p to top_ps
-                and top_k to top_ks, copying top_p_decay/top_p_min/top_p_reset_ids
-                to internal buffers.
-     *
-     * \param batch_size            [batch_size]
-     * \param op_k                  [batch_size]
-     * \param top_ks                [batch_size]
-     * \param top_ks_size           [batch_size]
-     * \param top_p                 [batch_size]
-     * \param top_ps                [batch_size]
-     * \param top_ps_size           [batch_size]
-     * \param skip_decode           [batch_size]
-     * \param initial_top_p_buf     [batch_size]
-     * \param top_p_decay_buf       [batch_size]
-     * \param top_p_decay           [batch_size], optional, must between [0, 1]
-     * \param top_p_min_buf         [batch_size]
-     * \param top_p_min             [batch_size], optional, must between [0, 1]
-     * \param top_p_reset_ids_buf    [batch_size]
-     * \param top_p_reset_ids        [batch_size], optional
-     *
-     */
-
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
-    for (int i = index; i < batch_size; i += gridDim.x * blockDim.x) {
-        uint  k = top_ks_size > 1 ? top_ks[i] : top_k;
-        float p = top_ps_size > 1 ? top_ps[i] : top_p;
-        if (k == 0 && p == 0.0f) {
-            // FT's topp implementation does not support topp = 0.0f, but it equivalent to greedy search.
-            // So, we set the topk = 1 as an alternative solution.
-            k = 1;
-        }
-        top_ks[i] = k;
-        // Clip p value if it is out of range. range = [0.0, 1.0].
-        top_ps[i] = p < 0.0f ? 0.0f : (p > 1.0f ? 1.0f : p);
-        if (p < 0.0f || p > 1.0f) {
-            printf("[WARNING] topp (%f) is out of range ([0.0, 1.0f]) for token %d"
-                   " clip to closest number %f.\n",
-                   p,
-                   i,
-                   top_ps[i]);
-        }
-        skip_decode[i] = k > 0;
-
-        initial_top_p_buf[i] = top_ps[i];
-        top_p_decay_buf[i]   = top_p_decay == nullptr ? 1.0f : top_p_decay[i];
-        if (top_p_decay_buf[i] > 1.0f || top_p_decay_buf[i] <= 0.0f) {
-            printf("[WARNING] top_p_decay_buf (%f) is out of range ([0.0, 1.0f]) for token %d,"
-                   " change to 1.0f.\n",
-                   top_p_decay_buf[i],
-                   i);
-            top_p_decay_buf[i] = 1.0f;
-        }
-        top_p_min_buf[i] = top_p_min == nullptr ? 1e-6f : top_p_min[i];  // prevent topp becoming 0.0
-        if (top_p_min_buf[i] > 1.0f || top_p_min_buf[i] <= 0.0f) {
-            printf("[WARNING] top_p_min_buf (%f) is out of range ([0.0, 1.0f]) for token %d,"
-                   " change to 0.5f.\n",
-                   top_p_min_buf[i],
-                   i);
-            top_p_min_buf[i] = 0.5f;
-        }
-        if (top_p_reset_ids == nullptr) {
-            top_p_reset_ids_buf[i] = -1;
-        } else {
-            top_p_reset_ids_buf[i] = top_p_reset_ids[i];
-        }
-        // top_p_reset_ids_buf[i] = (int32_t)(top_p_reset_ids == nullptr ? -1 : top_p_reset_ids[i]);
-    }
-}
-
 template<typename T>
 void TopPSamplingLayer<T>::allocateBuffer()
 {
@@ -235,21 +149,22 @@ void TopPSamplingLayer<T>::setup(const size_t batch_size, const size_t beam_widt
     const float*    top_p_decay     = runtime_args->getPtr<float>("top_p_decay", nullptr);
     const float*    top_p_min       = runtime_args->getPtr<float>("top_p_min", nullptr);
     const uint32_t* top_p_reset_ids = runtime_args->getPtr<uint32_t>("top_p_reset_ids", nullptr);
-    set_topp_runtime_args<<<grid, block, 0, stream_>>>(batch_size,
-                                                       top_k,
-                                                       runtime_top_k_buf_,
-                                                       runtime_top_k_size,
-                                                       top_p,
-                                                       runtime_top_p_buf_,
-                                                       runtime_top_p_size,
-                                                       skip_decode_buf_,
-                                                       initial_top_p_buf_,
-                                                       top_p_decay_buf_,
-                                                       top_p_decay,
-                                                       top_p_min_buf_,
-                                                       top_p_min,
-                                                       top_p_reset_ids_buf_,
-                                                       top_p_reset_ids);
+    invokeSetupTopPRuntimeArgs(batch_size,
+                                top_k,
+                                runtime_top_k_buf_,
+                                runtime_top_k_size,
+                                top_p,
+                                runtime_top_p_buf_,
+                                runtime_top_p_size,
+                                skip_decode_buf_,
+                                initial_top_p_buf_,
+                                top_p_decay_buf_,
+                                top_p_decay,
+                                top_p_min_buf_,
+                                top_p_min,
+                                top_p_reset_ids_buf_,
+                                top_p_reset_ids,
+                                stream_);
     sync_check_cuda_error();
     cudaAutoCpy(skip_decode_, skip_decode_buf_, batch_size, stream_);
     float* runtime_top_ps = new float[batch_size];

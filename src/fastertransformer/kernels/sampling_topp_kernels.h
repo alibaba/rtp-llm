@@ -146,4 +146,21 @@ void invokeComputeToppDecay(float*         runtime_top_p,
                             const int      local_batch_size,
                             cudaStream_t   stream);
 
+void invokeSetupTopPRuntimeArgs(int             batch_size,
+                                uint            top_k,
+                                uint*           top_ks,
+                                int             top_ks_size,
+                                float           top_p,
+                                float*          top_ps,
+                                int             top_ps_size,
+                                bool*           skip_decode,
+                                float*          initial_top_p_buf,
+                                float*          top_p_decay_buf,
+                                const float*    top_p_decay,
+                                float*          top_p_min_buf,
+                                const float*    top_p_min,
+                                int32_t*        top_p_reset_ids_buf,
+                                const uint32_t* top_p_reset_ids,
+                                cudaStream_t   stream);
+
 }  // namespace fastertransformer

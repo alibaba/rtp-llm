@@ -1427,4 +1427,130 @@ void invokeComputeToppDecay(float*         runtime_top_p,
         runtime_top_p, runtime_initial_top_p, output_ids, top_p_decay, top_p_min, top_p_reset_ids, local_batch_size);
 }
 
+
+static __global__ void set_topp_runtime_args(int             batch_size,
+                                             uint            top_k,
+                                             uint*           top_ks,
+                                             int             top_ks_size,
+                                             float           top_p,
+                                             float*          top_ps,
+                                             int             top_ps_size,
+                                             bool*           skip_decode,
+                                             float*          initial_top_p_buf,
+                                             float*          top_p_decay_buf,
+                                             const float*    top_p_decay,
+                                             float*          top_p_min_buf,
+                                             const float*    top_p_min,
+                                             int32_t*        top_p_reset_ids_buf,
+                                             const uint32_t* top_p_reset_ids)
+{
+    /**
+     * @brief Setup the runtime arguments for topp, broadcasting top_p to top_ps
+                and top_k to top_ks, copying top_p_decay/top_p_min/top_p_reset_ids
+                to internal buffers.
+     *
+     * \param batch_size            [batch_size]
+     * \param op_k                  [batch_size]
+     * \param top_ks                [batch_size]
+     * \param top_ks_size           [batch_size]
+     * \param top_p                 [batch_size]
+     * \param top_ps                [batch_size]
+     * \param top_ps_size           [batch_size]
+     * \param skip_decode           [batch_size]
+     * \param initial_top_p_buf     [batch_size]
+     * \param top_p_decay_buf       [batch_size]
+     * \param top_p_decay           [batch_size], optional, must between [0, 1]
+     * \param top_p_min_buf         [batch_size]
+     * \param top_p_min             [batch_size], optional, must between [0, 1]
+     * \param top_p_reset_ids_buf    [batch_size]
+     * \param top_p_reset_ids        [batch_size], optional
+     *
+     */
+
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    for (int i = index; i < batch_size; i += gridDim.x * blockDim.x) {
+        uint  k = top_ks_size > 1 ? top_ks[i] : top_k;
+        float p = top_ps_size > 1 ? top_ps[i] : top_p;
+        if (k == 0 && p == 0.0f) {
+            // FT's topp implementation does not support topp = 0.0f, but it equivalent to greedy search.
+            // So, we set the topk = 1 as an alternative solution.
+            k = 1;
+        }
+        top_ks[i] = k;
+        // Clip p value if it is out of range. range = [0.0, 1.0].
+        top_ps[i] = p < 0.0f ? 0.0f : (p > 1.0f ? 1.0f : p);
+        if (p < 0.0f || p > 1.0f) {
+            printf("[WARNING] topp (%f) is out of range ([0.0, 1.0f]) for token %d"
+                   " clip to closest number %f.\n",
+                   p,
+                   i,
+                   top_ps[i]);
+        }
+        skip_decode[i] = k > 0;
+
+        initial_top_p_buf[i] = top_ps[i];
+        top_p_decay_buf[i]   = top_p_decay == nullptr ? 1.0f : top_p_decay[i];
+        if (top_p_decay_buf[i] > 1.0f || top_p_decay_buf[i] <= 0.0f) {
+            printf("[WARNING] top_p_decay_buf (%f) is out of range ([0.0, 1.0f]) for token %d,"
+                   " change to 1.0f.\n",
+                   top_p_decay_buf[i],
+                   i);
+            top_p_decay_buf[i] = 1.0f;
+        }
+        top_p_min_buf[i] = top_p_min == nullptr ? 1e-6f : top_p_min[i];  // prevent topp becoming 0.0
+        if (top_p_min_buf[i] > 1.0f || top_p_min_buf[i] <= 0.0f) {
+            printf("[WARNING] top_p_min_buf (%f) is out of range ([0.0, 1.0f]) for token %d,"
+                   " change to 0.5f.\n",
+                   top_p_min_buf[i],
+                   i);
+            top_p_min_buf[i] = 0.5f;
+        }
+        if (top_p_reset_ids == nullptr) {
+            top_p_reset_ids_buf[i] = -1;
+        } else {
+            top_p_reset_ids_buf[i] = top_p_reset_ids[i];
+        }
+        // top_p_reset_ids_buf[i] = (int32_t)(top_p_reset_ids == nullptr ? -1 : top_p_reset_ids[i]);
+    }
+}
+
+void invokeSetupTopPRuntimeArgs(int             batch_size,
+                                uint            top_k,
+                                uint*           top_ks,
+                                int             top_ks_size,
+                                float           top_p,
+                                float*          top_ps,
+                                int             top_ps_size,
+                                bool*           skip_decode,
+                                float*          initial_top_p_buf,
+                                float*          top_p_decay_buf,
+                                const float*    top_p_decay,
+                                float*          top_p_min_buf,
+                                const float*    top_p_min,
+                                int32_t*        top_p_reset_ids_buf,
+                                const uint32_t* top_p_reset_ids,
+                                cudaStream_t   stream)
+{
+    dim3 block(std::min((int)batch_size, 256));
+    dim3 grid(div_up((int)batch_size, (int)block.x));
+
+    set_topp_runtime_args<<<grid, block, 0, stream>>>(batch_size,
+                                                       top_k,
+                                                       top_ks,
+                                                       top_ks_size,
+                                                       top_p,
+                                                       top_ps,
+                                                       top_ps_size,
+                                                       skip_decode,
+                                                       initial_top_p_buf,
+                                                       top_p_decay_buf,
+                                                       top_p_decay,
+                                                       top_p_min_buf,
+                                                       top_p_min,
+                                                       top_p_reset_ids_buf,
+                                                       top_p_reset_ids);
+
+
+}
+
 }  // namespace fastertransformer
