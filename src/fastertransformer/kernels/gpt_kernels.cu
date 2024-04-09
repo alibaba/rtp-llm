@@ -102,19 +102,6 @@ void invokeEmebeddingLookup(T*                    from_tensor,
 }
 #undef INVOKE_WORD_EMBED_LOOKUP
 
-template<typename T>
-void invokeEmebeddingLookup(T*                    from_tensor,
-                            const T*              embedding_table,
-                            const T*              pos_table,                            
-                            const int*            input_ids,
-                            const int*            input_pos,                            
-                            const int             token_num,
-                            const int             hidden_units,
-                            cudaStream_t          stream) {
-    invokeEmebeddingLookup(from_tensor, embedding_table, pos_table, (T*)nullptr, input_ids, input_pos, nullptr, token_num, hidden_units, stream);
-
-}
-
 // PROMPT_SRC: 0 --> no prompts, 1 --> from loaded prompts, 2 --> from request prompts
 template<typename T, bool OUTPUT_ID, int PROMPT_SRC>
 __global__ void start_id_embedding_position_lookups_kernel(T*                    from_tensor,
@@ -292,8 +279,10 @@ template void invokeInputIdsEmbeddingLookupPosEncoding(__nv_bfloat16*           
     template void invokeEmebeddingLookup(T*                    from_tensor, \
         const T*              embedding_table,                          \
         const T*              pos_table,                                \
+        const T*              type_table,                               \
         const int*            input_ids,                                \
         const int*            input_pos,                                \
+        const int*            input_type,                               \
         const int             token_num,                                \
         const int             hidden_units,                             \
         cudaStream_t          stream)

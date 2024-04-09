@@ -50,8 +50,10 @@ void ParallelWordEmbeddingWrapper<T>::forward(Tensor& embeddings, const Tensor t
     invokeEmebeddingLookup(word_embeddings,
                            embedding_table_->kernel,
                            params_.has_positional_encoding_ ? postition_table_->kernel : nullptr,
+                           nullptr,
                            input_ids,
                            params_.has_positional_encoding_ ? position_ids.getPtr<int>() : nullptr,
+                           nullptr,
                            token_num,
                            local_hidden_units,
                            stream_);
