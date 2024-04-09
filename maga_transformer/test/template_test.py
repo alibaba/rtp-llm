@@ -11,7 +11,7 @@ from maga_transformer.models.llava import LlavaTokenizer
 from maga_transformer.openai.api_datatype import ChatMessage, RoleEnum, \
     ChatCompletionRequest, GPTFunctionDefinition, ContentPart, ContentPartTypeEnum, RendererInfo
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
-from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer
+from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 from maga_transformer.openai.renderer_factory import ChatRendererFactory, RendererParams, \
     CustomChatRenderer, FastChatRenderer, LlamaTemplateRenderer
 from maga_transformer.openai.renderers.qwen_renderer import QwenRenderer

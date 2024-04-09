@@ -10,7 +10,7 @@ from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderers.llama_template_renderer import LlamaTemplateRenderer
 from maga_transformer.openai.renderers.fast_chat_renderer import FastChatRenderer
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
-from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer
+from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 from maga_transformer.openai.renderer_factory_register import _renderer_factory
 
 class ChatRendererFactory():

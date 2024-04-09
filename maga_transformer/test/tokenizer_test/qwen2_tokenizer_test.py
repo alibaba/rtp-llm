@@ -1,6 +1,6 @@
 from typing import Any
 from unittest import TestCase, main
-from maga_transformer.tokenizer.tokenization_qwen2 import Qwen2Tokenizer
+from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
 class AllFakeModelTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):
