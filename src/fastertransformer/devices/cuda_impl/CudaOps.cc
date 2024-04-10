@@ -15,12 +15,30 @@ namespace fastertransformer {
 void CudaDevice::copy(const CopyParams& params) {
     const auto& src = params.src;
     const auto& dst = params.dst;
-    RUNTIME_ASSERT_OP_ARG(src.size() == dst.size(),
-        "src and dst size mismatch: [%s] vs [%s]", src.debugString().c_str(), dst.debugString().c_str());
+    const auto& src_offset = params.src_offset;
+    const auto& dst_offset = params.dst_offset;
+    auto copy_length = params.copy_length ? params.copy_length : min(src.shape()[0], dst.shape()[0]);
 
-    if (src.size() == 0) {
+    if (copy_length == 0) {
         return;
     }
+
+    RUNTIME_ASSERT_OP_ARG((src.shape()[0] - src_offset >= copy_length),
+        "src size is smaller than copy_length: [%s] vs [%d]",
+        src.debugString().c_str(), copy_length);
+    RUNTIME_ASSERT_OP_ARG((dst.shape()[0] - dst_offset >= copy_length),
+        "dst size is smaller than copy_length: [%s] vs [%d]",
+        dst.debugString().c_str(), copy_length);
+
+    const auto element_size = src.sizeBytes() / src.shape()[0];
+    RUNTIME_ASSERT_OP_ARG((element_size == dst.sizeBytes() / dst.shape()[0]),
+        "src and dst element size mismatch: [%s] vs [%s]",
+        src.debugString().c_str(), dst.debugString().c_str());
+
+    auto src_ptr = src.data() + src_offset * element_size;
+    auto dst_ptr = dst.data() + dst_offset * element_size;
+    auto copy_bytes = copy_length * element_size;
+
     if (src.data() == dst.data()) {
         return;
     }
@@ -35,7 +53,8 @@ void CudaDevice::copy(const CopyParams& params) {
     } else {
         copyType = cudaMemcpyHostToHost;
     }
-    cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_);
+
+    cudaMemcpyAsync(dst_ptr, src_ptr, copy_bytes, copyType, stream_);
     sync_check_cuda_error();
 }
 

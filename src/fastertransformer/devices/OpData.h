@@ -69,14 +69,24 @@ inline std::optional<std::reference_wrapper<T>> mayGetRef(const std::unique_ptr<
 }
 
 struct CopyParams {
-    CopyParams(const Buffer& dst, const Buffer& src) : dst(dst), src(src)  {}
+    CopyParams(const Buffer& dst, const Buffer& src)
+    : dst(dst), src(src)
+    {}
+
+    // copy from part of src to full dst, offsets / size are at dim 0.
+    CopyParams(const Buffer& dst, const Buffer& src,
+               const size_t dst_offset, const size_t src_offset,
+               const size_t copy_length)
+    : dst(dst), src(src)
+    , dst_offset(dst_offset), src_offset(src_offset), copy_length(copy_length)
+    {}
 
     const Buffer& dst;
     const Buffer& src;
 
-    const std::optional<std::vector<size_t>> src_offset;
-    const std::optional<std::vector<size_t>> dst_offset;
-    const std::optional<std::vector<size_t>> sizes;
+    size_t dst_offset = 0;
+    size_t src_offset = 0;
+    size_t copy_length = 0;
 };
 
 using TransposeOutput = BufferPtr;

@@ -18,8 +18,22 @@ TEST_F(CudaOpsTest, testCopy) {
     device_->copy({*B, *A});
     device_->copy({*C, *B});
 
-    sync_check_cuda_error();
     assertBufferValueEqual(*C, expected);
+}
+
+TEST_F(CudaOpsTest, testCopyWithSlicing) {
+    using TestT = int32_t;
+
+    vector<TestT> input = {1, 2, 3, 4, 5, 6, 7, 8};
+    auto src = createHostBuffer({4, 2}, input.data());
+    auto dst = createBuffer<TestT>({2, 2}, {0, 0, 0, 0});
+
+    device_->copy({*dst, *src, 0, 1, 0});
+
+    assertBufferValueEqual<TestT>(*dst, {3, 4, 5, 6});
+
+    device_->copy({*dst, *src, 1, 3, 1});
+    assertBufferValueEqual<TestT>(*dst, {3, 4, 7, 8});
 }
 
 TEST_F(CudaOpsTest, testTranspose) {
