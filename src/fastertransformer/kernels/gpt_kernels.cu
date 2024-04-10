@@ -403,7 +403,7 @@ __global__ void transposeAxis01(T* out, T* in, const int dim0, const int dim1, c
 }
 
 template<typename T>
-void invokeTransposeAxis01(T* out, T* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream)
+void invokeTransposeAxis012(T* out, T* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream)
 {
     dim3 block(512);
     dim3 grid((int)(ceil(dim0 * dim1 * dim2 / 512.)));
@@ -411,18 +411,18 @@ void invokeTransposeAxis01(T* out, T* in, const int dim0, const int dim1, const 
 }
 
 template void
-invokeTransposeAxis01(float* out, float* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
+invokeTransposeAxis012(float* out, float* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
 
 template void
-invokeTransposeAxis01(half* out, half* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
+invokeTransposeAxis012(half* out, half* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
 
 #ifdef ENABLE_BF16
 template void
-invokeTransposeAxis01(__nv_bfloat16* out, __nv_bfloat16* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
+invokeTransposeAxis012(__nv_bfloat16* out, __nv_bfloat16* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
 #endif
 
 template void
-invokeTransposeAxis01(int* out, int* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
+invokeTransposeAxis012(int* out, int* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
 
 template<typename T>
 __global__ void transposeAxis01(T* out, T* in, const int* in_skipping_dim1, const int dim0, const int dim1)
@@ -444,15 +444,33 @@ __global__ void transposeAxis01(T* out, T* in, const int* in_skipping_dim1, cons
 
 template<typename T>
 void invokeTransposeAxis01(
-    T* out, T* in, const int* in_skipping_dim1, const int dim0, const int dim1, cudaStream_t stream)
+    T* out, T* in, const int dim0, const int dim1, cudaStream_t stream)
 {
     dim3 block(512);
     dim3 grid((int)(ceil(dim0 * dim1 / 512.)));
-    transposeAxis01<<<grid, block, 0, stream>>>(out, in, in_skipping_dim1, dim0, dim1);
+    transposeAxis01<<<grid, block, 0, stream>>>(out, in, nullptr, dim0, dim1);
 }
 
 template void invokeTransposeAxis01(
-    int* out, int* in, const int* in_skipping_dim1, const int dim0, const int dim1, cudaStream_t stream);
+    int32_t* out, int32_t* in, const int dim0, const int dim1, cudaStream_t stream);
+
+template void invokeTransposeAxis01(
+    uint32_t* out, uint32_t* in, const int dim0, const int dim1, cudaStream_t stream);
+
+template void invokeTransposeAxis01(
+    int64_t* out, int64_t* in, const int dim0, const int dim1, cudaStream_t stream);
+
+template void invokeTransposeAxis01(
+    uint64_t* out, uint64_t* in, const int dim0, const int dim1, cudaStream_t stream);
+
+template void invokeTransposeAxis01(
+    float* out, float* in, const int dim0, const int dim1, cudaStream_t stream);
+
+template void invokeTransposeAxis01(
+    half* out, half* in, const int dim0, const int dim1, cudaStream_t stream);
+
+template void invokeTransposeAxis01(
+    nv_bfloat16* out, nv_bfloat16* in, const int dim0, const int dim1, cudaStream_t stream);
 
 template<typename T, bool PREFIX_PROMPT>
 __global__ void buildDecoderAttentionMaskKernel(T*         attention_mask,

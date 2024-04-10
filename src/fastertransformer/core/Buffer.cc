@@ -73,6 +73,18 @@ void Buffer::reshape(std::vector<size_t>& shape) {
     shape_ = shape;
 }
 
+// NOTE: view() always slices the buffer from 0-dim, no matter how many dimensions the buffer has.
+// NOTE: new Buffer from view() has the same data pointer as the original buffer,
+//       and also shorter life time than the original buffer.
+//       user has the responsibility to keep the original buffer alive.
+std::unique_ptr<Buffer> Buffer::view(size_t offset, size_t size) const {
+    assert(offset + size <= this->shape_[0]);
+    auto new_shape = shape_;
+    new_shape[0] = size;
+    const auto offset_size = this->size() / shape_[0] * offset;
+    return std::make_unique<Buffer>(where_, type_, new_shape, dataWithOffset(offset_size));
+}
+
 std::string Buffer::debugString() const {
     std::string debugStr = "Buffer( ";
     debugStr += "where=" + std::to_string(where_) + ", ";

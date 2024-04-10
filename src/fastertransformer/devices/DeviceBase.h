@@ -15,6 +15,9 @@ public:
     virtual std::string type() const = 0;
 
 public:
+    // default implementations to be overriden
+    TransposeOutput transpose(const TransposeParams& params);
+
     // target independence ops
     FfnLayerOutput ffnLayer(const FfnLayerParams& params);
     LoraLinearOutput loraLinear(const LoraLinearParams& params);

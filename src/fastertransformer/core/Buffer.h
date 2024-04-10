@@ -53,6 +53,7 @@ public:
     size_t dim() const;
 
     void reshape(std::vector<size_t>& shape);
+    std::unique_ptr<Buffer> view(size_t offset, size_t size) const;
 
     std::string debugString() const;
 

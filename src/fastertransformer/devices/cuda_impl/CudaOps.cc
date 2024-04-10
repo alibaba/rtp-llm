@@ -1,7 +1,9 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
+#include "src/fastertransformer/devices/cuda_impl/Dispatch.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
+#include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 
@@ -35,6 +37,23 @@ void CudaDevice::copy(const CopyParams& params) {
     }
     cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_);
     sync_check_cuda_error();
+}
+
+TransposeOutput CudaDevice::transpose(const TransposeParams& params) {
+    const auto& input = params.input;
+    const auto data_type = input.type();
+    const auto& shape = input.shape();
+
+    RUNTIME_ASSERT_OP_ARG(shape.size() == 2,
+        "You can only transpose a 2D buffer, but got [%s]", input.debugString().c_str());
+
+    auto output = allocateBuffer({data_type, {shape[1], shape[0]}});
+
+    DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis01,
+        output->data(), input.data(), shape[0], shape[1], stream_
+    );
+
+    return move(output);
 }
 
 GroupedGemmOutput CudaDevice::groupedGemm(const GroupedGemmParams& params) {

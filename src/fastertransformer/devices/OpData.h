@@ -79,6 +79,12 @@ struct CopyParams {
     const std::optional<std::vector<size_t>> sizes;
 };
 
+using TransposeOutput = BufferPtr;
+
+struct TransposeParams {
+    const Buffer& input;
+};
+
 using LayernormOutput = void;
 
 struct LayernormParams {

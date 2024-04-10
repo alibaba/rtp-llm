@@ -1,5 +1,7 @@
 #include "maga_transformer/cpp/models/Sampler.h"
 
+#include <unordered_set>
+
 using namespace std;
 
 namespace rtp_llm {
@@ -9,6 +11,7 @@ Sampler::Sampler(const SamplerInitParams& params)
     {};
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
+
     return SamplerOutput();
 }
 

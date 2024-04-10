@@ -19,6 +19,7 @@ public:
 
 public:
     void copy(const CopyParams& params);
+    TransposeOutput transpose(const TransposeParams& params);
     LayernormOutput layernorm(const LayernormParams& params);
     BufferPtr gemm(const GemmParams& params);
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params);

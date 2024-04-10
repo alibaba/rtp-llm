@@ -111,4 +111,24 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
         }                                                                                       \
     } while (0)
 
+#define DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, function, ...)                           \
+    do {                                                                                        \
+        switch (data_type) {                                                                    \
+            case DataType::TYPE_INT32:                                                          \
+                ARG_CASTED_FUNC_CALL(int32_t, function, __VA_ARGS__);                           \
+                break;                                                                          \
+            case DataType::TYPE_UINT32:                                                         \
+                ARG_CASTED_FUNC_CALL(uint32_t, function, __VA_ARGS__);                          \
+                break;                                                                          \
+            case DataType::TYPE_INT64:                                                          \
+                ARG_CASTED_FUNC_CALL(int64_t, function, __VA_ARGS__);                           \
+                break;                                                                          \
+            case DataType::TYPE_UINT64:                                                         \
+                ARG_CASTED_FUNC_CALL(uint64_t, function, __VA_ARGS__);                          \
+                break;                                                                          \
+            default:                                                                            \
+                DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, function, __VA_ARGS__);             \
+        }                                                                                       \
+    } while (0)
+
 }  // namespace fastertransformer

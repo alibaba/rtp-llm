@@ -31,6 +31,16 @@ test_deps = [
 ] + torch_deps()
 
 
+cc_test(
+    name = "cuda_ops_test",
+    srcs = [
+        "CudaOpsTest.cc",
+    ],
+    data = [],
+    copts = cuda_copts() + copts() + torch_deps(),
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
 
 cc_test(
     name = "cuda_gemm_op_test",

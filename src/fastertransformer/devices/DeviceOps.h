@@ -16,6 +16,7 @@ public:
 
     // tensor ops
     virtual void copy(const CopyParams& params)                                             = 0;
+    virtual TransposeOutput transpose(const TransposeParams& params)                        = 0;
 
     // basic compuation ops
     virtual LayernormOutput layernorm(const LayernormParams& params)                        = 0;

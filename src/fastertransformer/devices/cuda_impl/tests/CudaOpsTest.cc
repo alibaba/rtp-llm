@@ -22,3 +22,22 @@ TEST_F(CudaOpsTest, testCopy) {
     assertBufferValueEqual(*C, expected);
 }
 
+TEST_F(CudaOpsTest, testTranspose) {
+    auto input = createBuffer<int32_t>({4, 3}, {
+        1, 2, 3,
+        4, 5, 6,
+        7, 8, 9,
+        10, 11, 12
+    });
+    std::vector<int32_t> expected = {
+        1, 4, 7, 10,
+        2, 5, 8, 11,
+        3, 6, 9, 12
+    };
+    auto output = device_->transpose({*input});
+    EXPECT_EQ(output->shape(), std::vector<size_t>({3, 4}));
+    assertBufferValueEqual(*output, expected);
+
+    sync_check_cuda_error();
+}
+
