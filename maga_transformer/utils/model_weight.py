@@ -80,7 +80,7 @@ def choose_available(ts: List[torch.Tensor], origin_func_list: List[Callable[[Li
         if t is not None and len(ts) > 0:
             return func([t])
     raise ValueError(f"all tensor is empty, but not allow empty")
-    
+
 
 def shift_one(ts: List[torch.Tensor], allow_empty=False) -> torch.Tensor:
     if len(ts) == 0 and allow_empty:
@@ -144,6 +144,15 @@ def sp_head_b(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broad
     t = t.reshape(-1)
     qkv_hidden_size = t.shape[0]
     return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
+
+def sp_head_qk_norm(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+    t = t.reshape(1, -1)
+    qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
+    if kv_broadcast:
+        ks = t[:,hidden_size:]
+    else:
+        ks = sp_neg1(t[:,hidden_size:], tp, tp_rank)
+    return torch.concat([qs, ks], dim=1).contiguous()
 
 def sp_head_lora(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
     # lora_b[dim0, 3*hidden_size]
@@ -255,6 +264,7 @@ class W:
     attn_qkv_b = 'self_attention_weights.query_weight.bias'
     attn_ln_gamma = 'self_attention_weights.attention_layernorm.gamma'
     attn_ln_beta = 'self_attention_weights.attention_layernorm.beta'
+    qk_ln_gamma = 'self_attention_weights.qk_layernorm.gamma'
     attn_o_w = 'self_attention_weights.attention_output_weight.kernel'
     attn_o_b = 'self_attention_weights.attention_output_weight.bias'
     post_ln_gamma = 'post_layernorm_weights.gamma'
@@ -363,12 +373,12 @@ class W:
     int8_ffn_weights = [
         [ffn_w1, ffn_s1],
         [ffn_w3, ffn_s3],
-        [ffn_w2, ffn_s2], 
+        [ffn_w2, ffn_s2],
     ]
 
     int8_ffn_weights_2 = [
         [ffn_w1, ffn_s1],
-        [ffn_w2, ffn_s2], 
+        [ffn_w2, ffn_s2],
     ]
 
     int8_partial_moe_weights = [
@@ -385,18 +395,18 @@ class W:
     int4_ffn_weights = [
         [ffn_w1, ffn_z1, ffn_s1],
         [ffn_w3, ffn_z3, ffn_s3],
-        [ffn_w2, ffn_z2, ffn_s2], 
+        [ffn_w2, ffn_z2, ffn_s2],
     ]
 
     int4_ffn_weights_2 = [
         [ffn_w1, ffn_z1, ffn_s1],
-        [ffn_w2, ffn_z2, ffn_s2], 
+        [ffn_w2, ffn_z2, ffn_s2],
     ]
 
     int4_partial_moe_weights = [
         [moe_w1, moe_z1, moe_s1],
         [moe_w3, moe_z3, moe_s3],
-        [moe_w2, moe_z2, moe_s2] 
+        [moe_w2, moe_z2, moe_s2]
     ]
 
     gpt_style_tp_strategy: Dict[str, Any] = {
@@ -411,6 +421,7 @@ class W:
         pre_ln_beta: sp_id,
         pre_attn_ln_gamma: sp_id,
         pre_attn_ln_beta: sp_id,
+        qk_ln_gamma: sp_head_qk_norm,
         attn_qkv_w: sp_head,
         attn_qkv_z: sp_head_z,
         attn_qkv_s: sp_head_s,
@@ -460,7 +471,7 @@ class W:
         moe_gate: sp_id,
         post_ffn_ln_beta: sp_id,
         post_ffn_ln_gamma: sp_id,
-        token_type_embedding: sp_neg1        
+        token_type_embedding: sp_neg1
     }
 
     weights_list = [
@@ -482,6 +493,7 @@ class W:
         attn_qkv_b,
         attn_ln_gamma,
         attn_ln_beta,
+        qk_ln_gamma,
         attn_o_w,
         attn_o_b,
         post_ln_gamma,
@@ -502,6 +514,7 @@ class W:
         attn_qkv_b,
         attn_ln_gamma,
         attn_ln_beta,
+        qk_ln_gamma,
         attn_o_w,
     ]
 

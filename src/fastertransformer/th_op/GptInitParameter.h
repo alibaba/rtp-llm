@@ -78,6 +78,8 @@ public:
 
     bool    use_logn_attn_ = false;
     int64_t logn_seq_len_  = 2048;
+    double  q_scaling_ = 1;
+    bool    qk_norm_ = false;
 
     bool use_norm_input_residual_    = false;
     bool use_norm_attn_out_residual_ = false;
@@ -101,7 +103,7 @@ public:
     bool use_fp32_to_compute_logit_  = false;
     bool add_bias_linear_            = false;
     bool has_moe_norm_               = false;            
-
+    double logit_scale_              = 1.0;
     bool is_causal_                  = true;
 
     std::string tokenizer_path_    = "";

@@ -153,6 +153,7 @@ static auto specialTokensTHS =
     DEF_PROPERTY(has_pre_decoder_layernorm, has_pre_decoder_layernorm_)                                                \
     DEF_PROPERTY(has_post_decoder_layernorm, has_post_decoder_layernorm_)                                              \
     DEF_PROPERTY(has_moe_norm, has_moe_norm_)                                                                          \
+    DEF_PROPERTY(logit_scale, logit_scale_)                                                                            \
     DEF_PROPERTY(has_lm_head, has_lm_head_)                                                                            \
     DEF_PROPERTY(use_attention_linear_bias, use_attention_linear_bias_)                                                \
     DEF_PROPERTY(use_fp32_to_compute_logit, use_fp32_to_compute_logit_)                                                \
@@ -168,6 +169,8 @@ static auto specialTokensTHS =
     DEF_PROPERTY(quant_algo, quant_algo_)                                                                              \
     DEF_PROPERTY(use_logn_attn, use_logn_attn_)                                                                        \
     DEF_PROPERTY(logn_seq_len, logn_seq_len_)                                                                          \
+    DEF_PROPERTY(q_scaling, q_scaling_)                                                                                \
+    DEF_PROPERTY(qk_norm, qk_norm_)                                                                                    \    
     DEF_PROPERTY(is_multimodal, is_multimodal_)                                                                        \
     DEF_PROPERTY(pre_allocate_op_mem, pre_allocate_op_mem_)                                                            \
     DEF_PROPERTY(seq_size_per_block, seq_size_per_block_)                                                              \

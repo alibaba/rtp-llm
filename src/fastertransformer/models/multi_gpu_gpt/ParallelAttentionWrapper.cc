@@ -118,11 +118,6 @@ void ParallelAttentionWrapper<T>::TRTFMHA(const ContextAttentionParams& params, 
     const int head_size = params_.size_per_head_;
     const int mTokensPerBlock = params_.seq_size_per_block_;
 
-
-    const int local_hidden_units_qo = num_heads * head_size;
-    const int local_hidden_units_kv = num_kv_heads * head_size;
-    const float q_scaling = q_scaling_;
-
     const bool mPagedContextFMHA=false;
 
     KVBlockArray kv_cache_buffer;
@@ -472,25 +467,12 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
                           attention_input,
                           qkv_buf_);
 
-    int k_start = local_hidden_units_rt;
-    int v_start = local_hidden_units_rt + local_hidden_units_kv_rt;
-    print_bsd(layer_id, "parallel attention q", qkv_buf_, h_token_num, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt, 0, 4);
-    print_bsd(layer_id,
-              "k",
-              qkv_buf_,
-              h_token_num,
-              1,
-              local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
-              k_start,
-              k_start + 4);
-    print_bsd(layer_id,
-              "v",
-              qkv_buf_,
-              h_token_num,
-              1,
-              local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
-              v_start,
-              v_start + 4);
+    print_bshd(layer_id, "q", qkv_buf_, 1, h_token_num, local_head_num, params_.size_per_head_,
+	       local_head_num + 2 * local_head_num_kv, 0);
+    print_bshd(layer_id, "k", qkv_buf_, 1, h_token_num, local_head_num_kv, params_.size_per_head_,
+	       local_head_num + 2 * local_head_num_kv, local_head_num);
+    print_bshd(layer_id, "v", qkv_buf_, 1, h_token_num, local_head_num_kv, params_.size_per_head_,
+	       local_head_num + 2 * local_head_num_kv, local_head_num + local_head_num_kv);
     POP_RANGE;
 }
 
@@ -723,10 +705,10 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     sync_check_cuda_error();
 
     // NOTE: qkv buffer shape (batch_size, num_heads,L or prompt_len + L, Dh)
-    const cudaDataType_t gemm_data_type      = getCudaDataType<T>();
-    const int            attention_seq_len_1 = max_context_seq_length;                      // q length
-    const int            attention_seq_len_2 = max_prompt_length + max_context_seq_length;  // kv length
-    const T              qk_scale               = static_cast<T>(1.0f / sqrtf(params_.size_per_head_ * 1.0f));
+    const cudaDataType_t gemm_data_type = getCudaDataType<T>();
+    const int attention_seq_len_1 = max_context_seq_length;                      // q length
+    const int attention_seq_len_2 = max_prompt_length + max_context_seq_length;  // kv length
+    const float qk_scale = 1.0f / (sqrtf(params_.size_per_head_ * 1.0f) * q_scaling_);
     if (use_trt_fmha_) {
         ContextAttentionParams context_attention_params{qkv_buf,                 // attention_input
                                                         max_context_seq_length,  // max_context_q_len
@@ -750,7 +732,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                        local_head_num_kv,
                        params_.size_per_head_,
                        max_context_seq_length,
-                       (1.0f / sqrtf(params_.size_per_head_ * 1.0f)),
+                       qk_scale,
                        linear_bias_slopes,
                        qkv_buf_2,
                        stream_);
@@ -950,6 +932,15 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
 
     QKVGemm(h_token_num, layer_id, input_tensors->at("input_query").getPtr<T>(), attention_weights,
             lora_ids, batch_size, lora_input_lengths, use_kvcache);
+    if (params_.qk_norm_) {
+        invokeQkLayerNorm(qkv_buf_, attention_weights->qk_layernorm.gamma,
+			  params_.layernorm_eps_, h_token_num, local_head_num_, local_head_num_kv_,
+			  params_.size_per_head_);
+	print_bshd(layer_id, "q_norm", qkv_buf_, 1, h_token_num, local_head_num_, params_.size_per_head_,
+		   local_head_num_ + 2 * local_head_num_kv_, 0);
+	print_bshd(layer_id, "k_norm", qkv_buf_, 1, h_token_num, local_head_num_kv_, params_.size_per_head_,
+		   local_head_num_ + 2 * local_head_num_kv_, local_head_num_);
+    }
     if (context_batch_size) {
         ContextAttention(output_tensors, input_tensors, attention_weights);
     }
@@ -987,7 +978,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     gemm_runner_(std::make_shared<GemmRunner<T>>(stream, allocator, cublas_wrapper, quant_algo)),
     local_layer_head_num_(getLocalParameter(gpt_init_parameter.layer_head_num_, tensor_para.world_size_)),
     local_layer_head_num_kv_(getLocalParameter(gpt_init_parameter.layer_head_num_kv_, tensor_para.world_size_)),
-    q_scaling_(1.0f),
+    q_scaling_(gpt_init_parameter.q_scaling_),
     tensor_para_(tensor_para) {
     multi_block_mode_ = UseMultiBlockMode();
 

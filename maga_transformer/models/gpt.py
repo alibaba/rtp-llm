@@ -179,9 +179,11 @@ class GPT(BaseModel):
             else:
                 lm_head_w = self.word_embedding._emb
             if self.config.normalize_lm_head_weight:
-                self.lm_head.set_weight(F.normalize(lm_head_w), self.weight.steal_pytorch_weight(W.lm_head_b))
-            else:
-                self.lm_head.set_weight(lm_head_w, self.weight.steal_pytorch_weight(W.lm_head_b))
+                lm_head_w = F.normalize(lm_head_w)
+            if self.config.logit_scale != 1.0:
+                lm_head_w = self.config.scale_logit * lm_head_w
+            self.lm_head.set_weight(lm_head_w, self.weight.steal_pytorch_weight(W.lm_head_b))
+
         if self.lm_head is not None:
             if self.config.tp_split_emb_and_lm_head:
                 self.vocab_size_padded = self.lm_head._w.shape[0] * g_parallel_info.tp_size

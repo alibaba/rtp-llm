@@ -648,19 +648,21 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         // see https://huggingface.co/THUDM/chatglm-6b/blob/8b7d33596d18c5e83e2da052d05ca4db02e60620/modeling_chatglm.py#L651
         norm_wrapper_->ffnAddBiasResidualLayerNorm(decoder_output,
                                                    params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ :
-                                                                                         self_attn_output_,
+                                                   self_attn_output_,
                                                    ffn_output_ptr,
                                                    input_residual,
                                                    params_.moe_style_ == 2 && use_moe? \
-                                                            partial_moe_output_: layer_weight->ffn_weights.output_weight.bias,
-                                                   layer_weight->posf_ffn_layernorm_weights.gamma,
-                                                   layer_weight->posf_ffn_layernorm_weights.beta,
+                                                   partial_moe_output_: layer_weight->ffn_weights.output_weight.bias,
+                                                   layer_weight->post_ffn_layernorm_weights.gamma,
+                                                   layer_weight->post_ffn_layernorm_weights.beta,
                                                    params_.layernorm_eps_,
                                                    h_token_num,
                                                    hidden_units,
                                                    nullptr,
                                                    nullptr,
                                                    stream_);
+
+	print_bsd(l, "decoder output", decoder_output, 1, h_token_num, hidden_units);
 
         sync_check_cuda_error();
         POP_RANGE;

@@ -36,6 +36,9 @@ class ExecutorBase(object):
     def process(self, batch_query: BatchQuery) -> None:
         raise NotImplementedError()
 
+def debug_print():
+    return os.environ.get('FT_DEBUG_PRINT_LEVEL') == 'DEBUG' and g_parallel_info.tp_rank == 0
+
 class NormalModelExecutor(ExecutorBase):
     def __init__(self, model_ops: ModelOps, cache_manager: CacheManager):
         self.model_ops = model_ops
@@ -235,9 +238,12 @@ class NormalModelExecutor(ExecutorBase):
     def _post_transformer_nn(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.model_ops.model.post_decoder_layernorm is not None:
             hidden_states = self.model_ops.model.post_decoder_layernorm(hidden_states)
+            if debug_print():
+                print('hidden_states', hidden_states, flush=True)
         assert self.model_ops.model.lm_head is not None
         logits = self.model_ops.model.lm_head(hidden_states).float()
-
+        if debug_print():
+            print('logits', hidden_states, flush=True)
         if 'CHECK_LOGITS_NAN' in os.environ:
             logits_cpu = to_cpu(logits.view(-1))
             if any(torch.isnan(logits_cpu).numpy().tolist()):

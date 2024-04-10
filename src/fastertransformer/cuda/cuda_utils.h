@@ -752,6 +752,8 @@ void print_bshd(const int   layer_id,
                 int         seq_len,
                 int         num_heads,
                 int         hidden_size_per_head,
+                int         total_num_heads = 0,
+                int         heads_offset = 0,
                 bool        is_device_ptr = true);
 template<typename T>
 void print_bhsd(const int   layer_id,

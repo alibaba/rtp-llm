@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import math
 
 from typing import Any, Dict, List
 
@@ -60,9 +61,6 @@ class Llama(GPT):
 
     @staticmethod
     def from_huggingface(config, config_json: Dict[str, Any]):
-        model_type = config_json['model_type']
-        if model_type not in ['llama', 'baichuan2', 'baichuan', 'xverse', 'internlm', 'aquila', 'Yi', 'llava', 'mistral', 'gemma']:
-            raise BaseException(f'model type is not llama: {model_type}')
         config.head_num = config_json['num_attention_heads']
         config.head_num_kv = config_json.get('num_key_value_heads', config.head_num)
         config.hidden_size = config_json['hidden_size']
@@ -71,7 +69,7 @@ class Llama(GPT):
         config.layer_num = config_json['num_hidden_layers']
         config.max_seq_len = config_json.get('max_sequence_length', 2048)
         config.vocab_size = config_json['vocab_size']
-        config.layernorm_eps = config_json['rms_norm_eps']
+        config.layernorm_eps = config_json.get('rms_norm_eps', config_json.get('layer_norm_eps', 1e-05))
         config.inter_size = config_json['intermediate_size']
         config.rotary_embedding_base = int(config_json.get('rope_theta', 10000))
         config.rotary_embedding_dim = config.size_per_head
@@ -161,6 +159,15 @@ class Gemma(Llama):
         config.activation_type = 'gated-gelu'
         return config
 
+class Cohere(Llama):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        config = Llama._create_config(ckpt_path)
+        config.rotary_embedding_style = 0
+        config.norm_type = 'layernorm'
+        config.qk_norm = True
+        return config
+
 register_model('internlm', Llama, ["InternLMForCausalLM"])
 register_model('internlm2', Llama, ["InternLM2ForCausalLM"])
 register_model('llama', Llama, ["LlamaForCausalLM", "YiForCausalLM"])
@@ -170,3 +177,4 @@ register_model('mistral', Llama, ["MistralForCausalLM"])
 register_model('baichuan', Baichuan, ["BaichuanForCausalLM"])
 register_model('baichuan2', Baichuan2)
 register_model('gemma', Gemma, ["GemmaForCausalLM"])
+register_model('cohere', Cohere, ["CohereForCausalLM"])

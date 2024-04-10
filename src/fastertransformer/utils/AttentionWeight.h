@@ -32,6 +32,7 @@ struct AttentionWeight {
     DenseWeight<T1, T2>          key_weight;
     DenseWeight<T1, T2>          value_weight;
     AttentionLayerNormWeight<T1> attention_layernorm;
+    AttentionLayerNormWeight<T1> qk_layernorm;
     DenseWeight<T1, T2>          attention_output_weight;
     DenseWeight<T1, T2>          ia3_key_weight;
     DenseWeight<T1, T2>          ia3_value_weight;

@@ -21,6 +21,114 @@
 namespace fastertransformer
 {
 
+__device__ __forceinline__ int64_t loadOffset(int head_num,
+                                              int size_per_head)
+{
+    // [[q_head_1],[q_head_2]...[k_head_1],[k_head_2]...[v_head_1],[v_head_2]...]
+    int head_id = blockIdx.y;
+    int batch_id = blockIdx.x;
+    int offset = batch_id * head_num * size_per_head + size_per_head * head_id;
+    return offset;
+}
+
+template<typename T>
+__global__ void qkLayerNorm(T* __restrict qkv,
+                            const T* __restrict gamma,
+                            const float layernorm_eps,
+                            int head_num,
+                            int size_per_head)
+{
+    constexpr auto num_elems_T = num_elems<T>::value;
+    constexpr size_t warp_size = 32;
+    const int vec_size_per_head = size_per_head / num_elems_T;
+    const int n_elems = vec_size_per_head / warp_size;
+    using float_packed_t = typename packed_as<float, num_elems_T>::type;
+
+    const int tid = threadIdx.x;
+
+    __shared__ float s_mean;
+    __shared__ float s_variance;
+    float            mean     = 0.0f;
+    float            variance = 0.0f;
+
+    float local_sum = 0.0f;
+    for (int i = 0; i < n_elems; i++) {
+        auto index = loadOffset(head_num, vec_size_per_head) + tid * n_elems + i;
+        auto val_f = cuda_cast<float_packed_t>(ldg(&qkv[index]));
+	local_sum += cuda_sum<float>(val_f);
+    }
+
+    mean = warpReduceSum(local_sum);
+
+    if (threadIdx.x == 0) {
+        s_mean = mean / size_per_head;
+    }
+    __syncthreads();
+
+    float local_var_sum = 0.0f;
+    for (int i = 0; i < n_elems; i++) {
+        auto index = loadOffset(head_num, vec_size_per_head) + tid * n_elems + i;
+        auto val_f = cuda_cast<float_packed_t>(ldg(&qkv[index]));
+        auto diff = val_f - s_mean;
+        local_var_sum += cuda_sum<float>(diff * diff);
+    }
+    variance = warpReduceSum(local_var_sum);
+
+    if (threadIdx.x == 0) {
+        s_variance = rsqrtf(variance / size_per_head + layernorm_eps);
+    }
+    __syncthreads();
+
+    for (int i = 0; i < n_elems; i++) {
+        auto index = loadOffset(head_num, vec_size_per_head) + tid * n_elems + i;
+	auto gamma_index = blockIdx.y * vec_size_per_head + tid * n_elems + i;
+        auto val_f = cuda_cast<float_packed_t>(ldg(&qkv[index]));
+	auto val_gamma = cuda_cast<float_packed_t>(gamma[gamma_index]);
+        qkv[index] = cuda_cast<T>((val_f - s_mean) * s_variance * val_gamma);
+    }
+}
+
+template<typename T>
+void invokeQkLayerNorm(T* __restrict qkv,
+		       const T* __restrict gamma,
+		       const float layernorm_eps,
+		       const int tokens,
+		       const int head_num,
+		       const int head_num_kv,
+		       const int size_per_head,
+		       cudaStream_t stream)
+{
+    constexpr size_t vec_size = 2;
+    constexpr size_t warp_size = 32;
+
+    if (size_per_head % warp_size != 0) {
+        throw std::invalid_argument("not supported size_per_head: " + std::to_string(size_per_head));
+    }
+    dim3 grid(tokens, head_num + head_num_kv);
+    dim3 block(warp_size);
+
+    int total_head_num = head_num + 2 * head_num_kv;
+    using Tp = typename packed_as<T, vec_size>::type;
+    qkLayerNorm<Tp><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(qkv), reinterpret_cast<const Tp*>(gamma),
+						layernorm_eps, total_head_num, size_per_head);
+}
+
+#define INSTANTIATE_QK_LAYERNORM(T)				\
+  template void invokeQkLayerNorm(T* __restrict qkv,		\
+				  const T* __restrict gamma,	\
+				  const float layernorm_eps,	\
+				  const int tokens,		\
+				  const int head_num,		\
+				  const int head_num_kv,	\
+				  const int size_per_head,	\
+				  cudaStream_t stream)
+INSTANTIATE_QK_LAYERNORM(float);
+INSTANTIATE_QK_LAYERNORM(half);
+#ifdef ENABLE_BF16
+INSTANTIATE_QK_LAYERNORM(__nv_bfloat16);
+#endif
+
+
 template <typename Tf, typename T, bool IS_BETA>
 __inline__ __device__ Tf compute_layernorm(Tf val, float s_mean, float s_variance, const T* gamma, const T* beta, int i)
 {

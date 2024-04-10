@@ -24,6 +24,7 @@ static const std::string attn_qkv_w        = "self_attention_weights.query_weigh
 static const std::string attn_qkv_b        = "self_attention_weights.query_weight.bias";
 static const std::string attn_ln_gamma     = "self_attention_weights.attention_layernorm.gamma";
 static const std::string attn_ln_beta      = "self_attention_weights.attention_layernorm.beta";
+static const std::string qk_ln_gamma       = "self_attention_weights.qk_layernorm.gamma";
 static const std::string attn_o_w          = "self_attention_weights.attention_output_weight.kernel";
 static const std::string attn_o_b          = "self_attention_weights.attention_output_weight.bias";
 static const std::string post_ln_gamma     = "post_layernorm_weights.gamma";

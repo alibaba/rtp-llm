@@ -99,6 +99,20 @@ class Internlm2WeightNames:
 class GemmaWeightNames(HfWeightNames):
     OUTPUT = 'model.embed_tokens.weight'
 
+class CohereWeightNames:
+    WQ = 'model.layers.{i}.self_attn.q_proj.weight'
+    WK = 'model.layers.{i}.self_attn.k_proj.weight'
+    WV = 'model.layers.{i}.self_attn.v_proj.weight'
+    WO = 'model.layers.{i}.self_attn.o_proj.weight'
+    FFW1 = 'model.layers.{i}.mlp.gate_proj.weight'
+    FFW2 = 'model.layers.{i}.mlp.down_proj.weight'
+    FFW3 = 'model.layers.{i}.mlp.up_proj.weight'
+    ATTEN_NORM = 'model.layers.{i}.input_layernorm.weight'
+    Q_NORM = 'model.layers.{i}.self_attn.q_norm.weight'
+    K_NORM = 'model.layers.{i}.self_attn.k_norm.weight'
+    NORM = 'model.norm.weight'
+    TOKEN_EMBEDDING = 'model.embed_tokens.weight'
+
 class LlamaWeightInfo(ModelDeployWeightInfo):
     def __init__(self, config, tp_size, tp_rank):
         super().__init__(config, tp_size, tp_rank)
@@ -132,16 +146,23 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
             logging.info('load hf llama1 style weight')
             self._names = HfWeightNames
             self._merge_qkv = merge_qkv_hf
+        elif HfWeightNames.FFN_NORM.format(i='0') not in weight_keys:
+            logging.info('load cohere style weight')
+            self._names = CohereWeightNames
+            self._merge_qkv = merge_qkv_hf
         else:
             raise Exception('unknown weights format')
 
     def _get_weight_info(self):
         weights = [
             WeightInfo(W.embedding, [CkptWeightInfo(self._names.TOKEN_EMBEDDING, concat_1)], identity),
-            WeightInfo(W.lm_head, [CkptWeightInfo(self._names.OUTPUT, concat_0)], identity),
             WeightInfo(W.final_ln_gamma, [CkptWeightInfo(self._names.NORM, identity)], identity),
             WeightInfo(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
         ]
+        if self._names == CohereWeightNames:
+            weights.append(WeightInfo(W.lm_head, [CkptWeightInfo(self._names.TOKEN_EMBEDDING, identity)], identity))
+        else:
+            weights.append(WeightInfo(W.lm_head, [CkptWeightInfo(self._names.OUTPUT, concat_0)], identity))
 
         layer_weights = [
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo(self._names.ATTEN_NORM, identity)], identity),
@@ -154,8 +175,14 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo(self._names.FFW2, concat_1)], transpose),
 
-            WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self._names.FFN_NORM, identity)], identity),
         ]
+        if self._names == CohereWeightNames:
+            layer_weights.append(WeightInfo(W.qk_ln_gamma,
+                                            [CkptWeightInfo(self._names.Q_NORM, identity),
+                                             CkptWeightInfo(self._names.K_NORM, identity)], concat_0))
+        else:
+            layer_weights.append(WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self._names.FFN_NORM, identity)], identity))
+
         if self._names == InternlmWeightNames:
             layer_weights[1] = WeightInfo(W.attn_qkv_b,
                                 [CkptWeightInfo(self._names.BQ, identity),

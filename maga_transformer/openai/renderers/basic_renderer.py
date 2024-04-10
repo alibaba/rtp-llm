@@ -73,6 +73,10 @@ class BasicRenderer(CustomChatRenderer):
         except:
             pass
 
+        if isinstance(self.chat_template, dict):
+            if 'default' not in self.chat_template:
+                raise Exception('default chat_template not exist: ' + str(self.chat_template.keys()))
+            self.chat_template = self.chat_template['default']
         logging.info(f"use chat template: [ {self.chat_template} ]  ")
         self.compiled_template = self._compile_jinja_template(self.chat_template)
 

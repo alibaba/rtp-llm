@@ -79,6 +79,7 @@ loadWeights(int                                                             pp_s
         gpt_layer_weights[i]->self_attention_weights.query_weight.bias              = maybe_get<T>(weights[i], W::attn_qkv_b);
         gpt_layer_weights[i]->self_attention_weights.attention_layernorm.gamma      = maybe_get<T>(weights[i], W::attn_ln_gamma);
         gpt_layer_weights[i]->self_attention_weights.attention_layernorm.beta       = maybe_get<T>(weights[i], W::attn_ln_beta);
+        gpt_layer_weights[i]->self_attention_weights.qk_layernorm.gamma             = maybe_get<T>(weights[i], W::qk_ln_gamma);
         gpt_layer_weights[i]->self_attention_weights.attention_output_weight.bias   = maybe_get<T>(weights[i], W::attn_o_b);
         gpt_layer_weights[i]->self_attn_layernorm_weights.gamma                     = maybe_get<T>(weights[i], W::post_ln_gamma);
         gpt_layer_weights[i]->self_attn_layernorm_weights.beta                      = maybe_get<T>(weights[i], W::post_ln_beta);
@@ -88,8 +89,8 @@ loadWeights(int                                                             pp_s
         gpt_layer_weights[i]->ffn_weights.dense_layernorm.beta                      = maybe_get<T>(weights[i], W::ffn_ln_beta);
         gpt_layer_weights[i]->ffn_weights.output_weight.bias                        = maybe_get<T>(weights[i], W::ffn_b2);
         gpt_layer_weights[i]->ffn_weights.gating_weight.kernel                      = maybe_get<T>(weights[i], W::ffn_gate);
-        gpt_layer_weights[i]->posf_ffn_layernorm_weights.gamma                      = maybe_get<T>(weights[i], W::post_ffn_ln_gamma);
-        gpt_layer_weights[i]->posf_ffn_layernorm_weights.beta                       = maybe_get<T>(weights[i], W::post_ffn_ln_beta);
+        gpt_layer_weights[i]->post_ffn_layernorm_weights.gamma                      = maybe_get<T>(weights[i], W::post_ffn_ln_gamma);
+        gpt_layer_weights[i]->post_ffn_layernorm_weights.beta                       = maybe_get<T>(weights[i], W::post_ffn_ln_beta);
         gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.bias          = maybe_get<T>(weights[i], W::moe_b1);
         gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.bias         = maybe_get<T>(weights[i], W::moe_b3);
         gpt_layer_weights[i]->partial_moe_weights.output_weight.bias                = maybe_get<T>(weights[i], W::moe_b2);

@@ -77,7 +77,7 @@ public:
     FfnWeight<T>       partial_moe_weights;
     FfnWeight<T>       after_attention_adapter_weights;
     FfnWeight<T>       after_ffn_adapter_weights;
-    LayerNormWeight<T> posf_ffn_layernorm_weights;
+    LayerNormWeight<T> post_ffn_layernorm_weights;
 
 private:
     void copyFrom(const ParallelGptDecoderLayerWeight& other);

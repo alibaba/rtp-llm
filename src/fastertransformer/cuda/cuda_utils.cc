@@ -356,15 +356,19 @@ void print_bshd(const int   layer_id,
                 int         seq_len,
                 int         num_heads,
                 int         hidden_size_per_head,
+                int         total_num_heads,
+                int         head_offset,
                 bool        is_device_ptr) {
     if (!should_print()) {
         return;
     }
-
+    if (total_num_heads == 0) {
+        total_num_heads = num_heads;
+    }
     T* cpu_ptr = nullptr;
     if (is_device_ptr) {
         cudaDeviceSynchronize();
-        auto size = batch_size * seq_len * num_heads * hidden_size_per_head * sizeof(T);
+        auto size = batch_size * seq_len * total_num_heads * hidden_size_per_head * sizeof(T);
         cpu_ptr   = reinterpret_cast<T*>(malloc(size));
         check_cuda_error(cudaMemcpy(cpu_ptr, ptr, size, cudaMemcpyDeviceToHost));
         cudaDeviceSynchronize();
@@ -372,18 +376,16 @@ void print_bshd(const int   layer_id,
         cpu_ptr = const_cast<T*>(ptr);
     }
     printf("layer_id: %d %s [%d %d %d %d]\n", layer_id, name, batch_size, seq_len, num_heads, hidden_size_per_head);
-    auto md_array_ptr = (T(*)[seq_len][num_heads][hidden_size_per_head])cpu_ptr;
+    auto md_array_ptr = (T(*)[seq_len][total_num_heads][hidden_size_per_head])cpu_ptr;
     for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < seq_len; j++) {
             for (int k = 0; k < std::min(num_heads, 4); k++) {
-                printf("b_%d s_%d h_%d %f %f %f %f\n",
-                       i,
-                       j,
-                       k,
-                       float(md_array_ptr[i][j][k][0]),
-                       float(md_array_ptr[i][j][k][1]),
-                       float(md_array_ptr[i][j][k][2]),
-                       float(md_array_ptr[i][j][k][3]));
+	        int kk = k + head_offset;
+                printf("b_%d s_%d h_%d %f %f %f %f\n", i, j, k,
+                       float(md_array_ptr[i][j][kk][0]),
+                       float(md_array_ptr[i][j][kk][1]),
+                       float(md_array_ptr[i][j][kk][2]),
+                       float(md_array_ptr[i][j][kk][3]));
             }
         }
     }
@@ -624,59 +626,62 @@ void print_bsd_sum_and_square(const int   layer_id,
     }
 }
 
-#define DECLARE_PRINT_TYPE(CPP_TYPE)                                                                                   \
-    template void print_bhsd<CPP_TYPE>(const int       layer_id,                                                       \
-                                       const char*     name,                                                           \
-                                       const CPP_TYPE* ptr,                                                            \
-                                       int             batch_size,                                                     \
-                                       int             num_heads,                                                      \
-                                       int             seq_len,                                                        \
-                                       int             hidden_size_per_head,                                           \
-                                       bool            is_device_ptr);                                                            \
-    template void print_bshd<CPP_TYPE>(const int       layer_id,                                                       \
-                                       const char*     name,                                                           \
-                                       const CPP_TYPE* ptr,                                                            \
-                                       int             batch_size,                                                     \
-                                       int             seq_len,                                                        \
-                                       int             num_heads,                                                      \
-                                       int             hidden_size_per_head,                                           \
-                                       bool            is_device_ptr);                                                            \
-    template void print_bhss<CPP_TYPE>(const int       layer_id,                                                       \
-                                       const char*     name,                                                           \
-                                       const CPP_TYPE* ptr,                                                            \
-                                       int             batch_size,                                                     \
-                                       int             num_heads,                                                      \
-                                       int             seq_len,                                                        \
-                                       int             seq_len2,                                                       \
-                                       bool            is_device_ptr);                                                            \
-    template void print_bsd<CPP_TYPE>(const int       layer_id,                                                        \
-                                      const char*     name,                                                            \
-                                      const CPP_TYPE* ptr,                                                             \
-                                      int             batch_size,                                                      \
-                                      int             seq_len,                                                         \
-                                      int             hidden_size,                                                     \
-                                      int             start,                                                           \
-                                      int             end,                                                             \
-                                      bool            is_device_ptr);                                                             \
-    template void print_bsd_sum_and_square<CPP_TYPE>(const int       layer_id,                                         \
-                                                     const char*     name,                                             \
-                                                     const CPP_TYPE* ptr,                                              \
-                                                     int             batch_size,                                       \
-                                                     int             seq_len,                                          \
-                                                     int             hidden_size,                                      \
-                                                     int             start,                                            \
-                                                     int             end,                                              \
-                                                     bool            is_device_ptr);                                              \
-    template void print_kv_cache<CPP_TYPE>(const int       layer_id,                                                   \
-                                           const char*     name,                                                       \
-                                           const CPP_TYPE* ptr,                                                        \
-                                           int             dim1,                                                       \
-                                           int             dim2,                                                       \
-                                           int             dim3,                                                       \
-                                           int             dim4,                                                       \
-                                           int             dim5,                                                       \
-                                           int             dim6,                                                       \
-                                           bool            print_all,                                                  \
+#define DECLARE_PRINT_TYPE(CPP_TYPE)                                    \
+    template void print_bhsd<CPP_TYPE>(const int       layer_id,        \
+                                       const char*     name,            \
+                                       const CPP_TYPE* ptr,             \
+                                       int             batch_size,      \
+                                       int             num_heads,       \
+                                       int             seq_len,         \
+                                       int             hidden_size_per_head, \
+                                       bool            is_device_ptr);  \
+    template void print_bshd<CPP_TYPE>(const int       layer_id,        \
+                                       const char*     name,            \
+                                       const CPP_TYPE* ptr,             \
+                                       int             batch_size,      \
+                                       int             seq_len,         \
+                                       int             num_heads,       \
+                                       int             hidden_size_per_head, \
+                                       int             total_num_heads, \
+                                       int             heads_offset,    \
+                                       bool            is_device_ptr);  \
+                                                                        \
+    template void print_bhss<CPP_TYPE>(const int       layer_id,        \
+                                       const char*     name,            \
+                                       const CPP_TYPE* ptr,             \
+                                       int             batch_size,      \
+                                       int             num_heads,       \
+                                       int             seq_len,         \
+                                       int             seq_len2,        \
+                                       bool            is_device_ptr);  \
+    template void print_bsd<CPP_TYPE>(const int       layer_id,         \
+                                      const char*     name,             \
+                                      const CPP_TYPE* ptr,              \
+                                      int             batch_size,       \
+                                      int             seq_len,          \
+                                      int             hidden_size,      \
+                                      int             start,            \
+                                      int             end,              \
+                                      bool            is_device_ptr);   \
+    template void print_bsd_sum_and_square<CPP_TYPE>(const int       layer_id, \
+                                                     const char*     name, \
+                                                     const CPP_TYPE* ptr, \
+                                                     int             batch_size, \
+                                                     int             seq_len, \
+                                                     int             hidden_size, \
+                                                     int             start, \
+                                                     int             end, \
+                                                     bool            is_device_ptr); \
+    template void print_kv_cache<CPP_TYPE>(const int       layer_id,    \
+                                           const char*     name,        \
+                                           const CPP_TYPE* ptr,         \
+                                           int             dim1,        \
+                                           int             dim2,        \
+                                           int             dim3,        \
+                                           int             dim4,        \
+                                           int             dim5,        \
+                                           int             dim6,        \
+                                           bool            print_all,   \
                                            bool            is_device_ptr);
 
 DECLARE_PRINT_TYPE(float);
@@ -687,5 +692,4 @@ DECLARE_PRINT_TYPE(uint8_t);
 DECLARE_PRINT_TYPE(int);
 DECLARE_PRINT_TYPE(int64_t);
 
-/* ************************** end of common utils ************************** */
 }  // namespace fastertransformer

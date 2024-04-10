@@ -42,4 +42,15 @@ void invokeGeneralLayerNorm(T* out, const T* input, const T* gamma, const T* bet
     const int hidden_dim, cudaStream_t stream = 0, bool use_diff_of_squares = true, const float* scale = nullptr,
     float* dynamic_scale = nullptr, int8_t* out_quant = nullptr);
 
+
+template<typename T>
+void invokeQkLayerNorm(T* __restrict qkv,
+                       const T* __restrict gamma,
+                       const float layernorm_eps,
+                       const int tokens,
+                       const int head_num,
+                       const int head_num_kv,
+                       const int size_per_head,
+                       cudaStream_t stream = 0);
+
 }  // namespace fastertransformer
