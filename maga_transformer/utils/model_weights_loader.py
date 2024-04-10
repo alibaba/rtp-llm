@@ -426,9 +426,9 @@ class ModelWeightsLoader:
     def preprocess_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str, gptq: bool, awq: bool):
         UINT4_TO_INT4_FLAG = 1
         GPTQ_FLAG = 1 if gptq == True else 0
-        qweight_int32=qweight_int32.reshape(qweight_int32.shape[0], -1)
-        qzeros_int32=qzeros_int32.reshape(qzeros_int32.shape[0], -1)
-        scales_fp16=scales_fp16.reshape(scales_fp16.shape[0], -1)
+        qweight_int32=qweight_int32.reshape(qweight_int32.shape[0], -1).cpu()
+        qzeros_int32=qzeros_int32.reshape(qzeros_int32.shape[0], -1).cpu()
+        scales_fp16=scales_fp16.reshape(scales_fp16.shape[0], -1).cpu()
         packer = torch.ops.fastertransformer.pack_int8_tensor_to_packed_int4
         preprocessor = torch.ops.fastertransformer.preprocess_weights_for_mixed_gemm
 
@@ -442,11 +442,14 @@ class ModelWeightsLoader:
             
         qweight_interleaved = preprocessor(packer(qweight_unpacked_int8),
                                            torch.quint4x2)
-        # zeros = zeros * scales
+
+        # zero = 0 if qzeros_int32 = -2004318072 torch.int32 for awq
+        # zero = 0 if qzeros_int32 = 2004318071  torch.int32 for gptq
         qzeros_unpacked_int32 = self.unpack_int32_into_int8(qzeros_int32)
         if awq:
             qzeros_unpacked_int32 = self.reverse_awq_order(qzeros_unpacked_int32)
 
+        # zeros = zeros * scales
         zeros_x_scales_fp16 = (-qzeros_unpacked_int32 + 8 * UINT4_TO_INT4_FLAG -
                                GPTQ_FLAG) * scales_fp16
         zeros_x_scales_fp16 = zeros_x_scales_fp16.half()
@@ -539,7 +542,8 @@ class ModelWeightsLoader:
         if not split_fun:
             raise Exception('this model not support TP: ' + name)
         kv_broadcast = self._weights_info._head_num_kv == 1
-        ts = split_fun(tensor, self._tp_size, tp_rank=self._tp_rank, hidden_size=self._weights_info._hidden_size, kv_broadcast=kv_broadcast)
+        qkv_hidden_size = self._weights_info._size_per_head *(self._weights_info._head_num + self._weights_info._head_num_kv * 2)
+        ts = split_fun(tensor, self._tp_size, tp_rank=self._tp_rank, hidden_size=self._weights_info._hidden_size, qkv_hidden_size=qkv_hidden_size, kv_broadcast=kv_broadcast)
         return ts
 
     # 避免被 storage 影响多用显存

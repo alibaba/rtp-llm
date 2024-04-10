@@ -672,7 +672,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         sync_check_cuda_error();
         POP_RANGE;
 
-        // PUSH_RANGE(stream_, "Nccl send");
         if (isLastLayerParallelId(l) == true && (pipeline_para_.rank_ != pipeline_para_.world_size_ - 1)) {
             const int data_size = h_token_num * hidden_units / tensor_para_.world_size_;
             ftNcclSend(decoder_output + data_size * tensor_para_.rank_,
@@ -681,7 +680,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                        pipeline_para_,
                        stream_);
         }
-        // POP_RANGE;
 
         POP_RANGE;
     }

@@ -19,6 +19,8 @@ void GemmRunner<T>::Gemm(int m, int n, int k, const T* inputs, const DenseWeight
 
     if (quant_algo_.int8Mode() == 1) {
         {
+            FT_CHECK_WITH_INFO(weights->int8_kernel,
+                               "weights is needed in weight only int8 quant");
             FT_CHECK_WITH_INFO(weights->weight_only_quant_scale,
                                "weight_only_quant_scale is needed in weight only int8 quant");
             size_t ws_size = weight_only_matmul_plguin_->getWorkspaceSize(m, n, k);
@@ -36,6 +38,8 @@ void GemmRunner<T>::Gemm(int m, int n, int k, const T* inputs, const DenseWeight
         }
     } 
     else if (quant_algo_.int4Mode() == true) {
+        FT_CHECK_WITH_INFO(weights->int4_kernel,
+                           "weights is needed in weight only int4 quant");
         FT_CHECK_WITH_INFO(weights->weight_only_quant_scale,
                            "weight_only_quant_scale is needed in weight only int4 quant");
         size_t ws_size = weight_only_groupwise_matmul_plguin_->getWorkspaceSize(m, n, k);

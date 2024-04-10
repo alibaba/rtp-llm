@@ -188,77 +188,63 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     constexpr int  m_padded        = 0;
 #endif
 
-    const bool fused_gemm_activation = false;
-    if (fused_gemm_activation) {
-        FT_LOG_WARNING("fused gemm actication not supported");
-    } else {
-        // gemm used inter_size, int8 use inter_padding_size
-        const int cur_inter_size = quant_algo_.int8Mode() == 1 ? inter_padding_size : inter_size;
+    const bool is_quant_mode = quant_algo_.int8Mode() == 1 || quant_algo_.int4Mode();
+    const int cur_inter_size = is_quant_mode ? inter_padding_size : inter_size;
+    // gemm used inter_size, int8 use inter_padding_size
+    gemm_runner_->Gemm(m,
+                       cur_inter_size,
+                       hidden_units_,
+                       input_tensor,
+                       &ffn_weights->intermediate_weight,
+                       inter_buf_);
+    // lora
+    print_bsd(layer_id, "ffn1", inter_buf_, 1, m, cur_inter_size);
+
+    lora_gemm_->applyLoRA(m,
+                          batch_size,
+                          lora_input_lengths,
+                          hidden_units_,
+                          cur_inter_size,
+                          lora_ids,
+                          ffn_weights->intermediate_weight.lora_weights,
+                          input_tensor,
+                          inter_buf_);
+
+    if (use_gated_activation_) {
         gemm_runner_->Gemm(m,
                            cur_inter_size,
                            hidden_units_,
                            input_tensor,
-                           &ffn_weights->intermediate_weight,
-                           inter_buf_);
+                           &ffn_weights->intermediate_weight2,
+                           inter_buf_2_);
+        
         // lora
-
         lora_gemm_->applyLoRA(m,
-                              batch_size,
-                              lora_input_lengths,
-                              hidden_units_,
-                              cur_inter_size,
-                              lora_ids,
-                              ffn_weights->intermediate_weight.lora_weights,
-                              input_tensor,
-                              inter_buf_);
+                            batch_size,
+                            lora_input_lengths,
+                            hidden_units_,
+                            cur_inter_size,
+                            lora_ids,
+                            ffn_weights->intermediate_weight2.lora_weights,
+                            input_tensor,
+                            inter_buf_2_);
 
-        if (use_gated_activation_) {
-            // if (quant_algo_.int8Mode())
-            // FT_CHECK_WITH_INFO(&ffn_weights->intermediate_weight2.int8_kernel, "intermediate_weights2 is needed for gated_activation")
-            gemm_runner_->Gemm(m,
-                               cur_inter_size,
-                               hidden_units_,
-                               input_tensor,
-                               &ffn_weights->intermediate_weight2,
-                               inter_buf_2_);
-            
-            // lora
-            lora_gemm_->applyLoRA(m,
-                                batch_size,
-                                lora_input_lengths,
-                                hidden_units_,
-                                cur_inter_size,
-                                lora_ids,
-                                ffn_weights->intermediate_weight2.lora_weights,
-                                input_tensor,
-                                inter_buf_2_);
-
-        }
+        print_bsd(layer_id, "ffn2", inter_buf_2_, 1, m, cur_inter_size);
     }
     POP_RANGE;  // End for NVTX Range: FFN gemm 1
 
-    print_bsd(layer_id, "ffn1", inter_buf_, 1, m, inter_padding_size);
-    if (use_gated_activation_) {
-        print_bsd(layer_id, "ffn2", inter_buf_2_, 1, m, inter_padding_size);
-    }
-
-    if (quant_algo_.int8Mode() != 1 || ia3_tasks != nullptr || use_gated_activation_ || !fused_gemm_activation) {
-        // if int8_mode == 1 && ia3_tasks == nullptr && we don't use gated activations, we use cutlass
-        // to fuse GEMM + bias + activation, so we skip the activation function here. In all
-        // other cases, we must apply the activation function separately.
-        PUSH_RANGE(stream_, "add_bias_act");
-        genericActivation(layer_id,
-                          m,
-                          ffn_weights->intermediate_weight.bias,
-                          use_gated_activation_ ? ffn_weights->intermediate_weight2.bias : nullptr,
-                          input_tensors->at("ia3_tasks", {MEMORY_GPU, TYPE_INT32, {}, nullptr}).getPtr<const int>(),
-                          ffn_weights->ia3_weight.kernel,
-                          quant_algo_.int8Mode() == 2 ? ffn_weights->intermediate_weight.scale_out : (float*)nullptr,
-                          quant_algo_.int8Mode() == 2 ? ffn_weights->output_weight.scale : (float*)nullptr,
-                          input_tensors->getPtr<int>("padding_offset", nullptr),
-                          input_tensors->getVal<int>("seq_len", 1));
-        POP_RANGE;
-    }
+    PUSH_RANGE(stream_, "add_bias_act");
+    genericActivation(layer_id,
+                      m,
+                      ffn_weights->intermediate_weight.bias,
+                      use_gated_activation_ ? ffn_weights->intermediate_weight2.bias : nullptr,
+                      input_tensors->at("ia3_tasks", {MEMORY_GPU, TYPE_INT32, {}, nullptr}).getPtr<const int>(),
+                      ffn_weights->ia3_weight.kernel,
+                      quant_algo_.int8Mode() == 2 ? ffn_weights->intermediate_weight.scale_out : (float*)nullptr,
+                      quant_algo_.int8Mode() == 2 ? ffn_weights->output_weight.scale : (float*)nullptr,
+                      input_tensors->getPtr<int>("padding_offset", nullptr),
+                      input_tensors->getVal<int>("seq_len", 1));
+    POP_RANGE;
 
     sync_check_cuda_error();
 
@@ -287,7 +273,6 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     print_bsd(layer_id, "ffn ln", inter_buf_normed_output, 1, m, inter_padding_size);
 
     PUSH_RANGE(stream_, "ffn_gemm_2");
-    const int cur_inter_size = quant_algo_.int8Mode() == 1 ? inter_padding_size : inter_size;
     gemm_runner_->Gemm(m,
                        hidden_units_,
                        cur_inter_size,

@@ -213,7 +213,10 @@ class GptInitModelParameters:
             self.model_type = ModelType.EMBEDDING
 
     def update_inter_padding_size(self, tp_size: int):
-        align_size = tp_size * 64
+        if self.quant_algo.int4_mode:
+            align_size = tp_size * self.quant_algo.weight_only_group_size
+        else:
+            align_size = tp_size * 64
         if self.layer_inter_size:
             layer_inter_padding_size = []
             for idx in range(len(self.layer_inter_size)):

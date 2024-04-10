@@ -128,14 +128,14 @@ loadWeights(int                                                             pp_s
                 gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.int4_kernel       = maybe_get<int8_t>(weights[i], W::moe_w3);
                 gpt_layer_weights[i]->partial_moe_weights.output_weight.int4_kernel              = maybe_get<int8_t>(weights[i], W::moe_w2);
 
-                gpt_layer_weights[i]->self_attention_weights.query_weight.int4_zeros            = maybe_get<int8_t>(weights[i], W::attn_qkv_z);
-                gpt_layer_weights[i]->self_attention_weights.attention_output_weight.int4_zeros = maybe_get<int8_t>(weights[i], W::attn_o_z);
-                gpt_layer_weights[i]->ffn_weights.intermediate_weight.int4_zeros                = maybe_get<int8_t>(weights[i], W::ffn_z1);
-                gpt_layer_weights[i]->ffn_weights.intermediate_weight2.int4_zeros               = maybe_get<int8_t>(weights[i], W::ffn_z3);
-                gpt_layer_weights[i]->ffn_weights.output_weight.int4_zeros                      = maybe_get<int8_t>(weights[i], W::ffn_z2);
-                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.int4_zeros        = maybe_get<int8_t>(weights[i], W::moe_z1);
-                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.int4_zeros       = maybe_get<int8_t>(weights[i], W::moe_z3);
-                gpt_layer_weights[i]->partial_moe_weights.output_weight.int4_zeros              = maybe_get<int8_t>(weights[i], W::moe_z2);
+                gpt_layer_weights[i]->self_attention_weights.query_weight.int4_zeros            = maybe_get<T>(weights[i], W::attn_qkv_z);
+                gpt_layer_weights[i]->self_attention_weights.attention_output_weight.int4_zeros = maybe_get<T>(weights[i], W::attn_o_z);
+                gpt_layer_weights[i]->ffn_weights.intermediate_weight.int4_zeros                = maybe_get<T>(weights[i], W::ffn_z1);
+                gpt_layer_weights[i]->ffn_weights.intermediate_weight2.int4_zeros               = maybe_get<T>(weights[i], W::ffn_z3);
+                gpt_layer_weights[i]->ffn_weights.output_weight.int4_zeros                      = maybe_get<T>(weights[i], W::ffn_z2);
+                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.int4_zeros        = maybe_get<T>(weights[i], W::moe_z1);
+                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.int4_zeros       = maybe_get<T>(weights[i], W::moe_z3);
+                gpt_layer_weights[i]->partial_moe_weights.output_weight.int4_zeros              = maybe_get<T>(weights[i], W::moe_z2);
             }
         }
         else {

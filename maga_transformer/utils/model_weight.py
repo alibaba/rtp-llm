@@ -22,6 +22,29 @@ def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
         return ts[0]
     return torch.concat(ts, dim=1).contiguous()
 
+def pad(ts, inter_padding_size, dim, div_8: bool = False):
+    if div_8:
+        inter_padding_size = inter_padding_size // 8
+    if dim == 0:
+        pad_shape = [inter_padding_size - ts[0].shape[0], ts[0].shape[1]]
+    elif dim == 1:
+        pad_shape = [ts[0].shape[0], inter_padding_size - ts[0].shape[1]]
+    else:
+        raise Exception('unknown padding dim: ' + str(dim))
+    if pad_shape[0] == 0 or pad_shape[1] ==0:
+        return ts[0].cpu().contiguous()
+    z = torch.zeros(pad_shape).cpu().to(ts[0].dtype)
+    return torch.cat((ts[0].cpu(), z), dim).to('cpu').contiguous()
+
+def transpose_pad(ts, inter_padding_size, dim):
+    if dim == 0:
+        pad_shape = [inter_padding_size - ts[0].shape[0], ts[0].shape[1]]
+    elif dim == 1:
+        pad_shape = [ts[0].shape[0], inter_padding_size - ts[0].shape[1]]
+    else:
+        raise Exception('unknown padding dim: ' + str(dim))
+    z = torch.zeros(pad_shape, device='cuda:0').half()
+    return torch.cat((ts[0].cuda(), z), dim).T.to('cuda:0').contiguous()
 
 def b_half_merge(ts: List[torch.Tensor]):
     n_ts_1 = []
@@ -90,11 +113,13 @@ def get_sp_tensor(t: torch.Tensor, qkv_hidden_size: int, hidden_size: int, tp: i
 
 # MHA layout: [D, head*size_per_head, head*size_per_head, head*size_per_head] == [D, 3, D] (sp_neg)
 # MQA layout: [D, head*size_per_head, kv_head*size_per_head, kv_head*size_per_head] (sp_head)
-def sp_head(t: torch.Tensor, tp: int, tp_rank: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
-    hidden_size = t.shape[0]
-    qkv_hidden_size = t.shape[1]
-    if t.dtype == torch.int32:
-        hidden_size = hidden_size * 8
+def sp_head(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+    # int4
+    if len(t.shape) ==2 and t.dtype == torch.int32:
+        # awq
+        if t.shape[0] == hidden_size and t.shape[1] == qkv_hidden_size // 8:
+            qkv_hidden_size = qkv_hidden_size // 8
+            hidden_size = hidden_size // 8
     if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
         return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
     else:
@@ -107,8 +132,8 @@ def sp_head_s(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broad
     else:
         return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
 
-def sp_head_z(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
-    qkv_hidden_size = t.shape[1]
+def sp_head_z(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+    qkv_hidden_size = qkv_hidden_size // 8
     hidden_size = hidden_size // 8
     if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
         return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
@@ -627,6 +652,7 @@ class ModelDeployWeightInfo:
         self._is_quant_mode = config.is_quant_mode
         self._is_gptq = config.quant_algo.is_gptq
         self._is_awq = config.quant_algo.is_awq
+        self._group_size = config.quant_algo.weight_only_group_size
         self._num_layers = config.num_layers
         self._layer_head_num = config.layer_head_num
         self._layer_inter_padding_size = config.layer_inter_padding_size
