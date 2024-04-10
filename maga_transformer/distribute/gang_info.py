@@ -6,7 +6,9 @@ from typing import NamedTuple, List, Any, Dict, Optional
 
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info, WorkerInfo
 
-def members_from_c2_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
+CONFIG_FILE_ENV = 'DISTRIBUTE_CONFIG_FILE'
+
+def members_from_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
     members: List[WorkerInfo] = []
     # here is only the fake ip
     for name, info in gang_info_json.items():
@@ -39,7 +41,13 @@ def get_c2_members():
     logging.info(f"gang info: {gang_info[gang_info.index('=') + 2: -1]}")
     gang_info_json = json.loads(gang_info[gang_info.index('=') + 2: -1])
     logging.info(f"gang info json: {gang_info_json}")
-    return members_from_c2_json(gang_info_json)
+    return members_from_json(gang_info_json)
+
+def get_members_from_file():
+    file = os.environ[CONFIG_FILE_ENV]
+    with open(file, 'r') as reader:
+        config_json = json.loads(reader.read())
+    return members_from_json(config_json)
 
 class GangInfo(NamedTuple):
     members: List[WorkerInfo]
@@ -51,7 +59,12 @@ class GangInfo(NamedTuple):
 
 def get_gang_info() -> GangInfo:
     if g_parallel_info.local_world_size < g_parallel_info.world_size:
-        members = get_c2_members()
+        # from config file
+        if os.environ.get(CONFIG_FILE_ENV):
+            members = get_members_from_file()
+        # from c2 annotation
+        else:
+            members = get_c2_members()
     else:
         members = [WorkerInfo(socket.gethostbyname(socket.gethostname()), 0, 0, 'local', None)]
 
