@@ -580,7 +580,6 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     const int  context_batch_size       = input_tensors->getVal<int>("context_batch_size");
     const int  max_context_seq_length   = input_tensors->getVal<int>("max_context_seq_length");
     const int  min_prefix_length        = input_tensors->getVal<int>("min_prefix_length", 0);
-    const T**  d_prefix_prompt_batch    = input_tensors->getPtr<const T*>("d_prefix_prompt_batch", nullptr);
     const T*   attention_mask           = input_tensors->getPtr<const T>("attention_mask", nullptr);
     const int* d_prefix_prompt_lengths_ = input_tensors->getPtr<int>("d_prefix_prompt_lengths", nullptr);
     const int* d_prefix_prompt_lengths =
@@ -626,24 +625,14 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         }
     }
 
-    PrefixPromptBatchWeightsParam<T>* param          = new PrefixPromptBatchWeightsParam<T>();
-
-    if (d_prefix_prompt_lengths && d_prefix_prompt_batch) {
-        throw std::runtime_error("not support both prefix_prompt and repeat_prompt");
-    }
-    else if (d_prefix_prompt_batch) {
-        param = new PrefixPromptBatchWeightsParam<T>{
-            d_prefix_prompt_lengths,
-            max_prompt_length,
-            count_prefix_length,
-            kv_block_array,
-            ContinuousCacheParam<T>{d_prefix_prompt_batch,
-                                    (size_t)(layer_id * 2 * local_head_num_kv * params_.size_per_head_)}};
-    }
-    else if (d_prefix_prompt_lengths) {
-        param = new PrefixPromptBatchWeightsParam<T>{
-            d_prefix_prompt_lengths, max_prompt_length, count_prefix_length, kv_block_array, ContinuousCacheParam<T>{}};
-    }
+    PrefixPromptBatchWeightsParam<T> prefix_param =
+        d_prefix_prompt_lengths
+            ? PrefixPromptBatchWeightsParam<T>{d_prefix_prompt_lengths,
+                                               max_prompt_length,
+                                               count_prefix_length,
+                                               kv_block_array,
+                                               ContinuousCacheParam<T>{}}
+            : PrefixPromptBatchWeightsParam<T>();
 
     PUSH_RANGE(stream_, "qkv_bias_add");
     if (use_kvcache || params_.rotary_embedding_style_ != 0) {
@@ -659,7 +648,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         invokeAddFusedQKVBiasTranspose(q_buf_2_,
                                        k_buf_2_,
                                        v_buf_2_,
-                                       *param,  // prefix prompt
+                                       prefix_param,  // prefix prompt
                                        qkv_buf,
                                        position_ids,
                                        attention_weights->query_weight.bias,
@@ -709,7 +698,6 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                params_.size_per_head_);
 
     sync_check_cuda_error();
-    delete param;
     // Use batch major
     // put k/v_buf from shape [B, H, PL + L, Dh]
     // to cache [B, H, Dh/x, PL + L, x]  and [B, H, PL + L, Dh/x, x], PL denotes prompt length
