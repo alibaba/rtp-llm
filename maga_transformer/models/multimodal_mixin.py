@@ -121,7 +121,7 @@ class MultiModalMixin:
             param = eval(w_name)
             _safe_load_from_module(param, ckpt_prefix + w, ctype)
 
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[Union[torch.Tensor, List[torch.Tensor]]]):
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor]):
         inputs = inputs.reshape(1, -1)
         if g_parallel_info.tp_size <= 1:
             return self.multimodal_embedding(inputs, images).squeeze(0)

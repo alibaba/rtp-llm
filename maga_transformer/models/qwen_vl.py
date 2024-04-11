@@ -28,7 +28,7 @@ class QwenVLImageEmbedding(BaseImageEmbedding):
         self.vit = QWen_VL_ViT(**config)
     
     def image_embedding(self, images: List[Any], device) -> torch.Tensor:
-        if len(images) != 0:
+        with torch.no_grad():
             images = self.vit.encode(images)
             assert images.shape[0] == len(images)
         return images.to(device=device)
@@ -142,6 +142,7 @@ class QWen_VL(QWen, MultiModalMixin):
             is_multimodal=True
         )
         QWen_VL._common_config(config, ckpt_path)
+        config.tp_split_emb_and_lm_head = False # qwen_vl embedding can't tp
         return config
 
     @staticmethod
@@ -176,33 +177,24 @@ class QWen_VL(QWen, MultiModalMixin):
     def get_weight_cls():
         return QWenVLWeightInfo
 
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor]):
         return MultiModalMixin.async_input_word_embedding(self, inputs, images)
 
-    def input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
+    def input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor]):
         return MultiModalMixin.input_word_embedding(self, inputs, images)
     
     def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
-        # if len(images) > 0:
-        #     image_features = self.visual.image_embedding(images, self.device)
-        return token_ids, images
+        if len(images) > 0:
+            image_features = self.visual.image_embedding(images, self.device)
+        return token_ids, image_features
     
-    # QWen_VL tokenizer encode image urls into tokens, so that multimodal_embedding don't need images as input
-    def multimodal_embedding(self, input_ids: torch.Tensor, images: List[List[Any]]):
+    def multimodal_embedding(self, input_ids: torch.Tensor, images: List[torch.Tensor]):
         img_start_id: int = self.config.vit_related_params.vit_special_token_ids['image_start_id']
         img_end_id: int = self.config.vit_related_params.vit_special_token_ids['image_end_id']
         bos_pos = torch.where(input_ids == img_start_id)
         eos_pos = torch.where(input_ids == img_end_id)
         assert (bos_pos[0] == eos_pos[0]).all()
         img_pos = torch.stack((bos_pos[0], bos_pos[1], eos_pos[1]), dim=1)
-
-        image_data = []
-        for image in images:
-            image_data.extend(image)
-
-        if len(image_data) != 0:
-            images = self.visual.image_embedding(image_data, self.device)
-            assert images.shape[0] == len(images)
 
         input_embeds = self.word_embedding(input_ids)
 

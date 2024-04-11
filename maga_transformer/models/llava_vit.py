@@ -16,13 +16,12 @@ class LlavaImageEmbedding(BaseImageEmbedding):
         self.config = config
     
     def image_embedding(self, images: List[Image.Image], device):
-        processed_images = process_images(images, 
-                                          self.config.get('image_aspect_ratio', None), 
-                                          self.vision_tower.image_processor, 
-                                          device)
-
-        image_features = self.encode_images(processed_images)
-
+        with torch.no_grad():
+            processed_images = process_images(images, 
+                                              self.config.get('image_aspect_ratio', None), 
+                                              self.vision_tower.image_processor, 
+                                              device)
+            image_features = self.encode_images(processed_images)
         return image_features
     
     def encode_images(self, images):

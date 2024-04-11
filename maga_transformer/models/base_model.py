@@ -202,7 +202,7 @@ class BaseModel(object):
         shape = list(t.shape)
         return t.unsqueeze(1).repeat([1, beam_width] + [1] * len(shape[1:])).reshape([-1] + shape[1:]).contiguous()
 
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[List[Any]]):
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor]):
         return self.word_embedding(inputs)
 
     def create_context_position_ids(self, input_lengths: List[int]):

@@ -169,7 +169,7 @@ class Llava(Llama, MultiModalMixin):
                               config.vit_related_params.vit_special_token_ids,
                               config.vit_related_params.vit_special_tokens)
     
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[Union[torch.Tensor, List[torch.Tensor]]]):
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor]):
         return MultiModalMixin.async_input_word_embedding(self, inputs, images)
         
     def input_word_embedding(self, inputs: torch.Tensor, images: List[Union[torch.Tensor, List[torch.Tensor]]]):
@@ -208,42 +208,42 @@ class Llava(Llama, MultiModalMixin):
         mm_use_im_start_end = self.config.vit_related_params.config["mm_use_im_start_end"]
         append_extra_tokens = tune_mm_mlp_adapter and mm_use_im_start_end
 
-        for batch_idx, cur_input_ids in enumerate(input_ids):
-            cur_input_ids = cur_input_ids[~(cur_input_ids == ignore_token_index)]
-            image_token_indices = torch.where(cur_input_ids == image_token_index)[0]
-            cur_new_input_embeds = []
-            cur_image_idx = 0
-            if len(image_features[batch_idx]) == 0:
-                cur_new_input_embeds = self.word_embedding(cur_input_ids)
-            else:
-                while image_token_indices.numel() > 0:
-                    cur_image_features = image_features[batch_idx][cur_image_idx]
-                    image_token_start = image_token_indices[0]
-                    if append_extra_tokens:
-                        cur_new_input_embeds.append(self.word_embedding(cur_input_ids[:image_token_start-1]).detach())
-                        cur_new_input_embeds.append(self.word_embedding(cur_input_ids[image_token_start-1:image_token_start]))
-                        cur_new_input_embeds.append(cur_image_features)
-                        cur_new_input_embeds.append(self.word_embedding(cur_input_ids[image_token_start+1:image_token_start+2]))
-                    else:
-                        cur_new_input_embeds.append(self.word_embedding(cur_input_ids[:image_token_start]))
-                        cur_new_input_embeds.append(cur_image_features)
-                    
-                    cur_image_idx += 1
-                    if append_extra_tokens:
-                        cur_input_ids = cur_input_ids[image_token_start+2:]
-                    else:
-                        cur_input_ids = cur_input_ids[image_token_start+1:]
-                    image_token_indices = torch.where(cur_input_ids == image_token_index)[0]
+        cur_input_ids = input_ids
+        cur_input_ids = cur_input_ids[~(cur_input_ids == ignore_token_index)]
+        image_token_indices = torch.where(cur_input_ids == image_token_index)[0]
+        cur_new_input_embeds = []
+        cur_image_idx = 0
+        if len(image_features) == 0:
+            cur_new_input_embeds = self.word_embedding(cur_input_ids)
+        else:
+            while image_token_indices.numel() > 0:
+                cur_image_features = image_features[cur_image_idx]
+                image_token_start = image_token_indices[0]
+                if append_extra_tokens:
+                    cur_new_input_embeds.append(self.word_embedding(cur_input_ids[:image_token_start-1]).detach())
+                    cur_new_input_embeds.append(self.word_embedding(cur_input_ids[image_token_start-1:image_token_start]))
+                    cur_new_input_embeds.append(cur_image_features)
+                    cur_new_input_embeds.append(self.word_embedding(cur_input_ids[image_token_start+1:image_token_start+2]))
+                else:
+                    cur_new_input_embeds.append(self.word_embedding(cur_input_ids[:image_token_start]))
+                    cur_new_input_embeds.append(cur_image_features)
                 
-                if cur_input_ids.numel() > 0:
-                    if append_extra_tokens:
-                        cur_new_input_embeds.append(self.word_embedding(cur_input_ids).detach())
-                    else:
-                        cur_new_input_embeds.append(self.word_embedding(cur_input_ids))
+                cur_image_idx += 1
+                if append_extra_tokens:
+                    cur_input_ids = cur_input_ids[image_token_start+2:]
+                else:
+                    cur_input_ids = cur_input_ids[image_token_start+1:]
+                image_token_indices = torch.where(cur_input_ids == image_token_index)[0]
+            
+            if cur_input_ids.numel() > 0:
+                if append_extra_tokens:
+                    cur_new_input_embeds.append(self.word_embedding(cur_input_ids).detach())
+                else:
+                    cur_new_input_embeds.append(self.word_embedding(cur_input_ids))
 
-                cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
-                cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
-            new_input_embeds.append(cur_new_input_embeds)
+            cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
+            cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
+        new_input_embeds.append(cur_new_input_embeds)
 
         if any(x.shape != new_input_embeds[0].shape for x in new_input_embeds):
             max_len = max(x.shape[0] for x in new_input_embeds)

@@ -119,12 +119,10 @@ class NormalModelExecutor(ExecutorBase):
 
     def _packed_tokens(self, batch_query: BatchQuery) -> Tuple[torch.Tensor, List[Any]]:
         combo_tokens: List[int] = []
-        combo_imgs: List[Any] = []
         for i in range(batch_query.generate_batch_size):
             combo_tokens.extend(batch_query.generate_query_last_token(i).numpy().tolist())
         for i in range(batch_query.context_batch_size):
             combo_tokens.extend(batch_query.context_query_output_tokens(i).numpy().tolist())
-            combo_imgs = batch_query.images
         if (not self.model_ops.config.is_multimodal):
             if any([t < 0 or t >= self.model_ops.config.vocab_size for t in combo_tokens]):
                 raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')
@@ -132,7 +130,7 @@ class NormalModelExecutor(ExecutorBase):
             special_set = set([v for v in self.model_ops.config.vit_related_params.vit_special_token_ids.values()])
             if any([((t < 0 or t >= self.model_ops.config.vocab_size) and (t not in special_set)) for t in combo_tokens]):
                 raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')
-        return to_cuda(torch.IntTensor(combo_tokens)), combo_imgs
+        return to_cuda(torch.IntTensor(combo_tokens)), batch_query.images
 
     # static for ut
     @staticmethod
@@ -158,7 +156,7 @@ class NormalModelExecutor(ExecutorBase):
         position_ids = self._create_position_ids_for_rotary(batch_query)
 
         assert model.word_embedding is not None
-        input_embeds = model.async_input_word_embedding(combo_tokens, [images])
+        input_embeds = model.async_input_word_embedding(combo_tokens, images)
 
         if model.position_encoding is not None:
             input_embeds += model.position_encoding(position_ids)
