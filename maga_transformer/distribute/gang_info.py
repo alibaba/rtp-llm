@@ -12,8 +12,9 @@ def members_from_json(gang_info_json: Dict[str, Any]) -> List[WorkerInfo]:
     members: List[WorkerInfo] = []
     # here is only the fake ip
     for name, info in gang_info_json.items():
+        server_port = info['port'] if 'port' in info else -1
         members.append(WorkerInfo(
-            server_port=-1,
+            server_port=server_port,
             gang_hb_port=-1,
             name=info['name'], ip=info['ip'], info=info))
     masters = [member for member in members if member.name.endswith('part0')]
@@ -66,7 +67,7 @@ def get_gang_info() -> GangInfo:
         else:
             members = get_c2_members()
     else:
-        members = [WorkerInfo(socket.gethostbyname(socket.gethostname()), 0, 0, 'local', None)]
+        members = [WorkerInfo(socket.gethostbyname(socket.gethostname()), -1, -1, 'local', None)]
 
     # 假设 GPU 均匀分布，可以整除
     # member 是按 part 排序的
@@ -77,13 +78,13 @@ def get_gang_info() -> GangInfo:
         for local_rank in range(g_parallel_info.local_world_size):
             new_member = WorkerInfo(
                 ip=member.ip,
-                server_port=g_worker_info.server_port_offset(local_rank),
-                gang_hb_port=g_worker_info.gang_hb_port_offset(local_rank),
+                server_port=g_worker_info.server_port_offset(local_rank, member.server_port),
+                gang_hb_port=g_worker_info.gang_hb_port_offset(local_rank, member.server_port),
                 name=member.name + '_' + str(local_rank),
                 info=member.info)
             all_members.append(new_member)
             if (local_rank == g_parallel_info.local_rank and
-                new_member.ip == g_worker_info.ip):
+                new_member.ip == g_worker_info.ip and new_member.server_port == g_worker_info.server_port):
                 self = new_member
             if part_rank == 0 and local_rank == 0:
                 master = new_member

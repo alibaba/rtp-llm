@@ -89,14 +89,26 @@ class WorkerInfo(object):
             gang_hb_port=WorkerInfo.gang_hb_port_offset(g_parallel_info.local_rank),
             name='', info=None)
         return info
+    
+    @staticmethod
+    def self_server_port():
+        return int(os.environ.get('START_PORT', DEFAULT_START_PORT))
 
     @staticmethod
-    def server_port_offset(local_rank: int) -> int:
-        return int(os.environ.get('START_PORT', DEFAULT_START_PORT)) + local_rank * 2
+    def server_port_offset(local_rank: int, server_port: int = -1) -> int:
+        if server_port != -1:
+            base_port = server_port
+        else:
+            base_port = WorkerInfo.self_server_port()
+        return base_port + local_rank * 2
 
     @staticmethod
-    def gang_hb_port_offset(local_rank: int) -> int:
-        return int(os.environ.get('START_PORT', DEFAULT_START_PORT)) + local_rank * 2 + 1
+    def gang_hb_port_offset(local_rank: int, server_port: int = -1) -> int:
+        if server_port != -1:
+            base_port = server_port
+        else:
+            base_port = WorkerInfo.self_server_port()
+        return base_port + local_rank * 2 + 1
 
     # used for ut
     def reload(self):
@@ -116,8 +128,6 @@ g_worker_info = WorkerInfo.from_env()
 class MasterInfo:
     ip: str
     th_nccl_port: int
-    context_decoder_nccl_port: int
-    decoder_nccl_port: int
     gpt_nccl_port: int
     dynamic_decoder_nccl_port: int
     nccl_op_port: int
@@ -125,20 +135,16 @@ class MasterInfo:
 
 g_master_info = MasterInfo(
     ip='',
-    th_nccl_port=0,
-    context_decoder_nccl_port=0,
-    decoder_nccl_port=0,
+    th_nccl_port=0,    
     gpt_nccl_port = 0,
     dynamic_decoder_nccl_port=0,
     nccl_op_port=0,
     sp_gpt_nccl_port=0)
 
-def update_master_info(ip, base_port):
+def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
     g_master_info.th_nccl_port = base_port - 1
-    g_master_info.context_decoder_nccl_port = base_port - 2
-    g_master_info.decoder_nccl_port = base_port - 3
-    g_master_info.gpt_nccl_port = base_port - 4
-    g_master_info.dynamic_decoder_nccl_port = base_port - 5
-    g_master_info.nccl_op_port = base_port - 6
-    g_master_info.sp_gpt_nccl_port = base_port - 7
+    g_master_info.gpt_nccl_port = base_port - 2
+    g_master_info.dynamic_decoder_nccl_port = base_port - 3
+    g_master_info.nccl_op_port = base_port - 4
+    g_master_info.sp_gpt_nccl_port = base_port - 5

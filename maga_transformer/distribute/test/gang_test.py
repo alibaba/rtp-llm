@@ -25,8 +25,9 @@ class GangTest(unittest.TestCase):
     def get_self_ip(self):
         return socket.gethostbyname(socket.gethostname())
 
-    def test_annocation(self):
-        os.environ['GANG_ANNOCATION_PATH'] = "maga_transformer/distribute/test/testdata/annocation"
+    @mock.patch.dict('os.environ', {'GANG_ANNOCATION_PATH': "maga_transformer/distribute/test/testdata/annocation"})
+    def test_annocation(self):        
+        # os.environ['GANG_ANNOCATION_PATH'] = "maga_transformer/distribute/test/testdata/annocation"
         gang_members = get_c2_members()
         self.assertEqual(len(gang_members), 2)
         self.assertEqual(gang_members[0].name, 'llama_7b_a10_part2_new_inference_part0')
@@ -34,13 +35,13 @@ class GangTest(unittest.TestCase):
         self.assertEqual(gang_members[1].name, 'llama_7b_a10_part2_new_inference_part1')
         self.assertEqual(gang_members[1].ip, "33.115.37.164")
 
+    @mock.patch.dict('os.environ', {'GANG_ANNOCATION_PATH': "maga_transformer/distribute/test/testdata/annocation",
+                                    "TP_SIZE": "2",
+                                    "PP_SIZE": "1",
+                                    "WORLD_SIZE": "2",
+                                    "WORLD_RANK": "0",
+                                    "LOCAL_WORLD_SIZE": "2"})
     def test_multi_gpu_gang_info(self):
-        os.environ['TP_SIZE'] = '2'
-        os.environ['PP_SIZE'] = '1'
-        os.environ['WORLD_SIZE'] = '2'
-        os.environ['WORLD_RANK'] = '0'
-        os.environ['LOCAL_WORLD_SIZE'] = '2'
-        os.environ['GANG_ANNOCATION_PATH'] = "maga_transformer/distribute/test/testdata/annocation"
         g_parallel_info.reload()
         gang_info = get_gang_info()
         self.assertEqual(len(gang_info.members), 2)
@@ -51,13 +52,13 @@ class GangTest(unittest.TestCase):
         self.assertEqual(gang_info.members[1].name, 'local_1')
         self.assertEqual(gang_info.members[1].server_port, WorkerInfo.server_port_offset(1))
 
+    @mock.patch.dict('os.environ', {'GANG_ANNOCATION_PATH': "maga_transformer/distribute/test/testdata/annocation",
+                                    "TP_SIZE": "2",
+                                    "PP_SIZE": "1",
+                                    "WORLD_SIZE": "2",
+                                    "WORLD_RANK": "0",
+                                    "LOCAL_WORLD_SIZE": "1"})
     def test_multi_worker_gang_info(self):
-        os.environ['TP_SIZE'] = '2'
-        os.environ['PP_SIZE'] = '1'
-        os.environ['WORLD_SIZE'] = '2'
-        os.environ['WORLD_RANK'] = '0'
-        os.environ['LOCAL_WORLD_SIZE'] = '1'
-        os.environ['GANG_ANNOCATION_PATH'] = "maga_transformer/distribute/test/testdata/annocation"
         g_parallel_info.reload()
         gang_info = get_gang_info()
         self.assertEqual(len(gang_info.members), 2)
@@ -68,13 +69,13 @@ class GangTest(unittest.TestCase):
         self.assertEqual(gang_info.members[1].name, 'llama_7b_a10_part2_new_inference_part1_0')
         self.assertEqual(gang_info.members[1].server_port, WorkerInfo.server_port_offset(0))
 
+    @mock.patch.dict('os.environ', {'GANG_ANNOCATION_PATH': "maga_transformer/distribute/test/testdata/annocation",
+                                    "TP_SIZE": "2",
+                                    "PP_SIZE": "2",
+                                    "WORLD_SIZE": "4",
+                                    "WORLD_RANK": "0",
+                                    "LOCAL_WORLD_SIZE": "2"})
     def test_multi_worker_gpu_gang_info(self):
-        os.environ['TP_SIZE'] = '2'
-        os.environ['PP_SIZE'] = '2'
-        os.environ['WORLD_SIZE'] = '4'
-        os.environ['WORLD_RANK'] = '0'
-        os.environ['LOCAL_WORLD_SIZE'] = '2'
-        os.environ['GANG_ANNOCATION_PATH'] = "maga_transformer/distribute/test/testdata/annocation"
         g_parallel_info.reload()
         gang_info = get_gang_info()
         self.assertEqual(len(gang_info.members), 4)
@@ -94,18 +95,39 @@ class GangTest(unittest.TestCase):
         self.assertEqual(gang_info.members[3].name, 'llama_7b_a10_part2_new_inference_part1_1')
         self.assertEqual(gang_info.members[3].server_port, WorkerInfo.server_port_offset(1))
 
+    @mock.patch.dict('os.environ', {'DISTRIBUTE_CONFIG_FILE': "maga_transformer/distribute/test/testdata/parallel.json",
+                                    "TP_SIZE": "2",
+                                    "PP_SIZE": "1",
+                                    "WORLD_SIZE": "2",
+                                    "WORLD_RANK": "0",
+                                    "LOCAL_WORLD_SIZE": "1"})
+    def test_multi_worker_gang_info_from_json(self):
+        g_parallel_info.reload()
+        gang_info = get_gang_info()
+        self.assertEqual(len(gang_info.members), 2)
+        self.assertEqual(gang_info.members[0].ip, '11.161.48.116')
+        self.assertEqual(gang_info.members[0].name, 'llama13B_2A10_PCIE_1_inference_part0_0')
+        self.assertEqual(gang_info.members[0].server_port, 10000)
+
+        self.assertEqual(gang_info.members[1].ip, '11.161.48.116')
+        self.assertEqual(gang_info.members[1].name, 'llama13B_2A10_PCIE_1_inference_part1_0')
+        self.assertEqual(gang_info.members[1].server_port, 20000)
+
+
     @mock.patch('torch.cuda.device_count')
+    @mock.patch.dict('os.environ', {"TP_SIZE": "4",
+                                    "PP_SIZE": "1",
+                                    "WORLD_SIZE": "4",
+                                    "WORLD_RANK": "0",
+                                    "START_PORT": str(random.randint(10000, 40000)),
+                                    "GANG_SLEEP_TIME": '1',
+                                    "FAKE_GANG_ENV": "1",
+                                    "MODEL_TYPE": "fake_model",
+                                    "TOKENIZER_PATH": os.path.join(os.getcwd(), "maga_transformer/distribute/test/testdata/tokenizer"),
+                                    "CHECKPOINT_PATH": os.path.join(os.getcwd(), "maga_transformer/distribute/test/testdata/cpt"),
+                                    "DIST_BARRIER_TIMEOUT": "10",
+                                    "CUDA_VISIBLE_DEVICES": "0,1,2,3"})
     def test_server_start(self, torch_device_count):
-        os.environ['WORLD_SIZE'] = '4'
-        os.environ['TP_SIZE'] = '4'
-        os.environ['PP_SIZE'] = '1'
-        os.environ['START_PORT'] = str(random.randint(10000, 40000))
-        os.environ['GANG_SLEEP_TIME'] = '1'
-        os.environ['FAKE_GANG_ENV'] = '1'
-        os.environ['MODEL_TYPE'] = "fake_model"
-        os.environ['TOKENIZER_PATH'] = os.path.join(os.getcwd(), "maga_transformer/distribute/test/testdata/tokenizer")
-        os.environ['CHECKPOINT_PATH'] = os.path.join(os.getcwd(), "maga_transformer/distribute/test/testdata/cpt")
-        os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
         torch_device_count.return_value = 4
         g_parallel_info.reload()
 

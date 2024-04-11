@@ -143,38 +143,23 @@ class GangServer:
                 logging.error(f"Gang server {member.ip} status code is not 200, do abort")
                 os._exit(-1)
             if res.json()['initializing'] == True:
-                logging.error(f"Gang server {member.ip} is restarted, do abort")
+                logging.error(f"Gang server {member.ip}:{member.server_port} is restarted, do abort")
                 os._exit(-1)
 
-    def _start_health_check(self):
+    def start_health_check(self):
         sleep_time = int(os.environ.get('GANG_SLEEP_TIME', '10'))
-        def wrapper():            
+        def wrapper():
             while True:
                 self._health_check_impl()
                 time.sleep(sleep_time)
         t = Thread(target=wrapper)
         t.daemon = True
         t.start()
-     
-    # for ut
-    # c10d自带tcp_barrier依赖group已经创建，所以需要重新实现一个
-    def memory_barrier(self, master_url: str):
+
+    # c10d自带tcp_barrier依赖group已经创建，且timeout无法修改，所以需要重新实现一个
+    def memory_barrier(self, master_url: str, timeout: int=10):
         self.store = create_store(master_url, g_parallel_info.world_rank, g_parallel_info.world_size)
-        store_based_barrier(g_parallel_info.world_rank, g_parallel_info.world_size, self.store, timeout=timedelta(seconds=10))
-        
-    def init_process_with_timeout(self, master_url: str, world_rank: int , world_size: int, timeout_seconds: int):
-        def init_func():
-            dist.init_process_group(backend=dist.Backend.NCCL, init_method=master_url, rank=world_rank, world_size=world_size)
-            logging.info('torch dist init done')
-        timeout = datetime.timedelta(seconds=timeout_seconds)
-        start_time = datetime.datetime.now()
-        t = Thread(target=init_func, daemon=True)
-        t.start()
-        while t.is_alive():        
-            now = datetime.datetime.now()
-            if now - start_time > timeout:
-                raise Exception(f"timeout, expect init in {timeout_seconds}s, acutal use time: {now - start_time}")
-            time.sleep(0.1)
+        store_based_barrier(g_parallel_info.world_rank, g_parallel_info.world_size, self.store, timeout=timedelta(seconds=timeout))
 
     def start(self):
         if g_parallel_info.world_size == 1:
@@ -188,11 +173,20 @@ class GangServer:
             self._gang_info.master.server_port)
         master_url = f"tcp://{g_master_info.ip}:{g_master_info.th_nccl_port}"
         logging.info(f'gang info exchange done, master_url: {master_url} gang_info: {self._gang_info}')
-        # init_process_group会去检查gpu num > 0, 所以测试环境不希望init_process_group，使用tcp barrier作为代替
-        if os.environ.get('FAKE_GANG_ENV', None) == None:
-            init_process_timeout = int(os.environ.get('INI_PROCESS_WITH_TIMEOUT', 300))
-            self.init_process_with_timeout(master_url, g_parallel_info.world_rank, g_parallel_info.world_size, init_process_timeout)
+        # init_process_group会去检查gpu num > 0, 所以测试环境不希望init_process_group
+        
+        init_process_timeout = int(os.environ.get('DIST_BARRIER_TIMEOUT', 30))
+        # 使用ProcessGroupNCCL自带的health check进行一次同步+nccl检测
+        if os.environ.get('FAKE_GANG_ENV', None) == None:            
+            os.environ['ENABLE_NCCL_HEALTH_CHECK'] = '1'
+            dist.init_process_group(backend=dist.Backend.NCCL, 
+                                    init_method=master_url, 
+                                    rank=g_parallel_info.world_rank, 
+                                    world_size=g_parallel_info.world_size, 
+                                    timeout=timedelta(seconds=init_process_timeout))
         else:
-            self.memory_barrier(master_url)
-        self._start_health_check()
+            # 由于后续会进行health check，且init_process_group默认不进行block，因此使用memory barrier进行一次同步                
+            self.memory_barrier(master_url, timeout=init_process_timeout)
+
+        self.start_health_check()
         logging.info(f'gang init done')
