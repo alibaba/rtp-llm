@@ -13,31 +13,27 @@ using namespace std;
 namespace fastertransformer {
 
 void CudaDevice::copy(const CopyParams& params) {
-    const auto& src = params.src;
-    const auto& dst = params.dst;
-    const auto& src_offset = params.src_offset;
-    const auto& dst_offset = params.dst_offset;
-    auto copy_length = params.copy_length ? params.copy_length : min(src.shape()[0], dst.shape()[0]);
+    const auto src_offset = params.src_offset;
+    const auto dst_offset = params.dst_offset;
+    auto copy_length = params.copy_length;
+
+    if (copy_length == 0) {
+        RUNTIME_ASSERT_OP_ARG(params.src.shape()[0] == params.dst.shape()[0],
+            "src and dst 0d size mismatch: [%s] vs [%s]",
+            params.src.debugString().c_str(), params.dst.debugString().c_str());
+        copy_length = params.src.shape()[0];
+    }
 
     if (copy_length == 0) {
         return;
     }
 
-    RUNTIME_ASSERT_OP_ARG((src.shape()[0] - src_offset >= copy_length),
-        "src size is smaller than copy_length: [%s] vs [%d]",
-        src.debugString().c_str(), copy_length);
-    RUNTIME_ASSERT_OP_ARG((dst.shape()[0] - dst_offset >= copy_length),
-        "dst size is smaller than copy_length: [%s] vs [%d]",
-        dst.debugString().c_str(), copy_length);
+    const auto src = params.src.view(src_offset, copy_length);
+    const auto dst = params.dst.view(dst_offset, copy_length);
 
-    const auto element_size = src.sizeBytes() / src.shape()[0];
-    RUNTIME_ASSERT_OP_ARG((element_size == dst.sizeBytes() / dst.shape()[0]),
-        "src and dst element size mismatch: [%s] vs [%s]",
+    RUNTIME_ASSERT_OP_ARG(src.sizeBytes() == dst.sizeBytes(),
+        "src and dst copy size mismatch: [%s] vs [%s]",
         src.debugString().c_str(), dst.debugString().c_str());
-
-    auto src_ptr = src.data() + src_offset * element_size;
-    auto dst_ptr = dst.data() + dst_offset * element_size;
-    auto copy_bytes = copy_length * element_size;
 
     if (src.data() == dst.data()) {
         return;
@@ -54,7 +50,7 @@ void CudaDevice::copy(const CopyParams& params) {
         copyType = cudaMemcpyHostToHost;
     }
 
-    cudaMemcpyAsync(dst_ptr, src_ptr, copy_bytes, copyType, stream_);
+    cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_);
     sync_check_cuda_error();
 }
 

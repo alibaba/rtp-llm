@@ -301,9 +301,9 @@ struct GreedyParams {
     const Buffer& input_lenghts;             // [batch_size]
     Buffer& token_ids;                       // [max_input_length + 1, batch_size]
 
-    Buffer& top_k;
-    Buffer& top_p;
-    Buffer& temperature;
+    const Buffer& top_k;
+    const Buffer& top_p;
+    const Buffer& temperature;
     OptionalBufferRef random_seed;
     OptionalBufferRef repetition_penalty;
     OptionalBufferRef length_penalty;

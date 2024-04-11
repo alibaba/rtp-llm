@@ -27,9 +27,11 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     // 1. confirm buffer sizes
     auto& top_k = params.top_k;
     auto& top_p = params.top_p;
+    auto& temperature = params.temperature;
     auto& random_seed = params.random_seed;
     assert(top_k.size() == batch_size);
     assert(top_p.size() == batch_size);
+    assert(temperature.size() == batch_size);
 
     auto default_top_k = 1;
     auto max_top_k = *max_element(top_k.data<int32_t>(), top_k.dataWithOffset<int32_t>(top_k.size()));
@@ -96,7 +98,6 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     // see BaseSamplingLayer<T>::allocateBuffer ------------------
     auto curandstate_buf = allocateBuffer({batch_size * sizeof(curandState_t)});
     auto random_seeds_buf = allocateBuffer({DataType::TYPE_UINT64, {batch_size}});
-    auto temperature_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
     auto skip_top_k_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
     auto skip_top_p_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
 
@@ -108,28 +109,19 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     auto topp_offset_buf = allocateBuffer({DataType::TYPE_INT32, {batch_size + 1}});
     auto begin_topp_offset_buf = allocateBuffer({DataType::TYPE_INT32, {batch_size + 1}});
 
-    // penalty_logits_
-    // repetition_penalty_buf_
-    // min_lengths_buf_
-    // runtime_logits_buf_
-    // temperature_        = new float[batch_size];
-    // repetition_penalty_ = new float[batch_size];
-    // min_lengths_        = new int[batch_size];
-    // skip_decode_        = new bool[batch_size];
-    // ------------------------------------------------------------
-
     // TopKSamplingLayer<T>::allocateBuffer
     auto top_k_workspace = allocateBuffer({topk_ws_size});
     auto top_p_workspace = allocateBuffer({topp_ws_size});
     auto runtime_top_k_buf = allocateBuffer({DataType::TYPE_UINT32, {batch_size}});
+    copy({*runtime_top_k_buf, top_k});
     auto runtime_top_p_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
+    copy({*runtime_top_p_buf, top_p});
 
     // TODO: integrate TopPSamplingLayer
 
     // 3. prepare kernel inputs
-    copy({*runtime_top_k_buf, top_k});
-    copy({*runtime_top_p_buf, top_p});
 
+    // 3.1. base sampling layer setup
     if (random_seed) {
         auto& seeds = random_seed.value().get();
         if (seeds.size() == 1) {
@@ -137,12 +129,18 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                 (curandState_t *)curandstate_buf->data(), batch_size,
                 seeds.data<int64_t>()[0], stream_);
         } else {
+            assert(seeds.size() == batch_size);
             copy({*random_seeds_buf, seeds});
             invokeCurandBatchInitialize(
                 (curandState_t *)curandstate_buf->data(), batch_size,
                 (unsigned long long *)random_seeds_buf->data(), stream_);
         }
+    } else {
+        // Initialize curand states using the default seed 0.
+        invokeCurandInitialize((curandState_t *)curandstate_buf->data(), batch_size, 0, stream_);
     }
+
+    // 3.2. topk setup
     invokeSetupTopKRuntimeArgs(batch_size,
                                default_top_k,
                                runtime_top_k_buf->data<uint>(),
@@ -153,6 +151,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                                skip_top_k_decode_buf->data<bool>(),
                                stream_);
 
+    // 3.3 top_p setup
     invokeSetupTopPRuntimeArgs(batch_size,
                                default_top_k,
                                runtime_top_k_buf->data<uint>(),
@@ -176,6 +175,23 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                          params.cum_log_probs.value().get().data<float>() : nullptr;
     auto output_log_probs = params.output_log_probs.has_value() ?
                             params.output_log_probs.value().get().data<float>() : nullptr;
+
+    // base sampling layer forward
+    if (std::any_of(temperature.data<float>(),
+                    temperature.data<float>() + batch_size,
+                    [&](auto t) { return t != 1.0f; }))
+    {
+        BufferPtr temperature_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
+        copy({*temperature_buf, temperature});
+        invokeBatchApplyTemperaturePenalty(
+            logits.data<float>(),
+            (float *)nullptr, // embedding_bias
+            temperature_buf->data<float>(),
+            batch_size,
+            vocab_size_padded,
+            vocab_size_padded,
+            stream_);
+    }
 
     // run top_k
     invokeBatchTopKSampling(

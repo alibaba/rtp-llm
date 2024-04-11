@@ -26,6 +26,10 @@ Buffer::~Buffer() {
     }
 }
 
+Buffer Buffer::emptyBuffer() {
+    return Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INVALID, {}, nullptr);
+}
+
 MemoryType Buffer::where() const {
     return where_;
 }
@@ -77,12 +81,16 @@ void Buffer::reshape(std::vector<size_t>& shape) {
 // NOTE: new Buffer from view() has the same data pointer as the original buffer,
 //       and also shorter life time than the original buffer.
 //       user has the responsibility to keep the original buffer alive.
-std::unique_ptr<Buffer> Buffer::view(size_t offset, size_t size) const {
-    assert(offset + size <= this->shape_[0]);
-    auto new_shape = shape_;
-    new_shape[0] = size;
-    const auto offset_size = this->size() / shape_[0] * offset;
-    return std::make_unique<Buffer>(where_, type_, new_shape, dataWithOffset(offset_size));
+Buffer Buffer::view(size_t offset, size_t size) const {
+    if (offset == 0 && size == shape_[0]) {
+        return Buffer(where_, type_, shape_, data_, nullptr);
+    } else {
+        assert(offset + size <= this->shape_[0]);
+        auto new_shape = shape_;
+        new_shape[0] = size;
+        const auto offset_size = this->size() / shape_[0] * offset;
+        return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), nullptr);
+    }
 }
 
 std::string Buffer::debugString() const {

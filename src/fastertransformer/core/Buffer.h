@@ -21,6 +21,8 @@ public:
            const std::function<void(Buffer *)> deleter = nullptr);
     ~Buffer();
 
+    static Buffer emptyBuffer();
+
     Buffer(const Buffer& buffer) = delete;
     Buffer(Buffer&& buffer)      = delete;
     Buffer& operator=(const Buffer& buffer) = delete;
@@ -53,7 +55,7 @@ public:
     size_t dim() const;
 
     void reshape(std::vector<size_t>& shape);
-    std::unique_ptr<Buffer> view(size_t offset, size_t size) const;
+    Buffer view(size_t offset, size_t size) const; // only from 0-d
 
     std::string debugString() const;
 

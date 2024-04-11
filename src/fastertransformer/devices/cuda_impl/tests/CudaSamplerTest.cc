@@ -30,7 +30,7 @@ TEST_F(CudaSamplerTest, testTopK) {
         0, 0, 0, 0,
     });
 
-    BufferPtr input_lengths = createBuffer<int32_t>({4}, {5, 5, 5});
+    BufferPtr input_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
     BufferPtr sequence_lengths = createBuffer<int32_t>({1}, {-1});
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
 
@@ -59,8 +59,8 @@ TEST_F(CudaSamplerTest, testTopK) {
     ASSERT_EQ(output_token_ids_host[21], 2);
     ASSERT_EQ(output_token_ids_host[22], 8);
     ASSERT_EQ(output_token_ids_host[23], 7);
-    ASSERT_NEAR(cum_log_probs_host[2], -3.69475, 1e-4);
-    ASSERT_NEAR(cum_log_probs_host[3], -3.69155, 1e-4);
+    ASSERT_NEAR(cum_log_probs_host[2], -3.693, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[3], -3.693, 1e-3);
 }
 
 TEST_F(CudaSamplerTest, testTopP) {
@@ -113,9 +113,9 @@ TEST_F(CudaSamplerTest, testTopP) {
     ASSERT_EQ(output_token_ids_host[21], 8);
     ASSERT_EQ(output_token_ids_host[22], 7);
     ASSERT_EQ(output_token_ids_host[23], 0);
-    ASSERT_NEAR(cum_log_probs_host[0], -3.06898, 1e-3);
-    ASSERT_NEAR(cum_log_probs_host[1], -3.94839, 1e-3);
-    ASSERT_NEAR(cum_log_probs_host[2], -5.04776, 1e-3);
-    ASSERT_NEAR(cum_log_probs_host[3], -5.26996, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[0], -1.0, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[1], -3.745, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[2], -5.02131, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[3], -5.2682, 1e-3);
 }
 

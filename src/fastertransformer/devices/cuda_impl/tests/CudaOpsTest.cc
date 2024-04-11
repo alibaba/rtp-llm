@@ -28,7 +28,7 @@ TEST_F(CudaOpsTest, testCopyWithSlicing) {
     auto src = createHostBuffer({4, 2}, input.data());
     auto dst = createBuffer<TestT>({2, 2}, {0, 0, 0, 0});
 
-    device_->copy({*dst, *src, 0, 1, 0});
+    device_->copy({*dst, *src, 0, 1, 2});
 
     assertBufferValueEqual<TestT>(*dst, {3, 4, 5, 6});
 
