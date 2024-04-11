@@ -151,6 +151,11 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     float avg_time_fpaintb = total_time_fpaintb / iterations;
     printf("m=%d n=%d k=%d cublas=%.6f fpa_intb=%.6f ratio=%f\n", m, n, k, avg_time_fp16, avg_time_fpaintb, avg_time_fp16/avg_time_fpaintb);
 
+    delete cublas_algo_map_;
+    delete cublas_wrapper_;
+    delete allocator_;
+    delete mutex_;
+
     deviceFree(in_ptr1);
     deviceFree(w_ptr1);
     deviceFree(s_ptr1);

@@ -33,6 +33,16 @@ enum class CutlassTileConfig
     // SiMT config
     CtaShape128x128x8_WarpShape64x64x8,
 
+    // TensorCore configs CTA_N = 64, CTA_K = 256
+    CtaShape16x64x256_WarpShape16x16x256,
+    CtaShape32x64x256_WarpShape16x32x256,
+
+    // TensorCore configs CTA_N = 32, CTA_K = 256
+    CtaShape32x32x256_WarpShape16x16x256,
+
+    // TensorCore configs CTA_N = 128, CTA_K = 128
+    CtaShape32x128x128_WarpShape32x32x128,
+
     // TensorCore configs CTA_N = 128, CTA_K = 64
     // Warp configs for M=32
     CtaShape32x128x64_WarpShape32x32x64,

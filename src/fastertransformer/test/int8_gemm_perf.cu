@@ -138,6 +138,11 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
 
     check_cuda_error(status);
 
+    delete cublas_algo_map_;
+    delete cublas_wrapper_;
+    delete allocator_;
+    delete mutex_;
+
     deviceFree(in_ptr1);
     deviceFree(w_ptr1);
     deviceFree(s_ptr1);
