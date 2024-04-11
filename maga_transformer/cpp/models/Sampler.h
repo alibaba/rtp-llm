@@ -13,15 +13,15 @@ struct SamplerInitParams {
 
 struct SamplerInputs {
     const Buffer& logits;            // shape: [batch_size * num_beams, vocab_size]
-    mutable BufferPtr token_ids;             // shape: [batch_size * num_beams, max_length]
+    mutable BufferPtr token_ids;     // shape: [batch_size * num_beams, max_length]
     const Buffer& sequence_lenghts;  // shape: [batch_size]
     const size_t step;               // typically largest sequence length in the batch
 
     const size_t batch_size;
     const Buffer& num_beams;                    // shape: [batch_size]
-    const Buffer& top_k;              // shape: [batch_size]
-    const Buffer& top_p;              // shape: [batch_size]
-    const Buffer& temperature;        // shape: [batch_size]
+    const Buffer& top_k;                        // shape: [batch_size]
+    const Buffer& top_p;                        // shape: [batch_size]
+    const Buffer& temperature;                  // shape: [batch_size]
     const OptionalBufferRef random_seeds;       // shape: [batch_size]
     const OptionalBufferRef repetition_penalty; // shape: [batch_size]
     const OptionalBufferRef length_penalty;     // shape: [batch_size]
@@ -38,6 +38,7 @@ struct SamplerOutput {
 // Sampler would split logits into appropriate groups (mostly, based on beam size)
 // and calls device sampling apis (greedy, beam search, etc) for each group
 class Sampler {
+public:
     Sampler(const SamplerInitParams& params);
     ~Sampler() {};
 

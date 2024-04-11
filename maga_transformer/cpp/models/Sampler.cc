@@ -33,7 +33,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         const auto sample_to_token_idx = from_token_idx + sample_token_batch_size;
 
         auto sample_tokens = device_->allocateBuffer(
-            {input_tokens.type(), {sample_batch_size, current_beam_size}});
+            {input_tokens.type(), {sample_batch_size * current_beam_size, inputs.step}});
         device_->copy({*sample_tokens, input_tokens, 0, from_token_idx, sample_token_batch_size});
         auto transposed_tokens = device_->transpose({*sample_tokens});
         auto sample_logits = inputs.logits.view(from_token_idx, sample_token_batch_size);
@@ -46,18 +46,23 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
             device_->sampleGreedy({
                 sample_logits,
+                inputs.sequence_lenghts,
                 *transposed_tokens,
-                *sample_tokens,
                 inputs.top_k,
                 inputs.top_p,
                 inputs.temperature,
                 inputs.random_seeds ? (OptionalBufferRef)batch_random_seeds : nullopt,
                 inputs.repetition_penalty ? (OptionalBufferRef)batch_repetition_penalty : nullopt,
-                inputs.length_penalty ? (OptionalBufferRef)batch_length_penalty : nullopt
+                inputs.length_penalty ? (OptionalBufferRef)batch_length_penalty : nullopt,
+                sample_cum_log_probs,
+                nullopt // output_log_probs
             });
         } else {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
+
+        auto output_tokens = device_->transpose({*transposed_tokens});
+        device_->copy({input_tokens, *output_tokens, from_token_idx, 0, sample_token_batch_size});
 
         // current sampling done, update indices
         from_batch_idx = sample_to_batch_idx + 1;
