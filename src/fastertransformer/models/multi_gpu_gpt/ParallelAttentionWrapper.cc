@@ -579,7 +579,6 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     const int  layer_id                 = input_tensors->getVal<int>("layer_id");
     const int  context_batch_size       = input_tensors->getVal<int>("context_batch_size");
     const int  max_context_seq_length   = input_tensors->getVal<int>("max_context_seq_length");
-    const int  min_prefix_length        = input_tensors->getVal<int>("min_prefix_length", 0);
     const T*   attention_mask           = input_tensors->getPtr<const T>("attention_mask", nullptr);
     const int* d_prefix_prompt_lengths_ = input_tensors->getPtr<int>("d_prefix_prompt_lengths", nullptr);
     const int* d_prefix_prompt_lengths =

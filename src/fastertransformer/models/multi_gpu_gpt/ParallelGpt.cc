@@ -363,15 +363,10 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         step             = step + 1;
     }
 
-    size_t min_prefix_length = 0;
     if (input_tensors->isExist("d_prefix_prompt_lengths")) {
         int *d_prefix_prompt_lengths = input_tensors->getPtr<int>("d_prefix_prompt_lengths");
         cudaMemcpyAsync(prefix_lengths_, d_prefix_prompt_lengths, sizeof(int) * total_batch_size,
                         cudaMemcpyHostToDevice, stream_);
-        if (input_tensors->getVal<bool>("count_prefix_length")) {
-            min_prefix_length =
-                *std::min_element(d_prefix_prompt_lengths + batch_size, d_prefix_prompt_lengths + total_batch_size);
-        }
     }
 
     size_t kv_cache_offset = 0;
@@ -527,8 +522,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             attention_input_tensors.insert("d_prefix_prompt_lengths",
                                            Tensor{MEMORY_GPU, TYPE_INT32, {total_batch_size}, prefix_lengths_});
             attention_input_tensors.insert("count_prefix_length", input_tensors->at("count_prefix_length"));
-            attention_input_tensors.insert("min_prefix_length",
-                                           Tensor{MEMORY_CPU, TYPE_INT32, {1}, &min_prefix_length});
         }
         TensorMap attention_output_tensors{
             {"hidden_features",
