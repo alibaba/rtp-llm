@@ -6,7 +6,7 @@
 using namespace std;
 using namespace rtp_llm;
 
-class GptModelTest: public DeviceTestBase<DeviceType::Cuda> {
+class GptModelTest: public DeviceTestBase {
 };
 
 TEST_F(GptModelTest, testSimple) {

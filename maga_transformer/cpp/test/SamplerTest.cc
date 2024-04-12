@@ -7,11 +7,11 @@ using namespace std;
 using namespace rtp_llm;
 
 // TODO: make this test device-independent
-class SamplerTest : public DeviceTestBase<DeviceType::Cuda> {
+class SamplerTest : public DeviceTestBase {
 public:
 
     void SetUp() override {
-        DeviceTestBase<DeviceType::Cuda>::SetUp();
+        DeviceTestBase::SetUp();
         sampler_.reset(new Sampler({device_}));
     }
 

@@ -4,7 +4,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CudaSamplerTest: public DeviceTestBase<DeviceType::Cuda> {
+class CudaSamplerTest: public DeviceTestBase {
 public:
 
 protected:

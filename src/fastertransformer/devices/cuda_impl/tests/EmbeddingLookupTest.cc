@@ -6,7 +6,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class EmbeddingLookupTest: public DeviceTestBase<DeviceType::Cuda> {
+class EmbeddingLookupTest: public DeviceTestBase {
 };
 
 TEST_F(EmbeddingLookupTest, testEmbeddingLookup) {

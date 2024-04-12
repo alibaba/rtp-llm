@@ -61,6 +61,9 @@ cc_test(
     deps = test_deps + [
         ":test_utils",
     ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
 )
 
 cc_test(
@@ -76,4 +79,7 @@ cc_test(
     deps = test_deps + [
         ":test_utils",
     ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
 )

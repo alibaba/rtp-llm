@@ -6,7 +6,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CudaSoftmaxOpTest: public DeviceTestBase<DeviceType::Cuda> {
+class CudaSoftmaxOpTest: public DeviceTestBase {
 public:
     template<typename input_t>
     void BasicSoftmaxTest(size_t b,

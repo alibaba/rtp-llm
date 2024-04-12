@@ -4,7 +4,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CudaGemmOpTest: public DeviceTestBase<DeviceType::Cuda> {
+class CudaGemmOpTest: public DeviceTestBase {
 public:
 
     void BasicGemmOP(size_t m, size_t n, size_t k);

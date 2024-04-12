@@ -6,7 +6,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CudaOpsTest: public DeviceTestBase<DeviceType::Cuda> {
+class CudaOpsTest: public DeviceTestBase {
 public:
 };
 

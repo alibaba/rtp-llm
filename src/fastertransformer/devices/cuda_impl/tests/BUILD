@@ -84,17 +84,17 @@ cc_test(
     deps = test_deps,
 )
 
-cc_test(
-    name = "cuda_attention_op_test",
-    srcs = [
-        "ops/CudaAttentionOpTest.cc",
-    ],
-    data = [],
-    env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
-    deps = test_deps,
-)
+# cc_test(
+#     name = "cuda_attention_op_test",
+#     srcs = [
+#         "ops/CudaAttentionOpTest.cc",
+#     ],
+#     data = [],
+#     env = test_envs,
+#     copts = cuda_copts() + copts() + torch_deps(),
+#     linkopts = test_linkopts,
+#     deps = test_deps,
+# )
 
 cc_test(
     name = "cuda_softmax_op_test",

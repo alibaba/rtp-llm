@@ -6,7 +6,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CudaAttentionOpTest: public DeviceTestBase<DeviceType::Cuda> {
+class CudaAttentionOpTest: public DeviceTestBase {
 public:
 
     void contextAttentionOpTest(size_t batch_size,

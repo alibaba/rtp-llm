@@ -4,7 +4,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CpuOpsTest: public DeviceTestBase<DeviceType::Cpu> {};
+class CpuOpsTest: public DeviceTestBase {};
 
 TEST_F(CpuOpsTest, testCopy) {
     vector<float> expected = {12, 223, 334, 4, 5, 6};

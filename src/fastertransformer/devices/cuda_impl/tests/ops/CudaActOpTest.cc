@@ -4,7 +4,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CudaActOpTest: public DeviceTestBase<DeviceType::Cuda> {
+class CudaActOpTest: public DeviceTestBase {
 public:
     void BasicActTest(ActivationType atype, size_t m, size_t n);
     void GateActTest(ActivationType atype, size_t m, size_t n);
