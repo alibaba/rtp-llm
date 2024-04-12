@@ -10,10 +10,10 @@
 using namespace std;
 using namespace fastertransformer;
 
-class LayerNormTest: public CudaDeviceTestBase {
+class LayerNormTest: public DeviceTestBase<DeviceType::Cuda> {
 public:
     void SetUp() override {
-        CudaDeviceTestBase::SetUp();
+        DeviceTestBase<DeviceType::Cuda>::SetUp();
         rtol_ = 1e-2;
         atol_ = 1e-2;
     }

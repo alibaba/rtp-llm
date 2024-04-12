@@ -7,6 +7,8 @@ cc_library(
     ]),
     srcs = glob([
         "*.cc",
+    ]) + glob([
+        "base_impl/*.cc",
     ]),
     deps = [
         "//src/fastertransformer/core:allocator",

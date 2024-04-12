@@ -6,7 +6,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class EmbeddingLookupTest: public CudaDeviceTestBase {
+class EmbeddingLookupTest: public DeviceTestBase<DeviceType::Cuda> {
 };
 
 TEST_F(EmbeddingLookupTest, testEmbeddingLookup) {
@@ -19,7 +19,7 @@ TEST_F(EmbeddingLookupTest, testEmbeddingLookup) {
     auto table_tensor = torch::rand(
         {vocab_size, hidden_size}, torch::Device(torch::kCPU)
     ).to(torch::kHalf);
-    auto table = CreateDeviceBuffer<half>(table_tensor);
+    auto table = createDeviceBuffer<half>(table_tensor);
     auto output = device_->embeddingLookup({*ids, *table});
     auto output_tensor = bufferToTensor(*output);
     std::cout << "output_tensor: " << output_tensor << std::endl;

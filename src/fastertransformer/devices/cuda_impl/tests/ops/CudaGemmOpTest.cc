@@ -4,7 +4,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CudaGemmOpTest: public CudaDeviceTestBase {
+class CudaGemmOpTest: public DeviceTestBase<DeviceType::Cuda> {
 public:
 
     void BasicGemmOP(size_t m, size_t n, size_t k);
@@ -29,8 +29,8 @@ void CudaGemmOpTest::BasicGemmOP(size_t m, size_t n, size_t k) {
     auto A_host = torch::rand({(int)m, (int)k}, torch::Device(torch::kCPU)).to(torch::kFloat);
     auto B_host = torch::rand({(int)k, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
 
-    auto A_device = CreateDeviceBuffer<half>(A_host);
-    auto B_device = CreateDeviceBuffer<half>(B_host);
+    auto A_device = createDeviceBuffer<half>(A_host);
+    auto B_device = createDeviceBuffer<half>(B_host);
 
     GemmParams params {*A_device, *B_device};
     auto C_device = device_->gemm(params);
@@ -49,8 +49,8 @@ void CudaGemmOpTest::BatchGemmOP(size_t b, size_t m, size_t n, size_t k) {
     auto B_host = torch::rand(
         {(int)b, (int)k, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
 
-    auto A_device = CreateDeviceBuffer<half>(A_host);
-    auto B_device = CreateDeviceBuffer<half>(B_host);
+    auto A_device = createDeviceBuffer<half>(A_host);
+    auto B_device = createDeviceBuffer<half>(B_host);
 
     GemmParams params {*A_device, *B_device};
     auto C_device = device_->gemm(params);
@@ -74,8 +74,8 @@ void CudaGemmOpTest::TransposeBatchGemmOP(TransposeOperation op_a,
     auto B_host = torch::rand(
         {(int)b, (int)k2, (int)n2}, torch::Device(torch::kCPU)).to(torch::kFloat);
 
-    auto A_device = CreateDeviceBuffer<half>(A_host);
-    auto B_device = CreateDeviceBuffer<half>(B_host);
+    auto A_device = createDeviceBuffer<half>(A_host);
+    auto B_device = createDeviceBuffer<half>(B_host);
 
     GemmParams params {*A_device, *B_device, nullopt, DataType::TYPE_INVALID, op_a, op_b };
     auto C_device = device_->gemm(params);
@@ -105,8 +105,8 @@ void CudaGemmOpTest::TransposeBatchMixFloatGemmOP(TransposeOperation op_a,
     auto B_host = torch::rand(
         {(int)b, (int)k2, (int)n2}, torch::Device(torch::kCPU)).to(torch::kFloat);
 
-    auto A_device = CreateDeviceBuffer<half>(A_host);
-    auto B_device = CreateDeviceBuffer<half>(B_host);
+    auto A_device = createDeviceBuffer<half>(A_host);
+    auto B_device = createDeviceBuffer<half>(B_host);
 
     GemmParams params {*A_device, *B_device, nullopt, DataType::TYPE_FP32, op_a, op_b };
     auto C_device = device_->gemm(params);

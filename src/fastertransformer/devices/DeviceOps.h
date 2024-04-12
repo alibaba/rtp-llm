@@ -1,7 +1,5 @@
 #pragma once
 
-#include "src/fastertransformer/devices/ModelInfo.h"
-#include "src/fastertransformer/devices/QueryInfo.h"
 #include "src/fastertransformer/devices/OpData.h"
 
 namespace fastertransformer {
@@ -12,7 +10,7 @@ public:
     virtual ~DeviceOps();
 
 public:
-    virtual size_t getKvCacheBlockSize(const ModelInfo& model) const ;
+    virtual size_t getKvCacheBlockSize() const ;
 
     // tensor ops
     virtual void copy(const CopyParams& params)                                             = 0;

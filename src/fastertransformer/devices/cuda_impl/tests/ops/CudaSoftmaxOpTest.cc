@@ -6,7 +6,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CudaSoftmaxOpTest: public CudaDeviceTestBase {
+class CudaSoftmaxOpTest: public DeviceTestBase<DeviceType::Cuda> {
 public:
     template<typename input_t>
     void BasicSoftmaxTest(size_t b,
@@ -14,7 +14,7 @@ public:
                           size_t q_len,
                           size_t k_len,
                           float scale);
-    
+
     template<typename input_t, typename output_t>
     void MixFloatSoftmaxTest(size_t b,
                              size_t head_num,
@@ -41,13 +41,13 @@ void CudaSoftmaxOpTest::BasicSoftmaxTest(size_t b,
     auto output_host = torch::zeros(
         {(int)b, (int)head_num, (int)q_len, (int)k_len}, tensor_options);
 
-    auto input_device = CreateDeviceBuffer<input_t>(input_host);
-    auto mask_device = CreateDeviceBuffer<input_t>(mask_host);
+    auto input_device = createDeviceBuffer<input_t>(input_host);
+    auto mask_device = createDeviceBuffer<input_t>(mask_host);
 
     auto output_device = device_->softmax({std::move(input_device),
                                           *mask_device,
                                           scale});
-    
+
     mask_host = mask_host.reshape({(int)b, 1, (int)q_len, (int)k_len});
     auto result_ref = torch::softmax((input_host + mask_host) * scale, -1);
 
@@ -74,8 +74,8 @@ void CudaSoftmaxOpTest::MixFloatSoftmaxTest(size_t b,
     auto output_host = torch::zeros(
         {(int)b, (int)head_num, (int)q_len, (int)k_len}, tensor_options);
 
-    auto input_device = CreateDeviceBuffer<input_t>(input_host);
-    auto mask_device = CreateDeviceBuffer<input_t>(mask_host);
+    auto input_device = createDeviceBuffer<input_t>(input_host);
+    auto mask_device = createDeviceBuffer<input_t>(mask_host);
 
     BufferPtr output_device = nullptr;
     output_device = device_->softmax({std::move(input_device),
@@ -84,7 +84,7 @@ void CudaSoftmaxOpTest::MixFloatSoftmaxTest(size_t b,
                                       getTensorType<output_t>()});
 
     assert(output_device != nullptr);
-    
+
     mask_host = mask_host.reshape({(int)b, 1, (int)q_len, (int)k_len});
     auto result_ref = torch::softmax((input_host + mask_host) * scale, -1);
 

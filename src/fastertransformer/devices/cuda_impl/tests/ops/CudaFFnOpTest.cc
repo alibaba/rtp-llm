@@ -6,7 +6,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CudaFFnOpTest: public CudaDeviceTestBase {
+class CudaFFnOpTest: public DeviceTestBase<DeviceType::Cuda> {
 public:
 
     void FFNOpTest(size_t token_num,
@@ -107,10 +107,10 @@ void CudaFFnOpTest::FFNOpTest(size_t token_num,
         {(int)inter_size, (int)hidden_size}, torch::Device(torch::kCPU)).to(torch::kFloat);
     state_dict["down_proj.weight"].set_data(down_proj_host.t());
 
-    auto input_device = CreateDeviceBuffer<half>(input_host);
-    auto gate_proj_device = CreateDeviceBuffer<half>(gate_proj_host);
-    auto up_proj_device = CreateDeviceBuffer<half>(up_proj_host);
-    auto down_proj_device = CreateDeviceBuffer<half>(down_proj_host);
+    auto input_device = createDeviceBuffer<half>(input_host);
+    auto gate_proj_device = createDeviceBuffer<half>(gate_proj_host);
+    auto up_proj_device = createDeviceBuffer<half>(up_proj_host);
+    auto down_proj_device = createDeviceBuffer<half>(down_proj_host);
 
     auto input      = bufferToTensor(*input_device);
     auto gate_proj  = bufferToTensor(*gate_proj_device);

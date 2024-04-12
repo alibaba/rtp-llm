@@ -6,7 +6,7 @@ DeviceOps::DeviceOps() {}
 
 DeviceOps::~DeviceOps() {}
 
-size_t DeviceOps::getKvCacheBlockSize(const ModelInfo& model) const {
+size_t DeviceOps::getKvCacheBlockSize() const {
     return 0;
 };
 

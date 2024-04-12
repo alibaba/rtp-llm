@@ -5,9 +5,6 @@ cc_library(
     hdrs = glob([
         "*.h",
     ]),
-    srcs = glob([
-        "*.cc",
-    ]),
     deps = [
         "@com_google_googletest//:gtest",
         "//src/fastertransformer/devices:device_utils",
@@ -16,3 +13,14 @@ cc_library(
     copts = copts(),
 )
 
+cc_library(
+    name = "ffn_layer_test",
+    hdrs = [
+        "FfnLayerTest.hpp",
+    ],
+    deps = [
+        ":device_test_utils",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)

@@ -18,7 +18,7 @@ public:
     // default implementations to be overriden
     TransposeOutput transpose(const TransposeParams& params);
 
-    // target independence ops
+    // device-independence op implementations
     FfnLayerOutput ffnLayer(const FfnLayerParams& params);
     LoraLinearOutput loraLinear(const LoraLinearParams& params);
 
