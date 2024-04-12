@@ -240,7 +240,7 @@ py_wheel(
     distribution = "maga_transformer",
     python_tag = "py3",
     tags = ["manual", "local"],
-    version = "0.1.10",
+    version = "0.1.11",
     deps = [
         ":maga_transformer_package",
         "//deps:extension_package",
@@ -282,7 +282,7 @@ py_wheel(
     distribution = "maga_transformer",
     python_tag = "py3",
     tags = ["manual", "local"],
-    version = "0.1.10",
+    version = "0.1.11",
     deps = [
         ":maga_transformer_package",
         "//deps:extension_package",
@@ -321,19 +321,19 @@ py_wheel(
 
 rename_wheel(
     name = "maga_transformer",
-    package_name = "maga_transformer-0.1.10",
+    package_name = "maga_transformer-0.1.11",
     src = ":maga_transformer_whl",
 )
 
 rename_wheel(
     name = "maga_transformer_cuda11",
-    package_name = "maga_transformer-0.1.10+cuda118",
+    package_name = "maga_transformer-0.1.11+cuda118",
     src = ":maga_transformer_whl",
 )
 
 rename_wheel(
     name = "maga_transformer_cuda12",
-    package_name = "maga_transformer-0.1.10+cuda121",
+    package_name = "maga_transformer-0.1.11+cuda121",
     src = ":maga_transformer_whl",
 )
 
