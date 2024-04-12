@@ -11,6 +11,8 @@ enum class DeviceType {
     Yitian = 2,
 };
 
+DeviceType getDeviceType(const std::string& device_name);
+
 class DeviceFactory {
 public:
     static DeviceBase* getDevice(DeviceType type, int device_id = 0);

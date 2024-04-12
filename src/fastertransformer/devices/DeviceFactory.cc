@@ -5,6 +5,19 @@ using namespace std;
 
 namespace fastertransformer {
 
+DeviceType getDeviceType(const std::string& device_name) {
+    if (device_name == "CPU") {
+        return DeviceType::Cpu;
+    } else if (device_name == "CUDA") {
+        return DeviceType::Cuda;
+    } else if (device_name == "YITIAN") {
+        return DeviceType::Yitian;
+    } else {
+        FT_LOG_ERROR("Unknown device type: %s", device_name.c_str());
+        abort();
+    }
+}
+
 unordered_map<DeviceType, function<DeviceBase*()>>& DeviceFactory::getRegistrationMap() {
     static unordered_map<DeviceType, function<DeviceBase*()>> registrationMap;
     return registrationMap;

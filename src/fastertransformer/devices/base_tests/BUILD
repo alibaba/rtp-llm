@@ -1,15 +1,13 @@
 load("//:def.bzl", "copts")
 
 cc_library(
-    name = "device_test_utils",
+    name = "base_tests",
     hdrs = glob([
-        "*.h",
+        "*.hpp",
     ]),
     deps = [
-        "@com_google_googletest//:gtest",
-        "//src/fastertransformer/devices:device_utils",
+        "//src/fastertransformer/devices/testing:device_test_utils",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
 )
-

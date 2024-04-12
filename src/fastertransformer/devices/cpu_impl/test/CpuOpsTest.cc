@@ -4,15 +4,7 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CpuOpsTest: public DeviceTestBase<DeviceType::Cpu> {
-public:
-    void SetUp() override {
-        DeviceTestBase<DeviceType::Cpu>::SetUp();
-    }
-    void TearDown() override {
-        DeviceTestBase<DeviceType::Cpu>::TearDown();
-    }
-};
+class CpuOpsTest: public DeviceTestBase<DeviceType::Cpu> {};
 
 TEST_F(CpuOpsTest, testCopy) {
     vector<float> expected = {12, 223, 334, 4, 5, 6};

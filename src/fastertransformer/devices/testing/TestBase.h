@@ -13,15 +13,19 @@
 
 using namespace fastertransformer;
 
-template <DeviceType device_type>
+static const std::string DEFAULT_DEVICE = "CPU";
+
 class DeviceTestBase : public ::testing::Test {
 public:
     void SetUp() override {
         setenv("FT_DEBUG_LEVEL", "DEBUG", 1);
+        const auto test_src_dir = getenv("TEST_SRCDIR");
+        const auto test_work_space = getenv("TEST_WORKSPACE");
+        const auto test_binary = getenv("TEST_BINARY");
+
+        auto device_name = getenv("TEST_USING_DEVICE");
+        DeviceType device_type = getDeviceType(device_name ? device_name : DEFAULT_DEVICE);
         device_ = DeviceFactory::getDevice(device_type);
-        const char* test_src_dir = std::getenv("TEST_SRCDIR");
-        const char* test_work_space = std::getenv("TEST_WORKSPACE");
-        const char* test_binary = getenv("TEST_BINARY");
 
         if (!(test_src_dir && test_work_space && test_binary)) {
             std::cerr << "Unable to retrieve TEST_SRCDIR / TEST_WORKSPACE / TEST_BINARY env!" << std::endl;
@@ -41,10 +45,6 @@ public:
     }
 
     void TearDown() override {}
-
-protected:
-    double rtol_ = 1e-03;
-    double atol_ = 1e-03;
 
 protected:
     template <typename T>
@@ -258,7 +258,6 @@ protected:
         }
     }
 
-protected:
     const std::string &getTestDataPath() const {
         return test_data_path_;
     }
@@ -266,6 +265,9 @@ protected:
 protected:
     DeviceBase* device_;
     std::string test_data_path_;
+    double rtol_ = 1e-03;
+    double atol_ = 1e-03;
+
 };
 
 int main(int argc, char** argv) {

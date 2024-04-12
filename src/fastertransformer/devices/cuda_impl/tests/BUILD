@@ -11,6 +11,10 @@ test_linkopts = [
     "-lnvToolsExt",
 ]
 
+test_envs = {
+    "TEST_USING_DEVICE": "CUDA",
+}
+
 cc_library(
     name = "cuda_test_util",
     hdrs = [
@@ -27,6 +31,7 @@ cc_library(
 test_deps = [
     "//src/fastertransformer/devices/cuda_impl:cuda_impl",
     "//src/fastertransformer/devices/testing:device_test_utils",
+    "//src/fastertransformer/devices/base_tests:base_tests",
     ":cuda_test_util",
 ] + torch_deps()
 
@@ -37,6 +42,7 @@ cc_test(
         "CudaOpsTest.cc",
     ],
     data = [],
+    env = test_envs,
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
     deps = test_deps,
@@ -48,6 +54,7 @@ cc_test(
         "ops/CudaGemmOpTest.cc",
     ],
     data = [],
+    env = test_envs,
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
     deps = test_deps,
@@ -59,6 +66,7 @@ cc_test(
         "ops/CudaActOpTest.cc",
     ],
     data = [],
+    env = test_envs,
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
     deps = test_deps,
@@ -70,6 +78,7 @@ cc_test(
         "ops/CudaFFnOpTest.cc",
     ],
     data = [],
+    env = test_envs,
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
     deps = test_deps,
@@ -81,6 +90,7 @@ cc_test(
         "ops/CudaAttentionOpTest.cc",
     ],
     data = [],
+    env = test_envs,
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
     deps = test_deps,
@@ -92,6 +102,7 @@ cc_test(
         "ops/CudaSoftmaxOpTest.cc",
     ],
     data = [],
+    env = test_envs,
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
     deps = test_deps,
@@ -103,6 +114,7 @@ cc_test(
         "CudaSamplerTest.cc",
     ],
     data = [],
+    env = test_envs,
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
     deps = test_deps,
@@ -114,6 +126,7 @@ cc_test(
         "EmbeddingLookupTest.cc",
     ],
     data = [],
+    env = test_envs,
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
     deps = test_deps,
@@ -125,6 +138,7 @@ cc_test(
         "LayernormTest.cc",
     ],
     data = [],
+    env = test_envs,
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
     deps = test_deps,
