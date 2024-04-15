@@ -39,7 +39,8 @@ test_deps = [
 cc_library(
     name = "test_utils",
     hdrs = [
-        "ModelTestUtil.h"
+        "ModelTestUtil.h",
+        "MockEngine.h"
     ],
     srcs = [
         "ModelTestUtil.cc",
@@ -47,6 +48,7 @@ cc_library(
     copts = test_copts,
     deps = test_deps,
     alwayslink = 1,
+    visibility = ["//visibility:public"],
 )
 
 cc_test(

@@ -43,12 +43,12 @@ public:
 
 class AuxInfo {
 public:
-    int                                              cost_time_ms;
-    int                                              iter_count;
-    int                                              input_len;
-    int                                              prefix_len;
-    int                                              reuse_len;
-    int                                              output_len;
+    int                                              cost_time_ms   = 0;
+    int                                              iter_count     = 0;
+    int                                              input_len      = 0;
+    int                                              prefix_len     = 0;
+    int                                              reuse_len      = 0;
+    int                                              output_len     = 0;
     std::optional<std::shared_ptr<const ft::Buffer>> cum_log_probs;
 };
 

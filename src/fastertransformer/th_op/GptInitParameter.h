@@ -6,6 +6,7 @@
 #include <torch/script.h>
 #include "src/fastertransformer/utils/quantization.h"
 #include <vector>
+#include <map>
 
 namespace ft = fastertransformer;
 namespace th = torch;
@@ -123,9 +124,11 @@ public:
     bool    is_multimodal_       = false;
     bool    int8_kv_cache_       = false;
     bool    pre_allocate_op_mem_ = true;
-    int64_t seq_size_per_block_  = 8;
+    int64_t  seq_size_per_block_ = 8;
 
     bool use_medusa_ = false;
+
+    std::map<int, std::vector<int>> multi_task_prompt_tokens;
 
     GptInitParameter();
 

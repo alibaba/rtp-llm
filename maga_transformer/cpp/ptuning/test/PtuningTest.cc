@@ -3,6 +3,7 @@
 
 #define private public
 #include "maga_transformer/cpp/ptuning/Ptuning.h"
+#include "maga_transformer/cpp/ptuning/PtuningConstructor.h"
 #include "maga_transformer/cpp/utils/TimeUtility.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include "src/fastertransformer/core/Tensor.h"

@@ -20,143 +20,164 @@ enum class PrefixType {
 };
 
 struct PrefixParams {
-    PrefixType                   prefixType;
-    int                          prefixLength;
-    std::vector<int>             blockCache;
-    std::optional<torch::Tensor> prefixTensor;
+    PrefixParams() {}
+    PrefixParams(PrefixType _prefix_type, size_t _prefix_length,
+                 const std::vector<int>& _block_cache, std::optional<torch::Tensor> _prefix_tensor, const std::vector<int>& _prefix_prompt) {
+        prefix_type = _prefix_type;
+        prefix_length = _prefix_length;
+        block_cache = _block_cache;
+        prefix_tensor = _prefix_tensor;
+        prefix_prompt = _prefix_prompt;
+    }
+    
+    PrefixType                      prefix_type;
+    size_t                          prefix_length;
+    std::vector<int>                block_cache;
+    // TODO(xinfei.sxf) 区分好 prefix tensor和tokens id
+    std::optional<torch::Tensor>    prefix_tensor;
+    std::vector<int>                prefix_prompt;
 };
 
 struct PrefixInfo {
-    bool                         ptuning           = false;
-    bool                         countLength       = true;
-    bool                         countPrefixLength = true;
-    std::optional<torch::Tensor> prefixTensors;
+    bool ptuning = false;
+    bool count_length = true;
+    bool count_prefix_length = true;
+    std::optional<torch::Tensor> prefix_tensors;
+    std::vector<int> prefix_prompt;
 };
 
 class PtuningBase {
 public:
-    PrefixType prefixType_;
+    PrefixType prefix_type_;
 
-    virtual std::tuple<PrefixType, std::optional<torch::Tensor>>
-                                              getPrefixParams(const GenerateConfig& generateConfig)              = 0;
-    virtual std::tuple<std::vector<int>, int> getBlockIndice(int blockNum, const GenerateConfig& generateConfig) = 0;
-    virtual size_t                            calcPrefixBlockNum(const GenerateConfig& generateConfig)           = 0;
+    virtual std::tuple<PrefixType, std::optional<torch::Tensor>, std::vector<int>> getPrefixParams(const GenerateConfig& generate_config) = 0;
+    virtual std::tuple<bool, std::vector<int>, int> getBlockIndice(int blockNum, const GenerateConfig& generate_config) = 0;
+    virtual size_t calcPrefixBlockNum(const GenerateConfig& generate_config) = 0;
 
-    PrefixInfo getPtuningInfo(const GenerateConfig& generateConfig) {
-        auto [prefixType, prefixTensors] = getPrefixParams(generateConfig);
-        return PrefixInfo{.ptuning           = true,
-                          .countLength       = prefixType_ == PrefixType::PromptTuning,
-                          .countPrefixLength = prefixType_ != PrefixType::PTuningV2,
-                          .prefixTensors     = prefixTensors};
+    PrefixInfo getPtuningInfo(const GenerateConfig& generate_config) {
+        auto [prefix_type, prefix_tensors, prefix_prompt] = getPrefixParams(generate_config);
+        return PrefixInfo{
+            .ptuning = true,
+            .count_length = prefix_type_ == PrefixType::PromptTuning,
+            .count_prefix_length = prefix_type_ != PrefixType::PTuningV2,
+            .prefix_tensors = prefix_tensors,
+            .prefix_prompt = prefix_prompt
+        };
     }
 };
 
-class Ptuning: public PtuningBase {
-public:
-    Ptuning(CacheManager& cacheManager, const PrefixParams& prefixParams, bool insertResidentCache = false):
-        prefixParams_(prefixParams),
-        cacheManager_(cacheManager),
-        prefixBlockIndice_(prefixParams_.blockCache),
-        prefixAdditionalBlock_(-1) {
-        prefixType_ = prefixParams_.prefixType;
-        maybeInsertPrefixCache(insertResidentCache);
-        if (prefixParams_.prefixLength % cacheManager.cacheConfig().seq_size_per_block != 0) {
-            prefixAdditionalBlock_ = prefixBlockIndice_.back();
-            prefixBlockIndice_.pop_back();
+class Ptuning : public PtuningBase {
+public:    
+    Ptuning(CacheManager& cache_manager,
+            const PrefixParams& prefix_params, bool insert_resident_cache = false)
+    : prefix_params_(prefix_params),
+      cache_manager_(cache_manager),
+      prefix_block_indice_(prefix_params_.block_cache),
+      prefix_additional_block_(-1)
+    {
+        prefix_type_ = prefix_params_.prefix_type;
+        maybeInsertPrefixCache(insert_resident_cache);
+        if (prefix_params_.prefix_length % cache_manager.cacheConfig().seq_size_per_block != 0) {
+            prefix_additional_block_ = prefix_block_indice_.back();
+            prefix_block_indice_.pop_back();
         }
     }
 
-    size_t calcPrefixBlockNum(const GenerateConfig& generateConfig) override {
-        return prefixBlockIndice_.size();
+    size_t calcPrefixBlockNum(const GenerateConfig& generate_config) override {
+        return prefix_block_indice_.size();
     }
 
-    std::tuple<PrefixType, std::optional<torch::Tensor>>
-    getPrefixParams(const GenerateConfig& generateConfig) override {
-        return {prefixType_, prefixParams_.prefixTensor};
+    std::tuple<PrefixType, std::optional<torch::Tensor>, std::vector<int>> getPrefixParams(const GenerateConfig& generate_config) override {
+        return {prefix_type_, prefix_params_.prefix_tensor, prefix_params_.prefix_prompt};
     }
 
-    std::tuple<std::vector<int>, int> getBlockIndice(int blockNum, const GenerateConfig& generateConfig) override {
-        std::vector<int> blockIndice = cacheManager_.mallocIndex(blockNum);
-        if (prefixAdditionalBlock_ > 0) {
-            std::vector<int> additionalBlock = cacheManager_.mallocIndex(1);
-            cacheManager_.blockCopy(prefixAdditionalBlock_, additionalBlock[0]);
-            blockIndice.insert(blockIndice.end(), additionalBlock.begin(), additionalBlock.end());
+    std::tuple<bool, std::vector<int>, int> getBlockIndice(int blockNum, const GenerateConfig& generate_config) override {
+        auto [success, block_indice] = cache_manager_.mallocIndex(blockNum);
+        if (!success) {
+            return {false, {}, 0};
         }
-        blockIndice.insert(blockIndice.begin(), prefixBlockIndice_.begin(), prefixBlockIndice_.end());
-        return {blockIndice, prefixParams_.prefixLength};
+        if (prefix_additional_block_ > 0) {
+            auto [success2, additional_block] = cache_manager_.mallocIndex(1);
+            if (!success2) {
+                return {false, {}, 0};
+            }
+            cache_manager_.blockCopy(prefix_additional_block_, additional_block[0]);
+            block_indice.insert(block_indice.end(), additional_block.begin(), additional_block.end());
+        }
+        block_indice.insert(block_indice.begin(), prefix_block_indice_.begin(), prefix_block_indice_.end());
+        return {true, block_indice, prefix_params_.prefix_length};
     }
 
 private:
     void maybeInsertPrefixCache(bool insertResidentCache) {
         if (insertResidentCache) {
-            assert(prefixParams_.prefixTensor.has_value());
-            // TODO(xinfei.sxf) convert prefixParams_.prefixTensor to std::vector<int>& token_ids
-            std::vector<int> token_ids;
-            cacheManager_.insertResidentCache(prefixParams_.blockCache, token_ids);
+            cache_manager_.insertResidentCache(prefix_params_.block_cache, prefix_params_.prefix_prompt);
         }
     }
 
-    PrefixParams     prefixParams_;
-    CacheManager&    cacheManager_;
-    std::vector<int> prefixBlockIndice_;
-    int              prefixAdditionalBlock_;
+    PrefixParams     prefix_params_;
+    CacheManager&    cache_manager_;
+    std::vector<int> prefix_block_indice_;
+    int              prefix_additional_block_;
 };
 
 class MultiTaskPtuning: public PtuningBase {
 public:
-    MultiTaskPtuning(CacheManager& cacheManager, const std::unordered_map<int, PrefixParams>& prefixParamsMap):
-        cacheManager_(cacheManager), prefixType_(PrefixType::PromptTuning) {
-        for (const auto& item : prefixParamsMap) {
-            int                 id     = item.first;
+    MultiTaskPtuning(CacheManager& cache_manager, const std::unordered_map<int, PrefixParams>& prefix_params_map) 
+    : cache_manager_(cache_manager), prefix_type_(PrefixType::PromptTuning) {
+        for (const auto& item : prefix_params_map) {
+            int id = item.first;
             const PrefixParams& params = item.second;
-            ptunings_[id]              = std::make_unique<Ptuning>(cacheManager, params, true);
+            ptunings_[id] = std::make_unique<Ptuning>(cache_manager, params, true);
         }
     }
 
-    std::tuple<std::vector<int>, int> getBlockIndice(int blockNum, const GenerateConfig& generateConfig) override {
-        auto task_id = generateConfig.task_id;
+    std::tuple<bool, std::vector<int>, int> getBlockIndice(int blockNum, const GenerateConfig& generate_config) override {
+        auto task_id = generate_config.task_id;
         if (task_id != std::nullopt) {
             auto it = ptunings_.find(task_id.value());
             if (it == ptunings_.end()) {
-                return {cacheManager_.mallocIndex(blockNum), 0};
+                auto [success, block_indices] = cache_manager_.mallocIndex(blockNum);
+                return {success, block_indices, 0};
             }
-            return it->second->getBlockIndice(blockNum, generateConfig);
+            return it->second->getBlockIndice(blockNum, generate_config);
         } else {
-            return {cacheManager_.mallocIndex(blockNum), 0};
+            auto [success, block_indices] = cache_manager_.mallocIndex(blockNum);
+            return {success, block_indices, 0};
         }
     }
 
-    std::tuple<PrefixType, std::optional<torch::Tensor>>
-    getPrefixParams(const GenerateConfig& generateConfig) override {
-        auto task_id = generateConfig.task_id;
+    std::tuple<PrefixType, std::optional<torch::Tensor>, std::vector<int>>
+    getPrefixParams(const GenerateConfig& generate_config) override {
+        auto task_id = generate_config.task_id;
         if (task_id != std::nullopt) {
             auto it = ptunings_.find(task_id.value());
             if (it == ptunings_.end()) {
-                return {PrefixType::NoPrefix, torch::Tensor()};
+                return {PrefixType::NoPrefix, torch::Tensor(), {}};
             }
-            return it->second->getPrefixParams(generateConfig);
+            return it->second->getPrefixParams(generate_config);
         } else {
-            return {PrefixType::NoPrefix, torch::Tensor()};
+            return {PrefixType::NoPrefix, torch::Tensor(), {}};
         }
     }
 
-    size_t calcPrefixBlockNum(const GenerateConfig& generateConfig) override {
-        auto task_id = generateConfig.task_id;
+    size_t calcPrefixBlockNum(const GenerateConfig& generate_config) override {
+        auto task_id = generate_config.task_id;
         if (task_id != std::nullopt) {
             auto it = ptunings_.find(task_id.value());
             if (it == ptunings_.end()) {
                 return 0;
             }
-            return it->second->calcPrefixBlockNum(generateConfig);
+            return it->second->calcPrefixBlockNum(generate_config);
         } else {
             return 0;
         }
     }
 
 private:
-    CacheManager&                                     cacheManager_;
+    CacheManager&                                     cache_manager_;
     std::unordered_map<int, std::unique_ptr<Ptuning>> ptunings_;
-    PrefixType                                        prefixType_;
+    PrefixType                                        prefix_type_;
 };
 
 }  // namespace rtp_llm

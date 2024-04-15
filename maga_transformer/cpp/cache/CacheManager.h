@@ -115,14 +115,13 @@ public:
 
     void free(const std::vector<void*> pointer);
     void free(const std::vector<KVCacheBlockAddr>& resource);
-    void freeWithCache(const std::vector<void*> pointer, const std::vector<int>& token_ids);
+    void freeWithCache(const std::vector<void *> pointer, const std::vector<int>& token_ids);
+    void insertResidentCache(const std::vector<void *> pointer, const std::vector<int>& token_ids);
     void insertResidentCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
 
-    void        setKvBlockValue(int index, const ft::BufferPtr& k_value, const ft::BufferPtr& v_value);
-    void        blockCopy(int src_block_index, int dest_block_index);
-    void        copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list,
-                                       const std::vector<int>& src_index,
-                                       const std::vector<int>& tgt_index);
+    void setKVBlockValue(int index, ft::BufferPtr& k_value, ft::BufferPtr& v_value);
+    void blockCopy(int src_block_index, int dest_block_index);
+    void copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list, const std::vector<int>& src_index, const std::vector<int>& tgt_index);
     SeqPosition getSeqPosition(const std::vector<int>& block_indice_list, int idx);
     void        copyKvCacheFromSeqPosition(const SeqPosition& src_seq_position, const SeqPosition& dst_seq_position);
 
@@ -139,7 +138,7 @@ private:
     void insertIntoCache(const std::vector<std::vector<int>>& block_indices,
                          const std::vector<int>&              token_ids,
                          bool                                 is_resident);
-    KVCacheBlockAddr convertIndexToAddr(const std::vector<int>& block_indices);
+    KVCacheBlockAddr convertIndexToAddr(const std::vector<int>& block_indices) const;
     std::vector<int> convertAddrToIndex(const std::vector<void*>& pointers) const;
 
 private:

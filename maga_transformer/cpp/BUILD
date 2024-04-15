@@ -200,6 +200,7 @@ cc_library(
         ":schedulers",
         ":executors",
         ":common",
+        ":ptuning",
         ":batch_stream_processor",
         "//src/fastertransformer/cuda:allocator_cuda",
         "@com_google_absl//absl/status",

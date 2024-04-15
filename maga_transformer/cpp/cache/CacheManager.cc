@@ -106,6 +106,10 @@ void CacheManager::insertResidentCache(const std::vector<int>& block_indices, co
     insertIntoCache(wrapper, token_ids, true);
 }
 
+void CacheManager::insertResidentCache(const std::vector<void *> pointer, const std::vector<int>& token_ids) {
+    insertResidentCache(convertAddrToIndex(pointer), token_ids);
+}
+
 void CacheManager::insertIntoCache(const std::vector<std::vector<int>>& block_indices,
                                    const std::vector<int>&              token_ids,
                                    bool                                 is_resident) {
@@ -190,10 +194,13 @@ const BlockCache& CacheManager::blockCache() const {
     return block_cache_;
 }
 
-void CacheManager::setKvBlockValue(int index, const ft::BufferPtr& k_value, const ft::BufferPtr& v_value) {
-    // kv_cache_.k_blocks.index({torch::indexing::Slice(), index, torch::indexing::Ellipsis}) =
-    // k_value.to(torch::kCUDA); kv_cache_.v_blocks.index({torch::indexing::Slice(), index, torch::indexing::Ellipsis})
-    // = v_value.to(torch::kCUDA);
+void CacheManager::setKVBlockValue(int index, ft::BufferPtr& k_value, ft::BufferPtr& v_value) {
+    auto layer_stride = block_nums_ * config_.block_stride;
+    for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
+        auto dst = kv_cache_.k_blocks->data() + layer_num * layer_stride + index * config_.block_stride;
+        auto src = k_value->data() + layer_num * config_.block_stride;
+        cudaMemcpy(dst, src, config_.block_stride, cudaMemcpyHostToDevice);
+    }
 }
 
 void CacheManager::blockCopy(int src_block_index, int dest_block_index) {
@@ -282,7 +289,7 @@ void CacheManager::maybeFreeBlockFromCache(int nums) {
     }
 }
 
-KVCacheBlockAddr CacheManager::convertIndexToAddr(const std::vector<int>& block_indices) {
+KVCacheBlockAddr CacheManager::convertIndexToAddr(const std::vector<int>& block_indices) const {
     KVCacheBlockAddr result;
     result.k_ptr.resize(config_.layer_num);
     result.v_ptr.resize(config_.layer_num);
@@ -337,9 +344,7 @@ std::vector<int> CacheManager::convertAddrToIndex(const std::vector<void*>& poin
     auto             base_addr = kv_cache_.k_blocks->data();
     for (auto& pointer : pointers) {
         auto offset       = (uint64_t)pointer - (uint64_t)base_addr;
-        auto block_stride = (size_t)config_.local_head_num_kv * (size_t)config_.seq_size_per_block
-                            * (size_t)config_.size_per_head * getTypeSize(config_.dtype);
-        auto block_index = offset / block_stride;
+        auto block_index  = offset / config_.block_stride;
         block_indices.push_back(block_index);
     }
 

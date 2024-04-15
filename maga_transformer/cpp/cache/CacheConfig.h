@@ -10,10 +10,12 @@ namespace rtp_llm {
 struct CacheConfig {
     uint         layer_num;
     uint         block_nums;
-    size_t       block_size;
+    
     uint         local_head_num_kv;
     uint         size_per_head;
     uint         seq_size_per_block;
+    size_t       block_size;
+    size_t       block_stride;
     ft::DataType dtype;
     CacheConfig(uint         layer_num_,
                 uint         block_nums_,
@@ -29,6 +31,7 @@ struct CacheConfig {
         dtype(dtype_) {
         block_size =
             layer_num * local_head_num_kv * size_per_head * seq_size_per_block * fastertransformer::getTypeSize(dtype);
+        block_stride = block_size / layer_num;
     }
 
     std::string debugString() const {

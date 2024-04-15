@@ -27,6 +27,11 @@ public:
     absl::Status startLoop();
     absl::Status enqueue(std::shared_ptr<GenerateStream>& stream);
 
+public:
+    const std::shared_ptr<CacheManager> cacheManager() const {
+        return cache_manager_;
+    }
+
 private:
     absl::Status trySaveStepError() const;
     void         loop();

@@ -60,7 +60,7 @@ class PtuningConstructor(object):
             assert stream.output.hidden_states is not None, "stream should be run once"
             assert len(stream.block_indice[0]) > 0, "stream should have block indice"
             multi_task_prompt_args[id] = PrefixParams(prefix_type=PrefixType.PromptTuning, prefix_length=len(input_tokens), block_cache=stream.block_indice[0], prefix_tensor=input_tokens)
-            return multi_task_prompt_args
+        return multi_task_prompt_args
 
     # input shape [layer_num, pre_seq_len, head_num, size_per_head]
     # dest k shape [layer_num, block_nums, head_num, seq_num_block, size_per_head]
