@@ -216,15 +216,6 @@ void selfAttentionwrapper(const AttentionModuleParams& params,
     // TODO(lidongjin) support relative attention
     const T* relative_attention_bias_ptr = nullptr;
 
-    int* cache_indir = nullptr;
-    if (params.common.cache_indir.has_value()) {
-        cache_indir = params.common.cache_indir.value().get().data<int>();
-    }
-    bool* finished = nullptr;
-    if (params.common.finished.has_value()) {
-        finished = params.common.finished.value().get().data<bool>();
-    }
-
     // rope
     int rotary_embedding_dim = params.configs.rope_config.embedding_dim;
     int rotary_embedding_style = (int)params.configs.rope_config.embedding_style;
@@ -281,9 +272,9 @@ void selfAttentionwrapper(const AttentionModuleParams& params,
         qkv_buf_ptr,
         bias_ptr,
         relative_attention_bias_ptr,
-        cache_indir,
+        nullptr, // cache_indir
         qkv_buf_2_,
-        finished,
+        nullptr, // finished
         sequence_lengths,
         batch_size,
         beam_width,

@@ -11,6 +11,14 @@ GptModel::GptModel(const GptModelInitParams& params)
     , attention_configs_(AttentionConfigs({}))
     {};
 
+AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inputs) {
+    AttentionCommonInputs attention_inputs({
+        inputs.input_lengths,
+        inputs.sequence_lengths
+    });
+    return move(attention_inputs);
+}
+
 GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto hidden_type = datatype_enum::TYPE_BF16;
     const auto norm_type = description_.norm_type;

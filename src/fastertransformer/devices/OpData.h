@@ -207,14 +207,9 @@ struct EmbeddingLookupParams {
 };
 
 struct AttentionCommonInputs {
-    // Scheduler assembles requests for prompt processing and incremental token decoding
-    // into a single batch.
-    // input_lengths holds original input length for requests,
-    // shape [context_batch_size + decoding_batch_size], int32
-    // sequence_lengths holds current sequence length for incremental decoding requests,
-    // shape [decoding_batch_size], int32
-    const Buffer& input_lengths;
-    const Buffer& sequence_lengths;
+    // see detailed comments at GptModelInputs
+    const Buffer& input_lengths;      // int32_t, [context_batch_size + decoder_batch_size]
+    const Buffer& sequence_lengths;   // int32_t, [decoder_batch_size]
 
     // [batch_size, block_length], int64 block pointers
     OptionalConstBufferRef kv_cache_blocks;

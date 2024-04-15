@@ -58,12 +58,10 @@ struct RotaryEmbeddingImpl : torch::nn::Module {
 TORCH_MODULE(RotaryEmbedding);
 
 struct AttentionImpl : torch::nn::Module {
-    AttentionImpl()
-    {
+    AttentionImpl() {
         // register_module() is needed if we want to use the parameters() method later on
         // register_module("rope", rope);
     }
-
 
     std::vector<torch::Tensor> forward(torch::Tensor& query_states,
                                        torch::Tensor& key_states,
@@ -352,7 +350,6 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
 }
 
 
-
 TEST_F(CudaAttentionOpTest, SelfAttentionOpTest) {
     std::vector<size_t> batch = {1};
     std::vector<size_t> seq   = {1};
@@ -370,12 +367,9 @@ TEST_F(CudaAttentionOpTest, SelfAttentionOpTest) {
                                     num_key_value_heads,
                                     head_dim);
             }
-
         }
     }
-
 }
-
 
 
 TEST_F(CudaAttentionOpTest, ContextAttentionOpTest) {
