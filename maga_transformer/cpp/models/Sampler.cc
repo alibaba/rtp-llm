@@ -46,7 +46,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
             device_->sampleGreedy({
                 sample_logits,
-                inputs.sequence_lenghts,
+                inputs.sequence_lengths,
                 *transposed_tokens,
                 inputs.top_k,
                 inputs.top_p,

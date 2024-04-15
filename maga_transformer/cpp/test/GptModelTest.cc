@@ -20,14 +20,14 @@ TEST_F(GptModelTest, testSimple) {
     GptModel model({device_, *weights, description});
 
     const auto combo_tokens = createBuffer<int32_t>({3}, {13048, 11, 220});
-    const auto input_lenghts = createBuffer<int32_t>({1}, {3});
-    const auto sequence_lenghts = createBuffer<int32_t>({}, {});
+    const auto input_lengths = createBuffer<int32_t>({1}, {3});
+    const auto sequence_lengths = createBuffer<int32_t>({}, {});
 
     // TODO: fill these blokcs when BlockManager is done.
     const auto kv_cache_blocks = createBuffer<int64_t>({1, 1}, {0});
 
     GptModelInputs inputs = {
-        *combo_tokens, *input_lenghts, *sequence_lenghts,
+        *combo_tokens, *input_lengths, *sequence_lengths,
         nullopt, nullopt, *kv_cache_blocks
     };
 

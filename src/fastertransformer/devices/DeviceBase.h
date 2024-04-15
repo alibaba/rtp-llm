@@ -16,11 +16,12 @@ public:
 
 public:
     // default implementations to be overriden
-    TransposeOutput transpose(const TransposeParams& params);
+    TransposeOutput transpose(const TransposeParams& params) override;
 
     // device-independence op implementations
-    FfnLayerOutput ffnLayer(const FfnLayerParams& params);
-    LoraLinearOutput loraLinear(const LoraLinearParams& params);
+    AttentionLayerOutput attentionLayer(const AttentionLayerParams& params) override;
+    FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
+    LoraLinearOutput loraLinear(const LoraLinearParams& params) override;
 
 private:
     DeviceBase(const DeviceBase&) = delete;

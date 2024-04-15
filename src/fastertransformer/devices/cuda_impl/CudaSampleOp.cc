@@ -199,7 +199,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         topk_ws_size,
         logits.data<float>(),
         params.token_ids.dataWithOffset<int32_t>(step * batch_size),
-        params.input_lenghts.data<int32_t>(),
+        params.input_lengths.data<int32_t>(),
         nullptr, // finished
         cum_log_probs,
         output_log_probs,
@@ -242,7 +242,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         topp_ws_size,
         cub_temp_storage_size,
         params.token_ids.dataWithOffset<int32_t>(step * batch_size),
-        params.input_lenghts.data<int32_t>(),
+        params.input_lengths.data<int32_t>(),
         nullptr, // finished
         cum_log_probs,
         output_log_probs,

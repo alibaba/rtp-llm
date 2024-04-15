@@ -363,7 +363,7 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
     const int local_hidden_units_kv_rt =
         (params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_) * params_.size_per_head_;
     T* qkv_buf_3_input = nullptr;
-        if (attention_weights->attention_layernorm.gamma && attention_weights->attention_layernorm.beta) {
+    if (attention_weights->attention_layernorm.gamma && attention_weights->attention_layernorm.beta) {
         invokeGeneralLayerNorm(qkv_buf_,
                                qkv_buf_2_,
                                attention_weights->attention_layernorm.gamma,

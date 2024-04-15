@@ -23,7 +23,6 @@ void addFusedQKVBiasTransposeWrapper(const AttentionModuleParams& params,
                                      const Buffer& k_output,
                                      const Buffer& v_output,
                                      cudaStream_t stream) {
-    
     //  qkv input shape [token_num, head_num + 2 * kv_head_num, size_per_head]
     T* qkv_input_ptr    = params.input.data<T>();
 
@@ -53,7 +52,7 @@ void addFusedQKVBiasTransposeWrapper(const AttentionModuleParams& params,
     bool        use_logn_attention  = false;
     const int   logn_seq_len        = 0;
 
-    // rope 
+    // rope
     const int rope_embedding_dim              = params.configs.rope_config.embedding_dim;
     const int rope_embedding_style            = (int) params.configs.rope_config.embedding_style;
     const int rope_embedding_base             = params.configs.rope_config.embedding_base;
@@ -133,7 +132,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         datatype != DataType::TYPE_FP32) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
-    
 
     auto token_num      = params.input.shape()[0];
     auto batch_size     = params.configs.batch_size;
@@ -152,7 +150,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                     {batch_size, kv_head_num, seq_len, size_per_head},
                                     AllocationType::DEVICE},
                                     {});
-
 
     auto v_output = allocateBuffer({params.input.type(),
                                     {batch_size, kv_head_num, seq_len, size_per_head},
@@ -185,22 +182,15 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
 
     auto qkv_output = gemm({*softmax_qk_output, *v_output});
 
-
-    auto qkv_transpose_output = allocateBuffer({params.input.type(),
-                                                {batch_size, seq_len, head_num, size_per_head},
-                                                AllocationType::DEVICE},
-                                                {});
+    auto &qkv_transpose_output = params.output;
 
     if (datatype == DataType::TYPE_FP16) {
-        transposeQKVWrapper<half>(params, *qkv_output, *qkv_transpose_output, stream_);
+        transposeQKVWrapper<half>(params, *qkv_output, qkv_transpose_output, stream_);
     } else if (datatype == DataType::TYPE_FP32) {
-        transposeQKVWrapper<float>(params, *qkv_output, *qkv_transpose_output, stream_);
+        transposeQKVWrapper<float>(params, *qkv_output, qkv_transpose_output, stream_);
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
-
-    return AttentionModuleOutput({std::move(qkv_transpose_output)});
-    
 }
 
 template<typename T>
@@ -218,7 +208,7 @@ void selfAttentionwrapper(const AttentionModuleParams& params,
 
     const T* qkv_buf_ptr = params.input.data<T>();
     T* qkv_buf_2_ = output.data<T>();
-    
+
     const T* bias_ptr = (params.weights.qkv_weight->bias == nullptr) ?
                          nullptr :
                          params.weights.qkv_weight->bias->data<T>();
@@ -233,11 +223,6 @@ void selfAttentionwrapper(const AttentionModuleParams& params,
     bool* finished = nullptr;
     if (params.common.finished.has_value()) {
         finished = params.common.finished.value().get().data<bool>();
-    }
-
-    int* sequence_lengths = nullptr;
-    if (params.common.sequence_lengths.has_value()) {
-        sequence_lengths = params.common.sequence_lengths.value().get().data<int>();
     }
 
     // rope
@@ -263,10 +248,8 @@ void selfAttentionwrapper(const AttentionModuleParams& params,
     int max_prefix_prompt_length = 0;
     bool count_prefix_length = false;
 
-    const int* input_lengths = nullptr;
-    if (params.common.input_lengths.has_value()) {
-        input_lengths = params.common.input_lengths.value().get().data<int>();
-    }
+    const auto* input_lengths = params.common.input_lengths.data<int>();
+    const auto* sequence_lengths = params.common.sequence_lengths.data<int>();
 
     float q_scaling = 1.f;
     int relative_attention_bias_stride = 0;
@@ -286,8 +269,8 @@ void selfAttentionwrapper(const AttentionModuleParams& params,
     int* block_counter = nullptr;
 
     KVBlockArray kv_block_array(batch_size,
-                                params.configs.mMaxBlocksPerSeq,
-                                params.configs.mTokensPerBlock, 0);
+                                params.configs.max_blocks_per_seq,
+                                params.configs.tokens_per_block, 0);
     if (!params.common.kv_cache_blocks.has_value()) {
         throw std::runtime_error("kv cache block pointers can not be null");
     }
@@ -344,13 +327,12 @@ void selfAttentionwrapper(const AttentionModuleParams& params,
 /// @brief   Self Attention ops
 /// @details
 AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
-
     auto datatype = params.input.type();
     if (datatype != DataType::TYPE_FP16 &&
         datatype != DataType::TYPE_FP32) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
-    
+
     size_t token_num            = params.configs.token_num;
     size_t batch_size           = params.configs.batch_size;
     size_t beam_width           = params.configs.beam_width;
@@ -359,19 +341,15 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     size_t size_per_head        = params.configs.size_per_head;
     size_t step                 = params.configs.step;
 
-    auto output = allocateBuffer({params.input.type(), 
-                                {token_num, local_head_num, size_per_head}});
+    auto &output = params.output;
 
     if (params.input.type() == DataType::TYPE_FP16) {
-        selfAttentionwrapper<half>(params, *output, stream_);
+        selfAttentionwrapper<half>(params, output, stream_);
     } else if (params.input.type() == DataType::TYPE_FP32) {
-        selfAttentionwrapper<float>(params, *output, stream_);
+        selfAttentionwrapper<float>(params, output, stream_);
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
-    return AttentionModuleOutput({std::move(output)});
 }
 
-
 } // namespace fastertransformer
-

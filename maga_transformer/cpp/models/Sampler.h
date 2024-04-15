@@ -14,7 +14,7 @@ struct SamplerInitParams {
 struct SamplerInputs {
     const Buffer& logits;            // shape: [batch_size * num_beams, vocab_size]
     mutable BufferPtr token_ids;     // shape: [batch_size * num_beams, max_length]
-    const Buffer& sequence_lenghts;  // shape: [batch_size]
+    const Buffer& sequence_lengths;  // shape: [batch_size]
     const size_t step;               // typically largest sequence length in the batch
 
     const size_t batch_size;

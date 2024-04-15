@@ -389,7 +389,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     if (context_batch_size) {
         PUSH_RANGE(stream_, "remove padding");
         invokeGetPaddingOffsetAndCuSeqLens(
-            h_pinned_token_num_ptr_,
             padding_offset_,
             cu_seqlens_,
             context_lengths_ + batch_size,
@@ -576,7 +575,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         if (params_.moe_style_ == 2) {
             ffn_output_ptr = ffn_output_;
         }
-        else { 
+        else {
             ffn_output_ptr =  params_.layernorm_type_ == LayerNormType::pre_layernorm ? decoder_normed_input_ : decoder_output;
         }
 
@@ -633,10 +632,10 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                 Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expanded_source_row_to_expanded_dest_row_});
             partial_moe_tensors.insert("expert_for_source_row",
                                       Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expert_for_source_row_});
-            
+
             ffn_layer_->forward(&partial_moe_tensors, &ffn_input_tensors, &layer_weight->partial_moe_weights, true);
 
-            print_bsd(l, "after partial moe", partial_moe_output_, 1, h_token_num, hidden_units);            
+            print_bsd(l, "after partial moe", partial_moe_output_, 1, h_token_num, hidden_units);
         }
 
         // the adapter after ffn (only pre layernorm currently)

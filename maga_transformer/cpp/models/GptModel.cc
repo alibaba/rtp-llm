@@ -42,10 +42,10 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             mayGetRef(layer.self_attention_weights.pre_attention_layernorm), norm_eps));
 
         AttentionCommonInputs attention_inputs({
+            inputs.input_lengths,
+            inputs.sequence_lengths
             // inputs.kv_cache_blocks,
             // nullopt,
-            // inputs.input_lengths,
-            // inputs.sequence_lengths,
             // nullopt,
             // nullopt,
             // nullopt,

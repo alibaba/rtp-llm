@@ -25,17 +25,7 @@
 
 namespace fastertransformer {
 
-void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
-                                        int*         h_token_num,
-                                        int*         tmp_mask_offset,
-                                        int*         cu_seqlens,
-                                        const int*   sequence_length,
-                                        const int    batch_size,
-                                        const int    max_seq_len,
-                                        cudaStream_t stream);
-
-void invokeGetPaddingOffsetAndCuSeqLens(size_t*      h_pinned_token_num,
-                                        int*         tmp_mask_offset,
+void invokeGetPaddingOffsetAndCuSeqLens(int*         tmp_mask_offset,
                                         int*         cu_seqlens,
                                         const int*   sequence_length,
                                         const int    batch_size,

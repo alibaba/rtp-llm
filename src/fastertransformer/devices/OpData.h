@@ -207,62 +207,58 @@ struct EmbeddingLookupParams {
 };
 
 struct AttentionCommonInputs {
+    // Scheduler assembles requests for prompt processing and incremental token decoding
+    // into a single batch.
+    // input_lengths holds original input length for requests,
+    // shape [context_batch_size + decoding_batch_size], int32
+    // sequence_lengths holds current sequence length for incremental decoding requests,
+    // shape [decoding_batch_size], int32
+    const Buffer& input_lengths;
+    const Buffer& sequence_lengths;
+
     // [batch_size, block_length], int64 block pointers
-    OptionalConstBufferRef kv_cache_blocks; 
-
-    // cross attention
-    OptionalConstBufferRef cache_indir;
-
-    OptionalConstBufferRef finished;
-    OptionalConstBufferRef input_lengths;
-    OptionalConstBufferRef sequence_lengths;
+    OptionalConstBufferRef kv_cache_blocks;
     OptionalConstBufferRef cu_seqlens;
-
     OptionalConstBufferRef padding_offset;
+
     OptionalConstBufferRef position_ids;
     OptionalConstBufferRef attention_mask;
     OptionalConstBufferRef linear_bias_slopes;
     OptionalConstBufferRef prefix_prompt_lengths;
-    
+
     OptionalConstBufferRef lora_ids;
     OptionalConstBufferRef lora_input_lengths;
 
     AttentionCommonInputs() = default;
-    
-    // context attention
-    AttentionCommonInputs(const Buffer& position_ids,
-                          const Buffer& attention_mask,
-                          const Buffer& padding_offset,
-                          const Buffer& cu_seqlens) :
-                          position_ids(position_ids),
-                          attention_mask(attention_mask),
-                          padding_offset(padding_offset),
-                          cu_seqlens(cu_seqlens) {}
-    
+
+    AttentionCommonInputs(const Buffer& input_lengths,
+                          const Buffer& sequence_lengths) :
+                          input_lengths(input_lengths),
+                          sequence_lengths(sequence_lengths) {}
+
     // self attention
-    AttentionCommonInputs (const Buffer& kv_cache_blocks,
-                           const Buffer& sequence_lengths,
-                           const Buffer& input_lengths) :
-                           kv_cache_blocks(kv_cache_blocks),
-                           sequence_lengths(sequence_lengths),
-                           input_lengths(input_lengths) {}
+    // AttentionCommonInputs (const Buffer& kv_cache_blocks,
+    //                        const Buffer& sequence_lengths,
+    //                        const Buffer& input_lengths) :
+    //                        kv_cache_blocks(kv_cache_blocks),
+    //                        sequence_lengths(sequence_lengths),
+    //                        input_lengths(input_lengths) {}
 };
 
 struct AttentionConfigs {
-
     size_t      token_num;
     size_t      batch_size;
     size_t      head_num;
     size_t      kv_head_num;
     size_t      seq_len;
     size_t      size_per_head;
-    
+
     // rotary embending config
     RopeConfig rope_config;
 
     //kv cache block
-    size_t mMaxBlocksPerSeq;
-    size_t mTokensPerBlock;
+    size_t max_blocks_per_seq;
+    size_t tokens_per_block;
 
     // step
     size_t step;
@@ -277,16 +273,15 @@ struct AttentionConfigs {
     // log attention
     bool    use_logn_attn = false;
     int64_t logn_seq_len  = 2048;
-    
 };
 
-struct AttentionModuleOutput {
-    BufferPtr hidden_states;
-};
+using AttentionModuleOutput = void;
 
 struct AttentionModuleParams {
-    // qkv shape[token_num * (head_num + 2 * kv_head_num), size_per_head]
+    // qkv shape[h_token_num, (head_num + 2 * kv_head_num) * size_per_head]
     const Buffer&                   input;
+    // shape[token_num, size_per_head]
+    Buffer&                         output;
     AttentionCommonInputs&          common;
     const AttentionLayerWeights&    weights;
     const AttentionConfigs&         configs;
@@ -327,7 +322,7 @@ struct FfnLayerParams {
 
 struct GreedyParams {
     const Buffer& logits;                    // [batch_size, vocab_size_padded]
-    const Buffer& input_lenghts;             // [batch_size]
+    const Buffer& input_lengths;             // [batch_size]
     Buffer& token_ids;                       // [max_input_length + 1, batch_size]
 
     const Buffer& top_k;
@@ -343,7 +338,7 @@ struct GreedyParams {
 
 struct BeamSearchParams {
     const Buffer& logits;
-    const Buffer& sequence_lenghts;  // shape: [batch_size]
+    const Buffer& sequence_lengths;  // shape: [batch_size]
     const size_t step;               // typically largest sequence length in the batch
 
     const size_t num_beams;
@@ -399,7 +394,7 @@ struct SoftmaxParams{
                   mask(mask),
                   scale(scale),
                   output_t(output_t) {}
-    
+
     // inplace
     BufferPtr input = nullptr;
     const Buffer& mask;
