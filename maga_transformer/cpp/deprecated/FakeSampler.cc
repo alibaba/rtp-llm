@@ -1,5 +1,6 @@
 #include "maga_transformer/cpp/deprecated/FakeSampler.h"
 #include "src/fastertransformer/core/Types.h"
+#include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 

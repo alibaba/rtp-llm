@@ -31,8 +31,8 @@ private:
     DeviceBase& operator=(DeviceBase&&) = delete;
 
 private:
-    virtual IAllocator* getAllocator() const = 0;
-    virtual IAllocator* getHostAllocator() const = 0;
+    virtual IAllocator* getAllocator() = 0;
+    virtual IAllocator* getHostAllocator() = 0;
 
 private:
     int device_id_;

@@ -55,7 +55,7 @@ private:
     ft::NcclParam                                      pipeline_para_;
     cudaStream_t                                       stream_;
     ft::IAllocator*                                    allocator_;
-    const ft::CudaDevice*                              device_;
+    ft::CudaDevice*                                    device_;
     std::shared_ptr<GptGlobalWeights<T>>               global_weights_;
     std::vector<ft::ParallelGptDecoderLayerWeight<T>*> gpt_layer_weights_;
 

@@ -11,8 +11,8 @@ public:
 
 public:
     std::string type() const override { return "cpu"; }
-    IAllocator* getAllocator() const override { return allocator_.get(); }
-    IAllocator* getHostAllocator() const override { return allocator_.get(); }
+    IAllocator* getAllocator() override { return allocator_.get(); }
+    IAllocator* getHostAllocator() override { return allocator_.get(); }
 
 public:
     void copy(const CopyParams& params);

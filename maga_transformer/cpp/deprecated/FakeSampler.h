@@ -19,7 +19,7 @@ public:
     void          freeBuffer();
 
 private:
-    const ft::CudaDevice*         device_;
+    ft::CudaDevice*               device_;
     ft::DynamicDecodeLayer<half>* dynamic_decode_layer_;
     cudaDeviceProp                prop_;
     cudaStream_t                  stream_;

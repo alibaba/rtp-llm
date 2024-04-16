@@ -1,5 +1,6 @@
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
 #include "src/fastertransformer/core/Buffer.h"
+#include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"

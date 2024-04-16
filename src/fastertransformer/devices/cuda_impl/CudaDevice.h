@@ -13,8 +13,8 @@ public:
 
 public:
     std::string type() const override { return "cuda"; }
-    IAllocator* getAllocator() const override { return allocator_.get(); }
-    IAllocator* getHostAllocator() const override { return host_allocator_.get(); }
+    IAllocator* getAllocator() override { return allocator_.get(); }
+    IAllocator* getHostAllocator() override { return host_allocator_.get(); }
     int getDeviceId() const { return device_id_; }
     cudaStream_t getStream() {return stream_;}
 
