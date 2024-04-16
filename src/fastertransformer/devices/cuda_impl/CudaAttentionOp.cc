@@ -126,7 +126,6 @@ void transposeQKVWrapper(const AttentionModuleParams& params,
 /// @brief   Context Attention ops
 /// @details
 AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& params) {
-
     auto datatype = params.input.type();
     if (datatype != DataType::TYPE_FP16 &&
         datatype != DataType::TYPE_FP32) {

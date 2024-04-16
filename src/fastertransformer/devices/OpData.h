@@ -218,7 +218,7 @@ struct EmbeddingLookupParams {
 
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs
-    const Buffer& input_lengths;      // int32_t, [context_batch_size + decoder_batch_size]
+    const Buffer& input_lengths;      // int32_t, [decoder_batch_size + context_batch_size]
     const Buffer& sequence_lengths;   // int32_t, [decoder_batch_size]
 
     // [batch_size, block_length], int64 block pointers
