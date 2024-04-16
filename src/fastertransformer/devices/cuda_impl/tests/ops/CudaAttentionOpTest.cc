@@ -208,13 +208,13 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto tensor_options = torch::TensorOptions(torch::kFloat).device(torch::Device(torch::kCPU));
     auto int_tensor_options = torch::TensorOptions(torch::kInt).device(torch::Device(torch::kCPU));
 
-    auto query_states_host = torch::ones(
+    auto query_states_host = torch::rand(
         {(int)batch_size, (int)seq_len, (int)num_heads, (int)head_dim}, tensor_options);
 
-    auto key_states_host = torch::ones(
+    auto key_states_host = torch::rand(
         {(int)batch_size, (int)seq_len, (int)num_key_value_heads, (int)head_dim}, tensor_options);
 
-    auto value_states_host = torch::ones(
+    auto value_states_host = torch::rand(
         {(int)batch_size, (int)seq_len, (int)num_key_value_heads, (int)head_dim}, tensor_options);
 
     auto k_cache_host = torch::zeros(
@@ -229,13 +229,13 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
          value_states_host.view({(int)batch_size * (int)seq_len , (int)num_key_value_heads, (int)head_dim})}, 1);
 
 
-    std::vector<size_t> sequence_lengths(batch_size);
-    std::vector<size_t> input_lengths(batch_size);
+    std::vector<int> sequence_lengths(batch_size);
+    std::vector<int> input_lengths(batch_size);
     for (int i = 0; i < batch_size; i++) {
         sequence_lengths[i] = kv_seq_len + seq_len - 1;
         input_lengths[i]    = kv_seq_len;
     }
-    auto step = *std::max_element(sequence_lengths.begin(), sequence_lengths.end());
+    size_t step = *std::max_element(sequence_lengths.begin(), sequence_lengths.end());
     step = step + 1;
     auto sequence_lengths_host = torch::from_blob((void*)sequence_lengths.data(), {(int)batch_size}, int_tensor_options);
     auto input_lengths_host = torch::from_blob((void*)input_lengths.data(), {(int)batch_size}, int_tensor_options);
@@ -347,7 +347,7 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
                                          v_cache_host);
 
     auto result  = bufferToTensor(*(qkv_output.hidden_states));
-    assertTensorClose(result_ref[6].to(result.dtype()), result);
+    assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 1e-2);
 
 }
 
@@ -356,7 +356,7 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
 TEST_F(CudaAttentionOpTest, SelfAttentionOpTest) {
     std::vector<size_t> batch = {1};
     std::vector<size_t> seq   = {1};
-    std::vector<size_t> kv_seq = {4};
+    std::vector<size_t> kv_seq = {16};
     for (auto batch_size : batch) {
         for (auto seq_len : seq) {
             for (auto kv_seq_len: kv_seq) {
