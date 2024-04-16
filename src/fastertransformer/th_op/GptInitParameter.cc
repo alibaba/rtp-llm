@@ -1,28 +1,33 @@
 #include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "c10/util/intrusive_ptr.h"
 
 namespace th = torch;
 namespace ft = fastertransformer;
 
 SpecialTokens::SpecialTokens():
-    user_(c10::intrusive_ptr<RoleSpecialTokens>::reclaim(new RoleSpecialTokens)),
-    assistant_(c10::intrusive_ptr<RoleSpecialTokens>::reclaim(new RoleSpecialTokens)),
-    system_(c10::intrusive_ptr<RoleSpecialTokens>::reclaim(new RoleSpecialTokens)) {}
+    user_(c10::make_intrusive<RoleSpecialTokens>()),
+    assistant_(c10::make_intrusive<RoleSpecialTokens>()),
+    system_(c10::make_intrusive<RoleSpecialTokens>()) {}
 
 GptInitParameter::GptInitParameter():
-    special_tokens_(c10::intrusive_ptr<SpecialTokens>::reclaim(new SpecialTokens)),
-    quant_algo_(c10::intrusive_ptr<QuantAlgo>::reclaim(new QuantAlgo)) {}
+    special_tokens_(c10::make_intrusive<SpecialTokens>()),
+    quant_algo_(c10::make_intrusive<QuantAlgo>()) {}
 
-GptInitParameter::GptInitParameter(
-    int64_t head_num, int64_t size_per_head, int64_t num_layers,
-    int64_t max_seq_len, int64_t vocab_size, int64_t hidden_size):
+GptInitParameter::GptInitParameter(int64_t head_num,
+                                   int64_t size_per_head,
+                                   int64_t num_layers,
+                                   int64_t max_seq_len,
+                                   int64_t vocab_size,
+                                   int64_t hidden_size):
     head_num_(head_num),
     size_per_head_(size_per_head),
     num_layers_(num_layers),
     max_seq_len_(max_seq_len),
     vocab_size_(vocab_size),
     hidden_size_(hidden_size),
-    special_tokens_(c10::intrusive_ptr<SpecialTokens>::reclaim(new SpecialTokens)),
-    quant_algo_(c10::intrusive_ptr<QuantAlgo>::reclaim(new QuantAlgo)) {}
+    special_tokens_(c10::make_intrusive<SpecialTokens>()),
+    quant_algo_(c10::make_intrusive<QuantAlgo>()) {
+}
 
 void GptInitParameter::setLayerNormType() {
     layernorm_type_ = ft::getLayerNormType(layernorm_type_str_);

@@ -18,14 +18,14 @@ inline BufferShapeType torchShapeToBufferShape(const c10::IntArrayRef& sizes) {
     return shape;
 }
 
-std::vector<int64_t> bufferShapeToTorchShape(const Buffer& buffer) {
+inline std::vector<int64_t> bufferShapeToTorchShape(const Buffer& buffer) {
     std::vector<int64_t> tensor_shape(buffer.shape().size());
     std::transform(
         buffer.shape().begin(), buffer.shape().end(), tensor_shape.begin(), [](size_t x) { return (int64_t)x;});
     return tensor_shape;
 }
 
-size_t calcTensorBytes(torch::Tensor tensor) {
+inline size_t calcTensorBytes(torch::Tensor tensor) {
     return tensor.numel() * torch::elementSize(torch::typeMetaToScalarType(tensor.dtype()));
 }
 
@@ -76,11 +76,11 @@ inline c10::ScalarType dataTypeToTorchType(DataType data_type) {
 
 #undef FOREACH_BUFFER_TORCH_TYPE_MAP
 
-MemoryType torchDeviceToMemoryType(const c10::Device& device ) {
+inline MemoryType torchDeviceToMemoryType(const c10::Device& device ) {
     return device.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
 }
 
-BufferPtr torchTensor2Buffer(const torch::Tensor& tensor) {
+inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor) {
     const auto& data = tensor.data_ptr();
     const auto& shape = torchShapeToBufferShape(tensor.sizes());
     const auto& dtype = torchDTypeToDataType(tensor.dtype());

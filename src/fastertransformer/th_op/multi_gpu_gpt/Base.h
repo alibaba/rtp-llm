@@ -2,9 +2,11 @@
 
 #include <string>
 #include <unordered_map>
+#include "src/fastertransformer/th_op/th_utils.h"
 #include "src/fastertransformer/models/W.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLoRALayerWeight.h"
-#include "src/fastertransformer/th_op/th_utils.h"
+#include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLayerWeight.h"
+#include "src/fastertransformer/th_op/GptInitParameter.h"
 
 namespace th = torch;
 namespace ft = fastertransformer;
@@ -29,8 +31,8 @@ inline at::ScalarType getScalarType(const std::string& data_type) {
     return scalar_type;
 }
 
-template<typename T>
-T *maybe_get(const std::unordered_map<std::string, th::Tensor> &m, const std::string &name) {
+template<typename T, typename TensorType=th::Tensor>
+T *maybe_get(const std::unordered_map<std::string, TensorType> &m, const std::string &name) {
     auto it = m.find(name);
     if (it == m.end()) {
         return nullptr;
@@ -39,13 +41,13 @@ T *maybe_get(const std::unordered_map<std::string, th::Tensor> &m, const std::st
     return get_ptr<T>(it->second);
 }
 
-template<typename T>
+template<typename T, typename TensorType=th::Tensor>
 std::vector<ft::ParallelGptDecoderLayerWeight<T>*>
 loadWeights(int                                                             pp_size,
             size_t                                                          pp_rank,
             size_t                                                          num_layers,
             c10::intrusive_ptr<QuantAlgo>                                   quant_algo,
-            const std::vector<std::unordered_map<std::string, th::Tensor>>& weights,
+            const std::vector<std::unordered_map<std::string, TensorType>>& weights,
             const std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*>*   lora_weights     = nullptr)
 {
     size_t local_num_layers = (num_layers + pp_size - 1) / pp_size;

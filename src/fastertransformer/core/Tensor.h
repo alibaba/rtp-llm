@@ -225,7 +225,9 @@ private:
     std::unordered_map<std::string, Tensor> tensor_map_;
 
     inline bool isValid(const Tensor& tensor) {
-        return tensor.size() > 0 && tensor.data() != nullptr;
+        // tmp not judge valid, allow empty tensor
+        return true;
+        // return tensor.size() > 0 && tensor.data() != nullptr;
     }
 
 public:

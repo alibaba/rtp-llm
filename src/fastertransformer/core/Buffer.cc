@@ -51,6 +51,10 @@ void* Buffer::dataWithOffset(size_t offset) const {
     return static_cast<char*>(data_) + offset * getTypeSize(type_);
 }
 
+size_t Buffer::typeSize() const {
+    return getTypeSize(type_);
+}
+
 size_t Buffer::size() const {
     if (shape_.empty()) {
         return 0;

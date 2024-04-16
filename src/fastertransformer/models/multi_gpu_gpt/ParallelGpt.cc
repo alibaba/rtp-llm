@@ -319,7 +319,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     FT_CHECK(input_tensors->isExist("decoder_input"));
     FT_CHECK(input_tensors->isExist("input_lengths"));
-    FT_CHECK(input_tensors->isExist("block_index_map"));
     FT_CHECK(output_tensors->isExist("decoder_output"));
     FT_CHECK(input_tensors->isExist("lora_ids"));
     FT_CHECK(input_tensors->isExist("lora_input_lengths"));
@@ -335,7 +334,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     }
     const size_t   h_token_num = decoder_input_tensor.shape()[0];
     const DataType data_type   = getTensorType<T>();
-    const bool     use_kvcache = output_tensors->isExist("key_cache") && output_tensors->isExist("value_cache");
+    const bool     use_kvcache = (output_tensors->isExist("key_cache") && output_tensors->isExist("value_cache")) || output_tensors->isExist("block_pointers");
 
     PUSH_RANGE(stream_, "buffer allocation");
     bool reuse_buf   = !params_.use_norm_input_residual_;
@@ -369,17 +368,22 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                         cudaMemcpyHostToDevice, stream_);
     }
 
-    size_t kv_cache_offset = 0;
     uint   max_blocks_per_batch = 0;
     size_t block_stride = 0;
     if (use_kvcache) {
-        convert_to_block_pointers(output_tensors, input_tensors, total_batch_size);
-        Tensor k_cache = output_tensors->at("key_cache");
-        for (auto t = k_cache.shape().begin() + 1; t != k_cache.shape().end(); ++t) {
-            kv_cache_offset *= *t;
+        if (output_tensors->isExist("block_pointers")) {
+            Tensor block_pointers = output_tensors->at("block_pointers");
+            assert(block_pointers.shape()[0] == params_.num_layers_);
+            assert(block_pointers.shape()[1] == total_batch_size);
+            assert(block_pointers.shape()[2] == 2);
+            max_blocks_per_batch = block_pointers.shape()[3];
+            block_stride = total_batch_size * 2 * max_blocks_per_batch;
+            cudaMemcpyAsync(block_pointers_, block_pointers.data(), sizeof(int64_t) * params_.num_layers_ * total_batch_size * max_blocks_per_batch * 2, cudaMemcpyHostToDevice, stream_);
+        } else {
+            convert_to_block_pointers(output_tensors, input_tensors, total_batch_size);
+            max_blocks_per_batch = (uint)(input_tensors->at("block_index_map").shape()[1]);
+            block_stride = total_batch_size * 2 * max_blocks_per_batch;
         }
-        max_blocks_per_batch = (uint)(input_tensors->at("block_index_map").shape()[1]);
-        block_stride = total_batch_size * 2 * max_blocks_per_batch;
     }
 
     const auto activation_in_type  = params_.quant_algo_->int8_mode_ == 2 ? TYPE_INT8 : data_type;
@@ -462,7 +466,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         sync_check_cuda_error();
         POP_RANGE;
 
-        size_t   cache_offset = (l - getFirstLayerParallelId()) * kv_cache_offset;
         const T* input_query  = nullptr;
         if (pre_attn_ln) {
             input_query = attn_normed_input_;

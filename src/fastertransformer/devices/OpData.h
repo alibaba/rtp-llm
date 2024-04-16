@@ -345,7 +345,7 @@ struct BroadcastParams {
     const int64_t        root;
 };
 
-struct AllReduceParams {
+struct AllReduceParameters {
     std::vector<Buffer>& buffers;
 };
 

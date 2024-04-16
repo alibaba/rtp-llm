@@ -13,8 +13,8 @@ public:
 
 public:
     std::string type() const override { return "cuda"; }
-    IAllocator* getAllocator() override { return allocator_.get(); }
-    IAllocator* getHostAllocator() override { return host_allocator_.get(); }
+    IAllocator* getAllocator() const override { return allocator_.get(); }
+    IAllocator* getHostAllocator() const override { return host_allocator_.get(); }
     int getDeviceId() const { return device_id_; }
     cudaStream_t getStream() {return stream_;}
 
@@ -33,7 +33,12 @@ public:
     void sampleGreedy(const GreedyParams& params);
     void sampleBeamSearch(const BeamSearchParams& params);
     void broadcast(const BroadcastParams& params);
-    void allReduceSum(const AllReduceParams& params);
+    void allReduceSum(const AllReduceParameters& params);
+
+// TODO: @xinglai delelte this
+public:
+    cudaStream_t stream() const {return stream_;}
+    cublasMMWrapper* cublasMMWrapperPtr() const {return cublas_mm_wrapper_.get();}
 
 private:
     std::unique_ptr<IAllocator> allocator_;

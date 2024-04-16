@@ -11,8 +11,8 @@ public:
 
 public:
     std::string type() const override { return "cpu"; }
-    IAllocator* getAllocator() override { return allocator_.get(); }
-    IAllocator* getHostAllocator() override { return allocator_.get(); }
+    IAllocator* getAllocator() const override { return allocator_.get(); }
+    IAllocator* getHostAllocator() const override { return allocator_.get(); }
 
 public:
     void copy(const CopyParams& params);
@@ -29,7 +29,7 @@ public:
     void sampleGreedy(const GreedyParams& params);
     void sampleBeamSearch(const BeamSearchParams& params);
     void broadcast(const BroadcastParams& params);
-    void allReduceSum(const AllReduceParams& params);
+    void allReduceSum(const AllReduceParameters& params);
 
 private:
     std::unique_ptr<IAllocator> allocator_;

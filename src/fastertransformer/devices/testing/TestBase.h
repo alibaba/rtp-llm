@@ -139,7 +139,7 @@ protected:
         return values;
     }
 
-    std::unique_ptr<Buffer> tensorToBuffer(const torch::Tensor& tensor,
+    std::unique_ptr<const Buffer> tensorToBuffer(const torch::Tensor& tensor,
                                            AllocationType alloc_type = AllocationType::DEVICE)
     {
         assert(tensor.is_cpu());
@@ -150,9 +150,9 @@ protected:
             );
             device_->copy(CopyParams(*device_buffer, *buffer));
             printf("created device buffer from tensor at %p with data=%p\n", device_buffer.get(), device_buffer->data());
-            return move(device_buffer);
+            return std::move(device_buffer);
         } else {
-            return move(buffer);
+            return std::move(buffer);
         }
     }
 

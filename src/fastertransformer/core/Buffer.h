@@ -49,6 +49,7 @@ public:
         assert(type_ == getTensorType<T>());
         return static_cast<T*>(dataWithOffset(offset));
     }
+    size_t                     typeSize() const;
 
     size_t size() const;
     size_t sizeBytes() const;
