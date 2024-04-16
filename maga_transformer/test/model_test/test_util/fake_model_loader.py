@@ -4,17 +4,19 @@ import json
 import torch
 from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
+from maga_transformer.async_decoder_engine.rpc_model import RpcModel
 from maga_transformer.model_factory import ModelConfig, ModelFactory
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 
 class FakeModelLoader(object):
-    def __init__(self, model_type: str, tokenizer_path: str, ckpt_path: str, weight_type: WEIGHT_TYPE, max_seq_len: int=0) -> None:
+    def __init__(self, model_type: str, tokenizer_path: str, ckpt_path: str, weight_type: WEIGHT_TYPE, max_seq_len: int=0, test_rpc_model: bool = False) -> None:
         self.model_type = model_type
         self.tokenizer_path = tokenizer_path
         self.ckpt_path = ckpt_path
         self.weight_type = weight_type
         self.max_seq_len = max_seq_len
+        self.test_rpc_model = test_rpc_model
 
         logging.info(f"tokenizer path: {self.tokenizer_path}")
         logging.info(f"check point path: {self.ckpt_path}")
@@ -65,6 +67,9 @@ class FakeModelLoader(object):
         )
 
         model = model_cls.from_config(raw_config)
-        model = AsyncModel(model)
+        if self.test_rpc_model:
+            model = RpcModel(model)
+        else:
+            model = AsyncModel(model)
 
         return model

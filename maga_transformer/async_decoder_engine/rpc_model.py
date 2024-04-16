@@ -8,15 +8,17 @@ from maga_transformer.utils.time_util import Timer
 from maga_transformer.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.distribute.worker_info import g_parallel_info
+from maga_transformer.config.gpt_init_model_parameters import ModelType
 from PIL import Image
 
 class RpcModel:
-    def __init__(self, model: BaseModel, sp_model: Optional[BaseModel] = None) -> None;
+    def __init__(self, model: BaseModel, sp_model: Optional[BaseModel] = None) -> None:
         self.model = model
         self.sp_model = sp_model
+        self.tokenizer = model.tokenizer
         self.config = model.config
         self.vit_expand_token_id_lock = asyncio.Lock()
-        self.rtp_llm_op_ = RtpLLMOp(model.config, False, model.weight.weights, model.global_weight)
+        self.rtp_llm_op_ = RtpLLMOp(model.config, False, model.weight.weights, model.global_weights)
         self.model_rpc_client = ModelRpcClient()
 
     def is_multimodal(self) -> bool:
@@ -46,4 +48,4 @@ class RpcModel:
     def enqueue(self, input: GenerateInput):
         if g_parallel_info.tp_size > 1 and g_parallel_info.tp_rank > 0:
             raise Exception('bug, not supposed to be here')
-        return self.model_rpc_client.decode(input)
+        return self.model_rpc_client.enqueue(input)
