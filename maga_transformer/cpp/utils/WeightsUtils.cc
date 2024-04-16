@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/utils/WeightsUtils.h"
-#include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/models/W.h"
 

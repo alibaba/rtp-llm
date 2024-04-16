@@ -6,11 +6,6 @@
 
 namespace fastertransformer {
 
-enum class AllocationType {
-    HOST   = 0,
-    DEVICE = 1,
-};
-
 enum class BufferLifecycleType {
     SHORT,
     LONG

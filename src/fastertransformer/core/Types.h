@@ -10,6 +10,11 @@ typedef enum memorytype_enum {
     MEMORY_GPU
 } MemoryType;
 
+enum class AllocationType {
+    HOST   = 0,
+    DEVICE = 1,
+};
+
 typedef enum datatype_enum {
     TYPE_INVALID,
     TYPE_BOOL,

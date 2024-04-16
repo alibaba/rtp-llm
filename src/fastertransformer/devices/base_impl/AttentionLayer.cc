@@ -33,14 +33,16 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
 
     const auto qkv_output = allocateBuffer({input.type(), {h_token_num, qkv_hidden_size}});
 
+    auto generate_qkv = qkv->view(0, generate_batch_size);
     auto generate_output = qkv_output->view(0, generate_batch_size);
+    auto context_qkv = qkv->view(generate_batch_size, context_token_num);
     auto context_output = qkv_output->view(generate_batch_size, context_token_num);
 
     if (generate_batch_size) {
-        decoderSelfAttention({*qkv, generate_output, params.common, params.weights, params.configs});
+        decoderSelfAttention({generate_qkv, generate_output, params.common, params.weights, params.configs});
     }
     if (context_batch_size) {
-        contextAttention({*qkv, context_output, params.common, params.weights, params.configs});
+        contextAttention({context_qkv, context_output, params.common, params.weights, params.configs});
     }
 
     auto output = gemm({*qkv_output, *(output_weight->kernel)});

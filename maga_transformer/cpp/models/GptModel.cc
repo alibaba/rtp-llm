@@ -1,4 +1,5 @@
 #include "maga_transformer/cpp/models/GptModel.h"
+#include "src/fastertransformer/devices/utils/BufferUtils.h"
 
 using namespace std;
 
@@ -11,11 +12,54 @@ GptModel::GptModel(const GptModelInitParams& params)
     , attention_configs_(AttentionConfigs({}))
     {};
 
+void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
+                                  int32_t*       cu_seqlens,
+                                  const int32_t* sequence_length,
+                                  const int32_t  batch_size)
+{
+    // do cumulated sum
+    int32_t        total_seq_len        = 0;
+    int32_t        cum_offset           = 0;
+    int32_t        index                = 0;
+    const auto max_seq_len = *std::max_element(sequence_length, sequence_length + batch_size);
+    for (int32_t i = 0; i < batch_size; i++) {
+        const int32_t seq_len = sequence_length[i];
+        cu_seqlens[i] = total_seq_len;
+        for (int32_t j = 0; j < seq_len; j++) {
+            padding_offset[index] = cum_offset;
+            index++;
+        }
+        cum_offset += max_seq_len - seq_len;
+        total_seq_len += seq_len;
+    }
+    cu_seqlens[batch_size] = total_seq_len;
+}
+
 AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inputs) {
     AttentionCommonInputs attention_inputs({
         inputs.input_lengths,
         inputs.sequence_lengths
     });
+
+    const auto decoder_batch_size = inputs.sequence_lengths.shape()[0];
+    const auto context_batch_size = inputs.input_lengths.shape()[0] - decoder_batch_size;
+
+    std::vector<int32_t> cu_seqlens_data(context_batch_size + 1);
+    std::vector<int32_t> padding_offset_data(inputs.combo_tokens.shape()[0]);
+    getPaddingOffsetAndCuSeqLens(
+        padding_offset_data.data(),
+        cu_seqlens_data.data(),
+        inputs.input_lengths.dataWithOffset<int32_t>(decoder_batch_size),
+        context_batch_size);
+    if (!(cu_seqlens_data[context_batch_size] == inputs.combo_tokens.shape()[0])) {
+        throw OpException(
+            {OpErrorType::ERROR_INVALID_ARGS, "cu_seqlens is not consistent with combo_tokens."});
+    }
+    attention_inputs.cu_seqlens = device_->clone({vector2Buffer(cu_seqlens_data)});
+    attention_inputs.padding_offset = device_->clone({vector2Buffer(padding_offset_data)});
+    attention_inputs.kv_cache_blocks = inputs.kv_cache_blocks;
+    attention_inputs.position_ids = inputs.position_ids;
+    attention_inputs.attention_mask = inputs.attention_mask;
     return move(attention_inputs);
 }
 

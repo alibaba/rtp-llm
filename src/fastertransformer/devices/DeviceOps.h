@@ -14,6 +14,7 @@ public:
 
     // tensor ops
     virtual void copy(const CopyParams& params)                                             = 0;
+    virtual CloneOutput clone(const CloneParams& params)                                    = 0;
     virtual TransposeOutput transpose(const TransposeParams& params)                        = 0;
 
     // basic compuation ops

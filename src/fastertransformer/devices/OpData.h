@@ -68,6 +68,16 @@ inline std::optional<std::reference_wrapper<T>> mayGetRef(const std::unique_ptr<
     return ptr ? std::optional<std::reference_wrapper<T>>(*ptr) : std::nullopt;
 }
 
+using CloneOutput = BufferPtr;
+
+struct CloneParams {
+    CloneParams(const Buffer& input, const AllocationType alloc_type = AllocationType::DEVICE)
+    : input(input), alloc_type(alloc_type) {}
+
+    const Buffer& input;
+    const AllocationType alloc_type;
+};
+
 struct CopyParams {
     CopyParams(const Buffer& dst, const Buffer& src)
     : dst(dst), src(src)
@@ -213,8 +223,9 @@ struct AttentionCommonInputs {
 
     // [batch_size, block_length], int64 block pointers
     OptionalConstBufferRef kv_cache_blocks;
-    OptionalConstBufferRef cu_seqlens;
-    OptionalConstBufferRef padding_offset;
+
+    ConstBufferPtr cu_seqlens;
+    ConstBufferPtr padding_offset;
 
     OptionalConstBufferRef position_ids;
     OptionalConstBufferRef attention_mask;

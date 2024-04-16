@@ -29,7 +29,7 @@ struct GptModelInitParams {
 // ids and lengths are int32_t
 struct GptModelInputs {
     // input_lengths holds original input length for requests,
-    // shape [context_batch_size + decoder_batch_size], int32
+    // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
     const Buffer& combo_tokens;                // [cumulated_seq_len]
@@ -39,7 +39,7 @@ struct GptModelInputs {
     OptionalConstBufferRef attention_mask;     // [batch_size, seq_len, seq_len]
     OptionalConstBufferRef position_ids;       // [batch_size, seq_len]
 
-    const Buffer& kv_cache_blocks;             // [batch_size, block_length], int64 block pointers
+    OptionalConstBufferRef kv_cache_blocks;    // [batch_size, block_length], int64 block pointers
 };
 
 struct GptModelOutputs {

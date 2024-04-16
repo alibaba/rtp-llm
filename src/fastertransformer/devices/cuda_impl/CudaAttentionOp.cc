@@ -39,8 +39,8 @@ void addFusedQKVBiasTransposeWrapper(const AttentionModuleParams& params,
 
     const int* position_ids     = params.common.position_ids.value().get().data<int>();
     const T*   bias_ptr         = params.weights.qkv_weight->bias->data<T>();
-    const int* padding_offset   = params.common.padding_offset.value().get().data<int>();
-    const int* cu_seqlens_ptr   = params.common.cu_seqlens.value().get().data<int>();
+    const int* padding_offset   = params.common.padding_offset->data<int>();
+    const int* cu_seqlens_ptr   = params.common.cu_seqlens->data<int>();
 
     PrefixPromptBatchWeightsParam<T> param;
 
