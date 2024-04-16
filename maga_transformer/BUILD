@@ -73,7 +73,7 @@ py_library(
     name = "pipeline",
     srcs = glob([
         "pipeline/**/*.py",
-    ])
+    ]),
 )
 
 py_library(
@@ -127,6 +127,7 @@ py_library(
         ":ops",
         ":config",
         ":structure",
+        "//maga_transformer/cpp:model_rpc_client",
     ],
 )
 

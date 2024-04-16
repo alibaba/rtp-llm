@@ -12,25 +12,27 @@ struct SamplerInitParams {
 };
 
 struct SamplerInputs {
-    const Buffer& logits;            // shape: [batch_size * num_beams, vocab_size]
-    mutable BufferPtr token_ids;     // shape: [batch_size * num_beams, max_length]
-    const Buffer& sequence_lengths;  // shape: [batch_size]
-    const size_t step;               // typically largest sequence length in the batch
+public:
+    BufferPtr logits;            // shape: [batch_size * num_beams, vocab_size]
+    mutable BufferPtr token_ids;         // shape: [batch_size * num_beams, max_length]
+    BufferPtr sequence_lenghts;  // shape: [batch_size]
+    size_t    step;              // typically largest sequence length in the batch
 
-    const size_t batch_size;
-    const Buffer& num_beams;                    // shape: [batch_size]
-    const Buffer& top_k;                        // shape: [batch_size]
-    const Buffer& top_p;                        // shape: [batch_size]
-    const Buffer& temperature;                  // shape: [batch_size]
-    const OptionalBufferRef random_seeds;       // shape: [batch_size]
-    const OptionalBufferRef repetition_penalty; // shape: [batch_size]
-    const OptionalBufferRef length_penalty;     // shape: [batch_size]
+    size_t    batch_size;
+    BufferPtr num_beams;           // shape: [batch_size]
+    BufferPtr top_k;               // shape: [batch_size]
+    BufferPtr top_p;               // shape: [batch_size]
+    BufferPtr temperature;         // shape: [batch_size]
+    BufferPtr random_seeds;        // shape: [batch_size]
+    BufferPtr repetition_penalty;  // shape: [batch_size]
+    BufferPtr length_penalty;      // shape: [batch_size]
 
-    Buffer& kv_cache_blocks; // shape: [batch_size * num_beams, block_length], int64 block pointers
-    mutable BufferPtr cum_log_probs; // shape: [batch_size * num_beams]
+    BufferPtr kv_cache_blocks;     // shape: [batch_size * num_beams, block_length], int64 block pointers
+    mutable BufferPtr cum_log_probs;       // shape: [batch_size * num_beams]
 };
 
 struct SamplerOutput {
+public:
     BufferPtr token_ids;
     BufferPtr cum_log_probs;
 };
@@ -40,7 +42,7 @@ struct SamplerOutput {
 class Sampler {
 public:
     Sampler(const SamplerInitParams& params);
-    ~Sampler() {};
+    ~Sampler(){};
 
     SamplerOutput forward(const SamplerInputs& inputs);
 
@@ -48,5 +50,16 @@ private:
     DeviceBase* device_;
 };
 
+class SpeculativeSampler: public Sampler {
+public:
+    SpeculativeSampler(const SamplerInitParams& params): Sampler(params){};
+    ~SpeculativeSampler(){};
+};
 
-} // namespace rtp_llm
+class MedusaTreeSampler: public Sampler {
+public:
+    MedusaTreeSampler(const SamplerInitParams& params): Sampler(params){};
+    ~MedusaTreeSampler(){};
+};
+
+}  // namespace rtp_llm

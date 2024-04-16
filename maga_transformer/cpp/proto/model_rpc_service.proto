@@ -1,0 +1,69 @@
+// message.proto
+syntax = "proto3";
+import "google/protobuf/wrappers.proto";
+
+
+message TensorPB {
+    enum DataType {
+        FLOAT32 = 0;
+        INT32 = 1;
+    }
+    DataType data_type = 1;
+    repeated int64 shape = 2;
+    repeated float data_float32 = 3;
+    repeated int32 data_int32 = 4;
+}
+
+message GenerateConfigPB {
+    int32 max_new_tokens = 1;
+    int32 num_beams = 2;
+    int32 num_return_sequences = 3;
+    int32 min_new_tokens = 4;
+
+    google.protobuf.Int32Value top_k = 5;
+    google.protobuf.FloatValue top_p = 6;
+    google.protobuf.FloatValue temperature = 7;
+    google.protobuf.FloatValue repetition_penalty = 8;
+    google.protobuf.Int64Value random_seed = 9;
+    google.protobuf.FloatValue top_p_decay = 10;
+    google.protobuf.FloatValue top_p_min = 11;
+    google.protobuf.Int32Value top_p_reset_ids = 12;
+    google.protobuf.Int64Value task_id = 13;
+    google.protobuf.Int64Value adapter_name = 14;
+    int32 calculate_loss = 15;
+    bool return_incremental = 16;
+    bool return_hidden_states = 17;
+    bool return_logits = 18;
+}
+
+message GenerateInputPB {
+    int64 request_id = 1;
+    repeated int32 token_ids = 2;
+    repeated bytes images = 3;
+    GenerateConfigPB generate_config = 4;
+    google.protobuf.Int64Value lora_id = 5;
+    int32 prefix_length = 6;
+}
+
+message AuxInfoPB {
+    int32 cost_time_ms = 1;
+    int32 iter_count = 2;
+    int32 input_len = 3;
+    int32 output_len = 4;
+    int32 reuse_len = 5;
+    TensorPB cum_log_probs = 6;
+}
+
+message GenerateOutputPB {
+    int64 request_id = 1;
+    bool finished = 3;
+    AuxInfoPB aux_info = 4;
+    TensorPB output_ids = 2;
+    TensorPB hidden_states = 5;
+    TensorPB loss = 6;
+    TensorPB logits = 7;
+}
+
+service ModelRpcService {
+    rpc generate_stream(GenerateInputPB) returns (stream GenerateOutputPB);
+}

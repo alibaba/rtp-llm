@@ -139,7 +139,7 @@ protected:
         return values;
     }
 
-    std::unique_ptr<const Buffer> tensorToBuffer(const torch::Tensor& tensor,
+    std::unique_ptr<Buffer> tensorToBuffer(const torch::Tensor& tensor,
                                            AllocationType alloc_type = AllocationType::DEVICE)
     {
         assert(tensor.is_cpu());

@@ -10,6 +10,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from maga_transformer.models.base_model import BaseModel, ModelConfig
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
+from maga_transformer.async_decoder_engine.rpc_model import RpcModel
 from maga_transformer.tools.api.hf_model_helper import get_model_info_from_hf
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.dump_config_utils import dump_model_to_table
@@ -70,9 +71,13 @@ class ModelFactory:
     @staticmethod
     def from_model_config(model_config: ModelConfig, sp_model_config: Optional[ModelConfig] = None) -> Union[AsyncModel, BaseModel]:
         model = ModelFactory._create_model(model_config)
-        if model_config.model_type != 'fake_model': # for test
+        if model_config.use_rpc:
+            sp_model = None if sp_model_config is None else ModelFactory._create_model(sp_model_config)
+            model = RpcModel(model, sp_model)
+        elif model_config.model_type != 'fake_model': # for test
             sp_model = None if sp_model_config is None else ModelFactory._create_model(sp_model_config)
             model = AsyncModel(model, sp_model)
+
         return model
 
     @staticmethod
@@ -117,7 +122,7 @@ class ModelFactory:
         ACT_TYPE = "ACT_TYPE"
         if os.environ.get(ACT_TYPE, None):
             act_type = WEIGHT_TYPE.from_str(os.environ.get(ACT_TYPE))
-
+        use_rpc_model = bool(int(os.environ.get("USE_RPC_MODEL", 0)))
         model_config = ModelConfig(model_type=model_type,
                                    ckpt_path=ckpt_path,
                                    tokenizer_path=tokenizer_path,
@@ -126,8 +131,9 @@ class ModelFactory:
                                    max_seq_len=max_seq_len,
                                    seq_size_per_block=seq_size_per_block,
                                    lora_infos=lora_infos,
-                                   ptuning_path=ptuning_path)
-    
+                                   ptuning_path=ptuning_path,
+                                   use_rpc=use_rpc_model)
+
         return model_config
     
     @staticmethod

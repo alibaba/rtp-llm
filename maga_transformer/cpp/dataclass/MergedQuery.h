@@ -1,84 +1,83 @@
 #pragma once
-
 #include "maga_transformer/cpp/dataclass/Query.h"
+#include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/models/GptModel.h"
+#include "maga_transformer/cpp/models/Sampler.h"
+#include "src/fastertransformer/core/Buffer.h"
+#include <memory>
+#include <optional>
 
-namespace th = torch;
+namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
 class MergedGenerateConfig {
 public:
-    int64_t batch_size;
-    int64_t beam_size = 1;
-    th::optional<th::Tensor> runtime_top_k;
-    th::optional<th::Tensor> runtime_top_p;
-    th::optional<th::Tensor> temperature;
-    th::optional<th::Tensor> repetition_penalty;
-    th::optional<th::Tensor> presence_penalty;
-    th::optional<th::Tensor> min_length;
-    th::optional<th::Tensor> len_penalty;
-    th::optional<th::Tensor> beam_search_diversity_rate;
-    th::optional<th::Tensor> random_seed;
-    th::optional<th::Tensor> top_p_decay;
-    th::optional<th::Tensor> top_p_min;
-    th::optional<th::Tensor> top_p_reset_ids;
+    int64_t                      batch_size;
+    int64_t                      beam_size = 1;
+    std::optional<ft::BufferPtr> runtime_top_k;
+    std::optional<ft::BufferPtr> runtime_top_p;
+    std::optional<ft::BufferPtr> temperature;
+    std::optional<ft::BufferPtr> repetition_penalty;
+    std::optional<ft::BufferPtr> presence_penalty;
+    std::optional<ft::BufferPtr> min_length;
+    std::optional<ft::BufferPtr> len_penalty;
+    std::optional<ft::BufferPtr> beam_search_diversity_rate;
+    std::optional<ft::BufferPtr> random_seed;
+    std::optional<ft::BufferPtr> top_p_decay;
+    std::optional<ft::BufferPtr> top_p_min;
+    std::optional<ft::BufferPtr> top_p_reset_ids;
 };
 
-class ModelRequest {
+class ModelInput {
 public:
     uint generate_batch_size;
     uint context_batch_size;
-    th::Tensor merged_ids;
-    th::Tensor combo_tokens;
-    th::Tensor input_lengths;
-    th::Tensor sequence_lengths;
-    th::Tensor prefix_lengths;
-    th::Tensor count_length;
-    th::Tensor lora_ids;
-    bool return_hidden_state;
-    bool calculate_loss;
-    th::Tensor kv_cache_blocks;
-    th::Tensor kv_cache_scales;
+    // ft::BufferPtr merged_ids;
+    ft::BufferPtr    combo_tokens;
+    std::vector<int> input_lengths;
+    std::vector<int> sequence_lengths;
+    std::vector<int> prefix_lengths;
+    ft::BufferPtr    count_length;
+    ft::BufferPtr    lora_ids;
+    bool             return_hidden_state;
+    bool             calculate_loss;
+    ft::BufferPtr    kv_cache_blocks;
+    ft::BufferPtr    kv_cache_scales;
 };
 
 class ModelOutput {
 public:
-    th::Tensor logits;
-    th::optional<th::Tensor> attentions;
-    th::optional<th::Tensor> all_hidden_states;
-    th::optional<th::Tensor> last_hidden_states;
-    th::optional<th::Tensor> loss;
+    ft::BufferPtr                logits;
 };
 
-class SamplerRequest {
+struct ModelRequest {
 public:
-    int64_t batch_size;
-    int32_t step;                 // same as max_input_length
-    std::shared_ptr<MergedGenerateConfig> generate_config;
-    bool need_setup = false;      // set to true when batch changes
-
-    // GPU tensors
-    th::Tensor input_lengths;     // [batch_size * beam_size]
-    th::Tensor sequence_lengths;  // [batch_size * beam_size]
-
-    // CPU tensors
-    th::Tensor finished;          // [batch_size * beam_size]
-    th::Tensor token_ids;         // [batch_size * beam_size, step + 1]
-    th::Tensor cum_log_probs;     // [batch_size * beam_size]
+    int generate_batch_size;
+    int context_batch_size;
+    BufferPtr combo_tokens;                // [cumulated_seq_len]
+    BufferPtr input_lengths;               // [batch_size]
+    BufferPtr sequence_lengths;            // [decoder_batch_size]
+    BufferPtr prefix_lengths;              // [batch_size, seq_len]
+    BufferPtr kv_cache_blocks;             // [batch_size, block_length], int64 block pointers
+    BufferPtr kv_cache_scales;             // [batch_size, block_length], int64 block scales
 };
 
-class SamplerOutput {
+struct MergedInput {
 public:
-    th::Tensor next_tokens;
-    th::Tensor finished;
-    th::Tensor cum_log_probs;
-    th::Tensor sequence_lengths;
+    // std::unique_ptr<GptModelInputs> model_input;
+    // std::unique_ptr<SamplerInputs> sampler_input;
+    GptModelInputs model_input;
+    SamplerInputs  sampler_input;
 };
 
-class MergedRequest {
+struct MergedOutput {
 public:
-    ModelRequest model_request;
-    SamplerRequest sampler_request;
+    GptModelOutputs model_output;
+    SamplerOutput   sampler_output;
+
+    // std::unique_ptr<GptModelOutputs> model_output;
+    // std::unique_ptr<SamplerOutput> sampler_output;
 };
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

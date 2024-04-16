@@ -171,6 +171,7 @@ class GPT(BaseModel):
 
         assert self.word_embedding is not None
         self.word_embedding.set_weight(self.weight.steal_pytorch_weight(W.embedding))
+        self.global_weights["embedding"] = self.word_embedding._emb;
         if (self.config.input_embedding_scalar - 1 > 1e-6):
             self.word_embedding.set_scalar(self.config.input_embedding_scalar)
         if self.lm_head is not None:
@@ -184,6 +185,7 @@ class GPT(BaseModel):
                 lm_head_w = self.config.scale_logit * lm_head_w
             self.lm_head.set_weight(lm_head_w, self.weight.steal_pytorch_weight(W.lm_head_b))
 
+        self.global_weights["lm_head"] = self.lm_head._w;
         if self.lm_head is not None:
             if self.config.tp_split_emb_and_lm_head:
                 self.vocab_size_padded = self.lm_head._w.shape[0] * g_parallel_info.tp_size
@@ -234,10 +236,15 @@ class GPT(BaseModel):
             if self.pre_decoder_layernorm is not None:
                 _safe_load_from_module(self.pre_decoder_layernorm.weight, W.pre_decoder_ln_gamma)
                 _safe_load_from_module(self.pre_decoder_layernorm.bias, W.pre_decoder_ln_beta)
+                self.global_weights["pre_attn_layernorm_weights.gamma"] = self.pre_decoder_layernorm.weight.data
+                self.global_weights["pre_attn_layernorm_weights.beta"] = self.pre_decoder_layernorm.bias.data
+
         if g_parallel_info.is_pp_last:
             if self.post_decoder_layernorm is not None:
                 _safe_load_from_module(self.post_decoder_layernorm.weight, W.final_ln_gamma)
                 _safe_load_from_module(self.post_decoder_layernorm.bias, W.final_ln_beta)
+                self.global_weights["final_layernorm.gamma"] = self.post_decoder_layernorm.weight.data
+                self.global_weights["final_layernorm.beta"] = self.post_decoder_layernorm.bias.data
 
         torch.cuda.empty_cache()
 

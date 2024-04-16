@@ -21,16 +21,16 @@ TEST_F(GptModelTest, testSimple) {
     GptModelDescription description;
     GptModel model({device_, *weights, description});
 
-    const auto combo_tokens = createBuffer<int32_t>({3}, {13048, 11, 220}, AllocationType::HOST);
-    const auto input_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
-    const auto sequence_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
+    auto combo_tokens = createBuffer<int32_t>({3}, {13048, 11, 220}, AllocationType::HOST);
+    auto input_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
+    auto sequence_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
 
     // TODO: fill these blokcs when BlockManager is done.
-    const auto kv_cache_blocks = createBuffer<int64_t>({1, 1}, {0}, AllocationType::HOST);
+    auto kv_cache_blocks = createBuffer<int64_t>({1, 1}, {0}, AllocationType::HOST);
 
     GptModelInputs inputs = {
-        *combo_tokens, *input_lengths, *sequence_lengths,
-        nullopt, nullopt, *kv_cache_blocks
+        std::move(combo_tokens), std::move(input_lengths), std::move(sequence_lengths),
+        nullopt, nullopt, std::move(kv_cache_blocks)
     };
 
     try {

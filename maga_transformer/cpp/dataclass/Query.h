@@ -1,109 +1,86 @@
 #pragma once
+#include "maga_transformer/cpp/dataclass/GenerateConfig.h"
+#include "src/fastertransformer/core/Buffer.h"
+#include <assert.h>
+#include <cstdint>
+#include <optional>
+#include <sstream>
+#include <string>
 
-#include <torch/custom_class.h>
-#include <torch/script.h>
-#include <torch/extension.h>
-
-#include <mutex>
-#include <condition_variable>
-
-namespace th = torch;
+namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-// TODO: complete params.
-// TODO: implement hash function to bind with sampler.
+struct MedusaState {};
 
-// NOTE: The params in generate config should be splitted into two parts:
-//       1. The params that can be different for a single sampler.
-//       e.g. top_k, top_p, temperature, repetition_penalty, etc.
-//       2. The params that must be the same for a single sampler.
-//       e.g. beam_size, max_seq_len, etc.
-//       For the second part, different samplers should be created for different params.
-//       So they can not be batched together for now.
-
-class GenerateConfig : public th::jit::CustomClassHolder {
+class GenerateInput {
 public:
-    int64_t max_seq_len = 8192;
-    int64_t max_new_tokens = 8192;
-    int64_t num_validate_token = 0; // for speculative decoding validation.
+    int inputLength() {
+        assert(input_ids->shape().size() == 1);
+        return input_ids->shape()[0];
+    }
 
-    int64_t beam_size = 1;
-    th::optional<int64_t> top_k;
-    th::optional<double> top_p;
-    th::optional<double> temperature;
-    th::optional<double> repetition_penalty;
-    th::optional<double> presence_penalty;
-    th::optional<int64_t> min_length;
-    th::optional<double> length_penalty;
-    th::optional<double> beam_search_diversity_rate;
-    th::optional<int64_t> random_seed;
-    th::optional<double> top_p_decay;
-    th::optional<double> top_p_min;
-    th::optional<int64_t> top_p_reset_ids;
+    int promptLength() {
+        return inputLength() - prefix_length;
+    }
+
+    std::string debugString() const {
+        std::stringstream debug_string;
+        debug_string << "GenerateInput {"
+                     << "request_id: " << request_id << ", generate_config:" << generate_config->debugString()
+                     << ", input_ids:" << input_ids->debugString() << ", prefix_length:" << prefix_length << "}";
+        return debug_string.str();
+    }
+
+public:
+    int64_t                         request_id;
+    std::shared_ptr<GenerateConfig> generate_config;
+    ft::BufferPtr                   input_ids;
+    std::optional<ft::BufferPtr>    input_embeddings;  // For multi-modality models
+    std::optional<int>              lora_id       = -1;
+    int                             prefix_length = 0;
+};
+
+class AuxInfo {
+public:
+    int                                              cost_time_ms;
+    int                                              iter_count;
+    int                                              input_len;
+    int                                              prefix_len;
+    int                                              reuse_len;
+    int                                              output_len;
+    std::optional<std::shared_ptr<const ft::Buffer>> cum_log_probs;
 };
 
 // TODO: add error code.
-class ErrorInfo : public th::jit::CustomClassHolder {
+class ErrorInfo {
 public:
-    bool has_error = false;
+    bool        has_error = false;
     std::string error_message;
 };
 
-class QueryRequest : public th::jit::CustomClassHolder {
+class GenerateOutput {
 public:
-    // NOTE: Every query must be assigned with a unique request_id.
-    //       This is related to the cache mechanism.
-    //       This id can be passed from outside, or generated during construction.
-    std::string request_id;
-    th::intrusive_ptr<GenerateConfig> generate_config;
-    th::Tensor input_ids;
-    // For multi-modality models, embedding might be calculated outside
-    th::optional<th::Tensor> input_embeddings;
+    std::shared_ptr<const ft::Buffer> output_ids;
+    bool                              finished;
+    ErrorInfo                         error_info;
+    AuxInfo                           aux_info;
+
+    std::optional<std::shared_ptr<const ft::Buffer>> hidden_states;
+    std::optional<std::shared_ptr<const ft::Buffer>> logits;
+    std::optional<std::shared_ptr<const ft::Buffer>> loss;
 };
 
-class GenerateResponse : public th::jit::CustomClassHolder {
-public:
-    th::Tensor output_token_ids;
-    th::Tensor finished;
-    bool all_finished;
-    th::intrusive_ptr<ErrorInfo> error_info;
-
-    th::optional<th::Tensor> log_probs;
-    th::optional<th::Tensor> hidden_states;
-    th::optional<th::Tensor> attentions;
-    th::optional<th::Tensor> logits;
-    th::optional<th::Tensor> loss;
+enum class GenerateState {
+    WAITING,
+    RUNNING,
+    STOPPED,
+    FINISHED,
 };
 
-class MagaQuery : public th::jit::CustomClassHolder {
-public:
-    MagaQuery(const th::intrusive_ptr<QueryRequest> &query);
-    ~MagaQuery();
-
-    // Exported to python world.
-    th::intrusive_ptr<GenerateResponse> next_response();
-    void cancel();
-
-    // Only used in C++ world.
-    void push_response(const th::intrusive_ptr<GenerateResponse> &response);
-    bool is_done();
-
-    // TODO: justify whether cache blocks should be managed here.
-    void add_cache_block(const std::vector<int64_t> &kv_cache_block);
-
-public:
-    th::intrusive_ptr<QueryRequest> query;
-    std::vector<std::vector<int64_t>> kv_cache_blocks;
-
-private:
-    size_t batch_size_;
-
-    bool done_;
-    bool cancelled_;
-    th::intrusive_ptr<GenerateResponse> current_response_;
-    std::mutex response_mutex_;
-    std::condition_variable update_cv_;
+struct GenerateStatus {
+    GenerateState status = GenerateState::WAITING;
+    std::string   error_info;
 };
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

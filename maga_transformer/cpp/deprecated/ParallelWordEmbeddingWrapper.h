@@ -1,13 +1,13 @@
 #pragma once
 
+#include "src/fastertransformer/cuda/cublas/cublas.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/layers/BaseLayer.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/utils/DenseWeight.h"
-#include "src/fastertransformer/cuda/cublas/cublas.h"
-#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 
-namespace maga_transformer {
+namespace rtp_llm {
 namespace ft = fastertransformer;
 
 template<typename T>
@@ -36,4 +36,4 @@ public:
     void forward(ft::Tensor& embeddings, const ft::Tensor tokens, ft::Tensor position_ids);
 };
 
-}  // namespace maga_transformer
+}  // namespace rtp_llm

@@ -53,19 +53,19 @@ TEST_F(SamplerTest, testSimple) {
     auto temperture = createBuffer<float>({batch_size}, {0.01, 0.01, 0.9, 0.7, 10}, AllocationType::HOST);
 
     SamplerInputs inputs {
-        *logits,
+        move(logits),
         move(output_token_ids),
-        *input_lengths,
-        step,
+        move(input_lengths),
+        size_t(step),
         batch_size,
-        *num_beams,
-        *top_k,
-        *top_p,
-        *temperture,
-        nullopt,
-        nullopt,
-        nullopt,
-        *kv_blocks,
+        move(num_beams),
+        move(top_k),
+        move(top_p),
+        move(temperture),
+        nullptr,
+        nullptr,
+        nullptr,
+        move(kv_blocks),
         move(cum_log_probs)
     };
 

@@ -51,6 +51,7 @@ cc_library(
     ], exclude = [
         "src/fastertransformer/th_op/GptInitParameter.h"
     ]),
+    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -68,6 +69,8 @@ cc_library(
         "//src/fastertransformer/layers:layers",
         "//src/fastertransformer/models:models",
         "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:model_rpc_server",
+        "@grpc//:grpc++",
     ],
     copts = copts(),
     alwayslink = True,
@@ -95,7 +98,6 @@ cc_library(
     ],
     hdrs = [
         "src/fastertransformer/th_op/th_utils.h",
-        "src/fastertransformer/th_op/GptCommonInputs.h",
     ],
     deps = [
         "//src/fastertransformer/cuda:allocator_torch",

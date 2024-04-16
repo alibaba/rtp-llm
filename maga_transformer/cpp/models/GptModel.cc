@@ -79,13 +79,13 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto norm_type = description_.norm_type;
     const auto norm_eps = description_.layernorm_eps;
 
-    const auto batch_size = inputs.input_lengths.shape()[0];
+    const auto batch_size = inputs.input_lengths->shape()[0];
     const auto& combo_tokens = inputs.combo_tokens;
     const auto& embedding_table = weights_.embedding->kernel;
     const auto hidden_size = embedding_table->shape()[1];
 
     // word embedding lookup
-    auto hidden = device_->embeddingLookup({combo_tokens, *embedding_table, nullopt, nullopt});
+    auto hidden = device_->embeddingLookup({*combo_tokens, *embedding_table, nullopt, nullopt});
 
     // pre layernorm
     if (weights_.pre_decoder_layernorm) {

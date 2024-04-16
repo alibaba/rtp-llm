@@ -1,0 +1,44 @@
+load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
+
+test_copts = [
+    "-fno-access-control",
+] + cuda_copts() + copts()
+
+test_linkopts = [
+    "-lpython3.10",
+    "-ltorch",
+    "-lc10",
+    "-ltorch_cpu",
+    "-L/home/xinfei.sxf/.local/lib/python3.10/site-packages/torch/lib",
+    "-lcudart",
+    "-ltorch_python",
+    "-L/usr/local/cuda/lib64",
+    "-L/usr/local/nvidia/lib64",
+    "-lcuda",
+    "-lnccl",
+    "-lnvToolsExt",
+]
+
+test_deps = [
+    "//src/fastertransformer/devices/testing:device_test_utils",
+    "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+    "//maga_transformer/cpp:cache",
+    "@com_google_googletest//:gtest",
+    "@com_google_googletest//:gtest_main",
+    "@local_config_cuda//cuda:cuda",
+    "@local_config_cuda//cuda:cudart",
+] + torch_deps()
+
+cc_test(
+    name = "cache_manager_test",
+    srcs = [
+        "CacheManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    }
+)

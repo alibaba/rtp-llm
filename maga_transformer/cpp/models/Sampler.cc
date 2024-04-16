@@ -15,7 +15,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     size_t sample_to_batch_idx = 0;
     size_t from_token_idx = 0; // accumulates batch_size * num_beams
 
-    auto beam_sizes = inputs.num_beams.data<uint64_t>();
+    auto beam_sizes = inputs.num_beams->data<uint64_t>();
     auto current_beam_size = beam_sizes[0];
 
     const auto& input_tokens = *inputs.token_ids;
@@ -36,21 +36,22 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             {input_tokens.type(), {sample_batch_size * current_beam_size, inputs.step}});
         device_->copy({*sample_tokens, input_tokens, 0, from_token_idx, sample_token_batch_size});
         auto transposed_tokens = device_->transpose({*sample_tokens});
-        auto sample_logits = inputs.logits.view(from_token_idx, sample_token_batch_size);
+        auto sample_logits = inputs.logits->view(from_token_idx, sample_token_batch_size);
         auto sample_cum_log_probs = inputs.cum_log_probs->view(from_batch_idx, sample_batch_size);
 
         if (current_beam_size == 1) {
-            auto batch_random_seeds = inputs.random_seeds ? inputs.random_seeds.value().get().view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer();
-            auto batch_repetition_penalty = inputs.repetition_penalty ? inputs.repetition_penalty.value().get().view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer();
-            auto batch_length_penalty = inputs.length_penalty ? inputs.length_penalty.value().get().view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer();
+            auto batch_random_seeds = inputs.random_seeds.get() ? inputs.random_seeds->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer();
+            auto batch_repetition_penalty = inputs.repetition_penalty.get() ? inputs.repetition_penalty->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer();
+            auto batch_length_penalty = inputs.length_penalty.get() ? inputs.length_penalty->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer();
 
             device_->sampleGreedy({
                 sample_logits,
                 inputs.sequence_lengths,
+                *inputs.sequence_lenghts,
                 *transposed_tokens,
-                inputs.top_k,
-                inputs.top_p,
-                inputs.temperature,
+                *inputs.top_k,
+                *inputs.top_p,
+                *inputs.temperature,
                 inputs.random_seeds ? (OptionalBufferRef)batch_random_seeds : nullopt,
                 inputs.repetition_penalty ? (OptionalBufferRef)batch_repetition_penalty : nullopt,
                 inputs.length_penalty ? (OptionalBufferRef)batch_length_penalty : nullopt,
@@ -69,7 +70,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         sample_to_batch_idx = from_batch_idx;
         from_token_idx = sample_to_token_idx;
     } while (from_batch_idx < inputs.batch_size);
-
     return SamplerOutput({move(inputs.token_ids), move(inputs.cum_log_probs)});
 }
 

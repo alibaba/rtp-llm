@@ -207,7 +207,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         nullptr, // token_id_for_index_prob,
         (curandState_t *)curandstate_buf->data(),
         max_top_k,  // useless because runtime_top_k_buf_ is never nullptr. Keep for legacy.
-        runtime_top_k_buf->data<int32_t>(),
+        (int32_t*)runtime_top_k_buf->data<uint32_t>(),
         1.0f,  // useless because runtime_top_p_buf_ is never nullptr. Keep for legacy.
         runtime_top_p_buf->data<float>(),
         vocab_size_padded,

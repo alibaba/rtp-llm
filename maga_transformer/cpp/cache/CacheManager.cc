@@ -1,0 +1,349 @@
+#include "maga_transformer/cpp/cache/CacheManager.h"
+
+using namespace std;
+
+namespace rtp_llm {
+
+KVCacheBlockAddr KVCacheBlockAddr::clone(std::shared_ptr<CacheManager>& cache_manager) {
+    if (!k_ptr.empty()) {
+        cache_manager->incrBlockRefCounter(k_ptr[0]);
+    }
+    return *this;
+}
+
+CacheManager::CacheManager(const CacheConfig& config, ncclComm_t nccl_op, ft::DeviceBase* device):
+    config_(config), seq_size_per_block_(config.seq_size_per_block), device_(device) {
+    FT_LOG_INFO("cache config: %s", config.debugString().c_str());
+    initFreeBlock(config_, nccl_op);
+    initKvCache(config_);
+}
+
+void CacheManager::initFreeBlock(const CacheConfig& config, ncclComm_t nccl_op) {
+    int block_nums = config.block_nums;
+
+    // Assuming g_parallel_info.tp_size and other global variables/functions are defined elsewhere.
+    // if (g_parallel_info.tp_size > 1) {
+    //     // Use NCCL communication functions to broadcast and synchronize block_nums across devices.
+    //     // ...
+    // }
+    block_nums_ = block_nums;
+    // TODO(xinfei.sxf) add log
+    free_blocks_index_ = std::set<int>();
+    // block 0 is reserved for tmp or padding use
+    for (int i = 1; i < block_nums; ++i) {
+        free_blocks_index_.insert(i);
+    }
+
+    block_ref_counter_ = BlockRefCounter(block_nums);
+    block_cache_       = BlockCache();
+}
+
+void CacheManager::initKvCache(const CacheConfig& config) {
+    // block num can't not use config.block_nums when tp, use sync block_nums_
+    kv_cache_.k_blocks = device_->allocateBuffer({config.dtype,
+                                                  std::vector<size_t>{(size_t)config.layer_num,
+                                                                      (size_t)block_nums_,
+                                                                      (size_t)config.local_head_num_kv,
+                                                                      (size_t)config.seq_size_per_block,
+                                                                      (size_t)config.size_per_head},
+                                                  ft::AllocationType::DEVICE},
+                                                 {});
+    kv_cache_.v_blocks = device_->allocateBuffer({config.dtype,
+                                                  std::vector<size_t>{(size_t)config.layer_num,
+                                                                      (size_t)block_nums_,
+                                                                      (size_t)config.local_head_num_kv,
+                                                                      (size_t)config.seq_size_per_block,
+                                                                      (size_t)config.size_per_head},
+                                                  ft::AllocationType::DEVICE},
+                                                 {});
+
+    if (config.dtype == ft::DataType::TYPE_INT8) {
+        kv_cache_.k_scale = device_->allocateBuffer({ft::DataType::TYPE_FP32,
+                                                     std::vector<size_t>{(size_t)config.layer_num,
+                                                                         (size_t)block_nums_,
+                                                                         (size_t)config.local_head_num_kv,
+                                                                         (size_t)config.seq_size_per_block},
+                                                     ft::AllocationType::DEVICE},
+                                                    {});
+        kv_cache_.v_scale = device_->allocateBuffer({ft::DataType::TYPE_FP32,
+                                                     std::vector<size_t>{(size_t)config.layer_num,
+                                                                         (size_t)block_nums_,
+                                                                         (size_t)config.local_head_num_kv,
+                                                                         (size_t)config.seq_size_per_block},
+                                                     ft::AllocationType::DEVICE},
+                                                    {});
+    }
+}
+
+void CacheManager::free(const std::vector<std::vector<int>>& block_indices) {
+    for (const auto& indice : block_indices) {
+        free(indice);
+    }
+}
+
+void CacheManager::free(const std::vector<int>& block_indices) {
+    block_ref_counter_.decrementRefCounter(block_indices);
+    for (auto block : block_indices) {
+        int ref_count = block_ref_counter_.getRefCounter(block);
+        if (ref_count == 0) {
+            free_blocks_index_.insert(block);
+        }
+    }
+}
+
+// TODO(xinfei.sxf) 支持batch的pointer?
+void CacheManager::freeWithCache(const std::vector<void*> pointer, const std::vector<int>& token_ids) {
+    freeWithCache({convertAddrToIndex(pointer)}, token_ids);
+}
+
+void CacheManager::freeWithCache(const std::vector<std::vector<int>>& block_indices,
+                                 const std::vector<int>&              token_ids) {
+    insertIntoCache(block_indices, token_ids, false);
+}
+
+void CacheManager::insertResidentCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids) {
+    std::vector<std::vector<int>> wrapper(1, block_indices);
+    insertIntoCache(wrapper, token_ids, true);
+}
+
+void CacheManager::insertIntoCache(const std::vector<std::vector<int>>& block_indices,
+                                   const std::vector<int>&              token_ids,
+                                   bool                                 is_resident) {
+    if (token_ids.size() > 1) {
+        const std::vector<int>& cache_block = block_indices.front();
+        int                     cache_len   = token_ids.size() - 1;
+        int                     block_len   = cache_len / seq_size_per_block_;
+        std::vector<int>        indices =
+            block_cache_.put(std::vector<int>(token_ids.begin(), token_ids.begin() + cache_len),
+                             std::vector<int>(cache_block.begin(), cache_block.begin() + block_len),
+                             is_resident);
+        free(indices);
+        free(std::vector<int>(cache_block.begin() + block_len, cache_block.end()));
+        for (size_t i = 1; i < block_indices.size(); ++i) {
+            free(block_indices[i]);
+        }
+    } else {
+        free(block_indices);
+    }
+}
+
+std::tuple<bool, KVCacheBlockAddr, int> CacheManager::mallocWithCache(int                     want_block_nums,
+                                                                      const std::vector<int>& token_ids) {
+    auto [success, block_indices, reuse_length] = mallocWithCacheImpl(want_block_nums, token_ids);
+    return {success, convertIndexToAddr(block_indices), reuse_length};
+}
+
+std::tuple<bool, std::vector<int>, int> CacheManager::mallocWithCacheImpl(int                     want_block_nums,
+                                                                          const std::vector<int>& token_ids) {
+    auto [cache_blocks, common_length] = block_cache_.match(token_ids);
+
+    int cache_block_num  = cache_blocks.size();
+    int reuse_length     = std::min(common_length, static_cast<size_t>(token_ids.size()) - 1);
+    int old_reuse_length = reuse_length;
+    int reuse_block_num  = reuse_length / config_.seq_size_per_block;
+    reuse_length         = reuse_block_num * config_.seq_size_per_block;
+
+    if (reuse_block_num > want_block_nums || reuse_block_num > cache_block_num) {
+        // TODO(xinfei.sxf) add log
+    }
+    assert(reuse_block_num <= want_block_nums);
+    assert(reuse_block_num <= cache_block_num);
+
+    std::vector<int> reuse_blocks(cache_blocks.begin(), cache_blocks.begin() + reuse_block_num);
+    block_ref_counter_.incrementRefCounter(reuse_blocks);
+    maybeFreeBlockFromCache(want_block_nums - reuse_block_num);
+
+    auto [success, new_blocks] = mallocImpl(want_block_nums - reuse_block_num);
+    if (success) {
+        reuse_blocks.insert(reuse_blocks.end(), new_blocks.begin(), new_blocks.end());
+        // TODO(xinfei.sxf) kmonitor.report(GaugeMetrics::KV_CACHE_REUSE_LENGTH_METRIC, reuse_length);
+        return {true, reuse_blocks, reuse_length};
+    } else {
+        free(reuse_blocks);
+        return {false, {}, 0};
+    }
+}
+
+std::tuple<bool, KVCacheBlockAddr> CacheManager::malloc(int nums) {
+    auto [success, block_indices] = mallocIndex(nums);
+    return {success, convertIndexToAddr(block_indices)};
+}
+
+std::tuple<bool, std::vector<int>> CacheManager::mallocIndex(int nums) {
+    maybeFreeBlockFromCache(nums);
+    return mallocImpl(nums);
+}
+
+void CacheManager::reserveBlocks(int nums) {
+    maybeFreeBlockFromCache(nums);
+}
+
+const CacheConfig& CacheManager::cacheConfig() const {
+    return config_;
+}
+
+const BlockRefCounter& CacheManager::blockRefCounter() const {
+    return block_ref_counter_;
+}
+
+const BlockCache& CacheManager::blockCache() const {
+    return block_cache_;
+}
+
+void CacheManager::setKvBlockValue(int index, const ft::BufferPtr& k_value, const ft::BufferPtr& v_value) {
+    // kv_cache_.k_blocks.index({torch::indexing::Slice(), index, torch::indexing::Ellipsis}) =
+    // k_value.to(torch::kCUDA); kv_cache_.v_blocks.index({torch::indexing::Slice(), index, torch::indexing::Ellipsis})
+    // = v_value.to(torch::kCUDA);
+}
+
+void CacheManager::blockCopy(int src_block_index, int dest_block_index) {
+    // kv_cache_.k_blocks.index({torch::indexing::Slice(), dest_block_index, torch::indexing::Ellipsis}) =
+    //     kv_cache_.k_blocks.index({torch::indexing::Slice(), src_block_index, torch::indexing::Ellipsis});
+    // kv_cache_.v_blocks.index({torch::indexing::Slice(), dest_block_index, torch::indexing::Ellipsis}) =
+    //     kv_cache_.v_blocks.index({torch::indexing::Slice(), src_block_index, torch::indexing::Ellipsis});
+}
+
+size_t CacheManager::freeBlockNums() const {
+    return free_blocks_index_.size();
+}
+
+size_t CacheManager::cacheItemNum() const {
+    return block_cache_.size();
+}
+
+const KVCacheBuffer& CacheManager::kvCacheBuffer() const {
+    return kv_cache_;
+}
+
+void CacheManager::copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list,
+                                          const std::vector<int>& src_index,
+                                          const std::vector<int>& tgt_index) {
+    if (src_index.size() != tgt_index.size()) {
+        throw std::runtime_error("src and tgt length should equal");
+    }
+    std::vector<SeqPosition> src_seq_positions;
+    std::vector<SeqPosition> tgt_seq_positions;
+
+    for (size_t i = 0; i < src_index.size(); ++i) {
+        src_seq_positions.push_back(getSeqPosition(block_indice_list, src_index[i]));
+        tgt_seq_positions.push_back(getSeqPosition(block_indice_list, tgt_index[i]));
+    }
+
+    for (size_t i = 0; i < src_seq_positions.size(); ++i) {
+        copyKvCacheFromSeqPosition(src_seq_positions[i], tgt_seq_positions[i]);
+    }
+}
+
+SeqPosition CacheManager::getSeqPosition(const std::vector<int>& block_indice_list, int idx) {
+    int block_idx = idx / seq_size_per_block_;
+    if (block_idx >= static_cast<int>(block_indice_list.size())) {
+        throw std::runtime_error("block idx should not >= len(block_indice_list)");
+    }
+    return SeqPosition{block_indice_list[block_idx], idx % seq_size_per_block_};
+}
+
+void CacheManager::copyKvCacheFromSeqPosition(const SeqPosition& src_seq_position,
+                                              const SeqPosition& dst_seq_position) {
+    // kv_cache_.k_blocks.index({"...", dst_seq_position.index, "...", dst_seq_position.offset, "..."}).copy_(
+    //     kv_cache_.k_blocks.index({"...", src_seq_position.index, "...", src_seq_position.offset, "..."}),
+    //     /*non_blocking=*/true);
+    // kv_cache_.v_blocks.index({"...", dst_seq_position.index, "...", dst_seq_position.offset, "..."}).copy_(
+    //     kv_cache_.v_blocks.index({"...", src_seq_position.index, "...", src_seq_position.offset, "..."}),
+    //     /*non_blocking=*/true);
+}
+
+std::tuple<bool, std::vector<int>> CacheManager::mallocImpl(int nums) {
+    if (free_blocks_index_.size() < static_cast<size_t>(nums)) {
+        std::string error_msg = "Failed to malloc " + std::to_string(nums) + " blocks, only "
+                                + std::to_string(free_blocks_index_.size()) + " blocks left";
+        std::cout << "error_msg = " << error_msg << std::endl;
+        return {false, {}};
+    } else {
+        std::vector<int> result;
+        result.reserve(nums);
+        for (int i = 0; i < nums; ++i) {
+            int block = *free_blocks_index_.begin();
+            free_blocks_index_.erase(free_blocks_index_.begin());
+            result.push_back(block);
+        }
+        block_ref_counter_.incrementRefCounter(result);
+        return {true, result};
+    }
+}
+
+void CacheManager::maybeFreeBlockFromCache(int nums) {
+    while (freeBlockNums() < nums && !block_cache_.empty()) {
+        std::vector<int> indices = block_cache_.pop();
+        if (indices.empty()) {
+            // Avoid infinite loop
+            break;
+        }
+        free(indices);
+    }
+}
+
+KVCacheBlockAddr CacheManager::convertIndexToAddr(const std::vector<int>& block_indices) {
+    KVCacheBlockAddr result;
+    result.k_ptr.resize(config_.layer_num);
+    result.v_ptr.resize(config_.layer_num);
+    if (config_.dtype == ft::DataType::TYPE_INT8) {
+        result.k_scale_ptr.resize(config_.layer_num);
+        result.v_scale_ptr.resize(config_.layer_num);
+    }
+
+    for (auto block_index : block_indices) {
+        vector<void*> blocks;
+        for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
+            auto offset = (layer_num) * (size_t)block_nums_ * (size_t)config_.local_head_num_kv
+                          * (size_t)config_.seq_size_per_block * (size_t)config_.size_per_head;
+            offset += block_index * (size_t)config_.local_head_num_kv * (size_t)config_.seq_size_per_block
+                      * (size_t)config_.size_per_head;
+
+            result.k_ptr[layer_num].push_back(kv_cache_.k_blocks->dataWithOffset(offset));
+            result.v_ptr[layer_num].push_back(kv_cache_.v_blocks->dataWithOffset(offset));
+
+            if (config_.dtype == ft::DataType::TYPE_INT8) {
+                auto scale_offset = (layer_num) * (size_t)block_nums_ * (size_t)config_.local_head_num_kv
+                                    * (size_t)config_.seq_size_per_block;
+                scale_offset += block_index * (size_t)config_.local_head_num_kv * (size_t)config_.seq_size_per_block;
+
+                result.k_scale_ptr[layer_num].push_back(kv_cache_.k_scale->dataWithOffset(scale_offset));
+                result.v_scale_ptr[layer_num].push_back(kv_cache_.v_scale->dataWithOffset(scale_offset));
+            }
+        }
+    }
+    return result;
+}
+
+void CacheManager::incrBlockRefCounter(const std::vector<void*> pointers) {
+    block_ref_counter_.incrementRefCounter(convertAddrToIndex(pointers));
+}
+
+void CacheManager::free(const std::vector<KVCacheBlockAddr>& resource) {
+    for (const auto& kv_block : resource) {
+        if (!kv_block.k_ptr.empty()) {
+            free(kv_block.k_ptr[0]);
+        }
+    }
+}
+
+void CacheManager::free(const std::vector<void*> pointers) {
+    free(convertAddrToIndex(pointers));
+}
+
+// pinter里面的指针必须都在第一个layer内
+std::vector<int> CacheManager::convertAddrToIndex(const std::vector<void*>& pointers) const {
+    std::vector<int> block_indices;
+    auto             base_addr = kv_cache_.k_blocks->data();
+    for (auto& pointer : pointers) {
+        auto offset       = (uint64_t)pointer - (uint64_t)base_addr;
+        auto block_stride = (size_t)config_.local_head_num_kv * (size_t)config_.seq_size_per_block
+                            * (size_t)config_.size_per_head * getTypeSize(config_.dtype);
+        auto block_index = offset / block_stride;
+        block_indices.push_back(block_index);
+    }
+
+    return block_indices;
+}
+
+}  // namespace rtp_llm

@@ -1,6 +1,6 @@
 #include <torch/script.h>
 #include "maga_transformer/cpp/test/ModelTestUtil.h"
-#include "maga_transformer/cpp/utils/WeightsUtils.h"
+#include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "src/fastertransformer/models/W.h"
 
 #include <filesystem>
