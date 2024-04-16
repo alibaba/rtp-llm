@@ -33,7 +33,7 @@ public:
     void sampleGreedy(const GreedyParams& params);
     void sampleBeamSearch(const BeamSearchParams& params);
     void broadcast(const BroadcastParams& params);
-    void allReduceSum(const AllReduceParameters& params);
+    void allReduceSum(const AllReduceParams& params);
 
 // TODO: @xinglai delelte this
 public:

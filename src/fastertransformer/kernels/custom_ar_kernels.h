@@ -43,7 +43,7 @@ typedef struct bf168 {
 #endif
 
 template<typename T>
-struct AllReduceParams {
+struct AllReduceParameters {
     size_t    elts_total;
     size_t    elts_per_rank;
     size_t    elts_per_block;
@@ -56,7 +56,7 @@ struct AllReduceParams {
 };
 
 template<typename T>
-void invokeOneOrTwoShotAllReduceKernel(AllReduceParams<T>& param, cudaStream_t stream);
+void invokeOneOrTwoShotAllReduceKernel(AllReduceParameters<T>& param, cudaStream_t stream);
 
 void kernelLaunchConfig(int& blocks_per_grid, int& threads_per_block, size_t elts, int kernel_algo);
 

@@ -136,7 +136,7 @@ inline __device__ bf168 init_packed_type()
 #endif
 
 template<typename T>
-static __global__ void oneShotAllReduceKernel(AllReduceParams<T> params)
+static __global__ void oneShotAllReduceKernel(AllReduceParameters<T> params)
 {
     // The block index.
     const int bidx = blockIdx.x;
@@ -199,7 +199,7 @@ static __global__ void oneShotAllReduceKernel(AllReduceParams<T> params)
 }
 
 template<typename T>
-static __global__ void twoShotAllReduceKernel(AllReduceParams<T> params)
+static __global__ void twoShotAllReduceKernel(AllReduceParameters<T> params)
 {
 
     // The block index.
@@ -364,7 +364,7 @@ void kernelLaunchConfig(
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T>
-void invokeOneOrTwoShotAllReduceKernel(AllReduceParams<T>& param, cudaStream_t stream)
+void invokeOneOrTwoShotAllReduceKernel(AllReduceParameters<T>& param, cudaStream_t stream)
 {
     size_t elts_total      = param.elts_total;
     int    blocks_per_grid = 1, threads_per_block = DEFAULT_BLOCK_SIZE;
@@ -389,10 +389,10 @@ void invokeOneOrTwoShotAllReduceKernel(AllReduceParams<T>& param, cudaStream_t s
 }
 
 // Template instantiation
-template void invokeOneOrTwoShotAllReduceKernel<uint16_t>(AllReduceParams<uint16_t>& param, cudaStream_t stream);
+template void invokeOneOrTwoShotAllReduceKernel<uint16_t>(AllReduceParameters<uint16_t>& param, cudaStream_t stream);
 #ifdef ENABLE_BF16
-template void invokeOneOrTwoShotAllReduceKernel<__nv_bfloat16>(AllReduceParams<__nv_bfloat16>& param,
+template void invokeOneOrTwoShotAllReduceKernel<__nv_bfloat16>(AllReduceParameters<__nv_bfloat16>& param,
                                                                cudaStream_t                    stream);
 #endif
-template void invokeOneOrTwoShotAllReduceKernel<uint32_t>(AllReduceParams<uint32_t>& param, cudaStream_t stream);
+template void invokeOneOrTwoShotAllReduceKernel<uint32_t>(AllReduceParameters<uint32_t>& param, cudaStream_t stream);
 }  // namespace fastertransformer

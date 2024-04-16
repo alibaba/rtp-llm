@@ -48,7 +48,7 @@ class RpcModelTest(TestCase):
                 result.append(t.submit(func))
             # just ensure every input has result
             for i in range(0, 10):
-                print("res:", result[i].result())
+                result[i].result()
         finally:
             pipeline.model.stop()
 

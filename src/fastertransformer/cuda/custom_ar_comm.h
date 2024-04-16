@@ -55,7 +55,7 @@ public:
     void enableP2P(int ngpus) override;
 
 private:
-    AllReduceParams<T>   param_;
+    AllReduceParameters<T>   param_;
     std::vector<Tensor>* output_tensor_;
     T*                   tmp_tensor_data_;
     size_t               rank_size_;

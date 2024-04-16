@@ -88,7 +88,7 @@ void CudaDevice::broadcast(const BroadcastParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CudaDevice::allReduceSum(const AllReduceParameters& params) {
+void CudaDevice::allReduceSum(const AllReduceParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
