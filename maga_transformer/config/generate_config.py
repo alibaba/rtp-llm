@@ -81,17 +81,20 @@ class GenerateConfig(BaseModel):
     def merge_generate_config(configs: List['GenerateConfig']) -> 'GenerateConfig':
         top_k: List[int] = []
         top_p: List[float] = []
+        temperature: List[float] = []
         min_new_tokens: List[int] = []
         repetition_penalty: List[float] = []
-        for config in configs:
+        for config in configs:            
             top_k.append(config.top_k)
             top_p.append(config.top_p)
+            temperature.append(config.temperature)
             min_new_tokens.append(config.min_new_tokens)
             repetition_penalty.append(config.repetition_penalty)
 
         res = GenerateConfig(
             top_k=top_k,
             top_p=top_p,
+            temperature=temperature,
             min_new_tokens=min_new_tokens,
             repetition_penalty=repetition_penalty,
             eos_token_id=configs[0].eos_token_id,

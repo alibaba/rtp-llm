@@ -16,6 +16,7 @@ class GenerateConfigTest(TestCase):
             "stop_words_list": [[8848]],
             "top_k": 1,
             "top_p": 0.95,
+            "temperature": 0.8,
             "max_new_tokens": 100
         }
         
@@ -97,6 +98,14 @@ class GenerateConfigTest(TestCase):
         a.gen_hash_value()
         b.gen_hash_value()
         self.assertTrue(a.is_same(b))
+        
+    def test_merge_generate_config(self):
+        config1 = GenerateConfig(**self._create_generate_config())
+        config2 = GenerateConfig(**self._create_generate_config())
+        merge_config = GenerateConfig.merge_generate_config([config1, config2])
+        self.assertEqual(merge_config.top_k, [1, 1])
+        self.assertEqual(merge_config.top_p, [0.95, 0.95])
+        self.assertEqual(merge_config.temperature, [0.8, 0.8])
 
 if __name__ == '__main__':
     main()
