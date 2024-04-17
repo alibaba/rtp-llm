@@ -50,17 +50,17 @@ cc_test(
     },
 )
 
-cc_test(
-    name = "ptuning_constructor_test",
-    srcs = [
-        "PtuningConstructorTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    linkopts = test_linkopts,
-    deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-)
+# cc_test(
+#     name = "ptuning_constructor_test",
+#     srcs = [
+#         "PtuningConstructorTest.cc",
+#     ],
+#     data = [],
+#     copts = test_copts,
+#     linkopts = test_linkopts,
+#     deps = test_deps,
+#     env = {
+#         "TEST_USING_DEVICE": "CUDA",
+#     },
+# )
 

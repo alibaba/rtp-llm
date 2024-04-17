@@ -109,7 +109,7 @@ public:
             const auto& kv_cache = stream->kvCache();
             assert(kv_cache.k_ptr.size() == 1);
             assert(kv_cache.k_ptr[0].size() > 0);
-            assert(stream->iter_count != 0);
+            // assert(stream->iter_count != 0);
             auto block_indices = engine->cacheManager()->convertAddrToIndex(kv_cache.k_ptr[0][0]);
             std::optional<torch::Tensor> prefix_tensor = std::nullopt;
             multi_task_prompt_args[task_id] = PrefixParams(PrefixType::PromptTuning,

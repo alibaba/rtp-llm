@@ -71,7 +71,7 @@ cc_library(
         ":utils",
         ":common",
         ":cache",
-        "//:gpt_init_params",
+        "//:gpt_init_params_hdr",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:device_utils",
         "//src/fastertransformer/models:weights_define",
