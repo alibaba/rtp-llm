@@ -1,4 +1,10 @@
 load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
+load("//bazel:arch_select.bzl", "requirement", "whl_deps")
+
+requirement([
+    "grpcio"
+])
+
 # load("//bazel:tf_proto.bzl", "tf_proto_library")
 
 linkopts = [
@@ -252,7 +258,10 @@ cc_library(
 py_library(
     name = "model_rpc_client",
     srcs = ["model_rpc/model_rpc_client.py"],
-    deps = ["//maga_transformer/cpp/proto:model_rpc_service_py_proto"],
+    deps = [
+        ":grpcio",
+        "//maga_transformer/cpp/proto:model_rpc_service_py_proto"
+    ],
     visibility = ["//visibility:public"],
 )
 
