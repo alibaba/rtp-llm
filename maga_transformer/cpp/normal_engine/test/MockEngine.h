@@ -15,6 +15,8 @@ namespace ft = fastertransformer;
 namespace rtp_llm {
 
 std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device) {
+    setenv("TEST_BLOCK_NUM", "100", 1);
+
     rtp_llm::MagaInitParams rtp_llm_params;
     rtp_llm_params.gpt_init_parameter = c10::make_intrusive<GptInitParameter>(2, 64, 2, 20, 20, 128);
     // GptInitParameter params(2, 64, 2, 20, 20, 128);
@@ -25,6 +27,7 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device) {
     params.inter_size_         = inter_size;
     params.inter_padding_size_ = inter_size;
     params.seq_size_per_block_ = 8;
+    params.reserve_runtime_mem_mb_ = 1024;
     typedef half         T;
     const at::ScalarType scalar_type  = at::ScalarType::Half;
     const ft::DataType   data_type    = getTensorType<T>();

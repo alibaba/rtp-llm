@@ -41,3 +41,17 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     }
 )
+
+cc_test(
+    name = "cache_config_creator_test",
+    srcs = [
+        "CacheConfigCreatorTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    }
+)

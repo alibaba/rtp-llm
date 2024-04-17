@@ -14,6 +14,9 @@
 #include "maga_transformer/cpp/ptuning/Ptuning.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
+#include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
+
+namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
@@ -83,9 +86,9 @@ public:
         for (int i = 0; i < block_indice_length; ++i) {
             auto k_tensor = tiled_k_prefix_prompt.index({torch::indexing::Slice(), i});
             auto v_tensor = tiled_v_prefix_prompt.index({torch::indexing::Slice(), i});
-            auto k_buffer = torchTensor2Buffer(k_tensor);
-            auto v_buffer = torchTensor2Buffer(v_tensor);
-
+            auto k_buffer = ft::torchTensor2Buffer(k_tensor);
+            auto v_buffer = ft::torchTensor2Buffer(v_tensor);
+            // TODO(xinfei.sxf) set kv cache scale?
             cache_manager->setKVBlockValue(prefix_block_indice[i], k_buffer, v_buffer);
         }
     }

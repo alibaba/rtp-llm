@@ -60,7 +60,7 @@ public:
 
     // TODO(xinfei.sxf) lora resource?
     virtual void releaseResource() {
-        if (!need_release_resource_) {
+        if (need_release_resource_) {
             stream_cache_resource_.releaseResource();
         }
     }

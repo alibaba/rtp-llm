@@ -10,13 +10,19 @@ namespace rtp_llm {
 struct CacheConfig {
     uint         layer_num;
     uint         block_nums;
-    
     uint         local_head_num_kv;
     uint         size_per_head;
     uint         seq_size_per_block;
-    size_t       block_size;
-    size_t       block_stride;
     ft::DataType dtype;
+
+    size_t       block_size;
+    size_t       kv_block_size;
+    size_t       kv_scale_block_size;
+    size_t       kv_block_stride;
+    size_t       kv_scale_block_stride;
+    
+    CacheConfig() {}
+
     CacheConfig(uint         layer_num_,
                 uint         block_nums_,
                 uint         local_head_num_kv_,
@@ -29,9 +35,19 @@ struct CacheConfig {
         size_per_head(size_per_head_),
         seq_size_per_block(seq_size_per_block_),
         dtype(dtype_) {
-        block_size =
-            layer_num * local_head_num_kv * size_per_head * seq_size_per_block * fastertransformer::getTypeSize(dtype);
-        block_stride = block_size / layer_num;
+
+        auto dtype_size = ft::getTypeSize(dtype);
+        int scale_size = 0;
+        if (dtype == ft::TYPE_INT8) {
+            scale_size = 4;
+        }
+
+        block_size = (layer_num * local_head_num_kv * (size_per_head + scale_size) * dtype_size * seq_size_per_block);
+        kv_block_size = layer_num * local_head_num_kv * size_per_head * seq_size_per_block * dtype_size;
+        kv_scale_block_size = layer_num * local_head_num_kv * scale_size * seq_size_per_block * dtype_size;
+
+        kv_block_stride = kv_block_size / layer_num;
+        kv_scale_block_stride = kv_scale_block_size / layer_num;
     }
 
     std::string debugString() const {

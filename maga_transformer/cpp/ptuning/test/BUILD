@@ -37,31 +37,30 @@ test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
 
-# cc_test(
-#     name = "ptuning_test",
-#     srcs = [
-#         "PtuningTest.cc",
-#     ],
-#     data = [],
-#     copts = test_copts,
-#     linkopts = test_linkopts,
-#     deps = test_deps,
-#     env = {
-#         "TEST_USING_DEVICE": "CUDA",
-#     },
-# )
+cc_test(
+    name = "ptuning_test",
+    srcs = [
+        "PtuningTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+)
 
-# cc_test(
-#     name = "ptuning_constructor_test",
-#     srcs = [
-#         "PtuningConstructorTest.cc",
-#     ],
-#     data = [],
-#     copts = test_copts,
-#     linkopts = test_linkopts,
-#     deps = test_deps,
-#     env = {
-#         "TEST_USING_DEVICE": "CUDA",
-#     },
-# )
-
+cc_test(
+    name = "ptuning_constructor_test",
+    srcs = [
+        "PtuningConstructorTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+)

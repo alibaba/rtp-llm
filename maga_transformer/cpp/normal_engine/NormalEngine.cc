@@ -5,6 +5,7 @@
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/cache/CacheConfigCreator.h"
 
 using namespace std;
 namespace rtp_llm {
@@ -94,6 +95,19 @@ absl::Status NormalEngine::step() {
         return absl::OkStatus();
     }
     return executor_->process(streams);
+}
+
+void NormalEngine::initCacheManager() {
+    auto [success, cache_config] = CacheConfigCreator::createConfig(*params_.gpt_init_parameter);
+    if (!success) {
+        // fix abort
+        FT_LOG_ERROR("create cache config failed");
+        abort();
+    }
+
+    ft::DeviceBase*               device        = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
+    ncclComm_t                    nccl_op;
+    cache_manager_ = make_shared<CacheManager>(cache_config, device);  
 }
 
 }  // namespace rtp_llm

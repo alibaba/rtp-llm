@@ -8,7 +8,9 @@
 #include "maga_transformer/cpp/normal_engine/test/MockEngine.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include "src/fastertransformer/core/Tensor.h"
+#include <cuda_runtime.h>
 
+#include <cstdlib>
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -45,6 +47,11 @@ TEST_F(PtuningConstructorTest, testMultiTaskPromptConstruct) {
 }
 
 TEST_F(PtuningConstructorTest, testPtuningConstruct) {
+    cudaDeviceSynchronize();
+    cudaMemPool_t defaultPool;
+    cudaDeviceGetDefaultMemPool(&defaultPool, 0);
+    cudaMemPoolTrimTo(defaultPool, 0);
+
     auto engine = createMockEngine(device_); 
     auto cache_config = engine->cacheManager()->cacheConfig();
     int64_t pre_seq_len = 3;

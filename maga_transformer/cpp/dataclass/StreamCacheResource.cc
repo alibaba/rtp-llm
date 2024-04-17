@@ -78,10 +78,12 @@ bool StreamCacheResource::initKVBlock() {
     return success;
 }
 
+// TODO(xinfei.sxf) fix this to reduce waste
 int StreamCacheResource::initalKVCacheCount() const {
     return (stream_->seqLength() - 2 + gen_num_per_circle_) / cache_manager_->cacheConfig().seq_size_per_block + 1;
 }
 
+// TODO(xinfei.sxf) fix this to reduce waste
 int StreamCacheResource::nextNeedBlockNums() const {
     auto next_length = stream_->seqLength() + gen_num_per_circle_;
     // TODO(xinfei.sxf) deal with ptuing

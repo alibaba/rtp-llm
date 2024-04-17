@@ -43,6 +43,7 @@ public:
 private:
     absl::Status trySaveStepError() const;
     void         loop();
+    void         initCacheManager();
 
 private:
     std::thread                           loop_thread_;

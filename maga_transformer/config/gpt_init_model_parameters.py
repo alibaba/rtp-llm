@@ -88,8 +88,6 @@ class GptInitModelParameters:
         "gpt_init_params",
         "_model_related_types",
         "has_lm_head_bias",
-        "reserve_runtime_mem_mb",
-        "kv_cache_mem_mb",
         "src_quantization_bit",
         "ptuning_path",
         "tp_split_emb_and_lm_head",

@@ -19,6 +19,9 @@ CacheManager::CacheManager(const CacheConfig& config, ft::DeviceBase* device):
     initKvCache(config_);
 }
 
+CacheManager::~CacheManager() {
+}
+
 void CacheManager::initFreeBlock(const CacheConfig& config) {
     int block_nums = config.block_nums;
 
@@ -197,14 +200,14 @@ const BlockCache& CacheManager::blockCache() const {
 }
 
 void CacheManager::setKVBlockValue(int index, ft::BufferPtr& k_value, ft::BufferPtr& v_value) {
-    auto layer_stride = block_nums_ * config_.block_stride;
+    auto layer_stride = block_nums_ * config_.kv_block_stride;
     for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
-        auto dst = kv_cache_.k_blocks->data() + layer_num * layer_stride + index * config_.block_stride;
-        auto src = k_value->data() + layer_num * config_.block_stride;
+        auto dst = kv_cache_.k_blocks->data() + layer_num * layer_stride + index * config_.kv_block_stride;
+        auto src = k_value->data() + layer_num * config_.kv_block_stride;
         auto dst_buffer = Buffer(
-            kv_cache_.k_blocks->where(), DataType::TYPE_INT8, {config_.block_stride}, dst);
+            kv_cache_.k_blocks->where(), DataType::TYPE_INT8, {config_.kv_block_stride}, dst);
         auto src_buffer = Buffer(
-            k_value->where(), DataType::TYPE_INT8, {config_.block_stride}, src);
+            k_value->where(), DataType::TYPE_INT8, {config_.kv_block_stride}, src);
         device_->copy({dst_buffer, src_buffer});
     }
 }
@@ -350,7 +353,7 @@ std::vector<int> CacheManager::convertAddrToIndex(const std::vector<void*>& poin
     auto             base_addr = kv_cache_.k_blocks->data();
     for (auto& pointer : pointers) {
         auto offset       = (uint64_t)pointer - (uint64_t)base_addr;
-        auto block_index  = offset / config_.block_stride;
+        auto block_index  = offset / config_.kv_block_stride;
         block_indices.push_back(block_index);
     }
 

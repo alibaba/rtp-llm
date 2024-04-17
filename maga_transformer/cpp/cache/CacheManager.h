@@ -122,6 +122,7 @@ struct KVCacheBuffer {
 class CacheManager {
 public:
     CacheManager(const CacheConfig& config, ft::DeviceBase* device);
+    ~CacheManager();
 
     const CacheConfig&     cacheConfig() const;
     const BlockRefCounter& blockRefCounter() const;
