@@ -15,13 +15,13 @@ GptModel::GptModel(const GptModelInitParams& params)
 void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
                                   int32_t*       cu_seqlens,
                                   const int32_t* sequence_length,
-                                  const int32_t  batch_size)
+                                  const int32_t  batch_size,
+                                  const int32_t  max_seq_len)
 {
     // do cumulated sum
     int32_t        total_seq_len        = 0;
     int32_t        cum_offset           = 0;
     int32_t        index                = 0;
-    const auto max_seq_len = *std::max_element(sequence_length, sequence_length + batch_size);
     for (int32_t i = 0; i < batch_size; i++) {
         const int32_t seq_len = sequence_length[i];
         cu_seqlens[i] = total_seq_len;
@@ -36,13 +36,14 @@ void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
 }
 
 AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inputs) {
-    AttentionCommonInputs attention_inputs({
-        inputs.input_lengths,
-        inputs.sequence_lengths
-    });
-
     const auto decoder_batch_size = inputs.sequence_lengths.shape()[0];
     const auto context_batch_size = inputs.input_lengths.shape()[0] - decoder_batch_size;
+    const auto max_context_seq_len = context_batch_size ? *std::max_element(
+        inputs.input_lengths.data<int32_t>() + decoder_batch_size,
+        inputs.input_lengths.data<int32_t>() + decoder_batch_size + context_batch_size) : 0;
+    const auto max_decoder_seq_len = decoder_batch_size ? *std::max_element(
+        inputs.sequence_lengths.data<int32_t>(),
+        inputs.sequence_lengths.data<int32_t>() + decoder_batch_size) : 0;
 
     std::vector<int32_t> cu_seqlens_data(context_batch_size + 1);
     std::vector<int32_t> padding_offset_data(inputs.combo_tokens.shape()[0]);
@@ -50,13 +51,23 @@ AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inp
         padding_offset_data.data(),
         cu_seqlens_data.data(),
         inputs.input_lengths.dataWithOffset<int32_t>(decoder_batch_size),
-        context_batch_size);
+        context_batch_size,
+        max_context_seq_len);
     if (!(cu_seqlens_data[context_batch_size] == inputs.combo_tokens.shape()[0])) {
         throw OpException(
             {OpErrorType::ERROR_INVALID_ARGS, "cu_seqlens is not consistent with combo_tokens."});
     }
+
+    AttentionCommonInputs attention_inputs({
+        inputs.input_lengths,
+        inputs.sequence_lengths
+    });
     attention_inputs.cu_seqlens = device_->clone({vector2Buffer(cu_seqlens_data)});
     attention_inputs.padding_offset = device_->clone({vector2Buffer(padding_offset_data)});
+    attention_inputs.decoder_batch_size = decoder_batch_size;
+    attention_inputs.context_batch_size = context_batch_size;
+    attention_inputs.context_max_seq_len = max_context_seq_len;
+    attention_inputs.decoder_max_seq_len = max_decoder_seq_len;
     attention_inputs.kv_cache_blocks = inputs.kv_cache_blocks;
     attention_inputs.position_ids = inputs.position_ids;
     attention_inputs.attention_mask = inputs.attention_mask;
@@ -82,6 +93,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             *hidden, *hidden, nullopt, norm_type, *(weights_.pre_decoder_layernorm), norm_eps));
     }
 
+    // prepare resources for all layers
+    auto attention_common_inputs = prepareAttentionInputs(inputs);
+
     // layers
     const auto layer_num = weights_.layers.size();
     for (int i = 0; i < layer_num; ++i) {
@@ -93,27 +107,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             *hidden, *hidden, nullopt, norm_type,
             mayGetRef(layer.self_attention_weights.pre_attention_layernorm), norm_eps));
 
-        AttentionCommonInputs attention_inputs({
-            inputs.input_lengths,
-            inputs.sequence_lengths
-            // inputs.kv_cache_blocks,
-            // nullopt,
-            // nullopt,
-            // nullopt,
-            // nullopt,
-            // nullopt,
-            // nullopt,
-            // nullopt,
-            // nullopt,
-            // nullopt,
-            // nullopt
-        });
-
         auto attn_output = device_->attentionLayer(AttentionLayerParams({
             *hidden,
             attention_configs_,
             layer.self_attention_weights,
-            attention_inputs,
+            attention_common_inputs,
         }));
         auto attn_hidden = move(attn_output.hidden_states);
 

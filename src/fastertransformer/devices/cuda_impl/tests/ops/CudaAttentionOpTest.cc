@@ -173,15 +173,17 @@ void CudaAttentionOpTest::contextAttentionOpTest(size_t batch_size,
     common_inputs.padding_offset = move(padding_offset_device);
     common_inputs.position_ids = *position_ids_device;
     common_inputs.attention_mask = *attention_mask_device;
+    common_inputs.context_batch_size = batch_size;
+    common_inputs.context_max_seq_len = seq_len;
+    common_inputs.decoder_batch_size = 0;
+    common_inputs.decoder_max_seq_len = 0;
+
     auto buffer_nullptr = unique_ptr<Buffer>(nullptr);
     auto attention_weight   = AttentionLayerWeights(std::make_unique<const DenseWeights>(
                                                     DenseWeights(buffer_nullptr, bias_device)));
 
-    auto attention_config   = AttentionConfigs({token_num,
-                                                batch_size,
-                                                num_heads,
+    auto attention_config   = AttentionConfigs({num_heads,
                                                 num_key_value_heads,
-                                                seq_len,
                                                 head_dim,
                                                 rope_config});
 
@@ -322,6 +324,10 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
 
     auto common_inputs = AttentionCommonInputs(*input_lengths_device, *sequence_lengths_device);
     common_inputs.kv_cache_blocks = *kv_cache;
+    common_inputs.context_batch_size = 0;
+    common_inputs.context_max_seq_len = 0;
+    common_inputs.decoder_batch_size = batch_size;
+    common_inputs.decoder_max_seq_len = step - 1;
 
     auto buffer_nullptr = unique_ptr<Buffer>(nullptr);
     auto attention_weight   = AttentionLayerWeights(std::make_unique<const DenseWeights>(
@@ -330,16 +336,11 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
 
     auto token_num = batch_size * seq_len;
 
-    auto attention_config   = AttentionConfigs({token_num,
-                                                batch_size,
-                                                num_heads,
+    auto attention_config   = AttentionConfigs({num_heads,
                                                 num_key_value_heads,
-                                                seq_len,
                                                 head_dim,
                                                 rope_config,
-                                                maxBlocksPerSeq,
-                                                tokensPerBlock,
-                                                step});
+                                                tokensPerBlock});
 
     auto qkv_output = device_->allocateBuffer(
         {qkv_states_device->type(), {token_num, num_heads, head_dim}}
@@ -357,7 +358,7 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
                                          k_cache_host,
                                          v_cache_host);
 
-    auto result  = bufferToTensor(*(qkv_output.hidden_states));
+    auto result  = bufferToTensor(*qkv_output);
     assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 1e-2);
 }
 

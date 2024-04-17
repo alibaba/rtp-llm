@@ -27,8 +27,8 @@ void addFusedQKVBiasTransposeWrapper(const AttentionModuleParams& params,
     T* qkv_input_ptr    = params.input.data<T>();
 
     auto token_num      = params.input.shape()[0];
-    auto batch_size     = params.configs.batch_size;
-    auto seq_len        = params.configs.seq_len;
+    auto batch_size     = params.common.context_batch_size;
+    auto seq_len        = params.common.context_max_seq_len;
     auto head_num       = params.configs.head_num;
     auto kv_head_num    = params.configs.kv_head_num;
     auto size_per_head  = params.configs.size_per_head;
@@ -100,8 +100,8 @@ void transposeQKVWrapper(const AttentionModuleParams& params,
                          cudaStream_t stream) {
 
     auto token_num      = params.input.shape()[0];
-    auto batch_size     = params.configs.batch_size;
-    auto seq_len        = params.configs.seq_len;
+    auto batch_size     = params.common.context_batch_size;
+    auto seq_len        = params.common.context_max_seq_len;
     auto head_num       = params.configs.head_num;
     auto kv_head_num    = params.configs.kv_head_num;
     auto size_per_head  = params.configs.size_per_head;
@@ -133,8 +133,8 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     }
 
     auto token_num      = params.input.shape()[0];
-    auto batch_size     = params.configs.batch_size;
-    auto seq_len        = params.configs.seq_len;
+    auto batch_size     = params.common.context_batch_size;
+    auto seq_len        = params.common.context_max_seq_len;
     auto head_num       = params.configs.head_num;
     auto kv_head_num    = params.configs.kv_head_num;
     auto size_per_head  = params.configs.size_per_head;
@@ -195,15 +195,14 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
 template<typename T>
 void selfAttentionwrapper(const AttentionModuleParams& params,
                           const Buffer& output,
-                          cudaStream_t stream) {
-
-    size_t token_num            = params.configs.token_num;
-    size_t batch_size           = params.configs.batch_size;
-    size_t beam_width           = params.configs.beam_width;
+                          cudaStream_t stream)
+{
+    size_t token_num            = params.input.shape()[0];
+    size_t batch_size           = params.common.decoder_batch_size;
+    size_t step                 = params.common.decoder_max_seq_len + 1;
     size_t local_head_num       = params.configs.head_num;
     size_t local_head_num_kv    = params.configs.kv_head_num;
     size_t size_per_head        = params.configs.size_per_head;
-    size_t step                 = params.configs.step;
 
     const T* qkv_buf_ptr = params.input.data<T>();
     T* qkv_buf_2_ = output.data<T>();
@@ -225,8 +224,8 @@ void selfAttentionwrapper(const AttentionModuleParams& params,
     int base_scale = params.configs.rope_config.base_scale;
 
     // logn attention
-    int logn_seq_len    = params.configs.logn_seq_len;
-    bool use_logn_attn  = params.configs.use_logn_attn;
+    int logn_seq_len    = 0;
+    bool use_logn_attn  = false;
 
     // prefix prompt
 
@@ -258,14 +257,13 @@ void selfAttentionwrapper(const AttentionModuleParams& params,
     float* partial_max = nullptr;
     int* block_counter = nullptr;
 
-    KVBlockArray kv_block_array(batch_size,
-                                params.configs.max_blocks_per_seq,
-                                params.configs.tokens_per_block, 0);
     if (!params.common.kv_cache_blocks.has_value()) {
         throw std::runtime_error("kv cache block pointers can not be null");
     }
-
-    kv_block_array.data = reinterpret_cast<int64_t*>(params.common.kv_cache_blocks.value().get().data());
+    const auto max_blocks_per_seq = params.common.kv_cache_blocks.value().get().shape()[1];
+    KVBlockArray kv_block_array(batch_size, max_blocks_per_seq, params.configs.tokens_per_block, 0);
+    kv_block_array.data = reinterpret_cast<int64_t*>(
+        params.common.kv_cache_blocks.value().get().data());
 
     fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
         qkv_buf_ptr,
@@ -276,7 +274,7 @@ void selfAttentionwrapper(const AttentionModuleParams& params,
         nullptr, // finished
         sequence_lengths,
         batch_size,
-        beam_width,
+        1, // beam_width
         local_head_num,
         local_head_num_kv,
         size_per_head,
@@ -318,18 +316,11 @@ void selfAttentionwrapper(const AttentionModuleParams& params,
 /// @details
 AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
     auto datatype = params.input.type();
-    if (datatype != DataType::TYPE_FP16 &&
-        datatype != DataType::TYPE_FP32) {
-        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-    }
 
-    size_t token_num            = params.configs.token_num;
-    size_t batch_size           = params.configs.batch_size;
-    size_t beam_width           = params.configs.beam_width;
+    size_t batch_size           = params.common.decoder_batch_size;
     size_t local_head_num       = params.configs.head_num;
     size_t local_head_num_kv    = params.configs.kv_head_num;
     size_t size_per_head        = params.configs.size_per_head;
-    size_t step                 = params.configs.step;
 
     auto &output = params.output;
 

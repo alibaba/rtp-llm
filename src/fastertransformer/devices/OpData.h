@@ -227,6 +227,11 @@ struct AttentionCommonInputs {
     ConstBufferPtr cu_seqlens;
     ConstBufferPtr padding_offset;
 
+    size_t context_batch_size;
+    size_t decoder_batch_size;
+    size_t context_max_seq_len;
+    size_t decoder_max_seq_len;
+
     OptionalConstBufferRef position_ids;
     OptionalConstBufferRef attention_mask;
     OptionalConstBufferRef linear_bias_slopes;
@@ -241,44 +246,18 @@ struct AttentionCommonInputs {
                           const Buffer& sequence_lengths) :
                           input_lengths(input_lengths),
                           sequence_lengths(sequence_lengths) {}
-
-    // self attention
-    // AttentionCommonInputs (const Buffer& kv_cache_blocks,
-    //                        const Buffer& sequence_lengths,
-    //                        const Buffer& input_lengths) :
-    //                        kv_cache_blocks(kv_cache_blocks),
-    //                        sequence_lengths(sequence_lengths),
-    //                        input_lengths(input_lengths) {}
 };
 
 struct AttentionConfigs {
-    size_t      token_num;
-    size_t      batch_size;
     size_t      head_num;
     size_t      kv_head_num;
-    size_t      seq_len;
     size_t      size_per_head;
 
     // rotary embending config
     RopeConfig rope_config;
 
     //kv cache block
-    size_t max_blocks_per_seq;
     size_t tokens_per_block;
-
-    // step
-    size_t step;
-
-    // beam search
-    size_t beam_width = 1;
-
-    // prefix params
-    bool        count_prefix_length = false;
-    size_t      max_prefix_length   = 0;
-
-    // log attention
-    bool    use_logn_attn = false;
-    int64_t logn_seq_len  = 2048;
 };
 
 using AttentionModuleOutput = void;
@@ -286,8 +265,8 @@ using AttentionModuleOutput = void;
 struct AttentionModuleParams {
     // qkv shape[h_token_num, (head_num + 2 * kv_head_num) * size_per_head]
     const Buffer&                   input;
-    // shape[token_num, size_per_head]
-    Buffer&                         output;
+    Buffer&                         output; // shape [token_num, size_per_head]
+
     AttentionCommonInputs&          common;
     const AttentionLayerWeights&    weights;
     const AttentionConfigs&         configs;
