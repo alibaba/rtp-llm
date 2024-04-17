@@ -274,7 +274,8 @@ py_wheel(
         "prettytable",
         "pydantic==2.5.3",
         "timm==0.9.12",
-        "sentence-transformers==2.3.1"
+        "sentence-transformers==2.3.1",
+        "grpcio==1.62.0"
     ] + whl_deps(),
 )
 
