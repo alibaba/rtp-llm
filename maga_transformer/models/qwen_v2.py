@@ -12,7 +12,7 @@ from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
     concat_0, concat_1, identity, zeros, transpose, trans_qkv, trans_qkv_b, trans_lora_qkv, transpose_pad, pad
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.qwen import QWen
-from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
+from transformers import AutoTokenizer
 from maga_transformer.model_factory_register import register_model
 
 def merge_qkv_b(ts: List[torch.Tensor]):
@@ -221,7 +221,7 @@ class QWenV2(QWen):
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
-        tokenizer = Qwen2Tokenizer.from_pretrained(config.tokenizer_path, verbose=False)
+        tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path, verbose=False, trust_remote_code=True, use_fast=False)
         tokenizer.im_start_id = tokenizer.encode('<|im_start|>')[0]
         tokenizer.im_end_id = tokenizer.encode('<|im_end|>')[0]
         return tokenizer
