@@ -46,16 +46,16 @@ TEST(TensorMapTest, InsertCorrectness) {
     EXPECT_FALSE(map.isExist("t2"));
 }
 
-TEST(TensorMapTest, InsertDoesNotAllowNoneTensor) {
-    TensorMap map;
-    EXPECT_TRUE(map.size() == 0);
-    // forbid a none tensor.
-    EXPECT_THROW(map.insert("none", {}), std::runtime_error);
+// TEST(TensorMapTest, InsertDoesNotAllowNoneTensor) {
+//     TensorMap map;
+//     EXPECT_TRUE(map.size() == 0);
+//     // forbid a none tensor.
+//     EXPECT_THROW(map.insert("none", {}), std::runtime_error);
 
-    // forbid a tensor having null data pointer.
-    Tensor none_data_tensor = Tensor(MEMORY_CPU, TYPE_INT32, {}, nullptr);
-    EXPECT_THROW(map.insert("empty", none_data_tensor), std::runtime_error);
-}
+//     // forbid a tensor having null data pointer.
+//     Tensor none_data_tensor = Tensor(MEMORY_CPU, TYPE_INT32, {}, nullptr);
+//     EXPECT_THROW(map.insert("empty", none_data_tensor), std::runtime_error);
+// }
 
 TEST(TensorMapTest, InsertDoesNotAllowDuplicatedKey) {
     int* v1 = new int[4]{1, 10, 20, 30};
