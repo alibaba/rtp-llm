@@ -35,12 +35,15 @@ DeviceBase* DeviceFactory::getDevice(DeviceType type, int device_id) {
 
 DeviceBase* DeviceFactory::getDefaultDevice() {
     DeviceBase* device = nullptr;
-    device = getDevice(DeviceType::Cuda);
-    if (!device) {
-        device = getDevice(DeviceType::Cpu);
+    const std::array<DeviceType, 3> types_to_try = {
+        DeviceType::Cuda, DeviceType::Yitian, DeviceType::Cpu};
+    for (const auto type : types_to_try) {
+        if (getRegistrationMap().find(type) != getRegistrationMap().end()) {
+            return getDevice(type);
+        }
     }
-    assert(device);
-    return device;
+    FT_LOG_ERROR("No device is registered !");
+    abort();
 }
 
 void DeviceFactory::registerDevice(DeviceType type, function<DeviceBase*()> creator) {
