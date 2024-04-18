@@ -7,7 +7,7 @@ if os.environ.get('FT_SERVER_TEST') is not None:
 else:
     LOGLEVEL = os.environ.get('PY_LOG_LEVEL', 'WARNING').upper()
 logging.basicConfig(level=LOGLEVEL,
-                    format="[%(name)s][%(asctime)s][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
+                    format="[process-%(process)d][%(name)s][%(asctime)s][%(filename)s:%(funcName)s():%(lineno)s][%(levelname)s] %(message)s",
                     datefmt='%m/%d/%Y %H:%M:%S')
 
 os.makedirs('logs', exist_ok=True)

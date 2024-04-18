@@ -6,7 +6,7 @@ import traceback
 import datetime
 import logging
 import uvicorn
-from typing import Dict, Any
+from typing import Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
 from fastapi import FastAPI
@@ -15,7 +15,7 @@ from datetime import timedelta
 import torch.distributed as dist
 from maga_transformer.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info, g_master_info, update_master_info
-from maga_transformer.distribute.gang_info import get_gang_info, GangInfo
+from maga_transformer.distribute.gang_info import get_gang_info, GangInfo, WorkerInfo
 
 # for ut
 from maga_transformer.distribute.gang_test_util import create_store, store_based_barrier
@@ -49,7 +49,7 @@ class GangServer:
             name = req['name']
             ip = req['ip']
             if not self._initialized:
-                logging.info(f'server member recv: {name} {ip}')
+                logging.debug(f'server member recv: {name} {ip}')
                 self._gang_status[name] = ip
             return {'initializing':not self._initialized}
 
@@ -79,19 +79,26 @@ class GangServer:
             try:
                 result = requests.post(url, json={"name": gang_info.self.name, "ip": gang_info.self.ip}, timeout=1)
             except Exception as e:
-                logging.warning(f'request {url} failed, {str(e)}')
+                logging.debug(f'request {url} failed, {str(e)}')
                 continue
             if result.status_code == 200:
                 response = result.json()
                 if response['initializing'] == True:
-                    logging.info(f'client member recv: {member.name} {member.ip}')
+                    logging.debug(f'client member recv: {member.name} {member.ip}')
                     self._gang_status[member.name] = member.ip
 
     def _check_ready(self):
+        miss: List[str] = []
+        ready: List[str]  = []
+        assert self._gang_info is not None, "gang info should not be none"
         for member in self._gang_info.members:
             actual_ip = self._gang_status.get(member.name)
             if actual_ip != member.ip:
-                raise Exception(f'gang member {member.name} expect {member.ip} actual {actual_ip}')
+                miss.append(member.name)
+            else:
+                ready.append(member.name)
+        if len(miss) > 0:            
+            raise Exception(f"worker rank: {g_parallel_info.tp_rank} not ready, collected workers: {ready}, missed workers: {miss}")
 
     def _wait_ready(self):
         timeout_minutes = int(os.environ.get('GANG_TIMEOUT_MIN', '30'))
@@ -106,7 +113,7 @@ class GangServer:
                 self._check_ready()
                 return
             except Exception as e:
-                logging.warning(f"gang cluster is not complete, will retry, retry times: {retry_time}, error_msg: {str(e)}")
+                logging.warning(f"gang worker rank:{g_parallel_info.world_rank} is not complete, error_msg: {str(e)}, retry times: {retry_time}")
                 cur_time = datetime.datetime.now()
                 if cur_time - start_time > datetime.timedelta(minutes=timeout_minutes):
                     raise Exception("failed to start gang server")
@@ -172,7 +179,7 @@ class GangServer:
             self._gang_info.master.ip,
             self._gang_info.master.server_port)
         master_url = f"tcp://{g_master_info.ip}:{g_master_info.th_nccl_port}"
-        logging.info(f'gang info exchange done, master_url: {master_url} gang_info: {self._gang_info}')
+        logging.info(f'gang worker {g_parallel_info} exchange done')
         # init_process_group会去检查gpu num > 0, 所以测试环境不希望init_process_group
         
         init_process_timeout = int(os.environ.get('DIST_BARRIER_TIMEOUT', 30))
