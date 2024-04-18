@@ -26,18 +26,20 @@ class QuantAlgo{
 
 public:
     QuantAlgo() = default;
-    QuantAlgo(int int8_mode, bool int4_mode, bool use_zeros, int64_t group_size):
+    QuantAlgo(int int8_mode, bool int4_mode, bool use_zeros, int64_t group_size, bool sq_int8):
         int8_mode_(int8_mode),
         int4_mode_(int4_mode),
         use_zeros_(use_zeros),
-        group_size_(group_size) {
+        group_size_(group_size),
+        sq_int8_(sq_int8) {
         }
     
     QuantAlgo(const QuantAlgo& quant_algo):
         int8_mode_(quant_algo.int8Mode()),
         int4_mode_(quant_algo.int4Mode()),
         use_zeros_(quant_algo.useZeros()),
-        group_size_(quant_algo.getGroupSize()) {
+        group_size_(quant_algo.getGroupSize()),
+        sq_int8_(quant_algo.smoothQuantInt8()) {
         }
     
     QuantAlgo(int int8_mode):
@@ -59,13 +61,17 @@ public:
         return group_size_;
     }
 
+    constexpr bool smoothQuantInt8() const {
+        return sq_int8_;
+    }
+
  
 private:
-    int     int8_mode_      = 0;
-    bool    int4_mode_      = false;
-    bool    use_zeros_      = false;
-    int64_t group_size_     = -1;
-
+    bool    int8_mode_  = 0;
+    bool    int4_mode_  = false;
+    bool    use_zeros_  = false;
+    int64_t group_size_ = -1;
+    bool    sq_int8_    = false;
 };
 
 class QuantMode {

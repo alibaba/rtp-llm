@@ -12,18 +12,19 @@ public:
     NormWrapper(LayerNormType layernorm_type, NormType norm_type, T alpha = 0.0f):
         layernorm_type_(layernorm_type), norm_type_(norm_type), alpha_(alpha) {}
 
-    void initDecoderLayerNorm(T*           output, 
-                              const T*     input, 
-                              const T*     gamma, 
-                              const T*     beta, 
+    void initDecoderLayerNorm(T*           output,
+                              const T*     input,
+                              const T*     gamma,
+                              const T*     beta,
                               const float  eps,
                               const size_t m,
                               const size_t n,
                               float*       scale,
                               float*       dynamic_scale,
-                              const int    int8_mode,
+                              const bool   sq_int8,
+                              int8_t*      norm_output_quant,
                               cudaStream_t stream);
-    
+
     void preAttentionLayerNorm(T*           output,
                                const T*     input,
                                const T*     gamma,
@@ -33,7 +34,8 @@ public:
                                const size_t n,
                                const float* scale,
                                float*       dynamic_scale,
-                               const int    int8_mode,
+                               const bool   sq_int8,
+                               int8_t*      norm_output_quant,
                                cudaStream_t stream);
 
     void attentionAddBiasResidualLayerNorm(T*           output,
@@ -48,7 +50,8 @@ public:
                                            const size_t n,
                                            const float* scale,
                                            float*       dynamic_scale,
-                                           const int    int8_mode,
+                                           const bool   sq_int8,
+                                           int8_t*      norm_output_quant,
                                            cudaStream_t stream);
 
     void ffnAddBiasResidualLayerNorm(T*           output,

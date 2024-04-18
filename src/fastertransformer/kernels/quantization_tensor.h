@@ -1,12 +1,11 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2019-2023, NVIDIA CORPORATION.  All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,23 +17,16 @@
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <cuda_runtime_api.h>
 
-#if defined(ENABLE_BF16)
-#include <cuda_bf16.h>
-#endif
-
-#include <type_traits>
-#include <vector>
-
-namespace tensorrt_llm
-{
-namespace kernels
+namespace fastertransformer
 {
 
 template <typename T>
-void apply_per_channel_scale_kernel_launcher(
-    T* smoothed_act, const T* act, const T* per_channel_scale, int rows, int cols, cudaStream_t stream = 0);
+void invokeQuantization(
+    int8_t* dst, const T* src, const int64_t size, const float* scalePtr, cudaStream_t stream = 0, int maxGirdSize = 0);
 
-} // namespace kernels
-} // namespace tensorrt_llm
+template <typename T>
+void invokePerTokenQuantization(
+    int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother, cudaStream_t stream = 0);
+
+}

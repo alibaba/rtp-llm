@@ -384,6 +384,14 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
         qkv_buf_3_input = qkv_buf_2_;
     }
     print_bsd(layer_id, "attn before o", qkv_buf_3_input, h_token_num, 1, local_hidden_units_rt);
+    if(params_.quant_algo_->sq_int8_){
+        FT_CHECK_WITH_INFO(attention_weights->attention_output_weight.smoother != nullptr, "smoother is needed in sq dynamic token");
+        invokePerTokenQuantization(reinterpret_cast<int8_t*>(qkv_buf_), qkv_buf_2_, h_token_num, local_hidden_units_rt, dense_gemm_dynamic_scale_, attention_weights->attention_output_weight.smoother, stream_);
+        qkv_buf_3_input = qkv_buf_;
+        sync_check_cuda_error();
+        print_bsd(layer_id, "quant per tensor", reinterpret_cast<int8_t*>(qkv_buf_3_input), h_token_num, 1, local_hidden_units_rt);
+    }
+
 
     PUSH_RANGE(stream_, "proj_gemm");
 #ifdef SPARSITY_ENABLED
@@ -400,7 +408,8 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
                        local_hidden_units_rt,
                        qkv_buf_3_input,
                        &attention_weights->attention_output_weight,
-                       attention_out);
+                       attention_out,
+                       dense_gemm_dynamic_scale_);
 
     // lora
     lora_gemm_->applyLoRA(h_token_num,
@@ -414,7 +423,6 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
                           attention_out);
 
     POP_RANGE;
-    // print_bsd(layer_id, "attn out", attention_out, 1, h_token_num, local_hidden_units_);
 }
 
 template<typename T>
@@ -425,7 +433,8 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
                                           int *                     lora_ids,
                                           int                       batch_size,
                                           const int*                lora_input_lengths,
-                                          bool                      use_kvcache)
+                                          bool                      use_kvcache,
+                                          const float*              dynamic_scale)
 {
     const int local_head_num        = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
     const int local_head_num_kv     = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
@@ -458,7 +467,8 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
                         hidden_units_,
                         attention_input,
                         &attention_weights->query_weight,
-                        qkv_buf_);
+                        qkv_buf_,
+                        dynamic_scale);
     }
     // lora
 
@@ -915,6 +925,8 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
     int                 max_context_seq_len_with_prefix = 0;
     const int           layer_id            = input_tensors->getVal<int>("layer_id");
     const int           h_token_num         = input_tensors->at("input_query").shape()[0];
+    const float*        attn_dynamic_scale  = params_.quant_algo_->sq_int8_ ? input_tensors->at("attn_dynamic_scale").getPtr<float>() : nullptr;
+
     // lora
     int* lora_ids = input_tensors->getPtr<int>("lora_ids", nullptr);
     int batch_size = context_batch_size + generate_batch_size;
@@ -935,15 +947,15 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
     sync_check_cuda_error();
 
     QKVGemm(h_token_num, layer_id, input_tensors->at("input_query").getPtr<T>(), attention_weights,
-            lora_ids, batch_size, lora_input_lengths, use_kvcache);
+            lora_ids, batch_size, lora_input_lengths, use_kvcache, attn_dynamic_scale);
     if (params_.qk_norm_) {
         invokeQkLayerNorm(qkv_buf_, attention_weights->qk_layernorm.gamma,
 			  params_.layernorm_eps_, h_token_num, local_head_num_, local_head_num_kv_,
 			  params_.size_per_head_);
-	print_bshd(layer_id, "q_norm", qkv_buf_, 1, h_token_num, local_head_num_, params_.size_per_head_,
-		   local_head_num_ + 2 * local_head_num_kv_, 0);
-	print_bshd(layer_id, "k_norm", qkv_buf_, 1, h_token_num, local_head_num_kv_, params_.size_per_head_,
-		   local_head_num_ + 2 * local_head_num_kv_, local_head_num_);
+	    print_bshd(layer_id, "q_norm", qkv_buf_, 1, h_token_num, local_head_num_, params_.size_per_head_,
+		        local_head_num_ + 2 * local_head_num_kv_, 0);
+	    print_bshd(layer_id, "k_norm", qkv_buf_, 1, h_token_num, local_head_num_kv_, params_.size_per_head_,
+		        local_head_num_ + 2 * local_head_num_kv_, local_head_num_);
     }
     if (context_batch_size) {
         ContextAttention(output_tensors, input_tensors, attention_weights);
@@ -1049,8 +1061,6 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
-    // const auto type_size = int8_mode_ == 2 ? sizeof(int8_t) : sizeof(T);
-    // NOTE (perkzz): use sizeof(T) here for cutlass int8 kernels.
     const auto qkv_hidden_size = local_head_num_ * params_.size_per_head_;
     const auto qkv_merged_size = qkv_hidden_size + 2 * local_head_num_kv_ * params_.size_per_head_;
     qkv_buf_   = (T*)allocator_->reMalloc(qkv_buf_,
@@ -1090,6 +1100,10 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
         }
     }
 
+    if(params_.quant_algo_->sq_int8_){
+        dense_gemm_dynamic_scale_ = (float*)allocator_->reMalloc(dense_gemm_dynamic_scale_, sizeof(float)*h_token_num, false);
+    }
+
     if(multi_block_mode_){
         const int threads_per_value = pow2roundup(params_.size_per_head_) * sizeof(T) / 16;
         max_seq_len_tile_ = 256 / threads_per_value; // for allocate partial output results memory. Regardless to THDS_PER_BLOCK
@@ -1122,6 +1136,10 @@ void ParallelAttentionWrapper<T>::freeBuffer()
             allocator_->free((void**)(&partial_sum_));
             allocator_->free((void**)(&partial_max_));
             allocator_->free((void**)(&block_counter_));
+        }
+
+        if(params_.quant_algo_->sq_int8_){
+            allocator_->free((void**)(&dense_gemm_dynamic_scale_));
         }
 
         allocator_->free((void**)(&mixed_gemm_workspace_));

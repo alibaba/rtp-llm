@@ -21,6 +21,7 @@ struct QuantAlgo: public th::jit::CustomClassHolder {
 public:
     bool    int8_mode_              = false;
     bool    int4_mode_              = false;
+    bool    sq_int8_                = false;
     bool    has_zeros_              = false;
     int64_t weight_only_group_size_ = 0;
     bool    is_gptq_                = false;

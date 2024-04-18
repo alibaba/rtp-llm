@@ -51,6 +51,7 @@ bool GptInitParameter::isGatedActivation() {
 #define REGISTER_PROPERTYS                                                                                             \
     DEF_PROPERTY(int8_mode)                                                                                            \
     DEF_PROPERTY(int4_mode)                                                                                            \
+    DEF_PROPERTY(sq_int8)                                                                                              \
     DEF_PROPERTY(has_zeros)                                                                                            \
     DEF_PROPERTY(weight_only_group_size)                                                                               \
     DEF_PROPERTY(is_gptq)                                                                                              \

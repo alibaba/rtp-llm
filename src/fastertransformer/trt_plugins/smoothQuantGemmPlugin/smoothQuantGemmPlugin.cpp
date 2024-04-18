@@ -22,7 +22,9 @@ using namespace tensorrt_llm::common;
 using namespace tensorrt_llm::kernels::cutlass_kernels;
 using tensorrt_llm::plugins::SmoothQuantGemmPlugin;
 
-SmoothQuantGemmPlugin::SmoothQuantGemmPlugin(QuantMode quantMode, nvinfer1::DataType type): mQuantMode(quantMode) {
+SmoothQuantGemmPlugin::SmoothQuantGemmPlugin(QuantMode quantMode, nvinfer1::DataType type)
+    : mQuantMode(quantMode)
+{
     init(type);
 }
 
@@ -55,13 +57,13 @@ size_t SmoothQuantGemmPlugin::getWorkspaceSize(const int m, const int n, const i
 }
 
 int SmoothQuantGemmPlugin::enqueue(const void* A, const void* B, const float* alphaCol, const float* alphaRow, void* C,
-    const int m, const int n, const int k, char* workspace, cudaStream_t stream) noexcept
+    char* workspace, const int m, const int n, const int k, cudaStream_t stream) noexcept
 {
     // inputs
     //     mat1           [M(*), K]
     //     mat2           [N, K]
-    //     scale_tokens   [M, 1] if has_per_token_scaling else [1, 1]
     //     scale_channels [1, N] if has_per_channel_scaling else [1, 1]
+    //     scale_tokens   [M, 1] if has_per_token_scaling else [1, 1]
     // outputs
     //     mat [M(*), N]
     const int wsSize = m_sqGemmRunner->getWorkspaceSize(m, n, k);

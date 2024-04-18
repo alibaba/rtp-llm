@@ -234,6 +234,39 @@ class ModelWeightsLoader:
         return results
     
     def _load_int8_layer_weight(self, layer_weights, layer_id: int, device: str, ref_model: Optional[torch.nn.Module] = None):
+        if self._merge_lora:
+            raise Exception("lora in sq is not implemented yet")
+        results = []
+        for weight_list in W.sq_weights: 
+            qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
+            qscale  = [weight for weight in layer_weights if weight.name == weight_list[1]]
+            if len(weight_list) == 3:
+                smoother = [weight for weight in layer_weights if weight.name == weight_list[2]]
+            if len(qweight) == 0:
+                if self._weights_info._is_sparse_head:
+                    continue
+                else:
+                    raise Exception(f"not found weight {weight_list[0]} in layer {layer_id}")
+            elif len(qweight) > 1:
+                raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
+            try:
+                qweight_tensor = self._load_and_convert_tensor(qweight[0], ref_model=ref_model, layer_id=layer_id, datatype=torch.int8)
+                qscale_tensor = self._load_and_convert_tensor(qscale[0], ref_model=ref_model, layer_id=layer_id, datatype=torch.float32)
+                qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor).to(device)
+                qscale_tensor = self._split_tensor(qscale[0].name, qscale_tensor).to(device)
+                results.append((layer_id, qweight[0].name, qweight_tensor))
+                results.append((layer_id, qscale[0].name, qscale_tensor))
+                if len(weight_list) ==3:
+                    smoother_tensor = self._load_and_convert_tensor(smoother[0], ref_model=ref_model, layer_id=layer_id, datatype=torch.float32)
+                    smoother_tensor = self._split_tensor(smoother[0].name, smoother_tensor).to(device)
+                    results.append((layer_id, smoother[0].name, smoother_tensor))
+                    
+            except Exception as e:
+                logging.error(f'load smooth_quant layer_weight in layer {layer_id} failed: {e}')
+                raise e
+        return results
+    
+    def _load_layer_weight_and_apply_int8(self, layer_weights, layer_id: int, device: str, ref_model: Optional[torch.nn.Module] = None):
         results = []
         is_moe = self._weights_info.expert_num_ > 0 and layer_id in self._weights_info.moe_layer_index_
         is_gated_activation = self._weights_info._is_gated_activation
@@ -291,8 +324,8 @@ class ModelWeightsLoader:
             layer_weights = self._trunc_layer_weights_for_partial_moe(layer_weights)
         for weight in layer_weights:
             try:
-                int8_flag = self._weights_info._int8_mode == True and (weight.name in W.quant_w)
-                int4_flag = self._weights_info._int4_mode == True and (weight.name in W.quant_w or weight.name in W.int4_quant_params)
+                int8_flag = (self._weights_info._int8_mode or self._weights_info._sq_int8) and (weight.name in W.quant_w)
+                int4_flag = self._weights_info._int4_mode and (weight.name in W.quant_w or weight.name in W.int4_quant_params)
 
                 if int4_flag or int8_flag:
                     continue
@@ -312,8 +345,10 @@ class ModelWeightsLoader:
                 raise e
         if self._weights_info._int4_mode:
             results.extend(self._load_int4_layer_weight(layer_weights, layer_id=layer_id, device=device, ref_model=ref_model))
-        elif self._weights_info._int8_mode:
+        elif self._weights_info._sq_int8:
             results.extend(self._load_int8_layer_weight(layer_weights, layer_id=layer_id, device=device, ref_model=ref_model))
+        elif self._weights_info._int8_mode:
+            results.extend(self._load_layer_weight_and_apply_int8(layer_weights, layer_id=layer_id, device=device, ref_model=ref_model))
 
         gc.collect()
         torch.cuda.empty_cache()

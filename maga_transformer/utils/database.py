@@ -342,7 +342,7 @@ class CkptDatabase(BaseDatabase):
                     tensor = torch._utils._rebuild_tensor_v2(typed_storage, *meta[1:])
                     # preread tensor content to memory: avoid multi-thread read file (e.g. from Fuse) cause cache miss
                     __preload_tensor_content(path, tensor, meta, storage_offset)
-                    tensor = tensor.contiguous().half()
+                    tensor = tensor.contiguous().to(datatype)
 
                     return tensor
 

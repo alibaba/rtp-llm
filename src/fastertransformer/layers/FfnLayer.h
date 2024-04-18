@@ -29,6 +29,7 @@
 #include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
 #include "src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 #include "src/fastertransformer/utils/layernorm_types.h"
+#include "src/fastertransformer/kernels/quantization_tensor.h"
 #include <stdint.h>
 #include <vector>
 
@@ -63,6 +64,8 @@ protected:
     T*     inter_buf_normed_ = nullptr;
     float* moe_gates_buf_    = nullptr;
     char*  moe_fc_workspace_ = nullptr;
+    float* ffn_dynamic_scale_2_ = nullptr;
+    bool   dynamic_token_       = true;
 
     char*  mixed_gemm_workspace_ = nullptr;
     size_t mixed_gemm_ws_bytes_  = 0;

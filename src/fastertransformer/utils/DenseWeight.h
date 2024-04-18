@@ -37,6 +37,7 @@ struct DenseWeight {
     const T2*    moe_scale   = nullptr;
     const float* scale_inter = nullptr;
     const float* scale_out   = nullptr;
+    const float* smoother    = nullptr;
 
     // for weight only kernel
     const T2* weight_only_quant_scale = nullptr;

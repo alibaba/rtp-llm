@@ -57,6 +57,11 @@ class Llama(GPT):
             Llama.from_params(config, param_json)
         else:
             raise Exception("llama parameter from unkown source")
+        
+        quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
+        if os.path.exists(quant_config_path):
+            config.quant_algo.sq_int8 = True
+            config.quant_algo.int8_mode = False
         return config
 
     @staticmethod

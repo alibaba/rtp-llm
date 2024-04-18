@@ -7,6 +7,7 @@
 #include "src/fastertransformer/layers/FfnWeight.h"
 #include "src/fastertransformer/layers/attention_layers/AttentionWeight.h"
 #include "src/fastertransformer/trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
+#include "src/fastertransformer/trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
 #include "src/fastertransformer/trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 #include "src/fastertransformer/utils/LoRAWeight.h"
 #include <string>
@@ -25,6 +26,8 @@ private:
     tc::QuantAlgo quant_algo_;
     std::shared_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin>          weight_only_matmul_plguin_;
     std::shared_ptr<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin> weight_only_groupwise_matmul_plguin_;
+    std::shared_ptr<trt_plugins::SmoothQuantGemmPlugin> smooth_quant_plugin_;
+    tc::QuantMode quant_mode_;
 
     char* workspace_ = nullptr;
 
@@ -45,12 +48,16 @@ public:
             FT_LOG_ERROR("not supported yet");
         }
 
-        if (quant_algo_.int8Mode() == 1) {
+        if (quant_algo_.int8Mode()) {
 
             weight_only_matmul_plguin_ = std::make_shared<trt_plugins::WeightOnlyQuantMatmulPlugin>(
                 datatype, trt_plugins::WeightTypeId::INT8);
         }
-        else if (quant_algo_.int4Mode() == true) {
+        else if(quant_algo_.smoothQuantInt8()){
+            quant_mode_ = tc::QuantMode::fromDescription(true, true, true, true, false, false, false, false);
+            smooth_quant_plugin_ = std::make_shared<trt_plugins::SmoothQuantGemmPlugin>(quant_mode_, datatype);
+        }
+        else if (quant_algo_.int4Mode()) {
             if (sm < 80) {
                 FT_LOG_ERROR("int4 mode not supported yet");
             }
@@ -88,8 +95,8 @@ public:
     }
     void freeBuffer();
 
-    void Gemm(int m, int n, int k, const T* inputs, const DenseWeight<T, T>* weights, T* outputs);
-    void GemmWithBias(int m, int n, int k, const T* inputs, const DenseWeight<T, T>* weights, T* outputs);
+    void Gemm(int m, int n, int k, const void* inputs, const DenseWeight<T, T>* weights, T* outputs, const float* scale_tokens=nullptr);
+    void GemmWithBias(int m, int n, int k, const void* inputs, const DenseWeight<T, T>* weights, T* outputs);
 
 private:
     void allocateWorkspace(size_t s);

@@ -38,8 +38,8 @@ public:
     ~SmoothQuantGemmPlugin() = default;
 
     size_t getWorkspaceSize(const int m, const int n, const int k) noexcept;
-    int enqueue(const void* A, const void* B, const float* alphaCol, const float* alphaRow,
-        void* C, const int m, const int n, const int k, char* workspace, cudaStream_t stream) noexcept;
+    int enqueue(const void* A, const void* B, const float* alphaCol, const float* alphaRow, void* C, char* workspace,
+        const int m, const int n, const int k, cudaStream_t stream) noexcept;
 
 private:
     void init(nvinfer1::DataType type);

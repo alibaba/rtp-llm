@@ -69,6 +69,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     const int* ia3_tasks = input_tensors->getPtr<const int>("ia3_tasks", nullptr);
     // lora
     const int* lora_ids = input_tensors->getPtr<int>("lora_ids", nullptr);
+    const float* ffn_dynamic_scale = quant_algo_.smoothQuantInt8() ? input_tensors->at("ffn_dynamic_scale").getPtr<float>() : nullptr;
 
     //  for moe output
     T*   expert_scales    = nullptr;
@@ -196,10 +197,9 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                        hidden_units_,
                        input_tensor,
                        &ffn_weights->intermediate_weight,
-                       inter_buf_);
+                       inter_buf_,
+                       ffn_dynamic_scale);
     // lora
-    print_bsd(layer_id, "ffn1", inter_buf_, 1, m, cur_inter_size);
-
     lora_gemm_->applyLoRA(m,
                           batch_size,
                           lora_input_lengths,
@@ -209,6 +209,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                           ffn_weights->intermediate_weight.lora_weights,
                           input_tensor,
                           inter_buf_);
+    print_bsd(layer_id, "ffn1", inter_buf_, 1, m, cur_inter_size);
 
     if (use_gated_activation_) {
         gemm_runner_->Gemm(m,
@@ -216,7 +217,8 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                            hidden_units_,
                            input_tensor,
                            &ffn_weights->intermediate_weight2,
-                           inter_buf_2_);
+                           inter_buf_2_,
+                           ffn_dynamic_scale);
         
         // lora
         lora_gemm_->applyLoRA(m,
@@ -240,8 +242,8 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                       use_gated_activation_ ? ffn_weights->intermediate_weight2.bias : nullptr,
                       input_tensors->at("ia3_tasks", {MEMORY_GPU, TYPE_INT32, {}, nullptr}).getPtr<const int>(),
                       ffn_weights->ia3_weight.kernel,
-                      quant_algo_.int8Mode() == 2 ? ffn_weights->intermediate_weight.scale_out : (float*)nullptr,
-                      quant_algo_.int8Mode() == 2 ? ffn_weights->output_weight.scale : (float*)nullptr,
+                      (float*)nullptr,
+                      (float*)nullptr,
                       input_tensors->getPtr<int>("padding_offset", nullptr),
                       input_tensors->getVal<int>("seq_len", 1));
     POP_RANGE;
@@ -270,7 +272,21 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     } else {
         inter_buf_normed_output = inter_buf_;
     }
-    print_bsd(layer_id, "ffn ln", inter_buf_normed_output, 1, m, inter_padding_size);
+    print_bsd(layer_id, "ffn ln", inter_buf_normed_output, 1, m, cur_inter_size);
+
+    if (quant_algo_.smoothQuantInt8()) {
+        invokePerTokenQuantization(reinterpret_cast<int8_t*>(inter_buf_normed_),
+                                   inter_buf_,
+                                   m,
+                                   cur_inter_size,
+                                   ffn_dynamic_scale_2_,
+                                   ffn_weights->output_weight.smoother,
+                                   stream_);
+        inter_buf_normed_output = (inter_buf_normed_);
+        sync_check_cuda_error();
+        print_bsd(layer_id, "ffn quant tensor", reinterpret_cast<int8_t*>(inter_buf_normed_output), 1, m, cur_inter_size);
+
+    }
 
     PUSH_RANGE(stream_, "ffn_gemm_2");
     gemm_runner_->Gemm(m,
@@ -278,7 +294,8 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                        cur_inter_size,
                        inter_buf_normed_output,
                        &ffn_weights->output_weight,
-                       output_tensor);
+                       output_tensor,
+                       ffn_dynamic_scale_2_);
 
     // lora
 
@@ -405,7 +422,6 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe) {
         size_t moe_workspace_size = moe_plugin_->getWorkspaceSize(token_num);
         moe_fc_workspace_         = (char*)allocator_->reMalloc(moe_fc_workspace_, moe_workspace_size, false);
     } else {
-        // const auto type_size = int8_mode_ == 2 ? sizeof(int8_t) : sizeof(T);
         const auto type_size = sizeof(T);
         inter_buf_ =
             (T*)allocator_->reMalloc(inter_buf_, type_size * token_num * inter_padding_size_ + token_num * 4, false);
@@ -415,6 +431,10 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe) {
         }
         inter_buf_normed_ = (T*)(allocator_->reMalloc(
             inter_buf_normed_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, inter_size_ != inter_padding_size_));
+    }
+
+    if(quant_algo_.smoothQuantInt8()){
+        ffn_dynamic_scale_2_ = (float*)(allocator_->reMalloc(ffn_dynamic_scale_2_, sizeof(float)* token_num, false));
     }
     is_allocate_buffer_ = true;
 }
@@ -452,7 +472,7 @@ void FfnLayer<T>::freeBuffer() {
                                  ia3_weights,                                                                          \
                                  m,                                                                                    \
                                  inter_padding_size,                                                                   \
-                                 quant_algo_.int8Mode(),                                                               \
+                                 0,                                                                                    \
                                  activation_in,                                                                        \
                                  activation_out,                                                                       \
                                  padding_offset,                                                                       \

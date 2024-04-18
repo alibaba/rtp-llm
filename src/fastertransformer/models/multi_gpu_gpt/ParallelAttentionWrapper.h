@@ -9,6 +9,7 @@
 #include "src/fastertransformer/layers/attention_layers/BaseAttentionLayer.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
+#include "src/fastertransformer/kernels/quantization_tensor.h"
 
 namespace fastertransformer {
 
@@ -84,6 +85,8 @@ protected:
     size_t int8_gemm_ws_bytes_   = 0;
     int    max_seq_len_tile_     = 0;
 
+    float* dense_gemm_dynamic_scale_ = nullptr;
+
     struct ContextAttentionParams {
         T const* attention_input;
         int32_t  input_seq_length;  // padded input length
@@ -135,7 +138,8 @@ public:
                  int*                      lora_ids,
                  int                       batch_size,
                  const int*                input_lengths,
-                 bool                      use_kvcache);
+                 bool                      use_kvcache,
+                 const float*              dynamic_scale = nullptr);
     void
     ContextAttention(TensorMap* output_tensors, TensorMap* input_tensors, const AttentionWeight<T>* attention_weights);
     void

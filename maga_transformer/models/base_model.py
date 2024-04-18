@@ -127,7 +127,7 @@ class BaseModel(object):
         if config.hidden_size == 0:
             config.hidden_size = config.size_per_head * config.head_num
         int8_mode = model_config.int8_mode
-        if config.quant_algo.int4_mode:
+        if config.quant_algo.int4_mode or config.quant_algo.sq_int8:
             int8_mode = False
         config.update_common(
             ckpt_path=model_config.ckpt_path,
