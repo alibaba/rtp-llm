@@ -110,59 +110,13 @@ void invokeTransposeAttentionOutRemovePadding(T*           src,
                                               const float* scale,
                                               const int    int8_mode,
                                               cudaStream_t stream);
-template<typename T>
-struct ContinuousCacheParam {
-    const T**    d_prefix_prompt_batch              = nullptr;
-    const size_t prefix_prompt_layer_offset_per_seq = 0;
-};
 
-template<typename T>
 struct PrefixPromptBatchWeightsParam {
     const int*              d_prefix_prompt_lengths  = nullptr;
     const int               max_prefix_prompt_length = 0;
     bool                    count_length             = false;
     KVBlockArray            kv_block_array           = KVBlockArray(0, 0, 0, 0);
-    ContinuousCacheParam<T> continuous_param         = ContinuousCacheParam<T>();
 };
-
-template<typename T>
-void invokeAddFusedQKVBiasTranspose(T*           q_buf,
-                                    T*           k_buf,
-                                    T*           v_buf,
-                                    T*           QKV,
-                                    const T*     qkv_bias,
-                                    const int*   padding_offset,
-                                    const int    batch_size,
-                                    const int    seq_len,
-                                    const int    token_num,
-                                    const int    head_num,
-                                    const int    head_num_kv,
-                                    const int    size_per_head,
-                                    cudaStream_t stream) {
-    invokeAddFusedQKVBiasTranspose(q_buf,
-                                   k_buf,
-                                   v_buf,
-                                   PrefixPromptBatchWeightsParam<T>{},
-                                   QKV,
-                                   nullptr,
-                                   qkv_bias,
-                                   padding_offset,
-                                   nullptr,
-                                   batch_size,
-                                   seq_len,
-                                   token_num,
-                                   head_num,
-                                   head_num_kv,
-                                   size_per_head,
-                                   0,
-                                   0,
-                                   0,
-                                   0,
-                                   0,
-                                   (float*)nullptr,
-                                   0,
-                                   stream);
-}
 
 void float_to_half(const void* input, void* output, int size);
 void half_to_float(const void* input, void* output, const int num_elements);
@@ -182,7 +136,7 @@ template<typename T>
 void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     T*                               k_buf,
                                     T*                               v_buf,
-                                    PrefixPromptBatchWeightsParam<T> param,
+                                    PrefixPromptBatchWeightsParam*   param,
                                     T*                               QKV,
                                     const int*                       position_ids,
                                     const T*                         qkv_bias,

@@ -611,14 +611,13 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         }
     }
 
-    PrefixPromptBatchWeightsParam<T> prefix_param =
+    PrefixPromptBatchWeightsParam prefix_param =
         d_prefix_prompt_lengths
-            ? PrefixPromptBatchWeightsParam<T>{d_prefix_prompt_lengths,
+            ? PrefixPromptBatchWeightsParam{d_prefix_prompt_lengths,
                                                max_prompt_length,
                                                count_prefix_length,
-                                               kv_block_array,
-                                               ContinuousCacheParam<T>{}}
-            : PrefixPromptBatchWeightsParam<T>();
+                                               kv_block_array}
+            : PrefixPromptBatchWeightsParam();
 
     PUSH_RANGE(stream_, "qkv_bias_add");
     if (use_kvcache || params_.rotary_embedding_style_ != 0) {
@@ -634,7 +633,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         invokeAddFusedQKVBiasTranspose(q_buf_2_,
                                        k_buf_2_,
                                        v_buf_2_,
-                                       prefix_param,  // prefix prompt
+                                       &prefix_param,  // prefix prompt
                                        qkv_buf,
                                        position_ids,
                                        attention_weights->query_weight.bias,

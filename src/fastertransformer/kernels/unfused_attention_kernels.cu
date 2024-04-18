@@ -1460,7 +1460,7 @@ template<typename T, typename Tcache, bool PREFIX_PROMPT>
 __global__ void add_fusedQKV_bias_transpose_kernel(T*                               q_buf,
                                                    T*                               k_buf,
                                                    T*                               v_buf,
-                                                   PrefixPromptBatchWeightsParam<T> param,
+                                                   PrefixPromptBatchWeightsParam    param,
                                                    T*                               QKV,
                                                    const int*  position_ids,
                                                    const T* __restrict qkv_bias,
@@ -1526,27 +1526,13 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                 const T* prefix_prompt_v = nullptr;
                 int      prefix_k_idx    = 0;
                 int      prefix_v_idx    = 0;
-                if (param.continuous_param.d_prefix_prompt_batch) {
-                    prefix_prompt_k = param.continuous_param.d_prefix_prompt_batch[prompt_batch_idx]
-                                      + param.continuous_param.prefix_prompt_layer_offset_per_seq * prompt_length;
-                    prefix_prompt_v = prefix_prompt_k + prompt_length * head_num_kv * size_per_head;
-                    prefix_k_idx =
-                        size_per_head * prompt_length * head_idx + size_per_head * prompt_seq_idx + tidx * vec_size;
-                    prefix_v_idx = prefix_k_idx;
-                    if (!is_masked) {
-                        *reinterpret_cast<Vec_t*>(&k_buf[dest_kv_idx]) =
-                            *reinterpret_cast<const Vec_t*>(&prefix_prompt_k[prefix_k_idx]);
-                        *reinterpret_cast<Vec_t*>(&v_buf[dest_kv_idx]) =
-                            *reinterpret_cast<const Vec_t*>(&prefix_prompt_v[prefix_v_idx]);
-                    }
-                }
-                else if (param.kv_block_array.mMaxSeqs > 0) {
+                if (param.kv_block_array.mMaxSeqs > 0) {
                     if (!is_masked) {
                         Tcache* k_cache = reinterpret_cast<Tcache*>(param.kv_block_array.getKBlockPtr(prompt_batch_idx, prompt_seq_idx));
                         Tcache* v_cache = reinterpret_cast<Tcache*>(param.kv_block_array.getVBlockPtr(prompt_batch_idx, prompt_seq_idx));
                         const int inBlockIdx = param.kv_block_array.getKVLocalIdx(
                             prompt_seq_idx, head_idx, size_per_head, tidx * vec_size);
- 
+
                         if constexpr (ENABLE_8BITS_CACHE) {
                             float* k_scale_ptr = reinterpret_cast<float*>(param.kv_block_array.getKScalePtr(prompt_batch_idx, prompt_seq_idx));
                             float* v_scale_ptr = reinterpret_cast<float*>(param.kv_block_array.getVScalePtr(prompt_batch_idx, prompt_seq_idx));
@@ -1685,7 +1671,7 @@ template<typename T>
 void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     T*                               k_buf,
                                     T*                               v_buf,
-                                    PrefixPromptBatchWeightsParam<T> param,
+                                    PrefixPromptBatchWeightsParam*   param_ptr,
                                     T*                               QKV,
                                     const int*                       position_ids,
                                     const T*                         qkv_bias,
@@ -1710,6 +1696,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     const int                        int8_mode,
                                     cudaStream_t                     stream)
 {
+    auto &param = *param_ptr;
     // [bs, seq_len, 3, head, Dh]
     if (rotary_embedding_dim == 0 && param.max_prefix_prompt_length == 0) {
         if (head_num_kv != head_num) {
@@ -1855,7 +1842,7 @@ INSTANTIATESPLITQKV(__nv_bfloat16);
     template void invokeAddFusedQKVBiasTranspose(T*                               q_buf,                               \
                                                  T*                               k_buf,                               \
                                                  T*                               v_buf,                               \
-                                                 PrefixPromptBatchWeightsParam<T> param,                               \
+                                                 PrefixPromptBatchWeightsParam*   param,                               \
                                                  T*                               QKV,                                 \
                                                  const int*                       position_ids,                        \
                                                  const T*                         qkv_bias,                            \

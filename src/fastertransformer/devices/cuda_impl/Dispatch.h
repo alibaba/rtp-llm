@@ -81,11 +81,18 @@ void castTuple(std::tuple<DstTs...> &dst, const std::tuple<SrcTs...> &src, std::
     }(), 0) ... };
 }
 
-template<typename CastedTuple, typename WorkT, typename ...Args>
+template<typename CastedTuple, typename WorkT, typename ...Args,
+         std::enable_if_t<std::is_constructible_v<CastedTuple>, bool> = 0>
 CastedTuple castArgs(const std::tuple<Args...>& args) {
     auto ret = CastedTuple();
     castTuple<WorkT>(ret, args, std::make_index_sequence<std::tuple_size_v<CastedTuple>>());
     return ret;
+}
+
+template<typename CastedTuple, typename WorkT, typename ...Args,
+         std::enable_if_t<!std::is_constructible_v<CastedTuple>, bool> = 0>
+CastedTuple castArgs(const std::tuple<Args...>& args) {
+    return move(args);
 }
 
 #define ARG_CASTED_FUNC_CALL(T, func_name, ...) {                                           \
