@@ -5,7 +5,6 @@
 #include <iostream>
 #include <list>
 #include <mutex>
-#include <nccl.h>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -99,7 +98,7 @@ struct KVCacheBuffer {
 
 class CacheManager {
 public:
-    CacheManager(const CacheConfig& config, ncclComm_t nccl_op, ft::DeviceBase* device);
+    CacheManager(const CacheConfig& config, ft::DeviceBase* device);
 
     const CacheConfig&     cacheConfig() const;
     const BlockRefCounter& blockRefCounter() const;
@@ -126,7 +125,7 @@ public:
     void        copyKvCacheFromSeqPosition(const SeqPosition& src_seq_position, const SeqPosition& dst_seq_position);
 
 private:
-    void                                    initFreeBlock(const CacheConfig& config, ncclComm_t nccl_op);
+    void                                    initFreeBlock(const CacheConfig& config);
     void                                    initKvCache(const CacheConfig& config);
     std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     std::tuple<bool, std::vector<int>>      mallocImpl(int nums);

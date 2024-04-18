@@ -26,7 +26,7 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
                                                ft::DataType::TYPE_FP16);
     ncclComm_t                    nccl_op;
     ft::DeviceBase*               device        = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
-    cache_manager_ = make_shared<CacheManager>(cache_config, nccl_op, device);
+    cache_manager_ = make_shared<CacheManager>(cache_config, device);
     scheduler_.reset(new FIFOScheduler(params, cache_manager_));
 }
 

@@ -31,7 +31,7 @@ protected:
 TEST_F(StreamCacheResourceTest, testSimple) {
     auto            cache_config = init_config();
     ft::DeviceBase* device;
-    CacheManagerPtr cache_manager = std::make_shared<CacheManager>(cache_config, nullptr, device_);
+    CacheManagerPtr cache_manager = std::make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 4);
 
     std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());

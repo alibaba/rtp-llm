@@ -35,7 +35,7 @@ protected:
 TEST_F(CacheManagerTest, testSimple) {
     auto            cache_config = init_config();
     ft::DeviceBase* device;
-    CacheManager    cache_manager(cache_config, nullptr, device_);
+    CacheManager    cache_manager(cache_config, device_);
 
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
 
@@ -63,7 +63,7 @@ TEST_F(CacheManagerTest, testSimple) {
 TEST_F(CacheManagerTest, testAllocateWithFreeCache) {
     auto            cache_config = init_config();
     ft::DeviceBase* device;
-    CacheManager    cache_manager(cache_config, nullptr, device_);
+    CacheManager    cache_manager(cache_config, device_);
 
     auto [success1, index1, reuse_len] = cache_manager.mallocWithCacheImpl(3, {1000, 2000, 3000});
     ASSERT_EQ(index1, std::vector<int>({1, 2, 3}));
@@ -88,7 +88,7 @@ TEST_F(CacheManagerTest, testAllocateWithFreeCache) {
 TEST_F(CacheManagerTest, testAllocateWithReuse) {
     auto            cache_config = init_config();
     ft::DeviceBase* device;
-    CacheManager    cache_manager(cache_config, nullptr, device_);
+    CacheManager    cache_manager(cache_config, device_);
 
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
     auto [success1, index1] = cache_manager.mallocIndex(2);
@@ -135,7 +135,7 @@ TEST_F(CacheManagerTest, testAllocateWithReuse) {
 TEST_F(CacheManagerTest, testMatchMaxLen) {
     auto cache_config       = init_config();
     cache_config.block_nums = 100;
-    CacheManager cache_manager(cache_config, nullptr, device_);
+    CacheManager cache_manager(cache_config, device_);
     ASSERT_EQ(cache_manager.freeBlockNums(), 99);
 
     // malloc cache item 1
@@ -201,7 +201,7 @@ TEST_F(CacheManagerTest, testMatchMaxLen) {
 
 TEST_F(CacheManagerTest, testPopNoResidentCacheItem) {
     auto         cache_config = init_config();
-    CacheManager cache_manager(cache_config, nullptr, device_);
+    CacheManager cache_manager(cache_config, device_);
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
 
     // malloc cache item 1
@@ -244,7 +244,7 @@ TEST_F(CacheManagerTest, testPopNoResidentCacheItem) {
 TEST_F(CacheManagerTest, testPopTwoCache) {
     auto cache_config       = init_config();
     cache_config.block_nums = 7;
-    CacheManager cache_manager(cache_config, nullptr, device_);
+    CacheManager cache_manager(cache_config, device_);
     ASSERT_EQ(cache_manager.freeBlockNums(), 6);
 
     // insert cache item 1
@@ -278,7 +278,7 @@ TEST_F(CacheManagerTest, testPopTwoCache) {
 TEST_F(CacheManagerTest, testPopWithResident) {
     auto cache_config       = init_config();
     cache_config.block_nums = 6;
-    CacheManager cache_manager(cache_config, nullptr, device_);
+    CacheManager cache_manager(cache_config, device_);
     ASSERT_EQ(cache_manager.freeBlockNums(), 5);
 
     // Insert resident cache item
@@ -313,7 +313,7 @@ TEST_F(CacheManagerTest, testPopWithResident) {
 TEST_F(CacheManagerTest, testResident) {
     auto cache_config       = init_config();
     cache_config.block_nums = 100;
-    CacheManager cache_manager(cache_config, nullptr, device_);
+    CacheManager cache_manager(cache_config, device_);
     ASSERT_EQ(cache_manager.freeBlockNums(), 99);
 
     // Malloc for resident block
@@ -356,7 +356,7 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     auto cache_config               = init_config();
     cache_config.block_nums         = 100;
     cache_config.seq_size_per_block = 2;
-    CacheManager cache_manager(cache_config, nullptr, device_);
+    CacheManager cache_manager(cache_config, device_);
     ASSERT_EQ(cache_manager.freeBlockNums(), 99);
 
     // Malloc cache item 1
@@ -395,7 +395,7 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
 TEST_F(CacheManagerTest, testConvertIndexToAddr) {
     auto TEST_CASE = [&](auto& cache_config) {
         ft::DeviceBase* device;
-        CacheManager    cache_manager(cache_config, nullptr, device_);
+        CacheManager    cache_manager(cache_config, device_);
         ASSERT_EQ(cache_manager.freeBlockNums(), 3);
         auto& kvCache = cache_manager.kvCacheBuffer();
 
@@ -439,7 +439,7 @@ TEST_F(CacheManagerTest, testConvertIndexToAddr) {
 TEST_F(CacheManagerTest, testConvertAddrToIndex) {
     auto            cache_config = init_complex_config();
     ft::DeviceBase* device;
-    CacheManager    cache_manager(cache_config, nullptr, device_);
+    CacheManager    cache_manager(cache_config, device_);
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
     auto& kvCache = cache_manager.kvCacheBuffer();
 

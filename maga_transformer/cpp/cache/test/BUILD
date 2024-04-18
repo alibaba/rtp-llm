@@ -9,7 +9,6 @@ test_linkopts = [
     "-ltorch",
     "-lc10",
     "-ltorch_cpu",
-    "-L/home/xinfei.sxf/.local/lib/python3.10/site-packages/torch/lib",
     "-lcudart",
     "-ltorch_python",
     "-L/usr/local/cuda/lib64",

@@ -31,8 +31,8 @@ SpeculativeEngine::SpeculativeEngine(
                              ft::DataType::TYPE_FP16);
     ncclComm_t      nccl_op;
     ft::DeviceBase* device = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
-    draft_cache_manager_   = make_shared<CacheManager>(cache_config, nccl_op, device);
-    target_cache_manager_  = make_shared<CacheManager>(cache_config, nccl_op, device);
+    draft_cache_manager_   = make_shared<CacheManager>(cache_config, device);
+    target_cache_manager_  = make_shared<CacheManager>(cache_config, device);
     scheduler_.reset(new FIFOScheduler(params, target_cache_manager_));
     params_ = *params.gpt_init_parameter;
 }

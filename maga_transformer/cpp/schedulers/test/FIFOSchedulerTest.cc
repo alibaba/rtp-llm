@@ -20,7 +20,7 @@ public:
 
 TEST_F(FIFOSchedulerTest, testSimple) {
     CacheConfig                   cache_config(1, 4, 1, 4, 8, fastertransformer::DataType::TYPE_FP16);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, nullptr, device_);
+    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 3);
     MagaInitParams init_config;
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
@@ -52,7 +52,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
 
 TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     CacheConfig                   cache_config(1, 2, 1, 4, 2, fastertransformer::DataType::TYPE_FP16);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, nullptr, device_);
+    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 1);
     MagaInitParams init_config;
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
@@ -80,7 +80,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
 
 TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     CacheConfig                   cache_config(1, 3, 1, 4, 2, fastertransformer::DataType::TYPE_FP16);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, nullptr, device_);
+    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 2);
     MagaInitParams init_config;
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
@@ -119,7 +119,7 @@ TEST_F(FIFOSchedulerTest, testReserverBlock) {}
 
 TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem2) {
     CacheConfig                   cache_config(1, 5, 1, 4, 2, fastertransformer::DataType::TYPE_FP16);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, nullptr, device_);
+    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 4);
     MagaInitParams init_config;
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
@@ -172,7 +172,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem2) {
 
 TEST_F(FIFOSchedulerTest, testReuseCache) {
     CacheConfig                   cache_config(1, 11, 1, 4, 2, fastertransformer::DataType::TYPE_FP16);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, nullptr, device_);
+    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 10);
     MagaInitParams init_config;
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();

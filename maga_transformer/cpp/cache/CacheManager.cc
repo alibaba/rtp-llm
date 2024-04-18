@@ -1,6 +1,7 @@
 #include "maga_transformer/cpp/cache/CacheManager.h"
 
 using namespace std;
+using namespace fastertransformer;
 
 namespace rtp_llm {
 
@@ -11,14 +12,14 @@ KVCacheBlockAddr KVCacheBlockAddr::clone(std::shared_ptr<CacheManager>& cache_ma
     return *this;
 }
 
-CacheManager::CacheManager(const CacheConfig& config, ncclComm_t nccl_op, ft::DeviceBase* device):
+CacheManager::CacheManager(const CacheConfig& config, ft::DeviceBase* device):
     config_(config), seq_size_per_block_(config.seq_size_per_block), device_(device) {
     FT_LOG_INFO("cache config: %s", config.debugString().c_str());
-    initFreeBlock(config_, nccl_op);
+    initFreeBlock(config_);
     initKvCache(config_);
 }
 
-void CacheManager::initFreeBlock(const CacheConfig& config, ncclComm_t nccl_op) {
+void CacheManager::initFreeBlock(const CacheConfig& config) {
     int block_nums = config.block_nums;
 
     // Assuming g_parallel_info.tp_size and other global variables/functions are defined elsewhere.
@@ -74,6 +75,7 @@ void CacheManager::initKvCache(const CacheConfig& config) {
                                                     {});
     }
 }
+
 
 void CacheManager::free(const std::vector<std::vector<int>>& block_indices) {
     for (const auto& indice : block_indices) {
@@ -199,7 +201,11 @@ void CacheManager::setKVBlockValue(int index, ft::BufferPtr& k_value, ft::Buffer
     for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
         auto dst = kv_cache_.k_blocks->data() + layer_num * layer_stride + index * config_.block_stride;
         auto src = k_value->data() + layer_num * config_.block_stride;
-        cudaMemcpy(dst, src, config_.block_stride, cudaMemcpyHostToDevice);
+        auto dst_buffer = Buffer(
+            kv_cache_.k_blocks->where(), DataType::TYPE_INT8, {config_.block_stride}, dst);
+        auto src_buffer = Buffer(
+            k_value->where(), DataType::TYPE_INT8, {config_.block_stride}, src);
+        device_->copy({dst_buffer, src_buffer});
     }
 }
 
