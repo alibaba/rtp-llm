@@ -130,8 +130,6 @@ class QwenRenderer(CustomChatRenderer):
             pass
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        assert (isinstance(self.tokenizer, QwenTokenizerTypes))
-
         if (self.template_chat_renderer != None) and \
             ((request.functions == None) or (len(request.functions) == 0)):
             return self.template_chat_renderer.render_chat(request)
