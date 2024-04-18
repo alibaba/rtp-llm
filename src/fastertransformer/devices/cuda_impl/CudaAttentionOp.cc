@@ -10,7 +10,6 @@
 
 #include "3rdparty/contextFusedMultiHeadAttention/fmhaRunner.h"
 #include "3rdparty/contextFusedMultiHeadAttention/fused_multihead_attention_common.h"
-#include "3rdparty/flash_attention2/flash.h"
 
 
 using namespace std;

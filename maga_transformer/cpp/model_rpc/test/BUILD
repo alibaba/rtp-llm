@@ -53,7 +53,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = [
         "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
-        "//maga_transformer/cpp:components",
+        "//3rdparty/flash_attention2:flash_attention2_impl",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "//maga_transformer/cpp:model_rpc_server",

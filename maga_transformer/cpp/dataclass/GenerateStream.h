@@ -21,9 +21,7 @@ namespace rtp_llm {
 
 class GenerateStream {
 public:
-    typedef std::vector<std::vector<uint32_t>> BlockIndiceType;
-
-    explicit GenerateStream(const std::shared_ptr<GenerateInput>& query, int max_seq_len = 2048);
+    GenerateStream(const std::shared_ptr<GenerateInput>& query, int max_seq_len = 2048);
     ~GenerateStream() {
         generate_outputs_.wakeup();
     }
@@ -52,9 +50,15 @@ public:
         return stream_cache_resource_.nextNeedBlockNums();
     }
 
+    void setNeedReleaseResource(bool need_release_resource) {
+        need_release_resource_ = need_release_resource;
+    }
+
     // TODO(xinfei.sxf) lora resource?
     void releaseResource() {
-        stream_cache_resource_.releaseResource();
+        if (!need_release_resource_) {
+            stream_cache_resource_.releaseResource();
+        }
     }
 
     int64_t streamId() const {
@@ -266,6 +270,7 @@ private:
     std::mutex                          output_mutex_;
     std::condition_variable             update_cv_;
     bool                                released_;
+    bool                                need_release_resource_;
     StreamCacheResource                 stream_cache_resource_;
 
     friend class StreamCacheResource;

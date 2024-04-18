@@ -10,7 +10,7 @@ namespace rtp_llm {
 
 NormalEngine::NormalEngine(const MagaInitParams&                                                   params,
                            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-                           const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) {
+                           const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) : params_(params) {
     executor_.reset(new NormalExecutor(params, layer_weights, weights));
     // TODO(xinfei.sxf) cache config from where, new cache Manager
     int   block_num     = 100;
@@ -26,8 +26,8 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
                                                ft::DataType::TYPE_FP16);
     ncclComm_t                    nccl_op;
     ft::DeviceBase*               device        = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
-    std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, nccl_op, device);
-    scheduler_.reset(new FIFOScheduler(params, cache_manager));
+    cache_manager_ = make_shared<CacheManager>(cache_config, nccl_op, device);
+    scheduler_.reset(new FIFOScheduler(params, cache_manager_));
 }
 
 NormalEngine::~NormalEngine() {
@@ -37,7 +37,6 @@ NormalEngine::~NormalEngine() {
 absl::Status NormalEngine::startLoop() {
     running_     = true;
     loop_thread_ = std::thread(&NormalEngine::loop, this);
-    loop_thread_.detach();
     return absl::OkStatus();
 }
 

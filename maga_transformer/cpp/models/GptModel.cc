@@ -36,31 +36,31 @@ void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
 }
 
 AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inputs) {
-    const auto decoder_batch_size = inputs.sequence_lengths.shape()[0];
-    const auto context_batch_size = inputs.input_lengths.shape()[0] - decoder_batch_size;
+    const auto decoder_batch_size = inputs.sequence_lengths->shape()[0];
+    const auto context_batch_size = inputs.input_lengths->shape()[0] - decoder_batch_size;
     const auto max_context_seq_len = context_batch_size ? *std::max_element(
-        inputs.input_lengths.data<int32_t>() + decoder_batch_size,
-        inputs.input_lengths.data<int32_t>() + decoder_batch_size + context_batch_size) : 0;
+        inputs.input_lengths->data<int32_t>() + decoder_batch_size,
+        inputs.input_lengths->data<int32_t>() + decoder_batch_size + context_batch_size) : 0;
     const auto max_decoder_seq_len = decoder_batch_size ? *std::max_element(
-        inputs.sequence_lengths.data<int32_t>(),
-        inputs.sequence_lengths.data<int32_t>() + decoder_batch_size) : 0;
+        inputs.sequence_lengths->data<int32_t>(),
+        inputs.sequence_lengths->data<int32_t>() + decoder_batch_size) : 0;
 
     std::vector<int32_t> cu_seqlens_data(context_batch_size + 1);
-    std::vector<int32_t> padding_offset_data(inputs.combo_tokens.shape()[0]);
+    std::vector<int32_t> padding_offset_data(inputs.combo_tokens->shape()[0]);
     getPaddingOffsetAndCuSeqLens(
         padding_offset_data.data(),
         cu_seqlens_data.data(),
-        inputs.input_lengths.dataWithOffset<int32_t>(decoder_batch_size),
+        inputs.input_lengths->dataWithOffset<int32_t>(decoder_batch_size),
         context_batch_size,
         max_context_seq_len);
-    if (!(cu_seqlens_data[context_batch_size] == inputs.combo_tokens.shape()[0])) {
+    if (!(cu_seqlens_data[context_batch_size] == inputs.combo_tokens->shape()[0])) {
         throw OpException(
             {OpErrorType::ERROR_INVALID_ARGS, "cu_seqlens is not consistent with combo_tokens."});
     }
 
     AttentionCommonInputs attention_inputs({
-        inputs.input_lengths,
-        inputs.sequence_lengths
+        *inputs.input_lengths,
+        *inputs.sequence_lengths
     });
     attention_inputs.cu_seqlens = device_->clone({vector2Buffer(cu_seqlens_data)});
     attention_inputs.padding_offset = device_->clone({vector2Buffer(padding_offset_data)});
@@ -68,7 +68,7 @@ AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inp
     attention_inputs.context_batch_size = context_batch_size;
     attention_inputs.context_max_seq_len = max_context_seq_len;
     attention_inputs.decoder_max_seq_len = max_decoder_seq_len;
-    attention_inputs.kv_cache_blocks = inputs.kv_cache_blocks;
+    attention_inputs.kv_cache_blocks = *inputs.kv_cache_blocks;
     attention_inputs.position_ids = inputs.position_ids;
     attention_inputs.attention_mask = inputs.attention_mask;
     return move(attention_inputs);

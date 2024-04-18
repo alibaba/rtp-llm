@@ -14,9 +14,10 @@ namespace W  = ft::W;
 namespace ft = fastertransformer;
 namespace rtp_llm {
 
-NormalEngine* createMockEngine(DeviceBase* device) {
+std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device) {
     rtp_llm::MagaInitParams rtp_llm_params;
     rtp_llm_params.gpt_init_parameter = c10::make_intrusive<GptInitParameter>(2, 64, 2, 20, 20, 128);
+    // GptInitParameter params(2, 64, 2, 20, 20, 128);
     auto& params        = *rtp_llm_params.gpt_init_parameter;
     params.head_num_kv_ = 2;
 
@@ -92,8 +93,11 @@ NormalEngine* createMockEngine(DeviceBase* device) {
         __weights.emplace(W::ffn_ln_beta, std::move(ffn_layer_norm_beta));
         layer_weights.push_back(std::move(__weights));
     }
-    NormalEngine* engine = new NormalEngine(rtp_llm_params, layer_weights, global_weights);
-    assert(engine->startLoop().ok());
+
+    std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, layer_weights, global_weights);
+    auto result = engine->startLoop();
+    assert(result.ok());
+    return engine;
 }
 
 }  // namespace rtp_llm

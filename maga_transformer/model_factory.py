@@ -10,7 +10,6 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from maga_transformer.models.base_model import BaseModel, ModelConfig
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
-from maga_transformer.async_decoder_engine.rpc_model import RpcModel
 from maga_transformer.tools.api.hf_model_helper import get_model_info_from_hf
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.dump_config_utils import dump_model_to_table
@@ -73,6 +72,7 @@ class ModelFactory:
         model = ModelFactory._create_model(model_config)
         if model_config.use_rpc:
             sp_model = None if sp_model_config is None else ModelFactory._create_model(sp_model_config)
+            from maga_transformer.async_decoder_engine.rpc_model import RpcModel
             model = RpcModel(model, sp_model)
         elif model_config.model_type != 'fake_model': # for test
             sp_model = None if sp_model_config is None else ModelFactory._create_model(sp_model_config)

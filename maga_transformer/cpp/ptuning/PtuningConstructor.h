@@ -26,6 +26,7 @@ public:
         return std::map<int, PrefixParams>();
     }
 
+    // prefix_prompt shape is [layer_num * 2, head_num, pre_seq_len, size_per_head]
     static PrefixParams createPtuningV2(const GptInitParameter& params, CacheManager* cache_manager, torch::Tensor& prefix_prompt) {        
         size_t prefix_seq_length = prefix_prompt.size(-2);
         // Reshape prefix_prompt to [layer_num, 2, head_num_kv, pre_seq_len, size_per_head]
@@ -101,23 +102,26 @@ public:
             std::vector<size_t> shape = {tokens_id.size()};
             generate_input->input_ids = std::make_unique<ft::Buffer>(ft::MEMORY_CPU, ft::TYPE_INT32, shape, (void *)(tokens_id.data()));
             generate_input->generate_config = generate_config;
-            
+
             // TODO(xinfei.sxf) consider tp
             GenerateStreamPtr stream = std::make_shared<GenerateStream>(generate_input);
+            stream->setNeedReleaseResource(false);
             engine->enqueue(stream);
-            engine->step();
+
+            auto output1 = stream->nextOutput();
+            assert(output1.ok());
+            assert(output1.value().aux_info.output_len == 1);
+            assert(stream->finished());
+
             const auto& kv_cache = stream->kvCache();
             assert(kv_cache.k_ptr.size() == 1);
             assert(kv_cache.k_ptr[0].size() > 0);
-            // assert(stream->iter_count != 0);
             auto block_indices = engine->cacheManager()->convertAddrToIndex(kv_cache.k_ptr[0][0]);
-            std::optional<torch::Tensor> prefix_tensor = std::nullopt;
             multi_task_prompt_args[task_id] = PrefixParams(PrefixType::PromptTuning,
-                                            tokens_id.size(), block_indices, prefix_tensor, tokens_id);
+                                            tokens_id.size(), block_indices, std::nullopt, tokens_id);
         }
         return multi_task_prompt_args;
     }
-
 };
 
 } // namespace rtp_llm

@@ -31,6 +31,9 @@ public:
     const std::shared_ptr<CacheManager> cacheManager() const {
         return cache_manager_;
     }
+    const MagaInitParams magaInitParams() const {
+        return params_;
+    }
 
 private:
     absl::Status trySaveStepError() const;
@@ -43,6 +46,7 @@ private:
     std::unique_ptr<SchedulerBase>        scheduler_;
     std::unique_ptr<BatchStreamProcessor> batch_stream_processor_;
     std::shared_ptr<CacheManager>         cache_manager_;
+    MagaInitParams                        params_;
 };
 
 }  // namespace rtp_llm

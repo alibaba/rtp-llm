@@ -4,6 +4,7 @@
 #include "maga_transformer/cpp/model_rpc/ModelRpcServer.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
 
 using namespace std;
 

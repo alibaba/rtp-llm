@@ -233,6 +233,7 @@ cc_library(
         "//src/fastertransformer/utils:utils",
         "//3rdparty:cuda_driver",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
         "//src/fastertransformer/cuda:allocator_cuda",
@@ -268,7 +269,10 @@ py_library(
 cc_binary(
     name = "main",
     srcs = ["main.cc"],
-    deps = [":model_rpc_server"] + torch_deps(),
+    deps = [
+        ":model_rpc_server",
+        "//3rdparty/flash_attention2:flash_attention2_impl",
+    ] + torch_deps(),
     linkopts = linkopts,
     visibility = ["//visibility:public"]
 )

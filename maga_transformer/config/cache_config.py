@@ -49,7 +49,7 @@ class CacheConfigGenerator(object):
         kv_cache_mem_size = CacheConfigGenerator.get_free_memory_size(param)
         config = CacheConfigGenerator._create_basic_config(param)
         block_nums: int = kv_cache_mem_size // config.block_size //  2
-        assert block_nums > 0
+        assert block_nums > 0, f"lack kv cache mem size, free gpu mem: {int(get_mem_info().free) / 1024 / 1024} MB, reserve_runtime_mem_mb: {param.reserve_runtime_mem_mb} MB, kv_cache_mem_size: {kv_cache_mem_size / 1024 / 1024} MB"
         return config._replace(block_nums=block_nums)
 
     @staticmethod
@@ -58,6 +58,5 @@ class CacheConfigGenerator(object):
         config = CacheConfigGenerator._create_basic_config(param)
         sp_config = CacheConfigGenerator._create_basic_config(sp_param)
         block_nums: int = kv_cache_mem_size // (sp_config.block_size + config.block_size) //  2
-        assert block_nums > 0
-
+        assert block_nums > 0, f"lack sp kv cache mem size, free gpu mem: {int(get_mem_info().free) / 1024 / 1024} MB, reserve_runtime_mem_mb: {param.reserve_runtime_mem_mb} MB, kv_cache_mem_size: {kv_cache_mem_size / 1024 / 1024} MB"
         return config._replace(block_nums=block_nums), sp_config._replace(block_nums=block_nums)

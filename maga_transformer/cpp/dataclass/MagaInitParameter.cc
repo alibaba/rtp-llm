@@ -1,6 +1,7 @@
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
 #include "src/fastertransformer/models/W.h"
 
 using namespace std;

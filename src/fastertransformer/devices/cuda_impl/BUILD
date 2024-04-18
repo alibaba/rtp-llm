@@ -18,7 +18,6 @@ cc_library(
         "//src/fastertransformer/layers:layers",
         "//src/fastertransformer/kernels:kernels",
         "cutlass_kernels_interface",
-        "//3rdparty/flash_attention2:flash_attention2_impl",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
     ],
     visibility = ["//visibility:public"],
