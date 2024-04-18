@@ -21,7 +21,6 @@ public:
                               const size_t n,
                               float*       scale,
                               float*       dynamic_scale,
-                              const bool   sq_int8,
                               int8_t*      norm_output_quant,
                               cudaStream_t stream);
 
@@ -34,7 +33,6 @@ public:
                                const size_t n,
                                const float* scale,
                                float*       dynamic_scale,
-                               const bool   sq_int8,
                                int8_t*      norm_output_quant,
                                cudaStream_t stream);
 
@@ -50,7 +48,6 @@ public:
                                            const size_t n,
                                            const float* scale,
                                            float*       dynamic_scale,
-                                           const bool   sq_int8,
                                            int8_t*      norm_output_quant,
                                            cudaStream_t stream);
 

@@ -446,7 +446,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                             hidden_units,
                                             nullptr,
                                             attention_query_dynamic_scale_,
-                                            params_.quant_algo_->sq_int8_,
                                             reinterpret_cast<int8_t*>(decoder_normed_input_),
                                             stream_);
         if (params_.quant_algo_->sq_int8_) {
@@ -466,7 +465,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                                  hidden_units,
                                                  nullptr,
                                                  attention_query_dynamic_scale_,
-                                                 params_.quant_algo_->sq_int8_,
                                                  reinterpret_cast<int8_t*>(attn_normed_input_),
                                                  stream_);
             print_bsd(l, "pre attn ln", attn_normed_input_, 1, h_token_num, hidden_units);
@@ -583,7 +581,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                 hidden_units,
                 nullptr,
                 ffn_intermediate_dynamic_scale_, 
-                params_.quant_algo_->sq_int8_,
                 reinterpret_cast<int8_t*>(normed_self_attn_output_),
                 stream_);
         }
