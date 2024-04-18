@@ -1,6 +1,6 @@
 import os
 import torch
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pydantic import BaseModel as PyBaseModel
 from typing import Any, Dict, List, Optional, Union, NamedTuple
 
@@ -87,28 +87,46 @@ class GenerateContext(NamedTuple):
     cache_indirection: Any
     output_token_ids: Any
 
-@dataclass
-class ModelConfigBase:
-    model_type: str = ""
-    ckpt_path: str = ""
-    tokenizer_path: str = ""
-    weight_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16
-    act_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16
-    max_seq_len: int = 0
-    seq_size_per_block: int = 8
-    gen_num_per_circle: int = 1
-    ptuning_path: Optional[str] = None
-    lora_infos: Optional[Dict[str, str]] = None
-    ref_model: Optional[torch.nn.Module] = None
-    use_rpc: bool = False
+class ModelConfig:
+    def __init__(
+            self, 
+            model_type: str = "",
+            ckpt_path: str = "",
+            tokenizer_path: str = "",
+            weight_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
+            act_type: WEIGHT_TYPE = WEIGHT_TYPE.FP16,
+            max_seq_len: int = 0,
+            seq_size_per_block: int = 8,
+            gen_num_per_circle: int = 1,
+            ptuning_path: Optional[str] = None,
+            lora_infos: Optional[Dict[str, str]] = None,
+            ref_model: Optional[torch.nn.Module] = None,
+            ref_dict: Dict[str, torch.Tensor] = {},
+            use_rpc: bool = False
+        ):
+        self.model_type: str = model_type
+        self.ckpt_path: str = ckpt_path
+        self.tokenizer_path: str = tokenizer_path
+        self.weight_type: WEIGHT_TYPE = weight_type
+        self.act_type: WEIGHT_TYPE = act_type
+        self.max_seq_len: int = max_seq_len
+        self.seq_size_per_block: int = seq_size_per_block
+        self.gen_num_per_circle: int = gen_num_per_circle
+        self.ptuning_path: Optional[str] = ptuning_path
+        self.lora_infos: Optional[Dict[str, str]] = lora_infos
+        self.ref_model: Optional[torch.nn.Module] = ref_model
+        self.ref_dict: Dict[str, torch.Tensor] = ref_dict
+        self.use_rpc: bool = use_rpc
 
-class ModelConfig(ModelConfigBase):
     @property
     def int8_mode(self):
         return True if self.weight_type == WEIGHT_TYPE.INT8 else False
 
     def add_ref_model(self, ref_model: Optional[torch.nn.Module]):
         self.ref_model = ref_model
+    
+    def add_ref_dict(self, ref_dict: Dict[str, torch.Tensor]):
+        self.ref_dict = ref_dict
 
     def _replace(self, **kwargs: Any):
         for k, v in kwargs.items():
@@ -140,7 +158,8 @@ class BaseModel(object):
             gen_num_per_circle=model_config.gen_num_per_circle,
             lora_infos=model_config.lora_infos,
             ptuning_path=model_config.ptuning_path,
-            ref_model=model_config.ref_model
+            ref_model=model_config.ref_model,
+            ref_dict=model_config.ref_dict
         )
         return config
 

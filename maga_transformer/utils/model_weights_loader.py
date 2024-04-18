@@ -11,7 +11,7 @@ from itertools import repeat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
     WeightInfo, W, ModelWeights, LoRAWeights
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.utils.database import BaseDatabase, CkptFileInfo, ModuleDatabase, CkptDatabase
+from maga_transformer.utils.database import BaseDatabase, CkptFileInfo, ModuleDatabase, CkptDatabase, DictDatabase
 from maga_transformer.utils.util import get_mem_info
 
 class WeightLog:
@@ -74,7 +74,7 @@ class ModelWeightsLoader:
             self._weights_info.process_meta(self._database.FinetuneFileList)
             self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
             self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
-        elif isinstance(self._database, ModuleDatabase):
+        elif isinstance(self._database, ModuleDatabase) or isinstance(self._database, DictDatabase):
             self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
             self._merge_lora = False
         else:
@@ -98,7 +98,7 @@ class ModelWeightsLoader:
 
             self._lora_log.dump()
 
-    def load_weights_from_scratch(self, ref_model: Optional[torch.nn.Module]=None, device: str='cuda:0', num_process=1):
+    def load_weights_from_scratch(self, device: str='cuda:0', num_process=1):
         weights = ModelWeights(self._num_layers)
         if num_process > 1:
             ctx = multiprocessing.get_context('spawn')
@@ -106,10 +106,9 @@ class ModelWeightsLoader:
                 all_results = pool.starmap(
                     self._load_layer_weight,
                     zip(range(self._num_layers),
-                        repeat(ref_model),
                         repeat(device)))
         else:
-            all_results = [self._load_layer_weight(id, ref_model, device)
+            all_results = [self._load_layer_weight(id, device)
                            for id in range(self._num_layers)]
         for results, logs, lora_logs in all_results:
             self._weight_log.update(logs)
@@ -118,7 +117,7 @@ class ModelWeightsLoader:
             for (layer_id, name, tensor) in results:
                 weights.append_layer_weight(layer_id, name, tensor)
         for weight in self._model_weights_info.weights:
-            tensor = self._load_and_convert_tensor(weight, ref_model)
+            tensor = self._load_and_convert_tensor(weight)
             tensor = self._split_and_sanitize_tensor(tensor, weight)
             tensor = tensor.to('cuda')
             weights.append_pytorch_weight(weight.name, tensor)
@@ -181,7 +180,7 @@ class ModelWeightsLoader:
 
         return results, self._lora_log
     
-    def _load_int4_layer_weight(self, layer_weights, layer_id: int, device: str, ref_model: Optional[torch.nn.Module] = None):
+    def _load_int4_layer_weight(self, layer_weights, layer_id: int, device: str):
         if self._merge_lora:
             raise Exception("lora in int4 is not implemented yet")
         results = []
@@ -200,9 +199,9 @@ class ModelWeightsLoader:
                 elif len(qweight) > 1:
                     raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
                 try:
-                    qweight_tensor = self._load_and_convert_tensor(qweight[0], ref_model=ref_model, layer_id=layer_id, datatype=torch.int32)
-                    qzero_tensor = self._load_and_convert_tensor(qzero[0], ref_model=ref_model, layer_id=layer_id, datatype=torch.int32)
-                    qscale_tensor = self._load_and_convert_tensor(qscale[0], ref_model=ref_model, layer_id=layer_id)
+                    qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=torch.int32)
+                    qzero_tensor = self._load_and_convert_tensor(qzero[0], layer_id=layer_id, datatype=torch.int32)
+                    qscale_tensor = self._load_and_convert_tensor(qscale[0], layer_id=layer_id)
                     qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor)
                     qzero_tensor = self._split_tensor(qzero[0].name, qzero_tensor)
                     qscale_tensor = self._split_tensor(qscale[0].name, qscale_tensor)
@@ -233,7 +232,7 @@ class ModelWeightsLoader:
 
         return results
     
-    def _load_int8_layer_weight(self, layer_weights, layer_id: int, device: str, ref_model: Optional[torch.nn.Module] = None):
+    def _load_int8_layer_weight(self, layer_weights, layer_id: int, device: str):
         if self._merge_lora:
             raise Exception("lora in sq is not implemented yet")
         results = []
@@ -250,14 +249,14 @@ class ModelWeightsLoader:
             elif len(qweight) > 1:
                 raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
             try:
-                qweight_tensor = self._load_and_convert_tensor(qweight[0], ref_model=ref_model, layer_id=layer_id, datatype=torch.int8)
-                qscale_tensor = self._load_and_convert_tensor(qscale[0], ref_model=ref_model, layer_id=layer_id, datatype=torch.float32)
+                qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=torch.int8)
+                qscale_tensor = self._load_and_convert_tensor(qscale[0], layer_id=layer_id, datatype=torch.float32)
                 qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor).to(device)
                 qscale_tensor = self._split_tensor(qscale[0].name, qscale_tensor).to(device)
                 results.append((layer_id, qweight[0].name, qweight_tensor))
                 results.append((layer_id, qscale[0].name, qscale_tensor))
                 if len(weight_list) ==3:
-                    smoother_tensor = self._load_and_convert_tensor(smoother[0], ref_model=ref_model, layer_id=layer_id, datatype=torch.float32)
+                    smoother_tensor = self._load_and_convert_tensor(smoother[0], layer_id=layer_id, datatype=torch.float32)
                     smoother_tensor = self._split_tensor(smoother[0].name, smoother_tensor).to(device)
                     results.append((layer_id, smoother[0].name, smoother_tensor))
                     
@@ -266,7 +265,7 @@ class ModelWeightsLoader:
                 raise e
         return results
     
-    def _load_layer_weight_and_apply_int8(self, layer_weights, layer_id: int, device: str, ref_model: Optional[torch.nn.Module] = None):
+    def _load_layer_weight_and_apply_int8(self, layer_weights, layer_id: int, device: str):
         results = []
         is_moe = self._weights_info.expert_num_ > 0 and layer_id in self._weights_info.moe_layer_index_
         is_gated_activation = self._weights_info._is_gated_activation
@@ -282,7 +281,7 @@ class ModelWeightsLoader:
                 elif len(qweight) > 1:
                     raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
                 try:
-                    qweight_tensor = self._load_and_convert_tensor(qweight[0], ref_model=ref_model, layer_id=layer_id)
+                    qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id)
                     if self._merge_lora:
                         qweight_tensor = self.apply_lora(qweight_tensor, qweight[0], layer_id)
                     qweight_tensor = self._split_and_sanitize_tensor(qweight_tensor, qweight[0])
@@ -313,7 +312,7 @@ class ModelWeightsLoader:
                 
         return results
 
-    def _load_layer_weight(self, layer_id: int, ref_model: Optional[torch.nn.Module] = None, device: str = "cuda:0"):
+    def _load_layer_weight(self, layer_id: int, device: str = "cuda:0"):
         use_fp32 = os.environ.get("USE_FLOAT32", None) is not None
         results = []
         if isinstance(self._model_weights_info.layer_weights[0], List):
@@ -329,7 +328,7 @@ class ModelWeightsLoader:
 
                 if int4_flag or int8_flag:
                     continue
-                tensor = self._load_and_convert_tensor(weight, ref_model=ref_model, layer_id=layer_id)
+                tensor = self._load_and_convert_tensor(weight, layer_id=layer_id)
                 
                 if self._merge_lora:
                     tensor = self.apply_lora(tensor, weight, layer_id)
@@ -344,11 +343,11 @@ class ModelWeightsLoader:
                 logging.error(f'load {weight.name} in layer {layer_id} failed: {e}')
                 raise e
         if self._weights_info._int4_mode:
-            results.extend(self._load_int4_layer_weight(layer_weights, layer_id=layer_id, device=device, ref_model=ref_model))
+            results.extend(self._load_int4_layer_weight(layer_weights, layer_id=layer_id, device=device))
         elif self._weights_info._sq_int8:
-            results.extend(self._load_int8_layer_weight(layer_weights, layer_id=layer_id, device=device, ref_model=ref_model))
+            results.extend(self._load_int8_layer_weight(layer_weights, layer_id=layer_id, device=device))
         elif self._weights_info._int8_mode:
-            results.extend(self._load_layer_weight_and_apply_int8(layer_weights, layer_id=layer_id, device=device, ref_model=ref_model))
+            results.extend(self._load_layer_weight_and_apply_int8(layer_weights, layer_id=layer_id, device=device))
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -553,7 +552,7 @@ class ModelWeightsLoader:
 
         return after_merge_tensor
 
-    def _load_and_convert_tensor(self, weight_info: WeightInfo, ref_model: Optional[torch.nn.Module] = None, layer_id: Optional[int] = None, datatype: str = torch.float16):
+    def _load_and_convert_tensor(self, weight_info: WeightInfo, layer_id: Optional[int] = None, datatype: str = torch.float16):
         before_merge_tensors = []
         self._weight_log.record_loaded_tensor(weight_info.name)
         for ckpt_weight in weight_info.weights:

@@ -62,8 +62,7 @@ class FakeModelLoader(object):
             seq_size_per_block=8,
             tp_size=1,
             gen_num_per_circle=1,
-            ptuning_path=None,
-            ref_model=None
+            ptuning_path=None
         )
 
         model = model_cls.from_config(raw_config)

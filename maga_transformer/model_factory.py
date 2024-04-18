@@ -190,3 +190,12 @@ class ModelFactory:
         ModelFactory.load_default_generate_config(model)
 
         return model
+    
+    @staticmethod
+    def create_from_dict(ref_dict: Dict[str, torch.Tensor]):
+        normal_model_config = ModelFactory.create_normal_model_config()
+        normal_model_config.add_ref_dict(ref_dict)
+        model = ModelFactory.from_model_config(normal_model_config)
+        ModelFactory.load_default_generate_config(model)
+
+        return model

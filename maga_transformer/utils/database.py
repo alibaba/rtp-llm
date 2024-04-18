@@ -184,6 +184,24 @@ class ModuleDatabase(BaseDatabase):
             return [eval('self.ref_model.' + weight_name)]
         except AttributeError:
             raise Exception(f'No weight named {weight_name} in reference model')
+    
+    def get_pretrain_tensor_names(self) -> List[str]:
+        return list(self.ref_model.state_dict().keys())
+        
+class DictDatabase(BaseDatabase):
+    ref_dict: Dict[str, torch.Tensor] = {}
+
+    def __init__(self, ref_dict: Dict[str, torch.Tensor]):
+        self.ref_dict = ref_dict
+    
+    def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
+        try:
+            return [self.ref_dict[name]]
+        except KeyError:
+            raise Exception(f'No weight named {name} in inference model')
+
+    def get_pretrain_tensor_names(self) -> List[str]:
+        return list(self.ref_dict.keys())
 
 class CkptDatabase(BaseDatabase):
 

@@ -40,10 +40,6 @@ class AsyncModel:
         async with self.vit_expand_token_id_lock:
             return self.model.expand_token_id(token_ids, images)
 
-    def load(self, ref_model: Optional[torch.nn.Module] = None):
-        self.model.load(ref_model)
-        self.decoder_engine_.executor_.gpt_op.set_weight(self.model.weight)
-
     @property
     def default_generate_config(self) -> GenerateConfig:
         return self.model.default_generate_config

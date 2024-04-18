@@ -99,6 +99,7 @@ class GptInitModelParameters:
         "medusa_config",
         "normalize_lm_head_weight",
         "ref_model",
+        "ref_dict",
         "is_quant_mode",
         "model_type",
         "tie_word_embeddings"
@@ -133,6 +134,7 @@ class GptInitModelParameters:
         self.prefix_projection = False
         self.vit_related_params: VitParameters = VitParameters()
         self.ref_model: Optional[torch.nn.Module] = None
+        self.ref_dict: Dict[str, torch.Tensor] = {}
 
         self.model_type = ModelType.NORMAL
         self.tie_word_embeddings = False
@@ -282,7 +284,8 @@ class GptInitModelParameters:
                       seq_size_per_block: int,
                       tp_size: int,
                       gen_num_per_circle: int,
-                      ref_model: Optional[torch.nn.Module]):
+                      ref_model: Optional[torch.nn.Module] = None,
+                      ref_dict: Dict[str, torch.Tensor] = {}):
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path
@@ -292,6 +295,7 @@ class GptInitModelParameters:
         self.gen_num_per_circle = gen_num_per_circle
         self.ptuning_path = ptuning_path
         self.ref_model = ref_model
+        self.ref_dict = ref_dict
         if max_seq_len != 0:
             self.max_seq_len = max_seq_len
         if self.max_seq_len < 1:

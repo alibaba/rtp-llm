@@ -16,7 +16,7 @@ from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, LoRAMo
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.utils.database import CkptDatabase, ModuleDatabase
+from maga_transformer.utils.database import CkptDatabase, ModuleDatabase, DictDatabase
 from maga_transformer.models.gpt_util.prefix_encoder import PrefixEncoder
 from maga_transformer.models.gpt_util.medusa_head import MedusaHead
 from maga_transformer.models.base_model import BaseModel
@@ -127,10 +127,13 @@ class GPT(BaseModel):
         logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
     def load(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
-        self._load_weights(self.config.ref_model, device)
+        self._load_weights(self.config.ref_model, self.config.ref_dict, device)
         self._initialize_from_weight(device)
 
-    def _load_weights(self, ref_model: Optional[torch.nn.Module] = None, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+    def _load_weights(self, 
+                      ref_model: Optional[torch.nn.Module] = None, 
+                      ref_dict: Dict[str, torch.Tensor] = {},
+                      device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         device = device or get_device()
         compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
 
@@ -139,6 +142,8 @@ class GPT(BaseModel):
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
             if ref_model is not None:
                 database = ModuleDatabase(ref_model)
+            elif len(ref_dict) != 0:
+                database = DictDatabase(ref_dict)
             else:
                 database = CkptDatabase(self.config.ckpt_path)
                 database.load_ptuning(self.config.ptuning_path)
