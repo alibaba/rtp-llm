@@ -1,5 +1,6 @@
 # 多卡并行
-rtp-llm支持单机多卡并行
+rtp-llm支持单机多卡、多机单卡、多机多卡并行策略。  
+多机并行需要rtp-llm版本>=`0.1.11` 。
 
 ## 单机多卡
 使用单机多卡并行，需要在启动服务时添加环境变量`TP_SIZE`, `WORLD_SIZE`，请求服务时和单卡逻辑一致，参考命令如下: 
@@ -44,4 +45,30 @@ START_PORT=10000 DISTRIBUTE_CONFIG_FILE=/path/to/file WORLD_RANK=0 TP_SIZE=4 WOR
 rank1:
 ``` shell
 START_PORT=20000 DISTRIBUTE_CONFIG_FILE=/path/to/file WORLD_RANK=2 TP_SIZE=4 WORLD_SIZE=4 LOCAL_WORLD_SIZE=2 MODEL_TYPE=xxx CHECKPOINT_PATH=/path/to/ckpt TOKENIZER_PATH=/path/to/tokenizer python3 -m maga_transformer.start_server
+```
+### 访问服务
+服务端点为rank0的Uvicorn Server地址，即http://0.0.0.0:10000
+
+## 常见问题及解决方案
+1. 启动报错`Caught signal 7 (Bus error: nonexistent physical address)`  
+单节点多卡间采用共享内存的方式通信，该报错是因为共享内存不足。  
+- 如通过docker启动，需添加`--shm-size=2g`参数
+- 如通过K8s部署，可通过为容器添加Memory类型的存储卷设置共享内存。
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: your-model-pod
+spec:
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: "2Gi"
+  containers:
+    - name: mycontainer
+      image: your_image_name
+      volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
 ```
