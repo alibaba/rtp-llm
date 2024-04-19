@@ -181,7 +181,7 @@ class ModuleDatabase(BaseDatabase):
     def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
         weight_name: str = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', name)
         try:
-            return [eval('self.ref_model.' + weight_name)]
+            return [eval('self.ref_model.' + weight_name).to(dtype = datatype)]
         except AttributeError:
             raise Exception(f'No weight named {weight_name} in reference model')
     
@@ -196,7 +196,7 @@ class DictDatabase(BaseDatabase):
     
     def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
         try:
-            return [self.ref_dict[name]]
+            return [self.ref_dict[name].to(dtype = datatype)]
         except KeyError:
             raise Exception(f'No weight named {name} in inference model')
 
