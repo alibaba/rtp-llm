@@ -45,21 +45,6 @@ class ModelWeihgtsLoaderTest(TestCase):
         weights = model_weights_loader.load_weights_from_scratch(device="cpu")
         model_weights_loader.show_warns()
         return config, weights
-    
-    @staticmethod
-    def load_module(model_type, ckpt_path, tp_size=1, tp_rank=1, pp_size=1, pp_rank=1, num_layers = None, ptuning_path=None):
-        ref_model = AutoModelForCausalLM.from_pretrained(ckpt_path, trust_remote_code=True)
-        config = ModelWeihgtsLoaderTest.create_config(model_type, ckpt_path, tp_size=tp_size, ptuning_path=ptuning_path, ref_model=ref_model)
-        config.num_layers = num_layers if num_layers else config.num_layers
-        logging.info(f"config.num_layers:{config.num_layers}")
-        weights_info = ModelFactory.get_weight_cls(model_type)(config, tp_size, tp_rank)
-        database = ModuleDatabase(ref_model)
-        model_weights_loader = ModelWeightsLoader(weights_info, database)
-        model_weights_loader.set_data_type(torch.float16)
-        weights = model_weights_loader.load_weights_from_scratch(device="cpu")
-        model_weights_loader.show_warns()
-        return config, weights
-
 
     def test_qwen_megatron_model_load(self):
         ckpt_path = os.path.join(ModelWeihgtsLoaderTest._testdata_path(), "qwen_14b_megatron_model")
