@@ -44,7 +44,11 @@ def cuda_default_copts():
         "-x", "cuda",
         "-DGOOGLE_CUDA=1",
         "-Xcuda-fatbinary=--compress-all",
-        "--no-cuda-include-ptx=all"
+        "--no-cuda-include-ptx=all",
+        "-nvcc_options=relaxed-constexpr",
+        "-nvcc_options=ftz=true",
+        "-nvcc_options=generate-line-info",
+        "-nvcc_options=threads=4",
     ] + %{cuda_extra_copts}) + if_cuda_clang_opt(
         # Some important CUDA optimizations are only enabled at O3.
         ["-O3"]

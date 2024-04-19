@@ -59,8 +59,8 @@ public:
     BufferPtr input_lengths;               // [batch_size]
     BufferPtr sequence_lengths;            // [decoder_batch_size]
     BufferPtr prefix_lengths;              // [batch_size, seq_len]
-    BufferPtr kv_cache_blocks;             // [batch_size, block_length], int64 block pointers
-    BufferPtr kv_cache_scales;             // [batch_size, block_length], int64 block scales
+    BufferPtr kv_cache_blocks;             // [layer_id, batch_size, 2, block_num_per_seq]
+    BufferPtr kv_cache_scales;             // [layer_id, batch_size, 2, block_num_per_seq]
 };
 
 struct MergedInput {

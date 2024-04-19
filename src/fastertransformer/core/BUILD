@@ -19,10 +19,7 @@ cc_library(
         "//:using_cuda": ["@local_config_cuda//cuda:cuda"],
         "//conditions:default": [],
     }),
-    copts = select({
-        "//:using_cuda": copts() + ["-DENABLE_CUDA"],
-        "//conditions:default": copts(),
-    }),
+    copts = cuda_copts(),
     visibility = ["//visibility:public"],
 )
 

@@ -137,12 +137,5 @@ def copts():
         "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE",
     ]
 
-
 def cuda_copts():
-    return copts() + cuda_default_copts() + [
-        "-nvcc_options=relaxed-constexpr",
-        "-nvcc_options=ftz=true",
-	"-nvcc_options=generate-line-info",
-	"-nvcc_options=threads=4",
-	# "-G",
-    ]
+    return copts() + cuda_default_copts()

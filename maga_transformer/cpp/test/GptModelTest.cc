@@ -1,7 +1,10 @@
+#include "src/fastertransformer/devices/testing/TestBase.h"
+
 #define private public
 
-#include "src/fastertransformer/devices/testing/TestBase.h"
+#ifdef GOOGLE_CUDA
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#endif
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/test/ModelTestUtil.h"
 

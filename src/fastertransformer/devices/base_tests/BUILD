@@ -7,6 +7,8 @@ cc_library(
     ]),
     deps = [
         "//src/fastertransformer/devices/testing:device_test_utils",
+        "//maga_transformer/cpp:cache",
+        "//maga_transformer/cpp:models",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

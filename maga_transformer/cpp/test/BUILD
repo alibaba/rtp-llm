@@ -1,4 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
+load("//src/fastertransformer/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 test_copts = [
     "-fno-access-control",
@@ -26,16 +27,12 @@ cc_library(
 
 test_deps = [
     "//src/fastertransformer/devices/testing:device_test_utils",
-    "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-    "//3rdparty/flash_attention2:flash_attention2_impl",
-    "//maga_transformer/cpp:model_rpc_server",
+    "//maga_transformer/cpp:models",
     "//:gpt_init_params",
     ":test_headers",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-    "@local_config_cuda//cuda:cuda",
-    "@local_config_cuda//cuda:cudart",
-] + torch_deps()
+] + torch_deps() + device_impl_target()
 
 cc_library(
     name = "test_utils",
@@ -57,16 +54,14 @@ cc_test(
         "GptModelTest.cc",
     ],
     data = [
-        "//maga_transformer/test/model_test/fake_test/testdata:testdata"
+        "//maga_transformer/test/model_test/fake_test/testdata:testdata",
     ],
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps + [
         ":test_utils",
     ],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
+    env = device_test_envs(),
 )
 
 cc_test(

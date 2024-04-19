@@ -3,7 +3,8 @@
 #include <string>
 #include <cstdint>
 
-#ifdef ENABLE_CUDA
+
+#if GOOGLE_CUDA
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #endif
@@ -26,7 +27,7 @@ namespace fastertransformer {
     F(DataType::TYPE_BYTES, char); \
     F(DataType::TYPE_STR, std::string);
 
-#ifdef ENABLE_CUDA
+#if GOOGLE_CUDA
 #define FT_FOREACH_DEVICE_TYPE(F) \
     F(DataType::TYPE_FP16, half); \
     F(DataType::TYPE_BF16, __nv_bfloat16);

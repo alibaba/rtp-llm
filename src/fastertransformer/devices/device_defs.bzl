@@ -1,0 +1,20 @@
+
+def device_test_envs():
+    return select({
+        "//:using_cuda": {
+            "TEST_USING_DEVICE": "CUDA",
+        },
+        "//conditions:default": {
+            "TEST_USING_DEVICE": "CPU",
+        },
+    })
+
+def device_impl_target():
+    return select({
+        "//:using_cuda": [
+            "//src/fastertransformer/devices/cuda_impl:cuda_impl"
+        ],
+        "//conditions:default": [
+            "//src/fastertransformer/devices/cpu_impl:cpu_impl"
+        ],
+    })
