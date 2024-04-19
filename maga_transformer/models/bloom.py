@@ -99,13 +99,13 @@ class Bloom(GPT):
             raise BaseException(f'model type is not bloom: {model_type}')
         config.head_num = config_json.get('num_attention_heads', config_json.get('n_head'))
         config.head_num_kv = config.head_num
-        hidden_size = config_json.get('n_embed', config_json.get('hidden_size'))
-        config.size_per_head = hidden_size // config.head_num
+        config.hidden_size = config_json.get('n_embed', config_json.get('hidden_size'))
+        config.size_per_head = config.hidden_size // config.head_num
         config.layer_num = config_json['n_layer']
         config.max_seq_len = config_json.get('seq_length', 2048)
         config.vocab_size = config_json['vocab_size']
         config.layernorm_eps = config_json['layer_norm_epsilon']
-        config.inter_size = hidden_size * 4
+        config.inter_size = config.hidden_size * 4
         config.special_tokens.eos_token_id = config_json['eos_token_id']
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         return config
