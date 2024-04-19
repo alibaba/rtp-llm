@@ -43,9 +43,8 @@ public:
         // Allocate prefix_block_indice using cache_manager
         // The actual implementation of `malloc` in the `cache_manager` object needs to be provided.
         auto [success, prefix_block_indice] = cache_manager->mallocIndex(prefix_blocks);
-
         if (!success) {
-            std::cout << "malloc kv cache block failed" << std::endl;
+            FT_LOG_ERROR("malloc kv cache block failed");
             abort();
         }
         setKVPrefixBlock(params, cache_manager, prefix_prompt, prefix_block_indice);

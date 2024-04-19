@@ -37,7 +37,6 @@ std::tuple<bool, CacheConfig> CacheConfigCreator::createConfig(const GptInitPara
     CacheConfig  config  = CacheConfigCreator::createBasicConfig(param);
     uint     block_nums  = 0;
     char* block_num_env  = std::getenv("TEST_BLOCK_NUM"); // for test
-    // TODO(xinfei.sxf) fix log
     if (block_num_env) {
         try {
             block_nums = std::stoi(block_num_env);

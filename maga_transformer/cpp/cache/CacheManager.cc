@@ -31,7 +31,7 @@ void CacheManager::initFreeBlock(const CacheConfig& config) {
     //     // ...
     // }
     block_nums_ = block_nums;
-    // TODO(xinfei.sxf) add log
+    FT_LOG_INFO("block_nums is %d after tp sync", block_nums_);
     free_blocks_index_ = std::set<int>();
     // block 0 is reserved for tmp or padding use
     for (int i = 1; i < block_nums; ++i) {
@@ -153,7 +153,10 @@ std::tuple<bool, std::vector<int>, int> CacheManager::mallocWithCacheImpl(int   
     reuse_length         = reuse_block_num * config_.seq_size_per_block;
 
     if (reuse_block_num > want_block_nums || reuse_block_num > cache_block_num) {
-        // TODO(xinfei.sxf) add log
+        FT_LOG_ERROR("reuse_block_num[%d] should not be greater than want_block_nums[%d], "
+                    "and reuse_block_num[%d] should not be greater than cache_block_num[%d]",
+                    reuse_block_num, want_block_nums, reuse_block_num, cache_block_num);
+        return {false, {}, 0}; 
     }
     assert(reuse_block_num <= want_block_nums);
     assert(reuse_block_num <= cache_block_num);
@@ -272,7 +275,7 @@ std::tuple<bool, std::vector<int>> CacheManager::mallocImpl(int nums) {
     if (free_blocks_index_.size() < static_cast<size_t>(nums)) {
         std::string error_msg = "Failed to malloc " + std::to_string(nums) + " blocks, only "
                                 + std::to_string(free_blocks_index_.size()) + " blocks left";
-        std::cout << "error_msg = " << error_msg << std::endl;
+        FT_LOG_ERROR("%s", error_msg);
         return {false, {}};
     } else {
         std::vector<int> result;

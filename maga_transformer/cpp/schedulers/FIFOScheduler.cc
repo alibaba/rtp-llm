@@ -12,11 +12,11 @@ FIFOScheduler::FIFOScheduler(const MagaInitParams& config, const std::shared_ptr
 
 FIFOScheduler::~FIFOScheduler() {
     (void)stop();
-    FT_LOG_DEBUG("destory FIFOScheduler\n");
+    FT_LOG_INFO("destory FIFOScheduler");
 }
 
 absl::Status FIFOScheduler::stop() {
-    FT_LOG_DEBUG("stop FIFOScheduler\n");
+    FT_LOG_INFO("stop FIFOScheduler");
     lock_guard<mutex> lock(lock_);
     stop_ = true;
     cond_.notify_all();
