@@ -96,7 +96,6 @@ void CacheManager::free(const std::vector<int>& block_indices) {
     }
 }
 
-// TODO(xinfei.sxf) 支持batch的pointer?
 void CacheManager::freeWithCache(const std::vector<void*> pointer, const std::vector<int>& token_ids) {
     freeWithCache({convertAddrToIndex(pointer)}, token_ids);
 }

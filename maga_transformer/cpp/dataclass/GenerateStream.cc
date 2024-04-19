@@ -65,7 +65,6 @@ absl::StatusOr<GenerateOutput> GenerateStream::nextOutput() {
     return generate_outputs_.getAndPopFront();
 }
 
-// TODO(xinfei.sxf) remove this api?
 void GenerateStream::cancel() {
     setStop("cancel stream");
 }

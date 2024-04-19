@@ -14,20 +14,7 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
                            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
                            const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) : params_(params) {
     executor_.reset(new NormalExecutor(params, layer_weights, weights));
-    // TODO(xinfei.sxf) cache config from where, new cache Manager
-    int   block_num     = 100;
-    char* block_num_env = std::getenv("BLOCK_NUM");
-    if (block_num_env) {
-        block_num = std::stoi(block_num_env);
-    }
-    CacheConfig                   cache_config(params.gpt_init_parameter->num_layers_,
-                                               block_num,
-                                               params.gpt_init_parameter->head_num_kv_,
-                                               params.gpt_init_parameter->size_per_head_,
-                                               params.gpt_init_parameter->seq_size_per_block_,
-                                               ft::DataType::TYPE_FP16);
-    ft::DeviceBase*               device        = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
-    cache_manager_ = make_shared<CacheManager>(cache_config, device);
+    initCacheManager();
     scheduler_.reset(new FIFOScheduler(params, cache_manager_));
     (void)startLoop();
 }
