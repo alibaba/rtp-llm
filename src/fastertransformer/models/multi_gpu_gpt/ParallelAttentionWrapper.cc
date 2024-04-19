@@ -384,7 +384,7 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
         qkv_buf_3_input = qkv_buf_2_;
     }
     print_bsd(layer_id, "attn before o", qkv_buf_3_input, h_token_num, 1, local_hidden_units_rt);
-    if(params_.quant_algo_->sq_int8_){
+    if(quant_algo_.smoothQuantInt8()){
         FT_CHECK_WITH_INFO(attention_weights->attention_output_weight.smoother != nullptr, "smoother is needed in sq dynamic token");
         invokePerTokenQuantization(reinterpret_cast<int8_t*>(qkv_buf_), qkv_buf_2_, h_token_num, local_hidden_units_rt, dense_gemm_dynamic_scale_, attention_weights->attention_output_weight.smoother, stream_);
         qkv_buf_3_input = qkv_buf_;
@@ -550,9 +550,9 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
         relative_attention_bias_stride,
         input_tensors->getPtr<T>("linear_bias_slopes", nullptr),
         input_tensors->getPtr<bool>("masked_tokens", nullptr),
-        params_.quant_algo_->int8_mode_ == 2 ? attention_weights->query_weight.scale_out : nullptr,
-        params_.quant_algo_->int8_mode_ == 2 ? attention_weights->attention_output_weight.scale : nullptr,
-        params_.quant_algo_->int8_mode_,
+        nullptr,
+        nullptr,
+        0,
         multi_block_mode_,
         max_seq_len_tile_,
         partial_out_,
@@ -665,7 +665,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                        params_.logn_seq_len_,
                                        params_.use_logn_attn_,
                                        attention_weights->query_weight.scale_out,
-                                       params_.quant_algo_->int8_mode_,
+                                       0,
                                        stream_);
 
     }
@@ -889,7 +889,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                local_head_num,
                                params_.size_per_head_,
                                attention_weights->attention_output_weight.scale,
-                               params_.quant_algo_->int8_mode_,
+                               0,
                                stream_);
             sync_check_cuda_error();
         }
@@ -903,7 +903,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                                      params_.size_per_head_,
                                                      padding_offset,
                                                      attention_weights->attention_output_weight.scale,
-                                                     params_.quant_algo_->int8_mode_,
+                                                     0,
                                                      stream_);
         }
         POP_RANGE;
@@ -925,7 +925,7 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
     int                 max_context_seq_len_with_prefix = 0;
     const int           layer_id            = input_tensors->getVal<int>("layer_id");
     const int           h_token_num         = input_tensors->at("input_query").shape()[0];
-    const float*        attn_dynamic_scale  = params_.quant_algo_->sq_int8_ ? input_tensors->at("attn_dynamic_scale").getPtr<float>() : nullptr;
+    const float*        attn_dynamic_scale  = quant_algo_.smoothQuantInt8() ? input_tensors->at("attn_dynamic_scale").getPtr<float>() : nullptr;
 
     // lora
     int* lora_ids = input_tensors->getPtr<int>("lora_ids", nullptr);
@@ -991,6 +991,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     local_hidden_units_(gpt_init_parameter.hidden_size_ / tensor_para.world_size_),
     is_qk_buf_float_(is_qk_buf_float),
     lora_gemm_(std::make_shared<LoraGemm<T>>(stream, allocator, cublas_wrapper)),
+    quant_algo_(quant_algo),
     gemm_runner_(std::make_shared<GemmRunner<T>>(stream, allocator, cublas_wrapper, quant_algo)),
     local_layer_head_num_(getLocalParameter(gpt_init_parameter.layer_head_num_, tensor_para.world_size_)),
     local_layer_head_num_kv_(getLocalParameter(gpt_init_parameter.layer_head_num_kv_, tensor_para.world_size_)),
@@ -998,9 +999,6 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     tensor_para_(tensor_para) {
     multi_block_mode_ = UseMultiBlockMode();
 
-    if (params_.quant_algo_->int8_mode_ == 2) {
-        abort();
-    }
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     tensorrt_llm::kernels::Data_type data_type;
@@ -1100,7 +1098,7 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
         }
     }
 
-    if(params_.quant_algo_->sq_int8_){
+    if(quant_algo_.smoothQuantInt8()){
         dense_gemm_dynamic_scale_ = (float*)allocator_->reMalloc(dense_gemm_dynamic_scale_, sizeof(float)*h_token_num, false);
     }
 
@@ -1138,7 +1136,7 @@ void ParallelAttentionWrapper<T>::freeBuffer()
             allocator_->free((void**)(&block_counter_));
         }
 
-        if(params_.quant_algo_->sq_int8_){
+        if(quant_algo_.smoothQuantInt8()){
             allocator_->free((void**)(&dense_gemm_dynamic_scale_));
         }
 

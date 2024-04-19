@@ -93,7 +93,7 @@ void ParallelGpt<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num,
     // only allocate additionl buffers when has adapters
     decoder_layer_output_ = reinterpret_cast<T*>(
         allocator_->reMalloc(decoder_layer_output_, sizeof(T) * h_token_num * hidden_units, false));
-    if (params_.quant_algo_->sq_int8_) {
+    if (quant_algo_.smoothQuantInt8()) {
         attention_query_dynamic_scale_ = reinterpret_cast<float*>(
             allocator_->reMalloc(attention_query_dynamic_scale_, sizeof(float) * h_token_num, false));
         ffn_intermediate_dynamic_scale_ = reinterpret_cast<float*>(
@@ -157,7 +157,7 @@ void ParallelGpt<T>::freeBuffer()
         allocator_->free((void**)(&prefix_lengths_));
         allocator_->free((void**)(&block_pointers_));
         allocator_->free((void**)(&block_scale_pointers_));
-        if (params_.quant_algo_->sq_int8_) {
+        if (quant_algo_.smoothQuantInt8()) {
             allocator_->free((void**)(&attention_query_dynamic_scale_));
             allocator_->free((void**)(&ffn_intermediate_dynamic_scale_));
         }
@@ -389,7 +389,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         }
     }
 
-    const auto activation_in_type  = params_.quant_algo_->sq_int8_ ? TYPE_INT8 : data_type;
+    const auto activation_in_type  = quant_algo_.smoothQuantInt8() ? TYPE_INT8 : data_type;
     const auto activation_out_type = data_type;
 
     size_t context_h_token_num = h_token_num - batch_size;
@@ -448,7 +448,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                             attention_query_dynamic_scale_,
                                             reinterpret_cast<int8_t*>(decoder_normed_input_),
                                             stream_);
-        if (params_.quant_algo_->sq_int8_) {
+        if (quant_algo_.smoothQuantInt8()) {
             print_bsd(l, "pre ln", reinterpret_cast<int8_t*>(decoder_normed_input_), 1, h_token_num, hidden_units);
         } else {
             print_bsd(l, "pre ln", decoder_normed_input_, 1, h_token_num, hidden_units);
@@ -502,7 +502,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             {"lora_ids", input_tensors->at("lora_ids")},
             {"lora_input_lengths", input_tensors->at("lora_input_lengths")}};
 
-        if (params_.quant_algo_->sq_int8_) {
+        if (quant_algo_.smoothQuantInt8()) {
             FT_CHECK_WITH_INFO(attention_query_dynamic_scale_!=nullptr, "attention_query_dynamic_scale_ should not be nullptr");
             attention_input_tensors.insert(
                 "attn_dynamic_scale", Tensor{MEMORY_GPU, TYPE_FP32, {h_token_num, 1}, attention_query_dynamic_scale_});
@@ -598,7 +598,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         int ffn_batch_size_lora = batch_size + context_batch_size;
         const int* lora_input_lengths = input_tensors->getPtr<int>("lora_input_lengths", nullptr);;
 
-        if (params_.quant_algo_->sq_int8_) {
+        if (quant_algo_.smoothQuantInt8()) {
             print_bsd(l,
                       "before ffn",
                       params_.layernorm_type_ == LayerNormType::pre_layernorm ?
@@ -628,7 +628,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
              {"lora_ids", input_tensors->at("lora_ids")},
              {"lora_input_lengths", Tensor{MEMORY_GPU, TYPE_INT32, {total_batch_size}, lora_input_lengths}},
              {"batch_size", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &ffn_batch_size_lora}}});
-        if(params_.quant_algo_->sq_int8_){
+        if(quant_algo_.smoothQuantInt8()){
             FT_CHECK_WITH_INFO(ffn_intermediate_dynamic_scale_ != nullptr, "ffn_dynamic_scale should not be nullptr");
             ffn_input_tensors.insert("ffn_dynamic_scale", Tensor{MEMORY_GPU, TYPE_FP32, {h_token_num, 1}, ffn_intermediate_dynamic_scale_});
         }

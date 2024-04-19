@@ -123,7 +123,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
 
         print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_); 
 
-        if (quant_algo_.int8Mode() == 1) {
+        if (quant_algo_.int8Mode()) {
 
             moe_plugin_->enqueue(input_tensor,
                                  moe_gates_buf_,
@@ -189,7 +189,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     constexpr int  m_padded        = 0;
 #endif
 
-    const bool is_quant_mode = quant_algo_.int8Mode() == 1 || quant_algo_.int4Mode();
+    const bool is_quant_mode = quant_algo_.int8Mode() || quant_algo_.int4Mode();
     const int cur_inter_size = is_quant_mode ? inter_padding_size : inter_size;
     // gemm used inter_size, int8 use inter_padding_size
     gemm_runner_->Gemm(m,

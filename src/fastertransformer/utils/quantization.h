@@ -26,7 +26,7 @@ class QuantAlgo{
 
 public:
     QuantAlgo() = default;
-    QuantAlgo(int int8_mode, bool int4_mode, bool use_zeros, int64_t group_size, bool sq_int8):
+    QuantAlgo(bool int8_mode, bool int4_mode, bool use_zeros, int64_t group_size, bool sq_int8):
         int8_mode_(int8_mode),
         int4_mode_(int4_mode),
         use_zeros_(use_zeros),

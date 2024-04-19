@@ -26,6 +26,7 @@ private:
     bool                           is_qk_buf_float_;
     std::shared_ptr<LoraGemm<T>>   lora_gemm_;
     std::shared_ptr<GemmRunner<T>> gemm_runner_;
+    tc::QuantAlgo                  quant_algo_;
 
     bool multi_block_mode_ = false;
     // for sparse
