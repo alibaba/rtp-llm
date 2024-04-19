@@ -68,8 +68,30 @@ class BasicRenderer(CustomChatRenderer):
                 self.add_extra_stop_words(["<|im_end|>"])
 
         try:
+            if tokenizer.special_tokens_map != None:
+                self.special_tokens_map = tokenizer.special_tokens_map
+                for k, v in self.special_tokens_map.items():
+                    logging.info(f"special token [{v}]({k}) added as stop words.")
+                    if isinstance(v, str):
+                        self.add_extra_stop_words([v])
+                    elif isinstance(v, list):
+                        self.add_extra_stop_words(v)
+        except:
+            pass
+
+        try:
             if tokenizer.additional_special_tokens != None:
+                logging.info(f"additional special tokens {tokenizer.additional_special_tokens}"
+                             "added as stop words.")
                 self.add_extra_stop_words(tokenizer.additional_special_tokens)
+        except:
+            pass
+
+        try:
+            if tokenizer.added_tokens_decoder != None:
+                for token_id, added_token in tokenizer.added_tokens_decoder.items():
+                    logging.info(f"added token [{token_id}]({added_token}) added as stop words.")
+                    self.add_extra_stop_word_ids([[token_id]])
         except:
             pass
 

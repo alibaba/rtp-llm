@@ -9,8 +9,6 @@ from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderers.llama_template_renderer import LlamaTemplateRenderer
 from maga_transformer.openai.renderers.fast_chat_renderer import FastChatRenderer
-from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
-from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 from maga_transformer.openai.renderer_factory_register import _renderer_factory
 
 class ChatRendererFactory():
@@ -71,7 +69,10 @@ class ChatRendererFactory():
             if tokenizer.chat_template != None:
                 logging.info(f"tokenizer has chat_template [{tokenizer.chat_template}], use it.")
                 return BasicRenderer(tokenizer, params)
+            else:
+                logging.info("tokenizer chat_template is None, skip.")
         except AttributeError:
+            logging.info("tokenizer has no chat_template attribute.")
             # tokenizer may has no chat_template property
             pass
 
