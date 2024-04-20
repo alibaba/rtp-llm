@@ -95,7 +95,7 @@ __global__ void perTokenQuantization(
     T localMax = 1e-6f;
     for (int i = threadIdx.x; i < numCols; i += blockDim.x)
     {
-        localMax = cuda_max(localMax, cuda_abs((srcRow[i])/ cuda_cast<T>(smoother[i])));
+        localMax = cuda_max(localMax, cuda_abs(cuda_cast<T>((srcRow[i])/ cuda_cast<T>(smoother[i]))));
     }
     const float rowMax = blockAllReduceMax(cuda_cast<float>(localMax));
 
