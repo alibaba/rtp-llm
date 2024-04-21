@@ -21,6 +21,9 @@ def hidden_to_inter(hidden_size):
     ffn_m = 256
     return int((int(4 * 2 / 3 * hidden_size) * 2 + ffn_m - 1) // ffn_m * ffn_m / 2)
 
+def qkv_transpose(ts, hidden_size):
+    return ts[0].reshape(hidden_size, -1)
+
 class QWenTokenizer(QwenTokenizerOrigin):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -153,44 +156,70 @@ class QWenWeight(ModelDeployWeightInfo):
         layer_quant_weights =[
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_1.weight', identity)],
                        identity),
-            WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qweight', identity)],
-                       identity),
-            WeightInfo(W.attn_qkv_z, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qzeros', identity)],
-                       identity),
             WeightInfo(W.attn_qkv_s, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.scales', identity)],
                        identity),
             WeightInfo(W.attn_qkv_b, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.bias', identity)],
-                       identity),
-            WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qweight', identity)],
-                       identity),
-            WeightInfo(W.attn_o_z, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qzeros', identity)],
                        identity),
             WeightInfo(W.attn_o_s, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.scales', identity)],
                        identity),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_2.weight', identity)],
                        identity),
+        ]     
+            
+        if self._is_awq or self._is_gptq:
+            layer_quant_weights.extend([
+                WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qweight', identity)],
+                           identity),
+                WeightInfo(W.attn_qkv_z, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qzeros', identity)],
+                           identity),
+                WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qweight', identity)],
+                           identity),
+                WeightInfo(W.attn_o_z, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qzeros', identity)],
+                           identity),
 
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.qweight', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size, dim=1, div_8=self._is_awq)),
-            WeightInfo(W.ffn_z1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.qzeros', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size // 8, dim=1)),
-            WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.scales', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size, dim=1)),
+                WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.qweight', identity)],
+                           functools.partial(pad, inter_padding_size=inter_padding_size, dim=1, div_8=self._is_awq)),
+                WeightInfo(W.ffn_z1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.qzeros', identity)],
+                           functools.partial(pad, inter_padding_size=inter_padding_size // 8, dim=1)),
+                WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.scales', identity)],
+                           functools.partial(pad, inter_padding_size=inter_padding_size, dim=1)),
 
-            WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qweight', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size, dim=1, div_8=self._is_awq)),
-            WeightInfo(W.ffn_z3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qzeros', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//8, dim=1)),
-            WeightInfo(W.ffn_s3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.scales', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size, dim=1)),
+                WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qweight', identity)],
+                           functools.partial(pad, inter_padding_size=inter_padding_size, dim=1, div_8=self._is_awq)),
+                WeightInfo(W.ffn_z3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qzeros', identity)],
+                           functools.partial(pad, inter_padding_size=inter_padding_size//8, dim=1)),
+                WeightInfo(W.ffn_s3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.scales', identity)],
+                           functools.partial(pad, inter_padding_size=inter_padding_size, dim=1)),
 
-            WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qweight', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size, dim=0, div_8=self._is_gptq)),
-            WeightInfo(W.ffn_z2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qzeros', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//group_size, dim=0)),
-            WeightInfo(W.ffn_s2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.scales', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//group_size, dim=0)),           
-        ]
+                WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qweight', identity)],
+                           functools.partial(pad, inter_padding_size=inter_padding_size, dim=0, div_8=self._is_gptq)),
+                WeightInfo(W.ffn_z2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qzeros', identity)],
+                           functools.partial(pad, inter_padding_size=inter_padding_size//group_size, dim=0)),
+                WeightInfo(W.ffn_s2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.scales', identity)],
+                           functools.partial(pad, inter_padding_size=inter_padding_size//group_size, dim=0)),  
+            ])
+                
+        if self._sq_int8:
+            layer_quant_weights.extend([
+                WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qweight', functools.partial(qkv_transpose, hidden_size=self._hidden_size))],
+                           transpose),
+                WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qweight', identity)],
+                           transpose),
+                WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.qweight', identity)],
+                           transpose),
+                WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.scales', identity)],
+                           identity),
+                WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qweight', identity)],
+                           transpose),
+                WeightInfo(W.ffn_s3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.scales', identity)],
+                           identity),
+                WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qweight', identity)],
+                           transpose),
+                WeightInfo(W.ffn_s2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.scales', identity)],
+                           identity),
+                WeightInfo(W.attn_o_smoother, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.smoother')], identity),
+                WeightInfo(W.ffn_smoother, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.smoother')], identity), 
+            ])
         return layer_quant_weights
     
 
@@ -204,7 +233,7 @@ class QWenWeight(ModelDeployWeightInfo):
 
         layer_weights: List[List[WeightInfo]] = []
         for layer in range(self._num_layers):
-            if self._int4_mode:
+            if self._int4_mode or self._sq_int8:
                 w=self._get_hf_quant_weight_info(layer)
                 layer_weights.append(w)
             else:
@@ -264,6 +293,11 @@ class QWenBase(GPT):
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", config.special_tokens.eos_token_id)
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
 
+        quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
+        if os.path.exists(quant_config_path):
+            config.quant_algo.sq_int8 = True
+            config.quant_algo.int8_mode = False
+         
         quant_config = config_json.get("quantization_config", None)
         if quant_config is not None:
             quant_bits = quant_config.get("bits", 0)
