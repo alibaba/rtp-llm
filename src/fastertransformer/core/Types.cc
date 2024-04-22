@@ -12,7 +12,6 @@
 namespace fastertransformer {
 
 #define FT_FOREACH_TYPE(F) \
-    F(DataType::TYPE_INVALID, void); \
     F(DataType::TYPE_BOOL, bool); \
     F(DataType::TYPE_UINT8, uint8_t); \
     F(DataType::TYPE_UINT16, uint16_t); \
@@ -41,15 +40,21 @@ struct TypeTrait {
     static const size_t size = 0;
 };
 
-#define DEFINE_TYPE(DT, T) \
+#define DECLARE_TYPE_TRAIT(DT, T) \
     template<> \
     struct TypeTrait<T> { \
         static const DataType type = DT; \
         static const size_t size = sizeof(T); \
-    }; \
+    };
+
+#define DECLARE_GET_TYPE(T) \
     template DataType getTensorType<T>(); \
     template DataType getTensorType<const T>(); \
     template DataType getTensorType<const T *>();
+
+#define DEFINE_TYPE(DT, T) \
+    DECLARE_TYPE_TRAIT(DT, T); \
+    DECLARE_GET_TYPE(T)
 
 template<typename T>
 DataType getTensorType() {
@@ -59,6 +64,7 @@ DataType getTensorType() {
 FT_FOREACH_TYPE(DEFINE_TYPE);
 FT_FOREACH_DEVICE_TYPE(DEFINE_TYPE);
 DEFINE_TYPE(DataType::TYPE_UINT64, unsigned long long int);
+DECLARE_GET_TYPE(void);
 
 size_t getTypeSize(DataType type) {
 #define CASE(DT, T) { \
