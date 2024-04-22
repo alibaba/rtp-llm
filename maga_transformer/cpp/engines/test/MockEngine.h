@@ -74,29 +74,27 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device) {
             make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{inter_size}, data->data());
         auto ffn_layer_norm_beta =
             make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{inter_size}, data->data());
-        std::unordered_map<std::string, ft::ConstBufferPtr> __weights;
-        __weights.emplace(W::pre_ln_gamma, std::move(pre_layernorm_weights));
-        __weights.emplace(W::pre_ln_beta, std::move(pre_layernorm_beta));
-        __weights.emplace(W::attn_qkv_w, std::move(qkv_weights));
-        __weights.emplace(W::attn_qkv_b, std::move(qkv_weights_b));
-        __weights.emplace(W::attn_ln_gamma, std::move(attention_layernorm));
-        __weights.emplace(W::attn_ln_beta, std::move(attention_layernorm_beta));
-        __weights.emplace(W::attn_o_w, std::move(attention_output_weight));
-        __weights.emplace(W::attn_o_b, std::move(attention_output_weight_beta));
-        __weights.emplace(W::post_ln_gamma, std::move(post_layernorm_weights));
-        __weights.emplace(W::post_ln_beta, std::move(post_layernorm_beta));
-        __weights.emplace(W::ffn_w1, std::move(ffn_weight));
-        __weights.emplace(W::ffn_b1, std::move(ffn_weight_beta));
-        __weights.emplace(W::ffn_w2, std::move(ffn_output_weight));
-        __weights.emplace(W::ffn_b2, std::move(ffn_output_weight_beta));
-        __weights.emplace(W::ffn_ln_gamma, std::move(ffn_layer_norm));
-        __weights.emplace(W::ffn_ln_beta, std::move(ffn_layer_norm_beta));
-        layer_weights.push_back(std::move(__weights));
+        std::unordered_map<std::string, ft::ConstBufferPtr> weights;
+        weights.emplace(W::pre_ln_gamma, std::move(pre_layernorm_weights));
+        weights.emplace(W::pre_ln_beta, std::move(pre_layernorm_beta));
+        weights.emplace(W::attn_qkv_w, std::move(qkv_weights));
+        weights.emplace(W::attn_qkv_b, std::move(qkv_weights_b));
+        weights.emplace(W::attn_ln_gamma, std::move(attention_layernorm));
+        weights.emplace(W::attn_ln_beta, std::move(attention_layernorm_beta));
+        weights.emplace(W::attn_o_w, std::move(attention_output_weight));
+        weights.emplace(W::attn_o_b, std::move(attention_output_weight_beta));
+        weights.emplace(W::post_ln_gamma, std::move(post_layernorm_weights));
+        weights.emplace(W::post_ln_beta, std::move(post_layernorm_beta));
+        weights.emplace(W::ffn_w1, std::move(ffn_weight));
+        weights.emplace(W::ffn_b1, std::move(ffn_weight_beta));
+        weights.emplace(W::ffn_w2, std::move(ffn_output_weight));
+        weights.emplace(W::ffn_b2, std::move(ffn_output_weight_beta));
+        weights.emplace(W::ffn_ln_gamma, std::move(ffn_layer_norm));
+        weights.emplace(W::ffn_ln_beta, std::move(ffn_layer_norm_beta));
+        layer_weights.push_back(std::move(weights));
     }
 
     std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, layer_weights, global_weights);
-    auto result = engine->startLoop();
-    assert(result.ok());
     return engine;
 }
 

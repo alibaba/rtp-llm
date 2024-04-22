@@ -18,8 +18,6 @@ ModelRpcServiceImpl::ModelRpcServiceImpl(
     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) {
     engine_.reset(new NormalEngine(maga_init_params, layer_weights, weights));
-    auto status = engine_->startLoop();
-    assert(status.ok());
 }
 
 grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*                  context,
@@ -47,12 +45,22 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
         }
         FT_LOG_DEBUG("req:%ld generate next output suc", request->request_id());
         GenerateOutputPB output_pb;
-        // std::cout << "oooooo:" << count << std::endl;
         QueryConverter::transResponse(&output_pb, &(output_status.value()));
         writer->Write(output_pb);
     }
     FT_LOG_DEBUG("req:%ld generate over", request->request_id());
     return grpc::Status::OK;
 }
+
+void ModelRpcServiceImpl::addLoRA(const int64_t                                                   lora_id,
+                       const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                       const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
+    engine_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+}
+
+void ModelRpcServiceImpl::removeLoRA(const int64_t lora_id) {
+    engine_->removeLoRA(lora_id);
+}
+
 
 }  // namespace rtp_llm

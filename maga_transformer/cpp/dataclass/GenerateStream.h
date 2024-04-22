@@ -32,8 +32,8 @@ public:
 
     absl::StatusOr<GenerateOutput>     nextOutput();
     // Only used in C++ world.
-    bool isContextStream() const {return seqLength() == inputLength();};
-    int tileNum() const {return std::max(numBeams(), numReturnSequences());}
+    bool isContextStream() const;
+    int tileNum() const;
     std::vector<int> inputTokens() const;
     std::vector<int> currentExecuteTokens() const;
 
@@ -245,6 +245,7 @@ public:
         debug_string << "GenerateStream {"
                      << "generate_input:" << generate_input_->debugString()
                      << ", max_seq_len:" << max_seq_len_
+                     << ", input_length:" << inputLength()
                      << ", seq_length:" << seq_length_
                      << ", reuse_length:" << reuse_length_
                      << ", batch_size:" << batch_size_

@@ -236,14 +236,16 @@ class NormalModelExecutor(ExecutorBase):
         return logits
 
     def _post_transformer_nn(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if debug_print():
+            print('hidden_states', hidden_states, flush=True)
         if self.model_ops.model.post_decoder_layernorm is not None:
             hidden_states = self.model_ops.model.post_decoder_layernorm(hidden_states)
             if debug_print():
-                print('hidden_states', hidden_states, flush=True)
+                print('hidden_states after layernorm', hidden_states, flush=True)
         assert self.model_ops.model.lm_head is not None
         logits = self.model_ops.model.lm_head(hidden_states).float()
         if debug_print():
-            print('logits', hidden_states, flush=True)
+            print('logits', logits, flush=True)
         if 'CHECK_LOGITS_NAN' in os.environ:
             logits_cpu = to_cpu(logits.view(-1))
             if any(torch.isnan(logits_cpu).numpy().tolist()):

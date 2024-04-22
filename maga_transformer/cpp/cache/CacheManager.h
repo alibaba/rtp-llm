@@ -6,6 +6,7 @@
 #include <list>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -80,6 +81,28 @@ public:
         }
     }
 
+    std::string debugString() const {
+        std::stringstream debug_string, k_ptr_string, v_ptr_string;
+        for (int i = 0; i < k_ptr.size(); i++) {
+            k_ptr_string << "batch: " << i << " ";
+            v_ptr_string << "batch: " << i << " ";
+            for (int j = 0; j < k_ptr[0].size(); ++j) {
+                k_ptr_string << "layer:" << j << ";";
+                v_ptr_string << "layer:" << j << ";";
+                for (auto &v: k_ptr[i][j]) {
+                    k_ptr_string << (int64_t)v << ", ";
+                }
+                for (auto &v: v_ptr[i][j]) {
+                    v_ptr_string << (int64_t)v << ", ";
+                }
+            }
+        }
+        debug_string << "BatchKVCacheBlockAddr {"
+                     << "k_ptr: " << k_ptr_string.str()
+                     << "v_ptr: " << v_ptr_string.str()
+                     << "}";
+        return debug_string.str();
+    }
 public:
     // [batch_size, layer_num, max_block_per_seq]
     std::vector<std::vector<std::vector<void*>>> k_ptr;

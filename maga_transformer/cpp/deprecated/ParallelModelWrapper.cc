@@ -34,7 +34,13 @@ void ParallelModelWrapperImpl<T>::initialize() {
     parallel_gpt_decoder_.reset(new ParallelGpt<T>(
         params_, tensor_para_, pipeline_para_, stream_, cublas_wrapper_, allocator_, true, true, false, nullptr, 0));
     parallel_logits_wrapper_.reset(new ParallelLogitsWrapper<T>(
-        params_, tensor_para_, stream_, cublas_wrapper_, allocator_, true, &global_weights_->embedding_table));
+        params_, tensor_para_, stream_, cublas_wrapper_, allocator_, true, &global_weights_->lm_head));
+    norm_wrapper_.reset(
+        new NormWrapper<T>(params_.layernorm_type_, params_.norm_type_, T(sqrt(2 * params_.num_layers_))));
+
+    for (int i = 0; i < static_cast<int>(params_.num_layers_); i++) {
+        gpt_lora_layer_weights_.push_back(new ft::ParallelGptDecoderLoRALayerWeight<T>());
+    }
 }
 
 template<typename T>
@@ -53,16 +59,15 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
     cublas_wrapper_ = device_->cublasMMWrapperPtr();
     stream_         = device_->stream();
 
-    // std::cout << "ss1:" << std::endl;
     std::vector<std::unordered_map<std::string, ft::Tensor>> layer_weights_;
     for (auto& weights : layer_weights) {
-        std::unordered_map<std::string, ft::Tensor> __weights;
+        std::unordered_map<std::string, ft::Tensor> weights_;
         for (auto& it : weights) {
-            __weights.emplace(
+            weights_.emplace(
                 it.first,
                 std::move(ft::Tensor(it.second->where(), it.second->type(), it.second->shape(), it.second->data())));
         }
-        layer_weights_.emplace_back(std::move(__weights));
+        layer_weights_.emplace_back(std::move(weights_));
     }
     gpt_layer_weights_ =
         torch_ext::loadWeights<T>(pipeline_para_.world_size_,
@@ -71,7 +76,6 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
                                   gpt_init_parameter.quant_algo_,
                                   layer_weights_,
                                   (const std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*>*)nullptr);
-
     global_weights_.reset(new GptGlobalWeights<T>(global_weights));
 
     initialize();
@@ -229,9 +233,9 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
     parallel_gpt_decoder_->forward(&output_tensors, &input_tensors, &gpt_layer_weights_);
     sync_check_cuda_error();
     // last hidden states
-    cudaMemcpyAsync(reinterpret_cast<T*>(all_hidden_states.getPtr<T>()),
-                    reinterpret_cast<T*>(last_hidden_states.getPtr<T>()),
-                    model_request.generate_batch_size * hidden_units,
+    cudaMemcpyAsync(reinterpret_cast<T*>(last_hidden_states.getPtr<T>()),
+                    reinterpret_cast<T*>(all_hidden_states.getPtr<T>()),
+                    model_request.generate_batch_size * hidden_units * sizeof(T),
                     cudaMemcpyDeviceToDevice,
                     stream_);
     sync_check_cuda_error();
@@ -246,10 +250,32 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
             hidden_units,
             stream_);
     }
+
+    if (params_.has_post_decoder_layernorm_) {
+        // std::cout<<"params:"<<params_.layernorm_eps_<<" "<<total_batch_size<<" "<<hidden_units<<" "<<params_.quant_algo_->int8_mode_<<std::endl;
+        norm_wrapper_->initDecoderLayerNorm(last_hidden_states.getPtr<T>(),
+                                            last_hidden_states.getPtr<T>(),
+                                            global_weights_->post_layernorm_weights.gamma,
+                                            global_weights_->post_layernorm_weights.beta,
+                                            params_.layernorm_eps_,
+                                            total_batch_size,
+                                            hidden_units,
+                                            nullptr,  // scale
+                                            nullptr,  // dyanmic scale
+                                            reinterpret_cast<int8_t*>(last_hidden_states.getPtr<T>()),
+                                            stream_);
+    }
     sync_check_cuda_error();
 
     // logits
     parallel_logits_wrapper_->forward(logits, last_hidden_states);
+    print_bsd(-1,
+               "logits",
+               logits.getPtr<float>(),
+               total_batch_size,
+               1,
+               params_.vocab_size_);
+
     return std::move(model_output);
 }
 

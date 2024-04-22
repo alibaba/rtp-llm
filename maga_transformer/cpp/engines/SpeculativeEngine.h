@@ -7,24 +7,34 @@
 #include <thread>
 #include "torch/all.h"
 #include "absl/status/status.h"
+#include "maga_transformer/cpp/engines/Engine.h"
 #include "maga_transformer/cpp/batch_stream_processor/BatchStreamProcessor.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/executors/Executor.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
+#include "maga_transformer/cpp/common/fatal_util.h"
 
 namespace rtp_llm {
 
-class SpeculativeEngine {
+class SpeculativeEngine: public Engine {
 public:
     SpeculativeEngine(const MagaInitParams&                                                   params,
                       const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
                       const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights);
     ~SpeculativeEngine();
     absl::Status step();
-    absl::Status stop();
+    absl::Status stop() override;
     absl::Status startLoop();
-    absl::Status enqueue(std::shared_ptr<GenerateStream>& stream);
+    absl::Status enqueue(std::shared_ptr<GenerateStream>& stream) override;
+    void addLoRA(const int64_t                                                   lora_id,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) override {
+        RAISE_FATAL_ERROR("Speculative not support lora now");
+    }
+    void removeLoRA(const int64_t lora_id) override {
+        RAISE_FATAL_ERROR("Speculative not support lora now");
+    }
 
 private:
     absl::StatusOr<std::list<GenerateStreamPtr>>

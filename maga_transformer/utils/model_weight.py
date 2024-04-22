@@ -1066,6 +1066,7 @@ class LoraResource():
 class ModelWeights:
     def __init__(self, num_layers: int):
         self.weights: List[Dict[str, torch.Tensor]] = []
+        self.global_weights: Dict[str, torch.Tensor] = {}
         self._pytorch_weights: Dict[str, torch.Tensor] = {}
         self.lora_resource: LoraResource = LoraResource()
         self._dtype = None
@@ -1089,6 +1090,9 @@ class ModelWeights:
 
     def append_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
         self.weights[layer_id][name] = tensor
+
+    def append_global_weight(self, name: str, tensor: torch.Tensor):
+        self.global_weights[name] = tensor
 
     @property
     def device(self):

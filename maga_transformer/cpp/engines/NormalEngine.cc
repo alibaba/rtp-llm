@@ -4,6 +4,7 @@
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 #include "src/fastertransformer/core/Types.h"
+#include "src/fastertransformer/utils/logger.h"
 
 using namespace std;
 namespace rtp_llm {
@@ -28,20 +29,35 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
     ft::DeviceBase*               device        = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     cache_manager_ = make_shared<CacheManager>(cache_config, device);
     scheduler_.reset(new FIFOScheduler(params, cache_manager_));
+    (void)startLoop();
 }
 
+
 NormalEngine::~NormalEngine() {
+    FT_LOG_DEBUG("destory Engine");
     (void)stop();
 }
 
+void NormalEngine::addLoRA(const int64_t                                                   lora_id,
+                           const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                           const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
+    executor_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+}
+
+void NormalEngine::removeLoRA(const int64_t lora_id) {
+    executor_->removeLoRA(lora_id);
+}
+
 absl::Status NormalEngine::startLoop() {
-    running_     = true;
+    running_ = true;
     loop_thread_ = std::thread(&NormalEngine::loop, this);
     return absl::OkStatus();
 }
 
 absl::Status NormalEngine::stop() {
+    FT_LOG_DEBUG("stop Engine");
     running_ = false;
+    RETURN_IF_STATUS_ERROR(scheduler_->stop());
     if (loop_thread_.joinable()) {
         loop_thread_.join();
     }
@@ -49,6 +65,7 @@ absl::Status NormalEngine::stop() {
 }
 
 void NormalEngine::loop() {
+    FT_LOG_DEBUG("loop begin");
     while (running_) {
         auto status = step();
         if (!status.ok()) {
@@ -74,10 +91,7 @@ absl::Status NormalEngine::step() {
     const auto& streams = streams_status.value();
     // FT_LOG_DEBUG("schedule res: %s", streams.debugString().c_str());
     if (streams.empty()) {
-        // TODO(xinfei.sxf) 加一个notify的机制，防止busy polling，测试空转cpu。
-        // std::this_thread::sleep_for(std::chrono::microseconds(1));
-        FT_LOG_DEBUG("no query run and sleep");
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        FT_LOG_WARNING("no query run and sleep");
         return absl::OkStatus();
     }
     return executor_->process(streams);

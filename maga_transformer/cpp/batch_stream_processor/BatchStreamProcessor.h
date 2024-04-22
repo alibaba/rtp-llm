@@ -9,6 +9,7 @@
 namespace rtp_llm {
 class BatchStreamProcessor {
 public:
+    virtual ~BatchStreamProcessor() {}
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const     = 0;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
                                                               const GptModelOutputs& model_output) const = 0;

@@ -1,7 +1,6 @@
 #include "maga_transformer/cpp/executors/NormalExecutor.h"
 #include "maga_transformer/cpp/batch_stream_processor/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/common/status_util.h"
-#include "maga_transformer/cpp/deprecated/FakeSampler.h"
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
@@ -24,7 +23,16 @@ NormalExecutor::NormalExecutor(const MagaInitParams&                            
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(*params.gpt_init_parameter));
     model_wrapper_.reset(
         new ParallelModelWrapper(*params.gpt_init_parameter, 1, "localhost", 0, weights, layer_weights));
-    fake_sampler_.reset(new FakeSampler(*params.gpt_init_parameter));
+}
+
+void NormalExecutor::addLoRA(const int64_t                                                   lora_id,
+                             const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                             const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
+    model_wrapper_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+}
+
+void NormalExecutor::removeLoRA(const int64_t lora_id) {
+    model_wrapper_->removeLoRA(lora_id);
 }
 
 ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input) {
@@ -38,8 +46,6 @@ ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input
     return model_request;
 }
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
-    // assert(model_.get());
-    // assert(sampler_.get());
     StreamGroups stream_groups(streams);
     auto         model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
@@ -51,7 +57,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     auto         sampler_input_status = batch_stream_processor_->gatherSamplerInput(stream_groups, *model_output);
     RETURN_IF_STATUS_OR_ERROR(sampler_input_status);
     auto& sampler_input           = sampler_input_status.value();
-    merged_output->sampler_output = std::move(fake_sampler_->forward(sampler_input));
+    merged_output->sampler_output = std::move(sampler_->forward(sampler_input));
     return batch_stream_processor_->dispatch(stream_groups, merged_output);
 }
 

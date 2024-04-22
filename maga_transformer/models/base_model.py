@@ -163,7 +163,6 @@ class BaseModel(object):
     def __init__(self) -> None:
         self.weight = None
         self.word_embedding: Optional[ParallelEmbedding] = None
-        self.global_weights: Dict[str, torch.Tensor] = {}
         self.prefix_encoder: Optional[torch.nn.Module] = None
         self.position_encoding: Optional[ParallelEmbedding] = None
         self.token_type_embeddings: Optional[ParallelEmbedding] = None

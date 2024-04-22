@@ -26,7 +26,6 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;
     FIFOScheduler scheduler(init_config, cache_manager);
-    scheduler.enable_fallback            = true;
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
@@ -58,7 +57,6 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;
     FIFOScheduler scheduler(init_config, cache_manager);
-    scheduler.enable_fallback            = true;
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
@@ -86,7 +84,6 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;
     FIFOScheduler scheduler(init_config, cache_manager);
-    scheduler.enable_fallback            = true;
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
@@ -125,7 +122,6 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem2) {
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;
     FIFOScheduler scheduler(init_config, cache_manager);
-    scheduler.enable_fallback            = true;
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
@@ -178,7 +174,6 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;
     FIFOScheduler scheduler(init_config, cache_manager);
-    scheduler.enable_fallback = true;
 
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({5}, {1, 2, 3, 4, 5}, AllocationType::HOST);

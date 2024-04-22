@@ -81,7 +81,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         auto&            model_input      = merge_input_status.value();
         vector<int>      combo_tokens     = {2, 3, 1, 2, 3, 2, 3, 4};
         vector<int>      input_lengths    = {1, 2, 3, 3};
-        vector<int>      sequence_lengths = {2, 3};
+        vector<int>      sequence_lengths = {1, 2};
         vector<int>      prefix_lengths   = {0, 0, 0, 1};
         vector<uint64_t> kv_cache_blocks  = {1, 2, 5, 6, 10, 20, 50, 60, 100, 0, 500, 0, 1000, 2000, 5000, 6000,
                                              3, 4, 7, 8, 30, 40, 70, 80, 300, 0, 700, 0, 3000, 4000, 7000, 8000};

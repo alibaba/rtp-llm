@@ -55,7 +55,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 inputs.repetition_penalty ? (OptionalBufferRef)batch_repetition_penalty : nullopt,
                 inputs.length_penalty ? (OptionalBufferRef)batch_length_penalty : nullopt,
                 sample_cum_log_probs,
-                nullopt // output_log_probs
+                nullopt, // output_log_probs
+                inputs.index_log_prob.get() ? (OptionalBufferRef)*inputs.index_log_prob: nullopt,
+                inputs.token_id_for_index_prob.get() ? (OptionalBufferRef)*inputs.token_id_for_index_prob: nullopt
             });
         } else {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
@@ -69,7 +71,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         sample_to_batch_idx = from_batch_idx;
         from_token_idx = sample_to_token_idx;
     } while (from_batch_idx < inputs.batch_size);
-    return SamplerOutput({move(inputs.token_ids), move(inputs.cum_log_probs)});
+    return SamplerOutput({move(inputs.token_ids), move(inputs.cum_log_probs), move(inputs.index_log_prob), move(inputs.token_id_for_index_prob)});
 }
 
 } // namespace rtp_llm

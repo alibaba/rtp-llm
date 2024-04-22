@@ -50,7 +50,7 @@ TEST_F(SamplerTest, testSimple) {
 
     auto top_k = createBuffer<int32_t>({batch_size}, {1, 4, 0, 0, 10}, AllocationType::HOST);
     auto top_p = createBuffer<float>({batch_size}, {0.0, 0.0, 0.001, 0.99, 0.7}, AllocationType::HOST);
-    auto temperture = createBuffer<float>({batch_size}, {0.01, 0.01, 0.9, 0.7, 10}, AllocationType::HOST);
+    auto temperature = createBuffer<float>({batch_size}, {0.01, 0.01, 0.9, 0.7, 10}, AllocationType::HOST);
 
     SamplerInputs inputs {
         move(logits),
@@ -61,7 +61,7 @@ TEST_F(SamplerTest, testSimple) {
         move(num_beams),
         move(top_k),
         move(top_p),
-        move(temperture),
+        move(temperature),
         nullptr,
         nullptr,
         nullptr,

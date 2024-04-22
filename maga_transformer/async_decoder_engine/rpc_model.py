@@ -18,7 +18,8 @@ class RpcModel:
         self.tokenizer = model.tokenizer
         self.config = model.config
         self.vit_expand_token_id_lock = asyncio.Lock()
-        self.rtp_llm_op_ = RtpLLMOp(model.config, False, model.weight.weights, model.global_weights)
+        self.rtp_llm_op_ = RtpLLMOp(model.config, False)
+        self.rtp_llm_op_.set_weight(model.weight)
         self.model_rpc_client = ModelRpcClient()
 
     def is_multimodal(self) -> bool:

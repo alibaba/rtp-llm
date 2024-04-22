@@ -382,6 +382,9 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             max_blocks_per_batch = block_pointers.shape()[3];
             block_stride = total_batch_size * 2 * max_blocks_per_batch;
             cudaMemcpyAsync(block_pointers_, block_pointers.data(), sizeof(int64_t) * params_.num_layers_ * total_batch_size * max_blocks_per_batch * 2, cudaMemcpyHostToDevice, stream_);
+            block_pointers_vector_.clear();
+            block_pointers_vector_.resize(params_.num_layers_ * total_batch_size * max_blocks_per_batch * 2);
+            memcpy(block_pointers_vector_.data(), block_pointers.data(), sizeof(int64_t) * params_.num_layers_ * total_batch_size * max_blocks_per_batch * 2);
         } else {
             convert_to_block_pointers(output_tensors, input_tensors, total_batch_size);
             max_blocks_per_batch = (uint)(input_tensors->at("block_index_map").shape()[1]);

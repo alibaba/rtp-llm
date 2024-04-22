@@ -12,8 +12,10 @@ namespace rtp_llm {
 
 class SchedulerBase {
 public:
+    virtual ~SchedulerBase() {}
     virtual absl::Status                                 enqueue(const GenerateStreamPtr& stream) = 0;
     virtual absl::StatusOr<std::list<GenerateStreamPtr>> schedule()                               = 0;
+    virtual absl::Status                                 stop()                                   = 0;
 };
 
 }  // namespace rtp_llm

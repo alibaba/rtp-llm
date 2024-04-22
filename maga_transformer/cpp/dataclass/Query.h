@@ -11,8 +11,6 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-struct MedusaState {};
-
 class GenerateInput {
 public:
     int inputLength() {

@@ -3,7 +3,6 @@
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include <cstring>
 
 using namespace std;
@@ -67,9 +66,11 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         auto current_batch_size = stream->batchSize();
         memcpy(merged_tokens + batch_idx, currentTokens.data(), currentTokens.size() * sizeof(int));
         auto kv_cache = stream->kvCache();
+        FT_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
+        FT_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
         for (auto i = 0; i < current_batch_size; ++i) {
             input_lengths[batch_idx]    = stream->inputLength();
-            sequence_lengths[batch_idx] = stream->seqLength();
+            sequence_lengths[batch_idx] = stream->seqLength() - 1; // need remove
             prefix_lengths[batch_idx]   = stream->reuseLength();
             memcpyKvCache(kv_cache_blocks,
                           kv_cache.k_ptr[i],
@@ -100,6 +101,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         input_lengths[batch_idx]  = stream->inputLength() - stream->reuseLength();
         prefix_lengths[batch_idx] = stream->reuseLength();
         auto kv_cache             = stream->kvCache();
+        FT_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
+        FT_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
         memcpyKvCache(kv_cache_blocks,
                       kv_cache.k_ptr[0],
                       kv_cache.v_ptr[0],
@@ -127,46 +130,57 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
                                                const GptModelOutputs& model_output) const {
     assert(!stream_groups.empty());
 
-    // const auto generate_config = (*stream_groups.begin())->generateConfig();
     SamplerInputs sampler_inputs;
-    // auto device = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     int    max_seq_len      = stream_groups.maxSeqLen();
+    sampler_inputs.step       = max_seq_len + 1;
     size_t total_batch_size = stream_groups.totalSamplerBatchSize();
-    auto   token_ids_cpu    = device_->allocateBuffer(
-        {ft::DataType::TYPE_INT32, {(size_t)max_seq_len + 10, total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.token_ids = device_->allocateBuffer(
-        {ft::DataType::TYPE_INT32, {(size_t)max_seq_len + 10, total_batch_size}, ft::AllocationType::DEVICE}, {});
+            {ft::DataType::TYPE_INT32, {total_batch_size, sampler_inputs.step}, ft::AllocationType::HOST}, {});
 
     int                     batch_idx   = 0;
-    int*                    token_ids   = (int*)token_ids_cpu->data();
+    int32_t*                token_ids   = sampler_inputs.token_ids->data<int32_t>();
     list<GenerateStreamPtr> all_streams = stream_groups.allStreams();
+    sampler_inputs.sequence_lengths =
+        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    int*      sequence_lengths = sampler_inputs.sequence_lengths->data<int32_t>();
     for (auto& stream : all_streams) {
         const auto& complete_token_ids = stream->completeTokenIds();
         auto        complete_seq_len   = complete_token_ids->shape()[1];
         auto        seq_len            = stream->seqLength();
         auto        current_batch_size = stream->batchSize();
         for (int i = 0; i < current_batch_size; ++i) {
-            memcpy(token_ids + (batch_idx + i) * max_seq_len,
-                   (int*)complete_token_ids->data() + i * complete_seq_len,
+            sequence_lengths[batch_idx] = stream->seqLength();
+            memcpy(sampler_inputs.token_ids->dataWithOffset<int32_t>((batch_idx) * max_seq_len),
+                   complete_token_ids->dataWithOffset<int32_t>(i * complete_seq_len),
                    seq_len * sizeof(int));
+            batch_idx += 1;
         }
-        batch_idx += current_batch_size;
     }
-    cudaMemcpyAsync(sampler_inputs.token_ids->data(),
-                    token_ids_cpu->data(),
-                    token_ids_cpu->sizeBytes(),
-                    cudaMemcpyHostToDevice,
-                    dynamic_cast<CudaDevice*>(device_)->stream());
-
     sampler_inputs.logits.reset(new ft::Buffer(ft::MemoryType::MEMORY_GPU,
-                                               ft::DataType::TYPE_FP16,
+                                               ft::DataType::TYPE_FP32,
                                                model_output.logits->shape(),
                                                model_output.logits->data()));
-    sampler_inputs.step       = max_seq_len;
+
     sampler_inputs.batch_size = total_batch_size;
-    sampler_inputs.top_k      = device_->allocateBuffer({ft::DataType::TYPE_INT32, {1}, ft::AllocationType::HOST}, {});
-    int* top_k                = (int*)sampler_inputs.top_k->data();
-    top_k[0]                  = 1;
+    sampler_inputs.top_k      = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.top_p      = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.temperature = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.num_beams  = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.cum_log_probs  = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+
+
+    int32_t* top_k            = sampler_inputs.top_k->data<int32_t>();
+    float* top_p              = sampler_inputs.top_p->data<float>();
+    float* temperature        = sampler_inputs.temperature->data<float>();
+    uint64_t* num_beams       = sampler_inputs.num_beams->data<uint64_t>();
+
+    for (int i = 0; i < total_batch_size; ++i) {
+
+        num_beams[i] = 1;
+        top_k[i]     = 1;
+        top_p[i]     = 1.0;
+        temperature[i] = 1.0;
+    }
     return sampler_inputs;
 }
 
@@ -175,27 +189,23 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
     const auto& model_output      = merge_outputs->model_output;
     const auto& sampler_output    = merge_outputs->sampler_output;
     const auto& new_all_token_ids = sampler_output.token_ids;
+    const size_t step = new_all_token_ids->shape()[1];
     size_t      total_batch_size  = stream_groups.totalSamplerBatchSize();
     // assert(total_batch_size == new_all_token_ids->size());
-    assert(total_batch_size == new_all_token_ids->shape()[1]);
+    assert(total_batch_size == new_all_token_ids->shape()[0]);
     auto token_ids_cpu =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, new_all_token_ids->shape(), ft::AllocationType::HOST}, {});
-    cudaMemcpyAsync(token_ids_cpu->data(),
-                    new_all_token_ids->data(),
-                    new_all_token_ids->sizeBytes(),
-                    cudaMemcpyDeviceToHost,
-                    dynamic_cast<CudaDevice*>(device_)->stream());
-    int token_idx = 0;
+    int batch_idx = 0;
     for (auto& stream : stream_groups.allStreams()) {
         auto          current_batch_size = stream->batchSize();
         auto          fake_input         = std::optional<ft::BufferPtr>();
-        ft::BufferPtr new_tokens;
-        new_tokens.reset(new Buffer(ft::MemoryType::MEMORY_CPU_PINNED,
-                                    ft::DataType::TYPE_INT32,
-                                    {(size_t)1, (size_t)current_batch_size},
-                                    (int*)token_ids_cpu->data() + token_idx));
+        ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)current_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
+        for (int i = 0; i < current_batch_size; ++i) {
+            memcpy(new_tokens->dataWithOffset<int32_t>(batch_idx * 1), new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1), sizeof(int32_t));
+            batch_idx += 1;
+        }
         stream->update(new_tokens, 1, false, fake_input, fake_input, fake_input, fake_input);
-        token_idx += current_batch_size;
+
     }
     return absl::OkStatus();
 }

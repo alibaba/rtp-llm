@@ -1,17 +1,27 @@
 from typing import Any, Dict
 import torch
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.ops.ft_op_base import FTOPBase
 
-class RtpLLMOp:
-    def __init__(self, config: GptInitModelParameters, is_sp: bool, layer_weights: Any, global_weights: Any):
+class RtpLLMOp(FTOPBase):
+    def __init__(self, config: GptInitModelParameters, is_sp: bool):
         super().__init__()
-        assert layer_weights
-        assert global_weights
+        self.config = config
+        self.is_sp = is_sp
         self.ft_op = torch.classes.FasterTransformer.RtpLLMOp()
-        self.ft_op.init(config, layer_weights, global_weights)
+
+    def _initialize_op(self, force_init: bool=False):
+        assert self.weight
+        self.ft_op.init( # type: ignore
+            self.config,
+            self.weight.weights,
+            self.weight.global_weights)
+
+        for id, lora_weight in self.weight.lora_resource.lora_map.weights_map.items():
+            self.ft_op.add_lora( # type: ignore
+                id,
+                lora_weight.lora_a_weights,
+                lora_weight.lora_b_weights)
 
     def stop(self):
-        self.ft_op.stop()
-
-    def update_lora(self, lora_infos: Dict[str, str]):
-        raise Exception("not support yet")
+        self.ft_op.stop() # type: ignore

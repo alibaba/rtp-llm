@@ -1,7 +1,6 @@
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.h"
 #include "maga_transformer/cpp/common/torch_bind.h"
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
-#include "maga_transformer/cpp/model_rpc/ModelRpcServer.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
@@ -32,9 +31,34 @@ void RtpLLMOp::init(const c10::intrusive_ptr<GptInitParameter>&                 
         }
         layer_weights_.emplace_back(std::move(__weights));
     }
-    server_thread_ = std::thread(&RtpLLMOp::_init, this, params, std::move(layer_weights_), std::move(global_weights));
-    server_thread_.detach();
+    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, params, std::move(layer_weights_), std::move(global_weights));
+    grpc_server_thread_.detach();
     // _init(params, layer_weights_, global_weights);
+}
+
+void RtpLLMOp::addLoRA(const int64_t                                                   lora_id,
+                       const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_a_weights,
+                       const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights) {
+    std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> lora_a_weights_, lora_b_weights_;
+    for (auto& weights : lora_a_weights) {
+        std::unordered_map<std::string, ft::ConstBufferPtr> __weights;
+        for (auto& it : weights) {
+            __weights.emplace(it.first, ft::torchTensor2Buffer(it.second));
+        }
+        lora_a_weights_.emplace_back(std::move(__weights));
+    }
+    for (auto& weights : lora_b_weights) {
+        std::unordered_map<std::string, ft::ConstBufferPtr> __weights;
+        for (auto& it : weights) {
+            __weights.emplace(it.first, ft::torchTensor2Buffer(it.second));
+        }
+        lora_b_weights_.emplace_back(std::move(__weights));
+    }
+    model_rpc_server_->addLoRA(lora_id, lora_a_weights_, lora_b_weights_);
+}
+
+void RtpLLMOp::removeLoRA(const int64_t lora_id) {
+    model_rpc_server_->removeLoRA(lora_id);
 }
 
 void RtpLLMOp::_init(const rtp_llm::MagaInitParams                                          params,
@@ -42,23 +66,26 @@ void RtpLLMOp::_init(const rtp_llm::MagaInitParams                              
                      const std::unordered_map<std::string, ft::ConstBufferPtr>              weights) {
 
     std::string                  server_address("0.0.0.0:25333");
-    rtp_llm::ModelRpcServiceImpl service(params, layer_weights, weights);
-
+    model_rpc_server_.reset(new rtp_llm::ModelRpcServiceImpl(params, layer_weights, weights));
     grpc::ServerBuilder builder;
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
-    builder.RegisterService(&service);
-    server_ = builder.BuildAndStart();
+    builder.RegisterService(model_rpc_server_.get());
+    grpc_server_ = builder.BuildAndStart();
 
     FT_LOG_INFO("Server listening on %s", server_address.c_str());
-    server_->Wait();
+    grpc_server_->Wait();
+    is_server_shutdown_ = true;
 }
 
 void RtpLLMOp::stop() {
-    server_->Shutdown();
+    if (!is_server_shutdown_) {
+        grpc_server_->Shutdown();
+        model_rpc_server_.reset();
+    }
 }
 
 RtpLLMOp::~RtpLLMOp() {
-    server_->Shutdown();
+    stop();
 }
 
 // shared_ptr<rtp_llm::GenerateStream> RtpLLMOp::forward(shared_ptr<rtp_llm::GenerateInput> query) {
@@ -98,4 +125,6 @@ static auto fasterTransformerGptTHS =
 #endif
         .def(torch::jit::init<>())  // quant_pre_scales
         .def("init", &torch_ext::RtpLLMOp::init)
+        .def("add_lora", &torch_ext::RtpLLMOp::addLoRA)
+        .def("remove_lora", &torch_ext::RtpLLMOp::removeLoRA)
         .def("stop", &torch_ext::RtpLLMOp::stop);

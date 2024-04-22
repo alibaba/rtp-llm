@@ -13,14 +13,13 @@ class FIFOScheduler: public SchedulerBase {
 public:
     explicit FIFOScheduler(const MagaInitParams& config, const std::shared_ptr<CacheManager>& cache_manager);
 
-    ~FIFOScheduler() {
-        // TODO(xinfei.sxf) add log
-        printf("destory FIFOScheduler\n");
-    }
+    ~FIFOScheduler();
 
     absl::Status enqueue(const GenerateStreamPtr& stream) override;
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+
+    absl::Status stop() override;
 
 public:
     // for test
@@ -42,9 +41,10 @@ private:
     const std::shared_ptr<CacheManager> cache_manager_;
 
     std::mutex lock_;
+    std::condition_variable cond_;
+    std::atomic<bool> stop_{false};
     int        max_seq_len_;
     int        reserve_block_num_ = 0;
-    bool       enable_fallback    = false;
     // TODO @wangyin support different beams run togather
 };
 

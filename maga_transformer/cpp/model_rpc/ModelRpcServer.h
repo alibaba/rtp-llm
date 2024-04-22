@@ -16,6 +16,10 @@ public:
     grpc::Status generate_stream(grpc::ServerContext*                  context,
                                  const GenerateInputPB*                request,
                                  grpc::ServerWriter<GenerateOutputPB>* writer) override;
+    void addLoRA(const int64_t                                                   lora_id,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights);
+    void removeLoRA(const int64_t lora_id);
 
 private:
     std::unique_ptr<NormalEngine> engine_;

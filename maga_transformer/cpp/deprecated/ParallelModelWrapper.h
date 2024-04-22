@@ -12,6 +12,7 @@
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGpt.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLoRALayerWeight.h"
 #include <memory>
 
 namespace ft = fastertransformer;
@@ -58,6 +59,7 @@ private:
     ft::CudaDevice*                                    device_;
     std::shared_ptr<GptGlobalWeights<T>>               global_weights_;
     std::vector<ft::ParallelGptDecoderLayerWeight<T>*> gpt_layer_weights_;
+    std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*> gpt_lora_layer_weights_;
 
     T*   all_hidden_states_  = nullptr;
     T*   last_hidden_states_ = nullptr;
@@ -77,6 +79,7 @@ private:
     std::unique_ptr<ParallelWordEmbeddingWrapper<T>> parallel_word_embedding_wrapper_;
     std::unique_ptr<ft::ParallelGpt<T>>              parallel_gpt_decoder_;
     std::unique_ptr<ParallelLogitsWrapper<T>>        parallel_logits_wrapper_;
+    std::unique_ptr<NormWrapper<T>> norm_wrapper_;
 };
 
 class ParallelModelWrapper {
@@ -89,6 +92,10 @@ public:
                          const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights);
 
     ~ParallelModelWrapper(){};
+    void addLoRA(const int64_t                                                   lora_id,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights){};
+    void removeLoRA(const int64_t lora_id){};
 
     std::unique_ptr<GptModelOutputs> forward(const ModelRequest& model_request);
 

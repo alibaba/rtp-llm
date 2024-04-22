@@ -1,4 +1,5 @@
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
+#include "src/fastertransformer/utils/logger.h"
 #include <memory>
 #include <mutex>
 
@@ -7,6 +8,20 @@ namespace rtp_llm {
 
 FIFOScheduler::FIFOScheduler(const MagaInitParams& config, const std::shared_ptr<CacheManager>& cache_manager):
     cache_manager_(cache_manager), max_seq_len_(config.gpt_init_parameter->max_seq_len_) {}
+
+
+FIFOScheduler::~FIFOScheduler() {
+    (void)stop();
+    FT_LOG_DEBUG("destory FIFOScheduler\n");
+}
+
+absl::Status FIFOScheduler::stop() {
+    FT_LOG_DEBUG("stop FIFOScheduler\n");
+    lock_guard<mutex> lock(lock_);
+    stop_ = true;
+    cond_.notify_all();
+    return absl::OkStatus();
+}
 
 void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) const {
     for (auto it = streams.begin(); it != streams.end();) {
@@ -25,6 +40,7 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     lock_guard<mutex> lock(lock_);
     stream->setCacheManager(cache_manager_);
     waiting_streams_.emplace_back(stream);
+    cond_.notify_all();
     return absl::OkStatus();
 }
 
@@ -41,27 +57,25 @@ void FIFOScheduler::evaluateRunningNext() {
         return;
     }
 
-    if (enable_fallback) {
-        int running_next_block_num = runningNextBlockNum();
-        for (auto& stream : waiting_streams_) {
-            int need_block_num = running_next_block_num - cache_manager_->freeBlockNums();
-            if (need_block_num > 0) {
-                stream->tryReleaseKVBlock(need_block_num);
-            } else {
-                break;
-            }
+    int running_next_block_num = runningNextBlockNum();
+    for (auto& stream : waiting_streams_) {
+        int need_block_num = running_next_block_num - cache_manager_->freeBlockNums();
+        if (need_block_num > 0) {
+            stream->tryReleaseKVBlock(need_block_num);
+        } else {
+            break;
         }
-        while (!running_streams_.empty()) {
-            int need_block_num = (int)runningNextBlockNum() - (int)cache_manager_->freeBlockNums();
-            if (need_block_num <= 0) {
-                break;
-            }
-            auto& last_stream = *(running_streams_.rbegin());
-            last_stream->tryReleaseKVBlock(need_block_num);
-            FT_LOG_DEBUG("stream: %d fall back", last_stream->streamId());
-            waiting_streams_.emplace_front(last_stream);
-            running_streams_.pop_back();
+    }
+    while (!running_streams_.empty()) {
+        int need_block_num = (int)runningNextBlockNum() - (int)cache_manager_->freeBlockNums();
+        if (need_block_num <= 0) {
+            break;
         }
+        auto& last_stream = *(running_streams_.rbegin());
+        last_stream->tryReleaseKVBlock(need_block_num);
+        FT_LOG_DEBUG("stream: %d fall back", last_stream->streamId());
+        waiting_streams_.emplace_front(last_stream);
+        running_streams_.pop_back();
     }
 
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
@@ -116,10 +130,10 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
-    lock_guard<mutex> lock(lock_);
+    unique_lock<mutex> lock(lock_);
+    cond_.wait(lock, [this]{return stop_ || !waiting_streams_.empty() || !running_streams_.empty();});
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
-
     // TODO(xinfei.sxf) 刚踢出running的可能马上又加入了running
     evaluateRunningNext();
 

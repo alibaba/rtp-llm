@@ -79,6 +79,14 @@ vector<int> GenerateStream::inputTokens() const {
     }
 }
 
+int GenerateStream::tileNum() const {
+    return std::max(numBeams(), numReturnSequences());
+}
+
+bool GenerateStream::isContextStream() const {
+    return seqLength() == inputLength();
+}
+
 int GenerateStream::batchSize() const {
     int tile_num   = tileNum();
     int batch_size = 0;
@@ -128,7 +136,7 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
     // # This differs from new_tokens.shape[-1] under beam search case,
     // # which needs to update all the generated tokens each update.
     assert(new_tokens->dim() == 2);
-    auto update_length   = new_tokens->shape()[0];
+    auto update_length   = new_tokens->shape()[1];
     auto update_to_pos   = seq_length_ + num_new_tokens;
     auto update_from_pos = update_to_pos - update_length;
 
@@ -148,9 +156,12 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
         setFinishedWithoutLock();
     }
     auto device = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
+    size_t output_len = seq_length_ - inputLength();
     generate_output_->output_ids =
-        device->allocateBuffer({new_tokens->type(), new_tokens->shape(), ft::AllocationType::HOST}, {});
-    memcpy(generate_output_->output_ids->data(), new_tokens->data(), new_tokens->sizeBytes());
+        device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)batchSize(), output_len}, ft::AllocationType::HOST}, {});
+    for (int i = 0; i < batchSize(); ++i) {
+        memcpy(generate_output_->output_ids->view(i, 1).data(), complete_token_ids_->view(i, 1).dataWithOffset<int32_t>(inputLength()), sizeof(int32_t) * output_len);
+    }
     if (generate_input_->generate_config->return_logits) {
         if (!generate_input_->generate_config->select_tokens_id.empty()) {
             ft::BufferPtr select_logits =

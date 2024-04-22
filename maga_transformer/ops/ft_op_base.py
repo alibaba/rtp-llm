@@ -2,7 +2,7 @@ import torch
 from abc import abstractmethod
 from typing import Any, Optional, Dict, List, Callable, Union
 
-from maga_transformer.utils.model_weight import LoraResource
+from maga_transformer.utils.model_weight import LoraResource, ModelWeights
 
 class FTWeightsBase:
     def __init__(self):
@@ -58,7 +58,7 @@ class FTWeightsBase:
 
 class FTOPBase:
     def __init__(self):
-        self.weight: Optional[Any] = None
+        self.weight: Optional[ModelWeights] = None
         self.ft_op: Optional[Any] = None
 
     @classmethod
