@@ -18,7 +18,7 @@ SpeculativeEngine::SpeculativeEngine(
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) {
     draft_executor_.reset(new NormalExecutor(params, layer_weights, weights));
     target_executor_.reset(new SpeculativeExecutor(params, layer_weights, weights));
-    // TODO(xinfei.sxf) cache config from where, new cache Manager
+    // TODO(xinfei.sxf) deal with sp cache config and sp ptuning
     int   block_num     = 100;
     char* block_num_env = std::getenv("BLOCK_NUM");
     if (block_num_env) {

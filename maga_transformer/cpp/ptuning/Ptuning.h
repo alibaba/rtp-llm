@@ -50,6 +50,8 @@ class PtuningBase {
 public:
     PrefixType prefix_type_;
 
+    virtual ~PtuningBase() {}
+
     virtual std::tuple<PrefixType, std::optional<torch::Tensor>, std::vector<int>> getPrefixParams(const GenerateConfig& generate_config) = 0;
     virtual std::tuple<bool, std::vector<int>, int> getBlockIndice(int blockNum, const GenerateConfig& generate_config) = 0;
     virtual size_t calcPrefixBlockNum(const GenerateConfig& generate_config) = 0;

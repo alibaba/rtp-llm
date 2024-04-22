@@ -1,6 +1,9 @@
 #pragma once
 #include "maga_transformer/cpp/dataclass/GenerateConfig.h"
 #include "src/fastertransformer/core/Buffer.h"
+#include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
+
 #include <assert.h>
 #include <cstdint>
 #include <optional>
@@ -28,6 +31,16 @@ public:
                      << "request_id: " << request_id << ", generate_config:" << generate_config->debugString()
                      << ", input_ids:" << input_ids->debugString() << ", prefix_length:" << prefix_length << "}";
         return debug_string.str();
+    }
+
+    void updatePrefix(const std::vector<int>& prefix_prompt) {
+        prefix_length   = prefix_prompt.size();
+        auto device     = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
+        auto new_input  = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)prefix_length + (size_t)inputLength()}, ft::AllocationType::HOST}, {});
+        auto buffer = ft::vector2Buffer(prefix_prompt);
+        auto bufferPtr = convertBuffer2Ptr(buffer);
+        ft::bufferConcat(bufferPtr, input_ids, new_input);
+        input_ids = std::move(new_input);
     }
 
 public:

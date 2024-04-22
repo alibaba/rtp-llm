@@ -14,19 +14,23 @@ namespace W  = ft::W;
 namespace ft = fastertransformer;
 namespace rtp_llm {
 
-std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device) {
+struct CustomConfig {
+    std::map<int, std::vector<int>> multi_task_prompt_tokens;
+};
+
+std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomConfig& config) {
     setenv("TEST_BLOCK_NUM", "100", 1);
 
     rtp_llm::MagaInitParams rtp_llm_params;
     rtp_llm_params.gpt_init_parameter = c10::make_intrusive<GptInitParameter>(2, 64, 2, 20, 20, 128);
-    // GptInitParameter params(2, 64, 2, 20, 20, 128);
+    rtp_llm_params.gpt_init_parameter->multi_task_prompt_tokens = config.multi_task_prompt_tokens;
     auto& params        = *rtp_llm_params.gpt_init_parameter;
     params.head_num_kv_ = 2;
 
     const size_t inter_size    = 512;
     params.inter_size_         = inter_size;
     params.inter_padding_size_ = inter_size;
-    params.seq_size_per_block_ = 8;
+    params.seq_size_per_block_ = 2;
     params.reserve_runtime_mem_mb_ = 1024;
     typedef half         T;
     const at::ScalarType scalar_type  = at::ScalarType::Half;

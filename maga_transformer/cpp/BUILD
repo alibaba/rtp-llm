@@ -55,6 +55,7 @@ cc_library(
         ":utils",
         ":common",
         ":cache",
+        ":ptuning",
         "//:gpt_init_params_hdr",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -68,16 +69,36 @@ cc_library(
 cc_library(
     name = "ptuning",
     hdrs = glob([
-        "ptuning/*.h",
+        "ptuning/Ptuning.h",
     ]),
     srcs = glob([
-        "ptuning/*.cc",
+    ]),
+    deps = torch_deps() + [
+        ":utils",
+        ":common",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "ptuning_constructor",
+    hdrs = glob([
+        "ptuning/PtuningConstructor.h",
+    ]),
+    srcs = glob([
+        "ptuning/PtuningConstructor.cc",
     ]),
     deps = torch_deps() + [
         ":utils",
         ":common",
         ":cache",
+        ":engine_base",
+        ":dataclass",
         "//:gpt_init_params_hdr",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:device_utils",
         "//src/fastertransformer/models:weights_define",
@@ -210,6 +231,7 @@ cc_library(
         ":model_wrapper",
         ":common",
         ":ptuning",
+        ":ptuning_constructor",
         "//src/fastertransformer/cuda:allocator_cuda",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

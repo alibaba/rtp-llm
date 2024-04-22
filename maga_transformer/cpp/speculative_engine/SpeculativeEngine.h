@@ -45,6 +45,7 @@ private:
     std::unique_ptr<Executor>             draft_executor_;
     std::unique_ptr<Executor>             target_executor_;
     std::unique_ptr<SchedulerBase>        scheduler_;
+    bool                                  reuse_cache_ = false;
     std::shared_ptr<CacheManager>         draft_cache_manager_;
     std::shared_ptr<CacheManager>         target_cache_manager_;
     GptInitParameter                      params_;

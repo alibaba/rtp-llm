@@ -5,6 +5,7 @@
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
+#include "maga_transformer/cpp/ptuning/Ptuning.h"
 
 
 namespace rtp_llm {
@@ -16,8 +17,8 @@ public:
     ~FIFOScheduler();
 
     absl::Status enqueue(const GenerateStreamPtr& stream) override;
-
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+    void setPtuning(const std::shared_ptr<PtuningBase>& ptuning, bool reuse_cache);
 
     absl::Status stop() override;
 
@@ -38,13 +39,16 @@ private:
 private:
     std::list<GenerateStreamPtr>        waiting_streams_;
     std::list<GenerateStreamPtr>        running_streams_;
-    const std::shared_ptr<CacheManager> cache_manager_;
+    std::shared_ptr<CacheManager>       cache_manager_;
+    std::shared_ptr<PtuningBase>        ptuning_;
+    bool                                reuse_cache_        = false;
+    int                                 max_seq_len_        = 0;
+    int                                 reserve_block_num_  = 0;
+    bool                                enable_fallback     = false;
+    std::atomic<bool>                   stop_               = false;
+    std::mutex                          lock_;
+    std::condition_variable             cond_;
 
-    std::mutex lock_;
-    std::condition_variable cond_;
-    std::atomic<bool> stop_{false};
-    int        max_seq_len_;
-    int        reserve_block_num_ = 0;
     // TODO @wangyin support different beams run togather
 };
 

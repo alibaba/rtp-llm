@@ -43,6 +43,10 @@ const std::vector<size_t>& Buffer::shape() const {
     return shape_;
 }
 
+const Buffer::DeleterFuncType& Buffer::deleter() const {
+    return deleter_;
+}
+
 void* Buffer::data() const {
     return data_;
 }

@@ -11,8 +11,9 @@
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
-#include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "maga_transformer/cpp/utils/SynchronizedQueue.h"
+#include "maga_transformer/cpp/ptuning/Ptuning.h"
+#include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "absl/status/statusor.h"
 
 namespace ft = fastertransformer;
@@ -56,13 +57,19 @@ public:
 
     void setNeedReleaseResource(bool need_release_resource) {
         need_release_resource_ = need_release_resource;
+        stream_cache_resource_.setNeedReleaseResource(need_release_resource);
     }
 
     // TODO(xinfei.sxf) lora resource?
+<<<<<<< HEAD
     virtual void releaseResource() {
         if (need_release_resource_) {
             stream_cache_resource_.releaseResource();
         }
+=======
+    void releaseResource() {
+        stream_cache_resource_.releaseResource();
+>>>>>>> feat: use ptuning/reuse_cache in stream and engine
     }
 
     int64_t streamId() const {
@@ -137,9 +144,16 @@ public:
         seq_length_ = seq_length;
     }
 
-    void setCacheManager(std::shared_ptr<CacheManager> cache_manager) {
+    void setCacheManager(const std::shared_ptr<CacheManager>& cache_manager) {
         stream_cache_resource_.setCacheManager(cache_manager);
     }
+
+    void setPtuning(const std::shared_ptr<PtuningBase>& ptuning) {
+        stream_cache_resource_.setPtuning(ptuning);
+        updatePrefix(ptuning);
+    }
+
+    void updatePrefix(const std::shared_ptr<PtuningBase>&  ptuning);
 
     void setReuseCache(bool reuse_cache) {
         stream_cache_resource_.setReuseCache(reuse_cache);
@@ -282,13 +296,13 @@ protected:
     std::mutex                          output_mutex_;
     std::condition_variable             update_cv_;
     StreamCacheResource                 stream_cache_resource_;
+    PrefixInfo                          prefix_info_;
     size_t                              batch_size_            = 1;
     int                                 reuse_length_          = 0;
     bool                                done_                  = false;
     bool                                cancelled_             = false;
     bool                                released_              = false;
     bool                                need_release_resource_ = false;
-
 
     friend class StreamCacheResource;
 };

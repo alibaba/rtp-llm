@@ -6,6 +6,8 @@
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
+#include "maga_transformer/cpp/ptuning/Ptuning.h"
+#include "maga_transformer/cpp/engines/EngineBase.h"
 #include "torch/all.h"
 #include <atomic>
 #include <chrono>
@@ -32,6 +34,7 @@ public:
     void removeLoRA(const int64_t lora_id) override;
     absl::Status step();
     absl::Status startLoop();
+
 public:
     const std::shared_ptr<CacheManager> cacheManager() const {
         return cache_manager_;
@@ -41,9 +44,10 @@ public:
     }
 
 private:
-    absl::Status trySaveStepError() const;
-    void         loop();
-    void         initCacheManager();
+    absl::Status    trySaveStepError() const;
+    void            loop();
+    void            initCacheManager();
+    void            initPtuning();
 
 private:
     std::thread                           loop_thread_;
@@ -52,6 +56,8 @@ private:
     std::unique_ptr<SchedulerBase>        scheduler_;
     std::shared_ptr<CacheManager>         cache_manager_;
     MagaInitParams                        params_;
+    std::shared_ptr<PtuningBase>          ptuning_;
+    bool                                  reuse_cache_{false};
 };
 
 }  // namespace rtp_llm

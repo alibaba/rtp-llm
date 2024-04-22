@@ -9,6 +9,16 @@ using namespace std;
 namespace rtp_llm {
 
 void StreamCacheResource::releaseResource() {
+    printf("here1 releaseResource\n");
+    fflush(stdout);
+
+    if (!need_release_resource_) {
+        return ;
+    }
+
+    printf("releaseResource\n");
+    fflush(stdout);
+
     // for test
     if (!cache_manager_) {
         return;
@@ -16,11 +26,13 @@ void StreamCacheResource::releaseResource() {
     if (!kv_cache_block_addr_.k_ptr.empty()) {
         for (auto& batch_block : kv_cache_block_addr_.k_ptr) {
             const auto& blocks = batch_block[0];
+            printf("this %p, blocks.size() = %lu, reuse_cache_ = %d\n", this, blocks.size(), reuse_cache_);
             if (reuse_cache_) {
                 // TODO(xinfei.sxf) batch token
                 auto tokens_id = stream_->completeTokenIdsVec();
                 cache_manager_->freeWithCache(blocks, tokens_id);
             } else {
+                printf("here free\n");
                 cache_manager_->free(blocks);
             }
         }
@@ -57,6 +69,8 @@ bool StreamCacheResource::initKVBlock() {
     KVCacheBlockAddr kv_cache_block_addr;
     int              reuse_length;
     bool             success;
+    printf("initKVBlock block_num = %d\n", block_num);
+    fflush(stdout);
     if (reuse_cache_) {
         std::tie(success, kv_cache_block_addr, reuse_length) =
             cache_manager_->mallocWithCache(block_num, stream_->completeTokenIdsVec());
@@ -86,7 +100,7 @@ int StreamCacheResource::initalKVCacheCount() const {
 // TODO(xinfei.sxf) fix this to reduce waste
 int StreamCacheResource::nextNeedBlockNums() const {
     auto next_length = stream_->seqLength() + gen_num_per_circle_;
-    // TODO(xinfei.sxf) deal with ptuing
+    // TODO(xinfei.sxf) deal with ptuning
     auto current_block_length = maxBlockSize() * cache_manager_->cacheConfig().seq_size_per_block;
     return ((next_length - current_block_length - 1) / cache_manager_->cacheConfig().seq_size_per_block) + 1;
 }
@@ -142,12 +156,20 @@ void StreamCacheResource::setKVCache(const BatchKVCacheBlockAddr& kv_cache_block
     kv_cache_block_addr_ = kv_cache_block_addr;
 }
 
-void StreamCacheResource::setCacheManager(std::shared_ptr<CacheManager> cache_manager) {
+void StreamCacheResource::setCacheManager(const std::shared_ptr<CacheManager>& cache_manager) {
     cache_manager_ = cache_manager;
+}
+
+void StreamCacheResource::setPtuning(const std::shared_ptr<PtuningBase>& ptuning) {
+    ptuning_ = ptuning;
 }
 
 void StreamCacheResource::setReuseCache(bool reuse_cache) {
     reuse_cache_ = reuse_cache;
+}
+
+void StreamCacheResource::setNeedReleaseResource(bool need_release_resource) {
+    need_release_resource_ = need_release_resource;
 }
 
 }  // namespace rtp_llm

@@ -9,28 +9,8 @@ using namespace std;
 
 namespace rtp_llm {
 
-class StreamCounter {
-public:
-    StreamCounter() {}
-    StreamCounter(const StreamCounter&)            = delete;
-    StreamCounter& operator=(const StreamCounter&) = delete;
-
-public:
-    static StreamCounter& getInstance() {
-        static StreamCounter streamCounter;
-        return streamCounter;
-    }
-
-    int incrAndGet() {
-        return ++counter_;
-    }
-
-private:
-    std::atomic_int counter_ = 0;
-};
-
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, int max_seq_len):
-    generate_input_(input), done_(false), cancelled_(false), stream_cache_resource_(this) {
+    generate_input_(input), stream_cache_resource_(this) {
     if (!input.get()) {
         return;
     }
@@ -49,7 +29,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, int max_s
     for (int i = 0; i < tileNum(); ++i) {
         sub_generate_status_[i].status = GenerateState::RUNNING;
     }
-    released_ = false;
 }
 
 absl::StatusOr<GenerateOutput> GenerateStream::nextOutput() {
@@ -103,6 +82,17 @@ size_t GenerateStream::maxSeqLen() const {
 
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
     return generate_input_;
+}
+
+void GenerateStream::updatePrefix(const std::shared_ptr<PtuningBase>& ptuning) {
+    if (ptuning) {
+        prefix_info_ = ptuning->getPtuningInfo(*generate_input_->generate_config);
+        if (!prefix_info_.prefix_prompt.empty()) {
+            generate_input_->updatePrefix(prefix_info_.prefix_prompt);
+            seq_length_ = generate_input_->inputLength();
+            memcpy(complete_token_ids_->data(), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
+        }
+    }
 }
 
 vector<int> GenerateStream::currentExecuteTokens() const {

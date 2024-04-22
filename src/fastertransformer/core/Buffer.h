@@ -14,11 +14,12 @@ namespace fastertransformer {
 // It only includes a pointer with metadata.
 class Buffer {
 public:
+    typedef std::function<void(Buffer *)> DeleterFuncType;
     Buffer(const MemoryType where,
            const DataType type,
            const std::vector<size_t>& shape,
            const void* data,
-           const std::function<void(Buffer *)> deleter = nullptr);
+           const DeleterFuncType deleter = nullptr);
     ~Buffer();
 
     static Buffer emptyBuffer();
@@ -35,6 +36,7 @@ public:
     const std::vector<size_t>& shape() const;
     void*                      data() const;
     void*                      dataWithOffset(size_t offset) const;
+    const DeleterFuncType&     deleter() const;
 
     template<typename T>
     inline T* data() const {
@@ -66,7 +68,7 @@ private:
     DataType            type_;
     std::vector<size_t> shape_;
     void*               data_;
-    std::function<void(Buffer *)> deleter_;
+    DeleterFuncType     deleter_ = nullptr;
 };
 
 using ConstBufferPtr = std::unique_ptr<const Buffer>;

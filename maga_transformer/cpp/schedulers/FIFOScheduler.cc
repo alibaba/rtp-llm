@@ -39,6 +39,8 @@ void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) const {
 absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     lock_guard<mutex> lock(lock_);
     stream->setCacheManager(cache_manager_);
+    stream->setPtuning(ptuning_);
+    stream->setReuseCache(reuse_cache_);
     waiting_streams_.emplace_back(stream);
     cond_.notify_all();
     return absl::OkStatus();
@@ -140,6 +142,11 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     auto new_stream = scheduleNew();
     running_streams_.insert(running_streams_.end(), new_stream.begin(), new_stream.end());
     return running_streams_;
+}
+
+void FIFOScheduler::setPtuning(const std::shared_ptr<PtuningBase>& ptuning, bool reuse_cache) {
+    ptuning_ = ptuning;
+    reuse_cache_ = reuse_cache;
 }
 
 int FIFOScheduler::waitingStreamsSize() {

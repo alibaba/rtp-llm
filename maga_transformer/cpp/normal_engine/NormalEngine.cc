@@ -5,10 +5,6 @@
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/utils/logger.h"
-#include "maga_transformer/cpp/cache/CacheConfigCreator.h"
-
-using namespace std;
-namespace rtp_llm {
 
 NormalEngine::NormalEngine(const MagaInitParams&                                                   params,
                            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
@@ -18,7 +14,6 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
     scheduler_.reset(new FIFOScheduler(params, cache_manager_));
     (void)startLoop();
 }
-
 
 NormalEngine::~NormalEngine() {
     FT_LOG_DEBUG("destory Engine");
@@ -38,6 +33,8 @@ void NormalEngine::removeLoRA(const int64_t lora_id) {
 absl::Status NormalEngine::startLoop() {
     running_ = true;
     loop_thread_ = std::thread(&NormalEngine::loop, this);
+    initPtuning();
+    dynamic_cast<FIFOScheduler*>(scheduler_.get())->setPtuning(ptuning_, reuse_cache_);
     return absl::OkStatus();
 }
 
@@ -95,6 +92,18 @@ void NormalEngine::initCacheManager() {
     ft::DeviceBase*               device        = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     ncclComm_t                    nccl_op;
     cache_manager_ = make_shared<CacheManager>(cache_config, device);  
+}
+
+void NormalEngine::initPtuning() {
+    char* reuse_cache_env  = std::getenv("REUSE_CACHE");
+    if (reuse_cache_env && strcmp(reuse_cache_env, "1") == 0) {
+        reuse_cache_ = true;
+    }
+    auto ptuning_param = PtuningConstructor::construct(*params_.gpt_init_parameter, this, cache_manager_.get());
+    if (!ptuning_param.empty()) {
+        reuse_cache_ = true;
+        ptuning_.reset(new MultiTaskPtuning(*cache_manager_, ptuning_param));
+    }
 }
 
 }  // namespace rtp_llm

@@ -29,8 +29,11 @@ TEST_F(PtuningConstructorTest, testMultiTaskPromptConstruct) {
     vector<int> prompt_2 = {4, 5, 6, 7};
     params.multi_task_prompt_tokens = {{1, prompt_1}, {2, prompt_2}};
     auto engine = createMockEngine(device_);
+    ASSERT_EQ(engine->cache_manager_->freeBlockNums(), 99);
     auto result = constructor.construct(params, engine.get());
     ASSERT_EQ(result.size(), 2);
+    ASSERT_EQ(engine->cache_manager_->freeBlockNums(), 99);
+
     const auto& item1 = result[1];
     ASSERT_EQ(item1.prefix_type, PrefixType::PromptTuning);
     ASSERT_EQ(item1.prefix_length, 3);
