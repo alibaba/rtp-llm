@@ -799,7 +799,7 @@ class ModelDeployWeightInfo:
     def _get_weight_info(self) -> ModelWeightInfo:
         raise NotImplementedError()
 
-    def process_meta(self, ckpt_metas: List[CkptFileInfo]):
+    def process_meta_from_ckpt(self, ckpt_metas: List[CkptFileInfo]):
         if len(ckpt_metas) == 0:
             return
         if 'ft_module' not in ckpt_metas[0].get_tensor_names():
@@ -808,6 +808,12 @@ class ModelDeployWeightInfo:
             meta_dicts = [ckpt_file.get_metadata() for ckpt_file in ckpt_metas]
             weight_keys = set(reduce(lambda x,y:x+y, [list(meta.keys()) for meta in meta_dicts], []))
             self._process_meta(meta_dicts, weight_keys)
+
+    def process_meta_from_dict(self, ref_dict: Dict[str, torch.Tensor]):
+        if len(ref_dict) == 0:
+            return
+        if 'ft_module' not in ref_dict.keys():
+            self._process_meta([ref_dict], ref_dict.keys())
 
     def _process_meta(self, meta_dict, weight_keys):
         pass

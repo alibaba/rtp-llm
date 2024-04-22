@@ -70,11 +70,16 @@ class ModelWeightsLoader:
         self._database: BaseDatabase = database
 
         if isinstance(self._database, CkptDatabase):
-            self._weights_info.process_meta(self._database.PretrainFileList)
-            self._weights_info.process_meta(self._database.FinetuneFileList)
+            self._weights_info.process_meta_from_ckpt(self._database.PretrainFileList)
+            self._weights_info.process_meta_from_ckpt(self._database.FinetuneFileList)
             self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
             self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
-        elif isinstance(self._database, ModuleDatabase) or isinstance(self._database, DictDatabase):
+        elif isinstance(self._database, ModuleDatabase):
+            self._weights_info.process_meta_from_dict(dict(self._database.ref_model.state_dict()))
+            self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
+            self._merge_lora = False
+        elif isinstance(self._database, DictDatabase):
+            self._weights_info.process_meta_from_dict(self._database.ref_dict)
             self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
             self._merge_lora = False
         else:
