@@ -41,18 +41,18 @@ void RtpLLMOp::addLoRA(const int64_t                                            
                        const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights) {
     std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> lora_a_weights_, lora_b_weights_;
     for (auto& weights : lora_a_weights) {
-        std::unordered_map<std::string, ft::ConstBufferPtr> __weights;
+        std::unordered_map<std::string, ft::ConstBufferPtr> weights_;
         for (auto& it : weights) {
-            __weights.emplace(it.first, ft::torchTensor2Buffer(it.second));
+            weights_.emplace(it.first, ft::torchTensor2Buffer(it.second));
         }
-        lora_a_weights_.emplace_back(std::move(__weights));
+        lora_a_weights_.emplace_back(std::move(weights_));
     }
     for (auto& weights : lora_b_weights) {
-        std::unordered_map<std::string, ft::ConstBufferPtr> __weights;
+        std::unordered_map<std::string, ft::ConstBufferPtr> weights_;
         for (auto& it : weights) {
-            __weights.emplace(it.first, ft::torchTensor2Buffer(it.second));
+            weights_.emplace(it.first, ft::torchTensor2Buffer(it.second));
         }
-        lora_b_weights_.emplace_back(std::move(__weights));
+        lora_b_weights_.emplace_back(std::move(weights_));
     }
     model_rpc_server_->addLoRA(lora_id, lora_a_weights_, lora_b_weights_);
 }
