@@ -1,5 +1,5 @@
-#include "maga_transformer/cpp/executors/NormalExecutor.h"
-#include "maga_transformer/cpp/engines/NormalEngine.h"
+#include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
+#include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/batch_stream_processor/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"

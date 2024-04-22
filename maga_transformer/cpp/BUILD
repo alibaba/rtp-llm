@@ -172,17 +172,37 @@ cc_library(
 )
 
 cc_library(
-    name = "executors",
+    name = "engine_base",
     hdrs = glob([
-        "executors/*.h",
-    ]),
-    srcs = glob([
-        "executors/*.cc",
+        "engine_base/*.h",
     ]),
     deps = torch_deps() + [
         ":dataclass",
         ":models",
         ":common",
+        ":ptuning",
+        ":batch_stream_processor",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
+    name = "normal_engine",
+    hdrs = glob([
+        "normal_engine/*.h",
+    ]),
+    srcs = glob([
+        "normal_engine/*.cc",
+    ]),
+    deps = torch_deps() + [
+        ":dataclass",
+        ":models",
+        ":schedulers",
+        ":engine_base",
+        ":common",
+        ":ptuning",
         ":model_wrapper",
         ":batch_stream_processor",
         "//src/fastertransformer/cuda:allocator_cuda",
@@ -193,18 +213,20 @@ cc_library(
 )
 
 cc_library(
-    name = "engines",
+    name = "speculative_engine",
     hdrs = glob([
-        "engines/*.h",
+        "speculative_engine/*.h",
     ]),
     srcs = glob([
-        "engines/*.cc",
+        "speculative_engine/*.cc",
     ]),
     deps = torch_deps() + [
         ":dataclass",
         ":models",
         ":schedulers",
-        ":executors",
+        ":engine_base",
+        ":normal_engine",
+        ":model_wrapper",
         ":common",
         ":ptuning",
         ":batch_stream_processor",
@@ -249,7 +271,8 @@ cc_library(
     deps = [
         "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
         "//maga_transformer/cpp:dataclass",
-        "//maga_transformer/cpp:engines",
+        "//maga_transformer/cpp:normal_engine",
+        "//maga_transformer/cpp:speculative_engine",
         "//src/fastertransformer/devices:devices_base",
     ],
     visibility = ["//visibility:public"]

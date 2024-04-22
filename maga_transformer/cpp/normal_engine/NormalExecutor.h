@@ -3,7 +3,7 @@
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
-#include "maga_transformer/cpp/executors/Executor.h"
+#include "maga_transformer/cpp/engine_base/Executor.h"
 #include <memory>
 namespace rtp_llm {
 

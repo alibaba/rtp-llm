@@ -60,7 +60,6 @@ cc_test(
         "//:gpt_init_params",
         "//maga_transformer/cpp:utils",
         "//maga_transformer/cpp:dataclass",
-        "//maga_transformer/cpp:engines",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
     ] + torch_deps(),

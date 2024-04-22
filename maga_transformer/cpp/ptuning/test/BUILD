@@ -26,10 +26,10 @@ cc_library(
 test_deps = [
     "//src/fastertransformer/devices/testing:device_test_utils",
     "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-    "//maga_transformer/cpp:engines",
+    "//maga_transformer/cpp:normal_engine",
     "//maga_transformer/cpp:schedulers",
     "//maga_transformer/cpp/test:test_utils",
-    "//maga_transformer/cpp/engines/test:mock_engine",
+    "//maga_transformer/cpp/normal_engine/test:mock_engine",
     ":test_headers",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",

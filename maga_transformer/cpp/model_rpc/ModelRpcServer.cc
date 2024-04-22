@@ -1,6 +1,6 @@
 #include "maga_transformer/cpp/model_rpc/ModelRpcServer.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "maga_transformer/cpp/engines/NormalEngine.h"
+#include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/model_rpc/QueryConverter.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
 #include <chrono>

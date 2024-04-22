@@ -1,6 +1,6 @@
 #pragma once
 #include "grpc++/grpc++.h"
-#include "maga_transformer/cpp/engines/NormalEngine.h"
+#include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
 #include <iostream>

@@ -1,10 +1,10 @@
-#include "maga_transformer/cpp/executors/NormalExecutor.h"
-#include "maga_transformer/cpp/engines/SpeculativeEngine.h"
+#include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
+#include "maga_transformer/cpp/speculative_engine/SpeculativeEngine.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
 #include "maga_transformer/cpp/dataclass/StreamGroups.h"
-#include "maga_transformer/cpp/executors/SpeculativeExecutor.h"
+#include "maga_transformer/cpp/speculative_engine/SpeculativeExecutor.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 
 using namespace std;

@@ -13,7 +13,7 @@
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/ptuning/Ptuning.h"
 #include "src/fastertransformer/core/Buffer.h"
-#include "maga_transformer/cpp/engines/NormalEngine.h"
+#include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 
 namespace rtp_llm {
 

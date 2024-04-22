@@ -1,4 +1,4 @@
-#include "maga_transformer/cpp/executors/SpeculativeExecutor.h"
+#include "maga_transformer/cpp/speculative_engine/SpeculativeExecutor.h"
 #include "maga_transformer/cpp/batch_stream_processor/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/batch_stream_processor/SpeculativeBatchStreamProcessor.h"
 #include "maga_transformer/cpp/common/status_util.h"

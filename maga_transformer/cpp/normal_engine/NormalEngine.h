@@ -1,11 +1,11 @@
 #pragma once
 
 #include "absl/status/status.h"
-#include "maga_transformer/cpp/engines/Engine.h"
+#include "maga_transformer/cpp/engine_base/Engine.h"
 #include "maga_transformer/cpp/batch_stream_processor/BatchStreamProcessor.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
-#include "maga_transformer/cpp/executors/Executor.h"
+#include "maga_transformer/cpp/engine_base/Executor.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
 #include "torch/all.h"
 #include <atomic>
