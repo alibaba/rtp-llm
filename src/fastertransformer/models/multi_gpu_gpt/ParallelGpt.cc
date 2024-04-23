@@ -652,7 +652,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             ffn_output_tensors.insert("expert_for_source_row",
                                       Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expert_for_source_row_});
         }
-        if (use_moe){
+        if (use_moe_instead_ffn){
             ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->partial_moe_weights, use_moe_instead_ffn);
         }
         else {
