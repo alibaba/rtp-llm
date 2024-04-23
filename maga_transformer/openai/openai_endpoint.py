@@ -85,7 +85,9 @@ class OpenaiEndopoint():
             config.random_seed = request.seed
         extra_configs = request.extra_configs
         if extra_configs:
-            config.top_k = extra_configs.top_k or config.top_k
+            if extra_configs.top_k:
+                config.top_k = extra_configs.top_k
+                config.top_p = 0.0
             config.repetition_penalty = extra_configs.repitition_penalty or config.repetition_penalty
             config.max_new_tokens = extra_configs.max_new_tokens or config.max_new_tokens
             config.timeout_ms = extra_configs.timeout_ms or config.timeout_ms
