@@ -406,6 +406,11 @@ class W:
         [moe_w2, moe_s2]
     ]
 
+    int8_partial_moe_weights_2 = [
+        [ffn_w1, ffn_s1],
+        [ffn_w2, ffn_s2],
+    ]
+
     int4_attn_weights = [
         [attn_qkv_w, attn_qkv_z, attn_qkv_s],
         [attn_o_w, attn_o_z, attn_o_s],
@@ -463,18 +468,18 @@ class W:
         ffn_s2: sp_0,
         ffn_b2: sp_id,
         ffn_smoother: sp_0,
-        moe_w1: sp_neg1,
-        moe_z1: sp_neg1,
-        moe_s1: sp_neg1,
-        moe_b1: sp_neg1,
-        moe_w3: sp_neg1,
-        moe_z3: sp_neg1,
-        moe_s3: sp_neg1,
-        moe_b3: sp_neg1,
-        moe_w2: sp_0,
-        moe_z2: sp_0,
-        moe_s2: sp_0,
-        moe_b2: sp_id,
+        moe_w1: sp_0,
+        moe_z1: sp_0,
+        moe_s1: sp_0,
+        moe_b1: sp_0,
+        moe_w3: sp_0,
+        moe_z3: sp_0,
+        moe_s3: sp_0,
+        moe_b3: sp_0,
+        moe_w2: sp_neg1,
+        moe_z2: sp_neg1,
+        moe_s2: sp_neg1,
+        moe_b2: sp_neg1,
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
         positional_embedding: sp_neg1,

@@ -91,12 +91,10 @@ void MixtureOfExpertsPlugin::init()
 size_t MixtureOfExpertsPlugin::getWorkspaceSize(int num_tokens)
 {
 
-    size_t dtype_size = tensorrt_llm::common::getDTypeSize(mType);
-
     size_t moe_workspace_size = mMOERunner->getWorkspaceSize(
         num_tokens, mExpertHiddenSize, mExpertInterSize, mNumExperts, mK, mActivationType, getParallelismConfig());
-
-    return moe_workspace_size;
+    
+        return moe_workspace_size;
 }
 
 MOEParallelismConfig MixtureOfExpertsPlugin::getParallelismConfig() const

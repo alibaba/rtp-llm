@@ -301,20 +301,19 @@ class ModelWeightsLoader:
         convert_weight(W.int8_attn_weights, self.apply_int8)
 
         if is_gated_activation: 
-            ffn_weight_lists = W.int8_ffn_weights
+            ffn_weight_lists = W.int8_ffn_weights if is_moe == False else W.int8_partial_moe_weights
         else:
-            ffn_weight_lists = W.int8_ffn_weights_2
+            ffn_weight_lists = W.int8_ffn_weights_2 if is_moe == False else W.int8_partial_moe_weights_2
 
-        if self._weights_info.moe_style_ == 2:
-            if is_moe:
-                convert_weight(W.int8_partial_moe_weights, self.moe_apply_int8)
-            convert_weight(ffn_weight_lists, self.apply_int8)
+        if is_moe:
+            convert_weight(ffn_weight_lists, self.moe_apply_int8)
         else:
-            if is_moe:
-                convert_weight(ffn_weight_lists, self.moe_apply_int8)
-            else:
-                convert_weight(ffn_weight_lists, self.apply_int8)
+            convert_weight(ffn_weight_lists, self.apply_int8)
                 
+        if self._weights_info.moe_style_ == 2:
+            # convert_weight(W.int8_partial_moe_weights, self.moe_apply_int8)
+            convert_weight(W.int8_ffn_weights, self.apply_int8)
+
         return results
 
     def _load_layer_weight(self, layer_id: int, device: str = "cuda:0"):
@@ -413,7 +412,7 @@ class ModelWeightsLoader:
         int8_weights = []
         int8_scales = []
         for t in tensor_list:
-            t = torch.squeeze(t)
+            t = torch.squeeze(t).transpose(1,0).contiguous()
             shape = t.shape
             weight, scale = torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix( # type: ignore
                 t.reshape([shape[0], -1]).cpu(), torch.int8)

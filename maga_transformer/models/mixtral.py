@@ -31,7 +31,7 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
         layer_weights = [
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)], identity),
             WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight', concat_1)], transpose),
-            WeightInfo(W.ffn_gate, [CkptWeightInfo('model.layers.{i}.block_sparse_moe.gate.weight', concat_0)], transpose),
+            WeightInfo(W.moe_gate, [CkptWeightInfo('model.layers.{i}.block_sparse_moe.gate.weight', concat_0)], transpose),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)], identity),
         ]
 
@@ -45,13 +45,13 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
         ffn_w2 = []
         ffn_w3 = []
         for num_experts in range(self.expert_num_):
-            ffn_w1.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w1.weight', transpose))
-            ffn_w2.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w2.weight', transpose))
-            ffn_w3.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w3.weight', transpose))
+            ffn_w1.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w1.weight', identity))
+            ffn_w2.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w2.weight', identity))
+            ffn_w3.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w3.weight', identity))
         
-        layer_weights.append(WeightInfo(W.ffn_w1,ffn_w1, stack_))
-        layer_weights.append(WeightInfo(W.ffn_w2,ffn_w2, stack_))
-        layer_weights.append(WeightInfo(W.ffn_w3,ffn_w3, stack_))
+        layer_weights.append(WeightInfo(W.moe_w1, ffn_w1, stack_))
+        layer_weights.append(WeightInfo(W.moe_w2, ffn_w2, stack_))
+        layer_weights.append(WeightInfo(W.moe_w3, ffn_w3, stack_))
 
 
         lora_base_name = "base_model.model.{}.{}.weight"

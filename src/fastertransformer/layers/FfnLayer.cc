@@ -374,9 +374,9 @@ FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
             FT_LOG_ERROR("not supported yet");
         }
 
-        if (quant_algo.int8Mode() == 1) {
+        if (quant_algo.int8Mode()) {
             weight_type = nvinfer1::DataType::kINT8;
-        } else if (quant_algo.int8Mode() == true) {
+        } else if (quant_algo.int4Mode()) {
             FT_LOG_ERROR("MOE in INT4 is not supported yet");
         } else {
             weight_type = data_type;
