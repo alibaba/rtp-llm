@@ -149,8 +149,8 @@ public:
     }
 
     void setPtuning(const std::shared_ptr<PtuningBase>& ptuning) {
-        stream_cache_resource_.setPtuning(ptuning);
         updatePrefix(ptuning);
+        stream_cache_resource_.setPtuning(ptuning);
     }
 
     void updatePrefix(const std::shared_ptr<PtuningBase>&  ptuning);

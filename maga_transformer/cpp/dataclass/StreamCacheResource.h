@@ -62,6 +62,7 @@ public:
                      << "}";
         return debug_string.str();
     }
+    
 public:
     // [batch_size, layer_num, max_block_per_seq]
     std::vector<std::vector<std::vector<void*>>> k_ptr;

@@ -9,30 +9,24 @@ using namespace std;
 namespace rtp_llm {
 
 void StreamCacheResource::releaseResource() {
-    printf("here1 releaseResource\n");
-    fflush(stdout);
-
     if (!need_release_resource_) {
         return ;
     }
 
-    printf("releaseResource\n");
-    fflush(stdout);
+    FT_LOG_DEBUG("stream[%ld] release resource", stream_->generate_input_->request_id);
 
     // for test
     if (!cache_manager_) {
         return;
     }
     if (!kv_cache_block_addr_.k_ptr.empty()) {
-        for (auto& batch_block : kv_cache_block_addr_.k_ptr) {
-            const auto& blocks = batch_block[0];
-            printf("this %p, blocks.size() = %lu, reuse_cache_ = %d\n", this, blocks.size(), reuse_cache_);
+        for (auto& batch : kv_cache_block_addr_.k_ptr) {
+            const auto& blocks = batch[0];
             if (reuse_cache_) {
                 // TODO(xinfei.sxf) batch token
                 auto tokens_id = stream_->completeTokenIdsVec();
                 cache_manager_->freeWithCache(blocks, tokens_id);
             } else {
-                printf("here free\n");
                 cache_manager_->free(blocks);
             }
         }
@@ -41,15 +35,17 @@ void StreamCacheResource::releaseResource() {
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
+    FT_LOG_DEBUG("stream[%ld] try release [%lu] blocks", stream_->generate_input_->request_id);
+        
     if (kv_cache_block_addr_.k_ptr.empty() || kv_cache_block_addr_.k_ptr[0].empty()) {
         return 0;
     }
-    auto&         blocks = kv_cache_block_addr_.k_ptr[0][0];
     int           release_blocks_num;
     vector<void*> release_blocks;
-    int           layer_id = 0;
-    for (auto& layers : kv_cache_block_addr_.k_ptr) {
-        for (auto& blocks : layers) {
+    // TODO(xinfei.sxf) deal with v, scale etc
+    for (auto& batch : kv_cache_block_addr_.k_ptr) {
+        for (size_t layer_id = 0; layer_id < batch.size(); layer_id++) {
+            auto& blocks = batch[layer_id];
             auto reserver_blocks = std::max(0lu, blocks.size() - nums);
             release_blocks_num   = blocks.size() - reserver_blocks;
             if (layer_id == 0) {
@@ -57,7 +53,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             }
             blocks.resize(reserver_blocks);
         }
-        layer_id++;
     }
     // TODO(xinfei.sxf) call free with cache if all blocks is released
     cache_manager_->free(release_blocks);
