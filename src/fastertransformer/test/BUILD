@@ -71,6 +71,25 @@ cc_binary(
     linkopts = test_linkopts,
 )
 
+cc_binary(
+    name = "int8_test",
+    srcs = [
+        "int8_gemm_test.cu",
+    ],
+    deps = [
+        "cutlass_kernels_interface",
+        "//src/fastertransformer/cuda:cuda",
+        "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/cuda:allocator_cuda",
+        "//:th_utils",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+    linkopts = test_linkopts,
+)
+
 cc_library(
     name = "cuda_sample_helpers",
     hdrs = [
