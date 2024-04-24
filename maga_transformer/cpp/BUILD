@@ -206,6 +206,7 @@ cc_library(
         ":engine_base",
         ":common",
         ":ptuning",
+        ":ptuning_constructor",
         ":model_wrapper",
         "//src/fastertransformer/cuda:allocator_cuda",
         "@com_google_absl//absl/status",

@@ -3,8 +3,14 @@
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
+#include "maga_transformer/cpp/cache/CacheConfigCreator.h"
+#include "maga_transformer/cpp/ptuning/PtuningConstructor.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/utils/logger.h"
+
+using namespace std;    
+
+namespace rtp_llm {
 
 NormalEngine::NormalEngine(const MagaInitParams&                                                   params,
                            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,

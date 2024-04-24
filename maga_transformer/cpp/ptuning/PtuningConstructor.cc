@@ -20,7 +20,7 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-std::unordered_map<int, PrefixParams> PtuningConstructor::construct(const GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager) {
+std::unordered_map<int, PrefixParams> PtuningConstructor::construct(const GptInitParameter& params, Engine* engine, CacheManager* cache_manager) {
     if (!params.multi_task_prompt_tokens.empty()) {
         return PtuningConstructor::createMultiTaskPrompt(params.multi_task_prompt_tokens, engine, cache_manager);
     }
@@ -91,7 +91,7 @@ void PtuningConstructor::setKVPrefixBlock(const GptInitParameter& params, CacheM
 }
 
 std::unordered_map<int, PrefixParams> PtuningConstructor::createMultiTaskPrompt(
-        std::map<int, std::vector<int>> multi_task_prompt_tokens, EngineBase* engine, CacheManager* cache_manager) {
+        std::map<int, std::vector<int>> multi_task_prompt_tokens, Engine* engine, CacheManager* cache_manager) {
     std::unordered_map<int, PrefixParams> multi_task_prompt_args;
     for (const auto& item: multi_task_prompt_tokens) {
         const auto& task_id = item.first;

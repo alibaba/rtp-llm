@@ -3,15 +3,13 @@
 
 #define private public
 
-#include "maga_transformer/cpp/normal_engine/NormalEngine.h"
-#include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
-#include "maga_transformer/cpp/normal_engine/test/MockEngine.h"
+#include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include "src/fastertransformer/models/W.h"
-#include "maga_transformer/cpp/engines/NormalEngine.h"
+#include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
-#include "maga_transformer/cpp/engines/test/MockEngine.h"
+#include "maga_transformer/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
 #include "gtest/gtest.h"

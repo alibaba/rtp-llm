@@ -28,11 +28,12 @@ TEST_F(PtuningConstructorTest, testMultiTaskPromptConstruct) {
     vector<int> prompt_1 = {1, 2, 3};
     vector<int> prompt_2 = {4, 5, 6, 7};
     params.multi_task_prompt_tokens = {{1, prompt_1}, {2, prompt_2}};
-    auto engine = createMockEngine(device_);
+    CustomConfig config;
+    auto engine = createMockEngine(device_, config);
     ASSERT_EQ(engine->cache_manager_->freeBlockNums(), 99);
-    auto result = constructor.construct(params, engine.get());
+    auto result = constructor.construct(params, engine.get(), engine->cache_manager_.get());
     ASSERT_EQ(result.size(), 2);
-    ASSERT_EQ(engine->cache_manager_->freeBlockNums(), 99);
+    ASSERT_EQ(engine->cache_manager_->freeBlockNums(), 95);
 
     const auto& item1 = result[1];
     ASSERT_EQ(item1.prefix_type, PrefixType::PromptTuning);
@@ -55,7 +56,8 @@ TEST_F(PtuningConstructorTest, testPtuningConstruct) {
     cudaDeviceGetDefaultMemPool(&defaultPool, 0);
     cudaMemPoolTrimTo(defaultPool, 0);
 
-    auto engine = createMockEngine(device_); 
+    CustomConfig config;
+    auto engine = createMockEngine(device_, config); 
     auto cache_config = engine->cacheManager()->cacheConfig();
     int64_t pre_seq_len = 3;
     auto size = cache_config.layer_num * 2 * cache_config.local_head_num_kv * pre_seq_len * cache_config.size_per_head;
