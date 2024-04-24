@@ -121,7 +121,6 @@ class GptInitModelParameters:
         }
         self.has_lm_head_bias = False
         self.normalize_lm_head_weight = False
-        self.kv_cache_mem_mb = -1
         self.src_quantization_bit = 0
         self.tp_split_emb_and_lm_head = True
         self.medusa_config = None

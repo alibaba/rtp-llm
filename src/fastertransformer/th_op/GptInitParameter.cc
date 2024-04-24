@@ -181,6 +181,8 @@ static auto specialTokensTHS =
     DEF_PROPERTY(is_multimodal, is_multimodal_)                                                                        \
     DEF_PROPERTY(pre_allocate_op_mem, pre_allocate_op_mem_)                                                            \
     DEF_PROPERTY(seq_size_per_block, seq_size_per_block_)                                                              \
+    DEF_PROPERTY(kv_cache_mem_mb, kv_cache_mem_mb_)                                                                    \
+    DEF_PROPERTY(reserve_runtime_mem_mb, reserve_runtime_mem_mb_)                                                      \
     DEF_PROPERTY(int8_kv_cache, int8_kv_cache_)                                                                        \
     DEF_PROPERTY(is_causal, is_causal_)                                                                                \
     DEF_PROPERTY(use_medusa, use_medusa_)
