@@ -117,7 +117,7 @@ cc_library(
     deps = torch_deps() + [
         ":utils",
         ":common",
-        "//:gpt_init_params",
+        "//:gpt_init_params_hdr",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:device_utils",
     ],

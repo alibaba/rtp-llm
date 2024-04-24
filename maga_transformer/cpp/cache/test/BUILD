@@ -21,6 +21,7 @@ test_linkopts = [
 test_deps = [
     "//src/fastertransformer/devices/testing:device_test_utils",
     "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+    "//:gpt_init_params",
     "//maga_transformer/cpp:cache",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
@@ -51,4 +52,7 @@ cc_test(
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    }
 )
