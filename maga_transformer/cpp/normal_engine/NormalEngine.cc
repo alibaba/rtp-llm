@@ -8,7 +8,7 @@
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/utils/logger.h"
 
-using namespace std;    
+using namespace std;
 
 namespace rtp_llm {
 
@@ -22,8 +22,33 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
 }
 
 NormalEngine::~NormalEngine() {
-    FT_LOG_DEBUG("destory Engine");
+    FT_LOG_INFO("destory normal engine");
     (void)stop();
+}
+
+void NormalEngine::initCacheManager() {
+    auto [success, cache_config] = CacheConfigCreator::createConfig(*params_.gpt_init_parameter);
+    if (!success) {
+        // TODO(xinfei.sxf) fix abort
+        FT_LOG_ERROR("create cache config failed");
+        abort();
+    }
+
+    auto device = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
+    cache_manager_ = make_shared<CacheManager>(cache_config, device);  
+}
+
+void NormalEngine::initPtuning() {
+    // TODO(xinfei.sxf) deal with old option : USE_BLOCK_CACHE 
+    char* reuse_cache_env  = std::getenv("REUSE_CACHE");
+    if (reuse_cache_env && strcmp(reuse_cache_env, "1") == 0) {
+        reuse_cache_ = true;
+    }
+    auto ptuning_param = PtuningConstructor::construct(*params_.gpt_init_parameter, this, cache_manager_.get());
+    if (!ptuning_param.empty()) {
+        reuse_cache_ = true;
+        ptuning_.reset(new MultiTaskPtuning(*cache_manager_, ptuning_param));
+    }
 }
 
 void NormalEngine::addLoRA(const int64_t                                                   lora_id,
@@ -37,15 +62,16 @@ void NormalEngine::removeLoRA(const int64_t lora_id) {
 }
 
 absl::Status NormalEngine::startLoop() {
+    FT_LOG_INFO("start normal engine");
     running_ = true;
     loop_thread_ = std::thread(&NormalEngine::loop, this);
-    initPtuning();
+    initPtuning(); // ptuning constructor depends on engine startup
     dynamic_cast<FIFOScheduler*>(scheduler_.get())->setPtuning(ptuning_, reuse_cache_);
     return absl::OkStatus();
 }
 
 absl::Status NormalEngine::stop() {
-    FT_LOG_DEBUG("stop Engine");
+    FT_LOG_INFO("stop normal engine");
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     if (loop_thread_.joinable()) {
@@ -55,7 +81,7 @@ absl::Status NormalEngine::stop() {
 }
 
 void NormalEngine::loop() {
-    FT_LOG_DEBUG("loop begin");
+    FT_LOG_INFO("loop begin");
     while (running_) {
         auto status = step();
         if (!status.ok()) {
@@ -79,37 +105,11 @@ absl::Status NormalEngine::step() {
     const auto streams_status = scheduler_->schedule();
     RETURN_IF_STATUS_OR_ERROR(streams_status);
     const auto& streams = streams_status.value();
-    // FT_LOG_DEBUG("schedule res: %s", streams.debugString().c_str());
     if (streams.empty()) {
         FT_LOG_WARNING("no query run and sleep");
         return absl::OkStatus();
     }
     return executor_->process(streams);
-}
-
-void NormalEngine::initCacheManager() {
-    auto [success, cache_config] = CacheConfigCreator::createConfig(*params_.gpt_init_parameter);
-    if (!success) {
-        // fix abort
-        FT_LOG_ERROR("create cache config failed");
-        abort();
-    }
-
-    ft::DeviceBase*               device        = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
-    ncclComm_t                    nccl_op;
-    cache_manager_ = make_shared<CacheManager>(cache_config, device);  
-}
-
-void NormalEngine::initPtuning() {
-    char* reuse_cache_env  = std::getenv("REUSE_CACHE");
-    if (reuse_cache_env && strcmp(reuse_cache_env, "1") == 0) {
-        reuse_cache_ = true;
-    }
-    auto ptuning_param = PtuningConstructor::construct(*params_.gpt_init_parameter, this, cache_manager_.get());
-    if (!ptuning_param.empty()) {
-        reuse_cache_ = true;
-        ptuning_.reset(new MultiTaskPtuning(*cache_manager_, ptuning_param));
-    }
 }
 
 }  // namespace rtp_llm

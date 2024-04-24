@@ -7,7 +7,7 @@
 #include <thread>
 #include "torch/all.h"
 #include "absl/status/status.h"
-#include "maga_transformer/cpp/engine_base/Engine.h"
+#include "maga_transformer/cpp/engine_base/EngineBase.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
@@ -16,7 +16,7 @@
 
 namespace rtp_llm {
 
-class SpeculativeEngine: public Engine {
+class SpeculativeEngine: public EngineBase {
 public:
     SpeculativeEngine(const MagaInitParams&                                                   params,
                       const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,

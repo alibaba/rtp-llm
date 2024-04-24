@@ -155,7 +155,7 @@ TEST_F(NormalEngineTest, testReuseCacheOption) {
     ASSERT_FALSE(engine4->reuse_cache_);
 }
 
-// TODO(xinfei.sxf) attention mask not support, tmp comment it
+// TODO(xinfei.sxf) attention mask not support, tmp comment out it
 TEST_F(NormalEngineTest, testReuseCache) {
     CustomConfig config;
     setenv("REUSE_CACHE", "1", 1);

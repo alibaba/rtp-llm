@@ -78,5 +78,4 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-
 )

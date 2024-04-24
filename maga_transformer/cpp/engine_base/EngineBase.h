@@ -5,9 +5,9 @@
 
 namespace rtp_llm {
 
-class Engine {
+class EngineBase {
 public:
-    virtual ~Engine() {}
+    virtual ~EngineBase() {}
     virtual void addLoRA(const int64_t                                                           lora_id,
                          const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                          const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) = 0;

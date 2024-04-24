@@ -37,6 +37,7 @@ public:
         prefix_length   = prefix_prompt.size();
         auto device     = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
         auto new_input  = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)prefix_length + (size_t)inputLength()}, ft::AllocationType::HOST}, {});
+        // TODO(xinfei.sxf) fix this
         auto buffer = ft::vector2Buffer(prefix_prompt);
         auto bufferPtr = convertBuffer2Ptr(buffer);
         ft::bufferConcat(bufferPtr, input_ids, new_input);
