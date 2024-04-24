@@ -20,26 +20,21 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-std::unordered_map<int, PrefixParams> PtuningConstructor::construct(const GptInitParameter& params, Engine* engine, CacheManager* cache_manager) {
+std::unordered_map<int, PrefixParams> PtuningConstructor::construct(const GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager) {
     if (!params.multi_task_prompt_tokens.empty()) {
         return PtuningConstructor::createMultiTaskPrompt(params.multi_task_prompt_tokens, engine, cache_manager);
     }
     return std::unordered_map<int, PrefixParams>();
 }
 
-// prefix_prompt shape is [layer_num * 2, head_num, pre_seq_len, size_per_head]
+// input prefix_prompt shape is [layer_num * 2, head_num, pre_seq_len, size_per_head]
 PrefixParams PtuningConstructor::createPtuningV2(const GptInitParameter& params, CacheManager* cache_manager, torch::Tensor& prefix_prompt) {        
     size_t prefix_seq_length = prefix_prompt.size(-2);
-    // Reshape prefix_prompt to [layer_num, 2, head_num_kv, pre_seq_len, size_per_head]
+    // reshape prefix_prompt to [layer_num, 2, head_num_kv, pre_seq_len, size_per_head]
     prefix_prompt = prefix_prompt.view({params.num_layers_, 2, prefix_prompt.size(1), prefix_prompt.size(2), prefix_prompt.size(3)})
                         .permute({1, 0, 3, 2, 4})
                         .contiguous();
-    
-    // Compute prefix_blocks
     int64_t prefix_blocks = (prefix_seq_length - 1) / params.seq_size_per_block_ + 1;
-    
-    // Allocate prefix_block_indice using cache_manager
-    // The actual implementation of `malloc` in the `cache_manager` object needs to be provided.
     auto [success, prefix_block_indice] = cache_manager->mallocIndex(prefix_blocks);
     if (!success) {
         FT_LOG_ERROR("malloc kv cache block failed");
@@ -52,11 +47,9 @@ PrefixParams PtuningConstructor::createPtuningV2(const GptInitParameter& params,
 
 void PtuningConstructor::setKVPrefixBlock(const GptInitParameter& params, CacheManager* cache_manager,
                                 torch::Tensor& kv_prefix_prompt, std::vector<int>& prefix_block_indice) {
-    // Access first and second element of kv_prefix_prompt
     auto k_prefix_prompt = kv_prefix_prompt[0];
     auto v_prefix_prompt = kv_prefix_prompt[1];
     
-    // Extract dimensions
     int64_t layer_num = k_prefix_prompt.size(0);
     int64_t pre_seq_len = k_prefix_prompt.size(1);
     int64_t head_num = k_prefix_prompt.size(2);
@@ -64,14 +57,11 @@ void PtuningConstructor::setKVPrefixBlock(const GptInitParameter& params, CacheM
     int64_t block_indice_length = prefix_block_indice.size();
     int64_t append_length = block_indice_length * params.seq_size_per_block_ - pre_seq_len;
     
-    // Create a zeros tensor of the required size
     auto blank_tensor = torch::zeros({layer_num, append_length, head_num, size_per_head}, k_prefix_prompt.options());
 
-    // Concatenate k and v prefix prompts with the blank tensor
     auto tiled_k_prefix_prompt = torch::cat({k_prefix_prompt, blank_tensor}, 1);
     auto tiled_v_prefix_prompt = torch::cat({v_prefix_prompt, blank_tensor}, 1);
 
-    // Reshape and permute the k and v prefix prompts
     tiled_k_prefix_prompt = tiled_k_prefix_prompt.view({layer_num, block_indice_length, params.seq_size_per_block_, head_num, size_per_head})
                                                 .permute({0, 1, 3, 2, 4})
                                                 .contiguous();
@@ -79,19 +69,18 @@ void PtuningConstructor::setKVPrefixBlock(const GptInitParameter& params, CacheM
                                                 .permute({0, 1, 3, 2, 4})
                                                 .contiguous();
 
-    // Set the cached k and v values
     for (int i = 0; i < block_indice_length; ++i) {
         auto k_tensor = tiled_k_prefix_prompt.index({torch::indexing::Slice(), i});
         auto v_tensor = tiled_v_prefix_prompt.index({torch::indexing::Slice(), i});
         auto k_buffer = ft::torchTensor2Buffer(k_tensor);
         auto v_buffer = ft::torchTensor2Buffer(v_tensor);
-        // TODO(xinfei.sxf) set kv cache scale?
+        // TODO(xinfei.sxf) set kv cache scale...
         cache_manager->setKVBlockValue(prefix_block_indice[i], k_buffer, v_buffer);
     }
 }
 
 std::unordered_map<int, PrefixParams> PtuningConstructor::createMultiTaskPrompt(
-        std::map<int, std::vector<int>> multi_task_prompt_tokens, Engine* engine, CacheManager* cache_manager) {
+        std::map<int, std::vector<int>> multi_task_prompt_tokens, EngineBase* engine, CacheManager* cache_manager) {
     std::unordered_map<int, PrefixParams> multi_task_prompt_args;
     for (const auto& item: multi_task_prompt_tokens) {
         const auto& task_id = item.first;
@@ -118,8 +107,6 @@ std::unordered_map<int, PrefixParams> PtuningConstructor::createMultiTaskPrompt(
         assert(kv_cache.k_ptr.size() == 1);
         assert(kv_cache.k_ptr[0].size() > 0);
         auto block_indices = cache_manager->convertAddrToIndex(kv_cache.k_ptr[0][0]);
-        printf("kv_cache.k_ptr[0] size = %d\n", kv_cache.k_ptr[0][0].size());
-        printf("block_indices = %d\n", block_indices.size());
         fflush(stdout);
         multi_task_prompt_args[task_id] = PrefixParams(PrefixType::PromptTuning,
                                         tokens_id.size(), block_indices, std::nullopt, tokens_id);

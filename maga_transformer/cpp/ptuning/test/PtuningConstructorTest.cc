@@ -51,6 +51,7 @@ TEST_F(PtuningConstructorTest, testMultiTaskPromptConstruct) {
 }
 
 TEST_F(PtuningConstructorTest, testPtuningConstruct) {
+    // shrink default memory pool because the above case malloc/free gpu from/to default pool, it leads the result of cudaMemGetInfo inaccurate
     cudaDeviceSynchronize();
     cudaMemPool_t defaultPool;
     cudaDeviceGetDefaultMemPool(&defaultPool, 0);
