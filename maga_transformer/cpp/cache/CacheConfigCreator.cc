@@ -18,7 +18,7 @@ namespace rtp_llm {
 std::tuple<bool, int64_t> CacheConfigCreator::getKVCacheMemorySize(const GptInitParameter& param) {
     size_t free_bytes, total_bytes;
     if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
-        FT_LOG_ERROR("cudaMemGetInfo failed");
+        FT_LOG_ERROR("cuda get mem info failed");
         return {false, 0};
     }
     FT_LOG_INFO("free mem bytes: %lu", free_bytes);

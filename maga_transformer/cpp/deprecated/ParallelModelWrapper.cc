@@ -252,7 +252,6 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
     }
 
     if (params_.has_post_decoder_layernorm_) {
-        // std::cout<<"params:"<<params_.layernorm_eps_<<" "<<total_batch_size<<" "<<hidden_units<<" "<<params_.quant_algo_->int8_mode_<<std::endl;
         norm_wrapper_->initDecoderLayerNorm(last_hidden_states.getPtr<T>(),
                                             last_hidden_states.getPtr<T>(),
                                             global_weights_->post_layernorm_weights.gamma,

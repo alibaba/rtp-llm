@@ -64,8 +64,6 @@ bool StreamCacheResource::initKVBlock() {
     KVCacheBlockAddr kv_cache_block_addr;
     int              reuse_length;
     bool             success;
-    printf("initKVBlock block_num = %d\n", block_num);
-    fflush(stdout);
     if (reuse_cache_) {
         std::tie(success, kv_cache_block_addr, reuse_length) =
             cache_manager_->mallocWithCache(block_num, stream_->completeTokenIdsVec());

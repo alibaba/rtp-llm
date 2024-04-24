@@ -107,7 +107,6 @@ std::unordered_map<int, PrefixParams> PtuningConstructor::createMultiTaskPrompt(
         assert(kv_cache.k_ptr.size() == 1);
         assert(kv_cache.k_ptr[0].size() > 0);
         auto block_indices = cache_manager->convertAddrToIndex(kv_cache.k_ptr[0][0]);
-        fflush(stdout);
         multi_task_prompt_args[task_id] = PrefixParams(PrefixType::PromptTuning,
                                         tokens_id.size(), block_indices, std::nullopt, tokens_id);
     }

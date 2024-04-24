@@ -31,7 +31,7 @@ void CacheManager::initFreeBlock(const CacheConfig& config) {
     //     // ...
     // }
     block_nums_ = block_nums;
-    FT_LOG_INFO("block_nums is %d after tp sync", block_nums_);
+    FT_LOG_INFO("block nums is %d after tp sync", block_nums_);
     free_blocks_index_ = std::set<int>();
     // block 0 is reserved for tmp or padding use
     for (int i = 1; i < block_nums; ++i) {

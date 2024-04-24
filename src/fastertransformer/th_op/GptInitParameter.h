@@ -129,7 +129,7 @@ public:
     int64_t  seq_size_per_block_ = 8;
 
     int64_t reserve_runtime_mem_mb_ = 0;
-    int64_t kv_cache_mem_mb_ = 0;
+    int64_t kv_cache_mem_mb_        = 0;
 
     bool use_medusa_ = false;
 
