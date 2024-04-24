@@ -28,7 +28,7 @@ void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) const {
         if ((*it)->stopped() || (*it)->finished()) {
             // Immediately free resources to run more streams
             (*it)->releaseResource();
-            FT_LOG_DEBUG("evict stream: %s", (*it)->streamId());
+            FT_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());
             it = streams.erase(it);
         } else {
             ++it;
@@ -75,7 +75,7 @@ void FIFOScheduler::evaluateRunningNext() {
         }
         auto& last_stream = *(running_streams_.rbegin());
         last_stream->tryReleaseKVBlock(need_block_num);
-        FT_LOG_DEBUG("stream: %d fall back", last_stream->streamId());
+        FT_LOG_DEBUG("stream [%ld] fall back", last_stream->streamId());
         waiting_streams_.emplace_front(last_stream);
         running_streams_.pop_back();
     }
@@ -84,7 +84,7 @@ void FIFOScheduler::evaluateRunningNext() {
         if (!(*it)->incrKVBlock()) {
             (*it)->setStop("incrKVBlock failed");
             (*it)->releaseResource();
-            FT_LOG_DEBUG("stream: %d incr block failed", (*it)->streamId());
+            FT_LOG_DEBUG("stream [%ld] incr block failed", (*it)->streamId());
             it = running_streams_.erase(it);
         } else {
             it++;
@@ -115,12 +115,12 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
     list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         if (evaluateNewStream(new_streams, *it)) {
-            FT_LOG_DEBUG("stream: %d add to new queue", (*it)->streamId());
+            FT_LOG_DEBUG("stream [%ld] add to new queue", (*it)->streamId());
             new_streams.emplace_back(*it);
             it = waiting_streams_.erase(it);
         } else if (running_streams_.empty() && new_streams.empty()) {
             // It is impossible for this stream to acquire enough resources
-            FT_LOG_DEBUG("stream: %d can not add to new queue", (*it)->streamId());
+            FT_LOG_DEBUG("stream [%ld] can not add to new queue", (*it)->streamId());
             (*it)->setStop("can not be add input queue");
             it++;
         } else {

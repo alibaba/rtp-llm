@@ -13,7 +13,7 @@ void StreamCacheResource::releaseResource() {
         return ;
     }
 
-    FT_LOG_DEBUG("stream[%ld] release resource", stream_->generate_input_->request_id);
+    FT_LOG_DEBUG("stream [%ld] release resource", stream_->streamId());
 
     // for test
     if (!cache_manager_) {
@@ -35,7 +35,7 @@ void StreamCacheResource::releaseResource() {
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
-    FT_LOG_DEBUG("stream[%ld] try release [%lu] blocks", stream_->generate_input_->request_id);
+    FT_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId());
         
     if (kv_cache_block_addr_.k_ptr.empty() || kv_cache_block_addr_.k_ptr[0].empty()) {
         return 0;

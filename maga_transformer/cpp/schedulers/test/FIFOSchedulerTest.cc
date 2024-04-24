@@ -174,12 +174,12 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;
     FIFOScheduler scheduler(init_config, cache_manager);
+    scheduler.reuse_cache_ = true;
 
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({5}, {1, 2, 3, 4, 5}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
     shared_ptr<GenerateStream> stream1   = make_shared<GenerateStream>(query);
-    stream1->setReuseCache(true);
     ASSERT_TRUE(scheduler.enqueue(stream1).ok());
 
     auto streams_status = scheduler.schedule();
@@ -198,7 +198,6 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     query2->input_ids                     = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
     query2->generate_config               = make_shared<GenerateConfig>();
     shared_ptr<GenerateStream> stream2    = make_shared<GenerateStream>(query2);
-    stream2->setReuseCache(true);
     ASSERT_TRUE(scheduler.enqueue(stream2).ok());
 
     auto streams_status3 = scheduler.schedule();
