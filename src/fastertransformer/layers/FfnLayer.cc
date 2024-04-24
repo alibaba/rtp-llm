@@ -121,7 +121,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                               CUDA_R_32F,
                               cublasGemmAlgo_t(-1));
 
-        print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_); 
+        print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_);
 
         if (quant_algo_.int8Mode()) {
 
@@ -219,7 +219,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                            &ffn_weights->intermediate_weight2,
                            inter_buf_2_,
                            ffn_dynamic_scale);
-        
+
         // lora
         lora_gemm_->applyLoRA(m,
                             batch_size,
@@ -308,6 +308,37 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                           ffn_weights->output_weight.lora_weights,
                           inter_buf_normed_output,
                           output_tensor);
+    print_bsd(layer_id, "before in share", output_tensor, 1, m, hidden_units_);
+
+    if (ffn_weights->shared_expert_gating_weight.kernel) {
+        float alpha = 1.0f;
+        float beta  = 0.0f;
+
+        cublas_wrapper_->Gemm(CUBLAS_OP_N,
+                              CUBLAS_OP_N,
+                              1,
+                              m,
+                              hidden_units_,
+                              &alpha,
+                              ffn_weights->shared_expert_gating_weight.kernel,
+                              CUDA_R_16F,
+                              1,
+                              input_tensor,
+                              CUDA_R_16F,
+                              hidden_units_,
+                              &beta,
+                              shared_gating_scale_buf_,
+                              CUDA_R_16F,
+                              1,
+                              CUDA_R_32F,
+                              cublasGemmAlgo_t(-1));
+
+        // gemm_runner_->Gemm(m, 1, hidden_units_, input_tensor, &ffn_weights->shared_expert_gating_weight, shared_gating_scale_buf_);
+        print_bsd(layer_id, "shared scale buf", shared_gating_scale_buf_, 1, m, 1, 0, 1);
+        invokeSigmoid(shared_gating_scale_buf_, m, 1, stream_);
+        print_bsd(layer_id, "after sigmoid", shared_gating_scale_buf_, 1, m, 1, 0, 1);
+        invokeScaledDot(output_tensor, output_tensor, shared_gating_scale_buf_, m, hidden_units_, stream_);
+    }
 
     print_bsd(layer_id, "ffn out layer", output_tensor, 1, m, hidden_units_);
 
@@ -419,6 +450,7 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe) {
     if (use_moe) {
         moe_gates_buf_ =
             (float*)allocator_->reMalloc(moe_gates_buf_, sizeof(float) * pad_to_multiple_of_16(token_num * expert_num_), false);
+        shared_gating_scale_buf_ =  (T*)allocator_->reMalloc(shared_gating_scale_buf_, sizeof(T) * token_num, false);
         size_t moe_workspace_size = moe_plugin_->getWorkspaceSize(token_num);
         moe_fc_workspace_         = (char*)allocator_->reMalloc(moe_fc_workspace_, moe_workspace_size, false);
     } else {
@@ -432,7 +464,6 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe) {
         inter_buf_normed_ = (T*)(allocator_->reMalloc(
             inter_buf_normed_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, inter_size_ != inter_padding_size_));
     }
-
     if(quant_algo_.smoothQuantInt8()){
         ffn_dynamic_scale_2_ = (float*)(allocator_->reMalloc(ffn_dynamic_scale_2_, sizeof(float)* token_num, false));
     }
@@ -448,6 +479,7 @@ void FfnLayer<T>::freeBuffer() {
             allocator_->free((void**)(&inter_buf_2_));
         }
         allocator_->free((void**)(&inter_buf_normed_));
+        allocator_->free((void**)(&shared_gating_scale_buf_));
 
         if (expert_num_ != 0) {
             allocator_->free((void**)(&moe_gates_buf_));

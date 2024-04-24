@@ -62,6 +62,7 @@ protected:
     T*     inter_buf_        = nullptr;
     T*     inter_buf_2_      = nullptr;  // for gated activation
     T*     inter_buf_normed_ = nullptr;
+    T*     shared_gating_scale_buf_ = nullptr;
     float* moe_gates_buf_    = nullptr;
     char*  moe_fc_workspace_ = nullptr;
     float* ffn_dynamic_scale_2_ = nullptr;

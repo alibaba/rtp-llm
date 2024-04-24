@@ -19,6 +19,7 @@ from .llava import Llava
 from .qwen_vl import QWen_VL
 from .mixtral import Mixtral
 from .bert import Bert
+from .qwen_v2_moe import Qwen2Moe
 
 import logging
 try:

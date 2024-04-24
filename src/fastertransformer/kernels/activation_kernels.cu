@@ -701,5 +701,44 @@ void invokeSigmoid(T* data, const int size, const float scale, cudaStream_t stre
 
 template void invokeSigmoid(float* data, const int size, const float scale, cudaStream_t stream);
 template void invokeSigmoid(half* data, const int size, const float scale, cudaStream_t stream);
+#ifdef ENABLE_BF16
+template void invokeSigmoid(__nv_bfloat16* data, const int size, const float scale, cudaStream_t stream);
+#endif
+
+template<typename T>
+__global__ void scaledot_kernel(T* out, const T* in, const T* scale, const int m, const int n)
+{
+    const int size = m * n;
+    const int index = (blockIdx.y * gridDim.x + blockIdx.x) * blockDim.x + threadIdx.x;    
+    const int scale_index = index / n;
+    if (index < size) {
+        float val   = cuda_cast<float>(in[index]);
+        float scale_val = cuda_cast<float>(scale[scale_index]);
+        out[index] = T(val * scale_val);
+    }
+}
+
+template<typename T>
+void invokeScaledDot(T* out, const T* input, const T* scale, const int m, const int n, cudaStream_t stream) {
+    int temp_n = n + n % 2;
+
+    dim3 block, grid;
+    if (temp_n <= 1024) {
+        block.x = temp_n;
+        grid.x  = m;
+    }
+    else {
+        block.x = 1024;
+        grid.x  = ceil(m * temp_n / 1024.);
+    }
+    scaledot_kernel<<<grid, block, 0, stream>>>(out, input, scale, m, n);
+}
+
+template void invokeScaledDot(float* out, const float* input, const float* scale, const int m, const int n, cudaStream_t stream);
+template void invokeScaledDot(half* out, const half* input, const half* scale, const int m, const int n, cudaStream_t stream);
+
+#ifdef ENABLE_BF16
+template void invokeScaledDot(__nv_bfloat16* out, const __nv_bfloat16* input, const __nv_bfloat16* scale, const int m, const int n, cudaStream_t stream);
+#endif
 
 }  // namespace fastertransformer

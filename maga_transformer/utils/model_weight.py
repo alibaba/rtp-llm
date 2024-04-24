@@ -22,7 +22,7 @@ def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
         return ts[0]
     return torch.concat(ts, dim=1).contiguous()
 
-def pad(ts, inter_padding_size, dim, div_8: bool = False):
+def pad(ts: List[torch.Tensor], inter_padding_size: int, dim: int, div_8: bool = False):
     if div_8:
         inter_padding_size = inter_padding_size // 8
     if dim == 0:
@@ -36,7 +36,7 @@ def pad(ts, inter_padding_size, dim, div_8: bool = False):
     z = torch.zeros(pad_shape).cpu().to(ts[0].dtype)
     return torch.cat((ts[0].cpu(), z), dim).to('cpu').contiguous()
 
-def transpose_pad(ts, inter_padding_size, dim):
+def transpose_pad(ts: List[torch.Tensor], inter_padding_size: int, dim: int):
     if dim == 0:
         pad_shape = [inter_padding_size - ts[0].shape[0], ts[0].shape[1]]
     elif dim == 1:
@@ -55,16 +55,16 @@ def b_half_merge(ts: List[torch.Tensor]):
         n_ts_2.append(t_a[1].cuda())
     return concat_0([concat_0(n_ts_1), concat_0(n_ts_2)])
 
-def zeros(ts: List[torch.Tensor], shape) -> torch.Tensor:
+def zeros(ts: List[torch.Tensor], shape: List[int]) -> torch.Tensor:
     return torch.zeros(shape, dtype=torch.half).contiguous()
 
-def ones(ts: List[torch.Tensor], shape) -> torch.Tensor:
+def ones(ts: List[torch.Tensor], shape: List[int]) -> torch.Tensor:
     return torch.ones(shape, dtype=torch.half).contiguous()
 
 def transpose(ts: List[torch.Tensor]) -> torch.Tensor:
     return ts[0].t().contiguous()
 
-def identity(ts: List[torch.Tensor], allow_empty=False) -> torch.Tensor:
+def identity(ts: List[torch.Tensor], allow_empty:bool = False) -> torch.Tensor:
     if len(ts) == 0 and allow_empty:
         return None
     return ts[0].contiguous()
@@ -75,27 +75,27 @@ def tolerate_failed(ts: List[torch.Tensor], origin_func: Callable[[List[torch.Te
     except Exception as _:
         return None
 
-def choose_available(ts: List[torch.Tensor], origin_func_list: List[Callable[[List[torch.Tensor]], torch.Tensor]]) -> torch.Tensor:
+def choose_available(ts: List[Optional[torch.Tensor]], origin_func_list: List[Callable[[List[torch.Tensor]], torch.Tensor]]) -> torch.Tensor:
     for t, func in zip(ts, origin_func_list):
         if t is not None and len(ts) > 0:
             return func([t])
     raise ValueError(f"all tensor is empty, but not allow empty")
 
 
-def shift_one(ts: List[torch.Tensor], allow_empty=False) -> torch.Tensor:
+def shift_one(ts: List[torch.Tensor], allow_empty: bool = False) -> torch.Tensor:
     if len(ts) == 0 and allow_empty:
         return None
     return (ts[0] + 1.0).contiguous()
 
-def sp_0(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.Tensor]:
+def sp_0(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     if (t.dim() == 3):
         return torch.split(t, t.shape[1] // tp, dim=1)[tp_rank]
     return torch.split(t, t.shape[0] // tp, dim=0)[tp_rank]
 
-def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.Tensor]:
+def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return torch.split(t, t.shape[-1] // tp, dim=-1)[tp_rank]
 
-def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.Tensor]:
+def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return t
 
 def get_sp_tensor(t: torch.Tensor, qkv_hidden_size: int, hidden_size: int, tp: int, tp_rank: int, kv_broadcast: bool):
@@ -113,7 +113,7 @@ def get_sp_tensor(t: torch.Tensor, qkv_hidden_size: int, hidden_size: int, tp: i
 
 # MHA layout: [D, head*size_per_head, head*size_per_head, head*size_per_head] == [D, 3, D] (sp_neg)
 # MQA layout: [D, head*size_per_head, kv_head*size_per_head, kv_head*size_per_head] (sp_head)
-def sp_head(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+def sp_head(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
     # int4
     if len(t.shape) ==2 and t.dtype == torch.int32:
         # awq
@@ -125,14 +125,14 @@ def sp_head(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden
     else:
         return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
 
-def sp_head_s(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+def sp_head_s(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
     qkv_hidden_size = t.shape[1]
     if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
         return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
     else:
         return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
 
-def sp_head_z(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+def sp_head_z(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
     qkv_hidden_size = qkv_hidden_size // 8
     hidden_size = hidden_size // 8
     if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
@@ -140,12 +140,12 @@ def sp_head_z(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidd
     else:
         return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
 
-def sp_head_b(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+def sp_head_b(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
     t = t.reshape(-1)
     qkv_hidden_size = t.shape[0]
     return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
 
-def sp_head_qk_norm(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+def sp_head_qk_norm(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
     t = t.reshape(1, -1)
     qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
     if kv_broadcast:
@@ -154,7 +154,7 @@ def sp_head_qk_norm(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv
         ks = sp_neg1(t[:,hidden_size:], tp, tp_rank)
     return torch.concat([qs, ks], dim=1).contiguous()
 
-def sp_head_lora(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs) -> List[torch.Tensor]:
+def sp_head_lora(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
     # lora_b[dim0, 3*hidden_size]
     dim0 = t.shape[0]
     if len(t.shape) == 2 and t.shape[1] != hidden_size * 3:
@@ -184,11 +184,11 @@ def trans_qkv_b(ts: List[torch.Tensor], hidden_size: int, head_num: int) -> torc
         .reshape(3 * hidden_size)\
         .contiguous()
 
-def qkv_gather(ts: List[torch.Tensor], dim0, head_num: int, head_num_kv: int, size_per_head: int = -1) -> torch.Tensor:
+def qkv_gather(ts: List[torch.Tensor], dim0: int, head_num: int, head_num_kv: int, size_per_head: int = -1) -> torch.Tensor:
     t = ts[0].t().contiguous().reshape(dim0, -1)
     if size_per_head == -1:
         size_per_head = t.shape[1] // (head_num + head_num_kv * 2)
-    new_idxs = []
+    new_idxs: List[int] = []
     q2kv_ratio = head_num // head_num_kv
     for q2kv_idx in range(head_num_kv):
         base_idx = (q2kv_ratio + 2) * q2kv_idx
@@ -199,7 +199,7 @@ def qkv_gather(ts: List[torch.Tensor], dim0, head_num: int, head_num_kv: int, si
         new_idxs.append((q2kv_ratio + 2) * q2kv_idx + q2kv_ratio + 1)
     return t.reshape(dim0, head_num + head_num_kv * 2, size_per_head)[:,new_idxs,:].reshape(dim0, -1)
 
-def sp_0_pad8(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> List[torch.Tensor]:
+def sp_0_pad8(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     align_size = tp * 8
     paded_size = int(math.ceil(t.shape[0] * 1.0 / align_size) * align_size)
     pad_size = int(paded_size - t.shape[0])
@@ -284,6 +284,7 @@ class W:
     post_ffn_ln_beta = "post_ffn_layernorm_weights.beta"
 
     # partial moe
+    shared_expert_gate = 'ffn_weights.shared_expert_gate.kernel'    
     moe_w1   = 'partial_moe_weights.intermediate_weight.kernel'
     moe_b1   = 'partial_moe_weights.intermediate_weight.bias'
     moe_w3   = 'partial_moe_weights.intermediate_weight3.kernel'
@@ -336,7 +337,8 @@ class W:
         moe_b2,
         moe_w3,
         moe_b3,
-        moe_gate
+        moe_gate,
+        shared_expert_gate
     ])
 
     quant_w = set([
@@ -495,6 +497,7 @@ class W:
         ffn_w2_lora_b: sp_id,
         ffn_gate: sp_id,
         moe_gate: sp_id,
+        shared_expert_gate: sp_id,
         post_ffn_ln_beta: sp_id,
         post_ffn_ln_gamma: sp_id,
         token_type_embedding: sp_neg1
@@ -679,6 +682,7 @@ class ModelDeployWeightInfo:
         self._hidden_size = config.hidden_size
         self._inter_size = config.inter_size
         self._inter_padding_size = config.inter_padding_size
+        self._moe_inter_padding_size = config.moe_inter_padding_size
         self._head_num = config.head_num
         self._head_num_kv = config.head_num_kv
         self.tp_size = tp_size

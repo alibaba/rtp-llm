@@ -42,6 +42,7 @@ static const std::string ffn_gate     = "ffn_weights.gate.kernel"; // for moe
 static const std::string post_ffn_ln_gamma     = "post_ffn_layernorm_weights.gamma";
 static const std::string post_ffn_ln_beta      = "post_ffn_layernorm_weights.beta";
 
+static const std::string shared_expert_gate_w = "ffn_weights.shared_expert_gate.kernel";
 static const std::string moe_w1   = "partial_moe_weights.intermediate_weight.kernel";
 static const std::string moe_b1   = "partial_moe_weights.intermediate_weight.bias";
 static const std::string moe_w3   = "partial_moe_weights.intermediate_weight3.kernel";

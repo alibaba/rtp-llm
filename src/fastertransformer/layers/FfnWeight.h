@@ -29,6 +29,7 @@ struct FfnNormWeight {
 template<typename T1, typename T2 = T1>
 struct FfnWeight {
     DenseWeight<T1, T2> gating_weight;
+    DenseWeight<T1, T2> shared_expert_gating_weight;
     DenseWeight<T1, T2> intermediate_weight;
     DenseWeight<T1, T2> intermediate_weight2;  // for gated activation
     FfnNormWeight<T1>   dense_layernorm;

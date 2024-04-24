@@ -694,9 +694,8 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                                    params_.use_norm_attn_out_residual_ ? normed_self_attn_output_ :
                                                    self_attn_output_,
                                                    ffn_output_ptr,
-                                                   input_residual,
-                                                   params_.moe_style_ == 2 && use_moe? \
-                                                   partial_moe_output_: layer_weight->ffn_weights.output_weight.bias,
+                                                   params_.moe_style_ == 2 && use_moe?partial_moe_output_ : input_residual,
+                                                   layer_weight->ffn_weights.output_weight.bias,
                                                    layer_weight->post_ffn_layernorm_weights.gamma,
                                                    layer_weight->post_ffn_layernorm_weights.beta,
                                                    params_.layernorm_eps_,

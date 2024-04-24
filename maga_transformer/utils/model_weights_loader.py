@@ -44,7 +44,7 @@ class WeightLog:
 
     def dump(self) -> None:
 
-        logging.info(f"""
+        logging.debug(f"""
             You have loaded {len(self.loaded_tensors)} tensors
             The loaded tensor is:
             {self.loaded_tensors}

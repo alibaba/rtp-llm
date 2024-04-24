@@ -1,4 +1,5 @@
 
+
 import torch
 import unicodedata
 import types
@@ -28,9 +29,17 @@ def merge_qkv_hf(ts: List[torch.Tensor]):
 class QWenV2Weight(ModelDeployWeightInfo):
     def _get_weight_info(self):
         return self._get_hf_weight_info()
-        
-    def _get_hf_layer_weight_info(self, layer_id):
+    
+    def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
+        return [WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)],
+            functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
+        WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight', identity)],
+            functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
+        WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)],
+            functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1))]
+        
+    def _get_hf_layer_weight_info(self, layer_id: int):
         layer_weights = [
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)],
                        identity),
@@ -48,18 +57,13 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 functools.partial(merge_qkv_hf)),
             WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight', identity)],
                        transpose),
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)],
-                       functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
-            WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight', identity)],
-                       functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
-            WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)],
-                       functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1)),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)],
                        identity),
         ]
+        layer_weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
         return layer_weights
     
-    def _get_hf_quant_weight_info(self, layer_id):
+    def _get_hf_quant_weight_info(self, layer_id: int):
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
         group_size = self._group_size 
         layer_quant_weights =[
