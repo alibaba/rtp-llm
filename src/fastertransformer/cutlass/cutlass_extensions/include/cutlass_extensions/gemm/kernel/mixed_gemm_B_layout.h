@@ -52,7 +52,7 @@ template <typename TypeB>
 struct LayoutDetailsB<TypeB, arch::Sm70>
 {
     static constexpr int ThreadblockK = 64;
-    using Layout = layout::ColumnMajor;
+    using Layout = layout::RowMajor;
     static constexpr int ElementsPerAccess = 8;
     using Operator = cutlass::arch::OpMultiplyAdd;
 };
