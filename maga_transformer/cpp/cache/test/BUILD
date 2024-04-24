@@ -51,7 +51,4 @@ cc_test(
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    }
 )
