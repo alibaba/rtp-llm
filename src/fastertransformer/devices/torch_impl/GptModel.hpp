@@ -9,19 +9,20 @@ namespace fastertransformer {
 torch::Tensor create_context_mask(const std::vector<int32_t>& input_lengths, bool is_causal = true) {
     int32_t batch_size = input_lengths.size();
     int32_t max_input_length = *std::max_element(input_lengths.begin(), input_lengths.end());
-    torch::Tensor attention_mask = torch::ones({max_input_length, max_input_length}, torch::dtype(torch::kBool));
-    if (is_causal) {
-        attention_mask = attention_mask.tril();
-    }
-    attention_mask = attention_mask.unsqueeze(0).repeat({batch_size, 1, 1});
-    for (int32_t b = 0; b < batch_size; ++b) {
-        int32_t input_length = input_lengths[b];
-        attention_mask[b].slice(0, input_length, max_input_length) = 0;
-        if (!is_causal) {
-            attention_mask[b].slice(1, 0, input_length) = 0;
-        }
-    }
-    return attention_mask;
+    // torch::Tensor attention_mask = torch::ones({max_input_length, max_input_length}, torch::dtype(torch::kBool));
+    // if (is_causal) {
+    //     attention_mask = attention_mask.tril();
+    // }
+    // attention_mask = attention_mask.unsqueeze(0).repeat({batch_size, 1, 1});
+    // for (int32_t b = 0; b < batch_size; ++b) {
+    //     int32_t input_length = input_lengths[b];
+    //     attention_mask[b].slice(0, input_length, max_input_length) = 0;
+    //     if (!is_causal) {
+    //         attention_mask[b].slice(1, 0, input_length) = 0;
+    //     }
+    // }
+    // return attention_mask;
+    return torch::zeros({max_input_length, max_input_length}).unsqueeze(0).repeat({batch_size, 1, 1});
 }
 
 torch::Tensor rotate_half(const torch::Tensor& x) {
@@ -106,7 +107,7 @@ public:
     GptAttentionImpl(const AttentionConfigs& config)
     : hidden_size(config.hidden_size),
         num_heads(config.head_num),
-        head_dim(hidden_size / num_heads),
+        head_dim(config.size_per_head),
         num_key_value_heads(config.kv_head_num),
         num_key_value_groups(num_heads / num_key_value_heads),
         max_position_embeddings(config.rope_config.dynamic_embedding_max_pos),
@@ -141,7 +142,7 @@ public:
         key_states = repeat_kv(key_states, num_key_value_groups);
         value_states = repeat_kv(value_states, num_key_value_groups);
 
-        auto attn_weights = torch::matmul(query_states, key_states.transpose(2, 3)) / std::sqrt(head_dim);
+        auto attn_weights = torch::matmul(query_states, key_states.transpose(2, 3)) / sqrtf(head_dim * 1.0f);
         if (attention_mask.defined()) {
             attn_weights = attn_weights + attention_mask;
         }

@@ -7,8 +7,6 @@ cc_library(
     ]),
     srcs = glob([
         "*.cc",
-    ]) + glob([
-        "base_impl/*.cc",
     ]),
     deps = [
         "//src/fastertransformer/core:allocator",
@@ -29,6 +27,19 @@ cc_library(
     ]),
     deps = [
         "devices_base",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
+    name = "devices_base_impl",
+    srcs = glob([
+        "base_impl/*.cc",
+    ]),
+    deps = [
+        ":devices_base",
+        ":device_utils",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

@@ -4,6 +4,7 @@
 
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
 #include "src/fastertransformer/devices/torch_impl/GptModel.hpp"
 #include "maga_transformer/cpp/cache/CacheManager.h"
@@ -88,11 +89,13 @@ template <typename T>
 AttentionLayerWeights AttentionLayerTest<T>::getAttentionWeights(const GptAttention& gpt_attention) {
     AttentionLayerWeights attention_weights;
     auto qkv_tensor = torch::concat({
-        gpt_attention->q_proj->weight, gpt_attention->k_proj->weight, gpt_attention->v_proj->weight
+        gpt_attention->q_proj->weight.transpose(0, 1),
+        gpt_attention->k_proj->weight.transpose(0, 1),
+        gpt_attention->v_proj->weight.transpose(0, 1)
     }, 1).to(dataTypeToTorchType(getTensorType<TestType>()));
     auto qkv_buf = tensorToBuffer(qkv_tensor);
     attention_weights.qkv_weight.reset(new DenseWeights(qkv_buf));
-    auto o_buf = tensorToBuffer(gpt_attention->o_proj->weight.to(
+    auto o_buf = tensorToBuffer(gpt_attention->o_proj->weight.transpose(0, 1).contiguous().to(
         dataTypeToTorchType(getTensorType<TestType>())));
     attention_weights.output_weight.reset(new DenseWeights(o_buf));
     return move(attention_weights);
@@ -137,11 +140,13 @@ void AttentionLayerTest<T>::testAttentionLayer(const AttentionConfigs& attention
     torch::nn::init::normal_(gpt_attention->k_proj->weight);
     torch::nn::init::normal_(gpt_attention->v_proj->weight);
     torch::nn::init::normal_(gpt_attention->o_proj->weight);
+    torch::nn::init::zeros_(gpt_attention->q_proj->bias);
+    torch::nn::init::zeros_(gpt_attention->k_proj->bias);
+    torch::nn::init::zeros_(gpt_attention->v_proj->bias);
+    torch::nn::init::zeros_(gpt_attention->o_proj->bias);
 
     auto torch_output = gpt_attention->forward(input_tensor.unsqueeze(0), mask_tensor)
                                     .reshape({-1, (int64_t)hidden_size});
-    cout << "inputs: " << input_tensor << endl;
-    cout << "output: " << torch_output << endl;
 
     // 3. compute kernel result and compare
     auto attention_weights = getAttentionWeights(gpt_attention);
@@ -153,25 +158,24 @@ void AttentionLayerTest<T>::testAttentionLayer(const AttentionConfigs& attention
     };
     auto attn_output = device_->attentionLayer(params);
     auto output_tensor = bufferToTensor(*attn_output.hidden_states);
-    std::cout << "ft out: " << output_tensor << std::endl;
-    std::cout << "diff=" << output_tensor - torch_output << std::endl;
+    assertTensorClose(output_tensor, torch_output, 1e-3, 1e-1);
 }
 
 class AttentionLayerTestFp16 : public AttentionLayerTest<half> {};
 
 TEST_F(AttentionLayerTestFp16, testSimpleContextAttention) {
-    // configs for qwen1.5 0.5b
     AttentionConfigs attention_conf;
-    attention_conf.head_num = 16;
-    attention_conf.kv_head_num = 16;
-    attention_conf.size_per_head = 64;
+    attention_conf.head_num = 4;
+    attention_conf.kv_head_num = 4;
+    attention_conf.size_per_head = 8;
     attention_conf.tokens_per_block = 4;
-    attention_conf.hidden_size = 1024;
-    attention_conf.rope_config.embedding_dim = 64;
-    attention_conf.rope_config.embedding_base = 10000;
+    attention_conf.hidden_size = 32;
 
-    const size_t hidden_size = 1024;
-    const size_t layer_num = 24;
+    attention_conf.rope_config.embedding_style = RopeType::Base;
+    attention_conf.rope_config.embedding_dim = attention_conf.size_per_head;
+    attention_conf.rope_config.embedding_base = 1000000;
+
+    const size_t layer_num = 2;
     const size_t block_num = 16;
     CacheConfig cache_conf(
         layer_num, block_num, attention_conf.kv_head_num, attention_conf.size_per_head,

@@ -254,6 +254,8 @@ protected:
             std::cout << "atol: " << atol << std::endl;
             std::cout << "a: " << a << std::endl;
             std::cout << "b: " << b << std::endl;
+            std::cout << "cmp diff: " << a_cmp - b_cmp << std::endl;
+            std::cout << "abs diff: " << torch::abs(a_cmp - b_cmp) / torch::abs(a_cmp) << std::endl;
             ASSERT_TRUE(false);
         }
     }

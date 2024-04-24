@@ -1,6 +1,7 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/devices/cuda_impl/Dispatch.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
 #include "src/fastertransformer/cutlass/interface.h"
@@ -90,6 +91,10 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         stream_
     );
 
+    printBufferData(*q_output, "q_output: ");
+    printBufferData(*k_output, "k_output: ");
+    printBufferData(*v_output, "v_output: ");
+
     // TODO(lidongjin): Only support float32 gemm output.
     auto qk_output = gemm({*q_output,
                             *k_output,
@@ -97,16 +102,20 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                             DataType::TYPE_FP32,
                             TransposeOperation::NONE,
                             TransposeOperation::TRANSPOSE});
+    printBufferData(*qk_output, "qk_output: ");
 
-    float scale = (1.0f / sqrtf(size_per_head* 1.0f));
+    float scale = (1.0f / sqrtf(size_per_head * 1.0f));
 
     // TODO(lidongjin): Only support float32(in)\float16(output).
+    auto softmax_type = qk_output->type();
     auto softmax_qk_output = softmax({std::move(qk_output),
                                       params.common.attention_mask.value().get(),
                                       scale,
                                       DataType::TYPE_FP16});
+    printBufferData(*softmax_qk_output, "softmax_qk_output: ");
 
     auto qkv_output = gemm({*softmax_qk_output, *v_output});
+    printBufferData(*qkv_output, "qkv_output: ");
 
     auto &qkv_transpose_output = params.output;
 

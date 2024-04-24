@@ -13,6 +13,8 @@ cc_library(
     ]),
     deps = [
         "//src/fastertransformer/devices:devices_base",
+        "//src/fastertransformer/devices:device_utils",
+        "//src/fastertransformer/devices:devices_base_impl",
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/cuda:allocator_cuda",
         "//src/fastertransformer/layers:layers",

@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 
 #include <numeric>
 
@@ -23,6 +24,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
     const auto qkv = gemm({input, *(qkv_weight->kernel)});
+    printBufferData(*qkv, "qkv");
 
     const auto generate_batch_size = sequence_lengths.shape()[0];
     const auto context_batch_size = input_lengths.shape()[0] - generate_batch_size;
@@ -44,6 +46,8 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     if (context_batch_size) {
         contextAttention({context_qkv, context_output, params.common, params.weights, params.configs});
     }
+    printBufferData(*qkv_output, "qkv_output");
+    printBufferData(*(output_weight->kernel), "output_weight");
 
     auto output = gemm({*qkv_output, *(output_weight->kernel)});
 
