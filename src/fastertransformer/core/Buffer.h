@@ -57,6 +57,7 @@ public:
 
     void reshape(std::vector<size_t>& shape);
     Buffer view(size_t offset, size_t size) const; // only from 0-d
+    Buffer operator[](size_t offset) const;
 
     std::string debugString() const;
 

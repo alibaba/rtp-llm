@@ -28,7 +28,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     const auto context_batch_size = input_lengths.shape()[0] - generate_batch_size;
 
     const auto context_token_num = std::accumulate(
-        input_lengths.data<int32_t>(), input_lengths.data<int32_t>() + generate_batch_size, 0);
+        input_lengths.data<int32_t>(), input_lengths.data<int32_t>() + context_batch_size, 0);
     const auto h_token_num = context_token_num + generate_batch_size;
 
     const auto qkv_output = allocateBuffer({input.type(), {h_token_num, qkv_hidden_size}});

@@ -2,6 +2,7 @@
 
 #include <numeric>
 #include <cassert>
+#include <stdexcept>
 
 using namespace std;
 
@@ -95,6 +96,19 @@ Buffer Buffer::view(size_t offset, size_t size) const {
         const auto offset_size = this->size() / shape_[0] * offset;
         return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), nullptr);
     }
+}
+
+Buffer Buffer::operator[](size_t offset) const {
+    if (shape().size() <= 1) {
+        throw std::runtime_error("Buffer::operator[]: shape must be larger than 1");
+    }
+    if (offset >= shape()[0]) {
+        throw std::runtime_error("Buffer::operator[]: offset out of range");
+    }
+    auto new_shape = shape_;
+    new_shape.erase(new_shape.begin());
+    const auto offset_size = this->size() / shape_[0] * offset;
+    return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), nullptr);
 }
 
 std::string Buffer::debugString() const {

@@ -7,11 +7,11 @@
 namespace fastertransformer {
 
 template <typename T>
-Buffer vector2Buffer(const std::vector<T>& vec) {
-    const auto& shape = {vec.size()};
+BufferPtr vector2Buffer(const std::vector<T>& vec) {
+    const auto& shape = std::vector{vec.size()};
     const auto& dtype = getTensorType<T>();
     const auto& memory_type = MemoryType::MEMORY_CPU;
-    return Buffer(memory_type, dtype, shape, vec.data());
+    return std::make_unique<Buffer>(memory_type, dtype, shape, vec.data());
 };
 
 inline void bufferCopy(const BufferPtr& src, torch::Tensor& dst, size_t numberOfElements) {

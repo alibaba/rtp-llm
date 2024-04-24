@@ -29,7 +29,6 @@ public:
     BufferPtr softmax(const SoftmaxParams& params);
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params);
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);
-    AttentionLayerOutput attentionLayer(const AttentionLayerParams& params);
     void sampleGreedy(const GreedyParams& params);
     void sampleBeamSearch(const BeamSearchParams& params);
     void broadcast(const BroadcastParams& params);

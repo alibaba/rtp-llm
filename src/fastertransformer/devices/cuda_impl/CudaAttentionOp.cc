@@ -18,7 +18,7 @@ using namespace std;
 namespace fastertransformer {
 
 AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& params) {
-    auto datatype = params.input.type();
+    auto datatype       = params.input.type();
     auto token_num      = params.input.shape()[0];
     auto batch_size     = params.common.context_batch_size;
     auto seq_len        = params.common.context_max_seq_len;

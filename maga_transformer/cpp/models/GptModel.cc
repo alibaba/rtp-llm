@@ -35,6 +35,15 @@ void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
     cu_seqlens[batch_size] = total_seq_len;
 }
 
+void checkKvBlocksShape(const BufferPtr& input_kv_blocks) {
+    if (!input_kv_blocks) {
+        return;
+    }
+    RUNTIME_ASSERT_OP_ARG(
+        input_kv_blocks->shape().size() == 4,
+        "kv_cache_blocks shape should be [layer_num, 2, batch_size, block_length].");
+}
+
 AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inputs) {
     const auto decoder_batch_size = inputs.sequence_lengths->shape()[0];
     const auto context_batch_size = inputs.input_lengths->shape()[0] - decoder_batch_size;
@@ -53,22 +62,23 @@ AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inp
         inputs.input_lengths->dataWithOffset<int32_t>(decoder_batch_size),
         context_batch_size,
         max_context_seq_len);
-    if (!(cu_seqlens_data[context_batch_size] == inputs.combo_tokens->shape()[0])) {
-        throw OpException(
-            {OpErrorType::ERROR_INVALID_ARGS, "cu_seqlens is not consistent with combo_tokens."});
-    }
+
+    RUNTIME_ASSERT_OP_ARG(
+        (cu_seqlens_data[context_batch_size] == inputs.combo_tokens->shape()[0]),
+        "cu_seqlens is not consistent with combo_tokens.");
+    // checkKvBlocksShape(inputs.kv_cache_blocks);
+    // checkKvBlocksShape(inputs.kv_cache_scales);
 
     AttentionCommonInputs attention_inputs({
         *inputs.input_lengths,
         *inputs.sequence_lengths
     });
-    attention_inputs.cu_seqlens = device_->clone({vector2Buffer(cu_seqlens_data)});
-    attention_inputs.padding_offset = device_->clone({vector2Buffer(padding_offset_data)});
+    attention_inputs.cu_seqlens = device_->clone({*vector2Buffer(cu_seqlens_data)});
+    attention_inputs.padding_offset = device_->clone({*vector2Buffer(padding_offset_data)});
     attention_inputs.decoder_batch_size = decoder_batch_size;
     attention_inputs.context_batch_size = context_batch_size;
     attention_inputs.context_max_seq_len = max_context_seq_len;
     attention_inputs.decoder_max_seq_len = max_decoder_seq_len;
-    attention_inputs.kv_cache_blocks = *inputs.kv_cache_blocks;
     attention_inputs.position_ids = inputs.position_ids;
     attention_inputs.attention_mask = inputs.attention_mask;
     return move(attention_inputs);
@@ -95,6 +105,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     // prepare resources for all layers
     auto attention_common_inputs = prepareAttentionInputs(inputs);
+    auto& input_kv_blocks = inputs.kv_cache_blocks;
+    auto& input_kv_scales = inputs.kv_cache_scales;
 
     // layers
     const auto layer_num = weights_.layers.size();

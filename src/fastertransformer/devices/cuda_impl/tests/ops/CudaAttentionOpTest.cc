@@ -9,9 +9,6 @@ using namespace fastertransformer;
 class CudaAttentionOpTest: public DeviceTestBase {
 public:
 
-    AttentionCommonInputs prepareCommonInputs(const size_t& ) {
-    }
-
     void contextAttentionOpTest(size_t batch_size,
                                 size_t seq_len,
                                 size_t num_heads,
@@ -24,41 +21,7 @@ public:
                              size_t num_heads,
                              size_t num_key_value_heads,
                              size_t head_dim);
-
 };
-
-struct RotaryEmbeddingImpl : torch::nn::Module {
-    RotaryEmbeddingImpl(size_t dim, size_t max_position_embeddings=2048, float base=10000) :
-        dim(dim), max_position_embeddings(max_position_embeddings), base(base) {}
-
-    torch::Tensor rotate_half(torch::Tensor x) {
-        // Rotates half the hidden dims of the input.
-        int half_size = x.sizes()[3] / 2;
-        auto x1 = x.index({"...", at::indexing::Slice(0, half_size)});
-        auto x2 = x.index({"...", at::indexing::Slice(half_size-1, -1)});
-        auto result = torch::cat({-x2, x1}, -1);
-        return result;
-    }
-
-    torch::Tensor forward(torch::Tensor hidden_states, torch::Tensor position_ids) {
-        int seq_len = position_ids.sizes()[0];
-        auto inv_freq = 1.0 / torch::pow(base, (torch::arange(0, (int)dim, 2).to(torch::kFloat) / (int)dim));
-        auto t = torch::arange(seq_len);
-        auto freqs = torch::outer(t, inv_freq);
-        auto emb = torch::cat({freqs, freqs}, -1);
-        auto cos = emb.cos();
-        auto sin = emb.sin();
-        auto embed = (hidden_states * cos) + (rotate_half(hidden_states) * sin);
-        return embed;
-    }
-
-    size_t dim;
-    size_t max_position_embeddings;
-    float base;
-
-};
-
-TORCH_MODULE(RotaryEmbedding);
 
 struct AttentionImpl : torch::nn::Module {
     AttentionImpl() {

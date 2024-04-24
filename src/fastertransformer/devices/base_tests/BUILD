@@ -7,6 +7,7 @@ cc_library(
     ]),
     deps = [
         "//src/fastertransformer/devices/testing:device_test_utils",
+        "//src/fastertransformer/devices/torch_impl:torch_reference_impl",
         "//maga_transformer/cpp:cache",
         "//maga_transformer/cpp:models",
     ],
