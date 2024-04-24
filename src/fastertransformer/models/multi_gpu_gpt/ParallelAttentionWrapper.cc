@@ -45,11 +45,11 @@ bool ParallelAttentionWrapper<T>::CheckUseFMHA() const {
         FT_LOG_WARNING("FMHA not support float");
         return false;
     }
-    if (multi_task_prompt_env != nullptr) {
+    if (multi_task_prompt_env && strcmp(multi_task_prompt_env, "") != 0) {
         FT_LOG_WARNING("FMHA not support multi_task_prompt");
         return false;
     }
-    if (multi_task_prompt_str_env != nullptr) {
+    if (multi_task_prompt_str_env && strcmp(multi_task_prompt_str_env, "") != 0) {
         FT_LOG_WARNING("FMHA not support multi_task_prompt_str");
         return false;
     }
