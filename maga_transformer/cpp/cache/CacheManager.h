@@ -72,19 +72,16 @@ public:
     std::tuple<bool, KVCacheBlockAddr, int> mallocWithCache(int want_block_nums, const std::vector<int>& token_ids);
     std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     void                                    reserveBlocks(int nums);
-    void                                    incrBlockRefCounter(const std::vector<void*> pointers);
+    void                                    incrBlockRefCounter(const std::vector<void*>& pointers);
 
-    void free(const std::vector<void*> pointer);
+    void free(const std::vector<void*>& pointer);
     void free(const std::vector<KVCacheBlockAddr>& resource);
-    void freeWithCache(const std::vector<void *> pointer, const std::vector<int>& token_ids);
-    void insertResidentCache(const std::vector<void *> pointer, const std::vector<int>& token_ids);
+    void freeWithCache(const std::vector<void *>& pointer, const std::vector<int>& token_ids);
+    void insertResidentCache(const std::vector<void *>& pointer, const std::vector<int>& token_ids);
     void insertResidentCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
 
     void setKVBlockValue(int index, ft::BufferPtr& k_value, ft::BufferPtr& v_value);
     void blockCopy(int src_block_index, int dest_block_index);
-    void copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list, const std::vector<int>& src_index, const std::vector<int>& tgt_index);
-    SeqPosition getSeqPosition(const std::vector<int>& block_indice_list, int idx);
-    void        copyKvCacheFromSeqPosition(const SeqPosition& src_seq_position, const SeqPosition& dst_seq_position);
 
     KVCacheBlockAddr convertIndexToAddr(const std::vector<int>& block_indices) const;
     std::vector<int> convertAddrToIndex(const std::vector<void*>& pointers) const;
@@ -94,6 +91,7 @@ private:
     void                                    initKvCache(const CacheConfig& config);
     std::tuple<bool, std::vector<int>>      mallocImpl(int nums);
     std::tuple<bool, std::vector<int>, int> mallocWithCacheImpl(int want_block_nums, const std::vector<int>& token_ids);
+    
     void                                    maybeFreeBlockFromCache(int nums);
     void                                    free(const std::vector<std::vector<int>>& indices);
     void                                    free(const std::vector<int>& indice);
@@ -101,6 +99,10 @@ private:
     void insertIntoCache(const std::vector<std::vector<int>>& block_indices,
                          const std::vector<int>&              token_ids,
                          bool                                 is_resident);
+
+    void copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list, const std::vector<int>& src_index, const std::vector<int>& tgt_index);
+    SeqPosition getSeqPosition(const std::vector<int>& block_indice_list, int idx);
+    void        copyKvCacheFromSeqPosition(const SeqPosition& src_seq_position, const SeqPosition& dst_seq_position);
 
 private:
     CacheConfig     config_;
