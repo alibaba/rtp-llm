@@ -18,7 +18,6 @@ using namespace fastertransformer;
 namespace rtp_llm {
 
 class CacheConfigCreatorTest: public DeviceTestBase {
-protected:
 };
 
 TEST_F(CacheConfigCreatorTest, testGetKVCacheMemorySize) {

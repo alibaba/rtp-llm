@@ -8,13 +8,12 @@ namespace ft = fastertransformer;
 namespace rtp_llm {
 
 struct CacheConfig {
-    uint         layer_num;
-    uint         block_nums;
-    uint         local_head_num_kv;
-    uint         size_per_head;
-    uint         seq_size_per_block;
+    uint32_t     layer_num;
+    uint32_t     block_nums;
+    uint32_t     local_head_num_kv;
+    uint32_t     size_per_head;
+    uint32_t     seq_size_per_block;
     ft::DataType dtype;
-
     size_t       block_size;
     size_t       kv_block_size;
     size_t       kv_scale_block_size;
@@ -42,7 +41,7 @@ struct CacheConfig {
             scale_size = 4;
         }
 
-        block_size = (layer_num * local_head_num_kv * (size_per_head + scale_size) * dtype_size * seq_size_per_block);
+        block_size = layer_num * local_head_num_kv * (size_per_head + scale_size) * seq_size_per_block * dtype_size;
         kv_block_size = layer_num * local_head_num_kv * size_per_head * seq_size_per_block * dtype_size;
         kv_scale_block_size = layer_num * local_head_num_kv * scale_size * seq_size_per_block * dtype_size;
 

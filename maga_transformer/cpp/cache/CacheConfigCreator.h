@@ -2,11 +2,7 @@
 
 #include "maga_transformer/cpp/cache/CacheConfig.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
-#include "src/fastertransformer/core/Types.h"
-#include <sstream>
-#include <string>
 
-namespace ft = fastertransformer;
 namespace rtp_llm {
 
 class CacheConfigCreator {
