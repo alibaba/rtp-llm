@@ -135,16 +135,16 @@ struct MOEParallelismConfig {
 
 class CutlassMoeFCRunnerInterface {
 public:
-    virtual ~CutlassMoeFCRunnerInterface()                                                     = default;
+    virtual ~CutlassMoeFCRunnerInterface()                                                      = default;
     virtual size_t getWorkspaceSize(const int                         num_rows,
                                     const int                         hidden_size,
                                     const int                         fc1_output_size,
                                     const int                         num_experts,
                                     const int                         k,
                                     fastertransformer::ActivationType activation_type,
-                                    MOEParallelismConfig              parallelism_config) const             = 0;
-    virtual void   setTactic(std::optional<cutlass_extensions::CutlassGemmConfig> gemm_config) = 0;
-    virtual std::vector<cutlass_extensions::CutlassGemmConfig> getTactics()                    = 0;
+                                    MOEParallelismConfig              parallelism_config) const = 0;
+    virtual void   setTactic(std::optional<cutlass_extensions::CutlassGemmConfig> gemm_config)  = 0;
+    virtual std::vector<cutlass_extensions::CutlassGemmConfig> getTactics()                     = 0;
 
     virtual void runMoe(const void*                       input_activations,
                         const float*                      gating_output,
@@ -240,6 +240,7 @@ private:
                                                      const int    num_experts,
                                                      int64_t*     total_rows_before_expert,
                                                      cudaStream_t stream);
+                                                     
     std::vector<size_t> getWorkspaceBufferSizes(const int                         num_rows,
                                                 const int                         hidden_size,
                                                 const int                         inter_size,
@@ -247,6 +248,7 @@ private:
                                                 const int                         num_experts_per_node,
                                                 const int                         k,
                                                 fastertransformer::ActivationType activation_type) const;
+
     void                configureWsPtrs(char*                             ws_ptr,
                                         const int                         num_rows,
                                         const int                         hidden_size,
@@ -311,6 +313,7 @@ public:
                 const int                         inter_size,
                 const int                         num_experts,
                 const int                         k,
+                const bool                        normalize_expert_scale,
                 char*                             workspace_ptr,
                 void*                             final_output,
                 void*                             fc2_result,
