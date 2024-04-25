@@ -583,7 +583,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                 h_token_num,
                 hidden_units,
                 nullptr,
-                ffn_intermediate_dynamic_scale_, 
+                ffn_intermediate_dynamic_scale_,
                 reinterpret_cast<int8_t*>(normed_self_attn_output_),
                 stream_);
         }
@@ -639,7 +639,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         size_t    moe_k = params_.moe_k_;
         ffn_output_tensors.insert("ffn_output",
                                   Tensor{MEMORY_GPU, activation_out_type, {h_token_num, hidden_units}, ffn_output_ptr});
-        bool use_moe_instead_ffn = params_.moe_style_ != 2 && use_moe;
+        bool use_moe_instead_ffn = params_.moe_style_ == 1;
         if (use_moe_instead_ffn) {
             ffn_output_tensors.insert(
                 "fc2_result",
@@ -652,12 +652,13 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             ffn_output_tensors.insert("expert_for_source_row",
                                       Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expert_for_source_row_});
         }
-        if (use_moe_instead_ffn){
-            ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->partial_moe_weights, use_moe_instead_ffn);
-        }
-        else {
-            ffn_layer_->forward(&ffn_output_tensors, &ffn_input_tensors, &layer_weight->ffn_weights, use_moe_instead_ffn);
-        }
+
+        ffn_layer_->forward(&ffn_output_tensors, 
+                            &ffn_input_tensors,
+                            use_moe_instead_ffn
+                                ? &layer_weight->partial_moe_weights
+                                : &layer_weight->ffn_weights,
+                            use_moe_instead_ffn);
 
         print_bsd(l, "post ffn", ffn_output_ptr, 1, h_token_num, hidden_units);
 

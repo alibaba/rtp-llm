@@ -56,7 +56,7 @@ private:
 
     void allocateBuffer() override;
     void freeBuffer() override;
-    void allocateBuffer(size_t token_num, int moe_k = 0, bool use_moe = false);
+    void allocateBuffer(size_t token_num, bool use_moe = false);
 
 protected:
     T*     inter_buf_        = nullptr;

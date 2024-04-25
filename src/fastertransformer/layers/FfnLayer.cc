@@ -24,7 +24,7 @@ namespace fastertransformer {
 template<typename T>
 void FfnLayer<T>::preAllocate() {
     if (max_token_num_ > 0) {
-        allocateBuffer(max_token_num_, 1, false);
+        allocateBuffer(max_token_num_, false);
     }
 }
 
@@ -57,7 +57,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     FT_CHECK(input_tensors->size() >= 1 && input_tensors->size() <= 9);
     FT_CHECK(output_tensors->size() >= 1 || output_tensors->size() <= 4);
 
-    allocateBuffer(input_tensors->at("ffn_input").shape()[0], moe_k_, use_moe);
+    allocateBuffer(input_tensors->at("ffn_input").shape()[0], use_moe);
 
     const int m             = input_tensors->at("ffn_input").shape()[0];
     T*        output_tensor = output_tensors->at("ffn_output").getPtr<T>();
@@ -445,15 +445,15 @@ void FfnLayer<T>::allocateBuffer() {
 }
 
 template<typename T>
-void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe) {
+void FfnLayer<T>::allocateBuffer(size_t token_num, bool use_moe) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (use_moe) {
         moe_gates_buf_ =
             (float*)allocator_->reMalloc(moe_gates_buf_, sizeof(float) * pad_to_multiple_of_16(token_num * expert_num_), false);
-        shared_gating_scale_buf_ =  (T*)allocator_->reMalloc(shared_gating_scale_buf_, sizeof(T) * token_num, false);
         size_t moe_workspace_size = moe_plugin_->getWorkspaceSize(token_num);
         moe_fc_workspace_         = (char*)allocator_->reMalloc(moe_fc_workspace_, moe_workspace_size, false);
     } else {
+        shared_gating_scale_buf_ =  (T*)allocator_->reMalloc(shared_gating_scale_buf_, sizeof(T) * token_num, false);
         const auto type_size = sizeof(T);
         inter_buf_ =
             (T*)allocator_->reMalloc(inter_buf_, type_size * token_num * inter_padding_size_ + token_num * 4, false);
@@ -464,6 +464,7 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, int moe_k, bool use_moe) {
         inter_buf_normed_ = (T*)(allocator_->reMalloc(
             inter_buf_normed_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, inter_size_ != inter_padding_size_));
     }
+
     if(quant_algo_.smoothQuantInt8()){
         ffn_dynamic_scale_2_ = (float*)(allocator_->reMalloc(ffn_dynamic_scale_2_, sizeof(float)* token_num, false));
     }
