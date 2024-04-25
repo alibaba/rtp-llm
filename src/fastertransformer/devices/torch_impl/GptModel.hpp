@@ -9,20 +9,29 @@ namespace fastertransformer {
 torch::Tensor create_context_mask(const std::vector<int32_t>& input_lengths, bool is_causal = true) {
     int32_t batch_size = input_lengths.size();
     int32_t max_input_length = *std::max_element(input_lengths.begin(), input_lengths.end());
-    // torch::Tensor attention_mask = torch::ones({max_input_length, max_input_length}, torch::dtype(torch::kBool));
-    // if (is_causal) {
-    //     attention_mask = attention_mask.tril();
-    // }
-    // attention_mask = attention_mask.unsqueeze(0).repeat({batch_size, 1, 1});
-    // for (int32_t b = 0; b < batch_size; ++b) {
-    //     int32_t input_length = input_lengths[b];
-    //     attention_mask[b].slice(0, input_length, max_input_length) = 0;
-    //     if (!is_causal) {
-    //         attention_mask[b].slice(1, 0, input_length) = 0;
-    //     }
-    // }
-    // return attention_mask;
-    return torch::zeros({max_input_length, max_input_length}).unsqueeze(0).repeat({batch_size, 1, 1});
+    torch::Tensor attention_mask = torch::ones({max_input_length, max_input_length}, torch::dtype(torch::kBool));
+    if (is_causal) {
+        attention_mask = attention_mask.tril();
+    }
+    attention_mask = attention_mask.unsqueeze(0).repeat({batch_size, 1, 1});
+    for (int32_t b = 0; b < batch_size; ++b) {
+        int32_t input_length = input_lengths[b];
+        attention_mask[b].slice(0, input_length, max_input_length) = 0;
+        if (!is_causal) {
+            attention_mask[b].slice(1, 0, input_length) = 0;
+        }
+    }
+    return attention_mask;
+}
+
+torch::Tensor create_position_ids(const std::vector<int32_t>& input_lengths) {
+    std::vector<torch::Tensor> tensors;
+    for (int32_t i = 0; i < input_lengths.size(); ++i) {
+        int32_t input_length = input_lengths[i];
+        torch::Tensor position_ids = torch::arange(input_length, torch::kInt32);
+        tensors.push_back(position_ids);
+    }
+    return torch::concat(tensors, 0);
 }
 
 torch::Tensor rotate_half(const torch::Tensor& x) {
@@ -39,12 +48,10 @@ std::tuple<torch::Tensor, torch::Tensor> apply_rotary_pos_emb(
         const torch::Tensor& position_ids,
         int64_t unsqueeze_dim = 1)
 {
-    auto cos_pos = (position_ids.defined() ?
-                    cos.index_select(/*dim=*/ 0, position_ids) :
-                    cos.unsqueeze(0)).unsqueeze(unsqueeze_dim);
-    auto sin_pos = (position_ids.defined() ?
-                    sin.index_select(/*dim=*/ 0, position_ids) :
-                    sin.unsqueeze(0)).unsqueeze(unsqueeze_dim);
+    auto cos_pos = (position_ids.defined() ? cos.index_select(/*dim=*/ 0, position_ids) : cos)
+                    .unsqueeze(0).unsqueeze(unsqueeze_dim);
+    auto sin_pos = (position_ids.defined() ? sin.index_select(/*dim=*/ 0, position_ids) : sin)
+                    .unsqueeze(0).unsqueeze(unsqueeze_dim);
 
     auto q_rot_half = rotate_half(q);
     auto k_rot_half = rotate_half(k);
@@ -102,6 +109,47 @@ torch::Tensor repeat_kv(torch::Tensor hidden_states, int n_rep) {
     return hidden_states.reshape({batch, num_key_value_heads * n_rep, slen, head_dim});
 }
 
+/*
+    This function merges rtp-llm mask tensor into pytroch gpt style mask tensor
+    python equivalent code:
+    ``` python
+    mask = torch.block_diag(*torch.unbind(mask, 0))
+    mask = mask[mask.sum(dim=1)!= 0][:, mask.sum(dim=0)!= 0].unsqueeze(0)
+    ```
+    Args:
+        mask: torch.Tensor, shape [batch_size, max_seq_len, max_seq_len]
+    Returns:
+        torch.Tensor, shape [1, h_token_num, h_token_num]
+    Example:
+        input:
+            tensor([[[1., 0., 0., 0.],
+                    [1., 1., 0., 0.],
+                    [0., 0., 0., 0.],
+                    [0., 0., 0., 0.]],
+
+                    [[1., 0., 0., 0.],
+                    [1., 1., 0., 0.],
+                    [1., 1., 1., 0.],
+                    [1., 1., 1., 1.]]])
+        output:
+            tensor([[[1., 0., 0., 0., 0., 0.],
+            [1., 1., 0., 0., 0., 0.],
+            [0., 0., 1., 0., 0., 0.],
+            [0., 0., 1., 1., 0., 0.],
+            [0., 0., 1., 1., 1., 0.],
+            [0., 0., 1., 1., 1., 1.]]])
+*/
+torch::Tensor merge_mask(const torch::Tensor& mask) {
+    auto mask_diag = torch::block_diag(torch::unbind(mask, 0));
+    auto row_sum = mask_diag.sum(1);
+    auto col_sum = mask_diag.sum(0);
+    auto row_mask = (row_sum!= 0);
+    auto col_mask = (col_sum!= 0);
+    auto ret_mask = mask_diag.index_select(0, row_mask.nonzero().squeeze(1).to(torch::kInt32))
+                             .index_select(1, col_mask.nonzero().squeeze(1).to(torch::kInt32)).unsqueeze(0);
+    return ret_mask;
+}
+
 class GptAttentionImpl : public torch::nn::Module {
 public:
     GptAttentionImpl(const AttentionConfigs& config)
@@ -125,6 +173,7 @@ public:
     {
         auto bsz = hidden_states.size(0);
         auto q_len = hidden_states.size(1);
+        std::cout << "hidden: " << hidden_states << std::endl;
 
         auto query_states = q_proj->forward(hidden_states);
         auto key_states = k_proj->forward(hidden_states);
@@ -144,6 +193,13 @@ public:
 
         auto attn_weights = torch::matmul(query_states, key_states.transpose(2, 3)) / sqrtf(head_dim * 1.0f);
         if (attention_mask.defined()) {
+            attention_mask = merge_mask(attention_mask);
+            // NOTE: the definition of mask is different in transformers and rtp_llm
+            // in transformers, attention_mask is bias added to the attention weights
+            // in rtp_llm, attention_mask is a binary value with 0s in the positions to be masked
+            // this line of code transforms the rtp_llm mask to the transformers mask
+            attention_mask = (1 - attention_mask) * -10000.0f;
+            std::cout << "use attention mask: " << attention_mask << std::endl;
             attn_weights = attn_weights + attention_mask;
         }
 

@@ -56,7 +56,7 @@ BufferPtr AttentionLayerTest<T>::allocateKVBlocks(const AttentionConfigs& attent
                                                 const std::vector<int32_t>& sequence_lengths) {
     const auto max_seq_len = *std::max_element(input_lengths.begin(), input_lengths.end());
     const auto batch_layer_kv_block_num =
-        ((max_seq_len / attention_conf.tokens_per_block) + 1) * input_lengths.size();
+        ((max_seq_len / attention_conf.tokens_per_block) + 2) * input_lengths.size();
     const auto batch_size = input_lengths.size();
     const auto num_layers = 1;
 
@@ -132,6 +132,7 @@ void AttentionLayerTest<T>::testAttentionLayer(const AttentionConfigs& attention
     auto common_inputs = model_->prepareAttentionInputs(model_inputs);
     auto layer_cache_blocks = (*model_inputs.kv_cache_blocks)[0];
     common_inputs.kv_cache_blocks = layer_cache_blocks;
+    printBufferData(*model_inputs.kv_cache_blocks, "kv_cache_blocks");
 
     // 2. compute reference implementation result
     GptAttention gpt_attention(attention_conf);
@@ -145,8 +146,10 @@ void AttentionLayerTest<T>::testAttentionLayer(const AttentionConfigs& attention
     torch::nn::init::zeros_(gpt_attention->v_proj->bias);
     torch::nn::init::zeros_(gpt_attention->o_proj->bias);
 
-    auto torch_output = gpt_attention->forward(input_tensor.unsqueeze(0), mask_tensor)
-                                    .reshape({-1, (int64_t)hidden_size});
+    auto position_ids = create_position_ids(input_lengths);
+    auto torch_output = gpt_attention->forward(input_tensor.unsqueeze(0), mask_tensor, position_ids)
+                                     .reshape({-1, (int64_t)hidden_size});
+    std::cout << "torch output: " << torch_output.sizes() << std::endl;
 
     // 3. compute kernel result and compare
     auto attention_weights = getAttentionWeights(gpt_attention);
@@ -158,7 +161,7 @@ void AttentionLayerTest<T>::testAttentionLayer(const AttentionConfigs& attention
     };
     auto attn_output = device_->attentionLayer(params);
     auto output_tensor = bufferToTensor(*attn_output.hidden_states);
-    assertTensorClose(output_tensor, torch_output, 1e-3, 1e-1);
+    assertTensorClose(output_tensor, torch_output, 1e-3, 1);
 }
 
 class AttentionLayerTestFp16 : public AttentionLayerTest<half> {};
@@ -176,11 +179,18 @@ TEST_F(AttentionLayerTestFp16, testSimpleContextAttention) {
     attention_conf.rope_config.embedding_base = 1000000;
 
     const size_t layer_num = 2;
-    const size_t block_num = 16;
+    const size_t block_num = 1024;
     CacheConfig cache_conf(
         layer_num, block_num, attention_conf.kv_head_num, attention_conf.size_per_head,
         attention_conf.tokens_per_block, getTensorType<TestType>());
     cache_manager_ = std::make_shared<CacheManager>(cache_conf, device_);
+    testAttentionLayer(attention_conf, {5}, {});
+
+    attention_conf.head_num = 16;
+    attention_conf.kv_head_num = 16;
+    attention_conf.size_per_head = 64;
+    attention_conf.hidden_size = 1024;
+    attention_conf.rope_config.embedding_dim = attention_conf.size_per_head;
     testAttentionLayer(attention_conf, {3}, {});
 }
 
