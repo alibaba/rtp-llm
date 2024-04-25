@@ -42,9 +42,9 @@ public:
     using MOEExpertScaleNormalizationMode = tensorrt_llm::kernels::MOEExpertScaleNormalizationMode;
 
     MixtureOfExpertsPlugin() = delete;
-    MixtureOfExpertsPlugin(int number_of_experts, int top_k, int expert_hidden_size, int expert_inter_size,
-        fastertransformer::ActivationType activation_type, nvinfer1::DataType type, nvinfer1::DataType weight_type,
-        MOEExpertScaleNormalizationMode normalization_mode);
+    MixtureOfExpertsPlugin(int number_of_experts, int top_k, bool normalize_expert_scale, int expert_hidden_size, 
+        int expert_inter_size, fastertransformer::ActivationType activation_type, nvinfer1::DataType type, 
+        nvinfer1::DataType weight_type, MOEExpertScaleNormalizationMode normalization_mode);
 
     void init();
 
@@ -79,6 +79,7 @@ private:
     int mK{};
     int mExpertHiddenSize{};
     int mExpertInterSize{};
+    bool mNormalizeExpertScale = false;
     fastertransformer::ActivationType mActivationType;
     nvinfer1::DataType mType{};
     nvinfer1::DataType mWeightType{};

@@ -45,6 +45,7 @@ private:
     size_t expert_num_    = 0;
     size_t moe_k_         = 0;
     size_t moe_style_     = 0;
+    bool   moe_normalize_expert_scale_ = false;
 
     // calculated data
     size_t hidden_units_ = 0;
@@ -109,6 +110,7 @@ public:
              size_t               hidden_units,
              size_t               expert_num,
              size_t               moe_k,
+             bool                 moe_normalize_expert_scale,
              size_t               moe_style,
              size_t               inter_size,
              size_t               inter_padding_size,

@@ -14,6 +14,7 @@ cc_library(
         "//src/fastertransformer/cuda:cuda",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
+        "//src/fastertransformer/kernels:kernels",
     ],
     # include_prefix = "src",
     copts = copts(),

@@ -37,6 +37,7 @@ public:
                            size_t                              hidden_units,
                            size_t                              expert_num,
                            size_t                              moe_k,
+                           bool                                moe_normalize_expert_scales,
                            size_t                              moe_style,
                            size_t                              inter_size,
                            size_t                              inter_padding_size,

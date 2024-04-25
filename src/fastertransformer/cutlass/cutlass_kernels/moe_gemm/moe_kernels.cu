@@ -35,6 +35,7 @@
 #include "moe_kernels.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/utils/activation_types.h"
+#include "src/fastertransformer/kernels/l1norm_kernels.h"
 
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
@@ -982,6 +983,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void*          inpu
                                                        const int            inter_size,
                                                        const int            num_experts,
                                                        const int            k,
+                                                       const bool           normalize_expert_scale,
                                                        char*                workspace_ptr,
                                                        void*                final_output_void,
                                                        void*                fc2_result_void,
@@ -1054,6 +1056,10 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void*          inpu
                                     end_expert,
                                     stream);
 
+    if (normalize_expert_scale) {
+        ft::invokeGeneralL1Norm(expert_scales, expert_scales, 0.0f, num_rows, k);
+    }
+    
     sync_check_cuda_error();
 
     sorter_.updateNumExperts(num_experts);

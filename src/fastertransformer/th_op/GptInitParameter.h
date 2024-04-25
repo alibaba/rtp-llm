@@ -89,13 +89,14 @@ public:
     std::string weights_data_type_ = "fp16";
     std::string data_type_         = "fp16";
 
-    int64_t              max_seq_len_     = 0;
-    int64_t              vocab_size_      = 0;
-    int64_t              type_vocab_size_ = 0;
-    int64_t              expert_num_      = 0;
-    int64_t              moe_k_           = 0;
-    int64_t              moe_style_       = 0; // 0 for no moe; 1 for all layer moe; 2 for partial layer moe
-    std::vector<int64_t> moe_layer_index_ = {};
+    int64_t              max_seq_len_                = 0;
+    int64_t              vocab_size_                 = 0;
+    int64_t              type_vocab_size_            = 0;
+    int64_t              expert_num_                 = 0;
+    int64_t              moe_k_                      = 0;
+    bool                 moe_normalize_expert_scale_ = false;
+    int64_t              moe_style_                  = 0; // 0 for no moe; 1 for all layer moe; 2 for partial layer moe
+    std::vector<int64_t> moe_layer_index_            = {};
 
     bool has_positional_encoding_    = false;
     bool has_pre_decoder_layernorm_  = false;

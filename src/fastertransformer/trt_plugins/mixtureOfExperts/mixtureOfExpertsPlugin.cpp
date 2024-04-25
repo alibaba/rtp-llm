@@ -25,11 +25,12 @@ using namespace tensorrt_llm::kernels;
 using tensorrt_llm::plugins::MixtureOfExpertsPlugin;
 
 
-MixtureOfExpertsPlugin::MixtureOfExpertsPlugin(int number_of_experts, int top_k, int expert_hidden_size,
-    int expert_inter_size, fastertransformer::ActivationType activation_type, nvinfer1::DataType type,
-    nvinfer1::DataType weight_type, MOEExpertScaleNormalizationMode normalization_mode)
+MixtureOfExpertsPlugin::MixtureOfExpertsPlugin(int number_of_experts, int top_k, bool normalize_expert_scale, 
+    int expert_hidden_size, int expert_inter_size, fastertransformer::ActivationType activation_type, 
+    nvinfer1::DataType type, nvinfer1::DataType weight_type, MOEExpertScaleNormalizationMode normalization_mode)
     : mNumExperts(number_of_experts)
     , mK(top_k)
+    , mNormalizeExpertScale(normalize_expert_scale)
     , mExpertHiddenSize(expert_hidden_size)
     , mExpertInterSize(expert_inter_size)
     , mActivationType(activation_type)
@@ -155,6 +156,7 @@ int MixtureOfExpertsPlugin::enqueue(
         mExpertInterSize,
         mNumExperts, 
         mK, 
+        mNormalizeExpertScale,
         reinterpret_cast<char*>(workspace),
         // Outputs
         final_output,

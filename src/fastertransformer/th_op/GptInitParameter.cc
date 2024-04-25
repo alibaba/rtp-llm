@@ -134,6 +134,7 @@ static auto specialTokensTHS =
     DEF_PROPERTY(num_valid_layer, num_valid_layer_)                                                                    \
     DEF_PROPERTY(expert_num, expert_num_)                                                                              \
     DEF_PROPERTY(moe_k, moe_k_)                                                                                        \
+    DEF_PROPERTY(moe_normalize_expert_scale, moe_normalize_expert_scale_)                                              \
     DEF_PROPERTY(moe_style, moe_style_)                                                                                \
     DEF_PROPERTY(moe_layer_index, moe_layer_index_)                                                                    \
     DEF_PROPERTY(layernorm_eps, layernorm_eps_)                                                                        \
