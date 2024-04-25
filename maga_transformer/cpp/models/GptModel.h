@@ -3,6 +3,7 @@
 #include "maga_transformer/cpp/common/torch_bind.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
+#include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/Weights.h"
 #include <string>
 
@@ -11,13 +12,10 @@ using namespace fastertransformer;
 namespace rtp_llm {
 
 struct GptModelDescription {
+    AttentionConfigs attention_conf;
     ActivationType activation_type;
     NormType       norm_type;
     double         layernorm_eps = 1e-5;
-
-    int64_t rotary_embedding_style = 0;
-    int64_t rotary_embedding_dim   = 0;
-    int64_t rotary_embedding_base  = 10000;
 };
 
 struct GptModelInitParams {
@@ -76,7 +74,6 @@ private:
     DeviceBase* device_;
     const Weights& weights_;
     const GptModelDescription& description_;
-    const AttentionConfigs     attention_configs_;
 };
 
 }  // namespace rtp_llm

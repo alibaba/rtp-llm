@@ -7,8 +7,6 @@
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
 #include "src/fastertransformer/devices/torch_impl/GptModel.hpp"
-#include "maga_transformer/cpp/cache/CacheManager.h"
-#include "maga_transformer/cpp/utils/KvCacheUtils.h"
 
 #define private public
 #include "maga_transformer/cpp/models/GptModel.h"
@@ -29,60 +27,20 @@ public:
         GptModel model({device_, weights, description});
     }
 
-    void testAttentionLayer (const AttentionConfigs& attention_conf,
-                             const std::vector<int32_t>& input_lengths,
-                             const std::vector<int32_t>& sequence_lengths);
-
-    BufferPtr allocateKVBlocks(const AttentionConfigs& attention_conf,
-                                const std::vector<int32_t>& input_lengths,
-                                const std::vector<int32_t>& sequence_lengths);
+    void testAttentionLayer(const CacheConfig& cache_conf,
+                            const AttentionConfigs& attention_conf,
+                            const std::vector<int32_t>& input_lengths,
+                            const std::vector<int32_t>& sequence_lengths);
 
     AttentionLayerWeights getAttentionWeights(const GptAttention& gpt_attention);
 
 protected:
-    CacheManagerPtr cache_manager_;
     std::shared_ptr<GptModel> model_;
-
 };
 
 torch::Tensor fakeAttentionInputs(const int64_t hidden_size, const int64_t token_num) {
     torch::manual_seed(1234);
     return torch::rand({token_num, hidden_size});
-}
-
-template <typename T>
-BufferPtr AttentionLayerTest<T>::allocateKVBlocks(const AttentionConfigs& attention_conf,
-                                                const std::vector<int32_t>& input_lengths,
-                                                const std::vector<int32_t>& sequence_lengths) {
-    const auto max_seq_len = *std::max_element(input_lengths.begin(), input_lengths.end());
-    const auto batch_layer_kv_block_num =
-        ((max_seq_len / attention_conf.tokens_per_block) + 2) * input_lengths.size();
-    const auto batch_size = input_lengths.size();
-    const auto num_layers = 1;
-
-    auto kv_blocks_buf = device_->allocateBuffer({
-        DataType::TYPE_INT64, {num_layers, 2, batch_size, batch_layer_kv_block_num}, AllocationType::HOST
-    });
-    BatchKVCacheBlockAddr batch_kv_cache;
-
-    for (auto i = 0; i < batch_size; i++) {
-        auto [success, kv_cache] = cache_manager_->malloc(batch_layer_kv_block_num);
-        EXPECT_TRUE(success);
-        batch_kv_cache.pushBack(kv_cache);
-    }
-    for (auto i = 0; i < batch_size; i++) {
-        memcpyKvCache(
-            kv_blocks_buf->data<uint64_t>(),
-            batch_kv_cache.k_ptr[i],
-            batch_kv_cache.v_ptr[i],
-            1,
-            kv_blocks_buf->shape().back(),
-            batch_size,
-            i
-        );
-    }
-
-    return move(kv_blocks_buf);
 }
 
 template <typename T>
@@ -102,9 +60,11 @@ AttentionLayerWeights AttentionLayerTest<T>::getAttentionWeights(const GptAttent
 }
 
 template <typename T>
-void AttentionLayerTest<T>::testAttentionLayer(const AttentionConfigs& attention_conf,
-                                            const std::vector<int32_t>& input_lengths,
-                                            const std::vector<int32_t>& sequence_lengths)
+void AttentionLayerTest<T>::testAttentionLayer(
+    const CacheConfig& cache_conf,
+    const AttentionConfigs& attention_conf,
+    const std::vector<int32_t>& input_lengths,
+    const std::vector<int32_t>& sequence_lengths)
 {
     // 1. prepare inputs
     const auto context_token_num = std::accumulate(
@@ -128,7 +88,7 @@ void AttentionLayerTest<T>::testAttentionLayer(const AttentionConfigs& attention
     model_inputs.sequence_lengths = vector2Buffer(sequence_lengths);
     const auto mask_buf = tensorToBuffer(mask_tensor);
     model_inputs.attention_mask = *mask_buf;
-    model_inputs.kv_cache_blocks = allocateKVBlocks(attention_conf, input_lengths, sequence_lengths);
+    model_inputs.kv_cache_blocks = allocateKVBlocks(cache_conf, input_lengths, sequence_lengths);
     auto common_inputs = model_->prepareAttentionInputs(model_inputs);
     auto layer_cache_blocks = (*model_inputs.kv_cache_blocks)[0];
     common_inputs.kv_cache_blocks = layer_cache_blocks;
@@ -183,14 +143,13 @@ TEST_F(AttentionLayerTestFp16, testSimpleContextAttention) {
     CacheConfig cache_conf(
         layer_num, block_num, attention_conf.kv_head_num, attention_conf.size_per_head,
         attention_conf.tokens_per_block, getTensorType<TestType>());
-    cache_manager_ = std::make_shared<CacheManager>(cache_conf, device_);
-    testAttentionLayer(attention_conf, {5}, {});
+    testAttentionLayer(cache_conf, attention_conf, {5}, {});
 
     attention_conf.head_num = 16;
     attention_conf.kv_head_num = 16;
     attention_conf.size_per_head = 64;
     attention_conf.hidden_size = 1024;
     attention_conf.rope_config.embedding_dim = attention_conf.size_per_head;
-    testAttentionLayer(attention_conf, {3}, {});
+    testAttentionLayer(cache_conf, attention_conf, {3}, {});
 }
 

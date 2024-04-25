@@ -12,7 +12,7 @@
 namespace fastertransformer {
 
 void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device) {
-    if (!is_debug_mode()) {
+    if (!isDebugMode()) {
         return;
     }
 

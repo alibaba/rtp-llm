@@ -7,6 +7,7 @@ cc_library(
     ]),
     deps = [
         "@com_google_googletest//:gtest",
+        "//maga_transformer/cpp:cache",
         "//src/fastertransformer/devices:device_utils",
     ],
     visibility = ["//visibility:public"],

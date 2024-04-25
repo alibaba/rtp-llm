@@ -7,6 +7,8 @@
 #include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/cache/CacheManager.h"
+#include "maga_transformer/cpp/utils/KvCacheUtils.h"
 
 #include <numeric>
 #include <stdlib.h>
@@ -232,6 +234,42 @@ protected:
         return std::move(buffer);
     }
 
+    BufferPtr allocateKVBlocks(const rtp_llm::CacheConfig& cache_config,
+                               const std::vector<int32_t>& input_lengths,
+                               const std::vector<int32_t>& sequence_lengths)
+    {
+        cache_manager_ = std::make_shared<rtp_llm::CacheManager>(cache_config, device_);
+        const auto max_seq_len = *std::max_element(input_lengths.begin(), input_lengths.end());
+        const auto batch_layer_kv_block_num =
+            ((max_seq_len / cache_config.seq_size_per_block) + 2) * input_lengths.size();
+        const auto batch_size = input_lengths.size();
+        const auto num_layers = 1;
+
+        auto kv_blocks_buf = device_->allocateBuffer({
+            DataType::TYPE_INT64, {num_layers, 2, batch_size, batch_layer_kv_block_num}, AllocationType::HOST
+        });
+        rtp_llm::BatchKVCacheBlockAddr batch_kv_cache;
+
+        for (auto i = 0; i < batch_size; i++) {
+            auto [success, kv_cache] = cache_manager_->malloc(batch_layer_kv_block_num);
+            EXPECT_TRUE(success);
+            batch_kv_cache.pushBack(kv_cache);
+        }
+        for (auto i = 0; i < batch_size; i++) {
+            rtp_llm::memcpyKvCache(
+                kv_blocks_buf->data<uint64_t>(),
+                batch_kv_cache.k_ptr[i],
+                batch_kv_cache.v_ptr[i],
+                1,
+                kv_blocks_buf->shape().back(),
+                batch_size,
+                i
+            );
+        }
+
+        return move(kv_blocks_buf);
+    }
+
     void assertTensorClose(const torch::Tensor& a, const torch::Tensor& b,
                            double rtol = 0, double atol = 0) {
         auto a_cmp = a;
@@ -269,7 +307,7 @@ protected:
     std::string test_data_path_;
     double rtol_ = 1e-03;
     double atol_ = 1e-03;
-
+    rtp_llm::CacheManagerPtr cache_manager_;
 };
 
 int main(int argc, char** argv) {

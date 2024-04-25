@@ -9,7 +9,6 @@ GptModel::GptModel(const GptModelInitParams& params)
     : device_(params.device)
     , weights_(params.weights)
     , description_(params.description)
-    , attention_configs_(AttentionConfigs({}))
     {};
 
 void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
@@ -121,7 +120,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         auto attn_output = device_->attentionLayer(AttentionLayerParams({
             *hidden,
-            attention_configs_,
+            description_.attention_conf,
             layer.self_attention_weights,
             attention_common_inputs,
         }));
