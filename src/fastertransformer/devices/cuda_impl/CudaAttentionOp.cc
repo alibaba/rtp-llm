@@ -91,10 +91,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         stream_
     );
 
-    printBufferData(*q_output, "q_output: ");
-    printBufferData(*k_output, "k_output: ");
-    printBufferData(*v_output, "v_output: ");
-
     // TODO(lidongjin): Only support float32 gemm output.
     auto qk_output = gemm({*q_output,
                             *k_output,
@@ -118,7 +114,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     printBufferData(*softmax_qk_output, "softmax_qk_output: ");
 
     auto qkv_output = gemm({*softmax_qk_output, *v_output});
-    printBufferData(*qkv_output, "qkv_output: ");
 
     auto &qkv_transpose_output = params.output;
 

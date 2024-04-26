@@ -1,5 +1,6 @@
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 
 using namespace std;
 
@@ -106,6 +107,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     auto attention_common_inputs = prepareAttentionInputs(inputs);
     auto& input_kv_blocks = inputs.kv_cache_blocks;
     auto& input_kv_scales = inputs.kv_cache_scales;
+    RUNTIME_ASSERT_OP_ARG(input_kv_blocks, "kv_cache_blocks is required for GPT model.");
+
+    printBufferData(*hidden, "input_hidden");
 
     // layers
     const auto layer_num = weights_.layers.size();
@@ -120,6 +124,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                 *layer.self_attention_weights.pre_attention_layernorm, norm_eps));
         }
 
+        auto layer_kv_blocks = (*input_kv_blocks)[i];
+        attention_common_inputs.kv_cache_blocks = layer_kv_blocks;
         auto attn_output = device_->attentionLayer(AttentionLayerParams({
             *hidden,
             description_.attention_conf,
@@ -158,6 +164,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         device_->layernorm(LayernormParams(
             *hidden, *hidden, nullopt, norm_type, *(weights_.final_layernorm), norm_eps));
     }
+    printBufferData(*hidden, "final_hidden");
 
     // lm head
     const auto& lm_head = weights_.lm_head;

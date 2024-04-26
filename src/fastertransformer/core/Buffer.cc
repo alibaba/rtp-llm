@@ -103,7 +103,10 @@ Buffer Buffer::operator[](size_t offset) const {
         throw std::runtime_error("Buffer::operator[]: shape must be larger than 1");
     }
     if (offset >= shape()[0]) {
-        throw std::runtime_error("Buffer::operator[]: offset out of range");
+        char msg[4096];
+        sprintf(msg, "Buffer::operator[]: offset [%d] out of range with buffer[%s]",
+                offset, debugString().c_str());
+        throw std::runtime_error(msg);
     }
     auto new_shape = shape_;
     new_shape.erase(new_shape.begin());

@@ -15,6 +15,15 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     const auto &qkv_weight = params.weights.qkv_weight;
     const auto &output_weight = params.weights.output_weight;
 
+    const auto &kv_cache_blocks = params.common.kv_cache_blocks;
+    if (kv_cache_blocks.has_value()) {
+        const auto &shape = kv_cache_blocks.value().get().shape();
+        RUNTIME_ASSERT_OP_ARG(
+            ((shape.size() == 3) && (shape[0] == 2) && (shape[1] == input_lengths.shape()[0])),
+            "kv_cache_blocks shape in attention layer should be [2, batch_size, block_length]"
+            ", but got %s", kv_cache_blocks.value().get().debugString().c_str());
+    }
+
     // typically local_head_num * size_per_head
     const auto qkv_hidden_size = output_weight->kernel->shape()[0];
     // typically local_head_num * size_per_head + 2 * local_head_num_kv * size_per_head
@@ -47,7 +56,6 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         contextAttention({context_qkv, context_output, params.common, params.weights, params.configs});
     }
     printBufferData(*qkv_output, "qkv_output");
-    printBufferData(*(output_weight->kernel), "output_weight");
 
     auto output = gemm({*qkv_output, *(output_weight->kernel)});
 

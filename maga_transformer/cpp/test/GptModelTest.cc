@@ -59,17 +59,13 @@ TEST_F(GptModelTest, testSimple) {
     const auto mask_buf = tensorToBuffer(mask_tensor);
 
     GptModelInputs inputs = {
-        std::move(combo_tokens), std::move(input_lengths), std::move(sequence_lengths),
-        *mask_buf, nullopt, std::move(kv_cache_blocks)
+        std::move(combo_tokens), std::move(input_lengths), std::move(sequence_lengths)
     };
+    inputs.attention_mask = *mask_buf;
+    inputs.kv_cache_blocks = std::move(kv_cache_blocks);
 
-    try {
-        auto outputs = model.forward(inputs);
-        printBufferData(*outputs.logits, "logits");
-    } catch (const exception& e) {
-        cout << e.what() << endl;
-        throw e;
-    }
+    auto outputs = model.forward(inputs);
+    printBufferData(*outputs.logits, "logits");
 }
 
 TEST_F(GptModelTest, testAttentionInputs) {

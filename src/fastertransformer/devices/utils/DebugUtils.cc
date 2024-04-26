@@ -8,7 +8,7 @@
 namespace fastertransformer {
 
 void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device) {
-    if (!isDebugMode()) {
+    if (!enableDebugPrint()) {
         return;
     }
 
