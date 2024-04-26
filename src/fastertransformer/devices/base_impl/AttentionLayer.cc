@@ -33,6 +33,8 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         FT_LOG_WARNING("AttentionLayer bias is not supported yet, ignored");
     }
     const auto qkv = gemm({input, *(qkv_weight->kernel)});
+    printBufferData(input, "qkv input");
+    printBufferData(*(qkv_weight->kernel), "qkv kernel");
     printBufferData(*qkv, "qkv");
 
     const auto generate_batch_size = sequence_lengths.shape()[0];

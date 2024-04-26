@@ -118,10 +118,10 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         auto residual = device_->allocateBuffer({hidden->type(), hidden->shape()}, {});
         device_->copy({*residual, *hidden});
-        if (layer.self_attention_weights.pre_attention_layernorm) {
+        if (layer.pre_layernorm) {
             device_->layernorm(LayernormParams(
                 *hidden, *hidden, nullopt, norm_type,
-                *layer.self_attention_weights.pre_attention_layernorm, norm_eps));
+                *layer.pre_layernorm, norm_eps));
         }
 
         auto layer_kv_blocks = (*input_kv_blocks)[i];
@@ -133,6 +133,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             attention_common_inputs,
         }));
         auto attn_hidden = move(attn_output.hidden_states);
+        printBufferData(*attn_hidden, "layer_" + to_string(i) + "_attn_output");
 
         if (layer.post_layernorm) {
             // attn_hidden = attn_hidden + residual
@@ -145,18 +146,21 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             hidden.swap(attn_hidden);
         }
 
+        printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_input");
         auto ffn_output = device_->ffnLayer(FfnLayerParams({
             *hidden,
             layer.ffn_weights,
             description_.activation_type,
         }));
         hidden.swap(ffn_output.hidden_states);
+        printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_output");
 
         // TODO: maybe move this layernorm to ffn layer
         device_->layernorm(LayernormParams(
             *hidden, *hidden, nullopt,
             norm_type, mayGetRef(layer.post_ffn_layernorm), norm_eps, *residual
         ));
+        printBufferData(*hidden, "layer_" + to_string(i) + "_final_hidden");
     }
 
     // final layernorm

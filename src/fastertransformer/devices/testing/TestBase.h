@@ -21,6 +21,7 @@ class DeviceTestBase : public ::testing::Test {
 public:
     void SetUp() override {
         setenv("FT_DEBUG_LEVEL", "DEBUG", 1);
+        // setenv("FT_DEBUG_PRINT_LEVEL", "DEBUG", 1);
         const auto test_src_dir = getenv("TEST_SRCDIR");
         const auto test_work_space = getenv("TEST_WORKSPACE");
         const auto test_binary = getenv("TEST_BINARY");
@@ -291,8 +292,8 @@ protected:
             std::cout << "atol: " << atol << std::endl;
             std::cout << "a: " << a << std::endl;
             std::cout << "b: " << b << std::endl;
-            std::cout << "cmp diff: " << a_cmp - b_cmp << std::endl;
-            std::cout << "abs diff: " << torch::abs(a_cmp - b_cmp) / torch::abs(a_cmp) << std::endl;
+            std::cout << "abs diff: " << torch::abs(a_cmp - b_cmp) << std::endl;
+            std::cout << "rel diff: " << torch::abs(a_cmp - b_cmp) / torch::abs(a_cmp) << std::endl;
             ASSERT_TRUE(false);
         }
     }
