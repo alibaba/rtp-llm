@@ -28,9 +28,8 @@ class QwenVLImageEmbedding(BaseImageEmbedding):
         self.vit = QWen_VL_ViT(**config)
     
     def image_embedding(self, images: List[Any], device) -> torch.Tensor:
-        with torch.no_grad():
-            images = self.vit.encode(images)
-            assert images.shape[0] == len(images)
+        images = self.vit.encode(images)
+        assert images.shape[0] == len(images)
         return images.to(device=device)
 
 class QWen_VL(QWen, MultiModalMixin):
@@ -183,6 +182,7 @@ class QWen_VL(QWen, MultiModalMixin):
     def input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor]):
         return MultiModalMixin.input_word_embedding(self, inputs, images)
     
+    @torch.no_grad()
     def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
         if len(images) > 0:
             image_features = self.visual.image_embedding(images, self.device)
