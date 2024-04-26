@@ -36,6 +36,8 @@ class EmbeddingModelExecutor(object):
 
     def _post_process(self, batch_input: EmbeddingBatchedInput, hidden_states: torch.Tensor) -> List[EmbeddingOutput]:
         attention_mask = self.model_.create_context_decoder_mask(batch_input.context_lengths_list)
+        if self.model_.post_decoder_layernorm is not None:
+            hidden_states = self.model_.post_decoder_layernorm(hidden_states)
         output = self.post_process_module_.process(batch_input, hidden_states, attention_mask, batch_input.embedding_config)
         return output
 

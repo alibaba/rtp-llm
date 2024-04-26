@@ -230,4 +230,13 @@ class QWenV2(QWen):
         tokenizer.im_end_id = tokenizer.encode('<|im_end|>')[0]
         return tokenizer
 
+class QWenV2Embedding(QWenV2):
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        config = QWenV2._create_config(ckpt_path)
+        config.is_causal = False
+        return config
+
+
 register_model('qwen_2', QWenV2, ["Qwen2ForCausalLM"])
+register_model('qwen_2_embedding', QWenV2Embedding)

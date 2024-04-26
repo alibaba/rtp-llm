@@ -36,7 +36,7 @@ class PostProcessModule(object):
             attention_mask_indexs.append(mask_bias + input_length - 1)
             mask_bias += attention_mask.shape[1]
             hidden_bias += input_length
-        batched_hidden_states = pad_sequence(sliced_hidden_states, batch_first=True, padding_value=self.pad_token_id_)
+        batched_hidden_states = pad_sequence(sliced_hidden_states, batch_first=True)
         batched_input_ids = pad_sequence(sliced_input_ids, batch_first=True, padding_value=self.pad_token_id_)
         batched_attention_mask = attention_mask.reshape(-1, attention_mask.shape[2])[attention_mask_indexs].contiguous()
         return batched_input_ids, batched_hidden_states, batched_attention_mask
