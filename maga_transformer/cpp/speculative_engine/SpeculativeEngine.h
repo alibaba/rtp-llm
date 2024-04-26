@@ -36,7 +36,6 @@ public:
     }
 
 private:
-    // absl::StatusOr<std::list<GenerateStreamPtr>> getTargetStreams(const std::list<GenerateStreamPtr>& streams);
     absl::Status updateDraftProb(const std::list<GenerateStreamPtr>& streams, uint index);
     void loop();
 

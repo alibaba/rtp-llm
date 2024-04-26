@@ -167,6 +167,14 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
     if (not_update_output) {
         return;
     }
+    updateOutput(finished, std::move(hidden_states), std::move(logits), std::move(cum_log_probs), std::move(loss));
+}
+
+void GenerateStream::updateOutput(bool finished,
+                                  optional<ft::BufferPtr> hidden_states,
+                                  optional<ft::BufferPtr> logits,
+                                  optional<ft::BufferPtr> cum_log_probs,
+                                  optional<ft::BufferPtr> loss) {
     size_t output_len = seq_length_ - inputLength();
     generate_output_->output_ids =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)batchSize(), output_len}, ft::AllocationType::HOST}, {});

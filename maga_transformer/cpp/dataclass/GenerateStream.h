@@ -249,6 +249,12 @@ public:
                 std::optional<ft::BufferPtr> loss,
                 bool not_update_output = false);
 
+    void updateOutput(bool finished,
+                      std::optional<ft::BufferPtr> hidden_states,
+                      std::optional<ft::BufferPtr> logits,
+                      std::optional<ft::BufferPtr> cum_log_probs,
+                      std::optional<ft::BufferPtr> loss);
+
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "GenerateStream {"

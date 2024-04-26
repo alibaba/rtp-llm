@@ -70,15 +70,6 @@ absl::Status SpeculativeEngine::enqueue(std::shared_ptr<GenerateStream>& stream)
     return scheduler_->enqueue(stream);
 }
 
-// absl::StatusOr<list<GenerateStreamPtr>> SpeculativeEngine::getTargetStreams(const list<GenerateStreamPtr>& streams)
-// {
-//     list<GenerateStreamPtr> target_streams;
-//     for (auto& stream : target_streams) {
-//         target_streams.emplace_back();
-//     }
-//     return target_streams;
-// }
-
 absl::Status SpeculativeEngine::updateDraftProb(const list<GenerateStreamPtr>& streams, uint index)
 {
     for (auto &stream: streams) {
