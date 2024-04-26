@@ -106,7 +106,7 @@ TEST_F(GptModelTest, testAttentionInputs) {
     Weights weights;
     GptModel model({device_, weights, description});
     GptModelInputs inputs;
-    inputs.kv_cache_blocks = createBuffer<int64_t>({1, 2, 1, 10}, {0}, AllocationType::HOST);
+    inputs.kv_cache_blocks = createBuffer<int64_t>({1, 2, 1, 10}, std::vector<int64_t>(20, 0), AllocationType::HOST);
     inputs.input_lengths = createBuffer<int32_t>({4}, {3, 5, 2, 7}, AllocationType::HOST);
     inputs.sequence_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
     inputs.combo_tokens = createBuffer<int32_t>({17}, std::vector<int32_t>(17, 0), AllocationType::HOST);
