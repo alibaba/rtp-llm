@@ -15,7 +15,7 @@ public:
     }
 
     void* malloc(size_t size, const bool is_set_zero = false);
-    void  free(void** ptr) const;
+    void  free(void** ptr);
     void* reMalloc(void* ptr, size_t size, const bool is_set_zero = false);
     void  memSet(void* ptr, const int val, const size_t size) const;
 

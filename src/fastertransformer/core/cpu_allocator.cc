@@ -7,7 +7,7 @@ void* Allocator<AllocatorType::CPU>::malloc(size_t size, const bool is_set_zero)
     return std::malloc(size);
 }
 
-void  Allocator<AllocatorType::CPU>::free(void** ptr) const {
+void  Allocator<AllocatorType::CPU>::free(void** ptr) {
     std::free(*ptr);
     *ptr = nullptr;
 }
