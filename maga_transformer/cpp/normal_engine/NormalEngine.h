@@ -2,7 +2,6 @@
 
 #include "absl/status/status.h"
 #include "maga_transformer/cpp/engine_base/Engine.h"
-#include "maga_transformer/cpp/batch_stream_processor/BatchStreamProcessor.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
@@ -50,7 +49,6 @@ private:
     std::atomic<bool>                     running_{false};
     std::unique_ptr<Executor>             executor_;
     std::unique_ptr<SchedulerBase>        scheduler_;
-    std::unique_ptr<BatchStreamProcessor> batch_stream_processor_;
     std::shared_ptr<CacheManager>         cache_manager_;
     MagaInitParams                        params_;
 };

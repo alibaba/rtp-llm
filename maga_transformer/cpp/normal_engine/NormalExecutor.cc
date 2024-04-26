@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
-#include "maga_transformer/cpp/batch_stream_processor/NormalBatchStreamProcessor.h"
+#include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
 #include "maga_transformer/cpp/models/GptModel.h"
@@ -45,6 +45,7 @@ ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input
     model_request.kv_cache_blocks     = std::move(model_input.kv_cache_blocks);
     return model_request;
 }
+
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     StreamGroups stream_groups(streams);
     auto         model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);

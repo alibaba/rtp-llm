@@ -4,6 +4,8 @@
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
+#include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
+
 #include <memory>
 namespace rtp_llm {
 
@@ -23,6 +25,9 @@ private:
     ModelRequest generateOldModelRequest(GptModelInputs& model_input);
 
 private:
+    std::unique_ptr<GptModel>             model_;
+    std::unique_ptr<Sampler>              sampler_;
+    std::unique_ptr<NormalBatchStreamProcessor> batch_stream_processor_;
     std::unique_ptr<ParallelModelWrapper> model_wrapper_;
 };
 

@@ -43,7 +43,7 @@ TEST_F(SamplerTest, testSimple) {
     BufferPtr sequence_lengths = createBuffer<int32_t>({batch_size}, {1, 2, -1, 2, -1}, AllocationType::HOST);
     BufferPtr num_beams = createBuffer<uint64_t>({batch_size}, {1, 1, 1, 1, 1}, AllocationType::HOST);
 
-    BufferPtr cum_log_probs = createBuffer<float>({batch_size}, {-1, -1, -1, -1, -1}, AllocationType::HOST);
+    BufferPtr cum_log_probs = createBuffer<float>({batch_size}, {-1, -1, -1, -1, -1});
     BufferPtr rand_seed = createBuffer<int64_t>({batch_size}, {0, 0, 0, 0, 1}, AllocationType::HOST);
 
     auto kv_blocks = createBuffer<int64_t>({batch_size, 1}, {0, 0, 0, 0, 0}, AllocationType::HOST);

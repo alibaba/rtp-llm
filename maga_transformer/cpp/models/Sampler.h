@@ -30,7 +30,6 @@ public:
     BufferPtr kv_cache_blocks;     // shape: [batch_size * num_beams, block_length], int64 block pointers
     mutable BufferPtr cum_log_probs;       // shape: [batch_size * num_beams]
     mutable BufferPtr index_log_prob;
-    mutable BufferPtr token_id_for_index_prob;
 };
 
 struct SamplerOutput {
@@ -38,7 +37,6 @@ public:
     BufferPtr token_ids;
     BufferPtr cum_log_probs;
     BufferPtr index_log_prob;
-    BufferPtr token_id_for_index_prob;
 };
 
 // Sampler would split logits into appropriate groups (mostly, based on beam size)
@@ -52,12 +50,6 @@ public:
 
 private:
     DeviceBase* device_;
-};
-
-class SpeculativeSampler: public Sampler {
-public:
-    SpeculativeSampler(const SamplerInitParams& params): Sampler(params){};
-    ~SpeculativeSampler(){};
 };
 
 }  // namespace rtp_llm

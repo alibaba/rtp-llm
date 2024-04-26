@@ -153,25 +153,6 @@ cc_library(
 )
 
 cc_library(
-    name = "batch_stream_processor",
-    hdrs = glob([
-        "batch_stream_processor/*.h",
-    ]),
-    srcs = glob([
-        "batch_stream_processor/*.cc",
-    ]),
-    deps = torch_deps() + [
-        ":dataclass",
-        ":models",
-        ":common",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-    ],
-    visibility = ["//visibility:public"]
-)
-
-cc_library(
     name = "engine_base",
     hdrs = glob([
         "engine_base/*.h",
@@ -181,7 +162,6 @@ cc_library(
         ":models",
         ":common",
         ":ptuning",
-        ":batch_stream_processor",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
@@ -204,7 +184,6 @@ cc_library(
         ":common",
         ":ptuning",
         ":model_wrapper",
-        ":batch_stream_processor",
         "//src/fastertransformer/cuda:allocator_cuda",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -229,7 +208,6 @@ cc_library(
         ":model_wrapper",
         ":common",
         ":ptuning",
-        ":batch_stream_processor",
         "//src/fastertransformer/cuda:allocator_cuda",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

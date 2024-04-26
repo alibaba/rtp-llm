@@ -73,7 +73,7 @@ TEST_F(StreamCacheResourceTest, testSimple) {
     ASSERT_EQ(blocks.k_scale_ptr[0][0].size(), 4);
     ASSERT_EQ(blocks.v_scale_ptr[0][0].size(), 4);
 
-    stream.seq_length_ = 7;
+    stream.setSeqLength(7);
     ASSERT_EQ(resource.nextNeedBlockNums(), 0);
     ASSERT_TRUE(resource.incrKVBlock());
     ASSERT_EQ(cache_manager->freeBlockNums(), 0);

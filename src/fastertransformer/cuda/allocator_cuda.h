@@ -1,6 +1,7 @@
 #pragma once
 #include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
+#include <mutex>
 
 namespace fastertransformer{
 
@@ -61,6 +62,7 @@ protected:
 
 protected:
     std::unique_ptr<std::unordered_map<void*, size_t>> pointer_mapping_;
+    std::mutex lock_;
 };
 
 template<>
@@ -70,7 +72,7 @@ public:
     ~Allocator();
 
     void* malloc(size_t size, const bool is_set_zero = false) override;
-    void free(void** ptr) const override;
+    void free(void** ptr) override;
 };
 
 template<>
@@ -84,7 +86,7 @@ public:
     }
 
     void* malloc(size_t size, const bool is_set_zero = false) override;
-    void free(void** ptr) const override;
+    void free(void** ptr) override;
 };
 
 

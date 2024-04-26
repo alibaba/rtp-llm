@@ -33,7 +33,7 @@ public:
     Allocator();
 
     void* malloc(size_t size, const bool is_set_zero = true);
-    void free(void** ptr) const;
+    void free(void** ptr);
 
     virtual ~Allocator();
 

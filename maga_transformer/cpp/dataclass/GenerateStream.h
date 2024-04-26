@@ -37,25 +37,29 @@ public:
     std::vector<int> inputTokens() const;
     std::vector<int> currentExecuteTokens() const;
 
-    int tryReleaseKVBlock(int nums) {
+    virtual int tryReleaseKVBlock(int nums) {
         return stream_cache_resource_.tryReleaseKVBlock(nums);
     }
-    bool initKVBlock() {
+    virtual bool initKVBlock() {
         return stream_cache_resource_.initKVBlock();
     }
-    bool incrKVBlock() {
+    virtual bool incrKVBlock() {
         return stream_cache_resource_.incrKVBlock();
     }
     int nextNeedBlockNums() const {
         return stream_cache_resource_.nextNeedBlockNums();
     }
 
+    std::shared_ptr<GenerateInput> generateInput() const;
+
+    size_t maxSeqLen() const;
+
     void setNeedReleaseResource(bool need_release_resource) {
         need_release_resource_ = need_release_resource;
     }
 
     // TODO(xinfei.sxf) lora resource?
-    void releaseResource() {
+    virtual void releaseResource() {
         if (!need_release_resource_) {
             stream_cache_resource_.releaseResource();
         }
@@ -232,13 +236,18 @@ public:
         return seq_length_ >= std::min(max_seq_len_, generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
     }
 
+    void setSeqLength(uint seq_length) {
+        seq_length_ = seq_length;
+    };
+
     void update(ft::BufferPtr& new_tokens,
                 int num_new_tokens,
                 bool finished,
-                std::optional<ft::BufferPtr>& hidden_states,
-                std::optional<ft::BufferPtr>& logits,
-                std::optional<ft::BufferPtr>& cum_log_probs,
-                std::optional<ft::BufferPtr>& loss);
+                std::optional<ft::BufferPtr> hidden_states,
+                std::optional<ft::BufferPtr> logits,
+                std::optional<ft::BufferPtr> cum_log_probs,
+                std::optional<ft::BufferPtr> loss,
+                bool not_update_output = false);
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -253,26 +262,27 @@ public:
         return debug_string.str();
     }
 
-private:
+protected:
+    ft::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;
     std::shared_ptr<GenerateOutput>     generate_output_;
     SynchronizedQueue<GenerateOutput>   generate_outputs_;
     GenerateStatus                      generate_status_;
     std::vector<GenerateStatus>         sub_generate_status_;
-
     int                                 max_seq_len_;
     int                                 seq_length_;
-    int                                 reuse_length_ = 0;
     ft::BufferPtr                       complete_token_ids_;
     int64_t                             begin_time_;
-    size_t                              batch_size_ = 1;
-    bool                                done_;
-    bool                                cancelled_;
     std::mutex                          output_mutex_;
     std::condition_variable             update_cv_;
-    bool                                released_;
-    bool                                need_release_resource_;
     StreamCacheResource                 stream_cache_resource_;
+    size_t                              batch_size_            = 1;
+    int                                 reuse_length_          = 0;
+    bool                                done_                  = false;
+    bool                                cancelled_             = false;
+    bool                                released_              = false;
+    bool                                need_release_resource_ = false;
+
 
     friend class StreamCacheResource;
 };

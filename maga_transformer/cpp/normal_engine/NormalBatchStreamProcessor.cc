@@ -1,4 +1,4 @@
-#include "maga_transformer/cpp/batch_stream_processor/NormalBatchStreamProcessor.h"
+#include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "maga_transformer/cpp/utils/KvCacheUtils.h"
@@ -102,7 +102,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         }
         batch_idx += 1;
     }
-    RETURN_IF_STATUS_ERROR(createAttentionMask(model_input));
+    // RETURN_IF_STATUS_ERROR(createAttentionMask(model_input));
     return model_input;
 }
 
@@ -147,7 +147,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     sampler_inputs.top_p      = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.temperature = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.num_beams  = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.cum_log_probs  = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.cum_log_probs  = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}}, {});
 
 
     int32_t* top_k            = sampler_inputs.top_k->data<int32_t>();
@@ -179,13 +179,12 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
     int batch_idx = 0;
     for (auto& stream : stream_groups.allStreams()) {
         auto          current_batch_size = stream->batchSize();
-        auto          fake_input         = std::optional<ft::BufferPtr>();
         ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)current_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
         for (int i = 0; i < current_batch_size; ++i) {
             memcpy(new_tokens->dataWithOffset<int32_t>(batch_idx * 1), new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1), sizeof(int32_t));
             batch_idx += 1;
         }
-        stream->update(new_tokens, 1, false, fake_input, fake_input, fake_input, fake_input);
+        stream->update(new_tokens, 1, false, nullopt, nullopt, nullopt, nullopt);
 
     }
     return absl::OkStatus();

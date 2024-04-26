@@ -38,12 +38,12 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
     auto query     = QueryConverter::transQuery(&input);
-    auto input_ids = query->generate_input_->input_ids.get();
+    auto input_ids = query->generateInput()->input_ids.get();
     EXPECT_EQ(input_ids->size(), 2);
     ASSERT_EQ(*(int*)(input_ids->data()), 0);
-    ASSERT_EQ(query->generate_input_->lora_id, 2);
-    ASSERT_EQ(query->generate_input_->prefix_length, 3);
-    auto generate_config = query->generate_input_->generate_config;
+    ASSERT_EQ(query->generateInput()->lora_id, 2);
+    ASSERT_EQ(query->generateInput()->prefix_length, 3);
+    auto generate_config = query->generateInput()->generate_config;
     ASSERT_EQ(generate_config->min_new_tokens, 4);
     ASSERT_EQ(generate_config->max_new_tokens, 5);
     ASSERT_EQ(generate_config->num_beams, 1);

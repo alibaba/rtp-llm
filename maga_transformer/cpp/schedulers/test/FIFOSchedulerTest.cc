@@ -96,7 +96,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     ASSERT_EQ(stream->stopReason(), "");
     ASSERT_EQ(cache_manager->freeBlockNums(), 0);
 
-    stream->seq_length_++;
+    stream->setSeqLength(stream->seqLength() + 1);
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
     ASSERT_EQ(streams_status2.value().size(), 0);
@@ -141,8 +141,8 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem2) {
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
     ASSERT_EQ(cache_manager->freeBlockNums(), 0);
 
-    stream1->seq_length_++;
-    stream2->seq_length_++;
+    stream1->setSeqLength(stream1->seqLength() + 1);
+    stream2->setSeqLength(stream2->seqLength() + 1);
 
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());

@@ -38,8 +38,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, int max_s
 
     max_seq_len_        = max_seq_len;
     begin_time_         = TimeUtility::currentTimeInMilliSeconds();
-    auto device         = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
-    complete_token_ids_ = device->allocateBuffer(
+    device_             = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
+    complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)numBeams(), (size_t)max_seq_len}, ft::AllocationType::HOST}, {});
     memcpy(complete_token_ids_->data(), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
     generate_output_ = make_shared<GenerateOutput>();
@@ -98,6 +98,14 @@ int GenerateStream::batchSize() const {
     return batch_size;
 }
 
+size_t GenerateStream::maxSeqLen() const {
+    return max_seq_len_;
+}
+
+std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
+    return generate_input_;
+}
+
 vector<int> GenerateStream::currentExecuteTokens() const {
     // TODO(xinfei.sxf) 在query回退，重运行case下，这个不对
     if (isContextStream()) {
@@ -120,10 +128,11 @@ vector<int> GenerateStream::currentExecuteTokens() const {
 void GenerateStream::update(ft::BufferPtr&           new_tokens,
                             int                      num_new_tokens,
                             bool                     finished,
-                            optional<ft::BufferPtr>& hidden_states,
-                            optional<ft::BufferPtr>& logits,
-                            optional<ft::BufferPtr>& cum_log_probs,
-                            optional<ft::BufferPtr>& loss) {
+                            optional<ft::BufferPtr> hidden_states,
+                            optional<ft::BufferPtr> logits,
+                            optional<ft::BufferPtr> cum_log_probs,
+                            optional<ft::BufferPtr> loss,
+                            bool not_update_output) {
     if (stoppedWithoutLock()) {
         return;
     }
@@ -155,20 +164,21 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
     if (finished) {
         setFinishedWithoutLock();
     }
-    auto device = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
+    if (not_update_output) {
+        return;
+    }
     size_t output_len = seq_length_ - inputLength();
     generate_output_->output_ids =
-        device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)batchSize(), output_len}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)batchSize(), output_len}, ft::AllocationType::HOST}, {});
     for (int i = 0; i < batchSize(); ++i) {
         memcpy(generate_output_->output_ids->view(i, 1).data(), complete_token_ids_->view(i, 1).dataWithOffset<int32_t>(inputLength()), sizeof(int32_t) * output_len);
     }
     if (generate_input_->generate_config->return_logits) {
         if (!generate_input_->generate_config->select_tokens_id.empty()) {
             ft::BufferPtr select_logits =
-                device->allocateBuffer({logits.value()->type(),
-                                        {generate_input_->generate_config->select_tokens_id.size()},
-                                        ft::AllocationType::HOST},
-                                       {});
+                device_->allocateBuffer({logits.value()->type(),
+                                         {generate_input_->generate_config->select_tokens_id.size()},
+                                         ft::AllocationType::HOST});
             ft::bufferIndexSelect<float>(
                 logits.value(), select_logits, generate_input_->generate_config->select_tokens_id);
             generate_output_->logits = std::move(select_logits);

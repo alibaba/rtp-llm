@@ -21,7 +21,7 @@ Allocator<AllocatorType::TH>::~Allocator() {
     pointer_mapping_->clear();
 }
 
-void Allocator<AllocatorType::TH>::free(void** ptr) const {
+void Allocator<AllocatorType::TH>::free(void** ptr) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     void* address = *ptr;
     pointer_mapping_->erase(address);

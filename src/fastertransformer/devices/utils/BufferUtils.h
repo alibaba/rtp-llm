@@ -31,33 +31,6 @@ inline void bufferIndexSelect(BufferPtr& dst, const BufferPtr& src, std::vector<
     }
 }
 
-inline void bufferSliceCopy(BufferPtr& dst, const BufferPtr& src, int dim, int from, int to) {
-    assert(dst->type() == src->type());
-    auto width = src->typeSize();
-    assert(dst->dim() == 2 && src->dim() == 2);
-    // assert(dst->where() == MemoryType::MEMORY_CPU && src->where() == MemoryType::MEMORY_CPU);
-    if (dim == 0) {
-        assert(dst->shape()[1] == src->shape()[1]);
-        assert(dst->shape()[0] >= src->shape()[0]);
-        memcpy(dst->data(), src->data(), src->sizeBytes());
-    } else if (dim == 1) {
-        size_t pre_dims = 1;
-        for (int i = 0; i < dim; ++i) {
-            pre_dims *= dst->shape()[i];
-        }
-        size_t post_dims = src->size() / src->shape()[0];
-
-        auto cp_size = src->sizeBytes() / src->shape()[0];
-        assert(dst->size() / dst->shape()[dim] / pre_dims == post_dims);
-        assert(dst->shape()[dim] == src->shape()[0]);
-        for (int i = from; i < to; ++i) {
-            memcpy((char*)dst->data() + i * dst->sizeBytes() / dst->shape()[0] + from * width,
-                   (char*)src->data() + i * cp_size,
-                   cp_size);
-        }
-    }
-}
-
 template<typename T>
 std::vector<T> buffer2vector(const BufferPtr& src, size_t num) {
     assert(num <= src->size());

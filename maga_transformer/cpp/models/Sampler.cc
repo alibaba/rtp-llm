@@ -34,6 +34,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
         auto sample_tokens = device_->allocateBuffer(
             {input_tokens.type(), {sample_batch_size * current_beam_size, inputs.step}});
+        auto sequence_lengths = device_->allocateBuffer(
+                {inputs.sequence_lengths->type(), inputs.sequence_lengths->shape()});
+        device_->copy({*sequence_lengths, *inputs.sequence_lengths});
         device_->copy({*sample_tokens, input_tokens, 0, from_token_idx, sample_token_batch_size});
         auto transposed_tokens = device_->transpose({*sample_tokens});
         auto sample_logits = inputs.logits->view(from_token_idx, sample_token_batch_size);
@@ -46,7 +49,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
             device_->sampleGreedy({
                 sample_logits,
-                *inputs.sequence_lengths,
+                *sequence_lengths,
                 *transposed_tokens,
                 *inputs.top_k,
                 *inputs.top_p,
@@ -56,8 +59,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 inputs.length_penalty ? (OptionalBufferRef)batch_length_penalty : nullopt,
                 sample_cum_log_probs,
                 nullopt, // output_log_probs
-                inputs.index_log_prob.get() ? (OptionalBufferRef)*inputs.index_log_prob: nullopt,
-                inputs.token_id_for_index_prob.get() ? (OptionalBufferRef)*inputs.token_id_for_index_prob: nullopt
+                inputs.index_log_prob.get() ? (OptionalBufferRef)*inputs.index_log_prob: nullopt
             });
         } else {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
@@ -71,7 +73,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         sample_to_batch_idx = from_batch_idx;
         from_token_idx = sample_to_token_idx;
     } while (from_batch_idx < inputs.batch_size);
-    return SamplerOutput({move(inputs.token_ids), move(inputs.cum_log_probs), move(inputs.index_log_prob), move(inputs.token_id_for_index_prob)});
+    return SamplerOutput({move(inputs.token_ids), move(inputs.cum_log_probs), move(inputs.index_log_prob)});
 }
 
 } // namespace rtp_llm

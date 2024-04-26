@@ -1,6 +1,6 @@
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
-#include "maga_transformer/cpp/batch_stream_processor/NormalBatchStreamProcessor.h"
+#include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 #include "src/fastertransformer/core/Types.h"
@@ -25,7 +25,6 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
                                                params.gpt_init_parameter->size_per_head_,
                                                params.gpt_init_parameter->seq_size_per_block_,
                                                ft::DataType::TYPE_FP16);
-    ncclComm_t                    nccl_op;
     ft::DeviceBase*               device        = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     cache_manager_ = make_shared<CacheManager>(cache_config, device);
     scheduler_.reset(new FIFOScheduler(params, cache_manager_));

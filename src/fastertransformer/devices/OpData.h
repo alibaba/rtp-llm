@@ -322,7 +322,6 @@ struct GreedyParams {
     OptionalBufferRef cum_log_probs;
     OptionalBufferRef output_log_probs;
     OptionalBufferRef output_index_probs;
-    OptionalBufferRef token_id_for_index_prob;
 };
 
 struct BeamSearchParams {

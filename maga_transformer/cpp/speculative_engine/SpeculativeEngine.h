@@ -8,7 +8,6 @@
 #include "torch/all.h"
 #include "absl/status/status.h"
 #include "maga_transformer/cpp/engine_base/Engine.h"
-#include "maga_transformer/cpp/batch_stream_processor/BatchStreamProcessor.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
@@ -37,8 +36,8 @@ public:
     }
 
 private:
-    absl::StatusOr<std::list<GenerateStreamPtr>>
-         generateDraftStreams(const std::list<GenerateStreamPtr>& target_streams);
+    // absl::StatusOr<std::list<GenerateStreamPtr>> getTargetStreams(const std::list<GenerateStreamPtr>& streams);
+    absl::Status updateDraftProb(const std::list<GenerateStreamPtr>& streams, uint index);
     void loop();
 
 private:
@@ -46,7 +45,6 @@ private:
     std::atomic<bool>                     running_;
     std::unique_ptr<Executor>             draft_executor_;
     std::unique_ptr<Executor>             target_executor_;
-    std::unique_ptr<BatchStreamProcessor> batch_stream_processor_;
     std::unique_ptr<SchedulerBase>        scheduler_;
     std::shared_ptr<CacheManager>         draft_cache_manager_;
     std::shared_ptr<CacheManager>         target_cache_manager_;
