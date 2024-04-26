@@ -5,10 +5,6 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 
-#ifdef GOOGLE_CUDA
-#include <cuda_runtime.h>
-#endif
-
 namespace fastertransformer {
 
 void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device) {
@@ -16,13 +12,10 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
         return;
     }
 
-#ifdef GOOGLE_CUDA
-    cudaDeviceSynchronize();
-#endif
-
     if (!device) {
         device = DeviceFactory::getDefaultDevice();
     }
+    device->syncAndCheck();
 
     auto host_buffer = device->allocateBuffer(
         {buffer.type(), buffer.shape(), AllocationType::HOST}

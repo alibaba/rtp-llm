@@ -65,8 +65,8 @@ AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inp
     RUNTIME_ASSERT_OP_ARG(
         (cu_seqlens_data[context_batch_size] == inputs.combo_tokens->shape()[0]),
         "cu_seqlens is not consistent with combo_tokens.");
-    // checkKvBlocksShape(inputs.kv_cache_blocks);
-    // checkKvBlocksShape(inputs.kv_cache_scales);
+    checkKvBlocksShape(inputs.kv_cache_blocks);
+    checkKvBlocksShape(inputs.kv_cache_scales);
 
     AttentionCommonInputs attention_inputs({
         *inputs.input_lengths,
@@ -114,9 +114,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         auto residual = device_->allocateBuffer({hidden->type(), hidden->shape()}, {});
         device_->copy({*residual, *hidden});
-        device_->layernorm(LayernormParams(
-            *hidden, *hidden, nullopt, norm_type,
-            mayGetRef(layer.self_attention_weights.pre_attention_layernorm), norm_eps));
+        if (layer.self_attention_weights.pre_attention_layernorm) {
+            device_->layernorm(LayernormParams(
+                *hidden, *hidden, nullopt, norm_type,
+                *layer.self_attention_weights.pre_attention_layernorm, norm_eps));
+        }
 
         auto attn_output = device_->attentionLayer(AttentionLayerParams({
             *hidden,

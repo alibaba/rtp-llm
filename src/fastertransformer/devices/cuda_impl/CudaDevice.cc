@@ -19,7 +19,7 @@ CudaDevice::CudaDevice() : DeviceBase(), device_id_(getDevice()) {
     cublas_mm_wrapper_.reset(new cublasMMWrapper(
         cublas_handle_, cublaslt_handle_, stream_, cublas_algo_map_.get(),
         &cublas_wrapper_mutex_, allocator_.get()));
-    
+
     cublas_mm_wrapper_->setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);
 }
 
@@ -28,6 +28,11 @@ CudaDevice::~CudaDevice() {
     cudaStreamDestroy(stream_);
     cublasDestroy(cublas_handle_);
     cublasLtDestroy(cublaslt_handle_);
+}
+
+void CudaDevice::syncAndCheck() {
+    cudaDeviceSynchronize();
+    sync_check_cuda_error();
 }
 
 RTP_LLM_REGISTER_DEVICE(Cuda);

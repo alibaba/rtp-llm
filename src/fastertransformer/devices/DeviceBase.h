@@ -13,6 +13,7 @@ public:
     std::unique_ptr<Buffer> allocateBuffer(const BufferParams& params, const BufferHints& hints = {});
     std::unique_ptr<Buffer> allocateBufferLike(const Buffer& buffer, const BufferHints& hints = {});
     virtual std::string type() const = 0;
+    virtual void syncAndCheck();
 
 public:
     // default implementations to be overriden

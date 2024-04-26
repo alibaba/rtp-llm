@@ -21,6 +21,10 @@ unique_ptr<Buffer> DeviceBase::allocateBuffer(const BufferParams& params, const 
     return buffer_manager_->allocate(params, hints);
 }
 
+void DeviceBase::syncAndCheck() {
+    return;
+}
+
 TransposeOutput DeviceBase::transpose(const TransposeParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

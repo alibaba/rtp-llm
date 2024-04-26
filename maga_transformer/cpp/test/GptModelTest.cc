@@ -7,9 +7,12 @@
 #endif
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/test/ModelTestUtil.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
+#include "src/fastertransformer/devices/torch_impl/GptModel.hpp"
 
 using namespace std;
 using namespace rtp_llm;
+using namespace fastertransformer;
 
 class GptModelTest: public DeviceTestBase {
 };
@@ -22,26 +25,50 @@ TEST_F(GptModelTest, testSimple) {
     assert(weights->layers.size() == 24);
 
     GptModelDescription description;
+    description.activation_type = ActivationType::Swiglu;
+    description.norm_type = NormType::rmsnorm;
+    auto& attention_conf = description.attention_conf;
+    attention_conf.head_num = 16;
+    attention_conf.kv_head_num = 16;
+    attention_conf.size_per_head = 64;
+    attention_conf.hidden_size = 1024;
+    attention_conf.tokens_per_block = 8;
+    attention_conf.rope_config.embedding_style = RopeType::Base;
+    attention_conf.rope_config.embedding_dim = 64;
+    attention_conf.rope_config.embedding_base = 1000000;
     GptModel model({device_, *weights, description});
 
-    auto combo_tokens = createBuffer<int32_t>({3}, {13048, 11, 220}, AllocationType::HOST);
-    auto input_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
-    auto sequence_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
+    const auto cache_block_num = 128;
+    CacheConfig cache_config(
+        weights->layers.size(),
+        cache_block_num,
+        attention_conf.kv_head_num,
+        attention_conf.size_per_head,
+        attention_conf.tokens_per_block,
+        DataType::TYPE_FP16
+    );
 
-    // TODO: fill these blokcs when BlockManager is done.
-    auto kv_cache_blocks = createBuffer<int64_t>({1, 1}, {0}, AllocationType::HOST);
+    const std::vector<int32_t> input_lengths_vec = {3};
+    const std::vector<int32_t> sequence_lengths_vec = {};
+
+    auto combo_tokens = createBuffer<int32_t>({3}, {13048, 11, 220}, AllocationType::HOST);
+    auto input_lengths = createBuffer<int32_t>({1}, input_lengths_vec, AllocationType::HOST);
+    auto sequence_lengths = createBuffer<int32_t>({0}, sequence_lengths_vec, AllocationType::HOST);
+    auto kv_cache_blocks = allocateKVBlocks(cache_config, input_lengths_vec, sequence_lengths_vec);
+    const auto mask_tensor = create_context_mask(input_lengths_vec).to(torch::kFloat16);
+    const auto mask_buf = tensorToBuffer(mask_tensor);
 
     GptModelInputs inputs = {
         std::move(combo_tokens), std::move(input_lengths), std::move(sequence_lengths),
-        nullopt, nullopt, std::move(kv_cache_blocks)
+        *mask_buf, nullopt, std::move(kv_cache_blocks)
     };
 
     try {
         auto outputs = model.forward(inputs);
-    } catch (const OpException& e) {
-        cout << e.what() << endl;
+        printBufferData(*outputs.logits, "logits");
     } catch (const exception& e) {
         cout << e.what() << endl;
+        throw e;
     }
 }
 

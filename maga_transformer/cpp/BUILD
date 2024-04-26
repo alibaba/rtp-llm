@@ -113,6 +113,7 @@ cc_library(
     deps = torch_deps() + [
         ":dataclass",
         ":utils",
+        "//src/fastertransformer/devices:devices_base",
     ],
     visibility = ["//visibility:public"]
 )

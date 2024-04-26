@@ -60,6 +60,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps + [
         ":test_utils",
+        "//src/fastertransformer/devices/torch_impl:torch_reference_impl",
     ],
     env = device_test_envs(),
 )

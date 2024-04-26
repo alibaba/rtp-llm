@@ -21,7 +21,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     const auto qkv_merged_size = qkv_weight->kernel->shape()[1];
 
     if (qkv_weight->bias) {
-        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+        FT_LOG_WARNING("AttentionLayer bias is not supported yet, ignored");
     }
     const auto qkv = gemm({input, *(qkv_weight->kernel)});
     printBufferData(*qkv, "qkv");

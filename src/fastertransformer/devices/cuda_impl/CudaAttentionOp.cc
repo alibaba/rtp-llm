@@ -108,6 +108,9 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
 
     // TODO(lidongjin): Only support float32(in)\float16(output).
     auto softmax_type = qk_output->type();
+    RUNTIME_ASSERT_OP_ARG(
+        params.common.attention_mask.has_value(),
+        "attention_mask must be provided for default context attention implementation");
     auto softmax_qk_output = softmax({std::move(qk_output),
                                       params.common.attention_mask.value().get(),
                                       scale,
