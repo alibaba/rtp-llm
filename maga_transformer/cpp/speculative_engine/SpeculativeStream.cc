@@ -8,17 +8,13 @@ using namespace std;
 
 namespace rtp_llm {
 
-SpeculativeStream::SpeculativeStream(const GenerateStreamPtr& stream, uint gen_num, size_t vocab_size):
-    GenerateStream(stream->generateInput(), stream->maxSeqLen()), gen_num_(gen_num) {
+SpeculativeStream::SpeculativeStream(const GenerateStreamPtr& stream, uint gen_num_per_circle, size_t vocab_size):
+    GenerateStream(stream->generateInput(), stream->maxSeqLen()), gen_num_per_circle_(gen_num_per_circle) {
     target_stream_     = stream;
     target_index_prob_ = device_->allocateBuffer(
-        {ft::DataType::TYPE_FP32, {(size_t)stream->tileNum(), gen_num, vocab_size}, ft::AllocationType::HOST});
+        {ft::DataType::TYPE_FP32, {(size_t)stream->tileNum(), gen_num_per_circle, vocab_size}, ft::AllocationType::HOST});
     draft_index_prob_ = device_->allocateBuffer(
-        {ft::DataType::TYPE_FP32, {(size_t)stream->tileNum(), gen_num, vocab_size}, ft::AllocationType::HOST});
-}
-
-void SpeculativeStream::setTargetStream(const GenerateStreamPtr& stream) {
-    target_stream_ = stream;
+        {ft::DataType::TYPE_FP32, {(size_t)stream->tileNum(), gen_num_per_circle, vocab_size}, ft::AllocationType::HOST});
 }
 
 int SpeculativeStream::tryReleaseKVBlock(int nums) {
@@ -27,29 +23,21 @@ int SpeculativeStream::tryReleaseKVBlock(int nums) {
 }
 
 bool SpeculativeStream::initKVBlock() {
-    bool init = GenerateStream::initKVBlock();
-    if (!init) {
-        return init;
-    }
-    return target_stream_->initKVBlock();
+    return GenerateStream::initKVBlock() && target_stream_->initKVBlock();
 }
 
 bool SpeculativeStream::incrKVBlock() {
-    bool init = GenerateStream::incrKVBlock();
-    if (!init) {
-        return init;
-    }
-    return target_stream_->incrKVBlock();
+    return GenerateStream::incrKVBlock() && target_stream_->incrKVBlock();
 }
 
 void SpeculativeStream::updateDraftToken() {
     auto new_tokens = device_->allocateBuffer(
-        {complete_token_ids_->type(), {(size_t)batchSize(), (size_t)gen_num_}, ft::AllocationType::HOST});
+        {complete_token_ids_->type(), {(size_t)batchSize(), (size_t)gen_num_per_circle_}, ft::AllocationType::HOST});
     for (auto i = 0; i < batchSize(); ++i) {
-        size_t src_offset = seqLength() - gen_num_;
-        device_->copy({(*new_tokens)[i], (*complete_token_ids_)[i], 0, src_offset, gen_num_});
+        size_t src_offset = seqLength() - gen_num_per_circle_;
+        device_->copy({(*new_tokens)[i], (*complete_token_ids_)[i], 0, src_offset, gen_num_per_circle_});
     }
-    target_stream_->update(new_tokens, gen_num_, false, nullopt, nullopt, nullopt, nullopt, true);
+    target_stream_->update(new_tokens, gen_num_per_circle_, false, nullopt, nullopt, nullopt, nullopt, true);
     target_stream_->incrKVBlock();
 }
 

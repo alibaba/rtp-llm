@@ -38,7 +38,6 @@ private:
     std::unique_ptr<SpeculativeSampler>              sampler_;
     std::unique_ptr<SpeculativeBatchStreamProcessor> batch_stream_processor_;
     std::unique_ptr<ParallelModelWrapper>            model_wrapper_;
-    uint                                             gen_num_;
 };
 
 }  // namespace rtp_llm

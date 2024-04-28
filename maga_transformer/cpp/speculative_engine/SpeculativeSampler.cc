@@ -16,7 +16,7 @@ SpeculativeSamplerOutput SpeculativeSampler::forward(const SpeculativeSamplerInp
     size_t                   batch_size  = token_ids->shape()[0];
     size_t                   max_seq_len = token_ids->shape()[1];
     size_t                   vocab_size  = inputs.target_prob->shape()[2];
-    size_t                   gen_num     = inputs.gen_num;
+    size_t                   gen_num_per_circle     = inputs.gen_num_per_circle;
     SpeculativeSamplerOutput output;
     assert(token_ids->dim() == 2);
     assert(draft_prob->dim() == 2);
@@ -28,23 +28,23 @@ SpeculativeSamplerOutput SpeculativeSampler::forward(const SpeculativeSamplerInp
     auto target_prob_host =
         device_->allocateBuffer({draft_prob->type(), draft_prob->shape(), ft::AllocationType::HOST});
     output.output_token_ids =
-        device_->allocateBuffer({token_ids->type(), {batch_size, gen_num}, ft::AllocationType::HOST});
+        device_->allocateBuffer({token_ids->type(), {batch_size, gen_num_per_circle}, ft::AllocationType::HOST});
     auto& output_token_len = output.output_token_len;
     output_token_len.resize(batch_size, 0);
     device_->copy({*draft_prob_host, *draft_prob});
     device_->copy({*target_prob_host, *target_prob});
     device_->copy({*sample_tokens_host, *inputs.token_ids});
-    auto                             draft_prob_ptr   = (float(*)[gen_num][vocab_size])draft_prob_host->data();
-    auto                             target_prob_ptr  = (float(*)[gen_num][vocab_size])target_prob_host->data();
-    auto                             output_token_ptr = (int32_t(*)[gen_num])output.output_token_ids->data();
+    auto                             draft_prob_ptr   = (float(*)[gen_num_per_circle][vocab_size])draft_prob_host->data();
+    auto                             target_prob_ptr  = (float(*)[gen_num_per_circle][vocab_size])target_prob_host->data();
+    auto                             output_token_ptr = (int32_t(*)[gen_num_per_circle])output.output_token_ids->data();
     std::random_device               rd;
     std::mt19937                     gen(rd());
     std::uniform_real_distribution<> dis(0.0, 1.0);
     for (auto i = 0; i < batch_size; ++i) {
         uint accept_n = 0;
-        for (auto j = 0; j < gen_num; ++j) {
+        for (auto j = 0; j < gen_num_per_circle; ++j) {
             double rand_num = dis(gen);
-            uint   token_id = *(sample_tokens_host->dataWithOffset<int32_t>((i + 1) * max_seq_len - gen_num + j));
+            uint   token_id = *(sample_tokens_host->dataWithOffset<int32_t>((i + 1) * max_seq_len - gen_num_per_circle + j));
             if (rand_num
                 < std::abs(target_prob_ptr[i][j][token_id]) / (std::abs(draft_prob_ptr[i][j][token_id]) + 1e-7)) {
                 output_token_len[i] += 1;

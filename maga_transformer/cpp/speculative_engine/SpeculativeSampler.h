@@ -5,11 +5,11 @@ namespace rtp_llm {
 
 struct SpeculativeSamplerInput {
 public:
-    size_t    gen_num;
+    size_t    gen_num_per_circle;
     BufferPtr token_ids;         // [batch_size, seq_len]
     BufferPtr sequence_lengths;  // [batch_size, seq_len]
-    BufferPtr draft_prob;        // [batch_size, gen_num, vocab_size]
-    BufferPtr target_prob;       // [batch_size, gen_num, vocab_size]
+    BufferPtr draft_prob;        // [batch_size, gen_num_per_circle, vocab_size]
+    BufferPtr target_prob;       // [batch_size, gen_num_per_circle, vocab_size]
 };
 
 struct SpeculativeSamplerOutput {

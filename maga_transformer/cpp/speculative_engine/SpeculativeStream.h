@@ -9,8 +9,6 @@ public:
     ~SpeculativeStream() {}
 
 public:
-    void setTargetStream(const GenerateStreamPtr& stream);
-
     int tryReleaseKVBlock(int nums) override;
 
     bool initKVBlock() override;
@@ -33,7 +31,7 @@ private:
     GenerateStreamPtr target_stream_;
     ft::BufferPtr     target_index_prob_;
     ft::BufferPtr     draft_index_prob_;
-    uint              gen_num_;
+    uint              gen_num_per_circle_;
 };
 
 }  // namespace rtp_llm

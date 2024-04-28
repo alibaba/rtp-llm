@@ -13,8 +13,7 @@ namespace rtp_llm {
 SpeculativeExecutor::SpeculativeExecutor(
     const MagaInitParams&                                                   params,
     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-    const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights):
-    gen_num_(params.gpt_init_parameter->gen_num_per_circle_) {
+    const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) {
     unique_ptr<GptModelInitParams> model_params;
     model_.reset(new GptModel(*model_params));
 
