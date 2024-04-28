@@ -149,18 +149,6 @@ void StreamCacheResource::setKVCache(const BatchKVCacheBlockAddr& kv_cache_block
     kv_cache_block_addr_ = kv_cache_block_addr;
 }
 
-// void StreamCacheResource::setCacheManager(const std::shared_ptr<CacheManager>& cache_manager) {
-//     cache_manager_ = cache_manager;
-// }
-
-// void StreamCacheResource::setPtuning(const std::shared_ptr<PtuningBase>& ptuning) {
-//     ptuning_ = ptuning;
-// }
-
-// void StreamCacheResource::setReuseCache(bool reuse_cache) {
-//     resource_context_.reuse_cache = reuse_cache;
-// }
-
 void StreamCacheResource::setNeedReleaseResource(bool need_release_resource) {
     need_release_resource_ = need_release_resource;
 }

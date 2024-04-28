@@ -53,6 +53,9 @@ public:
 
     std::shared_ptr<GenerateInput> generateInput() const;
 
+    const ResourceContext& resourceContext() const {
+        return stream_cache_resource_.resourceContext();
+    }
     size_t maxSeqLen() const;
 
     void setNeedReleaseResource(bool need_release_resource) {
@@ -61,15 +64,10 @@ public:
     }
 
     // TODO(xinfei.sxf) lora resource?
-<<<<<<< HEAD
     virtual void releaseResource() {
         if (need_release_resource_) {
             stream_cache_resource_.releaseResource();
         }
-=======
-    void releaseResource() {
-        stream_cache_resource_.releaseResource();
->>>>>>> feat: use ptuning/reuse_cache in stream and engine
     }
 
     int64_t streamId() const {
@@ -302,7 +300,7 @@ protected:
     bool                                done_                  = false;
     bool                                cancelled_             = false;
     bool                                released_              = false;
-    bool                                need_release_resource_ = false;
+    bool                                need_release_resource_ = true;
 
     friend class StreamCacheResource;
 };

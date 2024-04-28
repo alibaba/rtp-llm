@@ -180,8 +180,6 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 10);
     ResourceContext resource_context = {cache_manager, nullptr, true};
-    // resource_context.cache_manager = cache_manager;
-    // resource_context.reuse_cache = 
     MagaInitParams init_config;
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;

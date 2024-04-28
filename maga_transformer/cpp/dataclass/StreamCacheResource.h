@@ -96,22 +96,19 @@ public:
 
     const BatchKVCacheBlockAddr& kvCache() const;
     void                         setKVCache(const BatchKVCacheBlockAddr& kv_cache_block_addr);
-    // void                         setCacheManager(const std::shared_ptr<CacheManager>& cache_manager);
-    // void                         setPtuning(const std::shared_ptr<PtuningBase>& ptuning);
-    // void                         setReuseCache(bool reuse_cache);
+
+    const ResourceContext& resourceContext() const {
+        return resource_context_;
+    }
 
 private:
     BatchKVCacheBlockAddr           kv_cache_block_addr_;
     GenerateStream*                 stream_;
-    // std::shared_ptr<CacheManager>   cache_manager_;
-    // std::shared_ptr<PtuningBase>    ptuning_;
-    // bool                            reuse_cache_           = false;
     ResourceContext                 resource_context_;
     // TODO(xinfei.sxf) set gen_num_per_circle_
     int                             gen_num_per_circle_    = 1;
     int                             seq_size_per_block_    = 0;
     bool                            need_release_resource_ = true;
-    
 };
 
 }  // namespace rtp_llm
