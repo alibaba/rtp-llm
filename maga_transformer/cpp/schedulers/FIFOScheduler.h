@@ -18,7 +18,6 @@ public:
 
     absl::Status enqueue(const GenerateStreamPtr& stream) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
-    void setPtuning(const std::shared_ptr<PtuningBase>& ptuning, bool reuse_cache);
 
     absl::Status stop() override;
 
@@ -40,8 +39,6 @@ private:
     std::list<GenerateStreamPtr>        waiting_streams_;
     std::list<GenerateStreamPtr>        running_streams_;
     std::shared_ptr<CacheManager>       cache_manager_;
-    std::shared_ptr<PtuningBase>        ptuning_;
-    bool                                reuse_cache_        = false;
     int                                 max_seq_len_        = 0;
     int                                 reserve_block_num_  = 0;
     bool                                enable_fallback     = false;

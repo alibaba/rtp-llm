@@ -16,6 +16,7 @@ public:
 
     virtual absl::Status enqueue(std::shared_ptr<GenerateStream>& stream) = 0;
     virtual absl::Status stop()                                           = 0;
+    virtual const ResourceContext& resourceContext() const                = 0;
 };
 
 }  // namespace rtp_llm

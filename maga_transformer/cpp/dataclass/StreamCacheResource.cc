@@ -16,18 +16,18 @@ void StreamCacheResource::releaseResource() {
     FT_LOG_DEBUG("stream [%ld] release resource", stream_->streamId());
 
     // for test
-    if (!cache_manager_) {
+    if (!resource_context_.cache_manager) {
         return;
     }
     if (!kv_cache_block_addr_.k_ptr.empty()) {
         for (auto& batch : kv_cache_block_addr_.k_ptr) {
             const auto& blocks = batch[0];
-            if (reuse_cache_) {
+            if (resource_context_.reuse_cache) {
                 // TODO(xinfei.sxf) batch token
                 auto tokens_id = stream_->completeTokenIdsVec();
-                cache_manager_->freeWithCache(blocks, tokens_id);
+                resource_context_.cache_manager->freeWithCache(blocks, tokens_id);
             } else {
-                cache_manager_->free(blocks);
+                resource_context_.cache_manager->free(blocks);
             }
         }
         kv_cache_block_addr_.clear();
@@ -55,7 +55,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         }
     }
     // TODO(xinfei.sxf) call free with cache if all blocks is released
-    cache_manager_->free(release_blocks);
+    resource_context_.cache_manager->free(release_blocks);
     return release_blocks_num;
 }
 
@@ -64,11 +64,11 @@ bool StreamCacheResource::initKVBlock() {
     KVCacheBlockAddr kv_cache_block_addr;
     int              reuse_length;
     bool             success;
-    if (reuse_cache_) {
+    if (resource_context_.reuse_cache) {
         std::tie(success, kv_cache_block_addr, reuse_length) =
-            cache_manager_->mallocWithCache(block_num, stream_->completeTokenIdsVec());
+            resource_context_.cache_manager->mallocWithCache(block_num, stream_->completeTokenIdsVec());
     } else {
-        std::tie(success, kv_cache_block_addr) = cache_manager_->malloc(block_num);
+        std::tie(success, kv_cache_block_addr) = resource_context_.cache_manager->malloc(block_num);
         reuse_length                           = 0;
     }
 
@@ -77,7 +77,7 @@ bool StreamCacheResource::initKVBlock() {
         BatchKVCacheBlockAddr batch_block;
         batch_block.pushBack(kv_cache_block_addr);
         for (uint32_t i = 1; i < tile_num; i++) {
-            batch_block.pushBack(kv_cache_block_addr.clone(cache_manager_));
+            batch_block.pushBack(kv_cache_block_addr.clone(resource_context_.cache_manager));
         }
         setKVCache(batch_block);
         stream_->setReuseLength(reuse_length);
@@ -87,15 +87,15 @@ bool StreamCacheResource::initKVBlock() {
 
 // TODO(xinfei.sxf) fix this to reduce waste
 int StreamCacheResource::initalKVCacheCount() const {
-    return (stream_->seqLength() - 2 + gen_num_per_circle_) / cache_manager_->cacheConfig().seq_size_per_block + 1;
+    return (stream_->seqLength() - 2 + gen_num_per_circle_) / resource_context_.cache_manager->cacheConfig().seq_size_per_block + 1;
 }
 
 // TODO(xinfei.sxf) fix this to reduce waste
 int StreamCacheResource::nextNeedBlockNums() const {
     auto next_length = stream_->seqLength() + gen_num_per_circle_;
     // TODO(xinfei.sxf) deal with ptuning
-    auto current_block_length = maxBlockSize() * cache_manager_->cacheConfig().seq_size_per_block;
-    return ((next_length - current_block_length - 1) / cache_manager_->cacheConfig().seq_size_per_block) + 1;
+    auto current_block_length = maxBlockSize() * resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+    return ((next_length - current_block_length - 1) / resource_context_.cache_manager->cacheConfig().seq_size_per_block) + 1;
 }
 
 bool StreamCacheResource::incrKVBlock() {
@@ -107,7 +107,7 @@ bool StreamCacheResource::incrKVBlock() {
     bool                          all_success = true;
     std::vector<KVCacheBlockAddr> resource;
     for (uint32_t i = 0; i < batch_size; i++) {
-        auto [success, kv_cache_block_addr] = cache_manager_->malloc(blocks_num);
+        auto [success, kv_cache_block_addr] = resource_context_.cache_manager->malloc(blocks_num);
         if (success) {
             resource.push_back(kv_cache_block_addr);
         } else {
@@ -116,7 +116,7 @@ bool StreamCacheResource::incrKVBlock() {
         }
     }
     if (!all_success) {
-        cache_manager_->free(resource);
+        resource_context_.cache_manager->free(resource);
         return false;
     }
 
@@ -149,17 +149,17 @@ void StreamCacheResource::setKVCache(const BatchKVCacheBlockAddr& kv_cache_block
     kv_cache_block_addr_ = kv_cache_block_addr;
 }
 
-void StreamCacheResource::setCacheManager(const std::shared_ptr<CacheManager>& cache_manager) {
-    cache_manager_ = cache_manager;
-}
+// void StreamCacheResource::setCacheManager(const std::shared_ptr<CacheManager>& cache_manager) {
+//     cache_manager_ = cache_manager;
+// }
 
-void StreamCacheResource::setPtuning(const std::shared_ptr<PtuningBase>& ptuning) {
-    ptuning_ = ptuning;
-}
+// void StreamCacheResource::setPtuning(const std::shared_ptr<PtuningBase>& ptuning) {
+//     ptuning_ = ptuning;
+// }
 
-void StreamCacheResource::setReuseCache(bool reuse_cache) {
-    reuse_cache_ = reuse_cache;
-}
+// void StreamCacheResource::setReuseCache(bool reuse_cache) {
+//     resource_context_.reuse_cache = reuse_cache;
+// }
 
 void StreamCacheResource::setNeedReleaseResource(bool need_release_resource) {
     need_release_resource_ = need_release_resource;

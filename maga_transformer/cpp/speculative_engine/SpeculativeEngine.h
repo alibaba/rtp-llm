@@ -34,6 +34,9 @@ public:
     void removeLoRA(const int64_t lora_id) override {
         RAISE_FATAL_ERROR("Speculative not support lora now");
     }
+    const ResourceContext& resourceContext() const override {
+        return resource_context_;
+    }
 
 private:
     absl::Status updateDraftProb(const std::list<GenerateStreamPtr>& streams, uint index);
@@ -49,6 +52,7 @@ private:
     std::shared_ptr<CacheManager>         draft_cache_manager_;
     std::shared_ptr<CacheManager>         target_cache_manager_;
     GptInitParameter                      params_;
+    ResourceContext                       resource_context_;
 };
 
 }  // namespace rtp_llm

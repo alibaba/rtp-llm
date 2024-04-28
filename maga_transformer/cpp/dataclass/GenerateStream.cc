@@ -9,8 +9,8 @@ using namespace std;
 
 namespace rtp_llm {
 
-GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, int max_seq_len):
-    generate_input_(input), stream_cache_resource_(this) {
+GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const ResourceContext& resource_context, int max_seq_len):
+    generate_input_(input), stream_cache_resource_(this, resource_context) {
     if (!input.get()) {
         return;
     }
@@ -22,6 +22,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, int max_s
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)numBeams(), (size_t)max_seq_len}, ft::AllocationType::HOST}, {});
     memcpy(complete_token_ids_->data(), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
+    updatePrefix(resource_context.ptuning);
+
     generate_output_ = make_shared<GenerateOutput>();
     sub_generate_status_.clear();
     sub_generate_status_.resize(tileNum());

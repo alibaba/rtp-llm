@@ -29,16 +29,16 @@ TEST_F(NormalEngineTest, testSimple) {
     CustomConfig config;
     auto engine = createMockEngine(device_, config);
 
-    ASSERT_TRUE(engine->cache_manager_);
-    ASSERT_FALSE(engine->ptuning_);
-    ASSERT_FALSE(engine->reuse_cache_);
-    ASSERT_EQ(engine->cache_manager_->freeBlockNums(), 99);
+    ASSERT_TRUE(engine->resourceContext().cache_manager);
+    ASSERT_FALSE(engine->resourceContext().ptuning);
+    ASSERT_FALSE(engine->resourceContext().reuse_cache);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
 
     std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
     query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
     query->generate_config                 = make_shared<GenerateConfig>();
     query->generate_config->max_new_tokens = 3;
-    shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query);
+    shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query, engine->resourceContext());
 
     ASSERT_TRUE(engine->enqueue(stream).ok());
     auto output1 = stream->nextOutput();
@@ -70,17 +70,17 @@ TEST_F(NormalEngineTest, testPtuning) {
     vector<int> prompt_2 = {4, 5, 6, 7, 8, 9};
     config.multi_task_prompt_tokens = {{1, prompt_1}, {2, prompt_2}};
     auto engine = createMockEngine(device_, config);
-    ASSERT_TRUE(engine->cache_manager_);
-    ASSERT_TRUE(engine->ptuning_);
-    ASSERT_TRUE(engine->reuse_cache_);
-    ASSERT_EQ(engine->cache_manager_->freeBlockNums(), 96);
+    ASSERT_TRUE(engine->resourceContext().cache_manager);
+    ASSERT_TRUE(engine->resourceContext().ptuning);
+    ASSERT_TRUE(engine->resourceContext().reuse_cache);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 96);
 
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
         query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
         query->generate_config                 = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens = 1;
-        shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query);
+        shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query, engine->resourceContext());
 
         ASSERT_TRUE(engine->enqueue(stream).ok());
         auto output1 = stream->nextOutput();
@@ -99,7 +99,7 @@ TEST_F(NormalEngineTest, testPtuning) {
         query->input_ids                        = createBuffer<int32_t>({7}, {10, 20, 30, 40, 50, 60, 70}, AllocationType::HOST);
         query->generate_config                  = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens  = 1;
-        shared_ptr<GenerateStream> stream       = make_shared<GenerateStream>(query);
+        shared_ptr<GenerateStream> stream       = make_shared<GenerateStream>(query, engine->resourceContext());
 
         ASSERT_TRUE(engine->enqueue(stream).ok());
         auto output1 = stream->nextOutput();
@@ -119,7 +119,7 @@ TEST_F(NormalEngineTest, testPtuning) {
         query->generate_config                  = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens  = 1;
         query->generate_config->task_id         = 2;
-        shared_ptr<GenerateStream> stream       = make_shared<GenerateStream>(query);
+        shared_ptr<GenerateStream> stream       = make_shared<GenerateStream>(query, engine->resourceContext());
 
         ASSERT_TRUE(engine->enqueue(stream).ok());
         auto output1 = stream->nextOutput();
@@ -139,20 +139,20 @@ TEST_F(NormalEngineTest, testReuseCacheOption) {
     CustomConfig config;
     setenv("REUSE_CACHE", "1", 1);
     auto engine = createMockEngine(device_, config);
-    ASSERT_TRUE(engine->reuse_cache_);
-    ASSERT_EQ(engine->cache_manager_->freeBlockNums(), 99);
+    ASSERT_TRUE(engine->resourceContext().reuse_cache);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
 
     setenv("REUSE_CACHE", "0", 1);
     auto engine2 = createMockEngine(device_, config);
-    ASSERT_FALSE(engine2->reuse_cache_);
+    ASSERT_FALSE(engine2->resourceContext().reuse_cache);
 
     setenv("REUSE_CACHE", "2", 1);
     auto engine3 = createMockEngine(device_, config);
-    ASSERT_FALSE(engine3->reuse_cache_);
+    ASSERT_FALSE(engine3->resourceContext().reuse_cache);
 
     unsetenv("REUSE_CACHE");
     auto engine4 = createMockEngine(device_, config);
-    ASSERT_FALSE(engine4->reuse_cache_);
+    ASSERT_FALSE(engine4->resourceContext().reuse_cache);
 }
 
 // TODO(xinfei.sxf) attention mask not support, tmp comment out it
@@ -160,15 +160,14 @@ TEST_F(NormalEngineTest, testReuseCache) {
     CustomConfig config;
     setenv("REUSE_CACHE", "1", 1);
     auto engine = createMockEngine(device_, config);
-    ASSERT_TRUE(engine->reuse_cache_);
-    ASSERT_EQ(engine->cache_manager_->freeBlockNums(), 99);
-
+    ASSERT_TRUE(engine->resourceContext().reuse_cache);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
     // {
     //     std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
     //     query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
     //     query->generate_config                 = make_shared<GenerateConfig>();
     //     query->generate_config->max_new_tokens = 1;
-    //     shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query);
+    //     shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query, engine->resourceContext());
 
     //     ASSERT_TRUE(engine->enqueue(stream).ok());
     //     auto output1 = stream->nextOutput();
@@ -188,7 +187,7 @@ TEST_F(NormalEngineTest, testReuseCache) {
     //     query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 50, 60, 70}, AllocationType::HOST);
     //     query->generate_config                 = make_shared<GenerateConfig>();
     //     query->generate_config->max_new_tokens = 1;
-    //     shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query);
+    //     shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query, engine->resourceContext());
 
     //     ASSERT_TRUE(engine->enqueue(stream).ok());
     //     auto output1 = stream->nextOutput();

@@ -22,6 +22,9 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     CacheConfig                   cache_config(1, 4, 1, 4, 8, fastertransformer::DataType::TYPE_FP16);
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 3);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    
     MagaInitParams init_config;
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;
@@ -29,7 +32,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream    = make_shared<GenerateStream>(query);
+    shared_ptr<GenerateStream> stream    = make_shared<GenerateStream>(query, resource_context);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
@@ -53,6 +56,8 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     CacheConfig                   cache_config(1, 2, 1, 4, 2, fastertransformer::DataType::TYPE_FP16);
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 1);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
     MagaInitParams init_config;
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;
@@ -60,7 +65,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream    = make_shared<GenerateStream>(query);
+    shared_ptr<GenerateStream> stream    = make_shared<GenerateStream>(query, resource_context);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
@@ -80,6 +85,8 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     CacheConfig                   cache_config(1, 3, 1, 4, 2, fastertransformer::DataType::TYPE_FP16);
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 2);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
     MagaInitParams init_config;
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;
@@ -87,7 +94,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream    = make_shared<GenerateStream>(query);
+    shared_ptr<GenerateStream> stream    = make_shared<GenerateStream>(query, resource_context);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
@@ -118,6 +125,8 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem2) {
     CacheConfig                   cache_config(1, 5, 1, 4, 2, fastertransformer::DataType::TYPE_FP16);
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 4);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
     MagaInitParams init_config;
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;
@@ -125,8 +134,8 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem2) {
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream1   = make_shared<GenerateStream>(query);
-    shared_ptr<GenerateStream> stream2   = make_shared<GenerateStream>(query);
+    shared_ptr<GenerateStream> stream1   = make_shared<GenerateStream>(query, resource_context);
+    shared_ptr<GenerateStream> stream2   = make_shared<GenerateStream>(query, resource_context);
     ASSERT_TRUE(scheduler.enqueue(stream1).ok());
     ASSERT_TRUE(scheduler.enqueue(stream2).ok());
 
@@ -170,16 +179,18 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     CacheConfig                   cache_config(1, 11, 1, 4, 2, fastertransformer::DataType::TYPE_FP16);
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 10);
+    ResourceContext resource_context = {cache_manager, nullptr, true};
+    // resource_context.cache_manager = cache_manager;
+    // resource_context.reuse_cache = 
     MagaInitParams init_config;
     init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
     init_config.gpt_init_parameter->max_seq_len_ = 8192;
     FIFOScheduler scheduler(init_config, cache_manager);
-    scheduler.reuse_cache_ = true;
 
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({5}, {1, 2, 3, 4, 5}, AllocationType::HOST);
     query->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream1   = make_shared<GenerateStream>(query);
+    shared_ptr<GenerateStream> stream1   = make_shared<GenerateStream>(query, resource_context);
     ASSERT_TRUE(scheduler.enqueue(stream1).ok());
 
     auto streams_status = scheduler.schedule();
@@ -197,7 +208,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
     query2->input_ids                     = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
     query2->generate_config               = make_shared<GenerateConfig>();
-    shared_ptr<GenerateStream> stream2    = make_shared<GenerateStream>(query2);
+    shared_ptr<GenerateStream> stream2    = make_shared<GenerateStream>(query2, resource_context);
     ASSERT_TRUE(scheduler.enqueue(stream2).ok());
 
     auto streams_status3 = scheduler.schedule();

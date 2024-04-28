@@ -17,7 +17,7 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
                            const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) : params_(params) {
     executor_.reset(new NormalExecutor(params, layer_weights, weights));
     initCacheManager();
-    scheduler_.reset(new FIFOScheduler(params, cache_manager_));
+    scheduler_.reset(new FIFOScheduler(params, resource_context_.cache_manager));
     (void)startLoop();
 }
 
@@ -35,19 +35,19 @@ void NormalEngine::initCacheManager() {
     }
 
     auto device = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
-    cache_manager_ = make_shared<CacheManager>(cache_config, device);  
+    resource_context_.cache_manager = make_shared<CacheManager>(cache_config, device);  
 }
 
 void NormalEngine::initPtuning() {
     // TODO(xinfei.sxf) deal with old option : USE_BLOCK_CACHE 
     char* reuse_cache_env  = std::getenv("REUSE_CACHE");
     if (reuse_cache_env && strcmp(reuse_cache_env, "1") == 0) {
-        reuse_cache_ = true;
+        resource_context_.reuse_cache = true;
     }
-    auto ptuning_param = PtuningConstructor::construct(*params_.gpt_init_parameter, this, cache_manager_.get());
+    auto ptuning_param = PtuningConstructor::construct(*params_.gpt_init_parameter, this, resource_context_.cache_manager.get());
     if (!ptuning_param.empty()) {
-        reuse_cache_ = true;
-        ptuning_.reset(new MultiTaskPtuning(*cache_manager_, ptuning_param));
+        resource_context_.reuse_cache = true;
+        resource_context_.ptuning.reset(new MultiTaskPtuning(*resource_context_.cache_manager, ptuning_param));
     }
 }
 
@@ -66,7 +66,6 @@ absl::Status NormalEngine::startLoop() {
     running_ = true;
     loop_thread_ = std::thread(&NormalEngine::loop, this);
     initPtuning(); // ptuning constructor depends on engine startup
-    dynamic_cast<FIFOScheduler*>(scheduler_.get())->setPtuning(ptuning_, reuse_cache_);
     return absl::OkStatus();
 }
 

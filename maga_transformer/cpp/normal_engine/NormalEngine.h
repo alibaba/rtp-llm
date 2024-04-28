@@ -35,8 +35,8 @@ public:
     absl::Status startLoop();
 
 public:
-    const std::shared_ptr<CacheManager> cacheManager() const {
-        return cache_manager_;
+    const ResourceContext& resourceContext() const override {
+        return resource_context_;
     }
     const MagaInitParams magaInitParams() const {
         return params_;
@@ -55,8 +55,7 @@ private:
     std::unique_ptr<SchedulerBase>        scheduler_;
     std::shared_ptr<CacheManager>         cache_manager_;
     MagaInitParams                        params_;
-    std::shared_ptr<PtuningBase>          ptuning_;
-    bool                                  reuse_cache_{false};
+    ResourceContext                       resource_context_;
 };
 
 }  // namespace rtp_llm

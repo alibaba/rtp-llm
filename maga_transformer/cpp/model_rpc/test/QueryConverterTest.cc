@@ -23,6 +23,7 @@ protected:
 };
 
 TEST_F(QueryConverterTest, testTransInput) {
+    ResourceContext resource_context;
     GenerateInputPB input;
     input.add_token_ids(0);
     input.add_token_ids(1);
@@ -37,8 +38,8 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->mutable_top_p()->set_value(0.6);
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
-    auto query     = QueryConverter::transQuery(&input);
-    auto input_ids = query->generateInput()->input_ids.get();
+    auto query     = QueryConverter::transQuery(resource_context, &input);
+    auto input_ids = query->generate_input_->input_ids.get();
     EXPECT_EQ(input_ids->size(), 2);
     ASSERT_EQ(*(int*)(input_ids->data()), 0);
     ASSERT_EQ(query->generateInput()->lora_id, 2);

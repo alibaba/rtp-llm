@@ -22,7 +22,7 @@ namespace rtp_llm {
 
 class GenerateStream {
 public:
-    GenerateStream(const std::shared_ptr<GenerateInput>& query, int max_seq_len = 2048);
+    GenerateStream(const std::shared_ptr<GenerateInput>& query, const ResourceContext& resource_context, int max_seq_len = 2048);
     ~GenerateStream() {
         generate_outputs_.wakeup();
     }
@@ -144,20 +144,20 @@ public:
         seq_length_ = seq_length;
     }
 
-    void setCacheManager(const std::shared_ptr<CacheManager>& cache_manager) {
-        stream_cache_resource_.setCacheManager(cache_manager);
-    }
+    // void setCacheManager(const std::shared_ptr<CacheManager>& cache_manager) {
+    //     stream_cache_resource_.setCacheManager(cache_manager);
+    // }
 
-    void setPtuning(const std::shared_ptr<PtuningBase>& ptuning) {
-        updatePrefix(ptuning);
-        stream_cache_resource_.setPtuning(ptuning);
-    }
+    // void setPtuning(const std::shared_ptr<PtuningBase>& ptuning) {
+    //     updatePrefix(ptuning);
+    //     stream_cache_resource_.setPtuning(ptuning);
+    // }
 
-    void updatePrefix(const std::shared_ptr<PtuningBase>&  ptuning);
+    void updatePrefix(const std::shared_ptr<PtuningBase>& ptuning);
 
-    void setReuseCache(bool reuse_cache) {
-        stream_cache_resource_.setReuseCache(reuse_cache);
-    }
+    // void setReuseCache(bool reuse_cache) {
+    //     stream_cache_resource_.setReuseCache(reuse_cache);
+    // }
 
     void setStop(const std::string& err_msg) {
         std::lock_guard<std::mutex> lock(output_mutex_);

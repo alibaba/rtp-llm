@@ -24,7 +24,7 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
                                                   const GenerateInputPB*                request,
                                                   grpc::ServerWriter<GenerateOutputPB>* writer) {
     FT_LOG_DEBUG("rec request %ld", request->request_id());
-    auto stream = QueryConverter::transQuery(request);
+    auto stream = QueryConverter::transQuery(engine_->resourceContext(), request);
     FT_LOG_DEBUG("req:%ld trans to stream success", request->request_id());
     auto status = engine_->enqueue(stream);
     FT_LOG_DEBUG("req:%ld enqueue success", request->request_id());

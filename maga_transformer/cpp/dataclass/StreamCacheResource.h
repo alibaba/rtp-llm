@@ -8,6 +8,12 @@ namespace rtp_llm {
 
 class GenerateStream;
 
+struct ResourceContext {
+    std::shared_ptr<CacheManager>   cache_manager;
+    std::shared_ptr<PtuningBase>    ptuning;
+    bool                            reuse_cache{false};
+};
+
 class BatchKVCacheBlockAddr {
 public:
     BatchKVCacheBlockAddr() {}
@@ -74,7 +80,7 @@ public:
 
 class StreamCacheResource {
 public:
-    StreamCacheResource(GenerateStream* stream): stream_(stream) {}
+    StreamCacheResource(GenerateStream* stream, const ResourceContext& resource_context): stream_(stream), resource_context_(resource_context) {}
     ~StreamCacheResource() {
         releaseResource();
     }
@@ -90,20 +96,22 @@ public:
 
     const BatchKVCacheBlockAddr& kvCache() const;
     void                         setKVCache(const BatchKVCacheBlockAddr& kv_cache_block_addr);
-    void                         setCacheManager(const std::shared_ptr<CacheManager>& cache_manager);
-    void                         setPtuning(const std::shared_ptr<PtuningBase>& ptuning);
-    void                         setReuseCache(bool reuse_cache);
+    // void                         setCacheManager(const std::shared_ptr<CacheManager>& cache_manager);
+    // void                         setPtuning(const std::shared_ptr<PtuningBase>& ptuning);
+    // void                         setReuseCache(bool reuse_cache);
 
 private:
     BatchKVCacheBlockAddr           kv_cache_block_addr_;
     GenerateStream*                 stream_;
-    std::shared_ptr<CacheManager>   cache_manager_;
-    std::shared_ptr<PtuningBase>    ptuning_;
+    // std::shared_ptr<CacheManager>   cache_manager_;
+    // std::shared_ptr<PtuningBase>    ptuning_;
+    // bool                            reuse_cache_           = false;
+    ResourceContext                 resource_context_;
     // TODO(xinfei.sxf) set gen_num_per_circle_
     int                             gen_num_per_circle_    = 1;
     int                             seq_size_per_block_    = 0;
     bool                            need_release_resource_ = true;
-    bool                            reuse_cache_           = false;
+    
 };
 
 }  // namespace rtp_llm

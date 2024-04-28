@@ -33,6 +33,8 @@ TEST_F(StreamCacheResourceTest, testSimple) {
     ft::DeviceBase* device;
     CacheManagerPtr cache_manager = std::make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 4);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
 
     std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
     std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
@@ -43,8 +45,7 @@ TEST_F(StreamCacheResourceTest, testSimple) {
     generate_input->generate_config = generate_config;
     int max_seq_len                 = 2048;
 
-    GenerateStream stream(generate_input, max_seq_len);
-    stream.setCacheManager(cache_manager);
+    GenerateStream stream(generate_input, resource_context, max_seq_len);
 
     auto& resource = stream.streamCacheResource();
     ASSERT_EQ(resource.nextNeedBlockNums(), 4);
