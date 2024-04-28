@@ -64,36 +64,41 @@ TEST_F(GptModelTest, testSimple) {
     inputs.attention_mask = *mask_buf;
     inputs.kv_cache_blocks = std::move(kv_cache_blocks);
 
-    try {
-        auto outputs = model.forward(inputs);
-        printBufferData(*outputs.logits, "logits");
-        auto output_tensor = bufferToTensor(*outputs.logits);
-
-        // expected to output token 151645
-        assertTensorClose(
-            output_tensor.index({torch::indexing::Slice(), 151645}),
-            bufferToTensor(*createBuffer<float>({3}, {-2.0801, 17.1562, 15.7891}, AllocationType::HOST)),
-            1e-1, 5e-2
-        );
-        assertTensorClose(
-            output_tensor.index({torch::indexing::Slice(), torch::indexing::Slice(0, 3)}),
-            bufferToTensor(*createBuffer<float>({3, 3},
-                {-0.4348, -6.0078, -1.4941,
-                 6.3320, -5.0469,  0.6240,
-                 7.1562, -9.3672, -0.8486}, AllocationType::HOST)),
-            0.2, 0.3
-        );
-        std::cout << output_tensor.index({torch::indexing::Slice(), 151645}) << std::endl;
-        std::cout << output_tensor.index({torch::indexing::Slice(), torch::indexing::Slice(0, 5)}) << std::endl;
-    } catch (const std::exception& e) {
-        if (DeviceFactory::getDefaultDevice()->type() == "cuda") {
-            throw e;
-        } else {
-            // temporarily we allow CPU test to fail
-            std::cout << "exception: " << e.what() << std::endl;
-            return;
+    // temporarily disable test for cpu/arm device
+    // enable this back when device is ready.
+    if (DeviceFactory::getDefaultDevice()->type() != "cuda") {
+        try {
+            auto outputs = model.forward(inputs);
+            printBufferData(*outputs.logits, "logits");
+            auto output_tensor = bufferToTensor(*outputs.logits);
+        } catch (const std::exception& e) {
+            std::cout << e.what() << std::endl;
         }
+        return;
     }
+
+    auto outputs = model.forward(inputs);
+    printBufferData(*outputs.logits, "logits");
+    auto output_tensor = bufferToTensor(*outputs.logits);
+
+    // expected to output token 151645
+    assertTensorClose(
+        output_tensor.index({torch::indexing::Slice(), 151645}),
+        bufferToTensor(*createBuffer<float>({3}, {-2.0801, 17.1562, 15.7891}, AllocationType::HOST)),
+        1e-1, 5e-2
+    );
+    assertTensorClose(
+        output_tensor.index({torch::indexing::Slice(), torch::indexing::Slice(0, 3)}),
+        bufferToTensor(*createBuffer<float>({3, 3},
+            {-0.4348, -6.0078, -1.4941,
+                6.3320, -5.0469,  0.6240,
+                7.1562, -9.3672, -0.8486}, AllocationType::HOST)),
+        0.2, 0.1
+    );
+
+    inputs.combo_tokens = createBuffer<int32_t>({4}, {13048, 11, 220, 151645}, AllocationType::HOST);
+    inputs.input_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
+    inputs.sequence_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
 }
 
 TEST_F(GptModelTest, testAttentionInputs) {

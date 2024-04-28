@@ -19,8 +19,8 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     if (kv_cache_blocks.has_value()) {
         const auto &shape = kv_cache_blocks.value().get().shape();
         RUNTIME_ASSERT_OP_ARG(
-            ((shape.size() == 3) && (shape[0] == 2) && (shape[1] == input_lengths.shape()[0])),
-            "kv_cache_blocks shape in attention layer should be [2, batch_size, block_length]"
+            ((shape.size() == 3) && (shape[0] == input_lengths.shape()[0]) && (shape[1] == 2)),
+            "kv_cache_blocks shape in attention layer should be [batch_size, 2, block_length]"
             ", but got %s", kv_cache_blocks.value().get().debugString().c_str());
     }
 
@@ -48,13 +48,25 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
 
     auto generate_qkv = qkv->view(0, generate_batch_size);
     auto generate_output = qkv_output->view(0, generate_batch_size);
+    auto generate_kv_blocks = kv_cache_blocks
+        ? kv_cache_blocks.value().get().view(0, generate_batch_size)
+        : Buffer::emptyBuffer();
     auto context_qkv = qkv->view(generate_batch_size, context_token_num);
     auto context_output = qkv_output->view(generate_batch_size, context_token_num);
+    auto context_kv_blocks = kv_cache_blocks
+        ? kv_cache_blocks.value().get().view(generate_batch_size, context_token_num)
+        : Buffer::emptyBuffer();
 
     if (generate_batch_size) {
+        if (kv_cache_blocks) {
+            params.common.kv_cache_blocks = generate_kv_blocks;
+        }
         decoderSelfAttention({generate_qkv, generate_output, params.common, params.weights, params.configs});
     }
     if (context_batch_size) {
+        if (kv_cache_blocks) {
+            params.common.kv_cache_blocks = context_kv_blocks;
+        }
         contextAttention({context_qkv, context_output, params.common, params.weights, params.configs});
     }
     printBufferData(*qkv_output, "qkv_output");

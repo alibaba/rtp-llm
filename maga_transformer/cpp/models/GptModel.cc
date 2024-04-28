@@ -105,8 +105,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     // prepare resources for all layers
     auto attention_common_inputs = prepareAttentionInputs(inputs);
-    auto& input_kv_blocks = inputs.kv_cache_blocks;
-    auto& input_kv_scales = inputs.kv_cache_scales;
+    const auto& input_kv_blocks = inputs.kv_cache_blocks;
+    const auto& input_kv_scales = inputs.kv_cache_scales;
     RUNTIME_ASSERT_OP_ARG(input_kv_blocks, "kv_cache_blocks is required for GPT model.");
 
     printBufferData(*hidden, "input_hidden");

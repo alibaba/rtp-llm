@@ -40,8 +40,8 @@ struct GptModelInputs {
     OptionalConstBufferRef position_ids;    // [batch_size, seq_len]
 
     BufferPtr prefix_lengths;   // [batch_size, seq_len]
-    BufferPtr kv_cache_blocks;  // [layer_num, 2, batch_size, block_length], int64 block pointers
-    BufferPtr kv_cache_scales;  // [layer_num, 2, batch_size, block_length], int64 block scales
+    BufferPtr kv_cache_blocks;  // [layer_num, batch_size, 2, block_length], int64 block pointers
+    BufferPtr kv_cache_scales;  // [layer_num, batch_size, 2, block_length], int64 block scales
 
     std::string debugString() const {
         std::stringstream debug_string;

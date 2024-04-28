@@ -221,7 +221,7 @@ struct AttentionCommonInputs {
     const Buffer& input_lengths;      // int32_t, [decoder_batch_size + context_batch_size]
     const Buffer& sequence_lengths;   // int32_t, [decoder_batch_size]
 
-    // [2, batch_size, block_length], int64 block pointers
+    // [batch_size, 2, block_length], int64 block pointers
     OptionalBufferRef kv_cache_blocks;
 
     ConstBufferPtr cu_seqlens;

@@ -246,7 +246,7 @@ protected:
         const auto batch_size = input_lengths.size();
 
         auto kv_blocks_buf = device_->allocateBuffer({
-            DataType::TYPE_INT64, {cache_config.layer_num, 2, batch_size, batch_layer_kv_block_num}, AllocationType::HOST
+            DataType::TYPE_INT64, {cache_config.layer_num, batch_size, 2, batch_layer_kv_block_num}, AllocationType::HOST
         });
         rtp_llm::BatchKVCacheBlockAddr batch_kv_cache;
 
