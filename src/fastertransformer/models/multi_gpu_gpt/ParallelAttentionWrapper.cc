@@ -668,29 +668,29 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                        0,
                                        stream_);
 
+        print_bhsd(layer_id,
+                   "q bias rotary",
+                   q_buf_2_,
+                   context_batch_size,
+                   local_head_num,
+                   max_context_seq_length,
+                   params_.size_per_head_);
+        print_bhsd(layer_id,
+                   "k bias rotary",
+                   k_buf_2_,
+                   context_batch_size,
+                   local_head_num_kv,
+                   max_context_seq_length + max_prompt_length,
+                   params_.size_per_head_);
+        print_bhsd(layer_id,
+                   "v bias rotary",
+                   v_buf_2_,
+                   context_batch_size,
+                   local_head_num_kv,
+                   max_context_seq_length + max_prompt_length,
+                   params_.size_per_head_);
     }
     POP_RANGE;
-    print_bhsd(layer_id,
-               "q bias rotary",
-               q_buf_2_,
-               context_batch_size,
-               local_head_num,
-               max_context_seq_length,
-               params_.size_per_head_);
-    print_bhsd(layer_id,
-               "k bias rotary",
-               k_buf_2_,
-               context_batch_size,
-               local_head_num_kv,
-               max_context_seq_length + max_prompt_length,
-               params_.size_per_head_);
-    print_bhsd(layer_id,
-               "v bias rotary",
-               v_buf_2_,
-               context_batch_size,
-               local_head_num_kv,
-               max_context_seq_length + max_prompt_length,
-               params_.size_per_head_);
 
     sync_check_cuda_error();
     // Use batch major
@@ -1065,7 +1065,7 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
                                         sizeof(T) * h_token_num * qkv_merged_size,
                                         false);
 
-    if (use_kvcache) {
+    if (use_kvcache || params_.rotary_embedding_style_ != 0 || !UseFMHA()) {
         q_buf_2_   = (T*)allocator_->reMalloc(q_buf_2_,
                                         sizeof(T) * context_batch_size * seq_len_with_prefix * qkv_merged_size,
                                         false);
