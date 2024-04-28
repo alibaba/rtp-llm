@@ -23,9 +23,9 @@ protobuf==3.20.0
 matplotlib
 einops
 prettytable
-pydantic>=2.5.3
+pydantic==2.5.3
 timm==0.9.12
-tensorrt>=8.6.1
+tensorrt==8.6.1
 onnx
 aiohttp
 sentence-transformers==2.3.1
