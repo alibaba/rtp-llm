@@ -44,3 +44,27 @@ py_test(
         "//maga_transformer:testlib",
     ],
 )
+py_test(
+    name = "starcode_test",
+    srcs = [
+        "starcode_test.py",
+    ],
+    data = [
+        "//maga_transformer/models/test:testdata",
+    ],
+    deps = [
+        "//maga_transformer:testlib",
+    ],
+)
+py_test(
+    name = "starcode2_test",
+    srcs = [
+        "starcode2_test.py",
+    ],
+    data = [
+        "//maga_transformer/models/test:testdata",
+    ],
+    deps = [
+        "//maga_transformer:testlib",
+    ],
+)

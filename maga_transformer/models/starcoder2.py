@@ -119,24 +119,17 @@ class StarCoder2(GPT):
     def from_huggingface(config_json: Dict[str, Any]):
         model_type = config_json['model_type']
         config = GptInitModelParameters(
-            head_num=36,
-            head_num_kv=4,
-            size_per_head=128,
-            layer_num=32,
-            max_seq_len=16384,
-            vocab_size=49152,
+            head_num=config_json['num_attention_heads'],
+            head_num_kv=config_json['num_key_value_heads'],
+            size_per_head=config_json['hidden_size'] // config_json['num_attention_heads'],
+            layer_num=config_json['num_hidden_layers'],
+            max_seq_len=config_json.get('max_position_embeddings', 8192),
+            vocab_size=config_json['vocab_size'],
             rotary_embedding_dim=128,
             rotary_embedding_style=1,
         )
         if model_type != 'starcoder2':
             raise BaseException(f'model type is not starcoder: {model_type}')
-        config.head_num = config_json['num_attention_heads']
-        config.head_num_kv = config_json['num_key_value_heads']
-        config.size_per_head = config_json['hidden_size'] // config_json[
-            'num_attention_heads']
-        config.layer_num = config_json['num_hidden_layers']
-        config.max_seq_len = config_json.get('max_position_embeddings', 8192)
-        config.vocab_size = config_json['vocab_size']
         config.layernorm_eps = config_json['layer_norm_epsilon']
         config.inter_size = config_json['intermediate_size']
         config.special_tokens.eos_token_id = config_json['eos_token_id']
