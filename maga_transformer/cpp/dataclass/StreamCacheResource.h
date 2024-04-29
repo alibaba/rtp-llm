@@ -1,6 +1,6 @@
 #pragma once
 
-#include "maga_transformer/cpp/ptuning/Ptuning.h"
+#include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include <memory>
 
@@ -10,7 +10,7 @@ class GenerateStream;
 
 struct ResourceContext {
     std::shared_ptr<CacheManager>   cache_manager;
-    std::shared_ptr<PtuningBase>    ptuning;
+    std::shared_ptr<SystemPrompt>   system_prompt;
     bool                            reuse_cache{false};
 };
 

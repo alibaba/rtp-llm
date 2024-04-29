@@ -8,6 +8,7 @@ cc_library(
     deps = [
         "@com_google_googletest//:gtest",
         "//maga_transformer/cpp:cache",
+        "//maga_transformer/cpp:dataclass",
         "//src/fastertransformer/devices:device_utils",
     ],
     visibility = ["//visibility:public"],

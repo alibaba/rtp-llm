@@ -38,9 +38,9 @@ test_deps = [
 ] + torch_deps()
 
 cc_test(
-    name = "ptuning_test",
+    name = "system_prompt_test",
     srcs = [
-        "PtuningTest.cc",
+        "SystemPromptTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -52,9 +52,9 @@ cc_test(
 )
 
 cc_test(
-    name = "ptuning_constructor_test",
+    name = "system_prompt_constructor_test",
     srcs = [
-        "PtuningConstructorTest.cc",
+        "SystemPromptConstructorTest.cc",
     ],
     data = [],
     copts = test_copts,

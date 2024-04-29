@@ -55,7 +55,7 @@ cc_library(
         ":utils",
         ":common",
         ":cache",
-        ":ptuning",
+        ":system_prompt",
         "//:gpt_init_params_hdr",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -67,9 +67,9 @@ cc_library(
 )
 
 cc_library(
-    name = "ptuning",
+    name = "system_prompt",
     hdrs = glob([
-        "ptuning/Ptuning.h",
+        "system_prompt/SystemPrompt.h",
     ]),
     srcs = glob([
     ]),
@@ -83,12 +83,12 @@ cc_library(
 )
 
 cc_library(
-    name = "ptuning_constructor",
+    name = "system_prompt_constructor",
     hdrs = glob([
-        "ptuning/PtuningConstructor.h",
+        "system_prompt/SystemPromptConstructor.h",
     ]),
     srcs = glob([
-        "ptuning/PtuningConstructor.cc",
+        "system_prompt/SystemPromptConstructor.cc",
     ]),
     deps = torch_deps() + [
         ":utils",
@@ -118,6 +118,10 @@ cc_library(
         ":utils",
         ":common",
         "//:gpt_init_params_hdr",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:device_utils",
     ],
@@ -184,7 +188,7 @@ cc_library(
         ":dataclass",
         ":models",
         ":common",
-        ":ptuning",
+        ":system_prompt",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
@@ -205,8 +209,8 @@ cc_library(
         ":schedulers",
         ":engine_base",
         ":common",
-        ":ptuning",
-        ":ptuning_constructor",
+        ":system_prompt",
+        ":system_prompt_constructor",
         ":model_wrapper",
         "//src/fastertransformer/cuda:allocator_cuda",
         "@com_google_absl//absl/status",
@@ -231,8 +235,8 @@ cc_library(
         ":normal_engine",
         ":model_wrapper",
         ":common",
-        ":ptuning",
-        ":ptuning_constructor",
+        ":system_prompt",
+        ":system_prompt_constructor",
         "//src/fastertransformer/cuda:allocator_cuda",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

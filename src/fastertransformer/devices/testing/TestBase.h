@@ -8,6 +8,7 @@
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
+#include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
 #include "maga_transformer/cpp/utils/KvCacheUtils.h"
 
 #include <numeric>
@@ -246,7 +247,7 @@ protected:
         const auto batch_size = input_lengths.size();
 
         auto kv_blocks_buf = device_->allocateBuffer({
-            DataType::TYPE_INT64, {cache_config.layer_num, batch_size, 2, batch_layer_kv_block_num}, AllocationType::HOST
+            DataType::TYPE_UINT64, {cache_config.layer_num, batch_size, 2, batch_layer_kv_block_num}, AllocationType::HOST
         });
         rtp_llm::BatchKVCacheBlockAddr batch_kv_cache;
 
@@ -260,7 +261,7 @@ protected:
                 kv_blocks_buf->data<uint64_t>(),
                 batch_kv_cache.k_ptr[i],
                 batch_kv_cache.v_ptr[i],
-                1,
+                cache_config.layer_num,
                 kv_blocks_buf->shape().back(),
                 batch_size,
                 i

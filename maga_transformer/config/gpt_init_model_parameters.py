@@ -316,6 +316,11 @@ class GptInitModelParameters:
         logging.info(f'reserve_runtime_mem_mb: {self.reserve_runtime_mem_mb}')
         self.kv_cache_mem_mb = int(os.environ.get('KV_CACHE_MEM_MB', -1))
         logging.info(f'kv_cache_mem_mb: {self.kv_cache_mem_mb}')
+        self.block_nums = int(os.environ.get('TEST_BLOCK_NUM', 0))
+        logging.info(f'block_nums: {self.block_nums}')
+        # TODO(xinfei.sxf) deal with old option : USE_BLOCK_CACHE 
+        self.reuse_cache = bool(int(os.environ.get('REUSE_CACHE', 0)))
+        logging.info(f'reuse_cache: {self.reuse_cache}')
         self.pre_allocate_op_mem = bool(int(os.environ.get('PRE_ALLOCATE_OP_MEM', 1)))
         logging.info(f'pre_allocate_op_mem: {self.pre_allocate_op_mem}')
         self.int8_kv_cache = bool(int(os.environ.get('INT8_KV_CACHE', 0)))

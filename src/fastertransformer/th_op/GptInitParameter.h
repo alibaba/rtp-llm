@@ -123,13 +123,15 @@ public:
     int64_t max_context_batch_size_  = 1;
     int64_t gen_num_per_circle_      = 1;
 
-    bool    is_multimodal_       = false;
-    bool    int8_kv_cache_       = false;
-    bool    pre_allocate_op_mem_ = true;
-    int64_t  seq_size_per_block_ = 8;
+    bool     is_multimodal_       = false;
+    bool     int8_kv_cache_       = false;
+    bool     pre_allocate_op_mem_ = true;
+    int64_t  seq_size_per_block_  = 8;
 
-    int64_t reserve_runtime_mem_mb_ = 0;
-    int64_t kv_cache_mem_mb_        = 0;
+    int64_t  block_nums_             = 0;
+    int64_t  reserve_runtime_mem_mb_ = 0;
+    int64_t  kv_cache_mem_mb_        = 0;
+    bool     reuse_cache_            = false;
 
     bool use_medusa_ = false;
 

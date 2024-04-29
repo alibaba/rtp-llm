@@ -6,7 +6,7 @@
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
-#include "maga_transformer/cpp/ptuning/Ptuning.h"
+#include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "torch/all.h"
 #include <atomic>
 #include <chrono>
@@ -46,7 +46,7 @@ private:
     absl::Status    trySaveStepError() const;
     void            loop();
     void            initCacheManager();
-    void            initPtuning();
+    void            initSystemPrompt();
 
 private:
     std::thread                           loop_thread_;

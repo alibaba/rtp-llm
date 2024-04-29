@@ -22,7 +22,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const Res
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)numBeams(), (size_t)max_seq_len}, ft::AllocationType::HOST}, {});
     memcpy(complete_token_ids_->data(), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
-    updatePrefix(resource_context.ptuning);
+    updatePrefix(resource_context.system_prompt);
 
     generate_output_ = make_shared<GenerateOutput>();
     sub_generate_status_.clear();
@@ -86,11 +86,11 @@ std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
     return generate_input_;
 }
 
-void GenerateStream::updatePrefix(const std::shared_ptr<PtuningBase>& ptuning) {
-    if (ptuning) {
-        prefix_info_ = ptuning->getPtuningInfo(*generate_input_->generate_config);
-        if (!prefix_info_.prefix_prompt.empty()) {
-            generate_input_->updatePrefix(prefix_info_.prefix_prompt);
+void GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {
+    if (system_prompt) {
+        prompt_param_ = system_prompt->getPromptParams(*generate_input_->generate_config);
+        if (!prompt_param_.prompt_token.empty()) {
+            generate_input_->updatePrefix(prompt_param_.prompt_token);
             seq_length_ = generate_input_->inputLength();
             memcpy(complete_token_ids_->data(), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
         }

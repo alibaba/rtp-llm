@@ -5,8 +5,6 @@
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
-#include "maga_transformer/cpp/ptuning/Ptuning.h"
-
 
 namespace rtp_llm {
 

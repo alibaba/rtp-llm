@@ -12,7 +12,7 @@
 #include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/utils/SynchronizedQueue.h"
-#include "maga_transformer/cpp/ptuning/Ptuning.h"
+#include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "absl/status/statusor.h"
 
@@ -142,20 +142,7 @@ public:
         seq_length_ = seq_length;
     }
 
-    // void setCacheManager(const std::shared_ptr<CacheManager>& cache_manager) {
-    //     stream_cache_resource_.setCacheManager(cache_manager);
-    // }
-
-    // void setPtuning(const std::shared_ptr<PtuningBase>& ptuning) {
-    //     updatePrefix(ptuning);
-    //     stream_cache_resource_.setPtuning(ptuning);
-    // }
-
-    void updatePrefix(const std::shared_ptr<PtuningBase>& ptuning);
-
-    // void setReuseCache(bool reuse_cache) {
-    //     stream_cache_resource_.setReuseCache(reuse_cache);
-    // }
+    void updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
 
     void setStop(const std::string& err_msg) {
         std::lock_guard<std::mutex> lock(output_mutex_);
@@ -294,7 +281,7 @@ protected:
     std::mutex                          output_mutex_;
     std::condition_variable             update_cv_;
     StreamCacheResource                 stream_cache_resource_;
-    PrefixInfo                          prefix_info_;
+    SystemPromptParams                  prompt_param_;
     size_t                              batch_size_            = 1;
     int                                 reuse_length_          = 0;
     bool                                done_                  = false;

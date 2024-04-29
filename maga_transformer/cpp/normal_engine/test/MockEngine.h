@@ -16,16 +16,17 @@ namespace rtp_llm {
 
 struct CustomConfig {
     std::map<int, std::vector<int>> multi_task_prompt_tokens;
+    bool reuse_cache = false;
 };
 
 std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomConfig& config) {
-    setenv("TEST_BLOCK_NUM", "100", 1);
-
     rtp_llm::MagaInitParams rtp_llm_params;
     rtp_llm_params.gpt_init_parameter = c10::make_intrusive<GptInitParameter>(2, 64, 2, 20, 20, 128);
-    rtp_llm_params.gpt_init_parameter->multi_task_prompt_tokens = config.multi_task_prompt_tokens;
     auto& params        = *rtp_llm_params.gpt_init_parameter;
     params.head_num_kv_ = 2;
+    params.block_nums_  = 100;
+    params.reuse_cache_ = config.reuse_cache;
+    params.multi_task_prompt_tokens = config.multi_task_prompt_tokens;
 
     const size_t inter_size    = 512;
     params.inter_size_         = inter_size;

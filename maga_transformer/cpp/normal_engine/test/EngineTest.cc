@@ -30,7 +30,7 @@ TEST_F(NormalEngineTest, testSimple) {
     auto engine = createMockEngine(device_, config);
 
     ASSERT_TRUE(engine->resourceContext().cache_manager);
-    ASSERT_FALSE(engine->resourceContext().ptuning);
+    ASSERT_FALSE(engine->resourceContext().system_prompt);
     ASSERT_FALSE(engine->resourceContext().reuse_cache);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
 
@@ -64,14 +64,14 @@ TEST_F(NormalEngineTest, testSimple) {
     ASSERT_TRUE(!output4.ok());
 }
 
-TEST_F(NormalEngineTest, testPtuning) {
+TEST_F(NormalEngineTest, testSystemPrompt) {
     CustomConfig config;
     vector<int> prompt_1 = {1, 2, 3};
     vector<int> prompt_2 = {4, 5, 6, 7, 8, 9};
     config.multi_task_prompt_tokens = {{1, prompt_1}, {2, prompt_2}};
     auto engine = createMockEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().cache_manager);
-    ASSERT_TRUE(engine->resourceContext().ptuning);
+    ASSERT_TRUE(engine->resourceContext().system_prompt);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 96);
 
@@ -137,28 +137,20 @@ TEST_F(NormalEngineTest, testPtuning) {
 
 TEST_F(NormalEngineTest, testReuseCacheOption) {
     CustomConfig config;
-    setenv("REUSE_CACHE", "1", 1);
+    config.reuse_cache = true;
     auto engine = createMockEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
 
-    setenv("REUSE_CACHE", "0", 1);
+    config.reuse_cache = false;
     auto engine2 = createMockEngine(device_, config);
     ASSERT_FALSE(engine2->resourceContext().reuse_cache);
-
-    setenv("REUSE_CACHE", "2", 1);
-    auto engine3 = createMockEngine(device_, config);
-    ASSERT_FALSE(engine3->resourceContext().reuse_cache);
-
-    unsetenv("REUSE_CACHE");
-    auto engine4 = createMockEngine(device_, config);
-    ASSERT_FALSE(engine4->resourceContext().reuse_cache);
 }
 
 // TODO(xinfei.sxf) attention mask not support, tmp comment out it
 TEST_F(NormalEngineTest, testReuseCache) {
     CustomConfig config;
-    setenv("REUSE_CACHE", "1", 1);
+    config.reuse_cache = true;
     auto engine = createMockEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);

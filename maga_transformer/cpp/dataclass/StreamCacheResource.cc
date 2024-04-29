@@ -93,7 +93,7 @@ int StreamCacheResource::initalKVCacheCount() const {
 // TODO(xinfei.sxf) fix this to reduce waste
 int StreamCacheResource::nextNeedBlockNums() const {
     auto next_length = stream_->seqLength() + gen_num_per_circle_;
-    // TODO(xinfei.sxf) deal with ptuning
+    // TODO(xinfei.sxf) deal with system prompt
     auto current_block_length = maxBlockSize() * resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     return ((next_length - current_block_length - 1) / resource_context_.cache_manager->cacheConfig().seq_size_per_block) + 1;
 }

@@ -4,12 +4,11 @@
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"
-#include "maga_transformer/cpp/ptuning/PtuningConstructor.h"
+#include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/utils/logger.h"
 
 using namespace std;
-
 namespace rtp_llm {
 
 NormalEngine::NormalEngine(const MagaInitParams&                                                   params,
@@ -27,27 +26,23 @@ NormalEngine::~NormalEngine() {
 }
 
 void NormalEngine::initCacheManager() {
-    auto [success, cache_config] = CacheConfigCreator::createConfig(*params_.gpt_init_parameter);
-    if (!success) {
+    auto result = CacheConfigCreator::createConfig(*params_.gpt_init_parameter);
+    if (!result.ok()) {
         // TODO(xinfei.sxf) fix abort
         FT_LOG_ERROR("create cache config failed");
         abort();
     }
 
     auto device = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
-    resource_context_.cache_manager = make_shared<CacheManager>(cache_config, device);  
+    resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device);  
 }
 
-void NormalEngine::initPtuning() {
-    // TODO(xinfei.sxf) deal with old option : USE_BLOCK_CACHE 
-    char* reuse_cache_env  = std::getenv("REUSE_CACHE");
-    if (reuse_cache_env && strcmp(reuse_cache_env, "1") == 0) {
-        resource_context_.reuse_cache = true;
-    }
-    auto ptuning_param = PtuningConstructor::construct(*params_.gpt_init_parameter, this, resource_context_.cache_manager.get());
+void NormalEngine::initSystemPrompt() {
+    resource_context_.reuse_cache = params_.gpt_init_parameter->reuse_cache_;
+    auto ptuning_param = SystemPromptConstructor::construct(*params_.gpt_init_parameter, this, resource_context_.cache_manager.get());
     if (!ptuning_param.empty()) {
         resource_context_.reuse_cache = true;
-        resource_context_.ptuning.reset(new MultiTaskPtuning(*resource_context_.cache_manager, ptuning_param));
+        resource_context_.system_prompt.reset(new SystemPrompt(ptuning_param));
     }
 }
 
@@ -65,7 +60,7 @@ absl::Status NormalEngine::startLoop() {
     FT_LOG_INFO("start normal engine");
     running_ = true;
     loop_thread_ = std::thread(&NormalEngine::loop, this);
-    initPtuning(); // ptuning constructor depends on engine startup
+    initSystemPrompt(); // system prompt constructor depends on engine startup
     return absl::OkStatus();
 }
 
