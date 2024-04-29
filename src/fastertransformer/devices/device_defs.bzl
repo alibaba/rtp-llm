@@ -22,6 +22,9 @@ def device_test_envs():
         "//:using_rocm": {
             "TEST_USING_DEVICE": "ROCM",
         },
+        "//:using_arm": {
+            "TEST_USING_DEVICE": "ARM",
+        },
         "//conditions:default": {
             "TEST_USING_DEVICE": "CPU",
             # NOTE: libxfastertransformer.so has conflict of std::regex related symbols with torch,
@@ -42,6 +45,9 @@ def device_impl_target():
         ],
         "//:using_rocm": [
             "//src/fastertransformer/devices/rocm_impl:rocm_impl",
+        ],
+        "//:using_arm": [
+            "//src/fastertransformer/devices/arm_impl:arm_cpu_impl",
         ],
         "//conditions:default": [
             "//src/fastertransformer/devices/cpu_impl:cpu_impl"

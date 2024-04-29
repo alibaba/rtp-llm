@@ -63,9 +63,9 @@ TEST_F(GptModelTest, testSimple) {
     inputs.kv_cache_blocks = kv_cache_blocks;
     device_->syncAndCheck();
 
-    // temporarily disable test for cpu/arm device
+    // temporarily disable test for cpu device
     // enable this back when device is ready.
-    if (DeviceFactory::getDefaultDevice()->getDeviceProperties().type != DeviceType::Cuda) {
+    if (DeviceFactory::getDefaultDevice()->getDeviceProperties().type == DeviceType::Cpu) {
         try {
             auto outputs = model->forward(inputs);
             printBufferData(*outputs.logits, "logits");

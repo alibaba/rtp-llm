@@ -19,6 +19,11 @@ config_setting(
     values = {"define": "using_rocm=true"},
 )
 
+config_setting(
+    name = "using_arm",
+    values = {"define": "using_arm=true"},
+)
+
 
 cc_library(
     name = "gpt_init_params_hdr",

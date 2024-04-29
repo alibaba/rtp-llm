@@ -2,7 +2,10 @@
 
 #include <string>
 #include <cstdint>
+
+#if defined(__x86_64__)
 #include <immintrin.h>
+#endif
 
 #if GOOGLE_CUDA
 #include <cuda_fp16.h>
@@ -30,6 +33,10 @@ namespace fastertransformer {
 #define FT_FOREACH_DEVICE_TYPE(F) \
     F(DataType::TYPE_FP16, half); \
     F(DataType::TYPE_BF16, __nv_bfloat16);
+#elif defined(__aarch64__) 
+#define FT_FOREACH_DEVICE_TYPE(F) \
+    F(DataType::TYPE_FP16, __fp16); \
+    F(DataType::TYPE_BF16, __bf16);
 #else
 struct fake_half {
     uint16_t x;

@@ -4,6 +4,7 @@
 #include <memory>
 #include <map>
 #include <shared_mutex>
+#include <mutex>
 
 namespace fastertransformer {
 

@@ -87,6 +87,16 @@ build:rocm --copt="-DUSING_CUDA=0"
 build:rocm --copt="-DUSING_ROCM=1"
 build:rocm --copt="-D__HIP_PLATFORM_AMD__=1"
 
+build:arm --copt="-DENABLE_BF16=1"
+build:arm --define=using_cuda=false --define=using_cuda_nvcc=false
+build:arm --define=using_arm=true
+build:arm --action_env TF_NEED_CUDA="0"
+build:arm --host_action_env TF_NEED_CUDA="0"
+build:arm --crosstool_top=@bazel_tools//tools/cpp:toolchain
+build:arm --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
+build:arm --linkopt -ldl
+build:arm --copt="-DUSING_CUDA=0"
+
 build:debug -c dbg
 build:debug --copt -g --copt -O0
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
