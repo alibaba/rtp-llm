@@ -40,7 +40,6 @@ class Conversation:
             if isinstance(message.content, str):
                 prompt += f"{self.roles[message.role]}: {message.content}"
             elif isinstance(message.content, list):
-                prompt += f"{self.roles[message.role]}: "
                 now_prompt = ""
                 for content_part in message.content:
                     if content_part.type == ContentPartTypeEnum.text:
@@ -50,11 +49,11 @@ class Conversation:
                         assert (content_part.image_url != None)
                         images.append(content_part.image_url.url)
                         now_prompt = f"<image>\n" + now_prompt
-                if self.sep_style == SeparatorStyle.SINGLE:
-                    now_prompt += self.seps[0]
-                elif self.sep_style == SeparatorStyle.TWO:
-                    now_prompt += self.seps[index % 2]
-                prompt += now_prompt
+                prompt += f"{self.roles[message.role]}: " + now_prompt
+            if self.sep_style == SeparatorStyle.SINGLE:
+                prompt += self.seps[0]
+            elif self.sep_style == SeparatorStyle.TWO:
+                prompt += self.seps[index % 2]
         prompt += self.roles[RoleEnum.assistant] + ":"
         return PromptWithImages(prompt, images)
 
