@@ -59,3 +59,21 @@ def http_deps():
         type = "zip",
         build_file = clean_dep("//3rdparty/xft:BUILD"),
     )
+
+    http_archive(
+        name = "torch_2.3_py310_cpu_aarch64",
+        sha256 = "ad89e5a7dfaa96a3c054aaf644003b3e72cd34260b1288fdf4fb638eb9b15795",
+        urls = [
+            # This is a custom build of torch 2.3.0 for aarch64 with ACL 24.04 to workaround FP16 issue with ACL 23.08
+            "https://github.com/TianyuLi0/rtp-llm/raw/pytorch_2.3.0_aarch64_acl_24.04/3rdparty/acl/torch-2.3.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("//:BUILD.pytorch"),
+    )
+
+    http_archive(
+        name = "arm_compute",
+        sha256 = "6d7aebfa9be74d29ecd2dbeb17f69e00c667c36292401f210121bf26a30b38a5",
+        urls = ["https://github.com/ARM-software/ComputeLibrary/archive/refs/tags/v24.04.tar.gz"],
+        strip_prefix = "ComputeLibrary-24.04",
+    )

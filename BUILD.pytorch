@@ -35,3 +35,17 @@ cc_library(
     strip_include_prefix = "torch/include/torch/csrc/api/include",
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "torch_libs",
+    srcs = glob([
+        "torch.libs/libarm_compute*.so",
+        "torch.libs/libgfortran*.so*",
+        "torch.libs/libgomp*.so*",
+        "torch.libs/libopenblasp*.so",
+    ]),
+    deps = [
+        "@local_config_python//:python_headers",
+    ],
+    visibility = ["//visibility:public"],
+)

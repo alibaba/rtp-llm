@@ -134,10 +134,16 @@ def rpm_library(
 
 def torch_deps():
     torch_version = "2.1_py310"
-    return [
-        "@torch_" + torch_version + "_cpu//:torch_api",
-        "@torch_" + torch_version + "_cpu//:torch",
-    ]
+    deps = select({
+        "//:using_arm": ["@torch_2.3_py310_cpu_aarch64//:torch_api",
+            "@torch_2.3_py310_cpu_aarch64//:torch",
+            "@torch_2.3_py310_cpu_aarch64//:torch_libs",],
+        "//conditions:default": [
+            "@torch_" + torch_version + "_cpu//:torch_api",
+            "@torch_" + torch_version + "_cpu//:torch",
+            "@torch_" + torch_version + "_cpu//:torch_libs",]
+        })
+    return deps
 
 def copts():
     return [

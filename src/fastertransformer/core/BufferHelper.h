@@ -6,6 +6,7 @@
 
 #include <cassert>
 #include <cstring>
+#include <optional>
 
 namespace fastertransformer {
 
