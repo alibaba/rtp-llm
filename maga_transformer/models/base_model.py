@@ -11,7 +11,9 @@ from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.utils.sample_utils import HuggingfaceSampler, FtSampler, BaseSampler, DynamicDecodeOp, BeamSearchSampler
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, ModelType
+from maga_transformer.models.downstream_modules.custom_module import CustomModule
+from maga_transformer.config.task_type import TaskType
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
 from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
 
@@ -202,16 +204,15 @@ class BaseModel(object):
         self.tokenizer: Optional[PreTrainedTokenizerBase] = None
         self.max_input_buffer_len: int = 0
 
+        self.task_type: TaskType = TaskType.LANGUAGE_MODEL
+        self.custom_module: Optional[CustomModule] = None
+
         self.default_generate_config: GenerateConfig = GenerateConfig()
 
     @property
     def dtype(self) -> Union[str, torch.dtype]:
         assert self.weight is not None
         return self.weight.dtype
-    
-    @property
-    def model_type(self) -> ModelType:
-        return self.config.model_type
 
     @property
     def device(self) -> Union[str, torch.device]:

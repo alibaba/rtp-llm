@@ -1,14 +1,16 @@
 from typing import Union, List, Dict, Optional
 from enum import Enum
 from maga_transformer.config.base_model_config import PyDanticModelBase
-from maga_transformer.embedding.embedding_config import EmbeddingGenerateConfig, EmbeddingType
+
+class Usage(PyDanticModelBase):
+    prompt_tokens: int = 0
+    total_tokens: int = 0
 
 class OpenAIEmbeddingRequest(PyDanticModelBase):
     input: Union[str, List[str]]
     model: str = ""
     encoding_format: str = 'float'
     user: str = ""
-    embedding_config: EmbeddingGenerateConfig = EmbeddingGenerateConfig()
 
 class EmbeddingResponseType(str, Enum):
     DENSE = "embedding"
@@ -27,10 +29,6 @@ class EmbeddingResponseFormat(PyDanticModelBase):
     index: int
 
 # not in use yet
-class Usage(PyDanticModelBase):
-    prompt_tokens: int = 0
-    total_tokens: int = 0
-
 class OpenAIEmbeddingResponse(PyDanticModelBase):
     object: str = 'list'
     data: List[EmbeddingResponseFormat] = []
@@ -38,15 +36,13 @@ class OpenAIEmbeddingResponse(PyDanticModelBase):
     usage: Usage = Usage()
 
 class SimilarityRequest(PyDanticModelBase):
-    left: Union[str, List[str]]
-    right: Union[str, List[str]]
-    embedding_config: EmbeddingGenerateConfig = EmbeddingGenerateConfig()
+    left: List[str]
+    right: List[str]
     model: str = ""
     return_response: bool = False
-    
+
 class SimilarityResponse(PyDanticModelBase):
     model: str = ""
-    type: EmbeddingType = EmbeddingType.DENSE
     similarity: List[List[float]]
     left_response: Optional[OpenAIEmbeddingResponse] = None
     right_response: Optional[OpenAIEmbeddingResponse] = None

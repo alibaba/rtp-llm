@@ -1,61 +1,68 @@
 import torch
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Union
 from maga_transformer.utils.util import to_cuda, to_cpu
 
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.embedding.embedding_config import EmbeddingGenerateConfig
 from maga_transformer.config.base_model_config import PyDanticModelBase
 
 class EmbeddingInput(PyDanticModelBase):
     token_ids: List[int]
     token_type_ids: List[int]
     input_length: int
-    embedding_config: EmbeddingGenerateConfig
 
-class EmbeddingOutput(PyDanticModelBase):
-    sentence_embedding: Optional[torch.Tensor] = None
-    sparse_embedding: Optional[Dict[str, float]] = None
-    colbert_embedding: Optional[torch.Tensor] = None
+
+class EngineInputs(PyDanticModelBase):
+    inputs: List[EmbeddingInput]
+    input_length: int
+    config: Dict[str, Any] = {}
+
+
+class EngineOutputs(PyDanticModelBase):
+    outputs: Union[torch.Tensor, List[Any]]
+    input_length: int
+
 
 class EmbeddingStream(PyDanticModelBase):
-    input: EmbeddingInput
-    output: EmbeddingOutput = EmbeddingOutput()
+    inputs: EngineInputs
+    output: Optional[EngineOutputs] = None
     error_info: Optional[str] = None
     finished: bool = False
 
     def set_error(self, error: str):
         self.error_info = error
 
-    def update(self, embedding_output: EmbeddingOutput):
-        self.output = embedding_output
+    def update(self, embedding_output: Union[torch.Tensor, List[Any]]):
+        self.output = EngineOutputs(outputs=embedding_output, input_length=self.inputs.input_length)
         self.finished = True
+
 
 class EmbeddingBatchedInput(object):
     def __init__(self, nccl_op: Any) -> None:
         self.nccl_op_ = nccl_op
+        
+    def generate_model_input(self, streams: List[EmbeddingStream]):
+        self._clear()
+        if g_parallel_info.tp_rank == 0:
+            for stream in streams:
+                for input in stream.inputs.inputs:
+                    self.context_lengths_list.append(input.input_length)
+                    self.combo_tokens.extend(input.token_ids)
+                    self.combo_token_type_ids.extend(input.token_type_ids)
+            self.batch_size = len(self.context_lengths_list)
+            self.config = streams[0].inputs.config
+            self.token_num = len(self.combo_tokens)
+        self._tp_sync()
 
-    def clear(self):
+    def _clear(self):
         self.batch_size = 0
         self.token_num = 0
         self.context_lengths_list: List[int] = []
         self.combo_tokens: List[int] = []
         self.combo_token_type_ids: List[int] = []
         # no need to broadcast embedding config since only tp=0 will use it
-        self.embedding_config = EmbeddingGenerateConfig()
+        self.config = {}
 
-    def generate_model_input(self, streams: List[EmbeddingStream]):
-        self.clear()
-        if g_parallel_info.tp_rank > 0:
-            return
-        for stream in streams:
-            self.context_lengths_list.append(stream.input.input_length)
-            self.combo_tokens.extend(stream.input.token_ids)
-            self.combo_token_type_ids.extend(stream.input.token_type_ids)
-        self.batch_size = len(self.context_lengths_list)
-        self.embedding_config = streams[0].input.embedding_config
-        self.token_num = len(self.combo_tokens)
-
-    def tp_sync(self):
+    def _tp_sync(self):
         if g_parallel_info.tp_size <= 1:
             return
         check_num: int = 998244352

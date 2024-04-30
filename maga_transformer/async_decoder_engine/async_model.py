@@ -14,7 +14,7 @@ from maga_transformer.models.base_model import BaseModel, GenerateInput
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.engine_creator import create_engine
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.config.gpt_init_model_parameters import ModelType
+from maga_transformer.config.task_type import TaskType
 
 class AsyncModel:
     def __init__(self, model: BaseModel, sp_model: Optional[BaseModel] = None) -> None:
@@ -45,8 +45,8 @@ class AsyncModel:
         return self.model.default_generate_config
     
     @property
-    def model_type(self) -> ModelType:
-        return self.model.model_type
+    def task_type(self) -> TaskType:
+        return self.model.task_type
 
     # just for perf test
     def enable_perf_test_schedule_strategy(self):

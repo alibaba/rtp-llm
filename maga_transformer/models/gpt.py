@@ -4,18 +4,21 @@ import math
 import torch
 import logging
 import gc
-from typing import Optional, Union, List, Dict
+from typing import Optional, Union, List, Dict, Any
 from torch.nn.utils.init import skip_init
 import torch.nn.functional as F
 
 from maga_transformer.utils.util import get_device, to_torch_dtype
 from maga_transformer.models.gpt_util.rms import RMSNorm
 from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
-from maga_transformer.utils.model_weights_loader import get_model_weights_loader, estimate_load_parallel_num
+from maga_transformer.utils.model_weights_loader import get_model_weights_loader, estimate_load_parallel_num, ModelWeightsLoader
 from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, LoRAModelWeightInfo, LoRAMap
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.config.task_type import TaskType
+from maga_transformer.models.downstream_modules.utils import load_task_type, create_custom_module
+from maga_transformer.models.downstream_modules.custom_module import CustomModule
 from maga_transformer.utils.database import CkptDatabase, ModuleDatabase, DictDatabase
 from maga_transformer.models.gpt_util.prefix_encoder import PrefixEncoder
 from maga_transformer.models.gpt_util.medusa_head import MedusaHead
@@ -28,6 +31,9 @@ class GPT(BaseModel):
         super().__init__()
 
         self.config = config
+        self.load_tokenizer()
+        self.task_type = load_task_type(self.config)
+        self.custom_module = self.load_custom_module()
         compute_dtype = to_torch_dtype(self.config.data_type)
 
         if self.config.use_attention_linear_bias:
@@ -73,9 +79,8 @@ class GPT(BaseModel):
                     self.post_decoder_layernorm = RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0')
             else:
                 self.post_decoder_layernorm = None
-            self.lm_head = ParallelLinear(all_gather) if self.config.has_lm_head else None
-
-        self.load_tokenizer()
+            if self.task_type == TaskType.LANGUAGE_MODEL:
+                self.lm_head = ParallelLinear(all_gather)
         self.load()
 
     def split_slopes_tp(self, slopes: torch.Tensor):
@@ -126,6 +131,20 @@ class GPT(BaseModel):
         self._load_weights(self.config.ref_model, self.config.ref_dict, device)
         self._initialize_from_weight(device)
 
+    def load_custom_module(self) -> Optional[CustomModule]:        
+        return create_custom_module(self.task_type, self.config, self.tokenizer)
+    
+    def _load_custom_module_weights(self, model_weights_loader: ModelWeightsLoader):
+        if self.custom_module is not None:
+            tensor_names = self.custom_module.handler.tensor_info()
+            tensor_map: Dict[str, torch.Tensor] = {}
+            for name in tensor_names:
+                tensors = model_weights_loader.load_tensor(name)
+                if len(tensors) !=1 :
+                    raise Exception(f"load tensor {name} failed, get len=={len(tensors)}")
+                tensor_map[name] = tensors[0]
+            self.custom_module.handler.init(tensor_map)
+
     def _load_weights(self, 
                       ref_model: Optional[torch.nn.Module] = None, 
                       ref_dict: Dict[str, torch.Tensor] = {},
@@ -154,6 +173,7 @@ class GPT(BaseModel):
                 self.config, g_parallel_info.tp_size)
             model_weights_loader = get_model_weights_loader(weights_info, database, compute_dtype=compute_dtype)
             self.weight = model_weights_loader.load_weights_from_scratch(num_process=load_parallel_num)
+            self._load_custom_module_weights(model_weights_loader)
             if static_lora:
                 lora_name = list(self.config.lora_infos.keys())[0]
                 model_weights_loader.show_warns(lora_name=lora_name)
@@ -179,18 +199,18 @@ class GPT(BaseModel):
             if self.weight.has_pytorch_weight(W.lm_head):
                 lm_head_w = self.weight.steal_pytorch_weight(W.lm_head)
             else:
-                lm_head_w = self.word_embedding._emb
+                lm_head_w = self.word_embedding.weight
             if self.config.normalize_lm_head_weight:
                 lm_head_w = F.normalize(lm_head_w)
             if self.config.logit_scale != 1.0:
                 lm_head_w = self.config.scale_logit * lm_head_w
             self.lm_head.set_weight(lm_head_w, self.weight.steal_pytorch_weight(W.lm_head_b))
-            self.weight.append_global_weight("lm_head", self.lm_head._w);
+            self.weight.append_global_weight("lm_head", self.lm_head._w)
         if self.lm_head is not None:
             if self.config.tp_split_emb_and_lm_head:
-                self.vocab_size_padded = self.lm_head._w.shape[0] * g_parallel_info.tp_size
+                self.vocab_size_padded = self.lm_head.weight.shape[0] * g_parallel_info.tp_size
             else:
-                self.vocab_size_padded = self.lm_head._w.shape[0]
+                self.vocab_size_padded = self.lm_head.weight.shape[0]
 
         def _safe_load_from_module(param: torch.nn.Parameter, fname: str):
             # np_w is 1-D array since a bin file doesn't have shape info.
@@ -231,7 +251,7 @@ class GPT(BaseModel):
                 self.position_encoding.set_weight(pos_weight)
             if self.token_type_embeddings is not None:
                 token_type_weight = self.weight.steal_pytorch_weight(W.token_type_embedding)
-                assert token_type_weight is not None, "token_type embedding weight not found"                
+                assert token_type_weight is not None, "token_type embedding weight not found"
                 self.token_type_embeddings.set_weight(token_type_weight.cuda())
             if self.pre_decoder_layernorm is not None:
                 _safe_load_from_module(self.pre_decoder_layernorm.weight, W.pre_decoder_ln_gamma)

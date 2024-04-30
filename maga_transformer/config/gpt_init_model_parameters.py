@@ -80,10 +80,6 @@ class VitParameters:
     image_expand_token: Optional[int] = None
     vit_weights = None
 
-class ModelType(Enum):
-    NORMAL = "normal"
-    EMBEDDING = "embedding"
-
 class GptInitModelParameters:
     __slots__ = {
         "gpt_init_params",
@@ -100,8 +96,7 @@ class GptInitModelParameters:
         "ref_model",
         "ref_dict",
         "is_quant_mode",
-        "model_type",
-        "tie_word_embeddings"
+        "tie_word_embeddings"        
     }
 
     def __init__(self,
@@ -110,7 +105,7 @@ class GptInitModelParameters:
                  layer_num: int,
                  max_seq_len: int,
                  vocab_size: int,
-                 **kwargs):
+                 **kwargs: Any):
         hidden_size = head_num * size_per_head
         self.gpt_init_params = torch.classes.FasterTransformer.GptInitParameter(
             head_num, size_per_head, layer_num, max_seq_len, vocab_size, hidden_size
@@ -134,7 +129,6 @@ class GptInitModelParameters:
         self.ref_model: Optional[torch.nn.Module] = None
         self.ref_dict: Dict[str, torch.Tensor] = {}
 
-        self.model_type = ModelType.NORMAL
         self.tie_word_embeddings = False
         self.nccl_ip = g_master_info.ip
         self.nccl_port = g_master_info.gpt_nccl_port
@@ -202,20 +196,6 @@ class GptInitModelParameters:
             logging.info("use medusa config")
             self.medusa_config = medusa_config
             self.gpt_init_params.use_medusa = True
-
-    def update_embedding_config(self, ckpt_path: str):
-        def _check_is_sentence_transformer_repo() -> bool:
-            if os.path.exists(os.path.join(ckpt_path, "config_sentence_transformers.json")):
-                return True
-            module_file_path = os.path.join(ckpt_path, "modules.json")
-            if os.path.exists(module_file_path):
-                with open(module_file_path, 'r') as reader:
-                    content = reader.read()
-                    if 'sentence_transformers' in content:
-                        return True
-            return False
-        if os.environ.get('EMBEDDING_MODEL', '0') == '1' or _check_is_sentence_transformer_repo():
-            self.model_type = ModelType.EMBEDDING
 
     def update_inter_padding_size(self, tp_size: int):
         if self.quant_algo.int4_mode:
@@ -310,7 +290,6 @@ class GptInitModelParameters:
         self.update_task_prompt_config()
         self.update_ptuning_config()
         self.update_medusa_config(ckpt_path)
-        self.update_embedding_config(ckpt_path)
 
         self.seq_size_per_block = seq_size_per_block
         logging.info(f'seq_size_per_block: {self.seq_size_per_block}')
