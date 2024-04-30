@@ -18,6 +18,19 @@ cc_library(
 )
 
 cc_library(
+    name = "assert_utils",
+    hdrs = [
+        "assert_utils.h"
+    ],
+    deps = [
+        ":logger"
+    ],
+    copts = copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "utils",
     srcs = glob([
         "*.cc",
@@ -27,6 +40,7 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":logger",
+        ":assert_utils",
         "//src/fastertransformer/core:buffer"
     ],
     copts = copts(),

@@ -75,7 +75,7 @@ void CudaSoftmaxOpTest::MixFloatSoftmaxTest(size_t b,
         {(int)b, (int)head_num, (int)q_len, (int)k_len}, tensor_options);
 
     auto input_device = createDeviceBuffer<input_t>(input_host);
-    auto mask_device = createDeviceBuffer<input_t>(mask_host);
+    auto mask_device = createDeviceBuffer<output_t>(mask_host);
 
     BufferPtr output_device = nullptr;
     output_device = device_->softmax({std::move(input_device),

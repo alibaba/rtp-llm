@@ -1,7 +1,6 @@
 #include "src/fastertransformer/core/Buffer.h"
 
 #include <numeric>
-#include <cassert>
 #include <stdexcept>
 
 using namespace std;
@@ -52,7 +51,7 @@ void* Buffer::data() const {
 }
 
 void* Buffer::dataWithOffset(size_t offset) const {
-    assert(type_ != DataType::TYPE_INVALID);
+    FT_CHECK(type_ != DataType::TYPE_INVALID);
     return static_cast<char*>(data_) + offset * getTypeSize(type_);
 }
 
@@ -82,7 +81,9 @@ size_t Buffer::sizeBytes() const {
 void Buffer::reshape(std::vector<size_t>& shape) {
     int new_shape_size = std::accumulate(shape.begin(), shape.end(), 0);
     int old_shape_size = std::accumulate(shape_.begin(), shape_.end(), 0);
-    assert(new_shape_size == old_shape_size);
+    FT_CHECK_WITH_INFO(
+        new_shape_size == old_shape_size,
+        "reshape shape size not match: %d vs %d", new_shape_size, old_shape_size);
     shape_ = shape;
 }
 
@@ -94,7 +95,9 @@ Buffer Buffer::view(size_t offset, size_t size) const {
     if (offset == 0 && size == shape_[0]) {
         return Buffer(where_, type_, shape_, data_, nullptr);
     } else {
-        assert(offset + size <= this->shape_[0]);
+        FT_CHECK_WITH_INFO(offset + size <= this->shape_[0],
+                           "view offset %d + size %d out of range with buffer[%s]",
+                           offset, size, debugString().c_str());
         auto new_shape = shape_;
         new_shape[0] = size;
         const auto offset_size = this->size() / shape_[0] * offset;

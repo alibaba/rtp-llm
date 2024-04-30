@@ -92,7 +92,7 @@ void AttentionLayerTest<T>::testAttentionLayer(
     auto common_inputs = model_->prepareAttentionInputs(model_inputs);
     auto layer_cache_blocks = (*model_inputs.kv_cache_blocks)[0];
     common_inputs.kv_cache_blocks = layer_cache_blocks;
-    printBufferData(*model_inputs.kv_cache_blocks, "kv_cache_blocks");
+    printBufferData(common_inputs.kv_cache_blocks.value().get(), "kv_cache_blocks");
 
     // 2. compute reference implementation result
     GptAttention gpt_attention(attention_conf);

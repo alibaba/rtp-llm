@@ -1,8 +1,8 @@
 #pragma once
 
 #include "Types.h"
+#include "src/fastertransformer/utils/assert_utils.h"
 
-#include <cassert>
 #include <memory>
 #include <vector>
 #include <string>
@@ -41,15 +41,15 @@ public:
     template<typename T>
     inline T* data() const {
         static_assert(!std::is_same<T, void>::value);
-        assert(type_ == getTensorType<T>());
+        FT_CHECK_WITH_INFO(
+            type_ == getTensorType<T>(),
+            "get data type %d not match buffer type %d", getTensorType<T>(), type_);
         return static_cast<T*>(data_);
     }
 
     template<typename T>
     inline T* dataWithOffset(size_t offset) const {
-        static_assert(!std::is_same<T, void>::value);
-        assert(type_ == getTensorType<T>());
-        return static_cast<T*>(dataWithOffset(offset));
+        return data<T>() + offset;
     }
     size_t                     typeSize() const;
 

@@ -64,8 +64,10 @@ AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inp
         max_context_seq_len);
 
     RUNTIME_ASSERT_OP_ARG(
-        (cu_seqlens_data[context_batch_size] == inputs.combo_tokens->shape()[0]),
-        "cu_seqlens is not consistent with combo_tokens.");
+        (cu_seqlens_data[context_batch_size] + decoder_batch_size == inputs.combo_tokens->shape()[0]),
+        "combo_tokens is not consistent with input lengths, "
+        "there are %d tokens in context plus %d tokens in decoder batch, but got %d input tokens.",
+        cu_seqlens_data[context_batch_size], decoder_batch_size, inputs.combo_tokens->shape()[0]);
     checkKvBlocksShape(inputs.kv_cache_blocks);
     checkKvBlocksShape(inputs.kv_cache_scales);
 

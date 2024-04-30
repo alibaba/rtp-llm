@@ -5,6 +5,9 @@
 
 namespace fastertransformer {
 
+// TODO(wangyin.yx): add api for querying device info (e.g. available memory)
+// TODO(wangyin.yx): add ARM device type
+// TODO(wangyin.yx): add deivce-specific optimize options (currently for intel)
 class DeviceBase : public DeviceOps {
 public:
     DeviceBase();

@@ -1,6 +1,7 @@
 #include "maga_transformer/cpp/speculative_engine/SpeculativeSampler.h"
 #include <cmath>
 #include <random>
+#include <cassert>
 
 using namespace std;
 namespace ft = fastertransformer;

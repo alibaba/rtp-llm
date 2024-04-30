@@ -15,6 +15,7 @@ enum class AllocationType {
     DEVICE = 1,
 };
 
+
 typedef enum datatype_enum {
     TYPE_INVALID,
     TYPE_BOOL,

@@ -96,9 +96,12 @@ TEST_F(GptModelTest, testSimple) {
         0.2, 0.1
     );
 
-    inputs.combo_tokens = createBuffer<int32_t>({4}, {13048, 11, 220, 151645}, AllocationType::HOST);
+    inputs.combo_tokens = createBuffer<int32_t>({1}, {151645}, AllocationType::HOST);
     inputs.input_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
     inputs.sequence_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
+    outputs = model.forward(inputs);
+    output_tensor = bufferToTensor(*outputs.logits);
+    std::cout << "output_tensor: " << output_tensor << std::endl;
 }
 
 TEST_F(GptModelTest, testAttentionInputs) {
@@ -125,14 +128,14 @@ TEST_F(GptModelTest, testAttentionInputs) {
     }
 
     inputs.sequence_lengths = createBuffer<int32_t>({3}, {4, 19, 23}, AllocationType::HOST);
-    inputs.combo_tokens = createBuffer<int32_t>({7}, std::vector<int32_t>(7, 0), AllocationType::HOST);
+    inputs.combo_tokens = createBuffer<int32_t>({10}, std::vector<int32_t>(10, 0), AllocationType::HOST);
     {
         auto attention_inputs = model.prepareAttentionInputs(inputs);
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
         assertBufferValueEqual<int32_t>(*attention_inputs.cu_seqlens, {0, 7});
         assertBufferValueEqual<int32_t>(*attention_inputs.padding_offset,
-            {0, 0, 0, 0, 0, 0, 0});
+            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0});
         ASSERT_EQ(attention_inputs.context_batch_size, 1);
         ASSERT_EQ(attention_inputs.context_max_seq_len, 7);
         ASSERT_EQ(attention_inputs.decoder_batch_size, 3);
@@ -140,14 +143,14 @@ TEST_F(GptModelTest, testAttentionInputs) {
     }
 
     inputs.sequence_lengths = createBuffer<int32_t>({2}, {4, 6}, AllocationType::HOST);
-    inputs.combo_tokens = createBuffer<int32_t>({9}, std::vector<int32_t>(9, 0), AllocationType::HOST);
+    inputs.combo_tokens = createBuffer<int32_t>({11}, std::vector<int32_t>(11, 0), AllocationType::HOST);
     {
         auto attention_inputs = model.prepareAttentionInputs(inputs);
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
         assertBufferValueEqual<int32_t>(*attention_inputs.cu_seqlens, {0, 2, 9});
         assertBufferValueEqual<int32_t>(*attention_inputs.padding_offset,
-            {0, 0, 5, 5, 5, 5, 5, 5, 5});
+            {0, 0, 5, 5, 5, 5, 5, 5, 5, 0, 0});
         ASSERT_EQ(attention_inputs.context_batch_size, 2);
         ASSERT_EQ(attention_inputs.context_max_seq_len, 7);
         ASSERT_EQ(attention_inputs.decoder_batch_size, 2);

@@ -128,7 +128,7 @@ void CudaAttentionOpTest::contextAttentionOpTest(size_t batch_size,
     auto position_ids_device    = createDeviceBuffer<int>(position_ids_host);
     auto padding_offset_device  = createDeviceBuffer<int>(padding_offset_host);
     auto cu_seqlens_device      = createDeviceBuffer<int>(cu_seqlens_host);
-    auto attention_mask_device  = createDeviceBuffer<float>(attention_mask_host);
+    auto attention_mask_device  = createDeviceBuffer<half>(attention_mask_host);
     auto rope_config            = RopeConfig({RopeType::NOROPE, head_dim, 10000, 1, 2048, 1, 1});
 
     auto common_inputs      = AttentionCommonInputs({*input_lengths, *sequence_lengths});

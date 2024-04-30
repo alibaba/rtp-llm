@@ -63,6 +63,7 @@ cc_library(
     ],
     deps = [
         ":types_hdr",
+        "//src/fastertransformer/utils:assert_utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

@@ -25,6 +25,9 @@ namespace fastertransformer {
 
 inline void myAssert(bool result, const char* const file, int const line, std::string const& info = "") {
     if (!result) {
+        if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
+            abort();
+        }
         throwRuntimeError(file, line, info);
     }
 }

@@ -54,7 +54,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     auto context_qkv = qkv->view(generate_batch_size, context_token_num);
     auto context_output = qkv_output->view(generate_batch_size, context_token_num);
     auto context_kv_blocks = kv_cache_blocks
-        ? kv_cache_blocks.value().get().view(generate_batch_size, context_token_num)
+        ? kv_cache_blocks.value().get().view(generate_batch_size, context_batch_size)
         : Buffer::emptyBuffer();
 
     if (generate_batch_size) {
