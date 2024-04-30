@@ -8,7 +8,6 @@ from maga_transformer.utils.time_util import Timer
 from maga_transformer.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.config.gpt_init_model_parameters import ModelType
 from PIL import Image
 
 class RpcModel:
@@ -32,10 +31,6 @@ class RpcModel:
     @property
     def default_generate_config(self) -> GenerateConfig:
         return self.model.default_generate_config
-
-    @property
-    def model_type(self) -> ModelType:
-        return self.model.model_type
 
     def stop(self):
         self.rtp_llm_op_.stop()
