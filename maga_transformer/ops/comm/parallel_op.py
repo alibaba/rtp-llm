@@ -35,9 +35,17 @@ class ParallelLinear(object):
         self._b: Optional[torch.Tensor] = None
         self._all_gather = all_gather
 
-    def set_weight(self, w: torch.Tensor, b: torch.Tensor):
+    def set_weight(self, w: torch.Tensor, b: Optional[torch.Tensor]):
         self._w = w
         self._b = b
+        
+    @property
+    def weight(self):
+        return self._w
+    
+    @property
+    def bias(self):
+        return self._b
 
     def __call__(self, input: torch.Tensor):
         assert self._w is not None
