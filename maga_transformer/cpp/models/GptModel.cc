@@ -47,6 +47,7 @@ void checkKvBlocksShape(const BufferPtr& input_kv_blocks) {
 AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inputs) {
     const auto input_lengths = device_->clone({*inputs.input_lengths, AllocationType::HOST});
     const auto sequence_lengths = device_->clone({*inputs.sequence_lengths, AllocationType::HOST});
+    device_->syncAndCheck();
     const auto decoder_batch_size = sequence_lengths->shape()[0];
     const auto context_batch_size = input_lengths->shape()[0] - decoder_batch_size;
     const auto max_context_seq_len = context_batch_size ? *std::max_element(

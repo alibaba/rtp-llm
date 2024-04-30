@@ -190,6 +190,7 @@ TEST_F(LayerNormTest, testAddBiasResidual) {
     const auto bias = createBuffer<float>({3}, {1, 2, 3});
     const auto residual = createBuffer<float>({2, 3}, {0.01, 0.02, 0.03, 0.04, 0.05, 0.06});
 
+    device_->syncAndCheck();
     device_->layernorm(LayernormParams(
         *input, *norm_output, *norm_output, NormType::add_bias, nullopt, nullopt,
         *residual, nullopt, *bias));

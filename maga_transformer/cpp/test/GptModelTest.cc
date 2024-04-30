@@ -63,6 +63,7 @@ TEST_F(GptModelTest, testSimple) {
     };
     inputs.attention_mask = *mask_buf;
     inputs.kv_cache_blocks = std::move(kv_cache_blocks);
+    device_->syncAndCheck();
 
     // temporarily disable test for cpu/arm device
     // enable this back when device is ready.
@@ -78,6 +79,7 @@ TEST_F(GptModelTest, testSimple) {
     }
 
     auto outputs = model.forward(inputs);
+    device_->syncAndCheck();
     printBufferData(*outputs.logits, "logits");
     auto output_tensor = bufferToTensor(*outputs.logits);
 
@@ -99,11 +101,12 @@ TEST_F(GptModelTest, testSimple) {
     inputs.combo_tokens = createBuffer<int32_t>({1}, {151645});
     inputs.input_lengths = createBuffer<int32_t>({1}, {3});
     inputs.sequence_lengths = createBuffer<int32_t>({1}, {3});
+    device_->syncAndCheck();
     outputs = model.forward(inputs);
+    device_->syncAndCheck();
     output_tensor = bufferToTensor(*outputs.logits);
 
     // expected output token 198
-    std::cout << "output_tensor: " << output_tensor << std::endl;
     assertTensorClose(
         output_tensor.index({torch::indexing::Slice(), torch::indexing::Slice(190, 200)}),
         bufferToTensor(*createBuffer<float>(
@@ -124,7 +127,9 @@ TEST_F(GptModelTest, testAttentionInputs) {
     inputs.combo_tokens = createBuffer<int32_t>({17}, std::vector<int32_t>(17, 0), AllocationType::HOST);
 
     {
+        device_->syncAndCheck();
         auto attention_inputs = model.prepareAttentionInputs(inputs);
+        device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
         assertBufferValueEqual<int32_t>(*attention_inputs.cu_seqlens, {0, 3, 8, 10, 17});
@@ -139,7 +144,9 @@ TEST_F(GptModelTest, testAttentionInputs) {
     inputs.sequence_lengths = createBuffer<int32_t>({3}, {4, 19, 23}, AllocationType::HOST);
     inputs.combo_tokens = createBuffer<int32_t>({10}, std::vector<int32_t>(10, 0), AllocationType::HOST);
     {
+        device_->syncAndCheck();
         auto attention_inputs = model.prepareAttentionInputs(inputs);
+        device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
         assertBufferValueEqual<int32_t>(*attention_inputs.cu_seqlens, {0, 7});
@@ -154,7 +161,9 @@ TEST_F(GptModelTest, testAttentionInputs) {
     inputs.sequence_lengths = createBuffer<int32_t>({2}, {4, 6}, AllocationType::HOST);
     inputs.combo_tokens = createBuffer<int32_t>({11}, std::vector<int32_t>(11, 0), AllocationType::HOST);
     {
+        device_->syncAndCheck();
         auto attention_inputs = model.prepareAttentionInputs(inputs);
+        device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
         assertBufferValueEqual<int32_t>(*attention_inputs.cu_seqlens, {0, 2, 9});

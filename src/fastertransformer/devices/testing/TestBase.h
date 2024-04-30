@@ -21,7 +21,7 @@ static const std::string DEFAULT_DEVICE = "CPU";
 class DeviceTestBase : public ::testing::Test {
 public:
     void SetUp() override {
-        setenv("FT_DEBUG_LEVEL", "DEBUG", 1);
+        // setenv("FT_DEBUG_LEVEL", "DEBUG", 1);
         // setenv("FT_DEBUG_PRINT_LEVEL", "DEBUG", 1);
         const auto test_src_dir = getenv("TEST_SRCDIR");
         const auto test_work_space = getenv("TEST_WORKSPACE");
@@ -94,6 +94,7 @@ protected:
         if (data && (buffer->size() > 0)) {
             memcpy(buffer->data(), data, sizeof(T) * buffer->size());
         }
+        device_->syncAndCheck();
         return buffer;
     }
 
@@ -104,6 +105,7 @@ protected:
         if (data && (buffer->size() > 0)) {
             device_->copy(CopyParams(*buffer, *host_buffer));
         }
+        device_->syncAndCheck();
         return move(buffer);
     }
 
@@ -123,6 +125,7 @@ protected:
             {buffer.type(), buffer.shape(), AllocationType::HOST}
         );
         device_->copy(CopyParams(*comp_buffer, buffer));
+        device_->syncAndCheck();
         for (size_t i = 0; i < buffer.size(); i++) {
             printf("i=%ld, buffer[i] = %f, expected[i] = %f\n", i,
                     (comp_buffer->data<T>())[i], expected[i]);
@@ -133,9 +136,11 @@ protected:
     template<typename T>
     std::vector<T> getBufferValues(const Buffer& buffer) {
         std::vector<T> values(buffer.size());
+        device_->syncAndCheck();
         if (buffer.where() == MemoryType::MEMORY_GPU) {
             auto host_buffer = createHostBuffer<T>(buffer.shape(), nullptr);
             device_->copy(CopyParams(*host_buffer, buffer));
+            device_->syncAndCheck();
             memcpy(values.data(), host_buffer->data(), sizeof(T) * buffer.size());
         } else {
             memcpy(values.data(), buffer.data(), sizeof(T) * buffer.size());
@@ -153,6 +158,7 @@ protected:
                 {buffer->type(), buffer->shape(), AllocationType::DEVICE}
             );
             device_->copy(CopyParams(*device_buffer, *buffer));
+            device_->syncAndCheck();
             printf("created device buffer from tensor at %p with data=%p\n", device_buffer.get(), device_buffer->data());
             return std::move(device_buffer);
         } else {
@@ -165,6 +171,7 @@ protected:
             {buffer.type(), buffer.shape(), AllocationType::HOST}
         );
         device_->copy(CopyParams(*host_buffer, buffer));
+        device_->syncAndCheck();
 
         return torch::from_blob(
             host_buffer->data(), bufferShapeToTorchShape(buffer),
