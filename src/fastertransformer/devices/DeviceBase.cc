@@ -21,6 +21,10 @@ unique_ptr<Buffer> DeviceBase::allocateBuffer(const BufferParams& params, const 
     return buffer_manager_->allocate(params, hints);
 }
 
+unique_ptr<Buffer> DeviceBase::allocateBufferLike(const Buffer& buffer, const BufferHints& hints) {
+    return allocateBuffer({buffer.type(), buffer.shape()}, hints);
+}
+
 void DeviceBase::syncAndCheck() {
     return;
 }

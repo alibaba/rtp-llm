@@ -45,21 +45,23 @@ void checkKvBlocksShape(const BufferPtr& input_kv_blocks) {
 }
 
 AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inputs) {
-    const auto decoder_batch_size = inputs.sequence_lengths->shape()[0];
-    const auto context_batch_size = inputs.input_lengths->shape()[0] - decoder_batch_size;
+    const auto input_lengths = device_->clone({*inputs.input_lengths, AllocationType::HOST});
+    const auto sequence_lengths = device_->clone({*inputs.sequence_lengths, AllocationType::HOST});
+    const auto decoder_batch_size = sequence_lengths->shape()[0];
+    const auto context_batch_size = input_lengths->shape()[0] - decoder_batch_size;
     const auto max_context_seq_len = context_batch_size ? *std::max_element(
-        inputs.input_lengths->data<int32_t>() + decoder_batch_size,
-        inputs.input_lengths->data<int32_t>() + decoder_batch_size + context_batch_size) : 0;
+        input_lengths->data<int32_t>() + decoder_batch_size,
+        input_lengths->data<int32_t>() + decoder_batch_size + context_batch_size) : 0;
     const auto max_decoder_seq_len = decoder_batch_size ? *std::max_element(
-        inputs.sequence_lengths->data<int32_t>(),
-        inputs.sequence_lengths->data<int32_t>() + decoder_batch_size) : 0;
+        sequence_lengths->data<int32_t>(),
+        sequence_lengths->data<int32_t>() + decoder_batch_size) : 0;
 
     std::vector<int32_t> cu_seqlens_data(context_batch_size + 1);
     std::vector<int32_t> padding_offset_data(inputs.combo_tokens->shape()[0]);
     getPaddingOffsetAndCuSeqLens(
         padding_offset_data.data(),
         cu_seqlens_data.data(),
-        inputs.input_lengths->dataWithOffset<int32_t>(decoder_batch_size),
+        input_lengths->dataWithOffset<int32_t>(decoder_batch_size),
         context_batch_size,
         max_context_seq_len);
 
@@ -81,6 +83,7 @@ AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inp
     attention_inputs.context_batch_size = context_batch_size;
     attention_inputs.context_max_seq_len = max_context_seq_len;
     attention_inputs.decoder_max_seq_len = max_decoder_seq_len;
+    attention_inputs.context_token_num = cu_seqlens_data[context_batch_size];
     attention_inputs.position_ids = inputs.position_ids;
     attention_inputs.attention_mask = inputs.attention_mask;
     return move(attention_inputs);

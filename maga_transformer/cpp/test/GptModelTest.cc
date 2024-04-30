@@ -51,9 +51,9 @@ TEST_F(GptModelTest, testSimple) {
     const std::vector<int32_t> input_lengths_vec = {3};
     const std::vector<int32_t> sequence_lengths_vec = {};
 
-    auto combo_tokens = createBuffer<int32_t>({3}, {13048, 11, 220}, AllocationType::HOST);
-    auto input_lengths = createBuffer<int32_t>({1}, input_lengths_vec, AllocationType::HOST);
-    auto sequence_lengths = createBuffer<int32_t>({0}, sequence_lengths_vec, AllocationType::HOST);
+    auto combo_tokens = createBuffer<int32_t>({3}, {13048, 11, 220});
+    auto input_lengths = createBuffer<int32_t>({1}, input_lengths_vec);
+    auto sequence_lengths = createBuffer<int32_t>({0}, sequence_lengths_vec);
     auto kv_cache_blocks = allocateKVBlocks(cache_config, input_lengths_vec, sequence_lengths_vec);
     const auto mask_tensor = create_context_mask(input_lengths_vec).to(torch::kFloat16);
     const auto mask_buf = tensorToBuffer(mask_tensor);
@@ -96,9 +96,9 @@ TEST_F(GptModelTest, testSimple) {
         0.2, 0.1
     );
 
-    inputs.combo_tokens = createBuffer<int32_t>({1}, {151645}, AllocationType::HOST);
-    inputs.input_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
-    inputs.sequence_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
+    inputs.combo_tokens = createBuffer<int32_t>({1}, {151645});
+    inputs.input_lengths = createBuffer<int32_t>({1}, {3});
+    inputs.sequence_lengths = createBuffer<int32_t>({1}, {3});
     outputs = model.forward(inputs);
     output_tensor = bufferToTensor(*outputs.logits);
     std::cout << "output_tensor: " << output_tensor << std::endl;

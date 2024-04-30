@@ -231,6 +231,7 @@ struct AttentionCommonInputs {
     size_t decoder_batch_size;
     size_t context_max_seq_len;
     size_t decoder_max_seq_len;
+    size_t context_token_num;
 
     OptionalConstBufferRef position_ids;
     OptionalConstBufferRef attention_mask;

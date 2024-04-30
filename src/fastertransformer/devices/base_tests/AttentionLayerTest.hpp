@@ -83,9 +83,9 @@ void AttentionLayerTest<T>::testAttentionLayer(
         input_tensor.to(dataTypeToTorchType(getTensorType<TestType>())));
 
     GptModelInputs model_inputs;
-    model_inputs.combo_tokens = tensorToBuffer(input_tensor);
-    model_inputs.input_lengths = vector2Buffer(input_lengths);
-    model_inputs.sequence_lengths = vector2Buffer(sequence_lengths);
+    model_inputs.combo_tokens = device_->clone({*tensorToBuffer(input_tensor)});
+    model_inputs.input_lengths = device_->clone({*vector2Buffer(input_lengths)});
+    model_inputs.sequence_lengths = device_->clone({*vector2Buffer(sequence_lengths)});
     const auto mask_buf = tensorToBuffer(mask_tensor);
     model_inputs.attention_mask = *mask_buf;
     model_inputs.kv_cache_blocks = allocateKVBlocks(cache_conf, input_lengths, sequence_lengths);

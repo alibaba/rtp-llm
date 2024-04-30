@@ -18,6 +18,39 @@ using namespace std;
 
 namespace fastertransformer {
 
+template <typename T>
+void writeContextKvCache(
+        const AttentionModuleParams& params,
+        const Buffer& k, const Buffer& v,
+        cudaStream_t stream)
+{
+    const auto& kv_blocks = params.common.kv_cache_blocks.value().get();
+    const auto batch_size = params.common.context_batch_size;
+    RUNTIME_ASSERT_OP_ARG(
+        kv_blocks.shape()[0] == batch_size,
+        "context attention kv blocks batch size expected [%d] but got shape [%s]",
+        batch_size, kv_blocks.debugString().c_str());
+    const auto max_blocks_per_batch = kv_blocks.shape()[1];
+    KVBlockArray kv_block_array(
+        batch_size, max_blocks_per_batch, params.configs.tokens_per_block, 0);
+    KvCacheDataType cache_type = KvCacheDataType::BASE;
+    kv_block_array.data        = (int64_t *)kv_blocks.data();
+
+    invokeTranspose4dBatchMajor<T>(
+        k.data<T>(),
+        v.data<T>(),
+        kv_block_array,
+        batch_size,
+        params.common.context_max_seq_len,  // max input length + prefix prompt length
+        params.configs.size_per_head,
+        params.configs.kv_head_num,
+        cache_type,
+        nullptr,  // kvScaleOrigQuant
+        params.common.input_lengths.dataWithOffset<int32_t>(params.common.decoder_batch_size),
+        0, // d_prefix_prompt_lengths,
+        stream);
+}
+
 AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& params) {
     auto datatype       = params.input.type();
     auto token_num      = params.input.shape()[0];
@@ -90,6 +123,14 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         int8_mode,
         stream_
     );
+
+    if (params.common.kv_cache_blocks) {
+        ARG_CASTED_FUNC_CALL(half, writeContextKvCache,
+            std::cref(params),
+            std::cref(*k_output),
+            std::cref(*v_output),
+            stream_);
+    }
 
     // TODO(lidongjin): Only support float32 gemm output.
     auto qk_output = gemm({*q_output,
