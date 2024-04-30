@@ -101,7 +101,16 @@ TEST_F(GptModelTest, testSimple) {
     inputs.sequence_lengths = createBuffer<int32_t>({1}, {3});
     outputs = model.forward(inputs);
     output_tensor = bufferToTensor(*outputs.logits);
+
+    // expected output token 198
     std::cout << "output_tensor: " << output_tensor << std::endl;
+    assertTensorClose(
+        output_tensor.index({torch::indexing::Slice(), torch::indexing::Slice(190, 200)}),
+        bufferToTensor(*createBuffer<float>(
+            {10}, {1.1670, -0.6973, -0.6919, -1.7705, -1.4453,
+                -0.9766, -0.1351,  2.6152, 28.2500, -0.1479}, AllocationType::HOST)),
+        1e-1, 1e-2
+    );
 }
 
 TEST_F(GptModelTest, testAttentionInputs) {
