@@ -5,21 +5,20 @@ import copy
 import logging
 import logging.config
 import traceback
-from typing import Union, Any, Dict, AsyncGenerator, Callable
+from typing import Union, Any, Dict, Callable
 from pydantic import BaseModel
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, ORJSONResponse
 from fastapi import Request
 import torch
 import asyncio
+import functools
 
 from fastapi import Request as RawRequest
 
 from maga_transformer.utils.time_util import Timer, current_time_ms
 from maga_transformer.utils.util import AtomicCounter
-from maga_transformer.utils.model_weight import LoraCountException, LoraPathException
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from maga_transformer.metrics import sys_reporter, kmonitor, AccMetrics, GaugeMetrics
-from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.distribute.gang_server import GangServer
 from maga_transformer.utils.concurrency_controller import ConcurrencyController, ConcurrencyException
@@ -27,11 +26,10 @@ from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.access_logger.access_logger import AccessLogger
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
 from maga_transformer.embedding.embedding_endpoint import EmbeddingEndpoint
-from maga_transformer.embedding.api_datatype import OpenAIEmbeddingRequest, SimilarityRequest
-from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ChatCompletionRequest
 from maga_transformer.server.inference_worker import InferenceWorker, TokenizerEncodeResponse
-from maga_transformer.config.gpt_init_model_parameters import ModelType
+from maga_transformer.server.misc import format_exception
+from maga_transformer.config.task_type import TaskType
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -60,7 +58,7 @@ class InferenceServer(object):
             self._inference_worker = InferenceWorker()
             self._openai_endpoint = None
             self._embedding_endpoint = None
-            if self._inference_worker.model is not None and self._inference_worker.model.model_type == ModelType.EMBEDDING:
+            if self._inference_worker.model is not None and self._inference_worker.model.task_type != TaskType.LANGUAGE_MODEL:
                 self._embedding_endpoint = EmbeddingEndpoint(self._inference_worker.model)
             else:
                 self._openai_endpoint = OpenaiEndopoint(self._inference_worker.model)
@@ -111,25 +109,7 @@ class InferenceServer(object):
             self._access_logger.log_exception_access(request, e, id)
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
             yield response_data_prefix + \
-                json.dumps(InferenceServer.format_exception(e), ensure_ascii=False) + "\r\n\r\n"
-
-    @staticmethod
-    def format_exception(e: Exception):
-        @staticmethod
-        def _format(errcode: int, message: str) -> Dict[str, Any]:
-            return {'error_code': errcode, "message": message}
-
-        if isinstance(e, FtRuntimeException):
-            return _format(e.expcetion_type, e.message)
-        elif isinstance(e, ConcurrencyException):
-            return _format(ExceptionType.CONCURRENCY_LIMIT_ERROR, str(e))
-        elif isinstance(e, LoraCountException) or isinstance(e, LoraPathException):
-            return _format(ExceptionType.UPDATE_ERROR, str(e))
-        elif isinstance(e, Exception):
-            error_msg = f'ErrorMsg: {str(e)} \n Traceback: {traceback.format_exc()}'
-            return _format(ExceptionType.UNKNOWN_ERROR, error_msg)
-        else:
-            return _format(ExceptionType.UNKNOWN_ERROR, str(e))
+                json.dumps(format_exception(e), ensure_ascii=False) + "\r\n\r\n"
 
     def update(self, version_info: VersionInfo):
         id = self._atomic_count.increment()
@@ -146,7 +126,7 @@ class InferenceServer(object):
             self._access_logger.log_exception_access(version_info.__dict__, e, id)
             kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
             error_code = 500
-            rep = JSONResponse(self.format_exception(e), status_code=error_code)
+            rep = JSONResponse(format_exception(e), status_code=error_code)
         return rep
 
     async def inference(self, req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
@@ -176,34 +156,28 @@ class InferenceServer(object):
             return response
         return await self._infer_wrap(request.model_dump(), raw_request, generate_call)
 
-    async def embedding(self, request: Union[Dict[str, Any], str, OpenAIEmbeddingRequest], raw_request: Request):
+    async def embedding(self, request: Dict[str, Any], raw_request: Request):
         id = self._atomic_count.increment()
         kmonitor.report(AccMetrics.QPS_METRIC, 1)
         with self._controller:
             try:
                 assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
-                result = await self._embedding_endpoint.embedding(request)
+                result = await self._embedding_endpoint.handle(request)
                 log_result = copy.copy(result)
                 # do not log result since too big
-                log_result.data = []
+                if 'data' in log_result:
+                    log_result['data'] = []
                 self._access_logger.log_success_access(request, log_result, id)
-                return JSONResponse(result.model_dump(exclude_none=True))
+                return ORJSONResponse(result)
             except BaseException as e:
                 return self._handle_exception(request, e, id)
 
-    async def similarity(self, request: Union[Dict[str, Any], str, SimilarityRequest], raw_request: Request):
-        id = self._atomic_count.increment()
-        kmonitor.report(AccMetrics.QPS_METRIC, 1)
-        with self._controller:
-            try:
-                assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
-                result = await self._embedding_endpoint.similarity(request)
-                self._access_logger.log_success_access(request, result.model_dump(exclude_none=True), id)
-                return JSONResponse(result.model_dump(exclude_none=True))
-            except BaseException as e:
-                return self._handle_exception(request, e, id)
-
-
+    async def similarity(self, request: Dict[str, Any], raw_request: Request):
+        return await self.embedding(request, raw_request)        
+    
+    async def classifier(self, request: Dict[str, Any], raw_request: Request):
+        return await self.embedding(request, raw_request)        
+        
     def _handle_exception(self, request: Union[Dict[str, Any], str, BaseModel], e: Exception, id: int):
         self._access_logger.log_exception_access(request, e, id)
         if isinstance(e, ConcurrencyException):
@@ -215,7 +189,7 @@ class InferenceServer(object):
         else:
             error_code = 500
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
-        rep = JSONResponse(self.format_exception(e), status_code=error_code)
+        rep = JSONResponse(format_exception(e), status_code=error_code)
         return rep
 
     async def _call_generate_with_report(self, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
@@ -293,4 +267,4 @@ class InferenceServer(object):
             response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
             return JSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
-            return JSONResponse(self.format_exception(e), status_code=500)
+            return JSONResponse(format_exception(e), status_code=500)

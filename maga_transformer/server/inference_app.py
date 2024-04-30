@@ -5,8 +5,7 @@ import time
 import logging
 import logging.config
 import uvicorn
-import traceback
-from typing import Generator, Union, Any, Dict, List, AsyncGenerator, Callable, Coroutine
+from typing import Union, Any, Dict
 
 from fastapi import FastAPI
 from fastapi import Request as RawRequest
@@ -23,6 +22,7 @@ from maga_transformer.utils.version_info import VersionInfo
 from maga_transformer.config.uvicorn_config import UVICORN_LOGGING_CONFIG
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.server.inference_server import InferenceServer
+from maga_transformer.server.misc import check_is_master, check_is_worker
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
@@ -84,26 +84,14 @@ class InferenceApp(object):
 
         # entry for worker RANK != 0
         @app.post("/inference_internal")
+        @check_is_worker()
         async def inference_internal(req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
-            if g_parallel_info.is_master:
-                return InferenceServer.format_exception(
-                    FtRuntimeException(
-                        ExceptionType.UNSUPPORTED_OPERATION,
-                        "gang cluster is None or role is master, should not access /inference_internal!"
-                    )
-                )
             return await self.inference_server.inference(req, raw_request)
 
         # entry for worker RANK == 0
         @app.post("/")
+        @check_is_master()
         async def inference(req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
-            if not g_parallel_info.is_master:
-                return InferenceServer.format_exception(
-                    FtRuntimeException(
-                        ExceptionType.UNSUPPORTED_OPERATION,
-                        "gang worker should not access this / api directly!"
-                    )
-                )
             # compat for huggingface-pipeline request endpoint
             if self.inference_server.is_embedding:
                 return await self.inference_server.embedding(req, raw_request)
@@ -111,26 +99,15 @@ class InferenceApp(object):
                 return await self.inference_server.inference(req, raw_request)
 
         # update for worker RANK != 0
-        @app.post("/update_internal")
+        @app.post("/update_internal")                
+        @check_is_worker()
         def update_internal(version_info: VersionInfo):
-            if g_parallel_info.is_master:
-                return InferenceServer.format_exception(
-                    FtRuntimeException(
-                        ExceptionType.UNSUPPORTED_OPERATION,
-                        "gang cluster is None or role is master, should not access /update_internal!")
-                )
             return self.inference_server.update(version_info)
 
         # update for worker RANK == 0
         @app.post("/update")
+        @check_is_master()
         def update(version_info: VersionInfo):
-            if not g_parallel_info.is_master:
-                return InferenceServer.format_exception(
-                    FtRuntimeException(
-                        ExceptionType.UNSUPPORTED_OPERATION,
-                        "gang worker should not access /update api directly!"
-                    )
-                )
             return self.inference_server.update(version_info)
 
         @app.get("/v1/models")
@@ -141,26 +118,14 @@ class InferenceApp(object):
         # entry for worker RANK == 0
         @app.post("/chat/completions")
         @app.post("/v1/chat/completions")
+        @check_is_master()
         async def chat_completion(request: ChatCompletionRequest, raw_request: RawRequest):
-            if not g_parallel_info.is_master:
-                return InferenceServer.format_exception(
-                    FtRuntimeException(
-                        ExceptionType.UNSUPPORTED_OPERATION,
-                        "gang worker should not access this completions api directly!"
-                    )
-                )
             return await self.inference_server.chat_completion(request, raw_request)
 
         # entry for worker RANK == 0
         @app.post("/tokenizer/encode")
+        @check_is_master()
         async def encode(req: Union[str,Dict[Any, Any]]):
-            if not g_parallel_info.is_master:
-                return InferenceServer.format_exception(
-                    FtRuntimeException(
-                        ExceptionType.UNSUPPORTED_OPERATION,
-                        "gang worker should not access this completions api directly!"
-                    )
-                )
             return self.inference_server.tokenizer_encode(req)        
 
         register_embedding_api(app, self.inference_server)
