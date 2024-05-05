@@ -111,7 +111,7 @@ class InferenceServer(object):
             yield response_data_prefix + \
                 json.dumps(format_exception(e), ensure_ascii=False) + "\r\n\r\n"
 
-    def update(self, version_info: VersionInfo):
+    async def update(self, version_info: VersionInfo):
         id = self._atomic_count.increment()
         try:
             assert self._inference_worker is not None

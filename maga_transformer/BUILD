@@ -177,6 +177,7 @@ py_library(
         ":uvicorn",
         ":fastapi",
         ":psutil",
+        ":orjson"
     ],
     imports = ["."],
 )
