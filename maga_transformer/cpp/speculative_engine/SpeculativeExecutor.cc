@@ -1,7 +1,6 @@
 #include "maga_transformer/cpp/speculative_engine/SpeculativeExecutor.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
-#include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include "maga_transformer/cpp/speculative_engine/SpeculativeBatchStreamProcessor.h"
 #include "maga_transformer/cpp/speculative_engine/SpeculativeStream.h"
@@ -19,9 +18,9 @@ SpeculativeExecutor::SpeculativeExecutor(
 
     SamplerInitParams sampler_params;
     sampler_.reset(new SpeculativeSampler(sampler_params));
-    batch_stream_processor_.reset(new SpeculativeBatchStreamProcessor(*params.gpt_init_parameter));
     model_wrapper_.reset(
         new ParallelModelWrapper(*params.gpt_init_parameter, 1, "localhost", 0, weights, layer_weights));
+    batch_stream_processor_.reset(new SpeculativeBatchStreamProcessor(*params.gpt_init_parameter, !model_wrapper_->useFMHA()));
 }
 
 ModelRequest SpeculativeExecutor::generateOldModelRequest(GptModelInputs& model_input) {

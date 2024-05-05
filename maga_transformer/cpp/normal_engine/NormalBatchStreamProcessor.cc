@@ -7,6 +7,7 @@
 #include <cstring>
 
 using namespace std;
+using namespace fastertransformer;
 
 namespace rtp_llm {
 
@@ -52,6 +53,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         for (auto i = 0; i < current_batch_size; ++i) {
             input_lengths[batch_idx]    = stream->inputLength();
             sequence_lengths[batch_idx] = stream->seqLength() - 1; // need remove
+            // TODO(xinfei.sxf) decode stream 还需要设置prefix len吗？
             prefix_lengths[batch_idx]   = stream->reuseLength();
             memcpyKvCache(kv_cache_blocks,
                           kv_cache.k_ptr[i],
@@ -102,8 +104,54 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         }
         batch_idx += 1;
     }
-    // RETURN_IF_STATUS_ERROR(createAttentionMask(model_input));
+    createAttentionMask(stream_groups, model_input);
     return model_input;
+}
+
+// TODO(xinfei.sxf) fmha enable的判断支持动态化，现在是靠静态的判断，不太好。
+void NormalBatchStreamProcessor::createAttentionMask(const StreamGroups& stream_groups, GptModelInputs& model_input) const {
+    if (!need_attention_mask_) {
+        return;
+    }
+
+    auto           context_streams     = stream_groups.contextStreams();
+    size_t         context_batch_size  = context_streams.size();
+    size_t         max_context_seq_len = stream_groups.maxContextSeqLen();
+    size_t         max_reuse_len       = stream_groups.maxReuseLength();
+
+    DataType target_data_type = getDataType(data_type_);
+    DataType data_type = TYPE_FP32;
+
+    // TODO(xinfei.sxf) set 0 in device base
+    auto attention_mask =
+        device_->allocateBuffer({data_type,
+            {context_batch_size, max_context_seq_len, max_context_seq_len + max_reuse_len}, ft::AllocationType::HOST}, {});
+    for (size_t i = 0; i < context_batch_size; i++) {
+        auto seq_len = (*std::next(context_streams.begin(), i))->seqLength();
+        auto reuse_len = (*std::next(context_streams.begin(), i))->reuseLength();
+        for (size_t j = 0; j < seq_len; j++) {
+            for (size_t k = 0; k <= reuse_len + j; k++) {
+                switch (data_type) {
+                    #define ATTENTION_MASK_VALUE(ft_type) \
+                    case ft_type: { \
+                        typedef DataTypeTraits<ft_type>::type cppType; \
+                        auto data = reinterpret_cast<cppType (*) \
+                            [context_batch_size][max_context_seq_len][max_context_seq_len + max_reuse_len]>((void*)attention_mask->data()); \
+                        (*data)[i][j][k] = 1.0; \
+                        break; \
+                    }
+
+                    ATTENTION_MASK_VALUE(TYPE_FP32)
+                    default:
+                        throw std::runtime_error("wrong data type.");
+                }
+            }
+        }
+    }
+    
+    // TODO(xinfei.sxf) add convert to target data type
+
+    model_input.attention_mask = *attention_mask.release();
 }
 
 absl::StatusOr<SamplerInputs>

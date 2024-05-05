@@ -1,6 +1,5 @@
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
-#include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"
@@ -27,11 +26,7 @@ NormalEngine::~NormalEngine() {
 
 void NormalEngine::initCacheManager() {
     auto result = CacheConfigCreator::createConfig(*params_.gpt_init_parameter);
-    if (!result.ok()) {
-        // TODO(xinfei.sxf) fix abort
-        FT_LOG_ERROR("create cache config failed");
-        abort();
-    }
+    THROW_IF_STATUS_ERROR(result.status());
 
     auto device = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device);  

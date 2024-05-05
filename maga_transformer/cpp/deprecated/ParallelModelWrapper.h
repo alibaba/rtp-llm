@@ -23,6 +23,7 @@ namespace rtp_llm {
 class IModelWrapper {
 public:
     virtual ~IModelWrapper() {}
+    virtual bool                             useFMHA() = 0;
     virtual std::unique_ptr<GptModelOutputs> forward(const ModelRequest& model_request) = 0;
 };
 
@@ -39,6 +40,7 @@ public:
     void                             allocateBuffer(size_t total_batch_size, size_t h_token_num);
     void                             freeBuffer();
     void                             initialize();
+    bool                             useFMHA() override;
     std::unique_ptr<GptModelOutputs> forward(const ModelRequest& model_request) override;
 
 private:
@@ -94,8 +96,10 @@ public:
     ~ParallelModelWrapper(){};
     void addLoRA(const int64_t                                                   lora_id,
                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
-                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights){};
-    void removeLoRA(const int64_t lora_id){};
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {}
+    void removeLoRA(const int64_t lora_id) {}
+
+    bool useFMHA();
 
     std::unique_ptr<GptModelOutputs> forward(const ModelRequest& model_request);
 

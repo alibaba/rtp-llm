@@ -1,5 +1,4 @@
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
-#include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
 #include "maga_transformer/cpp/models/GptModel.h"
@@ -20,9 +19,9 @@ NormalExecutor::NormalExecutor(const MagaInitParams&                            
     device_               = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     sampler_params.device = device_;
     sampler_.reset(new Sampler(sampler_params));
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(*params.gpt_init_parameter));
     model_wrapper_.reset(
         new ParallelModelWrapper(*params.gpt_init_parameter, 1, "localhost", 0, weights, layer_weights));
+    batch_stream_processor_.reset(new NormalBatchStreamProcessor(*params.gpt_init_parameter, !model_wrapper_->useFMHA()));
 }
 
 void NormalExecutor::addLoRA(const int64_t                                                   lora_id,
@@ -43,6 +42,7 @@ ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input
     model_request.input_lengths       = std::move(model_input.input_lengths);
     model_request.sequence_lengths    = std::move(model_input.sequence_lengths);
     model_request.kv_cache_blocks     = std::move(model_input.kv_cache_blocks);
+    model_request.attention_mask      = std::move(model_input.attention_mask);
     return model_request;
 }
 

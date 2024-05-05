@@ -147,52 +147,52 @@ TEST_F(NormalEngineTest, testReuseCacheOption) {
     ASSERT_FALSE(engine2->resourceContext().reuse_cache);
 }
 
-// TODO(xinfei.sxf) attention mask not support, tmp comment out it
 TEST_F(NormalEngineTest, testReuseCache) {
+    setenv("REUSE_CACHE", "1", 1);
     CustomConfig config;
     config.reuse_cache = true;
     auto engine = createMockEngine(device_, config);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
-    // {
-    //     std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-    //     query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
-    //     query->generate_config                 = make_shared<GenerateConfig>();
-    //     query->generate_config->max_new_tokens = 1;
-    //     shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query, engine->resourceContext());
+    {
+        std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
+        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 1;
+        shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query, engine->resourceContext());
 
-    //     ASSERT_TRUE(engine->enqueue(stream).ok());
-    //     auto output1 = stream->nextOutput();
-    //     ASSERT_TRUE(output1.ok());
-    //     ASSERT_EQ(output1.value().aux_info.output_len, 1);
-    //     ASSERT_EQ(output1.value().aux_info.prefix_len, 0);
-    //     ASSERT_EQ(output1.value().aux_info.reuse_len, 2);
-    //     ASSERT_EQ(output1.value().aux_info.input_len, 7);
+        ASSERT_TRUE(engine->enqueue(stream).ok());
+        auto output1 = stream->nextOutput();
+        ASSERT_TRUE(output1.ok());
+        ASSERT_EQ(output1.value().aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().aux_info.prefix_len, 0);
+        ASSERT_EQ(output1.value().aux_info.reuse_len, 0);
+        ASSERT_EQ(output1.value().aux_info.input_len, 7);
 
-    //     ASSERT_TRUE(stream->finished());
-    //     auto output2 = stream->nextOutput();
-    //     ASSERT_TRUE(!output2.ok());
-    // }
+        ASSERT_TRUE(stream->finished());
+        auto output2 = stream->nextOutput();
+        ASSERT_TRUE(!output2.ok());
+    }
 
-    // {
-    //     std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-    //     query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 50, 60, 70}, AllocationType::HOST);
-    //     query->generate_config                 = make_shared<GenerateConfig>();
-    //     query->generate_config->max_new_tokens = 1;
-    //     shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query, engine->resourceContext());
+    {
+        std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
+        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 50, 60, 70}, AllocationType::HOST);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 1;
+        shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query, engine->resourceContext());
 
-    //     ASSERT_TRUE(engine->enqueue(stream).ok());
-    //     auto output1 = stream->nextOutput();
-    //     ASSERT_TRUE(output1.ok());
-    //     ASSERT_EQ(output1.value().aux_info.output_len, 1);
-    //     ASSERT_EQ(output1.value().aux_info.prefix_len, 0);
-    //     ASSERT_EQ(output1.value().aux_info.reuse_len, 4);
-    //     ASSERT_EQ(output1.value().aux_info.input_len, 7);
+        ASSERT_TRUE(engine->enqueue(stream).ok());
+        auto output1 = stream->nextOutput();
+        ASSERT_TRUE(output1.ok());
+        ASSERT_EQ(output1.value().aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().aux_info.prefix_len, 0);
+        ASSERT_EQ(output1.value().aux_info.reuse_len, 4);
+        ASSERT_EQ(output1.value().aux_info.input_len, 7);
 
-    //     ASSERT_TRUE(stream->finished());
-    //     auto output2 = stream->nextOutput();
-    //     ASSERT_TRUE(!output2.ok());
-    // }
+        ASSERT_TRUE(stream->finished());
+        auto output2 = stream->nextOutput();
+        ASSERT_TRUE(!output2.ok());
+    }
 }
 
 }  // namespace rtp_llm

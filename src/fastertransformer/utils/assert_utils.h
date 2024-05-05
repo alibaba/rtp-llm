@@ -18,14 +18,14 @@ namespace fastertransformer {
     auto error_msg = std::string("[FT][ERROR] ") + info + " Assertion fail: " + file + ":"
                              + std::to_string(line) + " \n";
     std::cerr << error_msg << std::endl;
-    fflush(stdout);
-    fflush(stderr);
     throw std::runtime_error(error_msg);
 }
 
 inline void myAssert(bool result, const char* const file, int const line, std::string const& info = "") {
     if (!result) {
         if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
+            fflush(stdout);
+            fflush(stderr);
             abort();
         }
         throwRuntimeError(file, line, info);

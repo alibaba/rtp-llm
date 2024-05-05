@@ -20,7 +20,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     GptInitParameter param;
     param.num_layers_    = 2;
     param.int8_kv_cache_ = true;
-    NormalBatchStreamProcessor     processor(param);
+    NormalBatchStreamProcessor     processor(param, true);
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
     query1->generate_config               = make_shared<GenerateConfig>();
@@ -89,13 +89,22 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         vector<uint64_t> kv_cache_scales  = {11,  12,    15,    16,    110,   120, 150,   160,   1100,  0,    1500,
                                              0,   11000, 12000, 15000, 16000, 13,  14,    17,    18,    130,  140,
                                              170, 180,   1300,  0,     1700,  0,   13000, 14000, 17000, 18000};
-
         EXPECT_EQ(combo_tokens, buffer2vector<int>(model_input.combo_tokens));
         EXPECT_EQ(input_lengths, buffer2vector<int>(model_input.input_lengths));
         EXPECT_EQ(sequence_lengths, buffer2vector<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, buffer2vector<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_blocks, buffer2vector<uint64_t>(model_input.kv_cache_blocks));
         EXPECT_EQ(kv_cache_scales, buffer2vector<uint64_t>(model_input.kv_cache_scales));
+        EXPECT_EQ(model_input.attention_mask.value().get().size(), 2 * 4 * 5);
+    }
+
+    {
+        NormalBatchStreamProcessor     processor(param, false);
+        StreamGroups stream_groups(streams);
+        auto merge_input_status = processor.gatherModelInput(stream_groups);
+        EXPECT_TRUE(merge_input_status.ok());
+        auto&            model_input      = merge_input_status.value();
+        EXPECT_EQ(model_input.attention_mask, nullopt);
     }
 }
 

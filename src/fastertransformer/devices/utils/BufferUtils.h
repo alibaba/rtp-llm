@@ -54,7 +54,6 @@ template<typename T>
 std::vector<T> buffer2vector(const BufferPtr& src, size_t num) {
     assert(num <= src->size());
     assert(sizeof(T) == src->typeSize());
-    // assert(src->where() == MemoryType::MEMORY_CPU || src->where() == MemoryType::MEMORY_CPU_PINNED);
     std::vector<T> dst;
     auto           size = num * sizeof(T);
     dst.resize(num);

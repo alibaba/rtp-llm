@@ -3,12 +3,6 @@
 #include <string>
 #include <cstdint>
 
-
-#if GOOGLE_CUDA
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
-#endif
-
 namespace fastertransformer {
 
 #define FT_FOREACH_TYPE(F) \

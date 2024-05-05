@@ -154,6 +154,11 @@ void ParallelModelWrapperImpl<T>::setPaddingOffsetAndCuSeqLens(ft::Tensor& paddi
 }
 
 template<typename T>
+bool ParallelModelWrapperImpl<T>::useFMHA() {
+    return parallel_gpt_decoder_->UseFMHA();
+}
+
+template<typename T>
 std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_request) {
     const uint   total_batch_size = model_request.generate_batch_size + model_request.context_batch_size;
     const size_t h_token_num      = model_request.combo_tokens->shape()[0];
@@ -211,11 +216,21 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
                                      max_context_seq_length,
                                      (int*)model_request.input_lengths->data() + model_request.generate_batch_size);
     }
-    ft::Tensor attention_mask(
+    ft::Tensor attention_mask;
+    if (model_request.attention_mask != nullopt) {
+        const auto& attention_mask_shape = model_request.attention_mask.value().get().shape();
+        attention_mask = ft::Tensor(
+            ft::MEMORY_GPU,
+            ft::DataType::TYPE_FP16,
+            {attention_mask_shape[0], attention_mask_shape[1], attention_mask_shape[2]},
+            model_request.attention_mask.value().get().data());
+    } else {
+        attention_mask = ft::Tensor(
         ft::MEMORY_GPU,
         ft::DataType::TYPE_FP16,
         {(size_t)model_request.context_batch_size, max_context_seq_length_, max_context_seq_length_},
         nullptr);
+    }
 
     ft::Tensor position_ids;
     // word embedding
@@ -308,6 +323,10 @@ ParallelModelWrapper::ParallelModelWrapper(
             throw std::runtime_error("Wrong tensor type.");
     }
 #undef CREATE_INSTANCE
+}
+
+bool ParallelModelWrapper::useFMHA() {
+    return model_wrapper_->useFMHA();
 }
 
 std::unique_ptr<GptModelOutputs> ParallelModelWrapper::forward(const ModelRequest& model_request) {
