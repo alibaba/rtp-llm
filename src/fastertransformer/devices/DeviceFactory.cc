@@ -12,6 +12,8 @@ DeviceType getDeviceType(const std::string& device_name) {
         return DeviceType::Cuda;
     } else if (device_name == "YITIAN") {
         return DeviceType::Yitian;
+    } else if (device_name == "ARM") {
+        return DeviceType::ArmCpu;
     } else {
         FT_LOG_ERROR("Unknown device type: %s", device_name.c_str());
         abort();

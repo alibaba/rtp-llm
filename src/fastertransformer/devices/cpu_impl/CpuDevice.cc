@@ -1,6 +1,5 @@
 #include "src/fastertransformer/devices/cpu_impl/CpuDevice.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/core/cpu_allocator.h"
 #include <cstring>
 

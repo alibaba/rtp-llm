@@ -12,7 +12,6 @@ torch::Tensor gelu(const torch::Tensor& tensor) {
     return torch::gelu(tensor);
 }
 
-
 std::unordered_map<ActivationType,
                    std::function<torch::Tensor(const torch::Tensor&)>> ACT2FUN {
     {ActivationType::Geglu , gelu},

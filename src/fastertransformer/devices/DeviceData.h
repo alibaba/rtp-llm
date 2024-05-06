@@ -7,6 +7,7 @@ enum class DeviceType {
     Cpu  = 0,
     Cuda = 1,
     Yitian = 2,
+    ArmCpu = 3,
 };
 
 // hardware-specific device properties, such as op fusion options. should be const.
