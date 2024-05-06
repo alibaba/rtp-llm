@@ -225,6 +225,58 @@ cc_library(
 )
 
 cc_library(
+    name = "embedding_engine",
+    hdrs = glob([
+        "embedding_engine/*.h",
+    ]),
+    srcs = glob([
+        "embedding_engine/*.cc",
+    ]),
+    deps = torch_deps() + [
+        ":dataclass",
+        ":models",
+        ":schedulers",
+        ":engine_base",
+        ":common",
+        ":system_prompt",
+        ":system_prompt_constructor",
+        ":model_wrapper",
+        "//src/fastertransformer/cuda:allocator_cuda",
+        "@com_google_absl//absl/status",
+        ":embedding_handler",
+        "@com_google_absl//absl/status:statusor",
+    ],
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
+    name = "embedding_handler",
+    hdrs = glob([
+        "embedding_engine/handlers/*.h",
+    ]),
+    srcs = glob([
+        "embedding_engine/handlers/*.cc",
+    ]),
+    deps = torch_deps() + [
+        ":dataclass",
+        ":models",
+        "//src/fastertransformer/layers:layers",
+        "//src/fastertransformer/models:models",
+        "//:th_utils",
+        "//:th_op_hdrs",
+        "//src/fastertransformer/utils:utils",
+        "//3rdparty:cuda_driver",
+        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+        "//src/fastertransformer/cuda:allocator_cuda",
+    ],
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
     name = "speculative_engine",
     hdrs = glob([
         "speculative_engine/*.h",
@@ -300,6 +352,7 @@ cc_library(
         "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
         "//maga_transformer/cpp:dataclass",
         "//maga_transformer/cpp:normal_engine",
+        "//maga_transformer/cpp:embedding_engine",
         "//maga_transformer/cpp:speculative_engine",
         "//src/fastertransformer/devices:devices_base",
     ],

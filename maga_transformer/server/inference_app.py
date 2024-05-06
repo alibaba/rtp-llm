@@ -94,7 +94,11 @@ class InferenceApp(object):
         async def inference(req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
             # compat for huggingface-pipeline request endpoint
             if self.inference_server.is_embedding:
-                return await self.inference_server.embedding(req, raw_request)
+                start_time = time.time()
+                res = await self.inference_server.embedding(req, raw_request)                
+                end_time = time.time()
+                # print("total: ", end_time - start_time)
+                return res
             else:
                 return await self.inference_server.inference(req, raw_request)
 

@@ -5,7 +5,7 @@
 #include <torch/extension.h>
 
 #define DECLARE_TORCH_JIT_CLASS(class) \
-    static auto class##THS = torch::jit::class_<rtp_llm::class>("MagaTransformer", #class)
+    static auto class##THS = torch::jit::class_<class>("MagaTransformer", #class)
 
 #define DECLARE_DEFAULT_CONSTRUCTOR(class) \
     .def(torch::init<>()) \
@@ -15,7 +15,7 @@
     DECLARE_DEFAULT_CONSTRUCTOR(class)
 
 #define ADD_TORCH_JIT_METHOD(class, method) \
-    .def(#method, &rtp_llm::class::method)
+    .def(#method, &class::method)
 
 #define ADD_TORCH_JIT_PROPERTY(class, property) \
-    .def_readwrite(#property, &rtp_llm::class::property)
+    .def_readwrite(#property, &class::property)

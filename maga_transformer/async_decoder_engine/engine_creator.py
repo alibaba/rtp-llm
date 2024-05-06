@@ -51,7 +51,11 @@ def create_engine(model: BaseModel, config: GptInitModelParameters, speculative_
     elif executor_type == ExecutorType.Medusa:
         return _create_medusa_engine(model, config)
     elif executor_type == ExecutorType.Embedding:
-        return _create_embedding_engine(model, config)
+        if os.environ.get('USE_CPP_EMEBDDING_ENGINE', None) == '1':
+            from maga_transformer.async_decoder_engine.embedding.cpp_embedding_engine import EmbeddingCppEngine
+            return EmbeddingCppEngine(model)
+        else:
+            return EmbeddingDecoderEngine(config, model)
     else:
         raise Exception(f"unsupported executor type: {executor_type}")
 
@@ -103,9 +107,6 @@ def _create_medusa_engine(model: BaseModel, config: GptInitModelParameters, **kw
     scheduler = Scheduler(config, stream_cache_manager, gen_num_per_circle, nccl_op)
     executor = MedusaModelExecutor(model_ops, cache_manager, medusa_buffer)
     return DecoderEngine(executor, scheduler, config)
-
-def _create_embedding_engine(model: BaseModel, config: GptInitModelParameters) -> EmbeddingDecoderEngine:
-    return EmbeddingDecoderEngine(config, model)
 
 def _create_ops(type: ModelType, model: BaseModel, config: GptInitModelParameters, is_sp: bool = False) -> ModelOps:
     gpt_op = GptOp(config, is_sp)

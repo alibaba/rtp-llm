@@ -30,11 +30,14 @@ void ParallelModelWrapperImpl<T>::initialize() {
                                             allocator_,
                                             true,
                                             &global_weights_->embedding_table,
-                                            &global_weights_->position_encoding_table));
+                                            &global_weights_->position_encoding_table,
+                                            &global_weights_->token_type_embedding_table));
     parallel_gpt_decoder_.reset(new ParallelGpt<T>(
         params_, tensor_para_, pipeline_para_, stream_, cublas_wrapper_, allocator_, true, true, false, nullptr, 0));
-    parallel_logits_wrapper_.reset(new ParallelLogitsWrapper<T>(
-        params_, tensor_para_, stream_, cublas_wrapper_, allocator_, true, &global_weights_->lm_head));
+    if (global_weights_->lm_head.kernel != nullptr) {
+        parallel_logits_wrapper_.reset(new ParallelLogitsWrapper<T>(
+            params_, tensor_para_, stream_, cublas_wrapper_, allocator_, true, &global_weights_->lm_head));
+    }
     norm_wrapper_.reset(
         new NormWrapper<T>(params_.layernorm_type_, params_.norm_type_, T(sqrt(2 * params_.num_layers_))));
 
@@ -100,7 +103,9 @@ void ParallelModelWrapperImpl<T>::allocateBuffer(size_t total_batch_size, size_t
     last_hidden_states_ = (T*)model_output->hidden_states->data();
     all_hidden_states_  = (T*)model_output->all_hidden_states->data();
     
-    combo_tokens_   = (int*)allocator_->reMalloc(combo_tokens_, sizeof(int) * h_token_num, true);
+    combo_tokens_   = (int*)allocator_->reMalloc(combo_tokens_, sizeof(int) * h_token_num, false);
+        combo_token_types_   = (int*)allocator_->reMalloc(combo_token_types_, sizeof(int) * h_token_num, false);
+    combo_position_ids_   = (int*)allocator_->reMalloc(combo_position_ids_, sizeof(int) * h_token_num, false);
     padding_offset_ = reinterpret_cast<int*>(allocator_->reMalloc(padding_offset_, sizeof(int) * (h_token_num), false));
     cu_seqlens_ =
         reinterpret_cast<int*>(allocator_->reMalloc(cu_seqlens_, sizeof(int) * (total_batch_size + 1), false));
@@ -177,6 +182,8 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
     ft::Tensor   all_hidden_states(ft::MEMORY_GPU, data_type_, {h_token_num, hidden_units}, all_hidden_states_);
     ft::Tensor   last_hidden_states(ft::MEMORY_GPU, data_type_, {total_batch_size, hidden_units}, last_hidden_states_);
     ft::Tensor   combo_tokens(ft::MEMORY_GPU, ft::DataType::TYPE_INT32, {h_token_num}, combo_tokens_);
+    ft::Tensor   combo_token_type_ids(ft::MEMORY_GPU, ft::DataType::TYPE_INT32, {h_token_num}, combo_token_types_);
+    ft::Tensor   combo_position_ids(ft::MEMORY_GPU, ft::DataType::TYPE_INT32, {h_token_num}, combo_position_ids_);
 
     ft::Tensor padding_offset(ft::MEMORY_GPU, ft::DataType::TYPE_INT32, {context_h_token_num}, padding_offset_);
 
@@ -209,6 +216,21 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
                     combo_tokens.sizeBytes(),
                     cudaMemcpyHostToDevice,
                     stream_);
+    if (model_request.combo_position_ids != nullptr) {
+        cudaMemcpyAsync(combo_position_ids.getPtr<int>(),
+                model_request.combo_position_ids->data(),
+                combo_position_ids.sizeBytes(),
+                cudaMemcpyHostToDevice,
+                stream_);
+    }
+    if (model_request.combo_token_type_ids != nullptr) {
+        cudaMemcpyAsync(combo_token_type_ids.getPtr<int>(),
+                model_request.combo_token_type_ids->data(),
+                combo_token_type_ids.sizeBytes(),
+                cudaMemcpyHostToDevice,
+                stream_);
+    }
+
     size_t max_context_seq_length_ = 0;
     if (model_request.context_batch_size) {
         const int max_context_seq_length =
@@ -240,7 +262,27 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
 
     ft::Tensor position_ids;
     // word embedding
-    parallel_word_embedding_wrapper_->forward(all_hidden_states, combo_tokens, position_ids);
+    print_bsd(-1, "token", combo_tokens.getPtr<int>(), 1, 1, h_token_num);
+    print_bsd(-1, "position", combo_position_ids.getPtr<int>(), 1, 1, h_token_num);
+    print_bsd(-1, "type", combo_token_type_ids.getPtr<int>(), 1, 1, h_token_num);
+    parallel_word_embedding_wrapper_->forward(all_hidden_states, combo_tokens, combo_token_type_ids, combo_position_ids);
+
+    print_bsd(-1, "embedding", all_hidden_states.getPtr<T>(), 1, h_token_num, hidden_units);
+
+    if (params_.has_pre_decoder_layernorm_) {
+        norm_wrapper_->generalLayerNorm(all_hidden_states.getPtr<T>(),
+                                            all_hidden_states.getPtr<T>(),
+                                            global_weights_->pre_decoder_layernorm_weights.gamma,
+                                            global_weights_->pre_decoder_layernorm_weights.beta,
+                                            params_.layernorm_eps_,
+                                            h_token_num,
+                                            hidden_units,
+                                            nullptr,  // scale
+                                            nullptr,  // dyanmic scale
+                                            reinterpret_cast<int8_t*>(last_hidden_states.getPtr<T>()),
+                                            stream_);
+    }
+    sync_check_cuda_error();
 
     // gpt layer
     ft::TensorMap input_tensors({{"decoder_input", all_hidden_states},
@@ -249,8 +291,16 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
                                  {"lora_ids", lora_ids},
                                  {"attention_mask", attention_mask},
                                  {"lora_input_lengths", lora_input_lengths}});
-    ft::TensorMap output_tensors({{"decoder_output", all_hidden_states}, {"block_pointers", block_pointers}});
+    ft::TensorMap output_tensors({{"decoder_output", all_hidden_states}});
 
+    if (model_request.kv_cache_blocks != nullptr) {
+        ft::Tensor block_pointers(
+            ft::MEMORY_CPU,
+            ft::DataType::TYPE_INT64,
+            model_request.kv_cache_blocks->shape(),
+            model_request.kv_cache_blocks->data());
+        output_tensors.insert("block_pointers", block_pointers);
+    }
     parallel_gpt_decoder_->forward(&output_tensors, &input_tensors, &gpt_layer_weights_);
     sync_check_cuda_error();
     // last hidden states
@@ -262,16 +312,24 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
     sync_check_cuda_error();
 
     if (model_request.context_batch_size) {
-        invokeLookupHiddenStateOfLastToken(
-            last_hidden_states.getPtrWithOffset<T>(model_request.generate_batch_size * hidden_units),
-            all_hidden_states.getPtrWithOffset<T>(model_request.generate_batch_size * hidden_units),
-            cu_seqlens.template getPtrWithOffset<int>(1),
-            0,
-            model_request.context_batch_size,
-            hidden_units,
-            stream_);
+        if (params_.is_causal_) {
+            invokeLookupHiddenStateOfLastToken(
+                last_hidden_states.getPtrWithOffset<T>(model_request.generate_batch_size * hidden_units),
+                all_hidden_states.getPtrWithOffset<T>(model_request.generate_batch_size * hidden_units),
+                cu_seqlens.template getPtrWithOffset<int>(1),
+                model_request.context_batch_size,
+                hidden_units,
+                stream_);
+        } else {
+            invokeLookupHiddenStateOfFirstToken(
+                last_hidden_states.getPtrWithOffset<T>(model_request.generate_batch_size * hidden_units),
+                all_hidden_states.getPtrWithOffset<T>(model_request.generate_batch_size * hidden_units),
+                cu_seqlens.template getPtrWithOffset<int>(1),
+                model_request.context_batch_size,
+                hidden_units,
+                stream_);
+        }
     }
-
     if (params_.has_post_decoder_layernorm_) {
         norm_wrapper_->initDecoderLayerNorm(last_hidden_states.getPtr<T>(),
                                             last_hidden_states.getPtr<T>(),
@@ -288,13 +346,21 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
     sync_check_cuda_error();
 
     // logits
-    parallel_logits_wrapper_->forward(logits, last_hidden_states);
-    print_bsd(-1,
-               "logits",
-               logits.getPtr<float>(),
-               total_batch_size,
-               1,
-               params_.vocab_size_);
+    if (parallel_logits_wrapper_ != nullptr) {
+        ft::Tensor logits(ft::MEMORY_GPU,
+                    ft::DataType::TYPE_FP32,
+                    {(size_t)total_batch_size, (size_t)params_.vocab_size_},
+                    model_output->logits->data());
+
+        parallel_logits_wrapper_->forward(logits, last_hidden_states);
+        print_bsd(-1,
+                "logits",
+                logits.getPtr<float>(),
+                total_batch_size,
+                1,
+                params_.vocab_size_);
+    }
+    sync_check_cuda_error();
 
     return std::move(model_output);
 }

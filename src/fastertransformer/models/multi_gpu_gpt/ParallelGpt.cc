@@ -325,6 +325,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
 
 
     Tensor decoder_input_tensor = input_tensors->at("decoder_input");
+    T* decoder_output_ptr = output_tensors->at("decoder_output").getPtr<T>();    
     size_t hidden_units         = params_.hidden_size_;
     FT_CHECK(decoder_input_tensor.shape()[1] == hidden_units);
     const size_t total_batch_size = input_tensors->at("input_lengths").shape()[0];
@@ -414,8 +415,8 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             continue;
         }
         ParallelGptDecoderLayerWeight<T>* layer_weight = gpt_decoder_layer_weight->at(l);
-        T* decoder_input  = (l == 0) ? decoder_input_tensor.getPtr<T>() : decoder_layer_output_;
-        T* decoder_output = decoder_layer_output_;
+        T* decoder_input  = (l == 0) ? decoder_input_tensor.getPtr<T>() : decoder_output_ptr;
+        T* decoder_output = decoder_output_ptr;
         sync_check_cuda_error();
 
         print_bsd(l, "decoder input", decoder_input, 1, h_token_num, hidden_units);
@@ -728,8 +729,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     POP_RANGE;
 
     // PUSH_RANGE(stream_, "Rebuild padding");
-    T* base_ptr = output_tensors->at("decoder_output").getPtr<T>();
-    cudaD2Dcpy(base_ptr, decoder_layer_output_, h_token_num * hidden_units);
+    // cudaD2Dcpy(base_ptr, decoder_layer_output_, h_token_num * hidden_units);
     sync_check_cuda_error();
     if (is_free_buffer_after_forward_ == true) {
         freeBuffer();

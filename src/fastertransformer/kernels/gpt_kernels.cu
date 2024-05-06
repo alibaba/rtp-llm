@@ -647,7 +647,6 @@ template<typename T>
 __launch_bounds__(1024, 1) __global__ void lookupHiddenStateOfLastToken(T*         from_tensor,
                                                                         const T*   hidden_state,
                                                                         const int* input_lengths,
-                                                                        const int  max_input_length,
                                                                         const int  batch_size,
                                                                         const int  hidden_units)
 {
@@ -655,8 +654,23 @@ __launch_bounds__(1024, 1) __global__ void lookupHiddenStateOfLastToken(T*      
          index += blockDim.x * gridDim.x) {
         const int col_index = index % hidden_units;
         const int batch_id  = index / hidden_units;
-        from_tensor[index]  = hidden_state[batch_id * max_input_length * hidden_units
-                                          + (input_lengths[batch_id] - 1) * hidden_units + col_index];
+        from_tensor[index]  = hidden_state[(input_lengths[batch_id] - 1) * hidden_units + col_index];
+    }
+}
+
+template<typename T>
+__launch_bounds__(1024, 1) __global__ void lookupHiddenStateOfFirstToken(T*         from_tensor,
+                                                                        const T*   hidden_state,
+                                                                        const int* input_lengths,
+                                                                        const int  batch_size,
+                                                                        const int  hidden_units)
+{
+    for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < batch_size * hidden_units;
+         index += blockDim.x * gridDim.x) {
+        const int col_index = index % hidden_units;
+        const int batch_id  = index / hidden_units;
+        const int base_index = batch_id == 0 ? 0 : input_lengths[batch_id - 1] * hidden_units;
+        from_tensor[index]  = hidden_state[base_index + col_index];
     }
 }
 
@@ -664,7 +678,6 @@ template<typename T>
 void invokeLookupHiddenStateOfLastToken(T*           from_tensor,
                                         const T*     hidden_state,
                                         const int*   input_lengths,
-                                        const int    max_input_length,
                                         const int    batch_size,
                                         const int    hidden_units,
                                         cudaStream_t stream)
@@ -673,33 +686,50 @@ void invokeLookupHiddenStateOfLastToken(T*           from_tensor,
     dim3      grid(min(grid_size, 65536));
     dim3      block(min(hidden_units, 1024));
     lookupHiddenStateOfLastToken<T><<<grid, block, 0, stream>>>(
-        from_tensor, hidden_state, input_lengths, max_input_length, batch_size, hidden_units);
+        from_tensor, hidden_state, input_lengths, batch_size, hidden_units);
 }
 
-template void invokeLookupHiddenStateOfLastToken(float*       from_tensor,
-                                                 const float* hidden_state,
-                                                 const int*   input_lengths,
-                                                 const int    max_input_length,
-                                                 const int    batch_size,
-                                                 const int    hidden_units,
-                                                 cudaStream_t stream);
+template<typename T>
+void invokeLookupHiddenStateOfFirstToken(T*           from_tensor,
+                                        const T*     hidden_state,
+                                        const int*   input_lengths,
+                                        const int    batch_size,
+                                        const int    hidden_units,
+                                        cudaStream_t stream)
+{
+    const int grid_size = (int)(ceil(batch_size * hidden_units / 1024.));
+    dim3      grid(min(grid_size, 65536));
+    dim3      block(min(hidden_units, 1024));
+    lookupHiddenStateOfFirstToken<T><<<grid, block, 0, stream>>>(
+        from_tensor, hidden_state, input_lengths, batch_size, hidden_units);
+}
 
-template void invokeLookupHiddenStateOfLastToken(half*        from_tensor,
-                                                 const half*  hidden_state,
-                                                 const int*   input_lengths,
-                                                 const int    max_input_length,
-                                                 const int    batch_size,
-                                                 const int    hidden_units,
-                                                 cudaStream_t stream);
+#define INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(T) \
+template void invokeLookupHiddenStateOfLastToken(T*       from_tensor, \
+                                                 const T* hidden_state, \
+                                                 const int*   input_lengths, \
+                                                 const int    batch_size, \
+                                                 const int    hidden_units, \
+                                                 cudaStream_t stream)
 
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(float);
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(half);
 #ifdef ENABLE_BF16
-template void invokeLookupHiddenStateOfLastToken(__nv_bfloat16*       from_tensor,
-                                                 const __nv_bfloat16* hidden_state,
-                                                 const int*           input_lengths,
-                                                 const int            max_input_length,
-                                                 const int            batch_size,
-                                                 const int            hidden_units,
-                                                 cudaStream_t         stream);
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(__nv_bfloat16);
+#endif
+
+#define INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_FIRST(T) \
+template void invokeLookupHiddenStateOfFirstToken(T*      from_tensor, \
+                                                 const T* hidden_state, \
+                                                 const int*   input_lengths, \
+                                                 const int    batch_size, \
+                                                 const int    hidden_units, \
+                                                 cudaStream_t stream)
+
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_FIRST(float);
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_FIRST(half);
+#ifdef ENABLE_BF16
+INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_FIRST(__nv_bfloat16);
 #endif
 
 template<bool PREFIX_PROMPT>

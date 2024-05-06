@@ -150,7 +150,9 @@ class GPT(BaseModel):
                 tensors = model_weights_loader.load_tensor(name)
                 if len(tensors) !=1 :
                     raise Exception(f"load tensor {name} failed, get len=={len(tensors)}")
-                tensor_map[name] = tensors[0]
+                loaded_tensor = tensors[0].cuda()
+                tensor_map[name] = loaded_tensor
+                self.weight.append_global_weight(name, loaded_tensor)
             self.custom_module.handler.init(tensor_map)
             
     def init_database(self):
@@ -200,7 +202,7 @@ class GPT(BaseModel):
     def init_word_embedding_weight(self):
         assert self.word_embedding is not None
         self.word_embedding.set_weight(self.weight.steal_pytorch_weight(W.embedding))
-        self.weight.append_global_weight("embedding", self.word_embedding._emb)
+        self.weight.append_global_weight(W.embedding, self.word_embedding._emb)        
         if (self.config.input_embedding_scalar - 1 > 1e-6):
             self.word_embedding.set_scalar(self.config.input_embedding_scalar)
 
@@ -215,7 +217,7 @@ class GPT(BaseModel):
             if self.config.logit_scale != 1.0:
                 lm_head_w = self.config.scale_logit * lm_head_w
             self.lm_head.set_weight(lm_head_w, self.weight.steal_pytorch_weight(W.lm_head_b))
-            self.weight.append_global_weight("lm_head", self.lm_head._w)
+            self.weight.append_global_weight(W.lm_head, self.lm_head._w)            
 
             if self.config.tp_split_emb_and_lm_head:
                 self.vocab_size_padded = self.lm_head.weight.shape[0] * g_parallel_info.tp_size
@@ -262,15 +264,17 @@ class GPT(BaseModel):
                 assert pos_weight is not None, "positional embedding weight not found"
                 pos_weight = pos_weight[:self.config.max_seq_len].cuda()
                 self.position_encoding.set_weight(pos_weight)
+                self.weight.append_global_weight(W.positional_embedding, self.position_encoding._emb)
             if self.token_type_embeddings is not None:
                 token_type_weight = self.weight.steal_pytorch_weight(W.token_type_embedding)
                 assert token_type_weight is not None, "token_type embedding weight not found"
                 self.token_type_embeddings.set_weight(token_type_weight.cuda())
+                self.weight.append_global_weight(W.token_type_embedding, self.token_type_embeddings._emb)                
             if self.pre_decoder_layernorm is not None:
                 self._safe_load_from_module(self.pre_decoder_layernorm.weight, W.pre_decoder_ln_gamma)
                 self._safe_load_from_module(self.pre_decoder_layernorm.bias, W.pre_decoder_ln_beta)
-                self.weight.append_global_weight("pre_attn_layernorm_weights.gamma", self.pre_decoder_layernorm.weight.data)
-                self.weight.append_global_weight("pre_attn_layernorm_weights.beta", self.pre_decoder_layernorm.bias.data)
+                self.weight.append_global_weight(W.pre_decoder_ln_gamma, self.pre_decoder_layernorm.weight.data)
+                self.weight.append_global_weight(W.pre_decoder_ln_beta, self.pre_decoder_layernorm.bias.data)
 
         if g_parallel_info.is_pp_last:
             if self.post_decoder_layernorm is not None:

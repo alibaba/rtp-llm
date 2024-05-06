@@ -33,6 +33,8 @@ struct GptModelInputs {
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
     ft::BufferPtr combo_tokens;      // [cumulated_seq_len]
+    ft::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
+    ft::BufferPtr combo_position_ids;      // [cumulated_seq_len]
     ft::BufferPtr input_lengths;     // [batch_size]
     ft::BufferPtr sequence_lengths;  // [decoder_batch_size]
 

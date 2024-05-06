@@ -43,6 +43,8 @@ def _is_classifier_task(ckpt_path: str) -> bool:
     return False
 
 def create_custom_module(task_type: TaskType, config: GptInitModelParameters, tokenizer: Optional[PreTrainedTokenizerBase]):
+    from maga_transformer.models.downstream_modules.mainse.mainse_module import MainseModule
+    return MainseModule(config, tokenizer)
     if task_type == TaskType.LANGUAGE_MODEL:
         return None
     if task_type == TaskType.PLUGIN_TASK:

@@ -175,7 +175,8 @@ class InferenceServer(object):
                 # do not log result since too big
                 if 'data' in log_result:
                     log_result['data'] = []
-                self._access_logger.log_success_access(request, log_result, id)
+                if  '__@_pos_@__' not in log_result:                    
+                    self._access_logger.log_success_access(request, log_result, id)
                 return ORJSONResponse(result)
             except BaseException as e:
                 return self._handle_exception(request, e, id)

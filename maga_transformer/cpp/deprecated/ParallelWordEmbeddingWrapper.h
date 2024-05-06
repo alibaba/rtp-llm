@@ -22,6 +22,7 @@ private:
     T*                        nccl_embedding_;
     ft::IAllocator*           allocator_;
     ft::CudaDevice*           device_;
+    const ft::DenseWeight<T>* token_type_table_;
 
 public:
     ParallelWordEmbeddingWrapper(const ft::GptInitParameter&   gpt_init_parameter,
@@ -30,14 +31,15 @@ public:
                                  ft::cublasMMWrapper*      cublas_wrapper,
                                  ft::IAllocator*           allocator,
                                  bool                      is_free_buffer_after_forward,
-                                 const ft::DenseWeight<T>* embedding_table,
-                                 const ft::DenseWeight<T>* postition_table);
+                                 const ft::DenseWeight<T>* embedding_table,                                
+                                 const ft::DenseWeight<T>* postition_table,
+                                 const ft::DenseWeight<T>* token_type_table);
 
     ~ParallelWordEmbeddingWrapper();
     void allocateBuffer(size_t h_token_num);
     void allocateBuffer() override{};
     void freeBuffer() override;
-    void forward(ft::Tensor& embeddings, const ft::Tensor tokens, ft::Tensor position_ids);
+    void forward(ft::Tensor& embeddings, const ft::Tensor tokens, const ft::Tensor tokens_types, const ft::Tensor position_ids);
 };
 
 }  // namespace rtp_llm

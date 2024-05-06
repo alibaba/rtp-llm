@@ -121,6 +121,22 @@ Buffer Buffer::operator[](size_t offset) const {
     return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), nullptr);
 }
 
+Buffer Buffer::slice(size_t begin, size_t end) const {
+    if (end <= begin) {
+        throw std::runtime_error("Buffer::slice: end must be larger than begin");
+    }
+    if (end > shape()[0]) {
+        char msg[4096];
+        sprintf(msg, "Buffer::slice: end [%d] out of range with buffer[%s]",
+                (int)end, debugString().c_str());
+        throw std::runtime_error(msg);
+    }
+    auto new_shape = shape_;
+    new_shape[0] = end - begin;
+    const auto offset_size = this->size() / shape_[0] * begin;
+    return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), nullptr);
+}
+
 std::string Buffer::debugStringMeta() const {
     std::string debugStr = "Buffer( ";
     debugStr += "where=" + std::to_string(where_) + ", ";
@@ -133,7 +149,22 @@ std::string Buffer::debugStringMeta() const {
         }
     }
     debugStr += "], ";
-    debugStr += "data=" + std::to_string(reinterpret_cast<uintptr_t>(data_));
+    debugStr += "data=";
+    if (where_ != MemoryType::MEMORY_GPU) {
+        if (type_ == DataType::TYPE_INT64) {
+            for (auto i = 0; i < size(); i++) {
+                debugStr += std::to_string(((int64_t*)data_)[i]);
+                debugStr += ",";
+            } 
+        } else {
+            for (auto i = 0; i < size(); i++) {
+                debugStr += std::to_string(((int*)data_)[i]);
+                debugStr += ",";
+            }
+        }
+    } else {
+        debugStr += "gpu omited";
+    }
     debugStr += " )";
     return debugStr;
 }

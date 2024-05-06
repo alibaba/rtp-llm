@@ -112,9 +112,6 @@ RtpLLMOp::~RtpLLMOp() {
 
 }  // namespace torch_ext
 
-DECLARE_TORCH_JIT_CLASS_WITH_DEFAULT_CONSTRUCTOR(MagaInitParams)
-ADD_TORCH_JIT_PROPERTY(MagaInitParams, gpt_init_parameter);
-
 static auto fasterTransformerGptTHS =
 #ifdef LEGACY_THS
     torch::jit::class_<torch_ext::RtpLLMOp>("FasterTransformerRtpLLMOp")

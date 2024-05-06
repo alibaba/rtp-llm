@@ -42,7 +42,6 @@ public:
     void                             initialize();
     bool                             useFMHA() override;
     std::unique_ptr<GptModelOutputs> forward(const ModelRequest& model_request) override;
-
 private:
     void setPaddingOffsetAndCuSeqLens(ft::Tensor& padding_offset,
                                       ft::Tensor& cu_seqlens,
@@ -66,6 +65,8 @@ private:
     T*   all_hidden_states_  = nullptr;
     T*   last_hidden_states_ = nullptr;
     int* combo_tokens_       = nullptr;
+    int* combo_token_types_  = nullptr;
+    int* combo_position_ids_ = nullptr;
     int* padding_offset_     = nullptr;
     int* cu_seqlens_         = nullptr;
     int* input_lengths_      = nullptr;

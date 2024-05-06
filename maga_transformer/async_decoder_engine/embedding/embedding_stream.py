@@ -12,15 +12,14 @@ class EmbeddingInput(PyDanticModelBase):
 
 
 class EngineInputs(PyDanticModelBase):
-    inputs: List[EmbeddingInput]
-    input_length: int
-    config: Dict[str, Any] = {}
+    token_ids: torch.Tensor
+    token_type_ids: torch.Tensor
+    input_lengths: torch.Tensor    
 
 
 class EngineOutputs(PyDanticModelBase):
     outputs: Union[torch.Tensor, List[Any]]
     input_length: int
-
 
 class EmbeddingStream(PyDanticModelBase):
     inputs: EngineInputs

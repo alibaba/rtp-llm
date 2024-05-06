@@ -3,6 +3,7 @@
 #include <torch/extension.h>
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/logger.h"
+#include <torch/all.h>
 
 namespace fastertransformer {
 
@@ -76,8 +77,12 @@ inline c10::ScalarType dataTypeToTorchType(DataType data_type) {
 
 #undef FOREACH_BUFFER_TORCH_TYPE_MAP
 
-inline MemoryType torchDeviceToMemoryType(const c10::Device& device ) {
+inline MemoryType torchDeviceToMemoryType(const c10::Device& device) {
     return device.is_cuda() ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
+}
+
+inline c10::Device memoryTypeToTorchDevice(const MemoryType& memory_type) {
+    return memory_type == MemoryType::MEMORY_GPU ? torch::DeviceType::CUDA : torch::DeviceType::CPU;
 }
 
 inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor) {
@@ -86,6 +91,17 @@ inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor) {
     const auto& dtype = torchDTypeToDataType(tensor.dtype());
     const auto& memory_type = torchDeviceToMemoryType(tensor.device());
     return std::make_unique<Buffer>(memory_type, dtype, shape, data);
+}
+
+inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf) {
+    auto option = torch::dtype(dataTypeToTorchType(buf->type())).device(memoryTypeToTorchDevice(buf->where())).requires_grad(false);
+    torch::Tensor out = torch::zeros(bufferShapeToTorchShape(*buf), option);
+    if (buf->where() == MemoryType::MEMORY_CPU || buf->where() == MemoryType::MEMORY_CPU_PINNED) {
+        memcpy(out.data_ptr(), buf->data(), buf->sizeBytes());
+    } else {
+        throw std::runtime_error("not implemented");
+    }
+    return out;
 }
 
 } // namespace fastertransformer

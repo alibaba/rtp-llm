@@ -48,6 +48,7 @@ std::shared_ptr<GenerateStream> QueryConverter::transQuery(const ResourceContext
     generate_input->input_ids     = device->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)input->token_ids_size()}, ft::AllocationType::HOST}, {});
     memcpy(generate_input->input_ids->data(), input->token_ids().data(), generate_input->input_ids->sizeBytes());
+    
     // TODO(xinfei.sxf) set max seq len
     std::shared_ptr<GenerateStream> stream = std::make_shared<GenerateStream>(generate_input, resource_context);
 

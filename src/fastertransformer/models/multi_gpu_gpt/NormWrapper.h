@@ -24,6 +24,19 @@ public:
                               int8_t*      norm_output_quant,
                               cudaStream_t stream);
 
+    // not check type
+    void generalLayerNorm(T*           output,
+                          const T*     input,
+                          const T*     gamma,
+                          const T*     beta,
+                          const float  eps,
+                          const size_t m,
+                          const size_t n,
+                          float*       scale,
+                          float*       dynamic_scale,
+                          int8_t*      norm_output_quant,
+                          cudaStream_t stream);
+
     void preAttentionLayerNorm(T*           output,
                                const T*     input,
                                const T*     gamma,

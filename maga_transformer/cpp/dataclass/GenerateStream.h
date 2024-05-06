@@ -37,6 +37,7 @@ public:
 
     absl::StatusOr<GenerateOutput>     nextOutput();
     // Only used in C++ world.
+    
     bool isContextStream() const;
     int tileNum() const;
     std::vector<int> inputTokens() const;

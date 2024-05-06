@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <curand_kernel.h>
 
 namespace fastertransformer {

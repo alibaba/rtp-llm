@@ -56,6 +56,8 @@ public:
     int generate_batch_size;
     int context_batch_size;
     ft::BufferPtr combo_tokens;                // [cumulated_seq_len]
+    ft::BufferPtr combo_token_type_ids;        // [cumulated_seq_len]
+    ft::BufferPtr combo_position_ids;          // [cumulated_seq_len]
     ft::BufferPtr input_lengths;               // [batch_size]
     ft::BufferPtr sequence_lengths;            // [decoder_batch_size]
     ft::BufferPtr prefix_lengths;              // [batch_size, seq_len]
