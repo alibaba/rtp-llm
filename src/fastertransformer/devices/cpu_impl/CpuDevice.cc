@@ -13,13 +13,18 @@ CpuDevice::CpuDevice() {
 CpuDevice::~CpuDevice() {
 }
 
+DeviceProperties CpuDevice::getDeviceProperties() {
+    DeviceProperties props;
+    props.type = DeviceType::Cpu;
+    return props;
+}
+
 void CpuDevice::copy(const CopyParams& params) {
     auto& src = params.src;
     auto& dst = params.dst;
     auto size = params.src.sizeBytes();
     memcpy(dst.data(), src.data(), size);
 }
-
 
 LayernormOutput CpuDevice::layernorm(const LayernormParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);

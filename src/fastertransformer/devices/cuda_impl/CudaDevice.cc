@@ -7,7 +7,7 @@ namespace fastertransformer {
 CudaDevice::CudaDevice() : DeviceBase(), device_id_(getDevice()) {
     cudaSetDevice(device_id_);
     cudaStreamCreate(&stream_);
-    
+
     auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
     allocator_ptr->setStream(stream_);
     allocator_.reset(allocator_ptr);
@@ -36,6 +36,15 @@ CudaDevice::~CudaDevice() {
 void CudaDevice::syncAndCheck() {
     cudaDeviceSynchronize();
     sync_check_cuda_error();
+}
+
+DeviceProperties CudaDevice::getDeviceProperties() {
+    static DeviceProperties* prop = nullptr;
+    if (prop == nullptr) {
+        prop = new DeviceProperties();
+        prop->type = DeviceType::Cuda;
+    }
+    return *prop;
 }
 
 RTP_LLM_REGISTER_DEVICE(Cuda);

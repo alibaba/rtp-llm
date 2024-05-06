@@ -12,10 +12,12 @@ public:
     ~CudaDevice();
 
 public:
-    std::string type() const override { return "cuda"; }
-    void syncAndCheck() override;
+    DeviceProperties getDeviceProperties() override;
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return host_allocator_.get(); }
+    void syncAndCheck() override;
+
+public:
     int getDeviceId() const { return device_id_; }
     cudaStream_t getStream() {return stream_;}
 

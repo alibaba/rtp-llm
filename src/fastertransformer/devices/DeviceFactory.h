@@ -5,12 +5,6 @@
 
 namespace fastertransformer {
 
-enum class DeviceType {
-    Cpu  = 0,
-    Cuda = 1,
-    Yitian = 2,
-};
-
 DeviceType getDeviceType(const std::string& device_name);
 
 class DeviceFactory {

@@ -1,21 +1,22 @@
 #pragma once
 
 #include "src/fastertransformer/devices/DeviceOps.h"
+#include "src/fastertransformer/devices/DeviceData.h"
 #include "src/fastertransformer/devices/BufferManager.h"
 
 namespace fastertransformer {
 
-// TODO(wangyin.yx): add api for querying device info (e.g. available memory)
 // TODO(wangyin.yx): add ARM device type
-// TODO(wangyin.yx): add deivce-specific optimize options (currently for intel)
+// TODO(wangyin.yx): add interface to return new GptModel for yitian device.
 class DeviceBase : public DeviceOps {
 public:
     DeviceBase();
 
     void init();
+    virtual DeviceProperties getDeviceProperties() = 0;
+    virtual DeviceStatus getDeviceStatus();
     std::unique_ptr<Buffer> allocateBuffer(const BufferParams& params, const BufferHints& hints = {});
     std::unique_ptr<Buffer> allocateBufferLike(const Buffer& buffer, const BufferHints& hints = {});
-    virtual std::string type() const = 0;
     virtual void syncAndCheck();
 
 public:

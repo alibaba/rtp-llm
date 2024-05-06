@@ -10,7 +10,7 @@ public:
     ~CpuDevice();
 
 public:
-    std::string type() const override { return "cpu"; }
+    DeviceProperties getDeviceProperties() override;
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return allocator_.get(); }
 
