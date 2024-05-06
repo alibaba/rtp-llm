@@ -18,6 +18,7 @@
 
 #include "cutlass_extensions/arch/mma.h"
 #include "cutlass_extensions/interleaved_numeric_conversion.h"
+#include "cutlass_extensions/transform/threadblock/fine_grained_scale_zero_iterator.h"
 
 namespace cutlass
 {
@@ -73,6 +74,44 @@ struct SetConverters<IteratorB, MmaOperator, arch::OpMultiplyAddDequantizeInterl
     using TransformAfterLDS
         = FastInterleavedAndBiasedNumericArrayConverter<typename MmaOperator::ArchMmaOperator::ElementB,
             typename TransformAfterLDG::result_type::Element, MmaOperator::FragmentB::kElements>;
+};
+
+////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////////////////////
+
+template <typename MmaShape, typename Element, typename Layout, WeightOnlyQuantOp QuantOp, int Alignment,
+    typename Enable = void>
+struct DefaultScaleIterators;
+
+// Fine grained iterators
+template <typename MmaShape, typename Element, typename Layout, WeightOnlyQuantOp QuantOp, int Alignment>
+struct DefaultScaleIterators<MmaShape, Element, Layout, QuantOp, Alignment, std::enable_if_t<isFinegrained(QuantOp)>>
+{
+    using IteratorScale
+        = cutlass::transform::threadblock::FineGrainedScaleZeroIterator<cutlass::MatrixShape<1, MmaShape::kN>, Element,
+            Layout, 0, Alignment>;
+
+    using SmemIteratorScale = IteratorScale;
+};
+
+// Per column iterators
+template <typename MmaShape, typename Element, typename Layout, WeightOnlyQuantOp QuantOp, int Alignment>
+struct DefaultScaleIterators<MmaShape, Element, Layout, QuantOp, Alignment, std::enable_if_t<!isFinegrained(QuantOp)>>
+{
+    // ThreadMap for scale iterator
+    static_assert((MmaShape::kN % Alignment) == 0, "");
+
+private:
+    using IteratorScaleThreadMap = transform::PitchLinearStripminedThreadMap<layout::PitchLinearShape<MmaShape::kN, 1>,
+        MmaShape::kN / Alignment, Alignment>;
+
+public:
+    // Define iterators over tiles from the scale operand
+    using IteratorScale = cutlass::transform::threadblock::PredicatedTileIterator<cutlass::MatrixShape<1, MmaShape::kN>,
+        Element, Layout, 0, IteratorScaleThreadMap, Alignment>;
+
+    using SmemIteratorScale = IteratorScale;
 };
 
 ////////////////////////////////////////////////////////////////////////////////

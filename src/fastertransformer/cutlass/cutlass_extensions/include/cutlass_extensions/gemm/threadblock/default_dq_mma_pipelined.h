@@ -83,7 +83,6 @@ struct DqMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB, Ele
 
     using OperatorInfo = arch::DetagOperator<Operator_>;
     using Operator = typename OperatorInfo::Operator;
-    static_assert(OperatorInfo::QuantOp == WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY, "");
 
     static constexpr bool DqAfterLDG = platform::is_same<arch::OpMultiplyAdd, Operator>::value;
     static constexpr bool arch_has_bf16_mma = ArchTag::kMinComputeCapability >= 80;
@@ -105,21 +104,13 @@ struct DqMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB, Ele
         cutlass::MatrixShape<MmaCore::Shape::kK, MmaCore::Shape::kN>, ElementB, LayoutB, 0,
         typename MmaCore::IteratorThreadMapB, kAlignmentB>;
 
-    // ThreadMap for scale iterator
-    static_assert((MmaCore::Shape::kN % kAlignmentScale) == 0, "");
-    using IteratorScaleThreadMap
-        = transform::PitchLinearStripminedThreadMap<layout::PitchLinearShape<MmaCore::Shape::kN, 1>,
-            MmaCore::Shape::kN / kAlignmentScale, kAlignmentScale>;
+    using ScaleIterators = DefaultScaleIterators<typename MmaCore::Shape, ElementScale, LayoutScale,
+        OperatorInfo::QuantOp, kAlignmentScale>;
 
     // Define iterators over tiles from the scale operand
-    using IteratorScale
-        = cutlass::transform::threadblock::PredicatedTileIterator<cutlass::MatrixShape<1, MmaCore::Shape::kN>,
-            ElementScale, LayoutScale, 0, IteratorScaleThreadMap, kAlignmentScale>;
+    using IteratorScale = typename ScaleIterators::IteratorScale;
 
-    using SmemScaleType = typename platform::conditional<arch_has_bf16_mma, ElementScale, half_t>::type;
-    using SmemIteratorScale
-        = cutlass::transform::threadblock::PredicatedTileIterator<cutlass::MatrixShape<1, MmaCore::Shape::kN>,
-            SmemScaleType, LayoutScale, 0, IteratorScaleThreadMap, kAlignmentScale>;
+    using SmemIteratorScale = typename ScaleIterators::SmemIteratorScale;
 
     using Converters = SetConverters<IteratorB, typename MmaCore::MmaPolicy::Operator, Operator>;
 
@@ -179,7 +170,6 @@ struct DqMma<ElementA, LayoutA, kAlignmentA, ElementB, LayoutB, kAlignmentB, Ele
 
     using OperatorInfo = arch::DetagOperator<Operator_>;
     using Operator = typename OperatorInfo::Operator;
-    static_assert(OperatorInfo::QuantOp == WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY, "");
 
     static constexpr bool DqAfterLDG = platform::is_same<arch::OpMultiplyAdd, Operator>::value;
     static constexpr bool arch_has_bf16_mma = ArchTag::kMinComputeCapability >= 80;

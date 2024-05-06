@@ -100,6 +100,7 @@ void generic_mixed_gemm_kernelLauncher(const T* A, const WeightType* B, const T*
     using EpilogueOp = typename tkc::Epilogue<ElementType, MixedGemmArchTraits::ElementsPerAccessC, ElementAccumulator,
         EpilogueTag>::Op;
 
+    // useless, just for compiler
     using Operator = typename MixedGemmArchTraits::Operator;
     using TaggedOperator = typename cutlass::arch::TagOperator<Operator, QuantOp>::TaggedOperator;
 
@@ -159,7 +160,7 @@ void generic_mixed_gemm_kernelLauncher(const T* A, const WeightType* B, const T*
     {
         if (group_size != k)
         {
-            throw std::runtime_error("Invalid group size for per column scaling kernels.");
+            throw std::runtime_error("Invalid group size for per col'umn scaling kernels.");
         }
 
         if (weight_zero_points != nullptr)
@@ -233,7 +234,8 @@ void filter_and_run_mixed_gemm(const T* A, const WeightType* B, const T* weight_
 {
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    if constexpr (cutlass::isFinegrained(QuantOp) && arch::kMinComputeCapability < 80)
+    if constexpr (cutlass::isFinegrained(QuantOp) && arch::kMinComputeCapability < 80 &&
+                  !cutlass::platform::is_same<arch, cutlass::arch::Sm70>::value)
     {
         // Finegrained only supported on Ampere
         std::string err_msg = "Cutlass fpA_intB gemm not implemented for arch "
@@ -246,6 +248,11 @@ void filter_and_run_mixed_gemm(const T* A, const WeightType* B, const T* weight_
         std::string err_msg = "Cutlass fpA_intB gemm not supported for arch "
             + std::to_string(arch::kMinComputeCapability) + " with stages set to " + std::to_string(Stages);
         throw std::runtime_error("[TensorRT-LLm Error][filter_and_run_mixed_gemm] " + err_msg);
+    }
+    else if constexpr (cutlass::platform::is_same<T, __nv_bfloat16>::value &&
+                       arch::kMinComputeCapability < 80)
+    {
+        throw std::runtime_error("[TensorRT-LLm Error][filter_and_run_mixed_gemm] " + std::to_string(arch::kMinComputeCapability) + " not support bf16");
     }
     else
     {

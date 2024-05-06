@@ -59,6 +59,9 @@ struct OpMultiplyAddDequantizeInterleavedBToA;
 struct OpMultiplyAddDequantizeInterleavedBToA_percol_scale;
 struct OpMultiplyAddDequantizeInterleavedBToA_fine_scale;
 struct OpMultiplyAddDequantizeInterleavedBToA_fine_scalebias;
+struct OpMultiplyAdd_percol_scale;
+struct OpMultiplyAdd_fine_scale;
+struct OpMultiplyAdd_fine_scalebias;
 
 // The default just forwards the original operator
 template <typename MmaOp, WeightOnlyQuantOp QuantOp_>
@@ -84,6 +87,23 @@ template <>
 struct TagOperator<OpMultiplyAddDequantizeInterleavedBToA, WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>
 {
     using TaggedOperator = OpMultiplyAddDequantizeInterleavedBToA_fine_scalebias;
+};
+template <>
+struct TagOperator<OpMultiplyAdd, WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>
+{
+    using TaggedOperator = OpMultiplyAdd_percol_scale;
+};
+
+template <>
+struct TagOperator<OpMultiplyAdd, WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY>
+{
+    using TaggedOperator = OpMultiplyAdd_fine_scale;
+};
+
+template <>
+struct TagOperator<OpMultiplyAdd, WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>
+{
+    using TaggedOperator = OpMultiplyAdd_fine_scalebias;
 };
 
 // Here we instantiate some structs to "detag" the tagged operator. It splits it back to the original
@@ -114,6 +134,26 @@ template <>
 struct DetagOperator<OpMultiplyAddDequantizeInterleavedBToA_fine_scalebias>
 {
     using Operator = OpMultiplyAddDequantizeInterleavedBToA;
+    static constexpr WeightOnlyQuantOp QuantOp = WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS;
+};
+template <>
+struct DetagOperator<OpMultiplyAdd_percol_scale>
+{
+    using Operator = OpMultiplyAdd;
+    static constexpr WeightOnlyQuantOp QuantOp = WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY;
+};
+
+template <>
+struct DetagOperator<OpMultiplyAdd_fine_scale>
+{
+    using Operator = OpMultiplyAdd;
+    static constexpr WeightOnlyQuantOp QuantOp = WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY;
+};
+
+template <>
+struct DetagOperator<OpMultiplyAdd_fine_scalebias>
+{
+    using Operator = OpMultiplyAdd;
     static constexpr WeightOnlyQuantOp QuantOp = WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS;
 };
 

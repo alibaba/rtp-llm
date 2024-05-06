@@ -49,7 +49,6 @@ public:
         }
 
         if (quant_algo_.int8Mode()) {
-
             weight_only_matmul_plguin_ = std::make_shared<trt_plugins::WeightOnlyQuantMatmulPlugin>(
                 datatype, trt_plugins::WeightTypeId::INT8);
         }
@@ -58,9 +57,6 @@ public:
             smooth_quant_plugin_ = std::make_shared<trt_plugins::SmoothQuantGemmPlugin>(quant_mode_, datatype);
         }
         else if (quant_algo_.int4Mode()) {
-            if (sm < 80) {
-                FT_LOG_ERROR("int4 mode not supported yet");
-            }
             weight_only_groupwise_matmul_plguin_ =
                 std::make_shared<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin>(
                     datatype, true, quant_algo_.getGroupSize());

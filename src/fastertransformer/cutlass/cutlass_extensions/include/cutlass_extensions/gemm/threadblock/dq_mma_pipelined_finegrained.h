@@ -60,42 +60,6 @@ namespace gemm
 namespace threadblock
 {
 
-/// Structure to compute the matrix product targeting CUDA cores and SIMT math instructions.
-template <
-    /// Size of the Gemm problem - concept: gemm::GemmShape<>
-    typename Shape_,
-    /// Iterates over tiles of A operand in global memory
-    //  (concept: ReadableTileIterator | ForwardTileIterator | MaskedTileIterator)
-    typename IteratorA_,
-    /// Iterates over tiles of A operand in shared memory
-    /// (concept: WriteableTileIterator | RandomAccessTileIterator)
-    typename SmemIteratorA_,
-    /// Iterates over tiles of B operand in global memory
-    //  (concept: ReadableTileIterator | ForwardTileIterator | MaskedTileIterator)
-    typename IteratorB_,
-    /// Iterates over tiles of B operand in shared memory
-    /// (concept: WriteableTileIterator | RandomAccessTileIterator)
-    typename SmemIteratorB_,
-    /// Data type for the scales
-    typename IteratorScale_,
-    /// Iterators over scales in shared memory
-    typename SmemIteratorScale_,
-    /// Data type of accumulator matrix
-    typename ElementC_,
-    /// Data type of accumulator matrix
-    typename LayoutC_,
-    /// Policy describing tuning details (concept: MmaPolicy)
-    typename Policy_,
-    /// Converter for B matrix applied immediately after the LDG (before STS)
-    typename TransformBAfterLDG_,
-    /// Converter for B matrix applited immediately after the LDS
-    typename TransformBAfterLDS_,
-    /// The quantization operator being used
-    WeightOnlyQuantOp QuantOp_,
-    /// Used for partial specialization
-    typename Enable = void>
-class DqMmaPipelined;
-
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// Structure to compute the matrix product targeting CUDA cores and SIMT math instructions.
@@ -133,7 +97,7 @@ template <
 class DqMmaPipelined<Shape_, IteratorA_, SmemIteratorA_, IteratorB_, SmemIteratorB_, 
                      IteratorScale_, SmemIteratorScale_, ElementC_, LayoutC_, Policy_,
                      TransformBAfterLDG_, TransformBAfterLDS_, QuantOp_,
-                     std::enable_if_t<!isFinegrained(QuantOp_)>>
+                     std::enable_if_t<isFinegrained(QuantOp_)>>
     : public DqMmaBase<Shape_, Policy_, typename SmemIteratorScale_::Element, 2, QuantOp_>
 {
 public:
@@ -169,9 +133,6 @@ public:
 
     /// Fragment of operand B loaded from global memory
     using FragmentB = typename IteratorB::Fragment;
-
-    /// Fragment of operand Scale loaded from global memory;
-    using FragmentScale = typename IteratorScale::Fragment;
 
     /// Fragment of accumulator tile
     using FragmentC = typename Policy::Operator::FragmentC;
@@ -231,10 +192,12 @@ public:
         )
         : Base(shared_storage, thread_idx, warp_idx, lane_idx)
         , warp_dequantizer_({shared_storage.operand_scale.data(), LayoutScale(Shape::kN)},
+                            {shared_storage.operand_zero.data(), LayoutScale(Shape::kN)},
               (warp_idx % (Base::WarpCount::kM * Base::WarpCount::kN)) / Base::WarpCount::kM, lane_idx)
         , smem_iterator_A_(shared_storage.operand_A_ref(), thread_idx)
         , smem_iterator_B_(shared_storage.operand_B_ref(), thread_idx)
-        , smem_iterator_scale_(LayoutScale(Shape::kN), shared_storage.operand_scale.data(), {1, Shape::kN}, thread_idx)
+        , smem_iterator_scale_(LayoutScale(Shape::kN), shared_storage.operand_scale.data(),
+              shared_storage.operand_zero.data(), {Base::kStages, Shape::kN}, thread_idx, group_size)
     {
 
         // Compute warp location within threadblock tile by mapping the warp_id to
@@ -252,6 +215,44 @@ public:
         // Add per-warp offsets in units of warp-level tiles
         this->warp_tile_iterator_A_.add_tile_offset({warp_idx_m, Base::kWarpGemmIterations * warp_idx_k});
         this->warp_tile_iterator_B_.add_tile_offset({Base::kWarpGemmIterationsForB * warp_idx_k, warp_idx_n});
+    }
+    
+    CUTLASS_DEVICE
+    void copy_scales_and_advance(IteratorScale& iterator_scale)
+    {
+        static_assert(IteratorScale::Shape::kRow == 1, "Scale stride must be 1.");
+
+        typename IteratorScale::AccessType* gmem_scale_ptr = iterator_scale.get_scale();
+        typename IteratorScale::AccessType* gmem_zero_ptr = iterator_scale.get_zero();
+
+        typename IteratorScale::AccessType* smem_scale_ptr
+            = reinterpret_cast<typename IteratorScale::AccessType*>(this->smem_iterator_scale_.get_scale());
+        typename IteratorScale::AccessType* smem_zero_ptr
+            = reinterpret_cast<typename IteratorScale::AccessType*>(this->smem_iterator_scale_.get_zero());
+
+        if (iterator_scale.valid()) {
+            *smem_scale_ptr = *gmem_scale_ptr;
+            if (gmem_zero_ptr != nullptr)
+            {
+                *smem_zero_ptr = *gmem_zero_ptr;
+            }
+        }
+
+        if (iterator_scale.group_size_ == 64)
+        {
+            iterator_scale.add_tile_offset({1, 0});
+        }
+        else if (iterator_scale.group_size_ == 128)
+        {
+            if (iterator_scale.row_groupsize64_ & 0x1)
+            {
+                iterator_scale.add_tile_offset({1, 0});
+            }
+        }
+
+        iterator_scale.row_groupsize64_++;
+
+        this->smem_iterator_scale_.add_tile_offset({1, 0});
     }
 
     /// Perform a threadblock-scoped matrix multiply-accumulate
@@ -273,46 +274,46 @@ public:
         using TransformA
             = NumericArrayConverter<typename WarpFragmentA::Element, typename FragmentA::Element, FragmentA::kElements>;
 
-        using TransformScale = NumericArrayConverter<typename SmemIteratorScale::Fragment::Element,
-            typename FragmentScale::Element, FragmentScale::kElements>;
-
         // These transforms are mainly to handle when we have bfloat activations and weights in GMEM and want
         // to issue HMMA on architectures older than Ampere. We will convert to FP16 before STS.
         TransformA transformA;
-        TransformScale transformScale;
 
         // Perform accumulation in the 'd' output operand
         accum = src_accum;
 
         FragmentA tb_frag_A;
         FragmentB tb_frag_B;
-        FragmentScale tb_frag_scales;
 
         using WarpFragmentScale = typename Dequantizer::FragmentScale;
+        using WarpFragmentZero = typename Dequantizer::FragmentZero;
         WarpFragmentScale warp_frag_scales;
+        WarpFragmentZero warp_frag_zeros;
 
         tb_frag_A.clear();
         tb_frag_B.clear();
-        tb_frag_scales.clear();
 
         // The last kblock is loaded in the prolog
         iterator_A.load(tb_frag_A);
         iterator_B.load(tb_frag_B);
-        iterator_scale.load(tb_frag_scales);
+        // iterator_scale.load(tb_frag_scales);
+        copy_scales_and_advance(iterator_scale);
+        
 
         ++iterator_A;
         ++iterator_B;
 
         this->smem_iterator_A_.store(transformA(tb_frag_A));
         this->smem_iterator_B_.store(ldg_converter(tb_frag_B));
-        this->smem_iterator_scale_.store(transformScale(tb_frag_scales));
+        // this->smem_iterator_scale_.store(transformScale(tb_frag_scales));
+        
 
         ++this->smem_iterator_A_;
         ++this->smem_iterator_B_;
 
         __syncthreads();
 
-        warp_dequantizer_.load(warp_frag_scales);
+        warp_dequantizer_.load(warp_frag_scales, warp_frag_zeros);
+        warp_dequantizer_.add_pointer_offset(Shape::kN);
 
         // Pair of fragments used to overlap shared memory loads and math instructions
         WarpFragmentA warp_frag_A[2];
@@ -334,6 +335,7 @@ public:
         // Avoid reading out of bounds
         iterator_A.clear_mask(gemm_k_iterations <= 1);
         iterator_B.clear_mask(gemm_k_iterations <= 1);
+        iterator_scale.clear_mask(gemm_k_iterations <= 1);
 
         // Issue loads during the first warp-level matrix multiply-add *AFTER* issuing
         // shared memory loads (which have the tighest latency requirement).
@@ -375,6 +377,7 @@ public:
                     {
                         this->smem_iterator_A_.add_tile_offset({0, -Base::kStages});
                         this->smem_iterator_B_.add_tile_offset({-Base::kStages, 0});
+                        this->smem_iterator_scale_.add_tile_offset({-Base::kStages, 0});
                     }
                     else
                     {
@@ -382,6 +385,7 @@ public:
                             {0, -Base::kStages * Policy::kPartitionsK * Base::kWarpGemmIterations});
                         this->warp_tile_iterator_B_.add_tile_offset(
                             {-Base::kStages * Policy::kPartitionsK * Base::kWarpGemmIterationsForB, 0});
+                        warp_dequantizer_.add_pointer_offset(-Base::kStages * Shape::kN);
                     }
 
                     smem_write_stage_idx ^= 1;
@@ -407,6 +411,7 @@ public:
 
                     iterator_A.load(tb_frag_A);
                     iterator_B.load(tb_frag_B);
+                    copy_scales_and_advance(iterator_scale);
 
                     ++iterator_A;
                     ++iterator_B;
@@ -414,14 +419,18 @@ public:
                     // Avoid reading out of bounds if this was the last loop iteration
                     iterator_A.clear_mask(gemm_k_iterations <= 2);
                     iterator_B.clear_mask(gemm_k_iterations <= 2);
+                    iterator_scale.clear_mask(gemm_k_iterations <= 2);
                 }
 
                 typename TransformBAfterLDS::result_type converted_frag_B
                     = lds_converter(warp_frag_B[warp_tileB_k_load_offset % 2]);
-                warp_dequantizer_.dequantize(converted_frag_B, warp_frag_scales);
+                warp_dequantizer_.dequantize(converted_frag_B, warp_frag_scales, warp_frag_zeros);
                 run_warp_mma(
                     warp_mma, accum, warp_frag_A[warp_mma_k % 2], converted_frag_B, accum, warp_tileB_k_compute_offset);
             }
+
+            warp_dequantizer_.load(warp_frag_scales, warp_frag_zeros);
+            warp_dequantizer_.add_pointer_offset(Shape::kN);
         }
     }
 };
@@ -433,5 +442,3 @@ public:
 } // namespace cutlass
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
-
-#include "cutlass_extensions/gemm/threadblock/dq_mma_pipelined_finegrained.h"

@@ -175,9 +175,17 @@ struct dispatch_stages<T, WeightType, arch, EpilogueTag, ThreadblockShape, WarpS
         cutlass_extensions::CutlassGemmConfig gemm_config, int multi_processor_count, cudaStream_t stream,
         int* occupancy = nullptr)
     {
-        genericMoeGemmKernelLauncher<T, WeightType, arch, EpilogueTag, ThreadblockShape, WarpShape, 2>(A, B,
-            weight_scales, biases, C, total_rows_before_expert, num_rows, gemm_n, gemm_k, num_experts, gemm_config,
-            multi_processor_count, stream, occupancy);
+        if constexpr (cutlass::platform::is_same<T, __nv_bfloat16>::value &&
+                      arch::kMinComputeCapability < 80)
+        {
+            throw std::runtime_error("[TensorRT-LLm Error][moe_gemm] " + std::to_string(arch::kMinComputeCapability) + " not support bf16");
+        }
+        else
+        {
+            genericMoeGemmKernelLauncher<T, WeightType, arch, EpilogueTag, ThreadblockShape, WarpShape, 2>(A, B,
+                                                                                                           weight_scales, biases, C, total_rows_before_expert, num_rows, gemm_n, gemm_k, num_experts, gemm_config,
+                                                                                                           multi_processor_count, stream, occupancy);
+        }
     }
 };
 
