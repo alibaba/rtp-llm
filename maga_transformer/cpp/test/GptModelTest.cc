@@ -2,10 +2,7 @@
 
 #define private public
 
-#ifdef GOOGLE_CUDA
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
-#endif
-#include "maga_transformer/cpp/models/GptModel.h"
+#include "maga_transformer/cpp/models/ModelFactory.h"
 #include "maga_transformer/cpp/test/ModelTestUtil.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/devices/torch_impl/GptModel.hpp"
@@ -36,7 +33,7 @@ TEST_F(GptModelTest, testSimple) {
     attention_conf.rope_config.embedding_style = RopeType::Base;
     attention_conf.rope_config.embedding_dim = 64;
     attention_conf.rope_config.embedding_base = 1000000;
-    GptModel model({device_, *weights, description});
+    auto model = createGptModel({device_, *weights, description});
 
     const auto cache_block_num = 128;
     CacheConfig cache_config(
@@ -69,7 +66,7 @@ TEST_F(GptModelTest, testSimple) {
     // enable this back when device is ready.
     if (DeviceFactory::getDefaultDevice()->getDeviceProperties().type != DeviceType::Cuda) {
         try {
-            auto outputs = model.forward(inputs);
+            auto outputs = model->forward(inputs);
             printBufferData(*outputs.logits, "logits");
             auto output_tensor = bufferToTensor(*outputs.logits);
         } catch (const std::exception& e) {
@@ -78,7 +75,7 @@ TEST_F(GptModelTest, testSimple) {
         return;
     }
 
-    auto outputs = model.forward(inputs);
+    auto outputs = model->forward(inputs);
     device_->syncAndCheck();
     printBufferData(*outputs.logits, "logits");
     auto output_tensor = bufferToTensor(*outputs.logits);
@@ -102,7 +99,7 @@ TEST_F(GptModelTest, testSimple) {
     inputs.input_lengths = createBuffer<int32_t>({1}, {3});
     inputs.sequence_lengths = createBuffer<int32_t>({1}, {3});
     device_->syncAndCheck();
-    outputs = model.forward(inputs);
+    outputs = model->forward(inputs);
     device_->syncAndCheck();
     output_tensor = bufferToTensor(*outputs.logits);
 
@@ -119,7 +116,7 @@ TEST_F(GptModelTest, testSimple) {
 TEST_F(GptModelTest, testAttentionInputs) {
     GptModelDescription description;
     Weights weights;
-    GptModel model({device_, weights, description});
+    auto model = createGptModel({device_, weights, description});
     GptModelInputs inputs;
     inputs.kv_cache_blocks = createBuffer<int64_t>({1, 2, 1, 10}, std::vector<int64_t>(20, 0), AllocationType::HOST);
     inputs.input_lengths = createBuffer<int32_t>({4}, {3, 5, 2, 7}, AllocationType::HOST);
@@ -128,7 +125,7 @@ TEST_F(GptModelTest, testAttentionInputs) {
 
     {
         device_->syncAndCheck();
-        auto attention_inputs = model.prepareAttentionInputs(inputs);
+        auto attention_inputs = model->prepareAttentionInputs(inputs);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
@@ -145,7 +142,7 @@ TEST_F(GptModelTest, testAttentionInputs) {
     inputs.combo_tokens = createBuffer<int32_t>({10}, std::vector<int32_t>(10, 0), AllocationType::HOST);
     {
         device_->syncAndCheck();
-        auto attention_inputs = model.prepareAttentionInputs(inputs);
+        auto attention_inputs = model->prepareAttentionInputs(inputs);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
@@ -162,7 +159,7 @@ TEST_F(GptModelTest, testAttentionInputs) {
     inputs.combo_tokens = createBuffer<int32_t>({11}, std::vector<int32_t>(11, 0), AllocationType::HOST);
     {
         device_->syncAndCheck();
-        auto attention_inputs = model.prepareAttentionInputs(inputs);
+        auto attention_inputs = model->prepareAttentionInputs(inputs);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);

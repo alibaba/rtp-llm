@@ -63,9 +63,9 @@ struct GptModelOutputs {
 class GptModel {
 public:
     GptModel(const GptModelInitParams& params);
-    ~GptModel(){};
+    virtual ~GptModel() {};
 
-    GptModelOutputs forward(const GptModelInputs& inputs);
+    virtual GptModelOutputs forward(const GptModelInputs& inputs);
 
 private:
     AttentionCommonInputs prepareAttentionInputs(const GptModelInputs& inputs);

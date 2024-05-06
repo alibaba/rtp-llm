@@ -6,8 +6,6 @@
 
 namespace fastertransformer {
 
-// TODO(wangyin.yx): add ARM device type
-// TODO(wangyin.yx): add interface to return new GptModel for yitian device.
 class DeviceBase : public DeviceOps {
 public:
     DeviceBase();

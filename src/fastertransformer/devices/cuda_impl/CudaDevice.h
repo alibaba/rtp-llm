@@ -6,6 +6,7 @@
 
 namespace fastertransformer {
 
+// TODO(wangyin.yx): add api for query device status.
 class CudaDevice : public DeviceBase {
 public:
     CudaDevice();
