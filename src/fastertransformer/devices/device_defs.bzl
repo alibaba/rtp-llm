@@ -1,3 +1,14 @@
+load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
+
+def device_copts():
+    return select({
+        "//:using_cuda": {
+            "TEST_USING_DEVICE": "CUDA",
+        },
+        "//conditions:default": {
+            "TEST_USING_DEVICE": "CPU",
+        },
+    })
 
 def device_test_envs():
     return select({

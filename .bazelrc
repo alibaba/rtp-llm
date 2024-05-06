@@ -63,6 +63,11 @@ build:cuda12_2 --define=use_cuda12=true
 build:cuda12_2 --copt="-DUSE_CUDA12=1"
 
 build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false
+build:cpu --action_env TF_NEED_CUDA="0"
+build:cpu --host_action_env TF_NEED_CUDA="0"
+build:cpu --crosstool_top=@bazel_tools//tools/cpp:toolchain
+build:cpu --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
+build:cpu --linkopt -ldl
 
 build:debug -c dbg
 build:debug --copt -g --copt -O0
