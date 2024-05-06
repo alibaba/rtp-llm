@@ -15,12 +15,11 @@ struct DeviceProperties {
     DeviceType type;
 };
 
-// All vars are in bytes.
 struct MemroyStatus {
-    size_t total_memory;
-    size_t free_memory;
-    size_t allocated_memory;     // memory allocated via current device
-    size_t preserved_memory;     // memory preserved by current Device object, but not allocated yet
+    size_t total_bytes      = 0;
+    size_t free_bytes       = 0;
+    size_t allocated_bytes  = 0; // memory allocated via current device
+    size_t preserved_bytes  = 0; // memory preserved by current Device object, but not allocated yet
 };
 
 // runtime device status, such as available memory.

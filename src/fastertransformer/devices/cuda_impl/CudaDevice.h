@@ -14,6 +14,7 @@ public:
 
 public:
     DeviceProperties getDeviceProperties() override;
+    DeviceStatus getDeviceStatus() override;
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return host_allocator_.get(); }
     void syncAndCheck() override;

@@ -1,7 +1,7 @@
 #pragma once
 
-#include <cuda_runtime.h>
 #include "src/fastertransformer/core/Types.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"
 
 namespace ft = fastertransformer;
@@ -16,11 +16,10 @@ namespace rtp_llm {
 }
 
 absl::StatusOr<int64_t> CacheConfigCreator::getKVCacheMemorySize(const GptInitParameter& param) {
-    size_t free_bytes, total_bytes;
-    if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
-        FT_LOG_ERROR("cuda get mem info failed");
-        return absl::InternalError("");
-    }
+    auto device = ft::DeviceFactory::getDefaultDevice();
+    const auto memory_status = device->getDeviceStatus().device_memory_status;
+    const auto free_bytes = memory_status.free_bytes;
+    const auto total_bytes = memory_status.total_bytes;
     FT_LOG_INFO("free mem bytes: %lu", free_bytes);
     int64_t kv_cache_mem_size = (int64_t)free_bytes - (int64_t)param.reserve_runtime_mem_mb_ * 1024 * 1024;
     if (param.kv_cache_mem_mb_ > 0) {

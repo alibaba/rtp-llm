@@ -2,6 +2,8 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/cuda/allocator_cuda.h"
 
+#include <cuda_runtime.h>
+
 namespace fastertransformer {
 
 CudaDevice::CudaDevice() : DeviceBase(), device_id_(getDevice()) {
@@ -45,6 +47,13 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->type = DeviceType::Cuda;
     }
     return *prop;
+}
+
+// TODO(wangyin.yx): fill all memory status.
+DeviceStatus CudaDevice::getDeviceStatus() {
+    DeviceStatus status;
+    cudaMemGetInfo(&status.device_memory_status.free_bytes, &status.device_memory_status.total_bytes);
+    return status;
 }
 
 RTP_LLM_REGISTER_DEVICE(Cuda);
