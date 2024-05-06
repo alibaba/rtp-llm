@@ -33,9 +33,5 @@ CloneOutput DeviceBase::clone(const CloneParams& params) {
     return move(dst);
 }
 
-TransposeOutput DeviceBase::transpose(const TransposeParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
 }; // namespace fastertransformer
 
