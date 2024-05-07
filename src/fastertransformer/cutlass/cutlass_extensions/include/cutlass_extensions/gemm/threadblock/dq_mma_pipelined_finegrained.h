@@ -218,14 +218,13 @@ public:
     }
 
     CUTLASS_DEVICE
-    static void store_scales_smem(bool valid,
-                                  SmemIteratorScale& smem_iterator_scale,
+    static void store_scales_smem(SmemIteratorScale& smem_iterator_scale,
                                   typename IteratorScale::AccessType &scale_frag,
                                   typename IteratorScale::AccessType &zero_frag)
     {
         auto smem_scale = reinterpret_cast<typename IteratorScale::AccessType*>(smem_iterator_scale.get_scale());
         auto smem_zero = reinterpret_cast<typename IteratorScale::AccessType*>(smem_iterator_scale.get_zero());
-        if (valid) {
+        if (smem_iterator_scale.valid()) {
             *smem_scale = scale_frag;
             if (smem_zero) {
                 *smem_zero = zero_frag;
@@ -300,7 +299,6 @@ public:
         WarpFragmentZero warp_frag_zeros;
         typename IteratorScale::AccessType scale_frag, zero_frag;
         typename IteratorScale::AccessType *smem_scale_ptr = nullptr, *smem_zero_ptr = nullptr;
-        bool valid = true;
 
         tb_frag_A.clear();
         tb_frag_B.clear();
@@ -308,7 +306,6 @@ public:
         // The last kblock is loaded in the prolog
         iterator_A.load(tb_frag_A);
         iterator_B.load(tb_frag_B);
-        valid = iterator_scale.valid();
         copy_scales_and_advance(iterator_scale, scale_frag, zero_frag);
 
         ++iterator_A;
@@ -316,7 +313,7 @@ public:
 
         this->smem_iterator_A_.store(transformA(tb_frag_A));
         this->smem_iterator_B_.store(ldg_converter(tb_frag_B));
-        store_scales_smem(valid, smem_iterator_scale_, scale_frag, zero_frag);
+        store_scales_smem(smem_iterator_scale_, scale_frag, zero_frag);
 
         ++this->smem_iterator_A_;
         ++this->smem_iterator_B_;
@@ -376,7 +373,7 @@ public:
                     // Write fragments to shared memory
                     this->smem_iterator_A_.store(transformA(tb_frag_A));
                     this->smem_iterator_B_.store(ldg_converter(tb_frag_B));
-                    store_scales_smem(valid, smem_iterator_scale_, scale_frag, zero_frag);
+                    store_scales_smem(smem_iterator_scale_, scale_frag, zero_frag);
 
                     __syncthreads();
 
@@ -422,7 +419,6 @@ public:
 
                     iterator_A.load(tb_frag_A);
                     iterator_B.load(tb_frag_B);
-                    valid = iterator_scale.valid();
                     copy_scales_and_advance(iterator_scale, scale_frag, zero_frag);
 
                     ++iterator_A;
