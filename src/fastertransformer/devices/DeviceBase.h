@@ -24,6 +24,9 @@ public:
     FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
     LoraLinearOutput loraLinear(const LoraLinearParams& params) override;
 
+protected:
+    BufferStatus queryBufferStatus();
+
 private:
     DeviceBase(const DeviceBase&) = delete;
     DeviceBase& operator=(const DeviceBase&) = delete;

@@ -123,7 +123,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     for (int i = 0; i < layer_num; ++i) {
         const auto& layer = weights_.layers[i];
 
-        auto residual = device_->allocateBuffer({hidden->type(), hidden->shape()}, {});
+        auto residual = device_->allocateBuffer({hidden->type(), hidden->shape()}, {"residual"});
         device_->copy({*residual, *hidden});
         if (layer.pre_layernorm) {
             device_->layernorm(LayernormParams(

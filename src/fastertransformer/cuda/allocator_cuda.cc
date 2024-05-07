@@ -74,7 +74,6 @@ Allocator<AllocatorType::CUDA>::~Allocator() {
 }
 
 void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (size == 0) {
         return nullptr;
     }
@@ -87,7 +86,6 @@ void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero
         check_cuda_error(cudaMemsetAsync(ptr, 0, (size_t)(ceil(size / 32.)) * 32, stream_));
     }
     check_cuda_error(getSetDevice(o_device));
-    FT_LOG_DEBUG("malloc buffer %p with size %ld", ptr, size);
     std::lock_guard<std::mutex> lock(lock_);
     pointer_mapping_->insert({ptr, size});
 
@@ -95,16 +93,14 @@ void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero
 }
 
 void Allocator<AllocatorType::CUDA>::free(void** ptr) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     void* address = *ptr;
     if (*ptr != nullptr) {
         int o_device = 0;
         std::lock_guard<std::mutex> lock(lock_);
         if (pointer_mapping_->count(address)) {
-            FT_LOG_DEBUG("Free buffer %p", address);
             check_cuda_error(getSetDevice(device_id_, &o_device));
             check_cuda_error(cudaFreeAsync(*ptr, stream_));
-            // cudaStreamSynchronize(stream_);            
+            // cudaStreamSynchronize(stream_);
             check_cuda_error(getSetDevice(o_device));
             pointer_mapping_->erase(address);
         } else {

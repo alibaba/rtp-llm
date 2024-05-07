@@ -20,8 +20,7 @@ absl::StatusOr<int64_t> CacheConfigCreator::getKVCacheMemorySize(const GptInitPa
     auto device = ft::DeviceFactory::getDefaultDevice();
     const auto memory_status = device->getDeviceStatus().device_memory_status;
     const auto free_bytes = memory_status.free_bytes;
-    const auto total_bytes = memory_status.total_bytes;
-    FT_LOG_INFO("free mem bytes: %lu, total mem bytes: %lu", free_bytes, total_bytes);
+    FT_LOG_INFO("free mem bytes: %lu", free_bytes);
     int64_t kv_cache_mem_size = (int64_t)free_bytes - (int64_t)param.reserve_runtime_mem_mb_ * 1024 * 1024;
     if (param.kv_cache_mem_mb_ > 0) {
         kv_cache_mem_size = (int64_t)param.kv_cache_mem_mb_ * 1024 * 1024;

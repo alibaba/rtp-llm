@@ -3,6 +3,7 @@
 #include "src/fastertransformer/cuda/allocator_cuda.h"
 
 #include <cuda_runtime.h>
+#include <unistd.h>
 
 namespace fastertransformer {
 
@@ -24,8 +25,12 @@ CudaDevice::CudaDevice() : DeviceBase(), device_id_(getDevice()) {
     cublas_mm_wrapper_.reset(new cublasMMWrapper(
         cublas_handle_, cublaslt_handle_, stream_, cublas_algo_map_.get(),
         &cublas_wrapper_mutex_, allocator_.get()));
-
     cublas_mm_wrapper_->setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);
+
+    auto ret = nvmlInit();
+    FT_CHECK(ret == NVML_SUCCESS);
+    ret = nvmlDeviceGetHandleByIndex(device_id_, &nvml_device_);
+    FT_CHECK(ret == NVML_SUCCESS);
 }
 
 CudaDevice::~CudaDevice() {
@@ -52,7 +57,22 @@ DeviceProperties CudaDevice::getDeviceProperties() {
 // TODO(wangyin.yx): fill all memory status.
 DeviceStatus CudaDevice::getDeviceStatus() {
     DeviceStatus status;
-    cudaMemGetInfo(&status.device_memory_status.free_bytes, &status.device_memory_status.total_bytes);
+
+    size_t total_bytes;
+    auto error = cudaMemGetInfo(&status.device_memory_status.free_bytes, &total_bytes);
+    FT_CHECK(error == cudaSuccess);
+    status.device_memory_status.used_bytes = total_bytes - status.device_memory_status.free_bytes;
+
+    const auto buffer_status = queryBufferStatus();
+    status.device_memory_status.allocated_bytes = buffer_status.device_allocated_bytes;
+    status.device_memory_status.preserved_bytes = buffer_status.device_preserved_bytes;
+    status.host_memory_status.allocated_bytes = buffer_status.host_allocated_bytes;
+
+    nvmlUtilization_t utilization;
+    auto ret = nvmlDeviceGetUtilizationRates(nvml_device_, &utilization);
+    FT_CHECK(ret == NVML_SUCCESS);
+    status.device_utilization = (float)utilization.gpu;
+
     return status;
 }
 

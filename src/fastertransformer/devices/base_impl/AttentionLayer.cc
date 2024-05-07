@@ -43,7 +43,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     const auto context_token_num = params.common.context_token_num;
     const auto h_token_num = context_token_num + generate_batch_size;
 
-    const auto qkv_output = allocateBuffer({input.type(), {h_token_num, qkv_hidden_size}});
+    const auto qkv_output = allocateBuffer({input.type(), {h_token_num, qkv_hidden_size}}, {"qkv_output"});
 
     auto generate_qkv = qkv->view(0, generate_batch_size);
     auto generate_output = qkv_output->view(0, generate_batch_size);

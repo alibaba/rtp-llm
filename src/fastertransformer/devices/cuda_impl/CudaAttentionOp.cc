@@ -63,17 +63,17 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     auto q_output = allocateBuffer({params.input.type(),
                                     {batch_size, head_num, seq_len, size_per_head},
                                     AllocationType::DEVICE},
-                                    {});
+                                    {"q_output"});
 
     auto k_output = allocateBuffer({params.input.type(),
                                     {batch_size, kv_head_num, seq_len, size_per_head},
                                     AllocationType::DEVICE},
-                                    {});
+                                    {"k_output"});
 
     auto v_output = allocateBuffer({params.input.type(),
                                     {batch_size, kv_head_num, seq_len, size_per_head},
                                     AllocationType::DEVICE},
-                                    {});
+                                    {"v_output"});
 
     PrefixPromptBatchWeightsParam prefix_prompt_param;
 

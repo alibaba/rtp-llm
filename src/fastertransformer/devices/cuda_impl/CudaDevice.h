@@ -4,6 +4,8 @@
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/cublas/cublas.h"
 
+#include <nvml.h>
+
 namespace fastertransformer {
 
 // TODO(wangyin.yx): add api for query device status.
@@ -56,6 +58,8 @@ private:
     std::mutex cublas_wrapper_mutex_;
     std::unique_ptr<cublasAlgoMap> cublas_algo_map_;
     std::unique_ptr<cublasMMWrapper> cublas_mm_wrapper_;
+
+    nvmlDevice_t nvml_device_;
 };
 
 } // namespace fastertransformer

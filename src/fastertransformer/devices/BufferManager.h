@@ -3,6 +3,7 @@
 #include "src/fastertransformer/core/Buffer.h"
 
 #include <string>
+#include <shared_mutex>
 
 namespace fastertransformer {
 
@@ -19,6 +20,11 @@ enum class SpaceComplexityType {
 };
 
 struct BufferHints {
+    BufferHints(const std::string& tag = "",
+                BufferLifecycleType lifecycle = BufferLifecycleType::SHORT,
+                SpaceComplexityType space_complexity = SpaceComplexityType::UNKNOWN)
+    : tag(tag), lifecycle(lifecycle), space_complexity(space_complexity) {}
+
     std::string tag;
     BufferLifecycleType lifecycle;
     SpaceComplexityType space_complexity;
@@ -42,17 +48,43 @@ struct BufferParams {
     AllocationType allocation;
 };
 
+struct BufferStatus {
+    size_t host_allocated_bytes = 0;
+    size_t device_allocated_bytes = 0;
+    size_t device_preserved_bytes = 0;
+    size_t device_fragmented_bytes = 0;
+};
+
+struct AllocationRecord {
+    AllocationType allocation_type;
+    bool success;
+    size_t bytes;
+    BufferHints hints;
+};
+
+// TODO: maybe need a lock for allocators?
 class BufferManager {
 public:
     BufferManager(IAllocator* device_allocator, IAllocator* host_allocator);
-    ~BufferManager();
+    virtual ~BufferManager();
 
-    std::unique_ptr<Buffer> allocate(const BufferParams& params, const BufferHints& hints);
+public:
+    BufferPtr allocate(const BufferParams& params, const BufferHints& hints);
     void recycle(Buffer* buffer, IAllocator* allocator);
+    virtual BufferStatus queryStatus();
+
+private:
+    virtual BufferPtr doAllocate(const BufferParams& params, const BufferHints& hints);
+    virtual void doRecycle(Buffer* buffer, IAllocator* allocator);
+    void recordAllcation(const BufferParams& params, const BufferHints& hints, const BufferPtr& buffer);
+    void recordRecycle(Buffer* buffer);
 
 private:
     IAllocator* device_allocator_;
     IAllocator* host_allocator_;
+
+    std::unordered_map<void*, AllocationRecord> allocation_records_;
+    std::shared_mutex mutex_;
 };
 
 } // namespace fastertransformer

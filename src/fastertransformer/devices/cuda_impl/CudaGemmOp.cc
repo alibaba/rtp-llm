@@ -43,7 +43,7 @@ struct CudaGemmDispatch {
         if (params.A.type() == DataType::TYPE_FP16 &&
             params.B.type() == DataType::TYPE_FP16 &&
             params.C == std::nullopt && dim == 2) {
-            
+
             return GemmImplementType::cublas_basic_gemm;
         }
 
@@ -51,7 +51,7 @@ struct CudaGemmDispatch {
                  params.B.type() == DataType::TYPE_FP16 &&
                  params.C == std::nullopt && dim > 2    &&
                  params.compute_type == DataType::TYPE_FP32) {
-            
+
             return GemmImplementType::cublas_batch_gemm_float32;
         }
 
@@ -60,7 +60,7 @@ struct CudaGemmDispatch {
                  params.C == std::nullopt && dim > 2    &&
                  (params.compute_type == DataType::TYPE_FP16 ||
                  params.compute_type == DataType::TYPE_INVALID)) {
-            
+
             return GemmImplementType::cublas_batch_gemm;
         }
         return GemmImplementType::invalid;
@@ -120,11 +120,11 @@ struct CudaGemmArguments {
         }
         DDtype = (params.compute_type == DataType::TYPE_INVALID) ?
                   params.A.type() : params.compute_type;
-        
+
         dim =  params.A.dim();
         batch_size = std::accumulate(Ashape.begin(), Ashape.end() - 2,
                                      (size_t)1, std::multiplies<size_t>());
-        
+
         m = Ashape[dim - 2];
         k = Ashape[dim - 1];
         n = Bshape[dim - 1];
@@ -177,7 +177,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 
-    auto output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {});
+    auto output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
 
     if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_basic_gemm) {
         const auto A = params.A.data();

@@ -21,6 +21,7 @@ static const std::string DEFAULT_DEVICE = "CPU";
 class DeviceTestBase : public ::testing::Test {
 public:
     void SetUp() override {
+        Logger::getLogger().setLevel(Logger::Level::DEBUG);
         // setenv("FT_DEBUG_LEVEL", "DEBUG", 1);
         // setenv("FT_DEBUG_PRINT_LEVEL", "DEBUG", 1);
         const auto test_src_dir = getenv("TEST_SRCDIR");

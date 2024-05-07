@@ -14,6 +14,10 @@ DeviceStatus DeviceBase::getDeviceStatus() {
     return DeviceStatus();
 }
 
+BufferStatus DeviceBase::queryBufferStatus() {
+    return buffer_manager_->queryStatus();
+}
+
 unique_ptr<Buffer> DeviceBase::allocateBuffer(const BufferParams& params, const BufferHints& hints) {
     return buffer_manager_->allocate(params, hints);
 }
