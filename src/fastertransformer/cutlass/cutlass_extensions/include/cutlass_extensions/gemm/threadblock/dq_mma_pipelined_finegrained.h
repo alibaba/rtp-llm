@@ -216,25 +216,37 @@ public:
         this->warp_tile_iterator_A_.add_tile_offset({warp_idx_m, Base::kWarpGemmIterations * warp_idx_k});
         this->warp_tile_iterator_B_.add_tile_offset({Base::kWarpGemmIterationsForB * warp_idx_k, warp_idx_n});
     }
-    
+
     CUTLASS_DEVICE
-    void copy_scales_and_advance(IteratorScale& iterator_scale)
+    static void store_scales_smem(bool valid,
+                                  SmemIteratorScale& smem_iterator_scale,
+                                  typename IteratorScale::AccessType &scale_frag,
+                                  typename IteratorScale::AccessType &zero_frag)
+    {
+        auto smem_scale = reinterpret_cast<typename IteratorScale::AccessType*>(smem_iterator_scale.get_scale());
+        auto smem_zero = reinterpret_cast<typename IteratorScale::AccessType*>(smem_iterator_scale.get_zero());
+        if (valid) {
+            *smem_scale = scale_frag;
+            if (smem_zero) {
+                *smem_zero = zero_frag;
+            }
+        }
+        smem_iterator_scale.add_tile_offset({1, 0});
+    }
+
+    CUTLASS_DEVICE
+    static void copy_scales_and_advance(IteratorScale& iterator_scale, typename IteratorScale::AccessType &scale_frag, typename IteratorScale::AccessType &zero_frag)
     {
         static_assert(IteratorScale::Shape::kRow == 1, "Scale stride must be 1.");
 
         typename IteratorScale::AccessType* gmem_scale_ptr = iterator_scale.get_scale();
         typename IteratorScale::AccessType* gmem_zero_ptr = iterator_scale.get_zero();
 
-        typename IteratorScale::AccessType* smem_scale_ptr
-            = reinterpret_cast<typename IteratorScale::AccessType*>(this->smem_iterator_scale_.get_scale());
-        typename IteratorScale::AccessType* smem_zero_ptr
-            = reinterpret_cast<typename IteratorScale::AccessType*>(this->smem_iterator_scale_.get_zero());
-
         if (iterator_scale.valid()) {
-            *smem_scale_ptr = *gmem_scale_ptr;
+            scale_frag = *gmem_scale_ptr;
             if (gmem_zero_ptr != nullptr)
             {
-                *smem_zero_ptr = *gmem_zero_ptr;
+                zero_frag = *gmem_zero_ptr;
             }
         }
 
@@ -251,8 +263,6 @@ public:
         }
 
         iterator_scale.row_groupsize64_++;
-
-        this->smem_iterator_scale_.add_tile_offset({1, 0});
     }
 
     /// Perform a threadblock-scoped matrix multiply-accumulate
@@ -288,6 +298,9 @@ public:
         using WarpFragmentZero = typename Dequantizer::FragmentZero;
         WarpFragmentScale warp_frag_scales;
         WarpFragmentZero warp_frag_zeros;
+        typename IteratorScale::AccessType scale_frag, zero_frag;
+        typename IteratorScale::AccessType *smem_scale_ptr = nullptr, *smem_zero_ptr = nullptr;
+        bool valid = true;
 
         tb_frag_A.clear();
         tb_frag_B.clear();
@@ -295,17 +308,15 @@ public:
         // The last kblock is loaded in the prolog
         iterator_A.load(tb_frag_A);
         iterator_B.load(tb_frag_B);
-        // iterator_scale.load(tb_frag_scales);
-        copy_scales_and_advance(iterator_scale);
-        
+        valid = iterator_scale.valid();
+        copy_scales_and_advance(iterator_scale, scale_frag, zero_frag);
 
         ++iterator_A;
         ++iterator_B;
 
         this->smem_iterator_A_.store(transformA(tb_frag_A));
         this->smem_iterator_B_.store(ldg_converter(tb_frag_B));
-        // this->smem_iterator_scale_.store(transformScale(tb_frag_scales));
-        
+        store_scales_smem(valid, smem_iterator_scale_, scale_frag, zero_frag);
 
         ++this->smem_iterator_A_;
         ++this->smem_iterator_B_;
@@ -364,8 +375,8 @@ public:
 
                     // Write fragments to shared memory
                     this->smem_iterator_A_.store(transformA(tb_frag_A));
-
                     this->smem_iterator_B_.store(ldg_converter(tb_frag_B));
+                    store_scales_smem(valid, smem_iterator_scale_, scale_frag, zero_frag);
 
                     __syncthreads();
 
@@ -411,7 +422,8 @@ public:
 
                     iterator_A.load(tb_frag_A);
                     iterator_B.load(tb_frag_B);
-                    copy_scales_and_advance(iterator_scale);
+                    valid = iterator_scale.valid();
+                    copy_scales_and_advance(iterator_scale, scale_frag, zero_frag);
 
                     ++iterator_A;
                     ++iterator_B;
