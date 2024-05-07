@@ -51,7 +51,7 @@ private:
 
 private:
     const GptInitParameter&                            params_;
-    const DataType                                     data_type_;
+    const ft::DataType                                 data_type_;
     ft::NcclParam                                      tensor_para_;
     ft::NcclParam                                      pipeline_para_;
     cudaStream_t                                       stream_;
@@ -79,7 +79,7 @@ private:
     std::unique_ptr<ParallelWordEmbeddingWrapper<T>> parallel_word_embedding_wrapper_;
     std::unique_ptr<ft::ParallelGpt<T>>              parallel_gpt_decoder_;
     std::unique_ptr<ParallelLogitsWrapper<T>>        parallel_logits_wrapper_;
-    std::unique_ptr<NormWrapper<T>> norm_wrapper_;
+    std::unique_ptr<ft::NormWrapper<T>> norm_wrapper_;
 };
 
 class ParallelModelWrapper {

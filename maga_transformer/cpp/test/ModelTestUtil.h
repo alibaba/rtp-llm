@@ -2,11 +2,11 @@
 
 #include "src/fastertransformer/devices/Weights.h"
 
-using namespace fastertransformer;
+namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-std::unique_ptr<const Weights> loadWeightsFromDir(std::string dir_path);
+std::unique_ptr<const ft::Weights> loadWeightsFromDir(std::string dir_path);
 
 } // namespace rtp_llm
 

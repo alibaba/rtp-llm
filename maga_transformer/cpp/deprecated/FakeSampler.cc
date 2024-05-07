@@ -5,6 +5,7 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 
 namespace ft = fastertransformer;
+using namespace fastertransformer;
 
 namespace rtp_llm {
 

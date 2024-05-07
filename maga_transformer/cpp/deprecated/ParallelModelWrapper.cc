@@ -16,7 +16,7 @@
 using namespace std;
 
 namespace th = torch;
-namespace ft = fastertransformer;
+using namespace fastertransformer;
 
 namespace rtp_llm {
 

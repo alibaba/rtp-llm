@@ -7,20 +7,20 @@
 #include "src/fastertransformer/devices/Weights.h"
 #include <string>
 
-using namespace fastertransformer;
+namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
 struct GptModelDescription {
-    AttentionConfigs attention_conf;
-    ActivationType activation_type;
-    NormType       norm_type;
-    double         layernorm_eps = 1e-5;
+    ft::AttentionConfigs attention_conf;
+    ft::ActivationType   activation_type;
+    ft::NormType         norm_type;
+    double               layernorm_eps = 1e-5;
 };
 
 struct GptModelInitParams {
-    DeviceBase*                device;
-    const Weights&             weights;
+    ft::DeviceBase*                device;
+    const ft::Weights&             weights;
     const GptModelDescription& description;
 };
 
@@ -32,16 +32,16 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    BufferPtr combo_tokens;      // [cumulated_seq_len]
-    BufferPtr input_lengths;     // [batch_size]
-    BufferPtr sequence_lengths;  // [decoder_batch_size]
+    ft::BufferPtr combo_tokens;      // [cumulated_seq_len]
+    ft::BufferPtr input_lengths;     // [batch_size]
+    ft::BufferPtr sequence_lengths;  // [decoder_batch_size]
 
-    OptionalConstBufferRef attention_mask;  // [batch_size, seq_len, seq_len]
-    OptionalConstBufferRef position_ids;    // [batch_size, seq_len]
+    ft::OptionalConstBufferRef attention_mask;  // [batch_size, seq_len, seq_len]
+    ft::OptionalConstBufferRef position_ids;    // [batch_size, seq_len]
 
-    BufferPtr prefix_lengths;   // [batch_size, seq_len]
-    BufferPtr kv_cache_blocks;  // [layer_num, batch_size, 2, block_length], int64 block pointers
-    BufferPtr kv_cache_scales;  // [layer_num, batch_size, 2, block_length], int64 block scales
+    ft::BufferPtr prefix_lengths;   // [batch_size, seq_len]
+    ft::BufferPtr kv_cache_blocks;  // [layer_num, batch_size, 2, block_length], int64 block pointers
+    ft::BufferPtr kv_cache_scales;  // [layer_num, batch_size, 2, block_length], int64 block scales
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -56,8 +56,8 @@ struct GptModelInputs {
 };
 
 struct GptModelOutputs {
-    BufferPtr logits;
-    BufferPtr hidden_states;
+    ft::BufferPtr logits;
+    ft::BufferPtr hidden_states;
 };
 
 class GptModel {
@@ -68,11 +68,11 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
 
 private:
-    AttentionCommonInputs prepareAttentionInputs(const GptModelInputs& inputs);
+    ft::AttentionCommonInputs prepareAttentionInputs(const GptModelInputs& inputs);
 
 private:
-    DeviceBase* device_;
-    const Weights& weights_;
+    ft::DeviceBase* device_;
+    const ft::Weights& weights_;
     const GptModelDescription& description_;
 };
 
