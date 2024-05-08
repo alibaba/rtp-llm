@@ -304,16 +304,16 @@ public:
         tb_frag_B.clear();
 
         // The last kblock is loaded in the prolog
-        iterator_A.load(tb_frag_A);
         iterator_B.load(tb_frag_B);
+        iterator_A.load(tb_frag_A);
         copy_scales_and_advance(iterator_scale, scale_frag, zero_frag);
 
         ++iterator_A;
         ++iterator_B;
 
         this->smem_iterator_A_.store(transformA(tb_frag_A));
-        this->smem_iterator_B_.store(ldg_converter(tb_frag_B));
         store_scales_smem(smem_iterator_scale_, scale_frag, zero_frag);
+        this->smem_iterator_B_.store(ldg_converter(tb_frag_B));
 
         ++this->smem_iterator_A_;
         ++this->smem_iterator_B_;
@@ -372,8 +372,8 @@ public:
 
                     // Write fragments to shared memory
                     this->smem_iterator_A_.store(transformA(tb_frag_A));
-                    this->smem_iterator_B_.store(ldg_converter(tb_frag_B));
                     store_scales_smem(smem_iterator_scale_, scale_frag, zero_frag);
+                    this->smem_iterator_B_.store(ldg_converter(tb_frag_B));
 
                     __syncthreads();
 
@@ -416,9 +416,8 @@ public:
 
                 if (warp_mma_k == 0)
                 {
-
-                    iterator_A.load(tb_frag_A);
                     iterator_B.load(tb_frag_B);
+                    iterator_A.load(tb_frag_A);
                     copy_scales_and_advance(iterator_scale, scale_frag, zero_frag);
 
                     ++iterator_A;
