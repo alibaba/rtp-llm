@@ -36,8 +36,8 @@ struct GptModelInputs {
     ft::BufferPtr input_lengths;     // [batch_size]
     ft::BufferPtr sequence_lengths;  // [decoder_batch_size]
 
-    ft::OptionalConstBufferRef attention_mask;  // [batch_size, seq_len, seq_len]
-    ft::OptionalConstBufferRef position_ids;    // [batch_size, seq_len]
+    ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
+    ft::BufferPtr position_ids;    // [batch_size, seq_len]
 
     ft::BufferPtr prefix_lengths;   // [batch_size, seq_len]
     ft::BufferPtr kv_cache_blocks;  // [layer_num, batch_size, 2, block_length], int64 block pointers

@@ -95,7 +95,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(prefix_lengths, buffer2vector<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_blocks, buffer2vector<uint64_t>(model_input.kv_cache_blocks));
         EXPECT_EQ(kv_cache_scales, buffer2vector<uint64_t>(model_input.kv_cache_scales));
-        EXPECT_EQ(model_input.attention_mask.value().get().size(), 2 * 4 * 5);
+        EXPECT_EQ(model_input.attention_mask->size(), 2 * 4 * 5);
     }
 
     {
@@ -104,7 +104,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         auto merge_input_status = processor.gatherModelInput(stream_groups);
         EXPECT_TRUE(merge_input_status.ok());
         auto&            model_input      = merge_input_status.value();
-        EXPECT_EQ(model_input.attention_mask, nullopt);
+        EXPECT_EQ(model_input.attention_mask.get(), nullptr);
     }
 }
 

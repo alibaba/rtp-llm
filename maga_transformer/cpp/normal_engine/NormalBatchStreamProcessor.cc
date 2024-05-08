@@ -148,10 +148,10 @@ void NormalBatchStreamProcessor::createAttentionMask(const StreamGroups& stream_
             }
         }
     }
-    
+
     // TODO(xinfei.sxf) add convert to target data type
 
-    model_input.attention_mask = *attention_mask.release();
+    model_input.attention_mask = attention_mask;
 }
 
 absl::StatusOr<SamplerInputs>

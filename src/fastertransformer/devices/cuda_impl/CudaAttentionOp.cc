@@ -100,7 +100,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         v_output->data(),
         &prefix_prompt_param,
         params.input.data(),
-        params.common.position_ids.has_value() ? params.common.position_ids.value().get().data<int>() : nullptr,
+        params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
         params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
         params.common.padding_offset->data<int>(),
         params.common.cu_seqlens->data<int>(),
@@ -146,10 +146,10 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     // TODO(lidongjin): Only support float32(in)\float16(output).
     auto softmax_type = qk_output->type();
     RUNTIME_ASSERT_OP_ARG(
-        params.common.attention_mask.has_value(),
+        params.common.attention_mask,
         "attention_mask must be provided for default context attention implementation");
     auto softmax_qk_output = softmax({std::move(qk_output),
-                                      params.common.attention_mask.value().get(),
+                                      *params.common.attention_mask,
                                       scale,
                                       DataType::TYPE_FP16});
     printBufferData(*softmax_qk_output, "softmax_qk_output: ");
@@ -212,8 +212,8 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     // prefix prompt
 
     int* prefix_prompt_lengths = nullptr;
-    if (params.common.prefix_prompt_lengths.has_value()) {
-        prefix_prompt_lengths = params.common.prefix_prompt_lengths.value().get().data<int>();
+    if (params.common.prefix_prompt_lengths) {
+        prefix_prompt_lengths = params.common.prefix_prompt_lengths->data<int>();
     }
 
     int max_prefix_prompt_length = 0;

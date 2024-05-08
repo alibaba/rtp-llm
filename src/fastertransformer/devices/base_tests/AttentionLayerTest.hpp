@@ -87,7 +87,7 @@ void AttentionLayerTest<T>::testAttentionLayer(
     model_inputs.input_lengths = device_->clone({*vector2Buffer(input_lengths)});
     model_inputs.sequence_lengths = device_->clone({*vector2Buffer(sequence_lengths)});
     const auto mask_buf = tensorToBuffer(mask_tensor);
-    model_inputs.attention_mask = *mask_buf;
+    model_inputs.attention_mask = mask_buf;
     model_inputs.kv_cache_blocks = allocateKVBlocks(cache_conf, input_lengths, sequence_lengths);
     auto common_inputs = model_->prepareAttentionInputs(model_inputs);
     auto layer_cache_blocks = (*model_inputs.kv_cache_blocks)[0];

@@ -217,13 +217,13 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
                                      (int*)model_request.input_lengths->data() + model_request.generate_batch_size);
     }
     ft::Tensor attention_mask;
-    if (model_request.attention_mask != nullopt) {
-        const auto& attention_mask_shape = model_request.attention_mask.value().get().shape();
+    if (model_request.attention_mask) {
+        const auto& attention_mask_shape = model_request.attention_mask->shape();
         attention_mask = ft::Tensor(
             ft::MEMORY_GPU,
             ft::DataType::TYPE_FP16,
             {attention_mask_shape[0], attention_mask_shape[1], attention_mask_shape[2]},
-            model_request.attention_mask.value().get().data());
+            model_request.attention_mask->data());
     } else {
         attention_mask = ft::Tensor(
         ft::MEMORY_GPU,

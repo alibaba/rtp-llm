@@ -3,7 +3,7 @@ load("//:def.bzl", "copts")
 cc_library(
     name = "basic_test_cases",
     srcs = glob([
-        "*.cc",
+        "BasicDeviceTest.cc",
     ]),
     deps = [
         "//src/fastertransformer/devices/testing:device_test_utils",

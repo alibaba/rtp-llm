@@ -233,13 +233,13 @@ struct AttentionCommonInputs {
     size_t decoder_max_seq_len;
     size_t context_token_num;
 
-    OptionalConstBufferRef position_ids;
-    OptionalConstBufferRef attention_mask;
-    OptionalConstBufferRef linear_bias_slopes;
-    OptionalConstBufferRef prefix_prompt_lengths;
+    BufferPtr position_ids;
+    BufferPtr attention_mask;
+    BufferPtr linear_bias_slopes;
+    BufferPtr prefix_prompt_lengths;
 
-    OptionalConstBufferRef lora_ids;
-    OptionalConstBufferRef lora_input_lengths;
+    BufferPtr lora_ids;
+    BufferPtr lora_input_lengths;
 
     AttentionCommonInputs() = default;
 

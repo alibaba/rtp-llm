@@ -58,7 +58,7 @@ TEST_F(GptModelTest, testSimple) {
     GptModelInputs inputs = {
         std::move(combo_tokens), std::move(input_lengths), std::move(sequence_lengths)
     };
-    inputs.attention_mask = *mask_buf;
+    inputs.attention_mask = mask_buf;
     inputs.kv_cache_blocks = std::move(kv_cache_blocks);
     device_->syncAndCheck();
 
