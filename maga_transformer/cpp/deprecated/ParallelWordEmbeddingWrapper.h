@@ -6,6 +6,7 @@
 #include "src/fastertransformer/layers/BaseLayer.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/utils/DenseWeight.h"
+#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 
 namespace rtp_llm {
 namespace ft = fastertransformer;
@@ -18,6 +19,9 @@ private:
     const size_t              local_head_num_;
     const ft::DenseWeight<T>* embedding_table_;
     const ft::DenseWeight<T>* postition_table_;
+    T*                        nccl_embedding_;
+    ft::IAllocator*           allocator_;
+    ft::CudaDevice*           device_;
 
 public:
     ParallelWordEmbeddingWrapper(const GptInitParameter&   gpt_init_parameter,
@@ -29,10 +33,10 @@ public:
                                  const ft::DenseWeight<T>* embedding_table,
                                  const ft::DenseWeight<T>* postition_table);
 
-    ~ParallelWordEmbeddingWrapper(){};
-
+    ~ParallelWordEmbeddingWrapper();
+    void allocateBuffer(size_t h_token_num);
     void allocateBuffer() override{};
-    void freeBuffer() override{};
+    void freeBuffer() override;
     void forward(ft::Tensor& embeddings, const ft::Tensor tokens, ft::Tensor position_ids);
 };
 

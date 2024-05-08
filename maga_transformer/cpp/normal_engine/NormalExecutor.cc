@@ -9,9 +9,15 @@ using namespace std;
 
 namespace rtp_llm {
 
-NormalExecutor::NormalExecutor(const MagaInitParams&                                                   params,
-                               const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-                               const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) {
+NormalExecutor::NormalExecutor(
+        const MagaInitParams&                                                   params,
+        ft::NcclParam                                                           tensor_para,
+        ft::NcclParam                                                           pipeline_para,
+        const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
+        const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights):
+    tensor_para_(tensor_para),
+    pipeline_para_(pipeline_para)
+{
     // need init model and sampler
     unique_ptr<GptModelInitParams> model_params;
     // model_.reset(new GptModel(*model_params));
@@ -20,7 +26,7 @@ NormalExecutor::NormalExecutor(const MagaInitParams&                            
     sampler_params.device = device_;
     sampler_.reset(new Sampler(sampler_params));
     model_wrapper_.reset(
-        new ParallelModelWrapper(*params.gpt_init_parameter, 1, "localhost", 0, weights, layer_weights));
+            new ParallelModelWrapper(*params.gpt_init_parameter, tensor_para_, pipeline_para_, weights, layer_weights));
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(*params.gpt_init_parameter, !model_wrapper_->useFMHA()));
 }
 
@@ -51,10 +57,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     auto         model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     auto& model_input = model_input_status.value();
+    model_input.tpSync(tensor_para_, pipeline_para_, device_);
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto         merged_output        = std::make_unique<MergedOutput>();
     ModelRequest model_request        = std::move(generateOldModelRequest(model_input));
     auto         model_output         = std::move(model_wrapper_->forward(model_request));
+    if (tensor_para_.rank_ > 0) {
+        return absl::OkStatus();
+    }
     auto         sampler_input_status = batch_stream_processor_->gatherSamplerInput(stream_groups, *model_output);
     RETURN_IF_STATUS_OR_ERROR(sampler_input_status);
     auto& sampler_input           = sampler_input_status.value();

@@ -30,12 +30,12 @@ public:
 template<typename T>
 class ParallelModelWrapperImpl: public IModelWrapper {
 public:
-    ParallelModelWrapperImpl(const GptInitParameter&                                                 gpt_init_parameter,
-                             const int                                                               tensor_para_size,
-                             const std::string&                                                      master_ip,
-                             const int                                                               master_port,
-                             const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
-                             const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights);
+    ParallelModelWrapperImpl(
+            const GptInitParameter&                                                 gpt_init_parameter,
+            ft::NcclParam                                                           tensor_para,
+            ft::NcclParam                                                           pipeline_para,
+            const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
+            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights);
     ~ParallelModelWrapperImpl();
     void                             allocateBuffer(size_t total_batch_size, size_t h_token_num);
     void                             freeBuffer();
@@ -86,12 +86,12 @@ private:
 
 class ParallelModelWrapper {
 public:
-    ParallelModelWrapper(const GptInitParameter&                                                 gpt_init_parameter,
-                         const int                                                               tensor_para_size,
-                         const std::string&                                                      master_ip,
-                         const int                                                               master_port,
-                         const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
-                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights);
+    ParallelModelWrapper(
+            const GptInitParameter&                                                 gpt_init_parameter,
+            ft::NcclParam                                                           tensor_para,
+            ft::NcclParam                                                           pipeline_para,
+            const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
+            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights);
 
     ~ParallelModelWrapper(){};
     void addLoRA(const int64_t                                                   lora_id,

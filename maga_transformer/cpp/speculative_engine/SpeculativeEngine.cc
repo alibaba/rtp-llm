@@ -16,8 +16,10 @@ SpeculativeEngine::SpeculativeEngine(
     const MagaInitParams&                                                   params,
     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) {
-    draft_executor_.reset(new NormalExecutor(params, layer_weights, weights));
-    target_executor_.reset(new SpeculativeExecutor(params, layer_weights, weights));
+    ft::NcclParam tensor_para, pipeline_para;
+    ftNcclInitialize(tensor_para, pipeline_para, params.gpt_init_parameter->tp_size_, params.gpt_init_parameter->pp_size_, params.gpt_init_parameter->nccl_ip_, params.gpt_init_parameter->nccl_port_);
+    draft_executor_.reset(new NormalExecutor(params, tensor_para, pipeline_para, layer_weights, weights));
+    target_executor_.reset(new SpeculativeExecutor(params, tensor_para, pipeline_para, layer_weights, weights));
     // TODO(xinfei.sxf) deal with sp cache config and sp system prompt
     int   block_num     = 100;
     char* block_num_env = std::getenv("BLOCK_NUM");

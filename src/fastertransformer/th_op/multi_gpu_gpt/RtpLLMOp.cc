@@ -1,4 +1,5 @@
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.h"
+#include "c10/util/intrusive_ptr.h"
 #include "maga_transformer/cpp/common/torch_bind.h"
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "src/fastertransformer/core/Types.h"
@@ -14,9 +15,10 @@ namespace torch_ext {
 
 RtpLLMOp::RtpLLMOp() {}
 
-void RtpLLMOp::init(const c10::intrusive_ptr<GptInitParameter>&                     gpt_init_params,
+void RtpLLMOp::init(const c10::intrusive_ptr<GptInitParameter>                      gpt_init_params,
                     const std::vector<std::unordered_map<std::string, th::Tensor>>& layer_weights,
                     const c10::Dict<std::string, th::Tensor>&                       weights) {
+
     rtp_llm::MagaInitParams params;
     params.gpt_init_parameter = gpt_init_params;
     std::unordered_map<std::string, ft::ConstBufferPtr>              global_weights;
@@ -31,7 +33,7 @@ void RtpLLMOp::init(const c10::intrusive_ptr<GptInitParameter>&                 
         }
         layer_weights_.emplace_back(std::move(__weights));
     }
-    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, params, std::move(layer_weights_), std::move(global_weights));
+    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, gpt_init_params->model_rpc_port_, params, std::move(layer_weights_), std::move(global_weights));
     grpc_server_thread_.detach();
     // _init(params, layer_weights_, global_weights);
 }
@@ -61,12 +63,15 @@ void RtpLLMOp::removeLoRA(const int64_t lora_id) {
     model_rpc_server_->removeLoRA(lora_id);
 }
 
-void RtpLLMOp::_init(const rtp_llm::MagaInitParams                                          params,
+void RtpLLMOp::_init(const int64_t                                                          model_rpc_port,
+                     const rtp_llm::MagaInitParams                                          params,
                      const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layer_weights,
                      const std::unordered_map<std::string, ft::ConstBufferPtr>              weights) {
-
-    std::string                  server_address("0.0.0.0:25333");
+    std::string                  server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     model_rpc_server_.reset(new rtp_llm::ModelRpcServiceImpl(params, layer_weights, weights));
+    if (model_rpc_port < 0) {
+        return;
+    }
     grpc::ServerBuilder builder;
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_server_.get());
@@ -79,7 +84,9 @@ void RtpLLMOp::_init(const rtp_llm::MagaInitParams                              
 
 void RtpLLMOp::stop() {
     if (!is_server_shutdown_) {
-        grpc_server_->Shutdown();
+        if (grpc_server_) {
+            grpc_server_->Shutdown();
+        }
         model_rpc_server_.reset();
     }
 }
@@ -96,25 +103,7 @@ RtpLLMOp::~RtpLLMOp() {
 
 }  // namespace torch_ext
 
-DECLARE_TORCH_JIT_CLASS_WITH_DEFAULT_CONSTRUCTOR(MasterInfo)
-ADD_TORCH_JIT_PROPERTY(MasterInfo, ip)
-ADD_TORCH_JIT_PROPERTY(MasterInfo, th_nccl_port)
-ADD_TORCH_JIT_PROPERTY(MasterInfo, context_decoder_nccl_port)
-ADD_TORCH_JIT_PROPERTY(MasterInfo, decoder_nccl_port)
-ADD_TORCH_JIT_PROPERTY(MasterInfo, gpt_nccl_port)
-ADD_TORCH_JIT_PROPERTY(MasterInfo, dynamic_decoder_nccl_port)
-ADD_TORCH_JIT_PROPERTY(MasterInfo, nccl_op_port);
-
-DECLARE_TORCH_JIT_CLASS_WITH_DEFAULT_CONSTRUCTOR(DistributedConfig)
-ADD_TORCH_JIT_PROPERTY(DistributedConfig, master_info)
-ADD_TORCH_JIT_PROPERTY(DistributedConfig, tp_size)
-ADD_TORCH_JIT_PROPERTY(DistributedConfig, pp_size)
-ADD_TORCH_JIT_PROPERTY(DistributedConfig, world_size)
-ADD_TORCH_JIT_PROPERTY(DistributedConfig, world_rank)
-ADD_TORCH_JIT_PROPERTY(DistributedConfig, local_world_size);
-
 DECLARE_TORCH_JIT_CLASS_WITH_DEFAULT_CONSTRUCTOR(MagaInitParams)
-ADD_TORCH_JIT_PROPERTY(MagaInitParams, distributed_config)
 ADD_TORCH_JIT_PROPERTY(MagaInitParams, gpt_init_parameter);
 
 static auto fasterTransformerGptTHS =

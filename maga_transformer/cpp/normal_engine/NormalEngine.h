@@ -56,6 +56,8 @@ private:
     std::shared_ptr<CacheManager>         cache_manager_;
     MagaInitParams                        params_;
     ResourceContext                       resource_context_;
+    ft::NcclParam                         tensor_para_;
+    ft::NcclParam                         pipeline_para_;
 };
 
 }  // namespace rtp_llm

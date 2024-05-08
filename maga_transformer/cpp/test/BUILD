@@ -30,6 +30,7 @@ test_deps = [
     "//maga_transformer/cpp:models",
     "//:gpt_init_params",
     ":test_headers",
+    "@local_config_cuda//cuda:cuda",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
 ] + torch_deps() + device_impl_target()

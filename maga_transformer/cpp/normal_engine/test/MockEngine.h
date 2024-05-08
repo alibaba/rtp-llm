@@ -1,3 +1,5 @@
+#pragma once
+
 #include "c10/util/intrusive_ptr.h"
 #include "src/fastertransformer/core/Types.h"
 #include "torch/all.h"

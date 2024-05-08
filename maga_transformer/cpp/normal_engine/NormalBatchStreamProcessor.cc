@@ -12,7 +12,7 @@ using namespace fastertransformer;
 namespace rtp_llm {
 
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups) const {
-    assert(!stream_groups.empty());
+    // assert(!stream_groups.empty());
     auto           context_streams = stream_groups.contextStreams();
     auto           decode_streams  = stream_groups.decodeStreams();
     GptModelInputs model_input;

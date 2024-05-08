@@ -11,9 +11,12 @@ namespace rtp_llm {
 
 class NormalExecutor: public Executor {
 public:
-    explicit NormalExecutor(const MagaInitParams&                                                   params,
-                            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-                            const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights);
+    explicit NormalExecutor(
+            const MagaInitParams&                                                   params,
+            ft::NcclParam                                                           tensor_para,
+            ft::NcclParam                                                           pipeline_para,
+            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
+            const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights);
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
     void addLoRA(const int64_t                                                   lora_id,
                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
@@ -29,6 +32,8 @@ private:
     std::unique_ptr<Sampler>              sampler_;
     std::unique_ptr<NormalBatchStreamProcessor> batch_stream_processor_;
     std::unique_ptr<ParallelModelWrapper> model_wrapper_;
+    ft::NcclParam                         tensor_para_;
+    ft::NcclParam                         pipeline_para_;
 };
 
 }  // namespace rtp_llm

@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from maga_transformer.utils.util import WEIGHT_TYPE
+from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
 
 updated_params: Set[str] = set()
 
@@ -135,6 +136,11 @@ class GptInitModelParameters:
 
         self.model_type = ModelType.NORMAL
         self.tie_word_embeddings = False
+        self.nccl_ip = g_master_info.ip
+        self.nccl_port = g_master_info.gpt_nccl_port
+        self.model_rpc_port = g_master_info.model_rpc_port if g_parallel_info.tp_rank == 0 else -1
+        self.tp_size = g_parallel_info.tp_size
+        self.pp_size = g_parallel_info.pp_size
 
         for k, v in kwargs.items():
             setattr(self, k, v)

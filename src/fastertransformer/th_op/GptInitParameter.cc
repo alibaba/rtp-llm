@@ -187,7 +187,13 @@ static auto specialTokensTHS =
     DEF_PROPERTY(reuse_cache, reuse_cache_)                                                                            \
     DEF_PROPERTY(int8_kv_cache, int8_kv_cache_)                                                                        \
     DEF_PROPERTY(is_causal, is_causal_)                                                                                \
-    DEF_PROPERTY(use_medusa, use_medusa_)
+    DEF_PROPERTY(use_medusa, use_medusa_)                                                                              \
+    DEF_PROPERTY(nccl_ip, nccl_ip_)                                                                                    \
+    DEF_PROPERTY(nccl_port, nccl_port_)                                                                                \
+    DEF_PROPERTY(model_rpc_port, model_rpc_port_)                                                                      \
+    DEF_PROPERTY(tp_size, tp_size_)                                                                                    \
+    DEF_PROPERTY(pp_size, pp_size_)
+
 
 static auto fasterTransformerGptInitParameterTHS =
 #ifdef LEGACY_THS

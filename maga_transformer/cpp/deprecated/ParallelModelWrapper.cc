@@ -46,15 +46,17 @@ void ParallelModelWrapperImpl<T>::initialize() {
 template<typename T>
 ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
     const GptInitParameter&                                                 gpt_init_parameter,
-    const int                                                               tensor_para_size,
-    const std::string&                                                      master_ip,
-    const int                                                               master_port,
+    ft::NcclParam                                                           tensor_para,
+    ft::NcclParam                                                           pipeline_para,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights):
     params_(gpt_init_parameter),
     data_type_(ft::getTensorType<T>()),
-    device_(dynamic_cast<CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda))) {
-    ftNcclInitialize(tensor_para_, pipeline_para_, tensor_para_size, 1, master_ip, master_port);
+    device_(dynamic_cast<ft::CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda))),
+    tensor_para_(tensor_para),
+    pipeline_para_(pipeline_para)
+{
+    // ftNcclInitialize(tensor_para_, pipeline_para_, tensor_para_size, 1, master_ip, master_port);
     allocator_      = device_->getAllocator();
     cublas_wrapper_ = device_->cublasMMWrapperPtr();
     stream_         = device_->stream();
@@ -295,15 +297,14 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
 
 ParallelModelWrapper::ParallelModelWrapper(
     const GptInitParameter&                                                 gpt_init_parameter,
-    const int                                                               tensor_para_size,
-    const std::string&                                                      master_ip,
-    const int                                                               master_port,
+    ft::NcclParam                                                           tensor_para,
+    ft::NcclParam                                                           pipeline_para,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights) {
 #define CREATE_INSTANCE(T_)                                                                                            \
     {                                                                                                                  \
         model_wrapper_ = new ParallelModelWrapperImpl<T_>(                                                             \
-            gpt_init_parameter, tensor_para_size, master_ip, master_port, global_weights, layer_weights);              \
+                gpt_init_parameter, tensor_para, pipeline_para, global_weights, layer_weights); \
     }
 
     DataType data_type = DataType::TYPE_FP16;

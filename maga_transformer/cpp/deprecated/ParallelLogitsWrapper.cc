@@ -1,6 +1,8 @@
 #include "maga_transformer/cpp/deprecated/ParallelLogitsWrapper.h"
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
+#include "src/fastertransformer/devices/DeviceBase.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 
 namespace rtp_llm {
 template<typename T>
@@ -15,15 +17,28 @@ ParallelLogitsWrapper<T>::ParallelLogitsWrapper(const GptInitParameter&   gpt_in
     params_(gpt_init_parameter),
     tensor_para_(tensor_para),
     local_head_num_(gpt_init_parameter.head_num_ / tensor_para.world_size_),
-    embedding_table_(embedding_table) {
+    embedding_table_(embedding_table),
+    device_(dynamic_cast<ft::CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda))) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    allocator_ = device_->getAllocator();
 }
 
-// template<typename T>
-// ParallelLogitsWrapper<T>::~ParallelLogitsWrapper()
-// {
-//     freeBuffer();
-// }
+template<typename T>
+ParallelLogitsWrapper<T>::~ParallelLogitsWrapper()
+{
+    freeBuffer();
+}
+
+template<typename T>
+void ParallelLogitsWrapper<T>::allocateBuffer(size_t h_token_num) {
+    size_t hidden_units = params_.hidden_size_;
+    nccl_logits_ = (T*)allocator_->reMalloc(nccl_logits_, sizeof(T) * h_token_num * params_.vocab_size_, true);
+}
+
+template<typename T>
+void ParallelLogitsWrapper<T>::freeBuffer() {
+    allocator_->free((void**)nccl_logits_);
+}
 
 template<typename T>
 void ParallelLogitsWrapper<T>::forward(ft::Tensor& logits, const ft::Tensor hidden_states) {
@@ -33,13 +48,14 @@ void ParallelLogitsWrapper<T>::forward(ft::Tensor& logits, const ft::Tensor hidd
     const size_t token_num = hidden_states.shape()[0];
 
     ft::Tensor nccl_logits;
-    // if (tensor_para_.world_size_ > 1) {
-    //     nccl_logits = Tensor(MEMORY_GPU, DataType::TYPE_FP32, logits.shape, allocator_, true);
-    // }
-    // else {
-    // save tmp memory
-    nccl_logits = ft::Tensor(ft::MEMORY_GPU, ft::DataType::TYPE_FP32, logits.shape(), logits.getPtr<float>());
-    // }
+    if (tensor_para_.world_size_ > 1) {
+        allocateBuffer(logits.shape()[0]);
+        nccl_logits = ft::Tensor(ft::MEMORY_GPU, ft::DataType::TYPE_FP32, logits.shape(), nccl_logits_);
+    }
+    else {
+        // save tmp memory
+        nccl_logits = ft::Tensor(ft::MEMORY_GPU, ft::DataType::TYPE_FP32, logits.shape(), logits.getPtr<float>());
+    }
 
     assert(params_.vocab_size_ % tensor_para_.world_size_ == 0);
     const int local_vocab_size = params_.vocab_size_ / tensor_para_.world_size_;
@@ -76,8 +92,9 @@ void ParallelLogitsWrapper<T>::forward(ft::Tensor& logits, const ft::Tensor hidd
                         tensor_para_.rank_,
                         tensor_para_,
                         stream_);
-        ft::invokeTransposeAxis01(logits.getPtr<float>(),
+        ft::invokeTransposeAxis012(logits.getPtr<float>(),
                                   nccl_logits.getPtr<float>(),
+                                  tensor_para_.world_size_,
                                   token_num,
                                   local_vocab_size,
                                   stream_);

@@ -13,6 +13,7 @@ from maga_transformer.cpp.proto.model_rpc_service_pb2 import AuxInfoPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputPB
 import numpy as np
 import torch
+from maga_transformer.distribute.worker_info import g_master_info
 
 
 def trans_option(pb_object, py_object, name):
@@ -84,7 +85,7 @@ def trans_output(output_pb: GenerateOutputPB):
 
 class ModelRpcClient(object):
 
-    def __init__(self, address: str = 'localhost:25333'):
+    def __init__(self, address: str = f'localhost:{g_master_info.model_rpc_port}'):
         # 创建到服务器的连接
         self._address = address
 

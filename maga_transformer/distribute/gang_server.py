@@ -14,7 +14,7 @@ from datetime import timedelta
 
 import torch.distributed as dist
 from maga_transformer.config.uvicorn_config import UVICORN_LOGGING_CONFIG
-from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info, g_master_info, update_master_info
+from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info, g_master_info, update_master_info, DEFAULT_START_PORT
 from maga_transformer.distribute.gang_info import get_gang_info, GangInfo, WorkerInfo
 
 # for ut
@@ -171,6 +171,9 @@ class GangServer:
     def start(self):
         if g_parallel_info.world_size == 1:
             logging.info("world_size==1, do not start gang_server")
+            update_master_info(
+                "",
+                int(os.environ.get('START_PORT', DEFAULT_START_PORT)))
             return
         self._start()
         self._wait_ready()

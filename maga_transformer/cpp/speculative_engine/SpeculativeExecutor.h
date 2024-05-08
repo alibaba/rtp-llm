@@ -15,6 +15,8 @@ namespace rtp_llm {
 class SpeculativeExecutor: public Executor {
 public:
     explicit SpeculativeExecutor(const MagaInitParams&                                                   params,
+                                 ft::NcclParam                                                           tensor_para,
+                                 ft::NcclParam                                                           pipeline_para,
                                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
                                  const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights);
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
@@ -38,6 +40,8 @@ private:
     std::unique_ptr<SpeculativeSampler>              sampler_;
     std::unique_ptr<SpeculativeBatchStreamProcessor> batch_stream_processor_;
     std::unique_ptr<ParallelModelWrapper>            model_wrapper_;
+    ft::NcclParam                                    tensor_para_;
+    ft::NcclParam                                    pipeline_para_;
 };
 
 }  // namespace rtp_llm

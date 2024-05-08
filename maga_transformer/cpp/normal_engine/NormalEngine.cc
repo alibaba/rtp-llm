@@ -1,3 +1,4 @@
+#include "maga_transformer/cpp/dataclass/GenerateStream.h"
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/common/status_util.h"
@@ -12,8 +13,11 @@ namespace rtp_llm {
 
 NormalEngine::NormalEngine(const MagaInitParams&                                                   params,
                            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-                           const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) : params_(params) {
-    executor_.reset(new NormalExecutor(params, layer_weights, weights));
+                           const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) :
+    params_(params)
+{
+    ft::ftNcclInitialize(tensor_para_, pipeline_para_, params.gpt_init_parameter->tp_size_, params.gpt_init_parameter->pp_size_, params.gpt_init_parameter->nccl_ip_, params.gpt_init_parameter->nccl_port_);
+    executor_.reset(new NormalExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights));
     initCacheManager();
     scheduler_.reset(new FIFOScheduler(params, resource_context_.cache_manager));
     (void)startLoop();
@@ -85,18 +89,21 @@ absl::Status NormalEngine::trySaveStepError() const {
 }
 
 absl::Status NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
-    FT_LOG_DEBUG("enqueue stream: %s", stream->debugString().c_str());
+    FT_LOG_DEBUG("enqueue stream: %s %d", stream->debugString().c_str(), tensor_para_.rank_);
     return scheduler_->enqueue(stream);
 }
 
 absl::Status NormalEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    const auto streams_status = scheduler_->schedule();
-    RETURN_IF_STATUS_OR_ERROR(streams_status);
-    const auto& streams = streams_status.value();
-    if (streams.empty()) {
-        FT_LOG_WARNING("no query run and sleep");
-        return absl::OkStatus();
+    list<GenerateStreamPtr> streams;
+    if (tensor_para_.rank_ == 0) {
+        const auto streams_status = scheduler_->schedule();
+        RETURN_IF_STATUS_OR_ERROR(streams_status);
+        streams = streams_status.value();
+        if (streams.empty()) {
+            FT_LOG_WARNING("no query run and sleep");
+            return absl::OkStatus();
+        }
     }
     return executor_->process(streams);
 }

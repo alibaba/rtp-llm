@@ -1,6 +1,8 @@
 #include "maga_transformer/cpp/deprecated/ParallelWordEmbeddingWrapper.h"
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
+#include "src/fastertransformer/devices/DeviceBase.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 
 namespace ft = fastertransformer;
 namespace th = torch;
@@ -20,8 +22,28 @@ ParallelWordEmbeddingWrapper<T>::ParallelWordEmbeddingWrapper(const GptInitParam
     tensor_para_(tensor_para),
     local_head_num_(gpt_init_parameter.head_num_ / tensor_para.world_size_),
     embedding_table_(embedding_table),
-    postition_table_(postition_table) {
+    postition_table_(postition_table),
+    device_(dynamic_cast<ft::CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda)))
+{
+    allocator_ = device_->getAllocator();
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+}
+
+template<typename T>
+ParallelWordEmbeddingWrapper<T>::~ParallelWordEmbeddingWrapper() {
+    ftNcclParamDestroy(tensor_para_);
+    freeBuffer();
+}
+
+template<typename T>
+void ParallelWordEmbeddingWrapper<T>::allocateBuffer(size_t h_token_num) {
+    size_t hidden_units = params_.hidden_size_;
+    nccl_embedding_ = (T*)allocator_->reMalloc(nccl_embedding_, sizeof(T) * h_token_num * hidden_units, true);
+}
+
+template<typename T>
+void ParallelWordEmbeddingWrapper<T>::freeBuffer() {
+    allocator_->free((void**)nccl_embedding_);
 }
 
 template<typename T>
@@ -35,13 +57,14 @@ void ParallelWordEmbeddingWrapper<T>::forward(ft::Tensor&      embeddings,
     const size_t token_num = tokens.shape()[0];
 
     ft::Tensor nccl_embeddings;
-    // if (tensor_para_.world_size_ > 1) {
-    //     nccl_embeddings = ft::Tensor(ft::MEMORY_GPU, data_type, embeddings.shape(), allocator_, true);
-    // }
-    // else {
-    // save tmp memory
-    nccl_embeddings = ft::Tensor(ft::MEMORY_GPU, data_type, embeddings.shape(), embeddings.getPtr<T>());
-    // }
+    if (tensor_para_.world_size_ > 1) {
+        allocateBuffer(embeddings.shape()[0]);
+        nccl_embeddings = ft::Tensor(ft::MEMORY_GPU, data_type, embeddings.shape(), nccl_embedding_);
+    }
+    else {
+        // save tmp memory
+        nccl_embeddings = ft::Tensor(ft::MEMORY_GPU, data_type, embeddings.shape(), embeddings.getPtr<T>());
+    }
     const int    data_size       = embeddings.size() / tensor_para_.world_size_;
     T*           word_embeddings = reinterpret_cast<T*>(nccl_embeddings.getPtr<T>()) + data_size * tensor_para_.rank_;
     const size_t local_hidden_units = local_head_num_ * params_.size_per_head_;
@@ -63,8 +86,9 @@ void ParallelWordEmbeddingWrapper<T>::forward(ft::Tensor&      embeddings,
                         tensor_para_.rank_,
                         tensor_para_,
                         stream_);
-        ft::invokeTransposeAxis01(embeddings.getPtr<T>(),
+        ft::invokeTransposeAxis012(embeddings.getPtr<T>(),
                                   nccl_embeddings.getPtr<T>(),
+                                  tensor_para_.world_size_,
                                   token_num,
                                   local_hidden_units,
                                   stream_);

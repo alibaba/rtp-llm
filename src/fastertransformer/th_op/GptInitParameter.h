@@ -135,6 +135,12 @@ public:
 
     bool use_medusa_ = false;
 
+    std::string nccl_ip_        = "";
+    int64_t     nccl_port_      = 0;
+    int64_t     model_rpc_port_ = 0;
+    int64_t     tp_size_        = 1;
+    int64_t     pp_size_        = 1;
+
     std::map<int, std::vector<int>> multi_task_prompt_tokens;
 
     GptInitParameter();

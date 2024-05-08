@@ -17,8 +17,10 @@ FIFOScheduler::~FIFOScheduler() {
 
 absl::Status FIFOScheduler::stop() {
     FT_LOG_INFO("stop FIFOScheduler");
-    lock_guard<mutex> lock(lock_);
-    stop_ = true;
+    {
+        lock_guard<mutex> lock(lock_);
+        stop_ = true;
+    }
     cond_.notify_all();
     return absl::OkStatus();
 }
@@ -37,8 +39,10 @@ void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) const {
 }
 
 absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
-    lock_guard<mutex> lock(lock_);
-    waiting_streams_.emplace_back(stream);
+    {
+        lock_guard<mutex> lock(lock_);
+        waiting_streams_.emplace_back(stream);
+    }
     cond_.notify_all();
     return absl::OkStatus();
 }
@@ -130,7 +134,9 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
-    cond_.wait(lock, [this]{return stop_ || !waiting_streams_.empty() || !running_streams_.empty();});
+    cond_.wait(lock, [this]{
+        return stop_ || !waiting_streams_.empty() || !running_streams_.empty();
+    });
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
     // TODO(xinfei.sxf) 刚踢出running的可能马上又加入了running

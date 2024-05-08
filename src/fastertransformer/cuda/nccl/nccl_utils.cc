@@ -203,7 +203,7 @@ void ftNcclGroupEnd() {
 #endif
 }
 
-void ftNcclStreamSynchronize(NcclParam tensor_para, NcclParam pipeline_para, cudaStream_t stream) {
+void ftNcclStreamSynchronize(NcclParam tensor_para, NcclParam pipeline_para, cudaStream_t stream, bool timeout) {
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
 #ifdef BUILD_MULTI_GPU
     cudaError_t  cudaErr;
@@ -220,7 +220,7 @@ void ftNcclStreamSynchronize(NcclParam tensor_para, NcclParam pipeline_para, cud
 
     while (1) {
         auto currentTimepoint = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(currentTimepoint - synchronizeTimepoint)
+        if (timeout && std::chrono::duration_cast<std::chrono::milliseconds>(currentTimepoint - synchronizeTimepoint)
             >= opTimeout) {
             FT_LOG_WARNING("Op run time more than 5000ms, abort");
             abort();

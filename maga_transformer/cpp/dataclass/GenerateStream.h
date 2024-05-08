@@ -146,6 +146,7 @@ public:
 
     void setStop(const std::string& err_msg) {
         std::lock_guard<std::mutex> lock(output_mutex_);
+        FT_LOG_WARNING("stop stream: %d %s", streamId(), err_msg.c_str());
         generate_status_.status = GenerateState::STOPPED;
         generate_status_.error_info = err_msg;
     }
