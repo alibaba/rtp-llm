@@ -71,8 +71,8 @@ private:
     DeleterFuncType     deleter_ = nullptr;
 };
 
-using ConstBufferPtr = std::unique_ptr<const Buffer>;
-using BufferPtr = std::unique_ptr<Buffer>;
+using ConstBufferPtr = std::shared_ptr<const Buffer>;
+using BufferPtr = std::shared_ptr<Buffer>;
 
 } // namespace fastertransformer
 

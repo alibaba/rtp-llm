@@ -15,7 +15,7 @@ BufferManager::BufferManager(IAllocator* device_allocator, IAllocator* host_allo
 
 BufferManager::~BufferManager() {}
 
-unique_ptr<Buffer> BufferManager::allocate(const BufferParams& params, const BufferHints& hints) {
+BufferPtr BufferManager::allocate(const BufferParams& params, const BufferHints& hints) {
     auto buffer = doAllocate(params, hints);
     recordAllcation(params, hints, buffer);
     return move(buffer);
@@ -34,7 +34,7 @@ BufferPtr BufferManager::doAllocate(const BufferParams& params, const BufferHint
     const auto data = allocator->malloc(alloc_bytes);
     const auto deleter = [this, allocator](Buffer* buffer) { this->recycle(buffer, allocator); };
     const auto buffer = new Buffer(allocator->memoryType(), params.type, shape, data, deleter);
-    return unique_ptr<Buffer>(buffer);
+    return BufferPtr(buffer);
 }
 
 void BufferManager::doRecycle(Buffer* buffer, IAllocator* allocator) {

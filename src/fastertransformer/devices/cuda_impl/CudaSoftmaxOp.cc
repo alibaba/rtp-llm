@@ -39,7 +39,7 @@ void mixFloatSoftmaxWrapper(const SoftmaxParams& params,
                             cudaStream_t stream) {
     MaskedSoftmaxParam<Out, In> param;
     auto& input = params.input;
-   
+
     // (batch_size, head_num, q_length, k_length)
     param.attention_score    = output.data<Out>();
     // (batch_size, head_num, q_length, k_length)
@@ -71,9 +71,7 @@ BufferPtr CudaDevice::softmax(const SoftmaxParams& params) {
         } else {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
-        auto output =  const_cast<SoftmaxParams&>(params).input.release();
-        return unique_ptr<Buffer>(output);
-
+        return BufferPtr(params.input);
     } else {
         if (type == DataType::TYPE_FP32 && params.output_t == DataType::TYPE_FP16) {
             auto output = allocateBuffer({params.output_t,
@@ -84,10 +82,10 @@ BufferPtr CudaDevice::softmax(const SoftmaxParams& params) {
         } else {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
-        
+
     }
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-    
+
 }
 
 

@@ -141,7 +141,7 @@ void CudaAttentionOpTest::contextAttentionOpTest(size_t batch_size,
     common_inputs.decoder_batch_size = 0;
     common_inputs.decoder_max_seq_len = 0;
 
-    auto buffer_nullptr = unique_ptr<Buffer>(nullptr);
+    auto buffer_nullptr = BufferPtr(nullptr);
     auto attention_weight   = AttentionLayerWeights(std::make_unique<const DenseWeights>(
                                                     DenseWeights(buffer_nullptr, bias_device)));
 
@@ -292,7 +292,7 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     common_inputs.decoder_batch_size = batch_size;
     common_inputs.decoder_max_seq_len = step - 1;
 
-    auto buffer_nullptr = unique_ptr<Buffer>(nullptr);
+    auto buffer_nullptr = BufferPtr(nullptr);
     auto attention_weight   = AttentionLayerWeights(std::make_unique<const DenseWeights>(
                                                     DenseWeights(buffer_nullptr, bias_device)));
 

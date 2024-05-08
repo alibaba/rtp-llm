@@ -13,8 +13,8 @@ public:
     void init();
     virtual DeviceProperties getDeviceProperties() = 0;
     virtual DeviceStatus getDeviceStatus();
-    std::unique_ptr<Buffer> allocateBuffer(const BufferParams& params, const BufferHints& hints = {});
-    std::unique_ptr<Buffer> allocateBufferLike(const Buffer& buffer, const BufferHints& hints = {});
+    BufferPtr allocateBuffer(const BufferParams& params, const BufferHints& hints = {});
+    BufferPtr allocateBufferLike(const Buffer& buffer, const BufferHints& hints = {});
     virtual void syncAndCheck();
 
 public:
@@ -26,6 +26,7 @@ public:
 
 protected:
     BufferStatus queryBufferStatus();
+    AllocationType getMemAllocationType(const MemoryType type);
 
 private:
     DeviceBase(const DeviceBase&) = delete;

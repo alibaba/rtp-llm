@@ -149,8 +149,8 @@ protected:
         return values;
     }
 
-    std::unique_ptr<Buffer> tensorToBuffer(const torch::Tensor& tensor,
-                                           AllocationType alloc_type = AllocationType::DEVICE)
+    BufferPtr tensorToBuffer(const torch::Tensor& tensor,
+                             AllocationType alloc_type = AllocationType::DEVICE)
     {
         assert(tensor.is_cpu());
         auto buffer = torchTensor2Buffer(tensor);
@@ -182,11 +182,11 @@ protected:
     }
 
     template <typename T>
-    std::unique_ptr<Buffer> CreateKVBlockArray(torch::Tensor& k_cache,
-                                               torch::Tensor& v_cache,
-                                               size_t seq_len,
-                                               size_t maxBlocksPerSeq,
-                                               size_t tokensPerBlock) {
+    BufferPtr CreateKVBlockArray(torch::Tensor& k_cache,
+                                torch::Tensor& v_cache,
+                                size_t seq_len,
+                                size_t maxBlocksPerSeq,
+                                size_t tokensPerBlock) {
         // k, v tensor shape is [batch_size, head_kv_size, kv_seq_len, head_dim].
         // split tensor to small tensor which shape is [head_size, tokensPerBlock, head_dim].
         // and the tensor map is [block_size, 2, block_num]

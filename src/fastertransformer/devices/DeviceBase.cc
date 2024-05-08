@@ -14,16 +14,20 @@ DeviceStatus DeviceBase::getDeviceStatus() {
     return DeviceStatus();
 }
 
+AllocationType DeviceBase::getMemAllocationType(const MemoryType type) {
+    return (type == getAllocator()->memoryType()) ? AllocationType::DEVICE : AllocationType::HOST;
+}
+
 BufferStatus DeviceBase::queryBufferStatus() {
     return buffer_manager_->queryStatus();
 }
 
-unique_ptr<Buffer> DeviceBase::allocateBuffer(const BufferParams& params, const BufferHints& hints) {
+BufferPtr DeviceBase::allocateBuffer(const BufferParams& params, const BufferHints& hints) {
     return buffer_manager_->allocate(params, hints);
 }
 
-unique_ptr<Buffer> DeviceBase::allocateBufferLike(const Buffer& buffer, const BufferHints& hints) {
-    return allocateBuffer({buffer.type(), buffer.shape()}, hints);
+BufferPtr DeviceBase::allocateBufferLike(const Buffer& buffer, const BufferHints& hints) {
+    return allocateBuffer({buffer.type(), buffer.shape(), getMemAllocationType(buffer.where())}, hints);
 }
 
 void DeviceBase::syncAndCheck() {
