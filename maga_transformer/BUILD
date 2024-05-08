@@ -107,7 +107,10 @@ py_library(
     srcs = glob([
         "config/*.py",
         "config/**/*.py",
-    ])
+    ]),
+    deps = [
+        "//maga_transformer/distribute:distribute"
+    ]
 )
 
 py_library(
