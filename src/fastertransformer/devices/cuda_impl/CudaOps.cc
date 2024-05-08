@@ -71,6 +71,28 @@ TransposeOutput CudaDevice::transpose(const TransposeParams& params) {
     return move(output);
 }
 
+template<typename DstT, typename SrcT>
+inline DstT castTo(SrcT value) {
+    return static_cast<DstT>(value);
+}
+
+#define SPECIALIZE_CAST_TO(DstT, SrcT)             \
+    template<>                                     \
+    inline DstT castTo<DstT, SrcT>(SrcT value) {   \
+        return static_cast<DstT>((float)value);    \
+    }
+
+SPECIALIZE_CAST_TO(int64_t, __half);
+SPECIALIZE_CAST_TO(uint64_t, __half);
+SPECIALIZE_CAST_TO(int64_t, __nv_bfloat16);
+SPECIALIZE_CAST_TO(uint64_t, __nv_bfloat16);
+SPECIALIZE_CAST_TO(__half, int64_t);
+SPECIALIZE_CAST_TO(__half, uint64_t);
+SPECIALIZE_CAST_TO(__nv_bfloat16, int64_t);
+SPECIALIZE_CAST_TO(__nv_bfloat16, uint64_t);
+SPECIALIZE_CAST_TO(__nv_bfloat16, __half);
+SPECIALIZE_CAST_TO(__half, __nv_bfloat16);
+
 // TODO: change this to use efficient cuda kernel
 template<typename DstT, typename SrcT>
 void convertType(const void* dst, void* src, size_t size) {
@@ -78,7 +100,7 @@ void convertType(const void* dst, void* src, size_t size) {
     auto dst_ptr = (DstT*)(dst);
 
     for (size_t i = 0; i < size; ++i) {
-        dst_ptr[i] = (DstT)src_ptr[i];
+        dst_ptr[i] = castTo<DstT>(src_ptr[i]);
     }
 }
 
