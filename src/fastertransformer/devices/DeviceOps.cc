@@ -18,6 +18,10 @@ TransposeOutput DeviceOps::transpose(const TransposeParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+ConvertOutput DeviceOps::convert(const ConvertParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 LayernormOutput DeviceOps::layernorm(const LayernormParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

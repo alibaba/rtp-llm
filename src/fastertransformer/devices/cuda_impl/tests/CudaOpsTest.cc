@@ -44,3 +44,21 @@ TEST_F(CudaOpsTest, testTranspose) {
     sync_check_cuda_error();
 }
 
+TEST_F(CudaOpsTest, testConvert) {
+    auto source = createBuffer<float>({7}, {0, -10, -1234, 1, 100, 10000, 3456});
+    auto tensor = bufferToTensor(*source);
+    auto testTypes = {
+        DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32,
+        DataType::TYPE_INT32, DataType::TYPE_INT64};
+    for (auto type1 : testTypes) {
+        for (auto type2 : testTypes) {
+            cout << "Testing " << type1 << " -> " << type2 << endl;
+            auto src = tensorToBuffer(tensor.to(dataTypeToTorchType(type1)));
+            auto output = device_->convert({src, type2});
+            assertTensorClose(
+                tensor.to(torch::kFloat32), bufferToTensor(*output).to(torch::kFloat32), 1, 1e-3);
+            device_->syncAndCheck();
+        }
+    }
+}
+

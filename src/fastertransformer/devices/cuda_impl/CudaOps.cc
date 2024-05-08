@@ -71,6 +71,35 @@ TransposeOutput CudaDevice::transpose(const TransposeParams& params) {
     return move(output);
 }
 
+// TODO: change this to use efficient cuda kernel
+template<typename DstT, typename SrcT>
+void convertType(const void* dst, void* src, size_t size) {
+    const auto src_ptr = (const SrcT*)(src);
+    auto dst_ptr = (DstT*)(dst);
+
+    for (size_t i = 0; i < size; ++i) {
+        dst_ptr[i] = (DstT)src_ptr[i];
+    }
+}
+
+ConvertOutput CudaDevice::convert(const ConvertParams& params) {
+    const auto& input = params.input;
+    if (input->type() == params.type) {
+        return input;
+    }
+
+    auto alloc_type = getMemAllocationType(input->where());
+    auto host_input = (alloc_type == AllocationType::HOST) ? input : clone({*input, AllocationType::HOST});
+    auto host_output = allocateBuffer({params.type, input->shape(), AllocationType::HOST});
+    syncAndCheck();
+    DISPATCH_CUDA_FUNCTION_TWO_TYPES(host_output->type(), input->type(), convertType,
+        host_output->data(), host_input->data(), host_input->size()
+    );
+
+    auto output = (alloc_type == AllocationType::HOST) ? host_output : clone({*host_output, alloc_type});
+    return {move(output)};
+}
+
 GroupedGemmOutput CudaDevice::groupedGemm(const GroupedGemmParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

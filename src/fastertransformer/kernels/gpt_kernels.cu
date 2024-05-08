@@ -455,6 +455,12 @@ template void invokeTransposeAxis01(
     int32_t* out, int32_t* in, const int dim0, const int dim1, cudaStream_t stream);
 
 template void invokeTransposeAxis01(
+    int8_t* out, int8_t* in, const int dim0, const int dim1, cudaStream_t stream);
+
+template void invokeTransposeAxis01(
+    uint8_t* out, uint8_t* in, const int dim0, const int dim1, cudaStream_t stream);
+
+template void invokeTransposeAxis01(
     uint32_t* out, uint32_t* in, const int dim0, const int dim1, cudaStream_t stream);
 
 template void invokeTransposeAxis01(

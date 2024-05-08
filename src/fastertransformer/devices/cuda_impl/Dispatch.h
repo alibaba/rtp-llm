@@ -101,41 +101,65 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
     std::apply(func_name<T>, typed_args);                                                   \
 }
 
+#define DISPATCH_FOR_EACH_COMPUTE_TYPE(MACRO, ...)         \
+    MACRO(DataType::TYPE_FP32, float, __VA_ARGS__)         \
+    MACRO(DataType::TYPE_FP16, half, __VA_ARGS__)          \
+    MACRO(DataType::TYPE_BF16, __nv_bfloat16, __VA_ARGS__) \
+    default: \
+        FT_CHECK(false);
+
+#define DISPATCH_FOR_EACH_NUMERIC_TYPE(MACRO, ...)         \
+    MACRO(DataType::TYPE_INT8, int8_t, __VA_ARGS__)        \
+    MACRO(DataType::TYPE_INT32, int32_t, __VA_ARGS__)      \
+    MACRO(DataType::TYPE_INT64, int64_t, __VA_ARGS__)      \
+    MACRO(DataType::TYPE_UINT8, uint8_t, __VA_ARGS__)      \
+    MACRO(DataType::TYPE_UINT32, uint32_t, __VA_ARGS__)    \
+    MACRO(DataType::TYPE_UINT64, uint64_t, __VA_ARGS__)    \
+    DISPATCH_FOR_EACH_COMPUTE_TYPE(MACRO, __VA_ARGS__)     \
+
+#define DP_FUNCTION_CALL_CASE(data_type, T, ...) \
+    case data_type: {                            \
+        ARG_CASTED_FUNC_CALL(T, __VA_ARGS__);    \
+        break;                                   \
+    }
+
 #define DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, function, ...)                              \
     do {                                                                                        \
         switch (data_type) {                                                                    \
-            case DataType::TYPE_FP32:                                                           \
-                ARG_CASTED_FUNC_CALL(float, function, __VA_ARGS__);                             \
-                break;                                                                          \
-            case DataType::TYPE_FP16:                                                           \
-                ARG_CASTED_FUNC_CALL(half, function, __VA_ARGS__);                              \
-                break;                                                                          \
-            case DataType::TYPE_BF16:                                                           \
-                ARG_CASTED_FUNC_CALL(__nv_bfloat16, function, __VA_ARGS__);                     \
-                break;                                                                          \
-            default:                                                                            \
-                FT_CHECK(false);                                                                \
+            DISPATCH_FOR_EACH_COMPUTE_TYPE(DP_FUNCTION_CALL_CASE, function, __VA_ARGS__)        \
         }                                                                                       \
     } while (0)
 
 #define DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, function, ...)                           \
     do {                                                                                        \
         switch (data_type) {                                                                    \
-            case DataType::TYPE_INT32:                                                          \
-                ARG_CASTED_FUNC_CALL(int32_t, function, __VA_ARGS__);                           \
-                break;                                                                          \
-            case DataType::TYPE_UINT32:                                                         \
-                ARG_CASTED_FUNC_CALL(uint32_t, function, __VA_ARGS__);                          \
-                break;                                                                          \
-            case DataType::TYPE_INT64:                                                          \
-                ARG_CASTED_FUNC_CALL(int64_t, function, __VA_ARGS__);                           \
-                break;                                                                          \
-            case DataType::TYPE_UINT64:                                                         \
-                ARG_CASTED_FUNC_CALL(uint64_t, function, __VA_ARGS__);                          \
-                break;                                                                          \
-            default:                                                                            \
-                DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, function, __VA_ARGS__);             \
+            DISPATCH_FOR_EACH_NUMERIC_TYPE(DP_FUNCTION_CALL_CASE, function, __VA_ARGS__)        \
         }                                                                                       \
     } while (0)
+
+#define INNER_TYPE_CASE(dtype2, T2, function, T1, ...) \
+    case dtype2: {                                     \
+        function<T1, T2>(__VA_ARGS__);                 \
+        break;                                         \
+    }
+
+#define OUTER_TYPE_CASE(dtype1, T1, dtype2, function, ...)                                   \
+    case dtype1: {                                                                           \
+        switch (dtype2) {                                                                    \
+            DISPATCH_FOR_EACH_NUMERIC_TYPE(INNER_TYPE_CASE, function, T1, __VA_ARGS__);      \
+        }                                                                                    \
+        break;                                                                               \
+    }
+
+#define DISPATCH_CUDA_FUNCTION_TWO_TYPES(dtype1, dtype2, function, ...)                      \
+    switch (dtype1) {                                                                        \
+        OUTER_TYPE_CASE(DataType::TYPE_FP16, half, dtype2, function, __VA_ARGS__)            \
+        OUTER_TYPE_CASE(DataType::TYPE_BF16, __nv_bfloat16, dtype2, function, __VA_ARGS__)   \
+        OUTER_TYPE_CASE(DataType::TYPE_FP32, float, dtype2, function, __VA_ARGS__)           \
+        OUTER_TYPE_CASE(DataType::TYPE_INT32, int32_t, dtype2, function, __VA_ARGS__)        \
+        OUTER_TYPE_CASE(DataType::TYPE_UINT32, uint32_t, dtype2, function, __VA_ARGS__)      \
+        OUTER_TYPE_CASE(DataType::TYPE_INT64, int64_t, dtype2, function, __VA_ARGS__)        \
+        OUTER_TYPE_CASE(DataType::TYPE_UINT64, uint64_t, dtype2, function, __VA_ARGS__)      \
+    }
 
 }  // namespace fastertransformer

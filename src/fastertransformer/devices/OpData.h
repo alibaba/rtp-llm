@@ -105,6 +105,13 @@ struct TransposeParams {
     const Buffer& input;
 };
 
+using ConvertOutput = BufferPtr;
+
+struct ConvertParams {
+    const BufferPtr input;
+    const DataType type;
+};
+
 using LayernormOutput = void;
 
 struct LayernormParams {
