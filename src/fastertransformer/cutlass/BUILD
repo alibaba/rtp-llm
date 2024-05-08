@@ -156,7 +156,8 @@ cc_library(
         "cutlass_kernels/weight_only_quant_op.h",
         "cutlass_kernels/gemm_configs.h",
         "cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h",
-        "cutlass_kernels/weightOnlyBatchedGemv/common.h"
+        "cutlass_kernels/weightOnlyBatchedGemv/common.h",
+        "cutlass_kernels/cutlass_heuristic.h"
     ],
     visibility = ["//visibility:public"],
 )

@@ -41,37 +41,58 @@ namespace kernels
 namespace cutlass_kernels
 {
 
-struct TileShape
-{
-    int m;
-    int n;
+struct TileConfig{
+    int block_m;
+    int block_n;
+    int block_k;
+    int warp_m;
+    int warp_n;
+    int warp_k;
 };
 
-TileShape get_cta_shape_for_config(CutlassTileConfig tile_config)
-{
-    switch (tile_config)
-    {
-    case CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64: return TileShape{32, 128};
-    case CutlassTileConfig::CtaShape64x64x128_WarpShape32x64x64: return TileShape{64, 64};
-    case CutlassTileConfig::CtaShape64x128x64_WarpShape32x64x64:
-    case CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64: return TileShape{64, 128};
-    case CutlassTileConfig::CtaShape128x64x64_WarpShape64x32x64: return TileShape{128, 64};
-    case CutlassTileConfig::CtaShape128x128x8_WarpShape64x64x8:
-    case CutlassTileConfig::CtaShape128x128x64_WarpShape64x32x64:
-    case CutlassTileConfig::CtaShape128x128x64_WarpShape64x64x64:
-    case CutlassTileConfig::CtaShape128x128x64_WarpShape128x32x64: return TileShape{128, 128};
-    case CutlassTileConfig::CtaShape128x256x64_WarpShape64x64x64: return TileShape{128, 256};
-    case CutlassTileConfig::CtaShape256x128x64_WarpShape64x64x64: return TileShape{256, 128};
-    default: throw std::runtime_error("[TensorRT-LLm Error][get_grid_shape_for_config] Invalid config");
+TileConfig
+get_tile_config_from_config(CutlassTileConfig tile_config) {
+    switch (tile_config) {
+        case CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64:
+            return TileConfig{32, 128, 64, 32, 32, 64};
+        case CutlassTileConfig::CtaShape64x64x128_WarpShape32x64x64:
+            return TileConfig{64, 64, 128, 32, 64, 64};
+        case CutlassTileConfig::CtaShape64x128x64_WarpShape32x64x64:
+            return TileConfig{64, 128, 64, 32, 64, 64};
+        case CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64:
+            return TileConfig{64, 128, 64, 64, 32, 64};
+        case CutlassTileConfig::CtaShape128x64x64_WarpShape64x32x64:
+            return TileConfig{128, 64, 64, 64, 32, 64};
+        case CutlassTileConfig::CtaShape128x128x8_WarpShape64x64x8:
+            return TileConfig{128, 128, 8, 64, 64, 8};
+        case CutlassTileConfig::CtaShape128x128x64_WarpShape64x32x64:
+            return TileConfig{128, 128, 64, 64, 32, 64};
+        case CutlassTileConfig::CtaShape128x128x64_WarpShape64x64x64:
+            return TileConfig{128, 128, 64, 64, 64, 64};
+        case CutlassTileConfig::CtaShape128x128x64_WarpShape128x32x64:
+            return TileConfig{128, 128, 64, 128, 32, 64};
+        case CutlassTileConfig::CtaShape128x256x64_WarpShape64x64x64:
+            return TileConfig{128, 256, 64, 64, 64, 64};
+        case CutlassTileConfig::CtaShape256x128x64_WarpShape64x64x64:
+            return TileConfig{256, 128, 64, 64, 64, 64};
+        default:
+            throw std::runtime_error("[TensorRT-LLm Error][get_grid_shape_for_config] Invalid config");
     }
 }
 
-bool is_valid_split_k_factor(const int64_t m, const int64_t n, const int64_t k, const TileShape tile_shape,
+void print_config(CutlassGemmConfig config){
+    TileConfig tile_config = get_tile_config_from_config(config.tile_config);
+    FT_LOG_INFO("cutlass gemm config: %d %d %d %d %d %d %d %d", tile_config.block_m, tile_config.block_n, tile_config.block_k, tile_config.warp_m, tile_config.warp_n, tile_config.warp_k, config.split_k_factor, config.stages);
+
+}
+
+bool is_valid_split_k_factor(const int64_t m, const int64_t n, const int64_t k, const CutlassGemmConfig gemm_config,
     const int split_k_factor, const size_t workspace_bytes, const bool is_weight_only)
 {
 
     // All tile sizes have a k_tile of 64.
     static constexpr int k_tile = 64;
+    TileConfig tile_config = get_tile_config_from_config(gemm_config.tile_config);
 
     // For weight-only quant, we need k and k_elements_per_split to be a multiple of cta_k
     if (is_weight_only)
@@ -94,8 +115,8 @@ bool is_valid_split_k_factor(const int64_t m, const int64_t n, const int64_t k, 
     }
 
     // Check that the workspace has sufficient space for this split-k factor
-    const int ctas_in_m_dim = (m + tile_shape.m - 1) / tile_shape.m;
-    const int ctas_in_n_dim = (n + tile_shape.n - 1) / tile_shape.n;
+    const int ctas_in_m_dim = (m + tile_config.block_m - 1) / tile_config.block_m;
+    const int ctas_in_n_dim = (n + tile_config.block_n - 1) / tile_config.block_n;
     const int required_ws_bytes = split_k_factor == 1 ? 0 : sizeof(int) * ctas_in_m_dim * ctas_in_n_dim;
 
     if (required_ws_bytes > workspace_bytes)
@@ -216,7 +237,7 @@ CutlassGemmConfig estimate_best_config_from_occupancies(const std::vector<Cutlas
     for (int ii = 0; ii < candidate_configs.size(); ++ii)
     {
         CutlassGemmConfig candidate_config = candidate_configs[ii];
-        TileShape tile_shape = get_cta_shape_for_config(candidate_config.tile_config);
+        TileConfig tile_config = get_tile_config_from_config(candidate_config.tile_config);
         int occupancy = occupancies[ii];
 
         if (occupancy == 0)
@@ -226,17 +247,17 @@ CutlassGemmConfig estimate_best_config_from_occupancies(const std::vector<Cutlas
 
         // Keep small tile sizes when possible.
         if (best_config.tile_config != CutlassTileConfig::ChooseWithHeuristic && m < current_m_tile
-            && current_m_tile < tile_shape.m)
+            && current_m_tile < tile_config.block_m)
         {
             continue;
         }
 
-        const int ctas_in_m_dim = (m + tile_shape.m - 1) / tile_shape.m;
-        const int ctas_in_n_dim = (n + tile_shape.n - 1) / tile_shape.n;
+        const int ctas_in_m_dim = (m + tile_config.block_m - 1) / tile_config.block_m;
+        const int ctas_in_n_dim = (n + tile_config.block_n - 1) / tile_config.block_n;
 
         for (int split_k_factor = 1; split_k_factor <= max_split_k; ++split_k_factor)
         {
-            if (is_valid_split_k_factor(m, n, k, tile_shape, split_k_factor, workspace_bytes, is_weight_only))
+            if (is_valid_split_k_factor(m, n, k, candidate_config, split_k_factor, workspace_bytes, is_weight_only))
             {
                 const int ctas_per_wave = occupancy * multi_processor_count;
                 const int ctas_for_problem = ctas_in_m_dim * ctas_in_n_dim * split_k_factor;
@@ -255,18 +276,18 @@ CutlassGemmConfig estimate_best_config_from_occupancies(const std::vector<Cutlas
                         = split_k_factor > 1 ? SplitKStyle::SPLIT_K_SERIAL : SplitKStyle::NO_SPLIT_K;
                     best_config = CutlassGemmConfig{
                         candidate_config.tile_config, split_style, split_k_factor, candidate_config.stages};
-                    current_m_tile = tile_shape.m;
+                    current_m_tile = tile_config.block_m;
                 }
                 else if (current_score == config_score
                     && (best_config.stages < candidate_config.stages || split_k_factor < best_config.split_k_factor
-                        || current_m_tile < tile_shape.m))
+                        || current_m_tile < tile_config.block_m))
                 {
                     // Prefer deeper pipeline or smaller split-k
                     SplitKStyle split_style
                         = split_k_factor > 1 ? SplitKStyle::SPLIT_K_SERIAL : SplitKStyle::NO_SPLIT_K;
                     best_config = CutlassGemmConfig{
                         candidate_config.tile_config, split_style, split_k_factor, candidate_config.stages};
-                    current_m_tile = tile_shape.m;
+                    current_m_tile = tile_config.block_m;
                     config_waves = num_waves_total;
                 }
             }
