@@ -99,7 +99,7 @@ loadWeights(int                                                             pp_s
         gpt_layer_weights[i]->partial_moe_weights.gating_weight.kernel              = maybe_get<T>(weights[i], W::moe_gate);
         gpt_layer_weights[i]->ffn_weights.shared_expert_gating_weight.kernel        = maybe_get<T>(weights[i], W::shared_expert_gate_w);
 
-        if(quant_algo->sq_int8_){
+        if(quant_algo->sq_int8_ || quant_algo->omni_quant_int8_){
             gpt_layer_weights[i]->self_attention_weights.query_weight.int8_kernel            = maybe_get<int8_t>(weights[i], W::attn_qkv_w);
             gpt_layer_weights[i]->self_attention_weights.attention_output_weight.int8_kernel = maybe_get<int8_t>(weights[i], W::attn_o_w);
             gpt_layer_weights[i]->ffn_weights.intermediate_weight.int8_kernel                = maybe_get<int8_t>(weights[i], W::ffn_w1);
@@ -112,8 +112,11 @@ loadWeights(int                                                             pp_s
             gpt_layer_weights[i]->ffn_weights.intermediate_weight2.scale               = maybe_get<float>(weights[i], W::ffn_s3);
             gpt_layer_weights[i]->ffn_weights.output_weight.scale                      = maybe_get<float>(weights[i], W::ffn_s2);
 
-            gpt_layer_weights[i]->ffn_weights.output_weight.smoother = get_ptr<float>(weights[i].at(W::ffn_smoother));
-            gpt_layer_weights[i]->self_attention_weights.attention_output_weight.smoother = get_ptr<float>(weights[i].at(W::attn_o_smoother));
+            gpt_layer_weights[i]->ffn_weights.output_weight.smoother = maybe_get<float>(weights[i], W::ffn_smoother);
+            gpt_layer_weights[i]->self_attention_weights.attention_output_weight.smoother = maybe_get<float>(weights[i], W::attn_o_smoother);
+            if (quant_algo->omni_quant_int8_) {
+                gpt_layer_weights[i]->self_attention_weights.attention_output_weight.shift = maybe_get<float>(weights[i], W::attn_o_shift);
+            }
         }
         else if (quant_algo->int8_mode_ || quant_algo->int4_mode_) {
             gpt_layer_weights[i]->self_attention_weights.query_weight.weight_only_quant_scale            = maybe_get<T>(weights[i], W::attn_qkv_s);

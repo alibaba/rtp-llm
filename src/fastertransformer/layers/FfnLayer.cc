@@ -281,6 +281,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                                    cur_inter_size,
                                    ffn_dynamic_scale_2_,
                                    ffn_weights->output_weight.smoother,
+                                   nullptr,
                                    stream_);
         inter_buf_normed_output = (inter_buf_normed_);
         sync_check_cuda_error();

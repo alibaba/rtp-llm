@@ -211,10 +211,8 @@ class QWenV2(QWen):
             quant_method = quant_config.get("quant_method", None)
             if quant_method == 'awq':
                 config.quant_algo.is_awq = True
-                config.quant_algo.has_zeros = True
             elif quant_method == 'gptq':
                 config.quant_algo.is_gptq = True
-                config.quant_algo.has_zeros = True
             else: 
                 raise ValueError("Unsupported quant method: %s" % (quant_method))
 

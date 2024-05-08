@@ -27,6 +27,6 @@ void invokeQuantization(
 
 template <typename T>
 void invokePerTokenQuantization(
-    int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother, cudaStream_t stream = 0);
+    int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother,  const float* shift, cudaStream_t stream = 0);
 
 }

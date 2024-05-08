@@ -325,6 +325,7 @@ class W:
 
     # sq
     attn_o_smoother = 'self_attention_weights.attention_output_weight.smoother'
+    attn_o_shift = 'self_attention_weights.attention_output_weight.shift'
     ffn_smoother = 'ffn_weights.intermediate_weight2.smoother'
 
     # medusa lm_head
@@ -356,6 +357,7 @@ class W:
         ffn_s2,
         ffn_s3,
         attn_o_smoother,
+        attn_o_shift,
         ffn_smoother
     ])
 
@@ -378,14 +380,28 @@ class W:
         moe_s3
     ])
 
-    sq_weights = [
-        [attn_qkv_w, attn_qkv_s],
-        [attn_o_w, attn_o_s, attn_o_smoother],
-        [ffn_w1, ffn_s1],
-        [ffn_w3, ffn_s3],
-        [ffn_w2, ffn_s2, ffn_smoother], 
+    sq_quant_weights = [
+        attn_qkv_w,
+        attn_o_w,
+        ffn_w1,
+        ffn_w3,
+        ffn_w2 
     ]
 
+    sq_quant_scales = [
+        attn_qkv_s,
+        attn_o_s,
+        ffn_s1,
+        ffn_s2,
+        ffn_s3,
+        attn_o_smoother,
+        ffn_smoother
+    ]
+
+    sq_quant_shifts = [
+        attn_o_shift
+    ]
+  
     int8_attn_weights = [
         [attn_qkv_w, attn_qkv_s],
         [attn_o_w, attn_o_s],
@@ -457,6 +473,7 @@ class W:
         attn_o_s: sp_0,
         attn_o_b: sp_id,
         attn_o_smoother: sp_0,
+        attn_o_shift: sp_0,
         ffn_w1: sp_neg1,
         ffn_z1: sp_neg1,
         ffn_s1: sp_neg1,
@@ -696,6 +713,7 @@ class ModelDeployWeightInfo:
         self._is_gptq = config.quant_algo.is_gptq
         self._is_awq = config.quant_algo.is_awq
         self._sq_int8 = config.quant_algo.sq_int8
+        self._omni_quant_int8 = config.quant_algo.omni_quant_int8
         self._group_size = config.quant_algo.weight_only_group_size
         self._num_layers = config.num_layers
         self._layer_head_num = config.layer_head_num

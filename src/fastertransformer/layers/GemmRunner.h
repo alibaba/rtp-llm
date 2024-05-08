@@ -63,7 +63,7 @@ public:
             }
             weight_only_groupwise_matmul_plguin_ =
                 std::make_shared<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin>(
-                    datatype, quant_algo_.useZeros(), quant_algo_.getGroupSize());
+                    datatype, true, quant_algo_.getGroupSize());
         }
     }
 

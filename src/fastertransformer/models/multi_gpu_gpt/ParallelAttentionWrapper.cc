@@ -386,7 +386,14 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
     print_bsd(layer_id, "attn before o", qkv_buf_3_input, h_token_num, 1, local_hidden_units_rt);
     if(quant_algo_.smoothQuantInt8()){
         FT_CHECK_WITH_INFO(attention_weights->attention_output_weight.smoother != nullptr, "smoother is needed in sq dynamic token");
-        invokePerTokenQuantization(reinterpret_cast<int8_t*>(qkv_buf_), qkv_buf_2_, h_token_num, local_hidden_units_rt, dense_gemm_dynamic_scale_, attention_weights->attention_output_weight.smoother, stream_);
+        invokePerTokenQuantization(reinterpret_cast<int8_t*>(qkv_buf_),
+                                   qkv_buf_2_,
+                                   h_token_num,
+                                   local_hidden_units_rt,
+                                   dense_gemm_dynamic_scale_,
+                                   attention_weights->attention_output_weight.smoother,
+                                   attention_weights->attention_output_weight.shift,
+                                   stream_);
         qkv_buf_3_input = qkv_buf_;
         sync_check_cuda_error();
         print_bsd(layer_id, "quant per tensor", reinterpret_cast<int8_t*>(qkv_buf_3_input), h_token_num, 1, local_hidden_units_rt);

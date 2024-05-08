@@ -241,33 +241,29 @@ class ModelWeightsLoader:
         if self._merge_lora:
             raise Exception("lora in sq is not implemented yet")
         results = []
-        for weight_list in W.sq_weights: 
-            qweight = [weight for weight in layer_weights if weight.name == weight_list[0]]
-            qscale  = [weight for weight in layer_weights if weight.name == weight_list[1]]
-            if len(weight_list) == 3:
-                smoother = [weight for weight in layer_weights if weight.name == weight_list[2]]
-            if len(qweight) == 0:
-                if self._weights_info._is_sparse_head:
-                    continue
-                else:
-                    raise Exception(f"not found weight {weight_list[0]} in layer {layer_id}")
-            elif len(qweight) > 1:
-                raise Exception(f"found more than one weight {weight_list[0]} in layer {layer_id}")
-            try:
-                qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=torch.int8)
-                qscale_tensor = self._load_and_convert_tensor(qscale[0], layer_id=layer_id, datatype=torch.float32)
-                qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor).to(device)
-                qscale_tensor = self._split_tensor(qscale[0].name, qscale_tensor).to(device)
-                results.append((layer_id, qweight[0].name, qweight_tensor))
-                results.append((layer_id, qscale[0].name, qscale_tensor))
-                if len(weight_list) ==3:
-                    smoother_tensor = self._load_and_convert_tensor(smoother[0], layer_id=layer_id, datatype=torch.float32)
-                    smoother_tensor = self._split_tensor(smoother[0].name, smoother_tensor).to(device)
-                    results.append((layer_id, smoother[0].name, smoother_tensor))
-                    
-            except Exception as e:
-                logging.error(f'load smooth_quant layer_weight in layer {layer_id} failed: {e}')
-                raise e
+        def load_weight(weight_list, datatype):
+            for quant_weight in weight_list: 
+                qweight = [weight for weight in layer_weights if weight.name == quant_weight]
+                if len(qweight) == 0:
+                    if self._weights_info._is_sparse_head:
+                        continue
+                    else:
+                        raise Exception(f"not found weight {quant_weight} in layer {layer_id}")
+                elif len(qweight) > 1:
+                    raise Exception(f"found more than one weight {quant_weight} in layer {layer_id}")
+                try:
+                    qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=datatype)
+                    qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor).contiguous().clone().to(device)
+                    results.append((layer_id, qweight[0].name, qweight_tensor))
+                       
+                except Exception as e:
+                    logging.error(f'load smooth_quant layer_weight in layer {layer_id} failed: {e}')
+                    raise e
+
+        load_weight(W.sq_quant_weights, torch.int8)
+        load_weight(W.sq_quant_scales, torch.float32)
+        if self._weights_info._omni_quant_int8:
+            load_weight(W.sq_quant_shifts, torch.float32)
         return results
     
     def _load_layer_weight_and_apply_int8(self, layer_weights, layer_id: int, device: str):
@@ -327,7 +323,7 @@ class ModelWeightsLoader:
             layer_weights = self._trunc_layer_weights_for_partial_moe(layer_weights)
         for weight in layer_weights:
             try:
-                int8_flag = (self._weights_info._int8_mode or self._weights_info._sq_int8) and (weight.name in W.quant_w)
+                int8_flag = (self._weights_info._int8_mode or self._weights_info._sq_int8 or self._weights_info._omni_quant_int8) and (weight.name in W.quant_w)
                 int4_flag = self._weights_info._int4_mode and (weight.name in W.quant_w or weight.name in W.int4_quant_params)
 
                 if int4_flag or int8_flag:
@@ -348,7 +344,7 @@ class ModelWeightsLoader:
                 raise e
         if self._weights_info._int4_mode:
             results.extend(self._load_int4_layer_weight(layer_weights, layer_id=layer_id, device=device))
-        elif self._weights_info._sq_int8:
+        elif self._weights_info._sq_int8 or self._weights_info._omni_quant_int8:
             results.extend(self._load_int8_layer_weight(layer_weights, layer_id=layer_id, device=device))
         elif self._weights_info._int8_mode:
             results.extend(self._load_layer_weight_and_apply_int8(layer_weights, layer_id=layer_id, device=device))
@@ -562,7 +558,7 @@ class ModelWeightsLoader:
         for ckpt_weight in weight_info.weights:
             before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(ckpt_weight.tensor_name(layer_id), datatype)))
             
-        after_merge_tensor = weight_info.process_fun(before_merge_tensors)
+        after_merge_tensor = weight_info.process_fun(before_merge_tensors).to(datatype)
         return after_merge_tensor
 
     def _split_and_sanitize_tensor(self, tensor: torch.Tensor, weight: WeightInfo):

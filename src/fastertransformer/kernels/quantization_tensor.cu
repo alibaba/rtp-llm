@@ -89,9 +89,9 @@ INSTANTIATE_INVOKE_QUANTIZATION(half);
 INSTANTIATE_INVOKE_QUANTIZATION(__nv_bfloat16);
 #endif
 
-template <typename T, bool IS_SMOOTHER>
+template <typename T, bool IS_SMOOTHER, bool IS_SHIFT>
 __global__ void perTokenQuantization(
-    int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother)
+    int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother, const float* shift)
 {
     const T* srcRow = src + blockIdx.x * numCols;
     int8_t* dstRow = dst + blockIdx.x * numCols;
@@ -102,6 +102,9 @@ __global__ void perTokenQuantization(
         T val = srcRow[i];
         if(IS_SMOOTHER){
             val = cuda_cast<T>(val / cuda_cast<T>(smoother[i]));
+        }
+        if(IS_SHIFT){
+            val = cuda_cast<T>(val + cuda_cast<T>(shift[i]));
         }
         localMax = cuda_max(localMax, cuda_abs(val));
     }
@@ -119,29 +122,45 @@ __global__ void perTokenQuantization(
         if(IS_SMOOTHER){
             val = val / cuda_cast<T>(smoother[i]);
         }
+        if(IS_SHIFT){
+            val = cuda_cast<T>(val + cuda_cast<T>(shift[i]));
+        }
         dstRow[i] = cuda_cast<int8_t>(cuda_cast<float>(val) * scaleOrigQuant);
     }
 }
 
-template <typename T>
-void invokePerTokenQuantization(
-    int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother, cudaStream_t stream)
+template <typename T, bool IS_SMOOTHER>
+void dispatch_per_token_quantization_shift(
+    int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother, const float* shift, cudaStream_t stream)
 {
     // each block is responsible for a single row
     const dim3 block(512);
     const dim3 grid(numRows);
 
-    if(smoother != nullptr){
-        perTokenQuantization<T, true><<<grid, block, 0, stream>>>(dst, src, numRows, numCols, scalePtr, smoother);
+    if(shift != nullptr){
+        perTokenQuantization<T, IS_SMOOTHER, true><<<grid, block, 0, stream>>>(dst, src, numRows, numCols, scalePtr, smoother, shift);
     }
     else{
-        perTokenQuantization<T, false><<<grid, block, 0, stream>>>(dst, src, numRows, numCols, scalePtr, nullptr);
+        perTokenQuantization<T, IS_SMOOTHER, false><<<grid, block, 0, stream>>>(dst, src, numRows, numCols, scalePtr, smoother, nullptr);
     }
+}
+
+template<typename T>
+void invokePerTokenQuantization(
+    int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother, const float* shift, cudaStream_t stream)
+{
+    if(smoother != nullptr){
+        dispatch_per_token_quantization_shift<T, true>(dst, src, numRows, numCols, scalePtr, smoother, shift, stream);
+    }
+    else{
+        dispatch_per_token_quantization_shift<T, false>(dst, src, numRows, numCols, scalePtr, nullptr, shift, stream);
+    }
+
 }
 
 #define INSTANTIATE_INVOKE_PER_TOKEN_QUANTIZATION(T)                                                                   \
     template void invokePerTokenQuantization(                                                                          \
-        int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother, cudaStream_t stream)
+        int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother, const float* shift, cudaStream_t stream)
 
 INSTANTIATE_INVOKE_PER_TOKEN_QUANTIZATION(float);
 INSTANTIATE_INVOKE_PER_TOKEN_QUANTIZATION(half);
