@@ -5,7 +5,6 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/Weights.h"
-#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include <string>
 
 namespace ft = fastertransformer;
@@ -45,7 +44,6 @@ struct GptModelInputs {
     ft::BufferPtr kv_cache_scales;  // [layer_num, batch_size, 2, block_length], int64 block scales
 
 public:
-    void tpSync(ft::NcclParam tensor_para, ft::NcclParam pipeline_para, ft::DeviceBase* device);
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "GptModelInputs { "

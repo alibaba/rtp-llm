@@ -139,7 +139,6 @@ cc_library(
         ":utils",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/cuda:nccl",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
     ],
     visibility = ["//visibility:public"]
 )

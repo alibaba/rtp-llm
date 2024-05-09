@@ -1,6 +1,7 @@
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
+#include "maga_transformer/cpp/deprecated/GptModelInputsTpSync.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
@@ -57,7 +58,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     auto         model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     auto& model_input = model_input_status.value();
-    model_input.tpSync(tensor_para_, pipeline_para_, device_);
+    tpSync(model_input, tensor_para_, pipeline_para_, device_);
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto         merged_output        = std::make_unique<MergedOutput>();
     ModelRequest model_request        = std::move(generateOldModelRequest(model_input));
