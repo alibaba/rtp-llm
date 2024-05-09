@@ -184,6 +184,9 @@ def trans_qkv_b(ts: List[torch.Tensor], hidden_size: int, head_num: int) -> torc
         .permute(1, 0, 2)\
         .reshape(3 * hidden_size)\
         .contiguous()
+        
+def qkv_transpose(ts, hidden_size):
+    return ts[0].reshape(hidden_size, -1)
 
 def qkv_gather(ts: List[torch.Tensor], dim0: int, head_num: int, head_num_kv: int, size_per_head: int = -1) -> torch.Tensor:
     t = ts[0].t().contiguous().reshape(dim0, -1)

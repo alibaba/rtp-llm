@@ -1,8 +1,9 @@
-from typing import Any, Dict
+import functools
+from typing import Any, Dict, List
 from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import W, WeightInfo, \
-    ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, identity, transpose
+    ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, identity, qkv_transpose, transpose
 from maga_transformer.models.gpt import GPT
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 from maga_transformer.model_factory_register import register_model
@@ -16,7 +17,20 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
             WeightInfo(W.final_ln_gamma, [CkptWeightInfo('transformer.ln_f.weight', identity)], identity),
             WeightInfo(W.final_ln_beta, [CkptWeightInfo('transformer.ln_f.bias', identity)], identity),
         ]
+        
+        layer_weights: List[List[WeightInfo]] = []
+        for layer in range(self._num_layers):
+            if self._int4_mode or self._sq_int8:
+                w=self._get_hf_4bit_quant_weight_info(layer)
+                layer_weights.append(w)
+            else:
+                w = self._get_hf_layer_weight_info(layer)
+                layer_weights.append(w)
 
+
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+    
+    def _get_hf_layer_weight_info(self, layer_id: int) -> List[WeightInfo]:
         layer_weights = [
             WeightInfo(W.pre_ln_beta, [CkptWeightInfo('transformer.h.{i}.ln_1.bias', identity)], identity),
 
@@ -42,9 +56,52 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
 
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_2.weight', identity)], identity),
         ]
+        return layer_weights
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+    def _get_hf_4bit_quant_weight_info(self, layer_id: int):
+        orig_weights = [W.pre_ln_gamma, W.attn_qkv_b, W.attn_qkv_b, W.attn_o_b, W.ffn_b1, W.post_ln_beta, W.post_ln_gamma]
+        layer_quant_weights = self._get_layer_weight_by_names(layer_id, orig_weights)
+        layer_quant_weights.extend(
+            [
+                WeightInfo(W.attn_qkv_s, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.scales')], identity),
+                WeightInfo(W.attn_o_s, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.scales')], identity),
+            ]
+        )
+        layer_quant_weights.extend([
+            WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qweight', identity)], transpose),
+            WeightInfo(W.attn_qkv_z, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qzeros', identity)], identity),
+            
+            WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qweight', identity)], identity),
+            WeightInfo(W.attn_o_z, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qzeros', identity)], identity),
+
+            WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.qweight', identity)], identity),
+            WeightInfo(W.ffn_z1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.qzeros', identity)], identity),
+            WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.scales', identity)], identity),
+
+            WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qweight', identity)], identity),
+            WeightInfo(W.ffn_z2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qzeros', identity)], identity),
+            WeightInfo(W.ffn_s2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.scales', identity)], identity),
+        ])
+        return layer_quant_weights
+
+
+    def _get_layer_weight_by_names(self, layer_id: int, weight_names: List[str]) -> List[WeightInfo]:
+        layer_weights = self._get_hf_layer_weight_info(layer_id)
+        res = []
+        for layer_weight in layer_weights:
+            if layer_weight.name in weight_names:
+                res.append(layer_weight)
+        return res
     
+    def _get_layer_weight_by_exclude_names(self, layer_id: int, weight_names: List[str]) -> List[WeightInfo]:
+        layer_weights = self._get_hf_layer_weight_info(layer_id)
+        res = []
+        for layer_weight in layer_weights:
+            if layer_weight.name not in weight_names:
+                res.append(layer_weight)
+        return res
+
+
 StarcoderTokenizer = GPT2TokenizerFast
 
 class StarCoder(GPT):
@@ -57,7 +114,7 @@ class StarCoder(GPT):
         return StarcoderWeightInfo
 
     @staticmethod
-    def from_huggingface(config_json: Dict[str, Any]):
+    def from_huggingface(ckpt_path: str, config_json: Dict[str, Any]):
         model_type = config_json['model_type']
         config = GptInitModelParameters(
             head_num=config_json['n_head'],
@@ -77,13 +134,14 @@ class StarCoder(GPT):
         config.has_positional_encoding = True
         config.has_post_decoder_layernorm = True
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
+        GPT._load_quant_config(ckpt_path, config_json, config)
         return config
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict:
-            config = StarCoder.from_huggingface(config_dict)
+            config = StarCoder.from_huggingface(ckpt_path, config_dict)
         else:
             config = GptInitModelParameters(
                 head_num=48,

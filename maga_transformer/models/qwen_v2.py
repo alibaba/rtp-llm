@@ -13,6 +13,7 @@ from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
     concat_0, concat_1, identity, zeros, transpose, trans_qkv, trans_qkv_b, trans_lora_qkv, transpose_pad, pad
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.qwen import QWen
+from maga_transformer.models.gpt import GPT
 from transformers import AutoTokenizer
 from maga_transformer.model_factory_register import register_model
 
@@ -203,9 +204,7 @@ class QWenV2(QWen):
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
 
-        quant_config = config_json.get("quantization_config", None)
-        if quant_config is not None:
-            config.quant_algo.setQuantAlgo(quant_config['quant_method'], quant_config["bits"], quant_config["group_size"])
+        GPT._load_quant_config(ckpt_path, config_json, config)
 
     @staticmethod
     def get_weight_cls():

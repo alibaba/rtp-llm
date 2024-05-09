@@ -310,13 +310,7 @@ class QWenBase(GPT):
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", config.special_tokens.eos_token_id)
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
 
-        quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
-        if os.path.exists(quant_config_path):
-            config.quant_algo.setQuantAlgo('smooth_quant', 0, 0)
-
-        quant_config = config_json.get("quantization_config", None)
-        if quant_config is not None:
-            config.quant_algo.setQuantAlgo(quant_config['quant_method'], quant_config["bits"], quant_config["group_size"])
+        GPT._load_quant_config(ckpt_path, config_json, config)
 
         use_dynamic_ntk = config_json.get("use_dynamic_ntk")
         use_logn_attn = config_json.get("use_logn_attn")

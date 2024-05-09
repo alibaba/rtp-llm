@@ -54,13 +54,13 @@ class Llama(GPT):
             logging.info("llama not find config.json, use default config")
             with open(param_path) as reader:
                 param_json = json.loads(reader.read())
+                config_json = param_json
             Llama.from_params(config, param_json)
         else:
             raise Exception("llama parameter from unkown source")
+        
+        GPT._load_quant_config(ckpt_path, config_json, config)
 
-        quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
-        if os.path.exists(quant_config_path):
-            config.quant_algo.setQuantAlgo('smooth_quant', 0, 0)
         return config
 
     @staticmethod
@@ -92,6 +92,7 @@ class Llama(GPT):
         if (use_logn_attn):
             config.use_logn_attn = True
             config.logn_seq_len = config_json.get("seq_length")
+        
 
     @staticmethod
     def from_params(config: GptInitModelParameters, params_json: Dict[str, Any]):

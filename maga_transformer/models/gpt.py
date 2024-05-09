@@ -286,3 +286,22 @@ class GPT(BaseModel):
         self.init_medusa_weight()
         self.init_pipeline_weight()
         torch.cuda.empty_cache()
+
+    def update_pre_seq_len(self, config: GptInitModelParameters) -> None:
+        config_json_path = os.path.join(config.ckpt_path, "config.json")
+        if not os.path.exists(config_json_path):
+            return
+        with open(config_json_path, 'r') as reader:
+            config_json = json.loads(reader.read())
+        config.pre_seq_len = config_json.get('pre_seq_len', 0)
+        config.prefix_projection = config_json.get('prefix_projection', False)
+
+    @staticmethod
+    def _load_quant_config(ckpt_path: str, config_json: Dict[str, Any], config: GptInitModelParameters):
+        quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
+        if os.path.exists(quant_config_path):
+            config.quant_algo.setQuantAlgo('smooth_quant', 0, 0)
+
+        quant_config = config_json.get("quantization_config", None)
+        if quant_config is not None:
+            config.quant_algo.setQuantAlgo(quant_config['quant_method'], quant_config["bits"], quant_config["group_size"])
