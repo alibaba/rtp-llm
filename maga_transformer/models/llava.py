@@ -6,6 +6,7 @@ import re
 from typing import List, Any, Dict, Tuple, Union
 from PIL import Image
 from transformers.models.llama.tokenization_llama import LlamaTokenizer
+from transformers import AutoConfig, CLIPVisionConfig
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.llava_weight import LlavaWeightInfo
@@ -127,39 +128,49 @@ class Llava(Llama, MultiModalMixin):
    
     @staticmethod
     def from_huggingface(config: GptInitModelParameters, config_json: Dict[str, Any]):
-        Llama.from_huggingface(config, config_json)
+        if "text_config" in config_json:
+            text_config = config_json["text_config"]
+            if text_config.get("_name_or_path", "") != "":
+                text_config = AutoConfig.from_pretrained(text_config["_name_or_path"]).to_dict()
+            Llama.from_huggingface(config, text_config)
 
-        vit_related_params_list = [
-            ("mm_use_im_patch_token", False),
-            ("mm_use_im_start_end", False),
-            ("image_aspect_ratio", None),
-            ("tune_mm_mlp_adapter", False),
-            ("mm_projector_type", "linear"),
-            ("hidden_size", 0),
-            ("mm_vision_select_layer", None),
-            ("mm_vision_select_feature", "patch")
-        ]
+            vision_config = config_json["vision_config"]
+            config.vit_related_params.config["vision_config"] = CLIPVisionConfig(vision_config)
 
-        for param_name, default_value in vit_related_params_list:
-            config.vit_related_params.config[param_name] = config_json.get(param_name, default_value)
+        else:
+            Llama.from_huggingface(config, config_json)
 
-        config.vit_related_params.config["mm_hidden_size"] = config_json.get("mm_hidden_size", config_json["hidden_size"])
-        config.vit_related_params.vit_special_token_ids.update({"ignore_token_index": -100, "image_token_index": -200})
-        config.vit_related_params.vit_special_tokens.update({
-            "default_image_token": "<image>", 
-            "default_im_start_token": "<im_start>", 
-            "default_im_end_token": "<im_end>"
-        })
-        config.vit_related_params.image_expand_token = -100
+            vit_related_params_list = [
+                ("mm_use_im_patch_token", False),
+                ("mm_use_im_start_end", False),
+                ("image_aspect_ratio", None),
+                ("tune_mm_mlp_adapter", False),
+                ("mm_projector_type", "linear"),
+                ("hidden_size", 0),
+                ("mm_vision_select_layer", None),
+                ("mm_vision_select_feature", "patch")
+            ]
 
-        vis_tower_name = config_json.get("mm_vision_tower", config_json.get("vision_tower", None))
-        img_expand_match = re.search("patch(\d+)-(\d+)", vis_tower_name)
-        if img_expand_match:
-            patch_size = int(img_expand_match.group(1))
-            img_size = int(img_expand_match.group(2))
-            config.vit_related_params.config["patch_size"] = patch_size
-            config.vit_related_params.config["image_size"] = img_size
-        config.vit_related_params.config["vit_tower_path"] = vis_tower_name
+            for param_name, default_value in vit_related_params_list:
+                config.vit_related_params.config[param_name] = config_json.get(param_name, default_value)
+
+            config.vit_related_params.config["mm_hidden_size"] = config_json.get("mm_hidden_size", config_json["hidden_size"])
+            config.vit_related_params.vit_special_token_ids.update({"ignore_token_index": -100, "image_token_index": -200})
+            config.vit_related_params.vit_special_tokens.update({
+                "default_image_token": "<image>", 
+                "default_im_start_token": "<im_start>", 
+                "default_im_end_token": "<im_end>"
+            })
+            config.vit_related_params.image_expand_token = -100
+
+            vis_tower_name = config_json.get("mm_vision_tower", config_json.get("vision_tower", None))
+            img_expand_match = re.search("patch(\d+)-(\d+)", vis_tower_name)
+            if img_expand_match:
+                patch_size = int(img_expand_match.group(1))
+                img_size = int(img_expand_match.group(2))
+                config.vit_related_params.config["patch_size"] = patch_size
+                config.vit_related_params.config["image_size"] = img_size
+            config.vit_related_params.config["vit_tower_path"] = vis_tower_name
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):

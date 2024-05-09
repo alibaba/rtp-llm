@@ -11,7 +11,10 @@ from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
 
 class LlavaImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
-        self.vision_tower = self.build_vision_tower(config).to(device='cuda:0')
+        if config.get("vision_config", None) != None:
+            self.vision_tower = CLIPVisionModel(config["vision_config"])
+        else:
+            self.vision_tower = self.build_vision_tower(config).to(device='cuda:0')
         self.mm_projector = self.build_vision_projector(config)
         self.config = config
     
