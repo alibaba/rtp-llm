@@ -54,3 +54,4 @@ class QwenVLRenderer(CustomChatRenderer):
         return RenderedInputs(input_ids=input_ids, input_images=prompt_and_images.image_urls)
 
 register_renderer('qwen_vl', QwenVLRenderer)
+register_renderer('qwen_vl_1b8', QwenVLRenderer)
