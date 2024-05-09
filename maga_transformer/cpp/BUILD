@@ -138,7 +138,6 @@ cc_library(
         ":dataclass",
         ":utils",
         "//src/fastertransformer/devices:devices_base",
-        "//src/fastertransformer/cuda:nccl",
     ],
     visibility = ["//visibility:public"]
 )

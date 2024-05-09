@@ -7,6 +7,7 @@
 #include "maga_transformer/cpp/engine_base/Executor.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "torch/all.h"
 #include <atomic>
 #include <chrono>
