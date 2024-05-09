@@ -181,9 +181,9 @@ class ModelFactory:
         return model
 
     @staticmethod
-    def create_from_module(ref_model: torch.nn.Module):
+    def create_from_module(ref_module: torch.nn.Module):
         normal_model_config = ModelFactory.create_normal_model_config()
-        normal_model_config.add_ref_model(ref_model)
+        normal_model_config.add_ref_module(ref_module)
         model = ModelFactory.from_model_config(normal_model_config)
         ModelFactory.load_default_generate_config(model)
 

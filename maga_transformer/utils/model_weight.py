@@ -63,8 +63,11 @@ def transpose(ts: List[torch.Tensor]) -> torch.Tensor:
     return ts[0].t().contiguous()
 
 def identity(ts: List[torch.Tensor], allow_empty:bool = False) -> torch.Tensor:
-    if len(ts) == 0 and allow_empty:
-        return None
+    if len(ts) == 0:
+        if allow_empty:
+            return None
+        else:
+            raise Exception("ts is empty")
     return ts[0].contiguous()
 
 def tolerate_failed(ts: List[torch.Tensor], origin_func: Callable[[List[torch.Tensor]], torch.Tensor]) -> torch.Tensor:
@@ -1047,7 +1050,7 @@ class LoraResource():
             if lora_name not in self.lora_infos:
                 self.database.load_lora(lora_name, lora_path)
         self.clear_for_update()
-        for lora_config in self.database.LoraFileList.keys():
+        for lora_config in self.database.LoraCkpt.LoraFileList.keys():
             lora_name = lora_config.name
             if self.lora_map.has_id(lora_name):
                 continue
@@ -1065,7 +1068,7 @@ class LoraResource():
             self.remove_old_lora(lora_infos)
             self.add_new_lora(lora_infos)
         self.lora_infos = lora_infos
-        self.database.dump_lora_summary()
+        self.database.dump_lora_info()
 
     def get_id(self, name: str) -> int:
         if self.lora_map != None:

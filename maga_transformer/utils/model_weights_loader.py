@@ -65,17 +65,17 @@ class ModelWeightsLoader:
         self._tp_rank = weights_info.tp_rank
         self._tp_split_emb_and_lm_head = weights_info.tp_split_emb_and_lm_head
         self._weights_info = weights_info
+        self._database: BaseDatabase = database
         self._weight_log: WeightLog = WeightLog()
         self._lora_log: WeightLog = WeightLog()
-        self._database: BaseDatabase = database
-
+        
         if isinstance(self._database, CkptDatabase):
             self._weights_info.process_meta_from_ckpt(self._database.PretrainFileList)
             self._weights_info.process_meta_from_ckpt(self._database.FinetuneFileList)
             self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
             self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
         elif isinstance(self._database, ModuleDatabase):
-            self._weights_info.process_meta_from_dict(dict(self._database.ref_model.state_dict()))
+            self._weights_info.process_meta_from_dict(dict(self._database.ref_module.state_dict()))
             self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
             self._merge_lora = False
         elif isinstance(self._database, DictDatabase):
@@ -92,6 +92,7 @@ class ModelWeightsLoader:
     def show_warns(self, lora_name: str = "", only_dump_lora: bool = False):
         if isinstance(self._database, ModuleDatabase):
             return
+        
         if not only_dump_lora:
             self._weight_log.record_missed_tensor(
                 set(self._database.get_pretrain_tensor_names()))
@@ -100,7 +101,6 @@ class ModelWeightsLoader:
         if lora_name != "":
             self._lora_log.record_missed_tensor(
                 set(self._database.get_lora_tensor_names(lora_name)))
-
             self._lora_log.dump()
 
     def load_weights_from_scratch(self, device: str='cuda:0', num_process=1):
@@ -115,6 +115,7 @@ class ModelWeightsLoader:
         else:
             all_results = [self._load_layer_weight(id, device)
                            for id in range(self._num_layers)]
+            
         for results, logs, lora_logs in all_results:
             self._weight_log.update(logs)
             if self._merge_lora:
@@ -145,8 +146,9 @@ class ModelWeightsLoader:
     def load_lora_weights_from_scratch(self, lora_name: str, device: str='cuda:0', num_process=1):
         lora_weights = LoRAWeights(self._num_layers)
         # set lora rank
-        lora_alpha = self._database.get_lora_config(lora_name).lora_alpha
-        rank = self._database.get_lora_config(lora_name).rank
+        lora_config = self._database.get_lora_config(lora_name)
+        lora_alpha = lora_config.lora_alpha
+        rank = lora_config.rank
         lora_weights.set_lora_rank(rank)
 
         all_results = [self._load_lora_layer_weight(id, lora_name, device)
@@ -167,22 +169,16 @@ class ModelWeightsLoader:
         layer_weights = self._model_weights_info.lora_weights
         for weight in layer_weights:
             try:
-
                 tensor = self._load_and_convert_lora_tensor(weight, lora_name, layer_id)
-
                 if tensor is None:
                     continue
-
                 tensor = self._split_and_sanitize_tensor(tensor, weight).to(device)
-
                 if use_fp32:
                     tensor = tensor.float()
-
                 results.append((False, layer_id, weight.name, tensor))
             except Exception as e:
                 logging.error(f'load {weight.name} in layer {layer_id} failed: {e}')
                 raise e
-
         return results, self._lora_log
 
     def _load_groupwise_layer_weight(self, layer_weights, layer_id: int, device: str):
@@ -580,6 +576,7 @@ class ModelWeightsLoader:
                 before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(name, datatype)))
             except Exception as e:
                 raise Exception('load %s failed, except: %s' % (name, str(e)))
+
         after_merge_tensor = weight_info.process_fun(before_merge_tensors).to(datatype)
         return after_merge_tensor
 

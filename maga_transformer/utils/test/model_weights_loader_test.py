@@ -18,7 +18,7 @@ class ModelWeihgtsLoaderTest(TestCase):
     @staticmethod
     def create_config(model_type, ckpt_path,  tokenizer_path = None, weight_type=WEIGHT_TYPE.FP16,
                       max_seq_len=2049, seq_size_per_block=1, tp_size=1,
-                      ptuning_path=None, ref_model=None):
+                      ptuning_path=None, ref_module=None):
         model_cls = ModelFactory.get_model_cls(model_type)
         model_config = ModelConfig(model_type=model_type,
             ckpt_path=ckpt_path,
@@ -28,7 +28,7 @@ class ModelWeihgtsLoaderTest(TestCase):
             seq_size_per_block=seq_size_per_block,
             gen_num_per_circle=1,
             ptuning_path=ptuning_path,
-            ref_model=ref_model
+            ref_module=ref_module
         )
         config = model_cls.create_config(model_config)
         return config

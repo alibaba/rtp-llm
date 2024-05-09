@@ -102,7 +102,7 @@ class ModelConfig:
             gen_num_per_circle: int = 1,
             ptuning_path: Optional[str] = None,
             lora_infos: Optional[Dict[str, str]] = None,
-            ref_model: Optional[torch.nn.Module] = None,
+            ref_module: Optional[torch.nn.Module] = None,
             ref_dict: Dict[str, torch.Tensor] = {},
             use_rpc: bool = False
         ):
@@ -116,7 +116,7 @@ class ModelConfig:
         self.gen_num_per_circle: int = gen_num_per_circle
         self.ptuning_path: Optional[str] = ptuning_path
         self.lora_infos: Optional[Dict[str, str]] = lora_infos
-        self.ref_model: Optional[torch.nn.Module] = ref_model
+        self.ref_module: Optional[torch.nn.Module] = ref_module
         self.ref_dict: Dict[str, torch.Tensor] = ref_dict
         self.use_rpc: bool = use_rpc
 
@@ -124,8 +124,8 @@ class ModelConfig:
     def int8_mode(self):
         return True if self.weight_type == WEIGHT_TYPE.INT8 else False
 
-    def add_ref_model(self, ref_model: Optional[torch.nn.Module]):
-        self.ref_model = ref_model
+    def add_ref_module(self, ref_module: Optional[torch.nn.Module]):
+        self.ref_module = ref_module
     
     def add_ref_dict(self, ref_dict: Dict[str, torch.Tensor]):
         self.ref_dict = ref_dict
@@ -157,7 +157,7 @@ class BaseModel(object):
             gen_num_per_circle=model_config.gen_num_per_circle,
             lora_infos=model_config.lora_infos,
             ptuning_path=model_config.ptuning_path,
-            ref_model=model_config.ref_model,
+            ref_module=model_config.ref_module,
             ref_dict=model_config.ref_dict
         )
         return config

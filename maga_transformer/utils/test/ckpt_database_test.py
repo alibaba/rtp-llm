@@ -1,7 +1,7 @@
 import os
 import unittest
 from pathlib import Path
-from maga_transformer.utils.database import CkptDatabase
+from maga_transformer.utils.database import CkptDatabase, MegatronUtil
 
 
 class CkptDataBaseTest(unittest.TestCase):
@@ -39,13 +39,13 @@ class CkptDataBaseTest(unittest.TestCase):
         self.assertEqual(1, len(database.PretrainFileList))
         self.assertEqual(path + '/pytorch_model.bin', database.PretrainFileList[0].file_name)
         self.assertEqual(12, len(database.PretrainFileList[0].get_tensor_names()))
-        self.assertEqual(1, len(database.LoraFileList))
-        self.assertEqual(8, list(database.LoraFileList)[0].rank)
-        self.assertEqual(8, list(database.LoraFileList)[0].lora_alpha)
-        self.assertEqual(0.0, list(database.LoraFileList)[0].lora_dropout)
-        self.assertEqual(['c_proj', 'w2', 'c_attn', 'w1'], list(database.LoraFileList)[0].target_modules)
-        self.assertEqual(1, len(list(database.LoraFileList.values())[0]))
-        self.assertEqual(12, len(list(database.LoraFileList.values())[0][0].get_tensor_names()))
+        self.assertEqual(1, len(database.LoraCkpt.LoraFileList))
+        self.assertEqual(8, list(database.LoraCkpt.LoraFileList)[0].rank)
+        self.assertEqual(8, list(database.LoraCkpt.LoraFileList)[0].lora_alpha)
+        self.assertEqual(0.0, list(database.LoraCkpt.LoraFileList)[0].lora_dropout)
+        self.assertEqual(['c_proj', 'w2', 'c_attn', 'w1'], list(database.LoraCkpt.LoraFileList)[0].target_modules)
+        self.assertEqual(1, len(list(database.LoraCkpt.LoraFileList.values())[0]))
+        self.assertEqual(12, len(list(database.LoraCkpt.LoraFileList.values())[0][0].get_tensor_names()))
 
     def test_mix_ckpt_file(self):
         path = os.path.join(self._testdata_path(), "mixture_testdata")
@@ -62,20 +62,19 @@ class MegatronCheckpointingTest(unittest.TestCase):
 
     def test_is_megatron_ckpt(self):    
         ckpt_path = os.path.join(self._testdata_path(), "hf_bin")
-        CkptLoader = CkptDatabase(None)
-        self.assertFalse(CkptLoader.is_megatron_ckpt(Path(ckpt_path)))
+        self.assertFalse(MegatronUtil.is_megatron_ckpt(Path(ckpt_path)))
         ckpt_path = os.path.join(self._testdata_path(), "hf_pt")
-        self.assertFalse(CkptLoader.is_megatron_ckpt(Path(ckpt_path)))
+        self.assertFalse(MegatronUtil.is_megatron_ckpt(Path(ckpt_path)))
         ckpt_path = os.path.join(self._testdata_path(), "hf_pt")
-        self.assertFalse(CkptLoader.is_megatron_ckpt(Path(ckpt_path)))
+        self.assertFalse(MegatronUtil.is_megatron_ckpt(Path(ckpt_path)))
         ckpt_path = os.path.join(self._testdata_path(), "deep_m6")
-        self.assertFalse(CkptLoader.is_megatron_ckpt(Path(ckpt_path))) 
+        self.assertFalse(MegatronUtil.is_megatron_ckpt(Path(ckpt_path))) 
         ckpt_path = os.path.join(self._testdata_path(), "dm_rank_xx")
-        self.assertTrue(CkptLoader.is_megatron_ckpt(Path(ckpt_path)))         
+        self.assertTrue(MegatronUtil.is_megatron_ckpt(Path(ckpt_path)))         
         ckpt_path = os.path.join(self._testdata_path(), "dm_rank_xx_xx")
-        self.assertTrue(CkptLoader.is_megatron_ckpt(Path(ckpt_path)))    
+        self.assertTrue(MegatronUtil.is_megatron_ckpt(Path(ckpt_path)))    
         ckpt_path = os.path.join(self._testdata_path(), "m6")
-        self.assertTrue(CkptLoader.is_megatron_ckpt(Path(ckpt_path))) 
+        self.assertTrue(MegatronUtil.is_megatron_ckpt(Path(ckpt_path))) 
         
 
     def test_get_megatron_ckpt_files(self):    
@@ -119,13 +118,13 @@ class LoraTest(unittest.TestCase):
 
         lora_path = os.path.join(self._testdata_path(), "lora_testdata")
         database.load_lora("test_name", lora_path)
-        self.assertEqual(1, len(database.LoraFileList))
+        self.assertEqual(1, len(database.LoraCkpt.LoraFileList))
         lora_config = database.get_lora_config("test_name")
         self.assertEqual(8, lora_config.rank)
         self.assertEqual(8, lora_config.lora_alpha)
         self.assertEqual(0.0, lora_config.lora_dropout)
         self.assertEqual(['c_proj', 'w2', 'c_attn', 'w1'], lora_config.target_modules)
-        self.assertEqual(1, len(database.get_lora("test_name")))
+        self.assertEqual(1, len(database.LoraCkpt.get_lora("test_name")))
         self.assertEqual(12, len(database.get_lora_tensor_names("test_name")))
 
         self.assertTrue(database.remove_lora("test_name"))
@@ -134,23 +133,24 @@ class LoraTest(unittest.TestCase):
         self.assertEqual(0, lora_config.lora_alpha)
         self.assertEqual(0.0, lora_config.lora_dropout)
         self.assertEqual([], lora_config.target_modules)
-        self.assertEqual(0, len(database.get_lora("test_name")))
+        self.assertEqual(0, len(database.LoraCkpt.get_lora("test_name")))
         self.assertEqual(0, len(database.get_lora_tensor_names("test_name")))
 
 
         lora_path = os.path.join(self._testdata_path(), "lora_testdata_safetensor")
         database.load_lora("test_name", lora_path)
-        self.assertEqual(1, len(database.LoraFileList))
+        self.assertEqual(1, len(database.LoraCkpt.LoraFileList))
         lora_config = database.get_lora_config("test_name")
         self.assertEqual(8, lora_config.rank)
         self.assertEqual(8, lora_config.lora_alpha)
         self.assertEqual(0.0, lora_config.lora_dropout)
         self.assertEqual(['c_proj', 'w2', 'c_attn', 'w1'], lora_config.target_modules)
-        self.assertEqual(1, len(database.get_lora("test_name")))
+        self.assertEqual(1, len(database.LoraCkpt.get_lora("test_name")))
         self.assertEqual(12, len(database.get_lora_tensor_names("test_name")))
 
     def test_lora_tensor_name_check(self):
-        database = CkptDatabase(None)
+        path = os.path.join(self._testdata_path(), "bin_testdata")
+        database = CkptDatabase(path)
         test_valid_names = ["base_model.model.x.lora_A.weight",
                             "base_model.model.x.lora_B.weight",]
 
@@ -160,10 +160,10 @@ class LoraTest(unittest.TestCase):
                               "base_model.model.x.lora_A.default.weight.x"]
 
         for name in test_valid_names:
-            self.assertEqual(None, database.lora_tensor_check(name))
+            self.assertEqual(None, database.LoraCkpt.lora_tensor_check(name))
 
         for name in test_invalid_names:
-            self.assertRaises(Exception, database.lora_tensor_check, name)
+            self.assertRaises(Exception, database.LoraCkpt.lora_tensor_check, name)
             
 
 if __name__ == '__main__':

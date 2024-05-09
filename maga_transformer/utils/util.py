@@ -42,7 +42,7 @@ PathLike = Union[str, Path]
 def get_device():
     return torch.cuda.current_device()
 
-def to_torch_dtype(maybe_str_dtype: Union[str, torch.dtype]):
+def to_torch_dtype(maybe_str_dtype: Union[str, torch.dtype]) -> torch.dtype:
     if isinstance(maybe_str_dtype, torch.dtype):
         dtype = maybe_str_dtype
     else:

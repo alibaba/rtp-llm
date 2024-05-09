@@ -93,7 +93,7 @@ class GptInitModelParameters:
         "multi_task_prompt",
         "medusa_config",
         "normalize_lm_head_weight",
-        "ref_model",
+        "ref_module",
         "ref_dict",
         "tie_word_embeddings"        
     }
@@ -124,7 +124,7 @@ class GptInitModelParameters:
         self.pre_seq_len = 0
         self.prefix_projection = False
         self.vit_related_params: VitParameters = VitParameters()
-        self.ref_model: Optional[torch.nn.Module] = None
+        self.ref_module: Optional[torch.nn.Module] = None
         self.ref_dict: Dict[str, torch.Tensor] = {}
 
         self.tie_word_embeddings = False
@@ -265,7 +265,7 @@ class GptInitModelParameters:
                       seq_size_per_block: int,
                       tp_size: int,
                       gen_num_per_circle: int,
-                      ref_model: Optional[torch.nn.Module] = None,
+                      ref_module: Optional[torch.nn.Module] = None,
                       ref_dict: Dict[str, torch.Tensor] = {}):
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
@@ -275,7 +275,7 @@ class GptInitModelParameters:
         self.data_type = data_type.to_str()
         self.gen_num_per_circle = gen_num_per_circle
         self.ptuning_path = ptuning_path
-        self.ref_model = ref_model
+        self.ref_module = ref_module
         self.ref_dict = ref_dict
         if max_seq_len != 0:
             self.max_seq_len = max_seq_len
