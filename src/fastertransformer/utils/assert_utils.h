@@ -18,6 +18,8 @@ namespace fastertransformer {
     auto error_msg = std::string("[FT][ERROR] ") + info + " Assertion fail: " + file + ":"
                              + std::to_string(line) + " \n";
     std::cerr << error_msg << std::endl;
+    fflush(stdout);
+    fflush(stderr);
     throw std::runtime_error(error_msg);
 }
 
