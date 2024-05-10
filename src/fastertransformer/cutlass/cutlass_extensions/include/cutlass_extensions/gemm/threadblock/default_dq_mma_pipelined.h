@@ -209,21 +209,13 @@ public:
     using IteratorB = cutlass::transform::threadblock::PredicatedTileIterator<GmemIteratorShape, ElementB,
         layout::ColumnMajor, 0, GmemThreadMapB, kAlignmentB>;
 
-    // ThreadMap for scale iterator
-    static_assert((MmaCore::Shape::kN % kAlignmentScale) == 0, "");
-    using IteratorScaleThreadMap
-        = transform::PitchLinearStripminedThreadMap<layout::PitchLinearShape<MmaCore::Shape::kN, 1>,
-            MmaCore::Shape::kN / kAlignmentScale, kAlignmentScale>;
+    using ScaleIterators = DefaultScaleIterators<typename MmaCore::Shape, ElementScale, LayoutScale,
+        OperatorInfo::QuantOp, kAlignmentScale>;
 
     // Define iterators over tiles from the scale operand
-    using IteratorScale
-        = cutlass::transform::threadblock::PredicatedTileIterator<cutlass::MatrixShape<1, MmaCore::Shape::kN>,
-            ElementScale, LayoutScale, 0, IteratorScaleThreadMap, kAlignmentScale>;
+    using IteratorScale = typename ScaleIterators::IteratorScale;
 
-    using SmemScaleType = typename platform::conditional<arch_has_bf16_mma, ElementScale, half_t>::type;
-    using SmemIteratorScale
-        = cutlass::transform::threadblock::PredicatedTileIterator<cutlass::MatrixShape<1, MmaCore::Shape::kN>,
-            SmemScaleType, LayoutScale, 0, IteratorScaleThreadMap, kAlignmentScale>;
+    using SmemIteratorScale = typename ScaleIterators::SmemIteratorScale;
 
     using Converters = SetConverters<IteratorB, typename MmaCore::MmaPolicy::Operator, Operator>;
 
