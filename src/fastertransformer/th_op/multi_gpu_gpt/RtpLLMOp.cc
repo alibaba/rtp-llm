@@ -5,6 +5,7 @@
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 
 using namespace std;
 
@@ -21,6 +22,7 @@ void RtpLLMOp::init(const c10::intrusive_ptr<ft::GptInitParameter>              
 
     rtp_llm::MagaInitParams params;
     params.gpt_init_parameter = gpt_init_params;
+    ft::DeviceFactory::initDevices(ft::DeviceFactory::getDefaultGlobalDeviceParams());
     std::unordered_map<std::string, ft::ConstBufferPtr>              global_weights;
     std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layer_weights_;
     for (auto& it : weights) {
