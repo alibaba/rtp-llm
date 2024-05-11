@@ -139,7 +139,7 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
         self._merge_qkv_b = None
 
     def _process_meta(self, meta_dicts, weight_keys):
-        if self._sq_int8:
+        if self._quant_algo.isSmoothQuant():
             logging.info('load hf llama smooth quant weight')
             self._names = SQWeightNames
         elif Internlm2WeightNames.W_QKV.format(i='0') in weight_keys:

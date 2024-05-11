@@ -8,7 +8,7 @@ namespace ft = fastertransformer;
 namespace torch_ext {
 
 template<typename T>
-FtGpt<T>::FtGpt(const GptInitParameter&       gpt_init_parameter,
+FtGpt<T>::FtGpt(const ft::GptInitParameter&   gpt_init_parameter,
                 const int                     tensor_para_size,
                 const int                     pipeline_para_size,
                 const std::string&            master_ip,
@@ -28,7 +28,7 @@ FtGpt<T>::FtGpt(const GptInitParameter&       gpt_init_parameter,
     gpt_layer_weights_ = loadWeights<T>(pipeline_para_.world_size_,
                                         pipeline_para_.rank_,
                                         gpt_init_parameter_.num_layers_,
-                                        gpt_init_parameter_.quant_algo_,
+                                        gpt_init_parameter_.quant_algo_->toQuantAlgo(),
                                         weights,
                                         &gpt_lora_layer_weights_);
     
@@ -177,7 +177,7 @@ bool FtGpt<T>::UseFMHA()
     return parallel_gpt_->UseFMHA();
 }
 
-ParallelGptOp::ParallelGptOp(c10::intrusive_ptr<GptInitParameter>                            gpt_init_parameter,
+ParallelGptOp::ParallelGptOp(c10::intrusive_ptr<ft::GptInitParameter>                        gpt_init_parameter,
                              const int64_t                                                   tensor_para_size,
                              const int64_t                                                   pipeline_para_size,
                              const std::string                                               master_ip,
@@ -308,7 +308,7 @@ static auto fasterTransformerGptTHS =
 #else
     torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformer", "ParallelGptOp")
 #endif
-        .def(torch::jit::init<c10::intrusive_ptr<GptInitParameter>,                         // gpt_init_parameter
+    .def(torch::jit::init<c10::intrusive_ptr<ft::GptInitParameter>,                         // gpt_init_parameter
                               int64_t,                  // tensor_para_size
                               int64_t,                  // pipeline_para_size
                               std::string,              // master_ip

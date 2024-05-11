@@ -45,7 +45,7 @@ void ParallelModelWrapperImpl<T>::initialize() {
 
 template<typename T>
 ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
-    const GptInitParameter&                                                 gpt_init_parameter,
+    const ft::GptInitParameter&                                                 gpt_init_parameter,
     ft::NcclParam                                                           tensor_para,
     ft::NcclParam                                                           pipeline_para,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
@@ -75,7 +75,7 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
         torch_ext::loadWeights<T>(pipeline_para_.world_size_,
                                   pipeline_para_.rank_,
                                   gpt_init_parameter.num_layers_,
-                                  gpt_init_parameter.quant_algo_,
+                                  gpt_init_parameter.quant_algo_->toQuantAlgo(),
                                   layer_weights_,
                                   (const std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*>*)nullptr);
     global_weights_.reset(new GptGlobalWeights<T>(global_weights));

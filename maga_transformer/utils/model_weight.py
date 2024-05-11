@@ -22,9 +22,7 @@ def concat_1(ts: List[torch.Tensor]) -> torch.Tensor:
         return ts[0]
     return torch.concat(ts, dim=1).contiguous()
 
-def pad(ts: List[torch.Tensor], inter_padding_size: int, dim: int, div_8: bool = False):
-    if div_8:
-        inter_padding_size = inter_padding_size // 8
+def pad(ts: List[torch.Tensor], inter_padding_size: int, dim: int):
     if dim == 0:
         pad_shape = [inter_padding_size - ts[0].shape[0], ts[0].shape[1]]
     elif dim == 1:
@@ -361,7 +359,7 @@ class W:
         ffn_smoother
     ])
 
-    int4_quant_params = set([
+    groupwise_quant_params = set([
         attn_qkv_z,
         attn_qkv_s,
         attn_o_z,
@@ -429,23 +427,23 @@ class W:
         [ffn_w2, ffn_s2],
     ]
 
-    int4_attn_weights = [
+    groupwise_attn_weights = [
         [attn_qkv_w, attn_qkv_z, attn_qkv_s],
         [attn_o_w, attn_o_z, attn_o_s],
     ]
 
-    int4_ffn_weights = [
+    groupwise_ffn_weights = [
         [ffn_w1, ffn_z1, ffn_s1],
         [ffn_w3, ffn_z3, ffn_s3],
         [ffn_w2, ffn_z2, ffn_s2],
     ]
 
-    int4_ffn_weights_2 = [
+    groupwise_ffn_weights_2 = [
         [ffn_w1, ffn_z1, ffn_s1],
         [ffn_w2, ffn_z2, ffn_s2],
     ]
 
-    int4_partial_moe_weights = [
+    groupwise_partial_moe_weights = [
         [moe_w1, moe_z1, moe_s1],
         [moe_w3, moe_z3, moe_s3],
         [moe_w2, moe_z2, moe_s2]
@@ -707,14 +705,7 @@ class ModelDeployWeightInfo:
         self._size_per_head = config.size_per_head
         if self._head_num_kv == -1:
             self._head_num_kv = self._head_num
-        self._int8_mode = config.quant_algo.int8_mode
-        self._int4_mode = config.quant_algo.int4_mode
-        self._is_quant_mode = config.is_quant_mode
-        self._is_gptq = config.quant_algo.is_gptq
-        self._is_awq = config.quant_algo.is_awq
-        self._sq_int8 = config.quant_algo.sq_int8
-        self._omni_quant_int8 = config.quant_algo.omni_quant_int8
-        self._group_size = config.quant_algo.weight_only_group_size
+        self._quant_algo = config.quant_algo
         self._num_layers = config.num_layers
         self._layer_head_num = config.layer_head_num
         self._layer_inter_padding_size = config.layer_inter_padding_size
@@ -1060,7 +1051,7 @@ class LoraResource():
             lora_name = lora_config.name
             if self.lora_map.has_id(lora_name):
                 continue
-            lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name,  self.weights_info._int8_mode, 'cuda:0')
+            lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name, 'cuda:0')
             self.model_weights_loader.show_warns(lora_name=lora_name, only_dump_lora=True)
             _ = self.add_lora_name(lora_name, lora_weights)
         for op in self.ft_op:

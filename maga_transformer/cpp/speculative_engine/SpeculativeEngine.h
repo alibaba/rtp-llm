@@ -51,7 +51,7 @@ private:
     bool                                  reuse_cache_ = false;
     std::shared_ptr<CacheManager>         draft_cache_manager_;
     std::shared_ptr<CacheManager>         target_cache_manager_;
-    GptInitParameter                      params_;
+    ft::GptInitParameter                  params_;
     ResourceContext                       resource_context_;
 };
 

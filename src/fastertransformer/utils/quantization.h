@@ -23,48 +23,36 @@ namespace tensorrt_llm {
 namespace common {
 
 class QuantAlgo{
-
 public:
     QuantAlgo() = default;
-    QuantAlgo(bool int8_mode, bool int4_mode, int64_t group_size, bool sq_int8):
-        int8_mode_(int8_mode),
-        int4_mode_(int4_mode),
-        group_size_(group_size),
-        sq_int8_(sq_int8) {
-        }
-    
-    QuantAlgo(const QuantAlgo& quant_algo):
-        int8_mode_(quant_algo.int8Mode()),
-        int4_mode_(quant_algo.int4Mode()),
-        group_size_(quant_algo.getGroupSize()),
-        sq_int8_(quant_algo.smoothQuantInt8()) {
-        }
-    
-    QuantAlgo(int int8_mode):
-        int8_mode_(int8_mode){}
+    QuantAlgo(int weight_bits, int64_t group_size, bool weight_only, bool sq_int8)
+        : weight_bits_(weight_bits)
+        , group_size_(group_size)
+        , weight_only_(weight_only)
+        , sq_int8_(sq_int8)
+    {}
 
-    constexpr int int8Mode() const {
-        return int8_mode_;
+    int getWeightBits() const {
+        return weight_bits_;
     }
 
-    constexpr bool int4Mode() const {
-        return int4_mode_;
-    }
-
-    constexpr int64_t getGroupSize() const {
+    int getGroupSize() const {
         return group_size_;
     }
 
-    constexpr bool smoothQuantInt8() const {
+    bool weightOnly() const {
+        return weight_only_;
+    }
+
+    bool smoothQuantInt8() const {
         return sq_int8_;
     }
 
- 
 private:
-    bool    int8_mode_  = 0;
-    bool    int4_mode_  = false;
-    int64_t group_size_ = -1;
-    bool    sq_int8_    = false;
+    int weight_bits_ = 0;
+    int group_size_ = 0;
+    bool weight_only_ = false;
+    bool sq_int8_    = false;
 };
 
 class QuantMode {

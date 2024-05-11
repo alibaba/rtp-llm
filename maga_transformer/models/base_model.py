@@ -146,13 +146,10 @@ class BaseModel(object):
         config: GptInitModelParameters = cls._create_config(model_config.ckpt_path)
         if config.hidden_size == 0:
             config.hidden_size = config.size_per_head * config.head_num
-        int8_mode = model_config.int8_mode
-        if config.quant_algo.int4_mode or config.quant_algo.sq_int8:
-            int8_mode = False
         config.update_common(
             ckpt_path=model_config.ckpt_path,
             tokenizer_path=model_config.tokenizer_path,
-            int8_mode=int8_mode,
+            int8_mode=model_config.int8_mode,
             data_type=model_config.act_type,
             max_seq_len=model_config.max_seq_len,
             seq_size_per_block=model_config.seq_size_per_block,

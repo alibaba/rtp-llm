@@ -152,16 +152,19 @@ class QWenWeight(ModelDeployWeightInfo):
 
     def _get_hf_quant_weight_info(self, layer_id):
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
-        group_size = self._group_size 
+        group_size = self._quant_algo.getGroupSize()
+        pad_div = 32 // self._quant_algo.getWeightBits()
         layer_quant_weights =[
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_1.weight')], identity),
             WeightInfo(W.attn_qkv_s, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.scales')], identity),
             WeightInfo(W.attn_qkv_b, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.bias')], identity),
             WeightInfo(W.attn_o_s, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.scales')], identity),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo('transformer.h.{i}.ln_2.weight')], identity),
-        ] 
-            
-        if self._is_awq or self._is_gptq:
+        ]
+
+        is_awq = self._quant_algo.isAwq()
+        is_gptq = self._quant_algo.isGptq()
+        if is_awq or is_gptq:
             layer_quant_weights.extend([
                 WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qweight', identity)],
                            identity),
@@ -173,28 +176,28 @@ class QWenWeight(ModelDeployWeightInfo):
                            identity),
 
                 WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.qweight', identity)],
-                           functools.partial(pad, inter_padding_size=inter_padding_size, dim=1, div_8=self._is_awq)),
+                           functools.partial(pad, inter_padding_size=inter_padding_size // pad_div if is_awq else inter_padding_size, dim=1)),
                 WeightInfo(W.ffn_z1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.qzeros', identity)],
-                           functools.partial(pad, inter_padding_size=inter_padding_size // 8, dim=1)),
+                           functools.partial(pad, inter_padding_size=inter_padding_size // pad_div, dim=1)),
                 WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.scales', identity)],
                            functools.partial(pad, inter_padding_size=inter_padding_size, dim=1)),
 
                 WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qweight', identity)],
-                           functools.partial(pad, inter_padding_size=inter_padding_size, dim=1, div_8=self._is_awq)),
+                           functools.partial(pad, inter_padding_size=inter_padding_size // pad_div if is_awq else inter_padding_size, dim=1)),
                 WeightInfo(W.ffn_z3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.qzeros', identity)],
-                           functools.partial(pad, inter_padding_size=inter_padding_size//8, dim=1)),
+                           functools.partial(pad, inter_padding_size=inter_padding_size // pad_div, dim=1)),
                 WeightInfo(W.ffn_s3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.scales', identity)],
                            functools.partial(pad, inter_padding_size=inter_padding_size, dim=1)),
 
                 WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qweight', identity)],
-                           functools.partial(pad, inter_padding_size=inter_padding_size, dim=0, div_8=self._is_gptq)),
+                           functools.partial(pad, inter_padding_size=inter_padding_size // pad_div if is_gptq else inter_padding_size, dim=0)),
                 WeightInfo(W.ffn_z2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qzeros', identity)],
                            functools.partial(pad, inter_padding_size=inter_padding_size//group_size, dim=0)),
                 WeightInfo(W.ffn_s2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.scales', identity)],
-                           functools.partial(pad, inter_padding_size=inter_padding_size//group_size, dim=0)),  
+                           functools.partial(pad, inter_padding_size=inter_padding_size//group_size, dim=0)),
             ])
-        
-        if self._sq_int8 or self._omni_quant_int8:
+
+        if self._quant_algo.isSmoothQuant() or self._quant_algo.isOmniQuant():
             layer_quant_weights.extend([
                 WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qweight', identity)],
                            transpose),
@@ -212,15 +215,15 @@ class QWenWeight(ModelDeployWeightInfo):
                            identity),
                 WeightInfo(W.attn_o_smoother, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.smoother')], identity),
             ])
-                
-        if self._sq_int8:
+
+        if self._quant_algo.isSmoothQuant():
             layer_quant_weights.extend([
-                WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qweight', 
+                WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qweight',
                             functools.partial(qkv_transpose, hidden_size=self._hidden_size))], transpose),
-                WeightInfo(W.ffn_smoother, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.smoother')], identity), 
+                WeightInfo(W.ffn_smoother, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.smoother')], identity),
             ])
 
-        if self._omni_quant_int8:
+        if self._quant_algo.isOmniQuant():
             layer_quant_weights.extend([
                 WeightInfo(W.pre_ln_beta, [CkptWeightInfo('transformer.h.{i}.ln_1.bias')], identity),
                 WeightInfo(W.attn_o_b, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.bias')], identity),
@@ -229,10 +232,10 @@ class QWenWeight(ModelDeployWeightInfo):
                 WeightInfo(W.ffn_b1, [CkptWeightInfo('transformer.h.{i}.mlp.w2.bias')], identity),
                 WeightInfo(W.ffn_b3, [CkptWeightInfo('transformer.h.{i}.mlp.w1.bias')], identity),
                 WeightInfo(W.attn_o_shift, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.shift')], identity),
-                WeightInfo(W.ffn_smoother, [], functools.partial(ones, shape=self._inter_padding_size)), 
+                WeightInfo(W.ffn_smoother, [], functools.partial(ones, shape=self._inter_padding_size)),
             ])
         return layer_quant_weights
-    
+
 
     def _get_hf_weight_info(self):
         weights = [
@@ -244,8 +247,11 @@ class QWenWeight(ModelDeployWeightInfo):
 
         layer_weights: List[List[WeightInfo]] = []
         for layer in range(self._num_layers):
-            if self._int4_mode or self._sq_int8 or self._omni_quant_int8:
-                w=self._get_hf_quant_weight_info(layer)
+            if (self._quant_algo.isGptq() or
+                self._quant_algo.isAwq() or
+                self._quant_algo.isSmoothQuant() or
+                self._quant_algo.isOmniQuant()):
+                w = self._get_hf_quant_weight_info(layer)
                 layer_weights.append(w)
             else:
                 w = self._get_hf_layer_weight_info(layer)
@@ -306,29 +312,11 @@ class QWenBase(GPT):
 
         quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
         if os.path.exists(quant_config_path):
-            config.quant_algo.sq_int8 = True
-            config.quant_algo.int8_mode = False
-         
+            config.quant_algo.setQuantAlgo('smooth_quant', 0, 0)
+
         quant_config = config_json.get("quantization_config", None)
         if quant_config is not None:
-            quant_bits = quant_config.get("bits", 0)
-            quant_method = quant_config.get("quant_method", None)
-            if quant_bits == 4:
-                config.quant_algo.int4_mode = True
-                group_size = quant_config.get("group_size", 0)
-                assert group_size == 128 or group_size == 64, "int4 only support group size == 64 or 128"
-                config.quant_algo.weight_only_group_size = group_size
-                if quant_method == 'awq':
-                    config.quant_algo.is_awq = True
-                elif quant_method == 'gptq':
-                    config.quant_algo.is_gptq = True
-                else: 
-                    raise ValueError("Unsupported quant method: %s" % (quant_method))
-            elif quant_bits == 8:
-                if quant_method == 'omni_quant':
-                    config.quant_algo.omni_quant_int8 = True
-            else: 
-                raise ValueError("Unsupported quant bits: %d" % (quant_bits))
+            config.quant_algo.setQuantAlgo(quant_config['quant_method'], quant_config["bits"], quant_config["group_size"])
 
         use_dynamic_ntk = config_json.get("use_dynamic_ntk")
         use_logn_attn = config_json.get("use_logn_attn")

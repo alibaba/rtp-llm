@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 class FakeSampler {
 public:
-    FakeSampler(const GptInitParameter& gpt_init_parameter);
+    FakeSampler(const ft::GptInitParameter& gpt_init_parameter);
     SamplerOutput forward(SamplerInputs& inputs);
     void          allocateBuffer(size_t total_batch_size);
     void          freeBuffer();

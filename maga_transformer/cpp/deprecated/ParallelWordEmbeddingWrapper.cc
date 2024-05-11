@@ -9,7 +9,7 @@ namespace th = torch;
 namespace rtp_llm {
 
 template<typename T>
-ParallelWordEmbeddingWrapper<T>::ParallelWordEmbeddingWrapper(const GptInitParameter&   gpt_init_parameter,
+ParallelWordEmbeddingWrapper<T>::ParallelWordEmbeddingWrapper(const ft::GptInitParameter&   gpt_init_parameter,
                                                               ft::NcclParam             tensor_para,
                                                               cudaStream_t              stream,
                                                               ft::cublasMMWrapper*      cublas_wrapper,

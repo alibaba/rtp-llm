@@ -9,7 +9,7 @@ using namespace fastertransformer;
 
 namespace rtp_llm {
 
-FakeSampler::FakeSampler(const GptInitParameter& gpt_init_parameter) {
+FakeSampler::FakeSampler(const ft::GptInitParameter& gpt_init_parameter) {
     device_               = dynamic_cast<CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda));
     allocator_            = device_->getAllocator();
     stream_               = device_->stream();

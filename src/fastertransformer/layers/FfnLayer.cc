@@ -123,17 +123,17 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
 
         print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_);
 
-        if (quant_algo_.int8Mode()) {
-
+        if (quant_algo_.weightOnly()) {
+            FT_CHECK_WITH_INFO(quant_algo_.getGroupSize() == 0, "moe only support scale_per_col");
             moe_plugin_->enqueue(input_tensor,
                                  moe_gates_buf_,
-                                 ffn_weights->intermediate_weight.int8_kernel,
+                                 ffn_weights->intermediate_weight.quant_kernel,
                                  ffn_weights->intermediate_weight.weight_only_quant_scale,
                                  ffn_weights->intermediate_weight.bias,
-                                 ffn_weights->output_weight.int8_kernel,
+                                 ffn_weights->output_weight.quant_kernel,
                                  ffn_weights->output_weight.weight_only_quant_scale,
                                  ffn_weights->output_weight.bias,
-                                 ffn_weights->intermediate_weight2.int8_kernel,
+                                 ffn_weights->intermediate_weight2.quant_kernel,
                                  ffn_weights->intermediate_weight2.weight_only_quant_scale,
                                  ffn_weights->intermediate_weight2.bias,
                                  m,
@@ -145,7 +145,6 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                                  permuted_rows,
                                  permuted_experts,
                                  stream_);
-            sync_check_cuda_error();
         } else {
             moe_plugin_->enqueue(input_tensor,
                                  moe_gates_buf_,
@@ -167,8 +166,8 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                                  permuted_rows,
                                  permuted_experts,
                                  stream_);
-            sync_check_cuda_error();
         }
+        sync_check_cuda_error();
         return;
     }
 
@@ -189,8 +188,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     constexpr int  m_padded        = 0;
 #endif
 
-    const bool is_quant_mode = quant_algo_.int8Mode() || quant_algo_.int4Mode();
-    const int cur_inter_size = is_quant_mode ? inter_padding_size : inter_size;
+    const int cur_inter_size = quant_algo_.weightOnly() ? inter_padding_size : inter_size;
     // gemm used inter_size, int8 use inter_padding_size
     gemm_runner_->Gemm(m,
                        cur_inter_size,
@@ -264,7 +262,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                                           inter_padding_size,
                                           nullptr,
                                           nullptr,
-                                          quant_algo_.int8Mode(),
+                                          0,
                                           stream_);
 
         inter_buf_normed_output = inter_buf_normed_;
@@ -408,10 +406,10 @@ FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
             FT_LOG_ERROR("not supported yet");
         }
 
-        if (quant_algo.int8Mode()) {
+        if (quant_algo.getWeightBits() == 8) {
             weight_type = nvinfer1::DataType::kINT8;
-        } else if (quant_algo.int4Mode()) {
-            FT_LOG_ERROR("MOE in INT4 is not supported yet");
+        } else if (quant_algo.getWeightBits() != 0) {
+            FT_LOG_ERROR("MOE only support int8");
         } else {
             weight_type = data_type;
         }
@@ -538,12 +536,7 @@ void FfnLayer<T>::genericActivation(int          layer_id,
     switch (getActivationType()) {
         case ActivationType::Gelu:
         case ActivationType::Geglu:
-            if (inter_buf_2_ == nullptr && quant_algo_.int8Mode() <= 1) {
-                invokeAddBiasGeluV2(
-                    inter_buf_, bias1, ia3_tasks, ia3_weights, padding_offset, seq_len, m, inter_padding_size, stream_);
-            } else {
-                INVOKE_GENERIC_ACT(GeluActivation);
-            }
+            INVOKE_GENERIC_ACT(GeluActivation);
             break;
         case ActivationType::Relu:
             INVOKE_GENERIC_ACT(ReluActivation);

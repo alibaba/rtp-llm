@@ -29,7 +29,7 @@ def merge_qkv_hf(ts: List[torch.Tensor]):
 class QWenV2Weight(ModelDeployWeightInfo):
     def _get_weight_info(self):
         return self._get_hf_weight_info()
-    
+
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
         return [WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)],
@@ -38,7 +38,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
             functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
         WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)],
             functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1))]
-        
+
     def _get_hf_layer_weight_info(self, layer_id: int):
         layer_weights = [
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)],
@@ -47,7 +47,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                     CkptWeightInfo('model.layers.{i}.self_attn.q_proj.bias', identity),
                     CkptWeightInfo('model.layers.{i}.self_attn.k_proj.bias', identity),
                     CkptWeightInfo('model.layers.{i}.self_attn.v_proj.bias', identity)
-                ], 
+                ],
                 functools.partial(merge_qkv_b)),
             WeightInfo(W.attn_qkv_w, [
                     CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', identity),
@@ -62,10 +62,14 @@ class QWenV2Weight(ModelDeployWeightInfo):
         ]
         layer_weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
         return layer_weights
-    
+
     def _get_hf_quant_weight_info(self, layer_id: int):
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
-        group_size = self._group_size 
+        group_size = self._quant_algo.getGroupSize()
+        pad_div = 32 // self._quant_algo.getWeightBits()
+        is_awq = self._quant_algo.isAwq()
+        is_gptq = self._quant_algo.isGptq()
+
         layer_quant_weights =[
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)],
                        identity),
@@ -92,7 +96,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                     CkptWeightInfo('model.layers.{i}.self_attn.q_proj.bias', identity),
                     CkptWeightInfo('model.layers.{i}.self_attn.k_proj.bias', identity),
                     CkptWeightInfo('model.layers.{i}.self_attn.v_proj.bias', identity)
-                ], 
+                ],
                 functools.partial(merge_qkv_b)),
 
             WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.qweight', identity)],
@@ -103,21 +107,21 @@ class QWenV2Weight(ModelDeployWeightInfo):
                        identity),
 
             WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.qweight', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size, dim=1, div_8=self._is_awq)),
+                       functools.partial(pad, inter_padding_size=inter_padding_size//pad_div if is_awq else inter_padding_size, dim=1)),
             WeightInfo(W.ffn_z1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.qzeros', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//8, dim=1)),
+                       functools.partial(pad, inter_padding_size=inter_padding_size//pad_div, dim=1)),
             WeightInfo(W.ffn_s1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.scales', identity)],
                        functools.partial(pad, inter_padding_size=inter_padding_size, dim=1)),
 
             WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.qweight', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size, dim=1, div_8=self._is_awq)),
+                       functools.partial(pad, inter_padding_size=inter_padding_size//pad_div if is_awq else inter_padding_size, dim=1)),
             WeightInfo(W.ffn_z3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.qzeros', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//8, dim=1)),
+                       functools.partial(pad, inter_padding_size=inter_padding_size//pad_div, dim=1)),
             WeightInfo(W.ffn_s3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.scales', identity)],
                        functools.partial(pad, inter_padding_size=inter_padding_size, dim=1)),
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.qweight', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size, dim=0, div_8=self._is_gptq)),
+                       functools.partial(pad, inter_padding_size=inter_padding_size//pad_div if is_gptq else inter_padding_size, dim=0)),
             WeightInfo(W.ffn_z2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.qzeros', identity)],
                        functools.partial(pad, inter_padding_size=inter_padding_size//group_size, dim=0)),
             WeightInfo(W.ffn_s2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.scales', identity)],
@@ -137,8 +141,8 @@ class QWenV2Weight(ModelDeployWeightInfo):
 
         layer_weights: List[List[WeightInfo]] = []
         for layer in range(self._num_layers):
-            if self._int4_mode:
-                w=self._get_hf_quant_weight_info(layer)
+            if self._quant_algo.isGroupwise():
+                w = self._get_hf_quant_weight_info(layer)
                 layer_weights.append(w)
             else:
                 w = self._get_hf_layer_weight_info(layer)
@@ -177,7 +181,7 @@ class QWenV2(QWen):
         QWenV2._from_hf(config, ckpt_path)
         assert config.head_num > 0 and config.head_num_kv > 0 and config.size_per_head > 0 and config.layer_num > 0 and config.inter_size > 0, "error config"
         return config
-    
+
     @staticmethod
     def _from_hf(config: GptInitModelParameters, ckpt_path: str):
         config_path = os.path.join(ckpt_path, "config.json")
@@ -186,7 +190,7 @@ class QWenV2(QWen):
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
-        
+
         # config.activation_type = config_json["hidden_act"]
         config.inter_size = config_json["intermediate_size"]
         config.head_num = config_json["num_attention_heads"]
@@ -201,22 +205,8 @@ class QWenV2(QWen):
 
         quant_config = config_json.get("quantization_config", None)
         if quant_config is not None:
-            quant_bits = quant_config.get("bits", 0)
-            if quant_bits != 4:
-                raise ValueError("Unsupported quant bits: %s" % (quant_bits))
-            config.quant_algo.int4_mode = True
-            group_size = quant_config.get("group_size", 0)
-            assert group_size == 128 or group_size == 64, "int4 only support group size == 64 or 128"
-            config.quant_algo.weight_only_group_size = group_size
-            quant_method = quant_config.get("quant_method", None)
-            if quant_method == 'awq':
-                config.quant_algo.is_awq = True
-            elif quant_method == 'gptq':
-                config.quant_algo.is_gptq = True
-            else: 
-                raise ValueError("Unsupported quant method: %s" % (quant_method))
+            config.quant_algo.setQuantAlgo(quant_config['quant_method'], quant_config["bits"], quant_config["group_size"])
 
-    
     @staticmethod
     def get_weight_cls():
         return QWenV2Weight

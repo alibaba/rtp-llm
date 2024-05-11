@@ -1,4 +1,5 @@
 #pragma once
+
 #include "src/fastertransformer/utils/layernorm_types.h"
 #include "src/fastertransformer/utils/activation_types.h"
 #include "torch/extension.h"
@@ -8,8 +9,18 @@
 #include <vector>
 #include <map>
 
-namespace ft = fastertransformer;
 namespace th = torch;
+
+namespace fastertransformer {
+
+enum QuantMethod {
+    None = 0,
+    WeightOnlyPerCol = 1,
+    GptQ = 2,
+    Awq = 3,
+    SmoothQuant = 4,
+    OmniQuant = 5
+};
 
 struct RoleSpecialTokens: public th::jit::CustomClassHolder {
 public:
@@ -19,13 +30,52 @@ public:
 
 struct QuantAlgo: public th::jit::CustomClassHolder {
 public:
-    bool    int8_mode_              = false;
-    bool    int4_mode_              = false;
-    bool    sq_int8_                = false;
-    bool    omni_quant_int8_        = false;
-    int64_t weight_only_group_size_ = 0;
-    bool    is_gptq_                = false;
-    bool    is_awq_                 = false;
+    QuantAlgo() = default;
+    QuantAlgo(QuantMethod method, int bits, int group_size)
+        : quant_method_(method)
+        , weight_bits_(bits)
+        , group_size_(group_size)
+    {}
+    tensorrt_llm::common::QuantAlgo toQuantAlgo() const {
+        return tensorrt_llm::common::QuantAlgo(weight_bits_, group_size_,
+                                               isWeightOnlyPerCol() || isGptq() || isAwq(),
+                                               isSmoothQuant());
+    }
+    bool isWeightOnlyPerCol() const {
+        return quant_method_ == WeightOnlyPerCol;
+    }
+    bool isGptq() const {
+        return quant_method_ == GptQ;
+    }
+    bool isAwq() const {
+        return quant_method_ == Awq;
+    }
+    bool isSmoothQuant() const {
+        return quant_method_ == SmoothQuant;
+    }
+    bool isOmniQuant() const {
+        return quant_method_ == OmniQuant;
+    }
+    bool isQuant() const {
+        return quant_method_ != None;
+    }
+    bool isGroupwise() const {
+        return group_size_ > 0;
+    }
+    QuantMethod getQuantMethod() const {
+        return quant_method_;
+    }
+    int64_t getGroupSize() const {
+        return group_size_;
+    }
+    int64_t getWeightBits() const {
+        return weight_bits_;
+    }
+    void setQuantAlgo(const std::string &method, int64_t bits, int64_t group_size);
+private:
+    QuantMethod quant_method_ = None;
+    int64_t weight_bits_ = 0;
+    int64_t group_size_ = 0;
 };
 
 struct SpecialTokens: public th::jit::CustomClassHolder {
@@ -65,9 +115,9 @@ public:
     std::string        layernorm_type_str_  = "pre_layernorm";
     std::string        norm_type_str_       = "layernorm";
     std::string        activation_type_str_ = "Gelu";
-    ft::LayerNormType  layernorm_type_      = ft::LayerNormType::pre_layernorm;
-    ft::NormType       norm_type_           = ft::NormType::layernorm;
-    ft::ActivationType activation_type_     = ft::ActivationType::Gelu;
+    LayerNormType  layernorm_type_      = LayerNormType::pre_layernorm;
+    NormType       norm_type_           = NormType::layernorm;
+    ActivationType activation_type_     = ActivationType::Gelu;
 
     int64_t rotary_embedding_dim_      = 0;
     int64_t rotary_embedding_style_    = 0;
@@ -101,11 +151,11 @@ public:
     bool has_positional_encoding_    = false;
     bool has_pre_decoder_layernorm_  = false;
     bool has_post_decoder_layernorm_ = false;
-    bool has_lm_head_                = true;        
+    bool has_lm_head_                = true;
     bool use_attention_linear_bias_  = false;
     bool use_fp32_to_compute_logit_  = false;
     bool add_bias_linear_            = false;
-    bool has_moe_norm_               = false;            
+    bool has_moe_norm_               = false;
     double logit_scale_              = 1.0;
     bool is_causal_                  = true;
 
@@ -154,3 +204,5 @@ public:
     void setActivationType();
     bool isGatedActivation();
 };
+
+}

@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 #include "src/fastertransformer/trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
+#include "src/fastertransformer/utils/utils.h"
 
 using namespace nvinfer1;
 using namespace tensorrt_llm::common;
@@ -24,57 +25,24 @@ using tensorrt_llm::plugins::WeightOnlyGroupwiseQuantMatmulPlugin;
 static constexpr int PRE_QUANT_SCALE = int(1) << 2;
 
 WeightOnlyGroupwiseQuantMatmulPlugin::WeightOnlyGroupwiseQuantMatmulPlugin(nvinfer1::DataType type, bool has_zeros,
-    int group_size)
+                                                                           int group_size, int weight_bits)
 {
-    init(type, has_zeros, group_size);
+    init(type, has_zeros, group_size, weight_bits);
 }
 
-void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type, bool has_zeros,int group_size)
+void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type, bool has_zeros,int group_size, int weight_bits)
 {
     mType = type;
     mGroupSize = group_size;
     mHasZeros = has_zeros;
-
-    if (mType == nvinfer1::DataType::kHALF)
-    {
-        if (has_zeros)
-        {
-            // has zeros
-            m_weightOnlyGroupwiseGemmRunner
-                = std::make_shared<tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunner<half,
-                    cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>>();
-        }
-        else
-        {
-            // no zeros
-            m_weightOnlyGroupwiseGemmRunner
-                = std::make_shared<tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunner<half,
-                    cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY>>();
-        }
-    }
-#if defined(ENABLE_BF16)
-    else if (mType == nvinfer1::DataType::kBF16)
-    {
-        if (has_zeros)
-        {
-            // has zeros
-            m_weightOnlyGroupwiseGemmRunner
-                = std::make_shared<tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunner<__nv_bfloat16,
-                    cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>>();
-        }
-        else
-        {
-            // no zeros
-            m_weightOnlyGroupwiseGemmRunner
-                = std::make_shared<tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunner<__nv_bfloat16,
-                    cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY>>();
-        }
-    }
-#endif
-    else
-    {
-        TLLM_THROW("Unsupported data type");
-    }
+    T_SWITCH(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&]{
+        V_SWITCH(has_zeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY, [&]{
+            T_SWITCH(weight_bits == 4, WT, cutlass::uint4b_t, uint8_t, [&] {
+                m_weightOnlyGroupwiseGemmRunner
+                    = std::make_shared<tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunner<T, WT, Q>>();
+            });
+        });
+    });
 }
 
 size_t WeightOnlyGroupwiseQuantMatmulPlugin::getWorkspaceSize(const int m, const int n, const int k) noexcept
@@ -154,6 +122,3 @@ int WeightOnlyGroupwiseQuantMatmulPlugin::enqueue(const void*  inputs,
 
     return 0;
 }
-
-
-

@@ -42,11 +42,9 @@ struct DenseWeight {
 
     // for weight only kernel
     const T2* weight_only_quant_scale = nullptr;
-    // for int8 kernel
-    const int8_t* int8_kernel = nullptr;
-    // for weight only int4 kernel
-    const int8_t* int4_kernel    = nullptr;
-    const T1* int4_zeros     = nullptr;
+    // for int8/int4 kernel
+    const int8_t* quant_kernel = nullptr;
+    const T1* quant_zeros     = nullptr;
 
     // FP8 scales
     // scale = AMAX(tensor) / FP8_MAX

@@ -46,7 +46,7 @@ std::vector<ft::ParallelGptDecoderLayerWeight<T>*>
 loadWeights(int                                                             pp_size,
             size_t                                                          pp_rank,
             size_t                                                          num_layers,
-            c10::intrusive_ptr<QuantAlgo>                                   quant_algo,
+            tc::QuantAlgo                                                   quant_algo,
             const std::vector<std::unordered_map<std::string, TensorType>>& weights,
             const std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*>*   lora_weights     = nullptr)
 {
@@ -54,7 +54,7 @@ loadWeights(int                                                             pp_s
 
     std::vector<ft::ParallelGptDecoderLayerWeight<T>*> gpt_layer_weights;
     for (size_t i = 0; i < (size_t)num_layers; i++) {
-        gpt_layer_weights.push_back(new ft::ParallelGptDecoderLayerWeight<T>(quant_algo->int8_mode_));
+        gpt_layer_weights.push_back(new ft::ParallelGptDecoderLayerWeight<T>());
 
         if (i / local_num_layers != pp_rank) {
             // Layer i is not in the current pipeline parallel group.
@@ -99,13 +99,13 @@ loadWeights(int                                                             pp_s
         gpt_layer_weights[i]->partial_moe_weights.gating_weight.kernel              = maybe_get<T>(weights[i], W::moe_gate);
         gpt_layer_weights[i]->ffn_weights.shared_expert_gating_weight.kernel        = maybe_get<T>(weights[i], W::shared_expert_gate_w);
 
-        if(quant_algo->sq_int8_ || quant_algo->omni_quant_int8_){
-            gpt_layer_weights[i]->self_attention_weights.query_weight.int8_kernel            = maybe_get<int8_t>(weights[i], W::attn_qkv_w);
-            gpt_layer_weights[i]->self_attention_weights.attention_output_weight.int8_kernel = maybe_get<int8_t>(weights[i], W::attn_o_w);
-            gpt_layer_weights[i]->ffn_weights.intermediate_weight.int8_kernel                = maybe_get<int8_t>(weights[i], W::ffn_w1);
-            gpt_layer_weights[i]->ffn_weights.intermediate_weight2.int8_kernel               = maybe_get<int8_t>(weights[i], W::ffn_w3);
-            gpt_layer_weights[i]->ffn_weights.output_weight.int8_kernel                      = maybe_get<int8_t>(weights[i], W::ffn_w2);
-            
+        if (quant_algo.smoothQuantInt8()) {
+            gpt_layer_weights[i]->self_attention_weights.query_weight.quant_kernel            = maybe_get<int8_t>(weights[i], W::attn_qkv_w);
+            gpt_layer_weights[i]->self_attention_weights.attention_output_weight.quant_kernel = maybe_get<int8_t>(weights[i], W::attn_o_w);
+            gpt_layer_weights[i]->ffn_weights.intermediate_weight.quant_kernel                = maybe_get<int8_t>(weights[i], W::ffn_w1);
+            gpt_layer_weights[i]->ffn_weights.intermediate_weight2.quant_kernel               = maybe_get<int8_t>(weights[i], W::ffn_w3);
+            gpt_layer_weights[i]->ffn_weights.output_weight.quant_kernel                      = maybe_get<int8_t>(weights[i], W::ffn_w2);
+
             gpt_layer_weights[i]->self_attention_weights.query_weight.scale            = maybe_get<float>(weights[i], W::attn_qkv_s);
             gpt_layer_weights[i]->self_attention_weights.attention_output_weight.scale = maybe_get<float>(weights[i], W::attn_o_s);
             gpt_layer_weights[i]->ffn_weights.intermediate_weight.scale                = maybe_get<float>(weights[i], W::ffn_s1);
@@ -114,51 +114,38 @@ loadWeights(int                                                             pp_s
 
             gpt_layer_weights[i]->ffn_weights.output_weight.smoother = maybe_get<float>(weights[i], W::ffn_smoother);
             gpt_layer_weights[i]->self_attention_weights.attention_output_weight.smoother = maybe_get<float>(weights[i], W::attn_o_smoother);
-            if (quant_algo->omni_quant_int8_) {
-                gpt_layer_weights[i]->self_attention_weights.attention_output_weight.shift = maybe_get<float>(weights[i], W::attn_o_shift);
-            }
+            gpt_layer_weights[i]->self_attention_weights.attention_output_weight.shift = maybe_get<float>(weights[i], W::attn_o_shift);
         }
-        else if (quant_algo->int8_mode_ || quant_algo->int4_mode_) {
+        else if (quant_algo.weightOnly()) {
             gpt_layer_weights[i]->self_attention_weights.query_weight.weight_only_quant_scale            = maybe_get<T>(weights[i], W::attn_qkv_s);
             gpt_layer_weights[i]->self_attention_weights.attention_output_weight.weight_only_quant_scale = maybe_get<T>(weights[i], W::attn_o_s);
             gpt_layer_weights[i]->ffn_weights.intermediate_weight.weight_only_quant_scale                = maybe_get<T>(weights[i], W::ffn_s1);
             gpt_layer_weights[i]->ffn_weights.intermediate_weight2.weight_only_quant_scale               = maybe_get<T>(weights[i], W::ffn_s3);
             gpt_layer_weights[i]->ffn_weights.output_weight.weight_only_quant_scale                      = maybe_get<T>(weights[i], W::ffn_s2);
-            
+
             gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.weight_only_quant_scale        = maybe_get<T>(weights[i], W::moe_s1);
             gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.weight_only_quant_scale       = maybe_get<T>(weights[i], W::moe_s3);
             gpt_layer_weights[i]->partial_moe_weights.output_weight.weight_only_quant_scale              = maybe_get<T>(weights[i], W::moe_s2);
 
-            if (quant_algo->int8_mode_) {
-                gpt_layer_weights[i]->self_attention_weights.query_weight.int8_kernel            = maybe_get<int8_t>(weights[i], W::attn_qkv_w);
-                gpt_layer_weights[i]->self_attention_weights.attention_output_weight.int8_kernel = maybe_get<int8_t>(weights[i], W::attn_o_w);
-                gpt_layer_weights[i]->ffn_weights.intermediate_weight.int8_kernel                = maybe_get<int8_t>(weights[i], W::ffn_w1);
-                gpt_layer_weights[i]->ffn_weights.intermediate_weight2.int8_kernel               = maybe_get<int8_t>(weights[i], W::ffn_w3);
-                gpt_layer_weights[i]->ffn_weights.output_weight.int8_kernel                      = maybe_get<int8_t>(weights[i], W::ffn_w2);
+            gpt_layer_weights[i]->self_attention_weights.query_weight.quant_kernel            = maybe_get<int8_t>(weights[i], W::attn_qkv_w);
+            gpt_layer_weights[i]->self_attention_weights.attention_output_weight.quant_kernel = maybe_get<int8_t>(weights[i], W::attn_o_w);
+            gpt_layer_weights[i]->ffn_weights.intermediate_weight.quant_kernel                = maybe_get<int8_t>(weights[i], W::ffn_w1);
+            gpt_layer_weights[i]->ffn_weights.intermediate_weight2.quant_kernel               = maybe_get<int8_t>(weights[i], W::ffn_w3);
+            gpt_layer_weights[i]->ffn_weights.output_weight.quant_kernel                      = maybe_get<int8_t>(weights[i], W::ffn_w2);
 
-                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.int8_kernel        = maybe_get<int8_t>(weights[i], W::moe_w1);
-                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.int8_kernel       = maybe_get<int8_t>(weights[i], W::moe_w3);
-                gpt_layer_weights[i]->partial_moe_weights.output_weight.int8_kernel              = maybe_get<int8_t>(weights[i], W::moe_w2);
-            }
-            else if(quant_algo->int4_mode_){
-                gpt_layer_weights[i]->self_attention_weights.query_weight.int4_kernel            = maybe_get<int8_t>(weights[i], W::attn_qkv_w);
-                gpt_layer_weights[i]->self_attention_weights.attention_output_weight.int4_kernel = maybe_get<int8_t>(weights[i], W::attn_o_w);
-                gpt_layer_weights[i]->ffn_weights.intermediate_weight.int4_kernel                = maybe_get<int8_t>(weights[i], W::ffn_w1);
-                gpt_layer_weights[i]->ffn_weights.intermediate_weight2.int4_kernel               = maybe_get<int8_t>(weights[i], W::ffn_w3);
-                gpt_layer_weights[i]->ffn_weights.output_weight.int4_kernel                      = maybe_get<int8_t>(weights[i], W::ffn_w2);
+            gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.quant_kernel        = maybe_get<int8_t>(weights[i], W::moe_w1);
+            gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.quant_kernel       = maybe_get<int8_t>(weights[i], W::moe_w3);
+            gpt_layer_weights[i]->partial_moe_weights.output_weight.quant_kernel              = maybe_get<int8_t>(weights[i], W::moe_w2);
 
-                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.int4_kernel        = maybe_get<int8_t>(weights[i], W::moe_w1);
-                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.int4_kernel       = maybe_get<int8_t>(weights[i], W::moe_w3);
-                gpt_layer_weights[i]->partial_moe_weights.output_weight.int4_kernel              = maybe_get<int8_t>(weights[i], W::moe_w2);
-
-                gpt_layer_weights[i]->self_attention_weights.query_weight.int4_zeros            = maybe_get<T>(weights[i], W::attn_qkv_z);
-                gpt_layer_weights[i]->self_attention_weights.attention_output_weight.int4_zeros = maybe_get<T>(weights[i], W::attn_o_z);
-                gpt_layer_weights[i]->ffn_weights.intermediate_weight.int4_zeros                = maybe_get<T>(weights[i], W::ffn_z1);
-                gpt_layer_weights[i]->ffn_weights.intermediate_weight2.int4_zeros               = maybe_get<T>(weights[i], W::ffn_z3);
-                gpt_layer_weights[i]->ffn_weights.output_weight.int4_zeros                      = maybe_get<T>(weights[i], W::ffn_z2);
-                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.int4_zeros        = maybe_get<T>(weights[i], W::moe_z1);
-                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.int4_zeros       = maybe_get<T>(weights[i], W::moe_z3);
-                gpt_layer_weights[i]->partial_moe_weights.output_weight.int4_zeros              = maybe_get<T>(weights[i], W::moe_z2);
+            if (quant_algo.getGroupSize() > 0) {
+                gpt_layer_weights[i]->self_attention_weights.query_weight.quant_zeros            = maybe_get<T>(weights[i], W::attn_qkv_z);
+                gpt_layer_weights[i]->self_attention_weights.attention_output_weight.quant_zeros = maybe_get<T>(weights[i], W::attn_o_z);
+                gpt_layer_weights[i]->ffn_weights.intermediate_weight.quant_zeros                = maybe_get<T>(weights[i], W::ffn_z1);
+                gpt_layer_weights[i]->ffn_weights.intermediate_weight2.quant_zeros               = maybe_get<T>(weights[i], W::ffn_z3);
+                gpt_layer_weights[i]->ffn_weights.output_weight.quant_zeros                      = maybe_get<T>(weights[i], W::ffn_z2);
+                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.quant_zeros        = maybe_get<T>(weights[i], W::moe_z1);
+                gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.quant_zeros       = maybe_get<T>(weights[i], W::moe_z3);
+                gpt_layer_weights[i]->partial_moe_weights.output_weight.quant_zeros              = maybe_get<T>(weights[i], W::moe_z2);
             }
         }
         else {
@@ -166,7 +153,7 @@ loadWeights(int                                                             pp_s
             gpt_layer_weights[i]->self_attention_weights.attention_output_weight.kernel = maybe_get<T>(weights[i], W::attn_o_w);
             gpt_layer_weights[i]->ffn_weights.intermediate_weight.kernel                = maybe_get<T>(weights[i], W::ffn_w1);
             gpt_layer_weights[i]->ffn_weights.intermediate_weight2.kernel               = maybe_get<T>(weights[i], W::ffn_w3);
-            gpt_layer_weights[i]->ffn_weights.output_weight.kernel                      = maybe_get<T>(weights[i], W::ffn_w2);            
+            gpt_layer_weights[i]->ffn_weights.output_weight.kernel                      = maybe_get<T>(weights[i], W::ffn_w2);
             gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.kernel        = maybe_get<T>(weights[i], W::moe_w1);
             gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.kernel       = maybe_get<T>(weights[i], W::moe_w3);
             gpt_layer_weights[i]->partial_moe_weights.output_weight.kernel              = maybe_get<T>(weights[i], W::moe_w2);

@@ -8,7 +8,7 @@
 namespace ft = fastertransformer;
 namespace rtp_llm {
 
-CacheConfig CacheConfigCreator::createBasicConfig(const GptInitParameter& param) {
+CacheConfig CacheConfigCreator::createBasicConfig(const ft::GptInitParameter& param) {
     // TODO(xinfei.sxf) tp_size from where
     size_t tp_size = 1;
     int local_head_num_kv = (param.head_num_kv_ > 1) ? param.head_num_kv_ / tp_size : param.head_num_kv_;
@@ -16,7 +16,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const GptInitParameter& param)
     return CacheConfig((uint)param.num_layers_, (uint)0, (uint)local_head_num_kv, (uint)param.size_per_head_, (uint)param.seq_size_per_block_, dtype);
 }
 
-absl::StatusOr<int64_t> CacheConfigCreator::getKVCacheMemorySize(const GptInitParameter& param) {
+absl::StatusOr<int64_t> CacheConfigCreator::getKVCacheMemorySize(const ft::GptInitParameter& param) {
     auto device = ft::DeviceFactory::getDefaultDevice();
     const auto memory_status = device->getDeviceStatus().device_memory_status;
     const auto free_bytes = memory_status.free_bytes;
@@ -32,7 +32,7 @@ absl::StatusOr<int64_t> CacheConfigCreator::getKVCacheMemorySize(const GptInitPa
     return kv_cache_mem_size;
 }
 
-absl::StatusOr<CacheConfig> CacheConfigCreator::createConfig(const GptInitParameter& param) {
+absl::StatusOr<CacheConfig> CacheConfigCreator::createConfig(const ft::GptInitParameter& param) {
     CacheConfig  config         = CacheConfigCreator::createBasicConfig(param);
     uint32_t     block_nums     = 0;
     if (param.block_nums_ > 0) {

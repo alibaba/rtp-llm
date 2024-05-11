@@ -95,7 +95,6 @@ class GptInitModelParameters:
         "normalize_lm_head_weight",
         "ref_model",
         "ref_dict",
-        "is_quant_mode",
         "tie_word_embeddings"        
     }
 
@@ -121,7 +120,6 @@ class GptInitModelParameters:
         self.tp_split_emb_and_lm_head = True
         self.medusa_config = None
 
-        self.is_quant_mode = False
         self.ptuning_path = None
         self.pre_seq_len = 0
         self.prefix_projection = False
@@ -198,18 +196,18 @@ class GptInitModelParameters:
             self.gpt_init_params.use_medusa = True
 
     def update_inter_padding_size(self, tp_size: int):
-        if self.quant_algo.int4_mode:
-            align_size = tp_size * self.quant_algo.weight_only_group_size
+        if self.quant_algo.isGroupwise():
+            align_size = tp_size * self.quant_algo.getGroupSize()
         else:
             align_size = tp_size * 64
         if self.layer_inter_size:
             layer_inter_padding_size = []
             for idx in range(len(self.layer_inter_size)):
                 inter_size = self.layer_inter_size[idx]
-                layer_inter_padding_size.append(inter_size + (get_pad_size(inter_size, align_size) if self.is_quant_mode else 0))
+                layer_inter_padding_size.append(inter_size + (get_pad_size(inter_size, align_size) if self.quant_algo.isQuant() else 0))
             self.layer_inter_padding_size = layer_inter_padding_size
         self.inter_padding_size = \
-            self.inter_size + (get_pad_size(self.inter_size, align_size) if self.is_quant_mode else 0)
+            self.inter_size + (get_pad_size(self.inter_size, align_size) if self.quant_algo.isQuant() else 0)
         if self.head_num_kv <= 0:
             self.head_num_kv = self.head_num
         if self.inter_padding_size <= 0:
@@ -272,8 +270,8 @@ class GptInitModelParameters:
         self.ckpt_path = ckpt_path
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path
-        self.quant_algo.int8_mode = int8_mode
-        self.is_quant_mode = int8_mode or self.quant_algo.int4_mode
+        if not self.quant_algo.isQuant() and int8_mode:
+            self.quant_algo.setQuantAlgo("weight_only_per_col", 8, 0);
         self.data_type = data_type.to_str()
         self.gen_num_per_circle = gen_num_per_circle
         self.ptuning_path = ptuning_path
@@ -371,9 +369,9 @@ class GptInitModelParameters:
 
         word_emb_param_count =  self.vocab_size * hidden_size
         layer_param_bytes = 2
-        if self.quant_algo.int8_mode:
+        if self.quant_algo.getWeightBits() == 8:
             layer_param_bytes = 1
-        elif self.quant_algo.int4_mode:
+        elif self.quant_algo.getWeightBits() == 4:
             layer_param_bytes = 0.54
 
         model_size = word_emb_param_count * 2 + \

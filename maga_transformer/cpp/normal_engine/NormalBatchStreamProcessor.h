@@ -11,7 +11,7 @@ namespace rtp_llm {
 
 class NormalBatchStreamProcessor {
 public:
-    NormalBatchStreamProcessor(const GptInitParameter& params, bool need_attention_mask):
+    NormalBatchStreamProcessor(const ft::GptInitParameter& params, bool need_attention_mask):
         num_layers_(params.num_layers_),
         use_int8_kv_cache_(params.int8_kv_cache_),
         data_type_(params.data_type_),

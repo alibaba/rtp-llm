@@ -10,11 +10,11 @@ namespace rtp_llm {
 
 class CacheConfigCreator {
 public:
-    static absl::StatusOr<CacheConfig> createConfig(const GptInitParameter& param);
+    static absl::StatusOr<CacheConfig> createConfig(const ft::GptInitParameter& param);
 
 private:
-    static CacheConfig createBasicConfig(const GptInitParameter& param);
-    static absl::StatusOr<int64_t> getKVCacheMemorySize(const GptInitParameter& param);
+    static CacheConfig createBasicConfig(const ft::GptInitParameter& param);
+    static absl::StatusOr<int64_t> getKVCacheMemorySize(const ft::GptInitParameter& param);
 };
 
 }  // namespace rtp_llm

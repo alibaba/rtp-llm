@@ -13,7 +13,7 @@ class RtpLLMOp: public th::jit::CustomClassHolder {
 public:
     RtpLLMOp();
     ~RtpLLMOp();
-    void init(const c10::intrusive_ptr<GptInitParameter>                      maga_init_params,
+    void init(const c10::intrusive_ptr<ft::GptInitParameter>                  maga_init_params,
               const std::vector<std::unordered_map<std::string, th::Tensor>>& layer_weights,
               const c10::Dict<std::string, th::Tensor>&                       weights);
     void addLoRA(const int64_t                                                   lora_id,

@@ -41,7 +41,7 @@ public:
 template<typename T>
 class FtGpt: public IFtGpt {
 public:
-    FtGpt(const GptInitParameter&   gpt_init_parameter,
+    FtGpt(const ft::GptInitParameter&   gpt_init_parameter,
           const int                     tensor_para_size,
           const int                     pipeline_para_size,
           const std::string&            master_ip,
@@ -77,7 +77,7 @@ public:
     virtual bool UseFMHA() override;
 
 private:
-    const GptInitParameter& gpt_init_parameter_;
+    const ft::GptInitParameter& gpt_init_parameter_;
 
     const std::vector<std::unordered_map<std::string, th::Tensor>> weights_;
 
@@ -98,7 +98,7 @@ private:
 
 class ParallelGptOp: public th::jit::CustomClassHolder {
 public:
-    ParallelGptOp(c10::intrusive_ptr<GptInitParameter>                            gpt_init_parameter,
+    ParallelGptOp(c10::intrusive_ptr<ft::GptInitParameter>                            gpt_init_parameter,
                   const int64_t                                                   tensor_para_size,
                   const int64_t                                                   pipeline_para_size,
                   const std::string                                               master_ip,
@@ -132,7 +132,7 @@ public:
     bool UseFMHA();
 
 private:
-    GptInitParameter        gpt_init_parameter_;
+    ft::GptInitParameter        gpt_init_parameter_;
     size_t                  tensor_para_size_;
     size_t                  pipeline_para_size_;
 

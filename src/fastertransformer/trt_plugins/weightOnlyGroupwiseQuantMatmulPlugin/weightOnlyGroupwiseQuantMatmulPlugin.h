@@ -36,7 +36,7 @@ class WeightOnlyGroupwiseQuantMatmulPlugin
 public:
     WeightOnlyGroupwiseQuantMatmulPlugin() = delete;
 
-    WeightOnlyGroupwiseQuantMatmulPlugin(nvinfer1::DataType type, bool has_zeros, int group_size);
+    WeightOnlyGroupwiseQuantMatmulPlugin(nvinfer1::DataType type, bool has_zeros, int group_size, int weight_bits);
 
     ~WeightOnlyGroupwiseQuantMatmulPlugin() = default;
 
@@ -55,7 +55,7 @@ public:
 
 private:
     // group_size: 64, 128
-    void init(nvinfer1::DataType type, bool has_zeros,int group_size);
+    void init(nvinfer1::DataType type, bool has_zeros,int group_size, int weight_bits);
 
     void configGemm();
 

@@ -15,7 +15,7 @@ namespace torch_ext {
 
 RtpLLMOp::RtpLLMOp() {}
 
-void RtpLLMOp::init(const c10::intrusive_ptr<GptInitParameter>                      gpt_init_params,
+void RtpLLMOp::init(const c10::intrusive_ptr<ft::GptInitParameter>                  gpt_init_params,
                     const std::vector<std::unordered_map<std::string, th::Tensor>>& layer_weights,
                     const c10::Dict<std::string, th::Tensor>&                       weights) {
 

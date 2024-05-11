@@ -31,7 +31,7 @@ template<typename T>
 class ParallelModelWrapperImpl: public IModelWrapper {
 public:
     ParallelModelWrapperImpl(
-            const GptInitParameter&                                                 gpt_init_parameter,
+            const ft::GptInitParameter&                                                 gpt_init_parameter,
             ft::NcclParam                                                           tensor_para,
             ft::NcclParam                                                           pipeline_para,
             const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
@@ -52,7 +52,7 @@ private:
                                       const int*  input_lengths);
 
 private:
-    const GptInitParameter&                            params_;
+    const ft::GptInitParameter&                            params_;
     const ft::DataType                                 data_type_;
     ft::NcclParam                                      tensor_para_;
     ft::NcclParam                                      pipeline_para_;
@@ -87,7 +87,7 @@ private:
 class ParallelModelWrapper {
 public:
     ParallelModelWrapper(
-            const GptInitParameter&                                                 gpt_init_parameter,
+            const ft::GptInitParameter&                                                 gpt_init_parameter,
             ft::NcclParam                                                           tensor_para,
             ft::NcclParam                                                           pipeline_para,
             const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,

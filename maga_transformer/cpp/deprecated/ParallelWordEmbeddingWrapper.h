@@ -14,7 +14,7 @@ namespace ft = fastertransformer;
 template<typename T>
 class ParallelWordEmbeddingWrapper: public ft::BaseLayer {
 private:
-    const GptInitParameter&   params_;
+    const ft::GptInitParameter&   params_;
     ft::NcclParam             tensor_para_;
     const size_t              local_head_num_;
     const ft::DenseWeight<T>* embedding_table_;
@@ -24,7 +24,7 @@ private:
     ft::CudaDevice*           device_;
 
 public:
-    ParallelWordEmbeddingWrapper(const GptInitParameter&   gpt_init_parameter,
+    ParallelWordEmbeddingWrapper(const ft::GptInitParameter&   gpt_init_parameter,
                                  ft::NcclParam             tensor_para,
                                  cudaStream_t              stream,
                                  ft::cublasMMWrapper*      cublas_wrapper,

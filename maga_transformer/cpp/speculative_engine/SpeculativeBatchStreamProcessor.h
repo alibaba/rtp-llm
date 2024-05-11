@@ -7,7 +7,7 @@ namespace rtp_llm {
 
 class SpeculativeBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
-    SpeculativeBatchStreamProcessor(const GptInitParameter& params, bool need_attention_mask): NormalBatchStreamProcessor(params, need_attention_mask) {}
+    SpeculativeBatchStreamProcessor(const ft::GptInitParameter& params, bool need_attention_mask): NormalBatchStreamProcessor(params, need_attention_mask) {}
 
     absl::StatusOr<SpeculativeSamplerInput> gatherSpeculativeSamplerInput(const StreamGroups&    stream_groups,
                                                                           const GptModelOutputs& model_output) const;
