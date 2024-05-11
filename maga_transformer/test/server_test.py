@@ -11,8 +11,7 @@ from maga_transformer.start_server import main as server_main
 
 class ServerTest(TestCase):
     def test_simple(self):    
-        if os.environ.get('TOKENIZER_PATH', None) is not None:             
-            server_main()
+        server_main()
 
 if __name__ == '__main__':
     main()

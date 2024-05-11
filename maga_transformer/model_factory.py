@@ -50,15 +50,13 @@ class ModelFactory:
         model = model_cls.from_config(config)
         dump_model_to_table(ModelFactory.model_config_json(model_cls, model_config, config))
         return model
-    
+
     #TODO: remove model_config, get all info from gpt_config
     @staticmethod
     def model_config_json(model_cls: Type[Any], model_config: ModelConfig, config: GptInitModelParameters) -> Dict[str, Any]:
-        weight_type = model_config.weight_type if config.quant_algo.int4_mode==False else WEIGHT_TYPE.INT4
         config_json = {
             "model_type": model_cls.__name__,
             "act_type": str(model_config.act_type),
-            "weight_type": str(weight_type),
             "max_seq_len": config.max_seq_len,
             "use_sparse_head": config.is_sparse_head,
             "use_multi_task_prompt": config.multi_task_prompt,
@@ -86,12 +84,12 @@ class ModelFactory:
         new_model_config = model_config
         new_model_config = new_model_config._replace(model_type=model_type, ckpt_path=model_path, tokenizer_path=model_path)
         return ModelFactory.from_model_config(new_model_config)
-    
+
     @staticmethod
     def create_normal_model_config():
         model_type = os.environ["MODEL_TYPE"]
-        tokenizer_path = os.environ["TOKENIZER_PATH"]
         ckpt_path = os.environ["CHECKPOINT_PATH"]
+        tokenizer_path = os.environ.get("TOKENIZER_PATH", ckpt_path)
         lora_infos = os.environ.get("LORA_INFO", "{}")
         max_seq_len = int(os.environ.get("MAX_SEQ_LEN", "0"))
         seq_size_per_block = int(os.environ.get("SEQ_SIZE_PER_BLOCK", "8"))
@@ -114,10 +112,10 @@ class ModelFactory:
             lora_infos[lora_name] = fetch_remote_file_to_local(lora_path)
 
         logging.info(f"load model from tokenizer_path: {tokenizer_path}, ckpt_path: {ckpt_path}, lora_infos: {lora_infos}, ptuning_path: {ptuning_path}")
-        
+
         weight_type: WEIGHT_TYPE = get_weight_type_from_env(os.environ)
         act_type = weight_type if weight_type in [ WEIGHT_TYPE.FP16, WEIGHT_TYPE.BF16] else WEIGHT_TYPE.FP16
-        
+
         # TODO(xinfei.sxf) fix this
         ACT_TYPE = "ACT_TYPE"
         if os.environ.get(ACT_TYPE, None):
@@ -135,7 +133,7 @@ class ModelFactory:
                                    use_rpc=use_rpc_model)
 
         return model_config
-    
+
     @staticmethod
     def __create_sp_model_config(tokenizer_path, max_seq_len):
         # speculative model params
@@ -179,7 +177,7 @@ class ModelFactory:
         sp_model_config = ModelFactory.__create_sp_model_config(normal_model_config.tokenizer_path, normal_model_config.max_seq_len)
         model = ModelFactory.from_model_config(normal_model_config, sp_model_config)
         ModelFactory.load_default_generate_config(model)
-        
+
         return model
 
     @staticmethod
@@ -190,7 +188,7 @@ class ModelFactory:
         ModelFactory.load_default_generate_config(model)
 
         return model
-    
+
     @staticmethod
     def create_from_dict(ref_dict: Dict[str, torch.Tensor]):
         normal_model_config = ModelFactory.create_normal_model_config()
