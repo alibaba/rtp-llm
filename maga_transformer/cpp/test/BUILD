@@ -1,5 +1,6 @@
 load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
-load("//src/fastertransformer/devices:device_defs.bzl", "device_impl_target", "device_test_envs")
+load("//src/fastertransformer/devices:device_defs.bzl",
+    "device_impl_target", "device_test_envs", "device_linkopts")
 
 test_copts = [
     "-fno-access-control",
@@ -11,12 +12,7 @@ test_linkopts = [
     "-lc10",
     "-ltorch_cpu",
     "-ltorch_python",
-    "-L/usr/local/cuda/lib64",
-    "-lcudart",
-    "-lcuda",
-    "-lnccl",
-    "-lnvToolsExt",
-]
+] + device_linkopts()
 
 cc_library(
     name = "test_headers",

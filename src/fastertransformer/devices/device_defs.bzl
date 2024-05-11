@@ -1,5 +1,18 @@
 load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
 
+def device_linkopts():
+    return select({
+        "//:using_cuda": [
+            "-L/usr/local/cuda/lib64",
+            "-lcudart",
+            "-lcuda",
+            "-lnccl",
+            "-lnvToolsExt",
+        ],
+        "//conditions:default": [
+        ],
+    })
+
 def device_copts():
     return select({
         "//:using_cuda": {
