@@ -116,6 +116,7 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":utils",
+        ":metrics",
         ":common",
         "//:gpt_init_params_hdr",
         "@com_google_absl//absl/status",
@@ -168,6 +169,7 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":dataclass",
+        ":metrics",
         ":utils",
         ":common",
         ":components",
@@ -203,6 +205,7 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":dataclass",
+        ":metrics",
         ":models",
         ":schedulers",
         ":engine_base",
@@ -238,6 +241,20 @@ cc_library(
         "//src/fastertransformer/cuda:allocator_cuda",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+    ],
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
+    name = "metrics",
+    hdrs = glob([
+        "metrics/*.h",
+    ]),
+    srcs = glob([
+        "metrics/*.cc",
+    ]),
+    deps = [
+        "@havenask//:kmonitor_client_cpp",
     ],
     visibility = ["//visibility:public"]
 )

@@ -20,14 +20,14 @@ public:
                                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
                                  const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights);
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
-    void         addLoRA(const int64_t                                                           lora_id,
+    absl::Status addLoRA(const int64_t                                                           lora_id,
                          const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                          const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) override {
-        RAISE_FATAL_ERROR("Speculative not support lora now");
+        return absl::UnimplementedError("speculative not support lora yet");
     }
 
-    void removeLoRA(const int64_t lora_id) override {
-        RAISE_FATAL_ERROR("Speculative not support lora now");
+    absl::Status removeLoRA(const int64_t lora_id) override {
+        return absl::UnimplementedError("speculative not support lora yet");
     }
 
 private:

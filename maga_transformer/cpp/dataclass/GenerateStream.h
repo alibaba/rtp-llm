@@ -15,6 +15,7 @@
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "absl/status/statusor.h"
+#include "kmonitor/client/MetricsReporter.h"
 
 namespace ft = fastertransformer;
 
@@ -24,6 +25,7 @@ class GenerateStream {
 public:
     GenerateStream(const std::shared_ptr<GenerateInput>& query, const ResourceContext& resource_context, int max_seq_len = 2048);
     ~GenerateStream() {
+        reportMetric();
         generate_outputs_.wakeup();
     }
 
@@ -42,6 +44,7 @@ public:
         return stream_cache_resource_.tryReleaseKVBlock(nums);
     }
     virtual bool initKVBlock() {
+        wait_time_us_ = TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
         return stream_cache_resource_.initKVBlock();
     }
     virtual bool incrKVBlock() {
@@ -195,7 +198,7 @@ public:
     }
 
     void check_timeout() {
-        auto running_time = TimeUtility::currentTimeInMilliSeconds() - begin_time_;
+        auto running_time = TimeUtility::currentTimeInMilliSeconds() - begin_time_us_;
         auto timeout_ms = generate_input_->generate_config->timeout_ms;
         if (timeout_ms > 0 && timeout_ms < running_time) {
             stopAndRelease("query has been running " + std::to_string(running_time) + " ms, it's timeout");
@@ -204,10 +207,6 @@ public:
 
     void reportWaitTime() {
         // kmonitor.report(GaugeMetrics.ASYNC_WAIT_WAIT_TIME_METRIC, TimeUtility::currentTimeInMilliSeconds() - begin_time_)
-    }
-
-    void reportFirstTokenRt() {
-        // kmonitor.report(GaugeMetrics.FT_FIRST_TOKEN_RT_METRIC, TimeUtility::currentTimeInMilliSeconds() - begin_time_);
     }
 
     // void setLoss(th::Tensor& loss) {
@@ -255,6 +254,12 @@ public:
                       std::optional<ft::BufferPtr> cum_log_probs,
                       std::optional<ft::BufferPtr> loss);
 
+    void setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {
+        metrics_reporter_ = metrics_reporter;
+    }
+
+    void reportMetric();
+
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "GenerateStream {"
@@ -278,7 +283,9 @@ protected:
     int                                 max_seq_len_;
     int                                 seq_length_;
     ft::BufferPtr                       complete_token_ids_;
-    int64_t                             begin_time_;
+    int64_t                             begin_time_us_;
+    int64_t                             wait_time_us_ = 0;
+    int64_t                             first_token_time_us_ = 0;
     std::mutex                          output_mutex_;
     std::condition_variable             update_cv_;
     StreamCacheResource                 stream_cache_resource_;
@@ -289,6 +296,7 @@ protected:
     bool                                cancelled_             = false;
     bool                                released_              = false;
     bool                                need_release_resource_ = true;
+    kmonitor::MetricsReporterPtr        metrics_reporter_      = nullptr;
 
     friend class StreamCacheResource;
 };

@@ -7,14 +7,17 @@
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/utils/logger.h"
+#include "maga_transformer/cpp/utils/TimeUtility.h"
 
 using namespace std;
 namespace rtp_llm {
 
 NormalEngine::NormalEngine(const MagaInitParams&                                                   params,
                            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-                           const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) :
-    params_(params)
+                           const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
+                           const kmonitor::MetricsReporterPtr                                      metrics_reporter) :
+    params_(params),
+    metrics_reporter_(metrics_reporter)
 {
     ft::ftNcclInitialize(tensor_para_, pipeline_para_, params.gpt_init_parameter->tp_size_, params.gpt_init_parameter->pp_size_, params.gpt_init_parameter->nccl_ip_, params.gpt_init_parameter->nccl_port_);
     executor_.reset(new NormalExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights));
@@ -45,14 +48,18 @@ void NormalEngine::initSystemPrompt() {
     }
 }
 
-void NormalEngine::addLoRA(const int64_t                                                   lora_id,
+absl::Status NormalEngine::addLoRA(const int64_t                                                   lora_id,
                            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
-    executor_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+    auto status = executor_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+    reportMetrics({status.ok(), !status.ok(), 0});
+    return status;
 }
 
-void NormalEngine::removeLoRA(const int64_t lora_id) {
-    executor_->removeLoRA(lora_id);
+absl::Status NormalEngine::removeLoRA(const int64_t lora_id) {
+    auto status = executor_->removeLoRA(lora_id);
+    reportMetrics({status.ok(), !status.ok(), 0});
+    return status;
 }
 
 absl::Status NormalEngine::startLoop() {
@@ -76,11 +83,13 @@ absl::Status NormalEngine::stop() {
 void NormalEngine::loop() {
     FT_LOG_INFO("loop begin");
     while (running_) {
+        int64_t step_begin_time_us = TimeUtility::currentTimeInMicroSeconds();
         auto status = step();
         if (!status.ok()) {
             FT_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
+        reportMetrics({false, false, TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us});
     }
 }
 
@@ -90,6 +99,7 @@ absl::Status NormalEngine::trySaveStepError() const {
 
 absl::Status NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     FT_LOG_DEBUG("enqueue stream: %s %d", stream->debugString().c_str(), tensor_para_.rank_);
+    stream->setMetricsReporter(metrics_reporter_);
     return scheduler_->enqueue(stream);
 }
 

@@ -5,6 +5,7 @@
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 
 using namespace std;
 
@@ -15,9 +16,11 @@ NormalExecutor::NormalExecutor(
         ft::NcclParam                                                           tensor_para,
         ft::NcclParam                                                           pipeline_para,
         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-        const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights):
+        const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
+        const kmonitor::MetricsReporterPtr                                      metrics_reporter):
     tensor_para_(tensor_para),
-    pipeline_para_(pipeline_para)
+    pipeline_para_(pipeline_para),
+    metrics_reporter_(metrics_reporter)
 {
     // need init model and sampler
     unique_ptr<GptModelInitParams> model_params;
@@ -31,14 +34,16 @@ NormalExecutor::NormalExecutor(
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(*params.gpt_init_parameter, !model_wrapper_->useFMHA()));
 }
 
-void NormalExecutor::addLoRA(const int64_t                                                   lora_id,
+absl::Status NormalExecutor::addLoRA(const int64_t                                                   lora_id,
                              const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                              const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
     model_wrapper_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+    return absl::OkStatus();
 }
 
-void NormalExecutor::removeLoRA(const int64_t lora_id) {
+absl::Status NormalExecutor::removeLoRA(const int64_t lora_id) {
     model_wrapper_->removeLoRA(lora_id);
+    return absl::OkStatus();
 }
 
 ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input) {
@@ -71,6 +76,17 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     auto& sampler_input           = sampler_input_status.value();
     merged_output->sampler_output = std::move(sampler_->forward(sampler_input));
     return batch_stream_processor_->dispatch(stream_groups, merged_output);
+}
+
+void NormalExecutor::reportMetrics(const StreamGroups& stream_groups) {
+    if (metrics_reporter_) {
+        RtpLLMExecutorMetricsCollector collector;
+        collector.context_batch_size = stream_groups.contextStreams().size();
+        collector.generate_batch_size = stream_groups.totalModelBatchSize() - stream_groups.contextStreams().size();
+        collector.execute_token_size = stream_groups.modelExecuteTokenSize();
+        collector.max_seq_len = stream_groups.maxSeqLen();
+        metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &collector);
+    }
 }
 
 }  // namespace rtp_llm

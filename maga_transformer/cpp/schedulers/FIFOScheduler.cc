@@ -1,4 +1,5 @@
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/utils/logger.h"
 #include <memory>
 #include <mutex>
@@ -6,9 +7,12 @@
 using namespace std;
 namespace rtp_llm {
 
-FIFOScheduler::FIFOScheduler(const MagaInitParams& config, const std::shared_ptr<CacheManager>& cache_manager):
-    cache_manager_(cache_manager), max_seq_len_(config.gpt_init_parameter->max_seq_len_) {}
-
+FIFOScheduler::FIFOScheduler(const MagaInitParams& config,
+                             const std::shared_ptr<CacheManager>& cache_manager,
+                             const kmonitor::MetricsReporterPtr   metrics_reporter):
+    cache_manager_(cache_manager),
+    max_seq_len_(config.gpt_init_parameter->max_seq_len_),
+    metrics_reporter_(metrics_reporter) {}
 
 FIFOScheduler::~FIFOScheduler() {
     (void)stop();
@@ -140,10 +144,15 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
     // TODO(xinfei.sxf) 刚踢出running的可能马上又加入了running
+    auto running_stream_size = running_streams_.size();
     evaluateRunningNext();
-
-    auto new_stream = scheduleNew();
+    auto fallback_stream_size = running_stream_size - running_streams_.size();
+    std::list<GenerateStreamPtr> new_stream;
+    if (fallback_stream_size == 0) {
+        new_stream = scheduleNew();
+    }
     running_streams_.insert(running_streams_.end(), new_stream.begin(), new_stream.end());
+    reportMetrics(fallback_stream_size);
     return running_streams_;
 }
 
@@ -153,6 +162,16 @@ int FIFOScheduler::waitingStreamsSize() {
 
 int FIFOScheduler::runningStreamsSize() {
     return running_streams_.size();
+}
+
+void FIFOScheduler::reportMetrics(size_t fallback_stream_size) {
+    if (metrics_reporter_) {
+        RtpLLMSchedulerMetricsCollector collector;
+        collector.fallback_stream_size = fallback_stream_size;
+        collector.running_stream_size = running_streams_.size();
+        collector.wait_stream_size = waiting_streams_.size();
+        metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
+    }
 }
 
 }  // namespace rtp_llm

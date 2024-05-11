@@ -8,6 +8,8 @@
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
+#include "kmonitor/client/MetricsReporter.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "torch/all.h"
 #include <atomic>
 #include <chrono>
@@ -21,19 +23,26 @@ class NormalEngine : public EngineBase {
 public:
     NormalEngine(const MagaInitParams&                                                   params,
                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-                 const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights);
+                 const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
+                 const kmonitor::MetricsReporterPtr                                      metrics_reporter = nullptr);
     ~NormalEngine();
 
     absl::Status enqueue(std::shared_ptr<GenerateStream>& stream) override;
     absl::Status stop() override;
 
-    void addLoRA(const int64_t                                                   lora_id,
+    absl::Status addLoRA(const int64_t                                                   lora_id,
                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) override;
 
-    void removeLoRA(const int64_t lora_id) override;
+    absl::Status removeLoRA(const int64_t lora_id) override;
     absl::Status step();
     absl::Status startLoop();
+
+    void reportMetrics(RtpLLMEngineMetricsCollector collector) {
+        if (metrics_reporter_) {
+            metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
+        }
+    }
 
 public:
     const ResourceContext& resourceContext() const override {
@@ -59,6 +68,7 @@ private:
     ResourceContext                       resource_context_;
     ft::NcclParam                         tensor_para_;
     ft::NcclParam                         pipeline_para_;
+    kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
 };
 
 }  // namespace rtp_llm

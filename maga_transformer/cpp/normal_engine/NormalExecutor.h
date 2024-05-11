@@ -5,8 +5,9 @@
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
-
+#include "kmonitor/client/MetricsReporter.h"
 #include <memory>
+
 namespace rtp_llm {
 
 class NormalExecutor: public Executor {
@@ -16,12 +17,14 @@ public:
             ft::NcclParam                                                           tensor_para,
             ft::NcclParam                                                           pipeline_para,
             const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-            const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights);
+            const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
+            const kmonitor::MetricsReporterPtr                                      metrics_reporter = nullptr);
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
-    void addLoRA(const int64_t                                                   lora_id,
-                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
-                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) override;
-    void removeLoRA(const int64_t lora_id) override;
+    absl::Status addLoRA(const int64_t                                                   lora_id,
+                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) override;
+    absl::Status removeLoRA(const int64_t lora_id) override;
+    void reportMetrics(const StreamGroups& stream_groups);
 
 private:
     // TODO: remove this
@@ -34,6 +37,7 @@ private:
     std::unique_ptr<ParallelModelWrapper> model_wrapper_;
     ft::NcclParam                         tensor_para_;
     ft::NcclParam                         pipeline_para_;
+    kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
 };
 
 }  // namespace rtp_llm

@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <thread>
 
 #include "maga_transformer/cpp/cache/BlockCache.h"
 #include "maga_transformer/cpp/cache/BlockRefCounter.h"
@@ -18,6 +19,7 @@
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
+#include "kmonitor/client/MetricsReporter.h"
 
 namespace ft = fastertransformer;
 namespace rtp_llm {
@@ -58,7 +60,8 @@ struct KVCacheBuffer {
 
 class CacheManager {
 public:
-    CacheManager(const CacheConfig& config, ft::DeviceBase* device);
+    CacheManager(const CacheConfig& config, ft::DeviceBase* device,
+                 const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
     ~CacheManager();
 
     const CacheConfig&     cacheConfig() const;
@@ -86,6 +89,7 @@ public:
     KVCacheBlockAddr convertIndexToAddr(const std::vector<int>& block_indices) const;
     std::vector<int> convertAddrToIndex(const std::vector<void*>& pointers) const;
 
+    void reportMetricsLoop();
 private:
     void                                    initFreeBlock(const CacheConfig& config);
     void                                    initKvCache(const CacheConfig& config);
@@ -113,6 +117,9 @@ private:
     int             block_nums_;
     KVCacheBuffer   kv_cache_;
     ft::DeviceBase* device_;
+    bool            stop_ = false;
+    std::thread     metrics_reporter_thread_;
+    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 };
 
 typedef std::shared_ptr<CacheManager> CacheManagerPtr;

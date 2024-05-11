@@ -2,6 +2,7 @@
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include <atomic>
 #include <memory>
 
@@ -17,7 +18,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const Res
     seq_length_ = generate_input_->inputLength();
 
     max_seq_len_        = max_seq_len;
-    begin_time_         = TimeUtility::currentTimeInMilliSeconds();
+    begin_time_us_      = TimeUtility::currentTimeInMicroSeconds();
     device_             = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)numBeams(), (size_t)max_seq_len}, ft::AllocationType::HOST}, {});
@@ -47,6 +48,7 @@ absl::StatusOr<GenerateOutput> GenerateStream::nextOutput() {
 }
 
 void GenerateStream::cancel() {
+    cancelled_ = true;
     setStop("cancel stream");
 }
 
@@ -128,7 +130,7 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
         return;
     }
     if (generate_output_->aux_info.iter_count == 0) {
-        reportFirstTokenRt();
+        first_token_time_us_ = TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     }
 
     // # NOTE: new tokens indicate num of newly genearted tokens
@@ -193,7 +195,7 @@ void GenerateStream::updateOutput(bool finished,
     }
 
     generate_output_->finished              = finished;
-    generate_output_->aux_info.cost_time_ms = TimeUtility::currentTimeInMilliSeconds() - begin_time_;
+    generate_output_->aux_info.cost_time_ms = (TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     generate_output_->aux_info.input_len    = generate_input_->promptLength();
     generate_output_->aux_info.prefix_len   = generate_input_->prefix_length;
     generate_output_->aux_info.output_len   = seq_length_ - generate_input_->inputLength();
@@ -206,6 +208,26 @@ void GenerateStream::updateOutput(bool finished,
     generate_output_->aux_info.iter_count += 1;
     generate_output_->aux_info.reuse_len = reuse_length_;
     generate_outputs_.push(*generate_output_);
+}
+
+void GenerateStream::reportMetric() {
+    if (metrics_reporter_) {
+        RtpLLMStreamMetricsCollector collector;
+        collector.qps = finished();
+        collector.cancel_qps = cancelled_;
+        collector.error_qps = stopped();
+        if (finished()) {
+            collector.reuse_length = reuse_length_;
+            collector.input_token_length = inputLength();
+            collector.output_token_length = seq_length_ - generate_input_->inputLength();
+            collector.iterate_cout = generate_output_->aux_info.iter_count;
+            collector.query_batch_size = tileNum();
+            collector.total_latency_us = TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+            collector.first_token_latency_us = first_token_time_us_;
+            collector.wait_latency_us = wait_time_us_;
+        }
+        metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(nullptr, &collector);
+    }
 }
 
 }  // namespace rtp_llm

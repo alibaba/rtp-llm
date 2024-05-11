@@ -1,4 +1,5 @@
 #include "maga_transformer/cpp/cache/CacheManager.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 
 using namespace std;
 using namespace fastertransformer;
@@ -12,14 +13,32 @@ KVCacheBlockAddr KVCacheBlockAddr::clone(std::shared_ptr<CacheManager>& cache_ma
     return *this;
 }
 
-CacheManager::CacheManager(const CacheConfig& config, ft::DeviceBase* device):
-    config_(config), seq_size_per_block_(config.seq_size_per_block), device_(device) {
+CacheManager::CacheManager(const CacheConfig& config, ft::DeviceBase* device,
+                           const kmonitor::MetricsReporterPtr metrics_reporter):
+    config_(config),
+    seq_size_per_block_(config.seq_size_per_block),
+    device_(device),
+    metrics_reporter_(metrics_reporter)
+{
     FT_LOG_INFO("cache config: %s", config.debugString().c_str());
     initFreeBlock(config_);
     initKvCache(config_);
+    metrics_reporter_thread_ = std::thread(&CacheManager::reportMetricsLoop, this);
 }
 
 CacheManager::~CacheManager() {
+    stop_ = true;
+}
+
+void CacheManager::reportMetricsLoop() {
+    while (!stop_) {
+        if (metrics_reporter_) {
+            RtpLLMCacheMetricsCollector collector;
+            collector.kv_cache_item_num = block_cache_.size();
+            collector.kv_cache_left_seq = freeBlockNums();
+            metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(nullptr, &collector);
+        }
+    }
 }
 
 void CacheManager::initFreeBlock(const CacheConfig& config) {

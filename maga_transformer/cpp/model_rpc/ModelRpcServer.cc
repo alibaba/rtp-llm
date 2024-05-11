@@ -18,6 +18,8 @@ ModelRpcServiceImpl::ModelRpcServiceImpl(
     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) {
     engine_.reset(new NormalEngine(maga_init_params, layer_weights, weights));
+    auto kmon_tags = kmonitor::MetricsTags();
+    metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
 }
 
 grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*                  context,

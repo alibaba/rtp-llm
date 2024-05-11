@@ -5,19 +5,23 @@
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
+#include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
 
 class FIFOScheduler: public SchedulerBase {
 public:
-    explicit FIFOScheduler(const MagaInitParams& config, const std::shared_ptr<CacheManager>& cache_manager);
+    explicit FIFOScheduler(const MagaInitParams& config,
+                           const std::shared_ptr<CacheManager>& cache_manager,
+                           const kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
 
     ~FIFOScheduler();
 
     absl::Status enqueue(const GenerateStreamPtr& stream) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
-
     absl::Status stop() override;
+
+    void reportMetrics(size_t fallback_stream_size);
 
 public:
     // for test
@@ -44,6 +48,7 @@ private:
     std::mutex                          lock_;
     std::condition_variable             cond_;
 
+    kmonitor::MetricsReporterPtr        metrics_reporter_ = nullptr;
     // TODO @wangyin support different beams run togather
 };
 

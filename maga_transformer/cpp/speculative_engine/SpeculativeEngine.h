@@ -26,13 +26,13 @@ public:
     absl::Status stop() override;
     absl::Status startLoop();
     absl::Status enqueue(std::shared_ptr<GenerateStream>& stream) override;
-    void addLoRA(const int64_t                                                   lora_id,
-                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
-                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) override {
-        RAISE_FATAL_ERROR("Speculative not support lora now");
+    absl::Status addLoRA(const int64_t                                                   lora_id,
+                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) override {
+        return absl::UnimplementedError("speculative not support lora yet");
     }
-    void removeLoRA(const int64_t lora_id) override {
-        RAISE_FATAL_ERROR("Speculative not support lora now");
+    absl::Status removeLoRA(const int64_t lora_id) override {
+        return absl::UnimplementedError("speculative not support lora yet");
     }
     const ResourceContext& resourceContext() const override {
         return resource_context_;
