@@ -89,31 +89,31 @@ def git_deps():
     http_file(
         name = "openssl-devel",
         urls = ["http://mirrors.aliyun.com/centos/7/os/x86_64/Packages/openssl-devel-1.0.2k-19.el7.x86_64.rpm"],
-        sha256 = "5724c9c1274fbfdf415cfc46aee1b67d281699d22087e0dcc1309400c077e45a",
+        sha256 = "00a702e913cb10d7ee36dc1602ec30353df6efdf229ffc23a8d7c8a614e46bb6",
     )
 
     http_file(
         name = "openssl",
         urls = ["http://mirrors.aliyun.com/centos/7/os/x86_64/Packages/openssl-1.0.2k-19.el7.x86_64.rpm"],
-        sha256 = "f568b3dd3aa069c7d0419055de478903ca61dd033677880882f0e22ac6ed1214",
+        sha256 = "55c478a259b0a27ccb485dce91e190c0040df26b800a1f7a74557a47bef106d4",
     )
 
     http_file(
         name = "openssl-libs",
         urls = ["http://mirrors.aliyun.com/centos/7/os/x86_64/Packages/openssl-libs-1.0.2k-19.el7.x86_64.rpm"],
-        sha256 = "ee1a517bfc1856eed2622e278bc42bedd1fb91aac76bef74a8b7eb91e42869d9",
+        sha256 = "8a907020f9b1697cb8971158b3a5279e5b54e5637f55dcce751f1610a2ed6452",
     )
 
     http_file(
         name = "krb5-devel",
         urls = ["http://mirrors.aliyun.com/centos/7/os/x86_64/Packages/krb5-devel-1.15.1-50.el7.x86_64.rpm"],
-        sha256 = "a0455890cde800204879f358de750c322fd174d62ffc89a8046309d6fcf0e3a2",
+        sha256 = "75069ac38fed957b70ea1de5e2824e6a77468e9745a3a828d47a02bab727ba11",
     )
 
     http_file(
         name = "libcom_err-devel",
         urls = ["https://mirrors.aliyun.com/centos/7/os/x86_64/Packages/libcom_err-devel-1.42.9-19.el7.x86_64.rpm"],
-        sha256 = "d6ed17613d58bdc7623097ae40e847a57f2900d256a8668694296948c12c69af",
+        sha256 = "3a14db2d86490211494bb142139121da838160fb7ba28d46cd01568b0173969c",
     )
 
     # Needed by Protobuf
