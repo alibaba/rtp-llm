@@ -13,6 +13,8 @@ build --copt -Werror=sign-compare
 build --copt -Werror=reorder
 build --copt -Werror=narrowing
 build --copt -Werror=return-type
+build --experimental_cc_implementation_deps
+build --deleted_packages @havenask//aios/kmonitor
 
 build --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
 build --copt="-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE"
