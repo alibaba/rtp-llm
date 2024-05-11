@@ -42,7 +42,7 @@ def git_deps():
 
     http_archive(
         name = "six_archive",
-        build_file = clean_dep("//third_party:six.BUILD"),
+        build_file = clean_dep("//3rdparty/six:six.BUILD"),
         sha256 = "105f8d68616f8248e24bf0e9372ef04d3cc10104f1980f54d57b2ce73a5ad56a",
         strip_prefix = "six-1.10.0",
         urls = [
@@ -53,7 +53,7 @@ def git_deps():
 
     http_archive(
         name = "zlib_archive",
-        build_file = clean_dep("//third_party:zlib.BUILD"),
+        build_file = clean_dep("//3rdparty/zlib:zlib.BUILD"),
         strip_prefix = "zlib-1.2.11",
         urls = [
             "https://www.zlib.net/fossils/zlib-1.2.11.tar.gz",
@@ -76,6 +76,33 @@ def git_deps():
         commit = "a2a0afb5468dc423782344a2047abc041e75323e",
         shallow_since = "1518192000 +0800",
         # build_file = str(Label("//3rdparty/protobuf:protobuf.BUILD")),
+    )
+
+    new_git_repository(
+        name = "rapidjson",
+        remote = "git@github.com:Tencent/rapidjson.git",
+        # tag = "v1.1.0",
+        commit = "f54b0e47a08782a6131cc3d60f94d038fa6e0a51",
+        build_file = clean_dep("//3rdparty/rapidjson:rapidjson.BUILD"),
+    )
+
+    new_git_repository(
+        name = "havenask",
+        remote = "git@github.com:alibaba/havenask.git",
+        commit = "3c973500afbd40933eb0a80cfdfb6592274377fb",
+        shallow_since = "1704038400 +0800",
+        build_file = clean_dep("//3rdparty/kmonitor:kmonitor.BUILD"),
+    )
+
+    tf_http_archive(
+        name = "curl",
+        build_file = clean_dep("//3rdparty/curl:curl.BUILD"),
+        sha256 = "e9c37986337743f37fd14fe8737f246e97aec94b39d1b71e8a5973f72a9fc4f5",
+        strip_prefix = "curl-7.60.0",
+        urls = [
+            "https://mirror.bazel.build/curl.haxx.se/download/curl-7.60.0.tar.gz",
+            "https://curl.haxx.se/download/curl-7.60.0.tar.gz",
+        ],
     )
 
     git_repository(
