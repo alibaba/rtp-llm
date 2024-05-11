@@ -24,14 +24,24 @@ public:
         Logger::getLogger().setLevel(Logger::Level::DEBUG);
         // setenv("FT_DEBUG_LEVEL", "DEBUG", 1);
         // setenv("FT_DEBUG_PRINT_LEVEL", "DEBUG", 1);
+
+        initTestDevices();
+        initTestDataDir();
+    }
+
+    virtual void initTestDevices() {
+        auto device_name = getenv("TEST_USING_DEVICE");
+        auto device_params = device_name
+            ? GlobalDeviceParams{{{getDeviceType(device_name), DeviceInitParams{0}}}}
+            : DeviceFactory::getDefaultGlobalDeviceParams();
+        DeviceFactory::initDevices(device_params);
+        device_ = DeviceFactory::getDefaultDevice();
+    }
+
+    void initTestDataDir() {
         const auto test_src_dir = getenv("TEST_SRCDIR");
         const auto test_work_space = getenv("TEST_WORKSPACE");
         const auto test_binary = getenv("TEST_BINARY");
-
-        auto device_name = getenv("TEST_USING_DEVICE");
-        DeviceType device_type = getDeviceType(device_name ? device_name : DEFAULT_DEVICE);
-        device_ = DeviceFactory::getDevice(device_type);
-
         if (!(test_src_dir && test_work_space && test_binary)) {
             std::cerr << "Unable to retrieve TEST_SRCDIR / TEST_WORKSPACE / TEST_BINARY env!" << std::endl;
             abort();
@@ -312,7 +322,7 @@ protected:
     }
 
 protected:
-    DeviceBase* device_;
+    DeviceBase* device_ = nullptr;
     std::string test_data_path_;
     double rtol_ = 1e-03;
     double atol_ = 1e-03;

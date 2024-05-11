@@ -62,6 +62,7 @@ cc_test(
         "//maga_transformer/cpp:dataclass",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        "//src/fastertransformer/devices/testing:device_test_utils"
     ] + torch_deps(),
     env = {
         "TEST_USING_DEVICE": "CUDA",

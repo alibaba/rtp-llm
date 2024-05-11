@@ -1,4 +1,4 @@
-#include "gtest/gtest.h"
+#include "src/fastertransformer/devices/testing/TestBase.h"
 #include <memory>
 #include <optional>
 
@@ -13,13 +13,7 @@
 using namespace std;
 namespace rtp_llm {
 
-class QueryConverterTest: public ::testing::Test {
-protected:
-    void SetUp() override {}
-
-    void TearDown() override {}
-
-protected:
+class QueryConverterTest: public DeviceTestBase {
 };
 
 TEST_F(QueryConverterTest, testTransInput) {

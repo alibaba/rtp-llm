@@ -11,7 +11,7 @@ namespace fastertransformer {
 // TODO(wangyin.yx): add api for query device status.
 class CudaDevice : public DeviceBase {
 public:
-    CudaDevice();
+    CudaDevice(const DeviceInitParams& params);
     ~CudaDevice();
 
 public:
@@ -22,7 +22,6 @@ public:
     void syncAndCheck() override;
 
 public:
-    int getDeviceId() const { return device_id_; }
     cudaStream_t getStream() {return stream_;}
 
 public:
@@ -50,7 +49,6 @@ public:
 private:
     std::unique_ptr<IAllocator> allocator_;
     std::unique_ptr<IAllocator> host_allocator_;
-    int device_id_;
     cudaStream_t stream_;
     cublasHandle_t cublas_handle_;
     cublasLtHandle_t cublaslt_handle_;

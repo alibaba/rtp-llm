@@ -7,7 +7,7 @@
 
 namespace fastertransformer {
 
-CudaDevice::CudaDevice() : DeviceBase(), device_id_(getDevice()) {
+CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     check_cuda_error(cudaSetDevice(device_id_));
     check_cuda_error(cudaStreamCreate(&stream_));
 

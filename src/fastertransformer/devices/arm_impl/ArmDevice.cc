@@ -5,7 +5,7 @@
 
 namespace fastertransformer {
 
-ArmCpuDevice::ArmCpuDevice() {
+ArmCpuDevice::ArmCpuDevice(const DeviceInitParams& params): DeviceBase(params) {
     allocator_.reset(new Allocator<AllocatorType::CPU>());
 }
 

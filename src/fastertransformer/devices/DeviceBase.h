@@ -8,7 +8,7 @@ namespace fastertransformer {
 
 class DeviceBase : public DeviceOps {
 public:
-    DeviceBase();
+    DeviceBase(const DeviceInitParams& params);
 
     void init();
     virtual DeviceProperties getDeviceProperties() = 0;
@@ -38,8 +38,10 @@ private:
     virtual IAllocator* getAllocator() = 0;
     virtual IAllocator* getHostAllocator() = 0;
 
-private:
+protected:
     int device_id_;
+
+private:
     std::unique_ptr<BufferManager> buffer_manager_;
 };
 

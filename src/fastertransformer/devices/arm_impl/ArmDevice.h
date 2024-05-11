@@ -6,7 +6,7 @@ namespace fastertransformer {
 
 class ArmCpuDevice : public DeviceBase {
 public:
-    ArmCpuDevice();
+    ArmCpuDevice(const DeviceInitParams& params);
     ~ArmCpuDevice();
 
 public:
