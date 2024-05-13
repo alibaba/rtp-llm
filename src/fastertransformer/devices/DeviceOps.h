@@ -39,7 +39,8 @@ public:
 
     // for device communication
     virtual void broadcast(const BroadcastParams& params);
-    virtual void allReduceSum(const AllReduceParams& params);
+    virtual void allReduce(const AllReduceParams& params);
+    virtual void allGather(const AllGatherParams& params);
 };
 
 }  // namespace fastertransformer

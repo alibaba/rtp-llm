@@ -13,9 +13,6 @@ class NcclTest: public DeviceTestBase {
 public:
     void SetUp() override {
         DeviceTestBase::SetUp();
-#ifndef BUILD_MULTI_GPU
-        abort();
-#endif // !BUILD_MULTI_GPU
     }
 
 };

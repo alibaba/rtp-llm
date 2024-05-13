@@ -13,6 +13,18 @@ cc_library(
 )
 
 cc_library(
+    name = "distributed_test",
+    srcs = glob([
+        "DistributedTest.cc",
+    ]),
+    deps = [
+        "//src/fastertransformer/devices/testing:device_test_utils",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
     name = "base_tests",
     hdrs = glob([
         "*.hpp",

@@ -177,12 +177,15 @@ protected:
         }
     }
 
-    torch::Tensor bufferToTensor(const Buffer& buffer) {
-        auto host_buffer = device_->allocateBuffer(
+    torch::Tensor bufferToTensor(const Buffer& buffer, DeviceBase* device = nullptr) {
+        if (!device) {
+            device = device_;
+        }
+        auto host_buffer = device->allocateBuffer(
             {buffer.type(), buffer.shape(), AllocationType::HOST}
         );
-        device_->copy(CopyParams(*host_buffer, buffer));
-        device_->syncAndCheck();
+        device->copy(CopyParams(*host_buffer, buffer));
+        device->syncAndCheck();
 
         return torch::from_blob(
             host_buffer->data(), bufferShapeToTorchShape(buffer),

@@ -352,12 +352,25 @@ struct BeamSearchOutput {
 };
 
 struct BroadcastParams {
-    std::vector<Buffer>& buffers;
-    const int64_t        root;
+    const std::vector<BufferPtr>& buffers;
+    const int64_t root;
+};
+
+enum class ReduceOp {
+    Sum = 0,
+    Prod = 1,
+    Max = 2,
+    Min = 3,
+    Avg = 4,
 };
 
 struct AllReduceParams {
-    std::vector<Buffer>& buffers;
+    const std::vector<BufferPtr>& buffers;
+    const ReduceOp op;
+};
+
+struct AllGatherParams {
+    const std::vector<BufferPtr>& buffers;
 };
 
 // output = act(input) + bias

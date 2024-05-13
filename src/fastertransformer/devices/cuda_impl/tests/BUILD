@@ -48,6 +48,18 @@ cc_test(
 )
 
 cc_test(
+    name = "cuda_dist_test",
+    srcs = [],
+    env = test_envs,
+    copts = cuda_copts() + copts() + torch_deps(),
+    linkopts = test_linkopts,
+    deps = test_deps + [
+        "//src/fastertransformer/devices/base_tests:distributed_test"
+    ],
+    tags = ["multi_device"],
+)
+
+cc_test(
     name = "cuda_ops_test",
     srcs = [
         "CudaOpsTest.cc",
@@ -166,4 +178,5 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
 )
+
 

@@ -137,7 +137,7 @@ void CpuDevice::broadcast(const BroadcastParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CpuDevice::allReduceSum(const AllReduceParams& params) {
+void CpuDevice::allReduce(const AllReduceParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

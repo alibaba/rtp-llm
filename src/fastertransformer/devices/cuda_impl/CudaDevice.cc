@@ -1,6 +1,9 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/cuda/allocator_cuda.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils_torch.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
+#include "src/fastertransformer/utils/logger.h"
 
 #include <cuda_runtime.h>
 #include <unistd.h>
@@ -8,6 +11,7 @@
 namespace fastertransformer {
 
 CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
+    FT_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_error(cudaSetDevice(device_id_));
     check_cuda_error(cudaStreamCreate(&stream_));
 
@@ -31,6 +35,32 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     FT_CHECK(ret == NVML_SUCCESS);
     ret = nvmlDeviceGetHandleByIndex(device_id_, &nvml_device_);
     FT_CHECK(ret == NVML_SUCCESS);
+
+    if (params.tp_size > 1) {
+        const auto rank = params.tp_rank;
+        const auto world_size = params.tp_size;
+
+        nccl_param_.rank_ = rank;
+        nccl_param_.world_size_ = world_size;
+        auto tcpStore = createTcpStore(
+            params.master_ip, params.master_port, world_size, rank);
+        const auto nccl_id = &(nccl_param_.nccl_uid_);
+
+        const std::string tp_group_name = "RTP_LLM_TP_GROUP_";
+        if (rank == 0) {
+            FT_LOG_INFO("rank %d creates nccl uid in group %s.", rank, tp_group_name.c_str());
+            NCCLCHECK(ncclGetUniqueId(nccl_id));
+            setUniqueId(nccl_id, tp_group_name, tcpStore);
+        } else {
+            FT_LOG_INFO("rank %d get nccl uid in group %s.", rank, tp_group_name.c_str());
+            getUniqueId(nccl_id, tp_group_name, tcpStore);
+        }
+
+        FT_LOG_INFO("Initialize NCCL communicators rank %d of %d.", rank, world_size);
+        NCCLCHECK(ncclGroupStart());
+        NCCLCHECK(ncclCommInitRank(&nccl_param_.nccl_comm_, world_size, *nccl_id, rank));
+        NCCLCHECK(ncclGroupEnd());
+    }
 }
 
 CudaDevice::~CudaDevice() {

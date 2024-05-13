@@ -78,7 +78,11 @@ void DeviceOps::broadcast(const BroadcastParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void DeviceOps::allReduceSum(const AllReduceParams& params) {
+void DeviceOps::allReduce(const AllReduceParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+void DeviceOps::allGather(const AllGatherParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
