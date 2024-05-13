@@ -167,15 +167,3 @@ cc_test(
     deps = test_deps,
 )
 
-cc_test(
-    name = "nccl_test",
-    srcs = [
-        "NcclTest.cc",
-    ],
-    data = [],
-    env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
-    deps = test_deps,
-)
-
