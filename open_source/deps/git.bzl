@@ -113,22 +113,14 @@ def git_deps():
         shallow_since = "1518192000 +0800",
     )
 
-    http_file(
-        name = "openssl-devel",
-        urls = ["http://mirrors.aliyun.com/centos/7/os/x86_64/Packages/openssl-devel-1.0.2k-19.el7.x86_64.rpm"],
-        sha256 = "00a702e913cb10d7ee36dc1602ec30353df6efdf229ffc23a8d7c8a614e46bb6",
-    )
-
-    http_file(
-        name = "openssl",
-        urls = ["http://mirrors.aliyun.com/centos/7/os/x86_64/Packages/openssl-1.0.2k-19.el7.x86_64.rpm"],
-        sha256 = "55c478a259b0a27ccb485dce91e190c0040df26b800a1f7a74557a47bef106d4",
-    )
-
-    http_file(
-        name = "openssl-libs",
-        urls = ["http://mirrors.aliyun.com/centos/7/os/x86_64/Packages/openssl-libs-1.0.2k-19.el7.x86_64.rpm"],
-        sha256 = "8a907020f9b1697cb8971158b3a5279e5b54e5637f55dcce751f1610a2ed6452",
+    http_archive(
+        name = "boringssl",
+        sha256 = "1188e29000013ed6517168600fc35a010d58c5d321846d6a6dfee74e4c788b45",
+        strip_prefix = "boringssl-7f634429a04abc48e2eb041c81c5235816c96514",
+        urls = [
+            "https://mirror.bazel.build/github.com/google/boringssl/archive/7f634429a04abc48e2eb041c81c5235816c96514.tar.gz",
+            "https://github.com/google/boringssl/archive/7f634429a04abc48e2eb041c81c5235816c96514.tar.gz",
+        ],
     )
 
     http_file(
@@ -157,7 +149,7 @@ def git_deps():
     # Needed by gRPC
     native.bind(
         name = "libssl",
-        actual = "//3rdparty/openssl:ssl",
+        actual = "@boringssl//:ssl",
     )
 
     # Needed by gRPC
