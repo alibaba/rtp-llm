@@ -105,7 +105,8 @@ class InferenceServer(object):
         except asyncio.CancelledError as e:
             self._access_logger.log_exception_access(request, e, id)
             kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1)
-        except Exception as e:
+        except BaseException as e:
+            # 捕获非Cancel以外所有的异常,所以使用BaseException
             self._access_logger.log_exception_access(request, e, id)
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
             yield response_data_prefix + \
@@ -212,6 +213,7 @@ class InferenceServer(object):
                     yield x
                 kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
                 kmonitor.report(GaugeMetrics.LANTENCY_METRIC, current_time_ms()-start_time)
+                kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1)
             finally:
                 self._controller.decrement()
 
@@ -229,6 +231,7 @@ class InferenceServer(object):
         complete_response = await res.gen_complete_response_once()
         complete_response = complete_response.model_dump(exclude_none=True) if isinstance(complete_response, BaseModel) else complete_response
         self._access_logger.log_success_access(req, complete_response, id)
+
         return complete_response
 
     async def _infer_impl(self, req: Union[str,Dict[Any, Any]], id: int, raw_request: RawRequest, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
