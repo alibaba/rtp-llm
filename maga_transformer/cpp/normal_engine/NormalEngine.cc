@@ -22,7 +22,7 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
     ft::ftNcclInitialize(tensor_para_, pipeline_para_, params.gpt_init_parameter->tp_size_, params.gpt_init_parameter->pp_size_, params.gpt_init_parameter->nccl_ip_, params.gpt_init_parameter->nccl_port_);
     executor_.reset(new NormalExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights));
     initCacheManager();
-    scheduler_.reset(new FIFOScheduler(params, resource_context_.cache_manager));
+    scheduler_.reset(new FIFOScheduler(params, resource_context_.cache_manager, metrics_reporter));
     (void)startLoop();
 }
 

@@ -254,6 +254,7 @@ cc_library(
         "metrics/*.cc",
     ]),
     deps = [
+        ":utils",
         "@havenask//:kmonitor_client_cpp",
     ],
     visibility = ["//visibility:public"]

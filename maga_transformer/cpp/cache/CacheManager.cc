@@ -1,5 +1,6 @@
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
+#include <unistd.h>
 
 using namespace std;
 using namespace fastertransformer;
@@ -23,7 +24,9 @@ CacheManager::CacheManager(const CacheConfig& config, ft::DeviceBase* device,
     FT_LOG_INFO("cache config: %s", config.debugString().c_str());
     initFreeBlock(config_);
     initKvCache(config_);
-    metrics_reporter_thread_ = std::thread(&CacheManager::reportMetricsLoop, this);
+    if (metrics_reporter_) {
+        metrics_reporter_thread_ = std::thread(&CacheManager::reportMetricsLoop, this);
+    }
 }
 
 CacheManager::~CacheManager() {
@@ -40,6 +43,7 @@ void CacheManager::reportMetricsLoop() {
             collector.kv_cache_item_num = block_cache_.size();
             collector.kv_cache_left_seq = freeBlockNums();
             metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(nullptr, &collector);
+            sleep(1); // 1s
         }
     }
 }

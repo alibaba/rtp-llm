@@ -1,7 +1,7 @@
 import asyncio
 import sys
 
-from typing import Any
+from typing import Any, Optional
 import grpc
 
 from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import ModelRpcServiceStub
@@ -85,8 +85,10 @@ def trans_output(output_pb: GenerateOutputPB):
 
 class ModelRpcClient(object):
 
-    def __init__(self, address: str = f'localhost:{g_master_info.model_rpc_port}'):
+    def __init__(self, address: Optional[str] = None):
         # 创建到服务器的连接
+        if not address:
+            address = f'localhost:{g_master_info.model_rpc_port}'
         self._address = address
 
     async def enqueue(self, input: GenerateInput) -> GenerateOutput:

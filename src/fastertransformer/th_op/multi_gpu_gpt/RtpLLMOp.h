@@ -31,6 +31,7 @@ private:
     std::unique_ptr<rtp_llm::ModelRpcServiceImpl> model_rpc_server_;
     std::unique_ptr<grpc::Server> grpc_server_;
     std::thread                   grpc_server_thread_;
+    std::atomic<bool>             is_server_ready_{false};
     std::atomic<bool>             is_server_shutdown_{false};
 };
 

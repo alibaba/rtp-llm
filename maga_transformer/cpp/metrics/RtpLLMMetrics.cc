@@ -1,4 +1,6 @@
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
+#include "src/fastertransformer/utils/logger.h"
+#include "kmonitor/client/KMonitorFactory.h"
 
 namespace rtp_llm {
 
@@ -35,7 +37,6 @@ bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStreamMetricsCollector* collector) {
-
     REPORT_QPS(qps);
     REPORT_QPS(cancel_qps);
     REPORT_QPS(error_qps);
@@ -72,7 +73,6 @@ bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMEngineMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMEngineMetricsCollector* collector) {
-
     REPORT_QPS(update_lora_qps);
     REPORT_QPS(error_update_lora_qps);
 
@@ -95,8 +95,8 @@ void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExec
 }
 
 bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_item_num_metric, "rtp_llm_context_batch_size");
-    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_left_seq_metric, "rtp_llm_generate_batch_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_item_num_metric, "rtp_llm_kv_cache_item_num");
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_left_seq_metric, "rtp_llm_kv_cache_left_seq");
     return true;
 }
 
@@ -107,5 +107,47 @@ void RtpLLMCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheMe
 
 #undef REPORT_QPS
 #undef REPORT_GAUGE
+
+std::string getEnvWithDefault(const std::string& name, const std::string& default_value) {
+    if (std::getenv(name.c_str())) {
+        return std::getenv(name.c_str());
+    } else {
+        return default_value;
+    }
+}
+
+bool initKmonitorFactory(const std::string& tenant, const std::string& sink_address) {
+    kmonitor::MetricsConfig metricsConfig;
+    metricsConfig.set_tenant_name(tenant);
+    metricsConfig.set_service_name(getEnvWithDefault("kmonitorServiceName", ""));
+    metricsConfig.set_sink_address(sink_address);
+    metricsConfig.set_enable_log_file_sink(false);
+    metricsConfig.set_enable_prometheus_sink(false);
+    metricsConfig.set_manually_mode(false);
+    metricsConfig.set_inited(true);
+    metricsConfig.AddGlobalTag("hippo_slave_ip", getEnvWithDefault("HIPPO_SLAVE_IP", ""));
+    if (!kmonitor::KMonitorFactory::Init(metricsConfig)) {
+        FT_LOG_ERROR("init kmonitor factory failed with");
+        return false;
+    }
+    FT_LOG_INFO("before KMonitorFactory::Start(), config");
+    kmonitor::KMonitorFactory::Start();
+    FT_LOG_INFO("KMonitorFactory::Start() finished");
+    kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, getEnvWithDefault("kmonitorMetricsPrefix", ""));
+    FT_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
+    return true;
+}
+
+kmonitor::MetricsTags getHippoTags() {
+    auto hippo_tags = kmonitor::MetricsTags();
+    if (std::getenv("HIPPO_ROLE")) {
+        hippo_tags.AddTag("host_ip", getEnvWithDefault("HIPPO_SLAVE_IP", ""));
+        hippo_tags.AddTag("container_ip", getEnvWithDefault("RequestedIP", ""));
+        hippo_tags.AddTag("hippo_role", getEnvWithDefault("HIPPO_ROLE", ""));
+        hippo_tags.AddTag("hippo_app", getEnvWithDefault("HIPPO_APP", ""));
+        hippo_tags.AddTag("hippo_group", getEnvWithDefault("HIPPO_SERVICE_NAME", ""));
+    }
+    return hippo_tags;
+}
 
 }  // namespace rtp_llm

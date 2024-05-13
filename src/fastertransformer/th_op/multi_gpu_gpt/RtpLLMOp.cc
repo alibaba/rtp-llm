@@ -6,6 +6,7 @@
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
+#include "autil/Log.h"
 
 using namespace std;
 
@@ -19,7 +20,8 @@ RtpLLMOp::RtpLLMOp() {}
 void RtpLLMOp::init(const c10::intrusive_ptr<ft::GptInitParameter>                  gpt_init_params,
                     const std::vector<std::unordered_map<std::string, th::Tensor>>& layer_weights,
                     const c10::Dict<std::string, th::Tensor>&                       weights) {
-
+    AUTIL_ROOT_LOG_CONFIG();
+    AUTIL_ROOT_LOG_SETLEVEL(INFO);
     rtp_llm::MagaInitParams params;
     params.gpt_init_parameter = gpt_init_params;
     ft::DeviceFactory::initDevices(ft::DeviceFactory::getDefaultGlobalDeviceParams());
@@ -37,6 +39,9 @@ void RtpLLMOp::init(const c10::intrusive_ptr<ft::GptInitParameter>              
     }
     grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, gpt_init_params->model_rpc_port_, params, std::move(layer_weights_), std::move(global_weights));
     grpc_server_thread_.detach();
+    while(!is_server_ready_) {
+        sleep(1); // wait 1s for server ready
+    }
     // _init(params, layer_weights_, global_weights);
 }
 
@@ -72,6 +77,7 @@ void RtpLLMOp::_init(const int64_t                                              
     std::string                  server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     model_rpc_server_.reset(new rtp_llm::ModelRpcServiceImpl(params, layer_weights, weights));
     if (model_rpc_port < 0) {
+        is_server_ready_ = true;
         return;
     }
     grpc::ServerBuilder builder;
@@ -80,6 +86,7 @@ void RtpLLMOp::_init(const int64_t                                              
     grpc_server_ = builder.BuildAndStart();
 
     FT_LOG_INFO("Server listening on %s", server_address.c_str());
+    is_server_ready_ = true;
     grpc_server_->Wait();
     is_server_shutdown_ = true;
 }

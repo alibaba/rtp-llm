@@ -132,4 +132,8 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+bool initKmonitorFactory(const std::string& tenant, const std::string& sink_address);
+
+kmonitor::MetricsTags getHippoTags();
+
 }  // namespace rtp_llm
