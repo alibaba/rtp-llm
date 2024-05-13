@@ -28,6 +28,9 @@ CacheManager::CacheManager(const CacheConfig& config, ft::DeviceBase* device,
 
 CacheManager::~CacheManager() {
     stop_ = true;
+    if (metrics_reporter_thread_.joinable()) {
+        metrics_reporter_thread_.join();
+    }
 }
 
 void CacheManager::reportMetricsLoop() {

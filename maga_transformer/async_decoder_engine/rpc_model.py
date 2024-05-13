@@ -8,6 +8,7 @@ from maga_transformer.utils.time_util import Timer
 from maga_transformer.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.distribute.worker_info import g_parallel_info
+from maga_transformer.config.task_type import TaskType
 from PIL import Image
 
 class RpcModel:
@@ -27,6 +28,10 @@ class RpcModel:
     async def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
         assert self.is_multimodal()
         raise Exception("not support yet")
+
+    @property
+    def task_type(self) -> TaskType:
+        return self.model.task_type
 
     @property
     def default_generate_config(self) -> GenerateConfig:
