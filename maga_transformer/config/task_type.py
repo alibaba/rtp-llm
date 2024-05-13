@@ -6,6 +6,7 @@ sequence_classfication: return label and score by classifier
 '''
 class TaskType(Enum):
     DENSE_EMBEDDING           = "DENSE_EMBEDDING"
+    ALL_EMBEDDING             = "ALL_EMBEDDING"
     SPARSE_EMBEDDING          = "SPARSE_EMBEDDING"
     COLBERT_EMBEDDING         = "COLBERT_EMBEDDING"
     LANGUAGE_MODEL            = "LANGUAGE_MODEL"

@@ -28,10 +28,21 @@ class EmbeddingResponseFormat(PyDanticModelBase):
     embedding: Union[List[float], Dict[str, float], List[List[float]], str]
     index: int
 
-# not in use yet
+class ALLEmbeddingResponseFormat(PyDanticModelBase):
+    object: EmbeddingResponseType
+    embedding: Union[List[float], Dict[str, float], List[List[float]], str]
+    token_ids: List[int]
+    index: int
+
 class OpenAIEmbeddingResponse(PyDanticModelBase):
     object: str = 'list'
     data: List[EmbeddingResponseFormat] = []
+    model: str = ""
+    usage: Usage = Usage()
+
+class ALLEmbeddingResponse(PyDanticModelBase):
+    object: str = 'list'
+    data: List[ALLEmbeddingResponseFormat] = []
     model: str = ""
     usage: Usage = Usage()
 

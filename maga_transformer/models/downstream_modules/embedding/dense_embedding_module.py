@@ -44,10 +44,10 @@ class DenseEmbeddingRenderer(EmbeddingRendererBase):
 class NormalHandler(CustomHandler):
     def __init__(self, config: GptInitModelParameters):
         super().__init__(config)
-        self.is_casual = config.is_casual
+        self.is_causal = config.is_causal
 
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor, config: Dict[str, Any]) -> torch.Tensor:
-        if self.is_casual:
+        if self.is_causal:
             ts = get_last_token_from_combo_tokens(hidden_states, input_lengths)
         else:
             ts = get_first_token_from_combo_tokens(hidden_states, input_lengths)

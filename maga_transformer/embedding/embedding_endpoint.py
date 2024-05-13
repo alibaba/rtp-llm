@@ -19,4 +19,4 @@ class EmbeddingEndpoint(object):
         formated_request = await self.custom_model_.renderer.render_request(request)
         batch_input = await self.custom_model_.renderer.create_input(formated_request)
         batch_output = await self.decoder_engine_.decode(batch_input)
-        return await self.custom_model_.renderer.render_response(formated_request, batch_output)
+        return await self.custom_model_.renderer.render_response(formated_request, batch_input, batch_output)

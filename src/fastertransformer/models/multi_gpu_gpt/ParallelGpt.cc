@@ -437,21 +437,23 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         sync_check_cuda_error();
 
         PUSH_RANGE(stream_, "pre-mha layernorm");
-        norm_wrapper_->initDecoderLayerNorm(decoder_normed_input_,
-                                            decoder_input,
-                                            layer_weight->pre_layernorm_weights.gamma,
-                                            layer_weight->pre_layernorm_weights.beta,
-                                            params_.layernorm_eps_,
-                                            h_token_num,
-                                            hidden_units,
-                                            nullptr,
-                                            attention_query_dynamic_scale_,
-                                            reinterpret_cast<int8_t*>(decoder_normed_input_),
-                                            stream_);
-        if (quant_algo_.smoothQuantInt8()) {
-            print_bsd(l, "pre ln", reinterpret_cast<int8_t*>(decoder_normed_input_), 1, h_token_num, hidden_units);
-        } else {
-            print_bsd(l, "pre ln", decoder_normed_input_, 1, h_token_num, hidden_units);
+        if (layer_weight->pre_layernorm_weights.gamma) {
+            norm_wrapper_->initDecoderLayerNorm(decoder_normed_input_,
+                                                decoder_input,
+                                                layer_weight->pre_layernorm_weights.gamma,
+                                                layer_weight->pre_layernorm_weights.beta,
+                                                params_.layernorm_eps_,
+                                                h_token_num,
+                                                hidden_units,
+                                                nullptr,
+                                                attention_query_dynamic_scale_,
+                                                reinterpret_cast<int8_t*>(decoder_normed_input_),
+                                                stream_);
+            if (quant_algo_.smoothQuantInt8()) {
+                print_bsd(l, "pre ln", reinterpret_cast<int8_t*>(decoder_normed_input_), 1, h_token_num, hidden_units);
+            } else {
+                print_bsd(l, "pre ln", decoder_normed_input_, 1, h_token_num, hidden_units);
+            }
         }
         sync_check_cuda_error();
 
@@ -473,6 +475,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         sync_check_cuda_error();
         POP_RANGE;
 
+        // TODO(xinfei.sxf) 为啥有两个pre ln
         const T* input_query  = nullptr;
         if (pre_attn_ln) {
             input_query = attn_normed_input_;
@@ -483,6 +486,9 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         else {
             input_query = decoder_input;
         }
+
+        print_bsd(l, "input query", input_query, 1, h_token_num, hidden_units);
+
         TensorMap attention_input_tensors{
             {"input_query", Tensor{MEMORY_GPU, activation_in_type, {h_token_num, hidden_units}, input_query}},
             {"use_kvcache", Tensor{MEMORY_CPU, TYPE_BOOL, {(size_t)1}, &use_kvcache}},

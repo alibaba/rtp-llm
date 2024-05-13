@@ -64,7 +64,7 @@ class EmbeddingRendererBase(CustomRenderer):
     def similar_func(self, left: Any, right: Any) -> float:
         raise NotImplementedError
 
-    async def _render_embedding_output(self, request: OpenAIEmbeddingRequest, outputs: EngineOutputs) -> Dict[str, Any]:
+    async def _render_embedding_output(self, request: OpenAIEmbeddingRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
         usage = Usage(prompt_tokens=outputs.input_length, total_tokens=outputs.input_length)
         data = [
             EmbeddingResponseFormat(
@@ -75,7 +75,7 @@ class EmbeddingRendererBase(CustomRenderer):
         ]
         return OpenAIEmbeddingResponse(data=data, usage=usage).model_dump()
 
-    async def _render_similarity_output(self, request: SimilarityRequest, outputs: EngineOutputs) -> Dict[str, Any]:
+    async def _render_similarity_output(self, request: SimilarityRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
         left = outputs.outputs[:len(request.left)]
         right = outputs.outputs[len(request.left): ]
         batch_results: List[List[float]] = []
@@ -86,8 +86,8 @@ class EmbeddingRendererBase(CustomRenderer):
             batch_results.append(result)
         return SimilarityResponse(similarity=batch_results).model_dump()
 
-    async def render_response(self, request: Union[OpenAIEmbeddingRequest, SimilarityRequest], outputs: EngineOutputs) -> Dict[str, Any]:
+    async def render_response(self, request: Union[OpenAIEmbeddingRequest, SimilarityRequest], inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
         if isinstance(request, OpenAIEmbeddingRequest):
-            return await self._render_embedding_output(request, outputs)
+            return await self._render_embedding_output(request, inputs, outputs)
         else:
-            return await self._render_similarity_output(request, outputs)
+            return await self._render_similarity_output(request, inputs, outputs)

@@ -138,7 +138,7 @@ class Pipeline(object):
                                              tokenizer=self.tokenizer,
                                              special_tokens=self._special_tokens,
                                              **kwargs)
-
+        
         kmonitor.report(GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.num_beams)
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))

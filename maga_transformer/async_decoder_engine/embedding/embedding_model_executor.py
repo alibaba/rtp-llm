@@ -28,7 +28,7 @@ class EmbeddingModelExecutor(object):
         combo_tokens_tensor = to_cuda(torch.IntTensor(batch_input.combo_tokens))
         position_ids_tensor = to_cuda(self.model_.create_context_position_ids(batch_input.context_lengths_list))
         token_type_ids_tensor = to_cuda(torch.IntTensor(batch_input.combo_token_type_ids))
-        input_embeds = self.embedding_op_.forward(combo_tokens_tensor, position_ids_tensor, token_type_ids_tensor)
+        input_embeds = self.embedding_op_.forward(combo_tokens_tensor, position_ids_tensor, token_type_ids_tensor)        
         if self.model_.pre_decoder_layernorm is not None:
             input_embeds = self.model_.pre_decoder_layernorm(input_embeds)
         return input_embeds, position_ids_tensor

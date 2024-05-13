@@ -160,12 +160,18 @@ class NormalModelExecutor(ExecutorBase):
 
         assert model.word_embedding is not None
         input_embeds = model.async_input_word_embedding(combo_tokens, images)
+        if debug_print():
+            print("input_embeds = ", input_embeds)
 
         if model.position_encoding is not None:
             input_embeds += model.position_encoding(position_ids)
+            if debug_print():
+                print("after add position_encoding, input_embeds = ", input_embeds)
 
         if model.pre_decoder_layernorm is not None:
             input_embeds = model.pre_decoder_layernorm(input_embeds)
+            if debug_print():
+                print("after pre_decoder_layernorm, input_embeds = ", input_embeds)
 
         if self.model_ops.gpt_op.use_fmha:
             attention_mask = None

@@ -50,5 +50,5 @@ class CustomRenderer(object):
     async def create_input(self, request: BaseModel) -> EngineInputs:
         raise NotImplementedError
     
-    async def render_response(self, request: BaseModel, outputs: EngineOutputs) -> Dict[str, Any]:
+    async def render_response(self, request: BaseModel, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
         raise NotImplementedError
