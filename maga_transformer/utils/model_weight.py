@@ -1000,6 +1000,10 @@ class LoraResource():
         self.to_remove_lora_id = list()
         self.stream = torch.cuda.Stream()
 
+    @property
+    def is_merge_lora(self):
+        return self.model_weights_loader and self.model_weights_loader.is_merge_lora
+
     def clear_for_update(self):
         self.to_add_lora_id.clear()
         self.to_remove_lora_id.clear()
@@ -1071,6 +1075,11 @@ class LoraResource():
         self.database.dump_lora_info()
 
     def get_id(self, name: str) -> int:
+        if self.is_merge_lora:
+            if name != self.model_weights_loader.static_lora_adapter_name:
+                raise ValueError(f"use static lora, but adpater name[{name}] not is static lora_name[{self.model_weights_loader.static_lora_adapter_name}]")
+            else:
+                return -1
         if self.lora_map != None:
             return self.lora_map.get_id(name)
 

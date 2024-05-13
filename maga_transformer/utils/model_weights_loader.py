@@ -11,7 +11,7 @@ from itertools import repeat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
     WeightInfo, W, ModelWeights, LoRAWeights
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.utils.database import BaseDatabase, CkptFileInfo, ModuleDatabase, CkptDatabase, DictDatabase
+from maga_transformer.utils.database import BaseDatabase, CkptFileInfo, LoraConfig, ModuleDatabase, CkptDatabase, DictDatabase
 from maga_transformer.utils.util import get_mem_info
 
 class WeightLog:
@@ -68,24 +68,35 @@ class ModelWeightsLoader:
         self._database: BaseDatabase = database
         self._weight_log: WeightLog = WeightLog()
         self._lora_log: WeightLog = WeightLog()
-        
+        self._database: BaseDatabase = database
+        self._merge_lora = False
+        self._static_lora_adapter_name = None
+
         if isinstance(self._database, CkptDatabase):
             self._weights_info.process_meta_from_ckpt(self._database.PretrainFileList)
             self._weights_info.process_meta_from_ckpt(self._database.FinetuneFileList)
             self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
             self._merge_lora = self._model_weights_info.has_lora_weight() and self._database.has_lora() and bool(os.environ.get("MERGE_LORA", 1))
+            if self._merge_lora:
+                static_lora_config: LoraConfig = list(self._database.LoraCkpt.LoraFileList.keys())[0]
+                self._static_lora_adapter_name = static_lora_config.name if self._merge_lora else None
         elif isinstance(self._database, ModuleDatabase):
             self._weights_info.process_meta_from_dict(dict(self._database.ref_module.state_dict()))
             self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
-            self._merge_lora = False
         elif isinstance(self._database, DictDatabase):
             self._weights_info.process_meta_from_dict(self._database.ref_dict)
             self._model_weights_info: ModelWeightInfo = self._weights_info.get_weight_info()
-            self._merge_lora = False
         else:
             raise Exception("Unknown database class")
         logging.info(f"merge lora is enable ? : {self._merge_lora}")
 
+    @property
+    def is_merge_lora(self):
+        return self._merge_lora
+    @property
+    def static_lora_adapter_name(self):
+        return self._static_lora_adapter_name
+        
     def set_data_type(self, data_type):
         self._data_type = data_type
 
