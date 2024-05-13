@@ -128,17 +128,9 @@ void initCustomAllReduceComm(std::vector<std::shared_ptr<AbstractCustomComm>>* c
     }
 
     if (rank_size != RANKS_PER_NODE) {
-#ifdef BUILD_MULTI_GPU
         if (rank_size > 1) {
             FT_LOG_WARNING("Custom All Reduce only supports 8 Ranks currently. Using NCCL as Comm.");
         }
-#else
-        FT_CHECK_WITH_INFO(rank_size == 1,
-                           fmtstr("Custom All Reduce only supports 8 Ranks currently, got rank_size %ld. FT needs "
-                                  "the NCCL library to communicate among devices but has built without NCCL. "
-                                  "Please use the flag -DBUILD_MULTI_GPU=ON when compiling.",
-                                  rank_size));
-#endif
         for (size_t i = 0; i < rank_size; i++) {
             custom_all_reduce_comms->push_back(nullptr);
         }

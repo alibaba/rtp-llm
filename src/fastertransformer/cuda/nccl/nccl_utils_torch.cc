@@ -3,7 +3,6 @@
 
 namespace fastertransformer {
 
-#ifdef BUILD_MULTI_GPU_TCP
 c10d::TCPStore* createTcpStore(const std::string& master_ip, const int port, const int world_size, const int rank) {
     c10d::TCPStoreOptions options;
     options.port          = port;
@@ -28,6 +27,5 @@ void getUniqueId(ncclUniqueId* id, const std::string& store_key, c10d::TCPStore*
         std::memcpy(id, vec.data(), vec.size());
     } catch (const std::exception& e) { FT_CHECK_WITH_INFO(false, "failed to get unique id"); }
 }
-#endif
 
 }  // namespace fastertransformer

@@ -20,9 +20,7 @@
 #include "src/fastertransformer/utils/logger.h"
 
 #include <cuda_runtime.h>
-#ifdef BUILD_MULTI_GPU
 #include <nccl.h>
-#endif
 
 #include <stdio.h>
 #include <string>
@@ -32,7 +30,6 @@
 #endif
 
 namespace fastertransformer {
-#ifdef BUILD_MULTI_GPU
 #define NCCLCHECK(cmd)                                                                                                 \
     do {                                                                                                               \
         ncclResult_t r = cmd;                                                                                          \
@@ -41,30 +38,19 @@ namespace fastertransformer {
             exit(EXIT_FAILURE);                                                                                        \
         }                                                                                                              \
     } while (0)
-#else
-#define NCCLCHECK(cmd) printf("[WARNING} No NCCL");
-#endif
 
 struct NcclUid {
-#ifndef BUILD_MULTI_GPU
-    NcclUid(){};
-    NcclUid(NcclUid const& uid){};
-#else
     ncclUniqueId nccl_uid_;
     NcclUid(){};
     NcclUid(NcclUid const& uid): nccl_uid_(uid.nccl_uid_){};
-#endif
 };
 
 struct NcclParam {
     int rank_{0};
     int world_size_{1};
-#ifdef BUILD_MULTI_GPU
     ncclUniqueId nccl_uid_;
     ncclComm_t   nccl_comm_ = nullptr;
-#endif
 
-#ifdef BUILD_MULTI_GPU
     NcclParam(): rank_(0), world_size_(1), nccl_comm_(nullptr){};
     NcclParam(int rank, int world_size): rank_(rank), world_size_(world_size){};
     NcclParam(NcclParam const& param):
@@ -72,14 +58,6 @@ struct NcclParam {
     std::string toString() {
         return fmtstr("NcclParam[rank=%d, world_size=%d, nccl_comm=%p]", rank_, world_size_, nccl_comm_);
     }
-#else
-    NcclParam(): rank_(0), world_size_(1){};
-    NcclParam(int rank, int world_size): rank_(rank), world_size_(world_size){};
-    NcclParam(NcclParam const& param): rank_(param.rank_), world_size_(param.world_size_){};
-    std::string toString() {
-        return fmtstr("NcclParam[rank=%d, world_size=%d]", rank_, world_size_);
-    }
-#endif
 };
 
 // New APIs

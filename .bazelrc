@@ -14,8 +14,6 @@ build --copt -Werror=reorder
 build --copt -Werror=narrowing
 build --copt -Werror=return-type
 
-build --copt="-DBUILD_MULTI_GPU_TCP=ON"
-build --copt="-DBUILD_MULTI_GPU=ON"
 build --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
 build --copt="-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE"
 
