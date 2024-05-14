@@ -148,9 +148,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     evaluateRunningNext();
     auto fallback_stream_size = running_stream_size - running_streams_.size();
     std::list<GenerateStreamPtr> new_stream;
-    if (fallback_stream_size == 0) {
-        new_stream = scheduleNew();
-    }
+    new_stream = scheduleNew();
     running_streams_.insert(running_streams_.end(), new_stream.begin(), new_stream.end());
     reportMetrics(fallback_stream_size);
     return running_streams_;
