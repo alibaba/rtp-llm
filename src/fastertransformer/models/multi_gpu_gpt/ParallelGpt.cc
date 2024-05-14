@@ -114,8 +114,8 @@ void ParallelGpt<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num,
     }
 
     // for moe
-    expert_scales_ = reinterpret_cast<T*>(
-        allocator_->reMalloc(expert_scales_, sizeof(T) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num), false));
+    expert_scales_ = reinterpret_cast<float*>(
+        allocator_->reMalloc(expert_scales_, sizeof(float) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num), false));
     expanded_source_row_to_expanded_dest_row_ = reinterpret_cast<int*>(allocator_->reMalloc(
         expanded_source_row_to_expanded_dest_row_, sizeof(int) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num), false));
     expert_for_source_row_                    = reinterpret_cast<int*>(
