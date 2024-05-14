@@ -297,13 +297,15 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
 
 ParallelModelWrapper::ParallelModelWrapper(
     const GptInitParameter&                                                 gpt_init_parameter,
-    ft::NcclParam                                                           tensor_para,
-    ft::NcclParam                                                           pipeline_para,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights) {
-#define CREATE_INSTANCE(T_)                                                                                            \
-    {                                                                                                                  \
-        model_wrapper_ = new ParallelModelWrapperImpl<T_>(                                                             \
+    auto device = dynamic_cast<ft::CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda));
+    ft::NcclParam pipeline_para;
+    auto tensor_para = device->getNcclParam();
+
+#define CREATE_INSTANCE(T_)                                                                     \
+    {                                                                                           \
+        model_wrapper_ = new ParallelModelWrapperImpl<T_>(                                      \
                 gpt_init_parameter, tensor_para, pipeline_para, global_weights, layer_weights); \
     }
 

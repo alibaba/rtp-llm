@@ -11,20 +11,16 @@ namespace rtp_llm {
 
 SpeculativeExecutor::SpeculativeExecutor(
     const MagaInitParams&                                                   params,
-    ft::NcclParam                                                           tensor_para,
-    ft::NcclParam                                                           pipeline_para,
     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-    const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights):
-    tensor_para_(tensor_para),
-    pipeline_para_(pipeline_para)
+    const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights)
 {
     unique_ptr<GptModelInitParams> model_params;
     model_.reset(new GptModel(*model_params));
 
-    SamplerInitParams sampler_params;
-    sampler_.reset(new SpeculativeSampler(sampler_params));
-    model_wrapper_.reset(
-            new ParallelModelWrapper(*params.gpt_init_parameter, tensor_para_, pipeline_para_, weights, layer_weights));
+    // SamplerInitParams sampler_params;
+    // sampler_.reset(new SpeculativeSampler(sampler_params));
+    // model_wrapper_.reset(
+    //         new ParallelModelWrapper(*params.gpt_init_parameter, weights, layer_weights));
     batch_stream_processor_.reset(new SpeculativeBatchStreamProcessor(*params.gpt_init_parameter, !model_wrapper_->useFMHA()));
 }
 

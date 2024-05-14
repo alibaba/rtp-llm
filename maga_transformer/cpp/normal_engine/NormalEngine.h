@@ -7,7 +7,6 @@
 #include "maga_transformer/cpp/engine_base/Executor.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
-#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "torch/all.h"
@@ -66,9 +65,8 @@ private:
     std::shared_ptr<CacheManager>         cache_manager_;
     MagaInitParams                        params_;
     ResourceContext                       resource_context_;
-    ft::NcclParam                         tensor_para_;
-    ft::NcclParam                         pipeline_para_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
+    ft::DeviceBase*                       device_;
 };
 
 }  // namespace rtp_llm

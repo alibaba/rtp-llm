@@ -1,7 +1,8 @@
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include "maga_transformer/cpp/common/status_util.h"
+
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
-#include "maga_transformer/cpp/deprecated/GptModelInputsTpSync.h"
+
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
@@ -13,13 +14,9 @@ namespace rtp_llm {
 
 NormalExecutor::NormalExecutor(
         const MagaInitParams&                                                   params,
-        ft::NcclParam                                                           tensor_para,
-        ft::NcclParam                                                           pipeline_para,
         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
         const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
         const kmonitor::MetricsReporterPtr                                      metrics_reporter):
-    tensor_para_(tensor_para),
-    pipeline_para_(pipeline_para),
     metrics_reporter_(metrics_reporter)
 {
     // need init model and sampler
@@ -29,8 +26,10 @@ NormalExecutor::NormalExecutor(
     device_               = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     sampler_params.device = device_;
     sampler_.reset(new Sampler(sampler_params));
+
     model_wrapper_.reset(
-            new ParallelModelWrapper(*params.gpt_init_parameter, tensor_para_, pipeline_para_, weights, layer_weights));
+            new ParallelModelWrapper(*params.gpt_init_parameter, weights, layer_weights));
+
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(*params.gpt_init_parameter, !model_wrapper_->useFMHA()));
 }
 
@@ -64,12 +63,12 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     auto         model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     auto& model_input = model_input_status.value();
-    tpSync(model_input, tensor_para_, pipeline_para_, device_);
+    tpSyncModelInputs(model_input, device_);
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto         merged_output        = std::make_unique<MergedOutput>();
     ModelRequest model_request        = std::move(generateOldModelRequest(model_input));
     auto         model_output         = std::move(model_wrapper_->forward(model_request));
-    if (tensor_para_.rank_ > 0) {
+    if (device_->getDeviceProperties().tp_rank > 0) {
         return absl::OkStatus();
     }
     auto         sampler_input_status = batch_stream_processor_->gatherSamplerInput(stream_groups, *model_output);

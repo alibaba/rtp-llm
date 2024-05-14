@@ -80,6 +80,9 @@ DeviceProperties CudaDevice::getDeviceProperties() {
     if (prop == nullptr) {
         prop = new DeviceProperties();
         prop->type = DeviceType::Cuda;
+        prop->id = device_id_;
+        prop->tp_rank = nccl_param_.rank_;
+        prop->tp_size = nccl_param_.world_size_;
     }
     return *prop;
 }

@@ -87,14 +87,12 @@ private:
 class ParallelModelWrapper {
 public:
     ParallelModelWrapper(
-            const ft::GptInitParameter&                                                 gpt_init_parameter,
-            ft::NcclParam                                                           tensor_para,
-            ft::NcclParam                                                           pipeline_para,
+            const ft::GptInitParameter&                                             gpt_init_parameter,
             const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
             const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights);
 
     ~ParallelModelWrapper(){};
-    void addLoRA(const int64_t                                                   lora_id,
+    void addLoRA(const int64_t                                                           lora_id,
                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {}
     void removeLoRA(const int64_t lora_id) {}

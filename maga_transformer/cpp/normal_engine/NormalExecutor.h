@@ -14,8 +14,6 @@ class NormalExecutor: public Executor {
 public:
     explicit NormalExecutor(
             const MagaInitParams&                                                   params,
-            ft::NcclParam                                                           tensor_para,
-            ft::NcclParam                                                           pipeline_para,
             const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
             const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
             const kmonitor::MetricsReporterPtr                                      metrics_reporter = nullptr);
@@ -35,8 +33,6 @@ private:
     std::unique_ptr<Sampler>              sampler_;
     std::unique_ptr<NormalBatchStreamProcessor> batch_stream_processor_;
     std::unique_ptr<ParallelModelWrapper> model_wrapper_;
-    ft::NcclParam                         tensor_para_;
-    ft::NcclParam                         pipeline_para_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
 };
 

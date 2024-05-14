@@ -24,7 +24,7 @@ public:
 
 public:
     cudaStream_t getStream() {return stream_;}
-
+    NcclParam getNcclParam() {return nccl_param_;}
 public:
     void copy(const CopyParams& params);
     TransposeOutput transpose(const TransposeParams& params);

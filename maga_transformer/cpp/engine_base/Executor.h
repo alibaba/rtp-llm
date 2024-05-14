@@ -18,7 +18,7 @@ public:
 
     virtual absl::Status removeLoRA(const int64_t lora_id) = 0;
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams) = 0;
-    ~Executor(){};
+    virtual ~Executor(){};
 
 public:
     ft::DeviceBase*                       device_;

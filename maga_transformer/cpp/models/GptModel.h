@@ -56,6 +56,42 @@ public:
     }
 };
 
+inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
+    if (device->getDeviceProperties().tp_size <= 1) {
+        return;
+    }
+    const size_t shape_hints_size = 6;
+    auto shape_hints = device->allocateBuffer({ft::DataType::TYPE_INT32, {shape_hints_size}, ft::AllocationType::HOST});
+    auto shape_hints_ptr = shape_hints->data<int32_t>();
+    shape_hints_ptr[0] = inputs.combo_tokens.get() ? inputs.combo_tokens->size() : 0; // combo_token_size
+    shape_hints_ptr[1] = inputs.combo_tokens.get() ? inputs.input_lengths->size() : 0; // total_batch_size
+    shape_hints_ptr[2] = inputs.combo_tokens.get() ? inputs.sequence_lengths->size() : 0; // generate_batch_size
+    shape_hints_ptr[3] = inputs.combo_tokens.get() ? inputs.kv_cache_blocks->shape()[0] : 0; // layer_num
+    shape_hints_ptr[4] = inputs.combo_tokens.get() ? inputs.kv_cache_blocks->shape()[3] : 0; // block_size
+    shape_hints_ptr[5] = inputs.kv_cache_scales.get() != nullptr; // use_block_scale
+    device->broadcast({{shape_hints}, 0});
+    device->syncAndCheck();
+    if (device->getDeviceProperties().tp_rank) {
+        inputs.combo_tokens = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[0]}, ft::AllocationType::HOST});
+        inputs.input_lengths = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[1]}, ft::AllocationType::HOST});
+        inputs.sequence_lengths = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[2]}, ft::AllocationType::HOST});
+        inputs.kv_cache_blocks = device->allocateBuffer({ft::DataType::TYPE_UINT64, {(size_t)shape_hints_ptr[3], (size_t)shape_hints_ptr[1], 2, (size_t)shape_hints_ptr[4]}, ft::AllocationType::HOST});
+        if (shape_hints_ptr[5]) {
+            inputs.kv_cache_scales = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[3], (size_t)shape_hints_ptr[0], 2, (size_t)shape_hints_ptr[4]}, ft::AllocationType::HOST});
+        }
+    }
+    std::vector<ft::BufferPtr> buffers;
+    buffers.emplace_back(inputs.combo_tokens);
+    buffers.emplace_back(inputs.input_lengths);
+    buffers.emplace_back(inputs.sequence_lengths);
+    buffers.emplace_back(inputs.kv_cache_blocks);
+    if (shape_hints_ptr[5]) {
+        buffers.emplace_back(inputs.kv_cache_scales);
+    }
+    device->broadcast({buffers, 0});
+    device->syncAndCheck();
+}
+
 struct GptModelOutputs {
     ft::BufferPtr logits;
     ft::BufferPtr hidden_states;

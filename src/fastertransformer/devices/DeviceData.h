@@ -26,6 +26,8 @@ struct DeviceInitParams {
 struct DeviceProperties {
     DeviceType type;
     size_t id = 0;
+    size_t tp_rank = 0;
+    size_t tp_size = 1;
 };
 
 struct MemroyStatus {

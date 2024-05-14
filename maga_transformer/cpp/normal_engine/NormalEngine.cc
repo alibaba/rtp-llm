@@ -19,8 +19,17 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
     params_(params),
     metrics_reporter_(metrics_reporter)
 {
-    ft::ftNcclInitialize(tensor_para_, pipeline_para_, params.gpt_init_parameter->tp_size_, params.gpt_init_parameter->pp_size_, params.gpt_init_parameter->nccl_ip_, params.gpt_init_parameter->nccl_port_);
-    executor_.reset(new NormalExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights, metrics_reporter_));
+    auto global_params = ft::DeviceFactory::getDefaultGlobalDeviceParams();
+    auto& default_device_params = global_params.device_params[0].second;
+    const auto rank       = stoi(string(getenv("WORLD_RANK") ? getenv("WORLD_RANK") : "0"));
+    const auto world_size = stoi(string(getenv("WORLD_SIZE") ? getenv("WORLD_SIZE") : "1"));
+    default_device_params.tp_size = rank;
+    default_device_params.tp_rank = world_size;
+    default_device_params.master_ip = params.gpt_init_parameter->nccl_ip_;
+    default_device_params.master_port = params.gpt_init_parameter->nccl_port_;
+    ft::DeviceFactory::initDevices(global_params);
+    device_ = ft::DeviceFactory::getDefaultDevice();;
+    executor_.reset(new NormalExecutor(params, layer_weights, weights, metrics_reporter_));
     initCacheManager();
     scheduler_.reset(new FIFOScheduler(params, resource_context_.cache_manager, metrics_reporter));
     (void)startLoop();
@@ -34,9 +43,7 @@ NormalEngine::~NormalEngine() {
 void NormalEngine::initCacheManager() {
     auto result = CacheConfigCreator::createConfig(*params_.gpt_init_parameter);
     THROW_IF_STATUS_ERROR(result.status());
-
-    auto device = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
-    resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device, metrics_reporter_);
+    resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device_, metrics_reporter_);
 }
 
 void NormalEngine::initSystemPrompt() {
@@ -98,15 +105,15 @@ absl::Status NormalEngine::trySaveStepError() const {
 }
 
 absl::Status NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
-    FT_LOG_DEBUG("enqueue stream: %s %d", stream->debugString().c_str(), tensor_para_.rank_);
     stream->setMetricsReporter(metrics_reporter_);
+    FT_LOG_DEBUG("enqueue stream: %s %d", stream->debugString().c_str(), device_->getDeviceProperties().tp_rank);
     return scheduler_->enqueue(stream);
 }
 
 absl::Status NormalEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     list<GenerateStreamPtr> streams;
-    if (tensor_para_.rank_ == 0) {
+    if (device_->getDeviceProperties().tp_rank == 0) {
         const auto streams_status = scheduler_->schedule();
         RETURN_IF_STATUS_OR_ERROR(streams_status);
         streams = streams_status.value();
