@@ -159,7 +159,7 @@ class OpenaiEndopoint():
         complete_response_collect_func = partial(self._collect_complete_response, debug_info=debug_info)
         return CompleteResponseAsyncGenerator(response_generator(), complete_response_collect_func)
 
-    def _get_debug_info(self, renderered_input: RenderedInputs, gen_config: GenerateConfig) -> Optional[DebugInfo]:
+    def _get_debug_info(self, renderered_input: RenderedInputs, gen_config: GenerateConfig) -> DebugInfo:
         prompt = self.tokenizer.decode(renderered_input.input_ids)
         return DebugInfo(
             input_prompt=prompt,
@@ -199,3 +199,11 @@ class OpenaiEndopoint():
         )
 
         return self._complete_stream_response(choice_generator, debug_info)
+
+    def chat_render(self, chat_request: ChatCompletionRequest) -> DebugInfo:
+        rendered_input = self.chat_renderer.render_chat(chat_request)
+        input_ids = rendered_input.input_ids
+        input_images = rendered_input.input_images
+        generate_config = self._extract_generation_config(chat_request)
+        debug_info = self._get_debug_info(rendered_input, generate_config)
+        return debug_info

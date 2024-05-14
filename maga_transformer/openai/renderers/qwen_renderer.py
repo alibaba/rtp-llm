@@ -135,7 +135,7 @@ class QwenRenderer(CustomChatRenderer):
             return self.template_chat_renderer.render_chat(request)
 
         query, history, system = self.parse_messages(request.messages, request.functions)
-        print(f"parsed query: {query}, history: {history}, system: {system}")
+        logging.debug(f"parsed query: {query}, history: {history}, system: {system}")
         input_ids = []
         if (query == _TEXT_COMPLETION_CMD):
             input_ids = self.text_complete_last_message(history)

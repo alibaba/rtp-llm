@@ -157,6 +157,13 @@ class InferenceServer(object):
             return response
         return await self._infer_wrap(request.model_dump(), raw_request, generate_call)
 
+    async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):
+        try:
+            assert (self._openai_endpoint != None)
+            return self._openai_endpoint.chat_render(request)
+        except Exception as e:
+            return JSONResponse(format_exception(e), status_code=500)
+
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         id = self._atomic_count.increment()
         kmonitor.report(AccMetrics.QPS_METRIC, 1)
@@ -174,11 +181,11 @@ class InferenceServer(object):
                 return self._handle_exception(request, e, id)
 
     async def similarity(self, request: Dict[str, Any], raw_request: Request):
-        return await self.embedding(request, raw_request)        
-    
+        return await self.embedding(request, raw_request)
+
     async def classifier(self, request: Dict[str, Any], raw_request: Request):
-        return await self.embedding(request, raw_request)        
-        
+        return await self.embedding(request, raw_request)
+
     def _handle_exception(self, request: Union[Dict[str, Any], str, BaseModel], e: Exception, id: int):
         self._access_logger.log_exception_access(request, e, id)
         if isinstance(e, ConcurrencyException):

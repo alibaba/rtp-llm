@@ -99,7 +99,7 @@ class InferenceApp(object):
                 return await self.inference_server.inference(req, raw_request)
 
         # update for worker RANK != 0
-        @app.post("/update_internal")                
+        @app.post("/update_internal")
         @check_is_worker()
         def update_internal(version_info: VersionInfo):
             return self.inference_server.update(version_info)
@@ -123,10 +123,17 @@ class InferenceApp(object):
             return await self.inference_server.chat_completion(request, raw_request)
 
         # entry for worker RANK == 0
+        @app.post("/chat/render")
+        @app.post("/v1/chat/render")
+        @check_is_master()
+        async def chat_render(request: ChatCompletionRequest, raw_request: RawRequest):
+            return await self.inference_server.chat_render(request, raw_request)
+
+        # entry for worker RANK == 0
         @app.post("/tokenizer/encode")
         @check_is_master()
         async def encode(req: Union[str,Dict[Any, Any]]):
-            return self.inference_server.tokenizer_encode(req)        
+            return self.inference_server.tokenizer_encode(req)
 
         register_embedding_api(app, self.inference_server)
         return app
