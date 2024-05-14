@@ -36,7 +36,7 @@ void NcclOp::broadcast_tp(std::vector<th::Tensor> tensors, int64_t root)
         ft::ftNcclGroupEnd();
     }
     if (tensor_para_.rank_ == root){
-        ft::ftNcclStreamSynchronize(tensor_para_, pipeline_para_, stream);
+        ft::ftNcclStreamSynchronize(tensor_para_, stream);
     }
     sync_check_cuda_error();
 }

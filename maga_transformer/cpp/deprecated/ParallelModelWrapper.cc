@@ -56,7 +56,6 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
     tensor_para_(tensor_para),
     pipeline_para_(pipeline_para)
 {
-    // ftNcclInitialize(tensor_para_, pipeline_para_, tensor_para_size, 1, master_ip, master_port);
     allocator_      = device_->getAllocator();
     cublas_wrapper_ = device_->cublasMMWrapperPtr();
     stream_         = device_->stream();
@@ -85,8 +84,6 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
 
 template<typename T>
 ParallelModelWrapperImpl<T>::~ParallelModelWrapperImpl() {
-    ftNcclParamDestroy(tensor_para_);
-    ftNcclParamDestroy(pipeline_para_);
     freeBuffer();
 }
 

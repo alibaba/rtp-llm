@@ -78,7 +78,7 @@ template<typename T>
 void ftNcclSend(const T* send_buf, const int data_size, const int peer, NcclParam nccl_param, cudaStream_t stream);
 
 // nccl stream synchronize, abort nccl comms and throw errors when nccl async errors detected
-void ftNcclStreamSynchronize(NcclParam tensor_para, NcclParam pipeline_para_, cudaStream_t stream, bool timeout = true);
+void ftNcclStreamSynchronize(NcclParam tensor_para, cudaStream_t stream, bool timeout = true);
 
 void ftNcclGroupStart();
 void ftNcclGroupEnd();

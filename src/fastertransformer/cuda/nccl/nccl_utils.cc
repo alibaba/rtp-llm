@@ -187,14 +187,12 @@ void ftNcclGroupEnd() {
     NCCLCHECK(ncclGroupEnd());
 }
 
-void ftNcclStreamSynchronize(NcclParam tensor_para, NcclParam pipeline_para, cudaStream_t stream, bool timeout) {
+void ftNcclStreamSynchronize(NcclParam tensor_para, cudaStream_t stream, bool timeout) {
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     cudaError_t  cudaErr;
-    ncclResult_t tensor_ncclErr = ncclSuccess, tensor_ncclAsyncErr = ncclSuccess, pipeline_ncclErr = ncclSuccess,
-                 pipeline_ncclAsyncErr = ncclSuccess;
+    ncclResult_t tensor_ncclErr = ncclSuccess, tensor_ncclAsyncErr = ncclSuccess;
     ncclComm_t tensor_comm             = tensor_para.nccl_comm_;
-    ncclComm_t pipeline_comm           = pipeline_para.nccl_comm_;
-    if (tensor_para.world_size_ == 1 && pipeline_para.world_size_ == 1) {
+    if (tensor_para.world_size_ == 1) {
         check_cuda_error(cudaStreamSynchronize(stream));
         return;
     }
@@ -221,13 +219,10 @@ void ftNcclStreamSynchronize(NcclParam tensor_para, NcclParam pipeline_para, cud
         if (tensor_para.world_size_ > 1) {
             tensor_ncclErr = ncclCommGetAsyncError(tensor_comm, &tensor_ncclAsyncErr);
         }
-        if (pipeline_para.world_size_ > 1) {
-            pipeline_ncclErr = ncclCommGetAsyncError(pipeline_comm, &pipeline_ncclAsyncErr);
-        }
 
-        if (tensor_ncclErr != ncclSuccess || pipeline_ncclErr != ncclSuccess) {
+        if (tensor_ncclErr != ncclSuccess) {
             std::string error_msg = "NCCL Error : ncclCommGetAsyncError returned " + std::to_string(tensor_ncclErr)
-                                    + " (tensor_para) " + std::to_string(pipeline_ncclErr) + " (pipeline_para)";
+                                    + " (tensor_para) ";
             throw std::runtime_error(error_msg);
         }
 
@@ -237,16 +232,6 @@ void ftNcclStreamSynchronize(NcclParam tensor_para, NcclParam pipeline_para, cud
             tensor_ncclErr = ncclCommAbort(tensor_comm);
             if (tensor_ncclErr != ncclSuccess) {
                 std::string error_msg = "NCCL Error : ncclCommDestroy returned " + std::to_string(tensor_ncclErr);
-                throw std::runtime_error(error_msg);
-            }
-        }
-
-        if (pipeline_ncclAsyncErr != ncclSuccess) {
-            // An asynchronous error happened. Stop the operation and destroy
-            // the communicator
-            pipeline_ncclErr = ncclCommAbort(pipeline_comm);
-            if (pipeline_ncclErr != ncclSuccess) {
-                std::string error_msg = "NCCL Error : ncclCommDestroy returned " + std::to_string(pipeline_ncclErr);
                 throw std::runtime_error(error_msg);
             }
         }

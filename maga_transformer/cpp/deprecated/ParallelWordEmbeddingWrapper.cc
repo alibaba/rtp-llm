@@ -31,7 +31,6 @@ ParallelWordEmbeddingWrapper<T>::ParallelWordEmbeddingWrapper(const ft::GptInitP
 
 template<typename T>
 ParallelWordEmbeddingWrapper<T>::~ParallelWordEmbeddingWrapper() {
-    ftNcclParamDestroy(tensor_para_);
     freeBuffer();
 }
 

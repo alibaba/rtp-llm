@@ -236,7 +236,7 @@ void FtDynamicDecode<T>::broadcastFromLastPipeline(std::vector<th::Tensor> tenso
     }
 
     // throw errors when detected
-    ft::ftNcclStreamSynchronize(tensor_para_, pipeline_para_, stream);
+    ft::ftNcclStreamSynchronize(tensor_para_, stream);
     sync_check_cuda_error();
 }
 

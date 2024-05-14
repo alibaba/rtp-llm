@@ -20,7 +20,9 @@ public:
     DeviceStatus getDeviceStatus() override;
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return host_allocator_.get(); }
+
     void syncAndCheck() override;
+    void syncCommunication() override;
 
 public:
     cudaStream_t getStream() {return stream_;}

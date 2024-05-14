@@ -144,9 +144,6 @@ class DynamicDecodeOp(FTOPBase):
                          config.top_p_min,
                          config.top_p_reset_ids)
 
-    def broadcast_from_last_pipeline(self, tensors: List[torch.Tensor]):
-        self.ft_op.broadcast_from_last_pipeline(tensors) # type: ignore
-
     def forward(self, # type: ignore
                 logits: torch.Tensor,
                 step: int,

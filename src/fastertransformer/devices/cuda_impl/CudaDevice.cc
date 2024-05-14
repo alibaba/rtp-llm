@@ -18,7 +18,9 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
     allocator_ptr->setStream(stream_);
     allocator_.reset(allocator_ptr);
-    host_allocator_.reset(new Allocator<AllocatorType::CUDA_HOST>(device_id_));
+    auto host_allocator_ptr = new Allocator<AllocatorType::CUDA_HOST>(device_id_);
+    host_allocator_ptr->setStream(stream_);
+    host_allocator_.reset(host_allocator_ptr);
 
     check_cuda_error(cublasCreate(&cublas_handle_));
     check_cuda_error(cublasLtCreate(&cublaslt_handle_));
@@ -68,11 +70,22 @@ CudaDevice::~CudaDevice() {
     check_cuda_error(cudaStreamDestroy(stream_));
     check_cuda_error(cublasDestroy(cublas_handle_));
     check_cuda_error(cublasLtDestroy(cublaslt_handle_));
+    if (nccl_param_.nccl_comm_) {
+        ncclCommDestroy(nccl_param_.nccl_comm_);
+    }
 }
 
 void CudaDevice::syncAndCheck() {
+    syncCommunication();
     cudaDeviceSynchronize();
     sync_check_cuda_error();
+}
+
+void CudaDevice::syncCommunication() {
+    if (nccl_param_.world_size_ > 1) {
+        FT_LOG_INFO("Synchronize NCCL communicators rank %d of %d.", nccl_param_.rank_, nccl_param_.world_size_);
+        ftNcclStreamSynchronize(nccl_param_, stream_);
+    }
 }
 
 DeviceProperties CudaDevice::getDeviceProperties() {
