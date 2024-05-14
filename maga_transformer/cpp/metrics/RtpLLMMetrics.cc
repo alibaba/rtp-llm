@@ -23,7 +23,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMEngineMetrics);
 bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(qps_metric, "rtp_llm_framework_qps");
     REGISTER_QPS_MUTABLE_METRIC(error_qps_metric, "rtp_llm_framework_error_qps");
-    REGISTER_QPS_MUTABLE_METRIC(cancel_qps_metric, "rtp_llm_cancal_qps");
+    REGISTER_QPS_MUTABLE_METRIC(cancel_qps_metric, "rtp_llm_cancel_qps");
 
     REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(first_token_latency_us_metric, "rtp_llm_first_token_latency_us");
