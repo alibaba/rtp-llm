@@ -35,5 +35,6 @@ cc_library(
         '@havenask//aios/autil:json', '@havenask//aios/autil:metric', '@havenask//aios/autil:thread',
         '@havenask//aios/network/curl_client:curl_client_lib',
     ],
+    alwayslink = True
 )
 

@@ -41,7 +41,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         max_top_k = 1;
     }
     auto max_top_p = *max_element(top_p.data<SamplerT>(), top_p.dataWithOffset<SamplerT>(top_p.size()));
-    FT_LOG_INFO("max_top_k: %d, max_top_p: %f", max_top_k, max_top_p);
+    FT_LOG_DEBUG("max_top_k: %d, max_top_p: %f", max_top_k, max_top_p);
 
     size_t topk_ws_size;
     size_t topp_ws_size;
@@ -88,7 +88,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                                 &device_prop_,
                                 nullptr);
 
-    FT_LOG_INFO("topk_ws_size: %d, topp_ws_size: %d", topk_ws_size, topp_ws_size);
+    FT_LOG_DEBUG("topk_ws_size: %d, topp_ws_size: %d", topk_ws_size, topp_ws_size);
 
     auto default_top_p = 0.0f;
     auto repetition_penalty_type = RepetitionPenaltyType::None;

@@ -116,11 +116,11 @@ std::string getEnvWithDefault(const std::string& name, const std::string& defaul
     }
 }
 
-bool initKmonitorFactory(const std::string& tenant, const std::string& sink_address) {
+bool initKmonitorFactory() {
     kmonitor::MetricsConfig metricsConfig;
-    metricsConfig.set_tenant_name(tenant);
+    metricsConfig.set_tenant_name("default");
     metricsConfig.set_service_name(getEnvWithDefault("kmonitorServiceName", ""));
-    metricsConfig.set_sink_address(sink_address);
+    metricsConfig.set_sink_address(getEnvWithDefault("HIPPO_SLAVE_IP", "localhost") + ":4141");
     metricsConfig.set_enable_log_file_sink(false);
     metricsConfig.set_enable_prometheus_sink(false);
     metricsConfig.set_manually_mode(false);

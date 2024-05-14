@@ -18,7 +18,7 @@ ModelRpcServiceImpl::ModelRpcServiceImpl(
     const MagaInitParams&                                                   maga_init_params,
     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) {
-    (void)initKmonitorFactory("default", "localhost:4141");
+    (void)initKmonitorFactory();
     auto kmon_tags = getHippoTags();
     metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
     engine_.reset(new NormalEngine(maga_init_params, layer_weights, weights, metrics_reporter_));

@@ -132,7 +132,7 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-bool initKmonitorFactory(const std::string& tenant, const std::string& sink_address);
+bool initKmonitorFactory();
 
 kmonitor::MetricsTags getHippoTags();
 
