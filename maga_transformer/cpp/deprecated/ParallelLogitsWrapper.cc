@@ -86,12 +86,10 @@ void ParallelLogitsWrapper<T>::forward(ft::Tensor& logits, const ft::Tensor hidd
 
     if (tensor_para_.world_size_ > 1) {
         PUSH_RANGE(stream_, "all gather");
-        ftNcclAllGather(nccl_logits.getPtr<float>(),
-                        nccl_logits.getPtr<float>(),
-                        data_size,
-                        tensor_para_.rank_,
-                        tensor_para_,
-                        stream_);
+        auto logits_buf = std::make_shared<ft::Buffer>(
+            ft::MemoryType::MEMORY_GPU, ft::getTensorType<T>(),
+            nccl_logits.shape(), nccl_logits.getPtr<T>());
+        device_->allGather({{logits_buf}});
         ft::invokeTransposeAxis012(logits.getPtr<float>(),
                                   nccl_logits.getPtr<float>(),
                                   tensor_para_.world_size_,

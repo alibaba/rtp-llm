@@ -79,12 +79,10 @@ void ParallelWordEmbeddingWrapper<T>::forward(ft::Tensor&      embeddings,
                                   stream_);
     if (tensor_para_.world_size_ > 1) {
         PUSH_RANGE(stream_, "all gather");
-        ftNcclAllGather(nccl_embeddings.getPtr<T>(),
-                        nccl_embeddings.getPtr<T>(),
-                        data_size,
-                        tensor_para_.rank_,
-                        tensor_para_,
-                        stream_);
+        auto embedding_buf = std::make_shared<ft::Buffer>(
+            ft::MemoryType::MEMORY_GPU, ft::getTensorType<T>(),
+            nccl_embeddings.shape(), nccl_embeddings.getPtr<T>());
+        device_->allGather({{embedding_buf}});
         ft::invokeTransposeAxis012(embeddings.getPtr<T>(),
                                   nccl_embeddings.getPtr<T>(),
                                   tensor_para_.world_size_,
