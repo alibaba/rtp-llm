@@ -1,6 +1,7 @@
 from typing import Optional, List, Dict, Any, Union, Callable, AsyncGenerator
 import logging
 import torch
+import os
 from functools import lru_cache
 from packaging import version
 import json
@@ -95,12 +96,26 @@ class BasicRenderer(CustomChatRenderer):
         except:
             pass
 
+        logging.info(f"found chat template to use: {self.chat_template}")
+        self.default_template_key = os.environ.get("DEFAULT_CHAT_TEMPLATE_KEY", "default")
+        self.default_tool_use_template_key = os.environ.get("DEFAULT_TOOL_USE_TEMPLATE_KEY", "tool_use")
+        self.compiled_template_map: Dict[str, jinja2.Template] = {}
+
         if isinstance(self.chat_template, dict):
-            if 'default' not in self.chat_template:
-                raise Exception('default chat_template not exist: ' + str(self.chat_template.keys()))
-            self.chat_template = self.chat_template['default']
-        logging.info(f"use chat template: [ {self.chat_template} ]  ")
-        self.compiled_template = self._compile_jinja_template(self.chat_template)
+            for key, template in self.chat_template.items():
+                self.compiled_template_map[key] = self._compile_jinja_template(template)
+        elif isinstance(self.chat_template, str):
+            self.compiled_template_map[self.default_template_key] = self._compile_jinja_template(self.chat_template)
+        else:
+            raise Exception(f"chat template [{self.chat_template}] "
+                            f"of type [{type(self.chat_template)}] is not supported.")
+
+        if self.default_template_key not in self.compiled_template_map:
+            raise Exception(f"default template key [{self.default_template_key}] not found "
+                            f"in chat templates: [{self.compiled_template_map.keys()}]")
+        if self.default_tool_use_template_key not in self.compiled_template_map:
+            self.default_tool_use_template_key = self.default_template_key
+        logging.info(f"compiled chat templates to use: {self.compiled_template_map.keys()}")
 
     def get_renderer_info(self) -> RendererInfo:
         renderer_info = super().get_renderer_info()
@@ -119,7 +134,11 @@ class BasicRenderer(CustomChatRenderer):
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         request_dict = json.loads(request.model_dump_json())
-        rendered = self.compiled_template.render(
+        template_key = self.default_tool_use_template_key \
+            if request.functions else self.default_template_key
+        template_key = request.chat_template or template_key
+        template = self.compiled_template_map[template_key]
+        rendered = template.render(
             messages=request_dict['messages'],
             functions=request_dict['functions'],
             json=json,

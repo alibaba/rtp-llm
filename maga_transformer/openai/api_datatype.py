@@ -104,6 +104,7 @@ class ChatCompletionRequest(BaseModel):
     private_request: bool = False
     trace_id: Optional[str] = None
     chat_id: Optional[str] = None
+    chat_template: Optional[str] = None
     debug_info: Optional[bool] = False
     aux_info: Optional[bool] = False
     extend_fields: Optional[Dict[str, Any]] = None # This field is not effective, only for logging.
