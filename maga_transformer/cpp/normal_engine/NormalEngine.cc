@@ -20,7 +20,7 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
     metrics_reporter_(metrics_reporter)
 {
     ft::ftNcclInitialize(tensor_para_, pipeline_para_, params.gpt_init_parameter->tp_size_, params.gpt_init_parameter->pp_size_, params.gpt_init_parameter->nccl_ip_, params.gpt_init_parameter->nccl_port_);
-    executor_.reset(new NormalExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights));
+    executor_.reset(new NormalExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights, metrics_reporter_));
     initCacheManager();
     scheduler_.reset(new FIFOScheduler(params, resource_context_.cache_manager, metrics_reporter));
     (void)startLoop();
@@ -36,7 +36,7 @@ void NormalEngine::initCacheManager() {
     THROW_IF_STATUS_ERROR(result.status());
 
     auto device = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
-    resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device);  
+    resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device, metrics_reporter_);
 }
 
 void NormalEngine::initSystemPrompt() {
@@ -111,7 +111,6 @@ absl::Status NormalEngine::step() {
         RETURN_IF_STATUS_OR_ERROR(streams_status);
         streams = streams_status.value();
         if (streams.empty()) {
-            FT_LOG_WARNING("no query run and sleep");
             return absl::OkStatus();
         }
     }

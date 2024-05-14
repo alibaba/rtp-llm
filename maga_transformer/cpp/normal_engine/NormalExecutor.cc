@@ -60,6 +60,7 @@ ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     StreamGroups stream_groups(streams);
+    reportMetrics(stream_groups);
     auto         model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     auto& model_input = model_input_status.value();
