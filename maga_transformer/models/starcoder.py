@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 from maga_transformer.utils.util import get_config_from_path
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.utils.model_weight import W, WeightInfo, \
-    ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, identity, qkv_transpose, transpose
+    ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, identity, ones, qkv_transpose, transpose
 from maga_transformer.models.gpt import GPT
 from transformers.models.gpt2.tokenization_gpt2_fast import GPT2TokenizerFast
 from maga_transformer.model_factory_register import register_model
@@ -22,10 +22,11 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
         for layer in range(self._num_layers):
             if self._int4_mode or self._sq_int8:
                 w=self._get_hf_4bit_quant_weight_info(layer)
-                layer_weights.append(w)
+            elif self._omni_quant_int8:
+                w = self._get_omni_quant_weight_info(layer)
             else:
                 w = self._get_hf_layer_weight_info(layer)
-                layer_weights.append(w)
+            layer_weights.append(w)
 
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
@@ -59,7 +60,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
         return layer_weights
 
     def _get_hf_4bit_quant_weight_info(self, layer_id: int):
-        orig_weights = [W.pre_ln_gamma, W.attn_qkv_b, W.attn_qkv_b, W.attn_o_b, W.ffn_b1, W.post_ln_beta, W.post_ln_gamma]
+        orig_weights = [W.pre_ln_beta, W.pre_ln_gamma, W.attn_qkv_b, W.attn_o_b, W.ffn_b1, W.post_ln_beta, W.post_ln_gamma]
         layer_quant_weights = self._get_layer_weight_by_names(layer_id, orig_weights)
         layer_quant_weights.extend(
             [
@@ -84,6 +85,30 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
         ])
         return layer_quant_weights
 
+    def _get_omni_quant_weight_info(self, layer_id):
+        orig_weights = [W.pre_ln_beta, W.pre_ln_gamma, W.attn_qkv_b, W.attn_o_b, W.ffn_b1, W.post_ln_beta, W.post_ln_gamma]
+        layer_quant_weights = self._get_layer_weight_by_names(layer_id, orig_weights)
+        layer_quant_weights.extend([
+            WeightInfo(W.attn_qkv_w, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.qweight')], transpose),
+            WeightInfo(W.attn_qkv_b, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.bias')], identity),
+            WeightInfo(W.attn_qkv_s, [CkptWeightInfo('transformer.h.{i}.attn.c_attn.scales')], identity),
+
+            WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qweight', identity)], transpose),
+            WeightInfo(W.attn_o_b, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.bias')], identity),
+            WeightInfo(W.attn_o_s, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.scales')], identity),
+            WeightInfo(W.attn_o_smoother, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.smoother')], transpose),
+            WeightInfo(W.attn_o_shift, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.shift')], transpose),
+
+            WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.qweight', identity)], transpose),
+            WeightInfo(W.ffn_b1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.bias')], identity),
+            WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.scales', identity)], identity),
+
+            WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qweight')], transpose),
+            WeightInfo(W.ffn_b2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.bias')], identity),
+            WeightInfo(W.ffn_s2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.scales')], identity),
+
+            WeightInfo(W.ffn_smoother, [], functools.partial(ones, shape=self._inter_padding_size)), 
+        ])
 
     def _get_layer_weight_by_names(self, layer_id: int, weight_names: List[str]) -> List[WeightInfo]:
         layer_weights = self._get_hf_layer_weight_info(layer_id)
