@@ -34,6 +34,7 @@ cc_library(
         "//src/fastertransformer/models:models",
         "//3rdparty/flash_attention2:flash_attention2_impl",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
+        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
         "@com_google_googletest//:gtest",
     ],
     visibility = ["//visibility:public"],

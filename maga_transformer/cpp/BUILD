@@ -279,6 +279,7 @@ cc_library(
         "//3rdparty:cuda_driver",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
+        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
         "//src/fastertransformer/cuda:allocator_cuda",
