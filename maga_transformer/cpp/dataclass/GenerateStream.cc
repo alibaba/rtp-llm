@@ -3,6 +3,7 @@
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
+#include "src/fastertransformer/th_op/GptInitParameter.h"
 #include <atomic>
 #include <memory>
 
@@ -45,6 +46,12 @@ absl::StatusOr<GenerateOutput> GenerateStream::nextOutput() {
         return absl::InternalError("no output any more");
     }
     return generate_outputs_.getAndPopFront();
+}
+
+bool GenerateStream::needFinishBySPTokens() const {
+    // TODO: support batch
+    int* token_ids_ = (int*)complete_token_ids_->data();
+    return special_tokens_.eos_token_id_ == token_ids_[seq_length_ - 1];
 }
 
 void GenerateStream::cancel() {
@@ -132,7 +139,7 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
     if (generate_output_->aux_info.iter_count == 0) {
         first_token_time_us_ = TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     }
-
+    generate_output_->aux_info.iter_count += 1;
     // # NOTE: new tokens indicate num of newly genearted tokens
     // # typically 1 but can be > 1 under speculative decoding
     // # This differs from new_tokens.shape[-1] under beam search case,
@@ -147,20 +154,18 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
     for (int i = 0; i < batchSize(); ++i) {
         token_ids_[i * complete_token_ids_->shape()[1] + seq_length_] = ((int*)new_tokens->data())[i];
     }
-    for (int i = 0; i < num_new_tokens; i++) {
-        seq_length_ += 1;
-        if (needFinish()) {
-            finished = true;
-            break;
-        }
-    }
+    seq_length_ += num_new_tokens;
+    finished = finished || needFinish();
     if (finished) {
         setFinishedWithoutLock();
     }
     if (not_update_output) {
         return;
     }
-    updateOutput(finished, std::move(hidden_states), std::move(logits), std::move(cum_log_probs), std::move(loss));
+
+    if (isStreaming() || finished) {
+        updateOutput(finished, std::move(hidden_states), std::move(logits), std::move(cum_log_probs), std::move(loss));
+    }
 }
 
 void GenerateStream::updateOutput(bool finished,
@@ -205,7 +210,6 @@ void GenerateStream::updateOutput(bool finished,
     } else {
         generate_output_->aux_info.cum_log_probs = std::nullopt;
     }
-    generate_output_->aux_info.iter_count += 1;
     generate_output_->aux_info.reuse_len = reuse_length_;
     generate_outputs_.push(*generate_output_);
 }

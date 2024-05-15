@@ -106,6 +106,7 @@ absl::Status NormalEngine::trySaveStepError() const {
 
 absl::Status NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setMetricsReporter(metrics_reporter_);
+    stream->setSpecialTokens(*(params_.gpt_init_parameter->special_tokens_));
     FT_LOG_DEBUG("enqueue stream: %s %d", stream->debugString().c_str(), device_->getDeviceProperties().tp_rank);
     return scheduler_->enqueue(stream);
 }

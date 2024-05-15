@@ -16,6 +16,8 @@
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "absl/status/statusor.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include "src/fastertransformer/th_op/GptInitParameter.h"
+
 
 namespace ft = fastertransformer;
 
@@ -24,7 +26,7 @@ namespace rtp_llm {
 class GenerateStream {
 public:
     GenerateStream(const std::shared_ptr<GenerateInput>& query, const ResourceContext& resource_context, int max_seq_len = 2048);
-    ~GenerateStream() {
+    virtual ~GenerateStream() {
         reportMetric();
         generate_outputs_.wakeup();
     }
@@ -56,6 +58,14 @@ public:
 
     std::shared_ptr<GenerateInput> generateInput() const;
 
+    ft::SpecialTokens specialTokens() const {
+        return special_tokens_;
+    }
+
+    void setSpecialTokens(const ft::SpecialTokens& special_tokens) {
+        special_tokens_ = special_tokens;
+    }
+
     const ResourceContext& resourceContext() const {
         return stream_cache_resource_.resourceContext();
     }
@@ -71,6 +81,10 @@ public:
         if (need_release_resource_) {
             stream_cache_resource_.releaseResource();
         }
+    }
+
+    bool isStreaming() const {
+        return generate_input_->generate_config->is_streaming;
     }
 
     int64_t streamId() const {
@@ -232,8 +246,10 @@ public:
     }
 
     bool needFinish() {
-        return seq_length_ >= std::min(max_seq_len_, generate_input_->generate_config->max_new_tokens + generate_input_->inputLength());
+        return seq_length_ >= std::min(max_seq_len_, generate_input_->generate_config->max_new_tokens + generate_input_->inputLength()) || needFinishBySPTokens();
     }
+
+    bool needFinishBySPTokens() const;
 
     void setSeqLength(uint seq_length) {
         seq_length_ = seq_length;
@@ -297,6 +313,7 @@ protected:
     bool                                released_              = false;
     bool                                need_release_resource_ = true;
     kmonitor::MetricsReporterPtr        metrics_reporter_      = nullptr;
+    ft::SpecialTokens                   special_tokens_;
 
     friend class StreamCacheResource;
 };

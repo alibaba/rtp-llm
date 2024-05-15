@@ -45,6 +45,7 @@ public:
     bool                return_logits;
     bool                return_incremental;
     bool                return_hidden_states;
+    bool                is_streaming;
     int                 timeout_ms;
 
     std::string debugString() const {

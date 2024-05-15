@@ -292,6 +292,23 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
     return std::move(model_output);
 }
 
+at::ScalarType getScalarType(const std::string& data_type) {
+    at::ScalarType scalar_type;
+    if (data_type == "fp16") {
+        scalar_type = at::ScalarType::Half;
+
+    } else if (data_type == "bf16") {
+        scalar_type = at::ScalarType::BFloat16;
+
+    } else if (data_type == "fp32") {
+        scalar_type = at::ScalarType::Float;
+
+    } else {
+        FT_LOG_ERROR("datatype not implemented %s", data_type.c_str());
+    }
+    return scalar_type;
+}
+
 ParallelModelWrapper::ParallelModelWrapper(
     const GptInitParameter&                                                 gpt_init_parameter,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
@@ -306,21 +323,20 @@ ParallelModelWrapper::ParallelModelWrapper(
                 gpt_init_parameter, tensor_para, pipeline_para, global_weights, layer_weights); \
     }
 
-    DataType data_type = DataType::TYPE_FP16;
-    switch (data_type) {
-        case DataType::TYPE_FP32:
-            CREATE_INSTANCE(float);
-            break;
-        case DataType::TYPE_FP16:
-            CREATE_INSTANCE(half);
-            break;
-        case DataType::TYPE_BF16:
-            if constexpr (CompileConfig::enable_bf16) {
-                CREATE_INSTANCE(__nv_bfloat16);
-            }
-            break;
-        default:
-            throw std::runtime_error("Wrong tensor type.");
+    switch (getScalarType(gpt_init_parameter.data_type_)) {
+    case at::ScalarType::Float:
+        CREATE_INSTANCE(float);
+        break;
+    case at::ScalarType::Half:
+        CREATE_INSTANCE(half);
+        break;
+    case at::ScalarType::BFloat16:
+        if constexpr (CompileConfig::enable_bf16) {
+            CREATE_INSTANCE(__nv_bfloat16);
+        }
+        break;
+    default:
+        throw std::runtime_error("Wrong tensor type.");
     }
 #undef CREATE_INSTANCE
 }

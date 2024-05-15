@@ -22,6 +22,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->return_incremental             = config_proto->return_incremental();
     generate_config->return_hidden_states           = config_proto->return_hidden_states();
     generate_config->calculate_loss                 = config_proto->calculate_loss();
+    generate_config->is_streaming                   = config_proto->is_streaming();
 
     TRANS_OPTIONAL(top_k);
     TRANS_OPTIONAL(top_p);
@@ -41,9 +42,6 @@ std::shared_ptr<GenerateStream> QueryConverter::transQuery(const ResourceContext
 
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
-    }
-    if (input->has_lora_id()) {
-        generate_input->lora_id.emplace(input->lora_id().value());
     }
     generate_input->prefix_length = input->prefix_length();
     auto device                   = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);

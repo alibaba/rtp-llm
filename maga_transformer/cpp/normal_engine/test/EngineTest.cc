@@ -38,6 +38,8 @@ TEST_F(NormalEngineTest, testSimple) {
     query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
     query->generate_config                 = make_shared<GenerateConfig>();
     query->generate_config->max_new_tokens = 3;
+    query->generate_config->is_streaming   = true;
+
     shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query, engine->resourceContext());
 
     ASSERT_TRUE(engine->enqueue(stream).ok());

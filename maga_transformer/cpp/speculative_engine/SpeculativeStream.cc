@@ -10,6 +10,7 @@ namespace rtp_llm {
 
 SpeculativeStream::SpeculativeStream(const GenerateStreamPtr& stream, uint gen_num_per_circle, size_t vocab_size):
     GenerateStream(stream->generateInput(), stream->resourceContext(), stream->maxSeqLen()), gen_num_per_circle_(gen_num_per_circle) {
+    special_tokens_ = stream->specialTokens();
     target_stream_     = stream;
     target_index_prob_ = device_->allocateBuffer(
         {ft::DataType::TYPE_FP32, {(size_t)stream->tileNum(), gen_num_per_circle, vocab_size}, ft::AllocationType::HOST});
