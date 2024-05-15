@@ -135,7 +135,7 @@ void invokeGenRelativePosBiasV2(T*            relative_position_bias,
                                   algo));
 
     invokeGenericActivation<ReluActivation, T, T>(
-        cpb_mlp_1, cpb_mlp_bias1, nullptr, nullptr, nullptr, nullptr, m, cpb_mlp_out_dim, 0, nullptr, nullptr, stream);
+        cpb_mlp_1, cpb_mlp_bias1, nullptr, nullptr, nullptr, nullptr, m, cpb_mlp_out_dim, 0, nullptr, nullptr, nullptr, stream);
 
     check_cuda_error(cublasGemmEx(cublas_handle,
                                   CUBLAS_OP_T,

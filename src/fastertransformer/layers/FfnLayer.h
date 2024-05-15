@@ -101,6 +101,7 @@ protected:
                            const T*     ia3_weights,
                            const float* activation_in,
                            const float* activation_out,
+                           const T*     activation_scale,
                            const int*   padding_offset,
                            const int    seq_len);
 

@@ -59,6 +59,8 @@ static const std::string ffn_z1 = "ffn_weights.intermediate_weight.zero";
 static const std::string ffn_s1 = "ffn_weights.intermediate_weight.weight_only_quant_scale";
 static const std::string ffn_z3 = "ffn_weights.intermediate_weight3.zero";
 static const std::string ffn_s3 = "ffn_weights.intermediate_weight3.weight_only_quant_scale";
+static const std::string ffn_act_s = "ffn_weights.intermediate_weight2.act_quant_scale";
+
 static const std::string ffn_z2 = "ffn_weights.intermediate_weight2.zero";
 static const std::string ffn_s2 = "ffn_weights.intermediate_weight2.weight_only_quant_scale";
 static const std::string moe_z1 = "partial_moe_weights.intermediate_weight.zero";

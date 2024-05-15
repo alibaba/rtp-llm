@@ -132,6 +132,8 @@ loadWeights(int                                                             pp_s
             gpt_layer_weights[i]->ffn_weights.intermediate_weight.quant_kernel                = maybe_get<int8_t>(weights[i], W::ffn_w1);
             gpt_layer_weights[i]->ffn_weights.intermediate_weight2.quant_kernel               = maybe_get<int8_t>(weights[i], W::ffn_w3);
             gpt_layer_weights[i]->ffn_weights.output_weight.quant_kernel                      = maybe_get<int8_t>(weights[i], W::ffn_w2);
+            gpt_layer_weights[i]->ffn_weights.output_weight.act_scale                         = maybe_get<T>(weights[i], W::ffn_act_s);
+
 
             gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.quant_kernel        = maybe_get<int8_t>(weights[i], W::moe_w1);
             gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.quant_kernel       = maybe_get<int8_t>(weights[i], W::moe_w3);

@@ -242,6 +242,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                       ffn_weights->ia3_weight.kernel,
                       (float*)nullptr,
                       (float*)nullptr,
+                      ffn_weights->output_weight.act_scale,
                       input_tensors->getPtr<int>("padding_offset", nullptr),
                       input_tensors->getVal<int>("seq_len", 1));
     POP_RANGE;
@@ -510,6 +511,7 @@ void FfnLayer<T>::freeBuffer() {
                                  0,                                                                                    \
                                  activation_in,                                                                        \
                                  activation_out,                                                                       \
+                                 activation_scale,                                                                     \
                                  padding_offset,                                                                       \
                                  seq_len,                                                                              \
                                  stream_);
@@ -523,6 +525,7 @@ void FfnLayer<T>::genericActivation(int          layer_id,
                                     const T*     ia3_weights,
                                     const float* activation_in,
                                     const float* activation_out,
+                                    const T*     activation_scale,
                                     const int*   padding_offset,
                                     const int    seq_len) {
     if (ia3_tasks != nullptr) {

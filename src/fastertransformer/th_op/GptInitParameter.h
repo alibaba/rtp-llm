@@ -39,7 +39,7 @@ public:
     tensorrt_llm::common::QuantAlgo toQuantAlgo() const {
         return tensorrt_llm::common::QuantAlgo(weight_bits_, group_size_,
                                                isWeightOnlyPerCol() || isGptq() || isAwq(),
-                                               isSmoothQuant());
+                                               isSmoothQuant() || isOmniQuant());
     }
     bool isWeightOnlyPerCol() const {
         return quant_method_ == WeightOnlyPerCol;

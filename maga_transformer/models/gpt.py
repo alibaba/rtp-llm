@@ -304,4 +304,4 @@ class GPT(BaseModel):
 
         quant_config = config_json.get("quantization_config", None)
         if quant_config is not None:
-            config.quant_algo.setQuantAlgo(quant_config['quant_method'], quant_config["bits"], quant_config["group_size"])
+            config.quant_algo.setQuantAlgo(quant_config['quant_method'], quant_config["bits"], quant_config.get("group_size", 0))

@@ -224,7 +224,7 @@ class ModelWeightsLoader:
                     results.append((layer_id, qzero[0].name, zero))
                     results.append((layer_id, qscale[0].name, scale))
                 except Exception as e:
-                    logging.error(f'load groupwise layer_weight in layer {layer_id} failed: {e}')
+                    logging.error(f'load groupwise layer_weight in layer {layer_id}.{qweight[0].name} failed: {e}')
                     raise e
 
         convert_weight(W.groupwise_attn_weights, self.preprocess_groupwise_weight_params)
@@ -243,7 +243,15 @@ class ModelWeightsLoader:
                 convert_weight(ffn_weight_lists, self.preprocess_moe_groupwise_weight_params)
             else:
                 convert_weight(ffn_weight_lists, self.preprocess_groupwise_weight_params)
-
+        # load act_scales 
+        try:
+            ffn_act_scales_weight = [weight for weight in layer_weights if weight.name == W.ffn_act_s]
+            if len(ffn_act_scales_weight) == 1:
+                ffn_act_scales_tensor = self._load_and_convert_tensor(ffn_act_scales_weight[0], layer_id=layer_id, datatype=torch.float16)
+                ffn_act_scales_tensor = self._split_tensor(ffn_act_scales_weight[0].name, ffn_act_scales_tensor).contiguous().clone().to(device)
+                results.append((layer_id, ffn_act_scales_weight[0].name, ffn_act_scales_tensor))
+        except Exception as e:
+            logging.error(f'load ffn_act_scales_weight in layer {layer_id}.{W.ffn_act_s} failed:{e}')
         return results
 
     def _load_int8_layer_weight(self, layer_weights, layer_id: int, device: str):
@@ -257,7 +265,8 @@ class ModelWeightsLoader:
                     if self._weights_info._is_sparse_head:
                         continue
                     else:
-                        raise Exception(f"not found weight {quant_weight} in layer {layer_id}")
+                        logging.info(f"not found weight {quant_weight} in layer {layer_id}")
+                        continue
                 elif len(qweight) > 1:
                     raise Exception(f"found more than one weight {quant_weight} in layer {layer_id}")
                 try:
@@ -498,7 +507,6 @@ class ModelWeightsLoader:
         qweight = qweight.to(torch.int8)
         if not is_int8:
             qweight = packer(qweight)
-
         qweight_interleaved = preprocessor(qweight, quant_type)
 
         # zero = 0 if qzeros_int32 = -2004318072 torch.int32 for awq

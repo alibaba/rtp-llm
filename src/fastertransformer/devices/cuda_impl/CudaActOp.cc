@@ -32,6 +32,7 @@ namespace fastertransformer {
         0,                          \
         (const float*) nullptr,     \
         (const float*) nullptr,     \
+        (const Dtype*) nullptr,     \
         stream);                    \
 } while (0)
 

@@ -318,6 +318,7 @@ class W:
     ffn_s1 = 'ffn_weights.intermediate_weight.weight_only_quant_scale'
     ffn_z3 = 'ffn_weights.intermediate_weight3.zero'
     ffn_s3 = 'ffn_weights.intermediate_weight3.weight_only_quant_scale'
+    ffn_act_s = 'ffn_weights.intermediate_weight2.act_quant_scale'  # gpt_xx model awq quant act need div scales
     ffn_z2 = 'ffn_weights.intermediate_weight2.zero'
     ffn_s2 = 'ffn_weights.intermediate_weight2.weight_only_quant_scale'
     moe_z1 = 'partial_moe_weights.intermediate_weight.zero'
@@ -359,6 +360,7 @@ class W:
         attn_o_s,
         ffn_s1,
         ffn_s2,
+        ffn_act_s,
         ffn_s3,
         attn_o_smoother,
         attn_o_shift,
@@ -490,6 +492,7 @@ class W:
         ffn_z2: sp_0,
         ffn_s2: sp_0,
         ffn_b2: sp_id,
+        ffn_act_s: sp_0,
         ffn_smoother: sp_0,
         moe_w1: sp_0,
         moe_z1: sp_0,

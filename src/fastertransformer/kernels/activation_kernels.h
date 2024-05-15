@@ -43,6 +43,7 @@ void invokeGenericActivation(T*           out,
                              const int    int8_mode,
                              const float* activation_in,
                              const float* activation_out,
+                             const BT*    activation_scale,
                              const int*   padding_offset,
                              const int    seq_len,
                              cudaStream_t stream);
@@ -59,6 +60,7 @@ void invokeGenericActivation(T*           out,
                              const int    int8_mode,
                              const float* activation_in,
                              const float* activation_out,
+                             const BT*     activation_scale,
                              cudaStream_t stream) {
     invokeGenericActivation<Activation, T, BT>(out,
                                                bias,
@@ -71,6 +73,7 @@ void invokeGenericActivation(T*           out,
                                                int8_mode,
                                                activation_in,
                                                activation_out,
+                                               activation_scale,
                                                (const int*)nullptr,
                                                0,
                                                stream);
@@ -90,7 +93,7 @@ void invokeAddBiasGeluV2(T*           out,
 template<typename T>
 void invokeAddBias(T* out, T const* bias, const int m, const int n, cudaStream_t stream) {
     invokeGenericActivation<IdentityActivation, T, T>(
-        out, bias, nullptr, nullptr, nullptr, nullptr, m, n, 0, nullptr, nullptr, stream);
+        out, bias, nullptr, nullptr, nullptr, nullptr, m, n, 0, nullptr, nullptr, nullptr, stream);
 }
 
 template<typename T>

@@ -217,6 +217,7 @@ __global__ void generic_activation(T*                      out,
                                    const int               int8_mode,
                                    const float* __restrict activation_in,
                                    const float* __restrict activation_out,
+                                   const BT* __restrict    activation_scale,
                                    const int* __restrict padding_offset,
                                    const int seq_len,
                                    int m,
@@ -228,6 +229,7 @@ __global__ void generic_activation(T*                      out,
     const bool with_bias = bias != nullptr;
     const bool with_gate = gated_weights != nullptr;
     const bool with_ia3  = ia3_tasks != nullptr;
+    const bool with_act_scale = activation_scale != nullptr;
 
     using Act_T         = typename Activation<T>::return_type;
     using Float_T       = typename packed_as<float, packed_elems>::type;
@@ -272,7 +274,12 @@ __global__ void generic_activation(T*                      out,
             val            = val * ia3_weights[task * n + (id % n)];
         }
 
-        if (int8_mode != 2) {
+        if (with_act_scale) {
+            const T reg_activation = static_cast<T>(activation_scale[id % n]);
+            val = val / reg_activation;
+        }
+
+        if (int8_mode != 2 ) {
             out[id] = val;
         }
         else {
@@ -295,6 +302,7 @@ void invokeGenericActivation(T*           out,
                              const int    int8_mode,
                              const float* activation_in,
                              const float* activation_out,
+                             const BT*    activation_scale,
                              const int*   padding_offset,
                              const int    seq_len,
                              cudaStream_t stream)
@@ -324,6 +332,7 @@ void invokeGenericActivation(T*           out,
                                                                int8_mode,
                                                                activation_in,
                                                                activation_out,
+                                                               reinterpret_cast<const PBT*>(activation_scale),
                                                                padding_offset,
                                                                seq_len,
                                                                m,
@@ -343,6 +352,7 @@ void invokeGenericActivation(T*           out,
                                                              const int    int8_mode,                                   \
                                                              const float* activation_in,                               \
                                                              const float* activation_out,                              \
+                                                             const BT* activation_scale,                               \
                                                              const int*   padding_offset,                              \
                                                              const int    seq_len,                                     \
                                                              cudaStream_t stream);
@@ -573,6 +583,7 @@ void invokeAddBiasGeluV2(T*           out,
                                                             0,
                                                             (float*)nullptr,
                                                             (float*)nullptr,
+                                                            (T*)nullptr,
                                                             padding_offset,
                                                             seq_len,
                                                             stream);
@@ -603,6 +614,7 @@ void invokeAddBiasGeluV2(T*           out,
                                                             0,
                                                             (float*)nullptr,
                                                             (float*)nullptr,
+                                                            (T*)nullptr,
                                                             padding_offset,
                                                             seq_len,
                                                             stream);
@@ -622,6 +634,7 @@ void invokeAddBiasGeluV2(T*           out,
                                                 0,
                                                 (float*)nullptr,
                                                 (float*)nullptr,
+                                                (T*)nullptr,
                                                 padding_offset,
                                                 seq_len,
                                                 stream);

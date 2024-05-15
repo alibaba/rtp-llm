@@ -65,7 +65,7 @@ void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int6
         quant_method_ = SmoothQuant;
         weight_bits_ = 8;
     } else if (quant_method == "omni_quant") {
-        quant_method_ = SmoothQuant;
+        quant_method_ = OmniQuant;
         weight_bits_ = 8;
     } else {
         throw std::invalid_argument("unknown quant_method: " + quant_method);
