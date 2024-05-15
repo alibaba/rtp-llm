@@ -1,0 +1,35 @@
+load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
+
+cc_library(
+    name = "trt_fused_multihead_attention_impl",
+    srcs = glob([
+        "*.cu",
+        "*.cpp",
+        ]),
+    hdrs = glob([
+        "*.h",
+    ]),
+    deps = [
+        "@cutlass//:cutlass",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+        "//src/fastertransformer/cuda:cuda_utils",
+        "//3rdparty:cuda_driver",
+    ],
+    copts = cuda_copts(),
+    visibility = ["//:__subpackages__"],
+    alwayslink = True,
+)
+
+cc_library(
+    name = "trt_fused_multihead_attention_header",
+    hdrs = glob([
+        "qkvToContext.h",
+    ]),    
+    deps = [        
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",    
+    ],
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],    
+)
