@@ -18,8 +18,9 @@ from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessa
     FinisheReason, DeltaMessage, ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse, \
     DebugInfo
 from maga_transformer.openai.renderers.custom_renderer import RendererParams, \
-    StreamResponseObject, RenderedInputs
+    StreamResponseObject, RenderedInputs, CustomChatRenderer
 from maga_transformer.openai.renderer_factory import ChatRendererFactory
+from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.multimodal_download import DownloadEngine
 
@@ -49,7 +50,10 @@ class OpenaiEndopoint():
             stop_word_ids_list=self.stop_word_ids_list,
         )
 
-        self.chat_renderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)
+        self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)
+        self.template_renderer: CustomChatRenderer = self.chat_renderer \
+            if (type(self.chat_renderer) == BasicRenderer) \
+            else BasicRenderer(self.tokenizer, render_params)
         logging.info(f"chat_renderer [{self.chat_renderer}] is created.")
         extra_stop_word_ids_list = self.chat_renderer.get_all_extra_stop_word_ids_list()
         self.stop_word_ids_list.extend(extra_stop_word_ids_list)
@@ -159,7 +163,8 @@ class OpenaiEndopoint():
         complete_response_collect_func = partial(self._collect_complete_response, debug_info=debug_info)
         return CompleteResponseAsyncGenerator(response_generator(), complete_response_collect_func)
 
-    def _get_debug_info(self, renderered_input: RenderedInputs, gen_config: GenerateConfig) -> DebugInfo:
+    def _get_debug_info(self, renderer: CustomChatRenderer,
+                        renderered_input: RenderedInputs, gen_config: GenerateConfig) -> DebugInfo:
         prompt = self.tokenizer.decode(renderered_input.input_ids)
         return DebugInfo(
             input_prompt=prompt,
@@ -177,7 +182,8 @@ class OpenaiEndopoint():
     def chat_completion(
             self, chat_request: ChatCompletionRequest, raw_request: Request
     ) -> CompleteResponseAsyncGenerator:
-        rendered_input = self.chat_renderer.render_chat(chat_request)
+        renderer = self.template_renderer if chat_request.user_template else self.chat_renderer
+        rendered_input = renderer.render_chat(chat_request)
         input_ids = rendered_input.input_ids
 
         input_images = rendered_input.input_images
@@ -188,9 +194,9 @@ class OpenaiEndopoint():
         else:
             images = []
 
-        debug_info = self._get_debug_info(rendered_input, generate_config) if chat_request.debug_info else None
-
-        choice_generator = self.chat_renderer.generate_choice(
+        debug_info = self._get_debug_info(renderer, rendered_input, generate_config) \
+            if chat_request.debug_info else None
+        choice_generator = renderer.generate_choice(
             input_ids,
             images,
             generate_config,
@@ -201,9 +207,8 @@ class OpenaiEndopoint():
         return self._complete_stream_response(choice_generator, debug_info)
 
     def chat_render(self, chat_request: ChatCompletionRequest) -> DebugInfo:
-        rendered_input = self.chat_renderer.render_chat(chat_request)
-        input_ids = rendered_input.input_ids
-        input_images = rendered_input.input_images
+        renderer = self.template_renderer if chat_request.user_template else self.chat_renderer
+        rendered_input = renderer.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
-        debug_info = self._get_debug_info(rendered_input, generate_config)
+        debug_info = self._get_debug_info(renderer, rendered_input, generate_config)
         return debug_info

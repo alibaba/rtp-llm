@@ -132,12 +132,17 @@ class BasicRenderer(CustomChatRenderer):
         jinja_env.globals["raise_exception"] = raise_exception
         return jinja_env.from_string(chat_template)
 
-    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        request_dict = json.loads(request.model_dump_json())
+    def _get_template(self, request: ChatCompletionRequest) -> jinja2.Template:
+        if request.user_template:
+            return self._compile_jinja_template(request.user_template)
         template_key = self.default_tool_use_template_key \
             if request.functions else self.default_template_key
-        template_key = request.chat_template or template_key
-        template = self.compiled_template_map[template_key]
+        template_key = request.template_key or template_key
+        return self.compiled_template_map[template_key]
+
+    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
+        template = self._get_template(request)
+        request_dict = json.loads(request.model_dump_json())
         rendered = template.render(
             messages=request_dict['messages'],
             functions=request_dict['functions'],
