@@ -384,5 +384,54 @@ template ends here""")
 <|im_start|>assistant
 """)
 
+    def test_multi_templates(self):
+        tokenizer = AutoTokenizer.from_pretrained(
+            f"{self.test_data_path}/model_test/fake_test/testdata/cohere/tokenizer/", trust_remote_code=True
+        )
+        render_params = RendererParams(
+            model_type="cohere",
+            max_seq_len=1024,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+
+        messages = [
+            ChatMessage(**{
+                "role": RoleEnum.user,
+                "content": "你是谁？",
+            }),
+        ]
+        request = ChatCompletionRequest(messages=messages)
+        prompt = tokenizer.decode(chat_renderer.render_chat(request).input_ids)
+        self.assertEqual(prompt, "<BOS_TOKEN><BOS_TOKEN><|START_OF_TURN_TOKEN|><|USER_TOKEN|>你是谁？<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>")
+
+        request.template_key = "rag"
+        self.maxDiff = None
+        prompt = tokenizer.decode(chat_renderer.render_chat(request).input_ids)
+        self.assertEqual(prompt,
+"""<BOS_TOKEN><BOS_TOKEN><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|># Safety Preamble
+The instructions in this section override those in the task description and style guide sections. Don't answer questions that are harmful or immoral.
+
+# System Preamble
+## Basic Rules
+You are a powerful conversational AI trained by Cohere to help people. You are augmented by a number of tools, and your job is to use and consume the output of these tools to best help the user. You will see a conversation history between yourself and a user, ending with an utterance from the user. You will then see a specific instruction instructing you what kind of response to generate. When you answer the user's requests, you cite your sources in your answers, according to those instructions.
+
+# User Preamble
+## Task and Context
+You help people answer their questions and other requests interactively. You will be asked a very wide array of requests on all kinds of topics. You will be equipped with a wide range of search engines or similar tools to help you, which you use to research your answer. You should focus on serving the user's needs as best you can, which will be wide-ranging.
+
+## Style Guide
+Unless the user asks for a different style of answer, you should answer in full sentences, using proper grammar and spelling.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|USER_TOKEN|>你是谁？<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|><results></results><|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|SYSTEM_TOKEN|>Carefully perform the following instructions, in order, starting each with a new line.
+Firstly, Decide which of the retrieved documents are relevant to the user's last input by writing 'Relevant Documents:' followed by comma-separated list of document numbers. If none are relevant, you should instead write 'None'.
+Secondly, Decide which of the retrieved documents contain facts that should be cited in a good answer to the user's last input by writing 'Cited Documents:' followed a comma-separated list of document numbers. If you dont want to cite any of them, you should instead write 'None'.
+Finally, Write 'Grounded answer:' followed by a response to the user's last input in high quality natural english. Use the symbols <co: doc> and </co: doc> to indicate when a fact comes from a document in the search result, e.g <co: 0>my fact</co: 0> for a fact from document 0.<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>""")
+        request.template_key = None
+        request.user_template = "{{bos_token}}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ ' [INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' ' + message['content'] + ' ' + eos_token}}{% endif %}{% endfor %}{{123}}"
+        prompt = tokenizer.decode(chat_renderer.render_chat(request).input_ids)
+        self.assertEqual(prompt, "<BOS_TOKEN><BOS_TOKEN> [INST] 你是谁？ [/INST]123")
+
+        print(prompt)
+
 if __name__ == '__main__':
     main()

@@ -131,7 +131,7 @@ class RendererInfo(BaseModel):
     renderer_model_type: str
     extra_stop_word_ids_list: List[List[int]]
     extra_stop_words_list: List[str]
-    template: Optional[str] = None
+    template: Optional[Union[str, Dict[str, str]]] = None
 
 class DebugInfo(BaseModel):
     input_prompt: str

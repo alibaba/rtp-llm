@@ -134,6 +134,8 @@ class BasicRenderer(CustomChatRenderer):
 
     def _get_template(self, request: ChatCompletionRequest) -> jinja2.Template:
         if request.user_template:
+            if request.template_key:
+                raise ValueError("template_key and user_template can not be used together.")
             return self._compile_jinja_template(request.user_template)
         template_key = self.default_tool_use_template_key \
             if request.functions else self.default_template_key
