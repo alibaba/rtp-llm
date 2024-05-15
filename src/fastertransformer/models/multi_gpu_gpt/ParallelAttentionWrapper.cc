@@ -2,7 +2,7 @@
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
-#include "src/fastertransformer/kernels/activation_kernels.h"
+#include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
@@ -93,6 +93,26 @@ bool ParallelAttentionWrapper<T>::UseTRTFMHA() const {
         use_trt_fmha = false;
     }
     return use_trt_fmha;
+}
+
+// for bert and gpu sm=75
+template<typename T>
+bool ParallelAttentionWrapper<T>::UseOldTRTFMHA() const {
+#ifdef USE_OLD_TRT_FMHA
+    bool use_trt_fmha = CheckUseFMHA();
+    if (!use_trt_fmha) {
+        return false;
+    }
+    if(!std::is_same<T, half>::value){
+        FT_LOG_INFO("OLD TRT FMHA only support half");
+        return false;
+    }
+    auto testRunner = FusedMHARunnerFP16v2(local_head_num_, size_per_head_, get_sm(), q_scaling_);
+    return testRunner.fmha_supported(params_.is_causal_);
+#else
+    FT_LOG_INFO("USE_OLD_TRT_FMHA not enabled by define");
+    return false;
+#endif
 }
 
 template<typename T>
@@ -306,13 +326,13 @@ void ParallelAttentionWrapper<T>::OpenSourceFMHA(
 template<typename T>
 void ParallelAttentionWrapper<T>::preAllocate()
 {
-    FT_LOG_WARNING("use fmha: %s", std::to_string(use_open_source_fmha_ || use_trt_fmha_).c_str());
+    FT_LOG_WARNING("use fmha: %s", std::to_string(UseFMHA()).c_str());
     allocateBuffer(params_.max_generate_batch_size_ + params_.max_context_batch_size_ * params_.max_seq_len_,
                    params_.max_context_batch_size_,
                    params_.max_generate_batch_size_,
                    params_.max_seq_len_,
                    params_.max_seq_len_,
-                   !(use_open_source_fmha_ || use_trt_fmha_),
+                   !UseFMHA(),
                    multi_block_mode_,
                    true);
 }
@@ -730,6 +750,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     const int attention_seq_len_1 = max_context_seq_length;                      // q length
     const int attention_seq_len_2 = max_prompt_length + max_context_seq_length;  // kv length
     const float qk_scale = 1.0f / (sqrtf(params_.size_per_head_ * 1.0f) * q_scaling_);
+    print_bsd(layer_id, "qkv_buf", qkv_buf,  h_token_num, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt, 0, local_hidden_units_rt + 2 * local_hidden_units_kv_rt);
     if (use_trt_fmha_) {
         ContextAttentionParams context_attention_params{qkv_buf,                 // attention_input
                                                         max_context_seq_length,  // max_context_q_len
@@ -744,8 +765,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                                         max_blocks_per_batch,  // max_blocks_per_sequence
                                                         linear_bias_slopes != nullptr};
         TRTFMHA(context_attention_params, stream_);
-    }
-    else if (use_open_source_fmha_) {
+    } else if (use_open_source_fmha_) {
         OpenSourceFMHA(qkv_buf,
                        cu_seqlens,
                        context_batch_size,
@@ -758,6 +778,19 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                        qkv_buf_2,
                        stream_);
         sync_check_cuda_error();
+    } else if (use_old_trt_fmha_) {
+#ifdef USE_OLD_TRT_FMHA
+        FT_CHECK_WITH_INFO(local_head_num == local_head_num_kv, "old flash attention don't support head_num != head_num_kv");
+        if (params_.is_causal_) {
+            dispatcher_fp16->setup_causal_masked_fmha(max_context_seq_length, context_batch_size);
+            dispatcher_fp16->run_causal_masked_fmha(qkv_buf_, cu_seqlens, qkv_buf_2, true, stream_);
+        } else {
+            invokeTransposeAxis12(qkv_buf_t_, qkv_buf, h_token_num, 3, local_head_num, size_per_head_, stream_);
+            auto max_length  = dispatcher_fp16->getSFromMaxSeqLen(max_context_seq_length);
+            dispatcher_fp16->setup(max_length, context_batch_size);
+            dispatcher_fp16->run(qkv_buf_t_, nullptr, cu_seqlens, nullptr, qkv_buf_2, stream_);
+        }
+#endif
     }
     else {
         FT_CHECK_WITH_INFO(attention_mask != nullptr, "attention mask should not be nullptr when not use flash attention");
@@ -993,6 +1026,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     params_(gpt_init_parameter),
     hidden_units_(gpt_init_parameter.hidden_size_),
     local_head_num_(gpt_init_parameter.head_num_ / tensor_para.world_size_),
+    size_per_head_(gpt_init_parameter.size_per_head_),
     local_head_num_kv_(
         gpt_init_parameter.head_num_kv_ == 1 ? 1 : gpt_init_parameter.head_num_kv_ / tensor_para.world_size_),
     local_hidden_units_(gpt_init_parameter.hidden_size_ / tensor_para.world_size_),
@@ -1035,16 +1069,24 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
         }
     }
 #endif
-    use_open_source_fmha_ = UseOpenSourceFMHA();
+    use_open_source_fmha_ = !use_trt_fmha_ && UseOpenSourceFMHA();
     if (use_open_source_fmha_) {
         FT_LOG_INFO("use open source fmha");
     }
+
+#ifdef USE_OLD_TRT_FMHA
+    use_old_trt_fmha_ = !use_trt_fmha_ && !use_open_source_fmha_ && UseOldTRTFMHA();
+    if (use_old_trt_fmha_) {
+        FT_LOG_INFO("use old trt fmha");
+        dispatcher_fp16.reset(new FusedMHARunnerFP16v2(local_head_num_, size_per_head_, get_sm(), q_scaling_));
+    }
+#endif
 }
 
 template<typename T>
 bool ParallelAttentionWrapper<T>::UseFMHA()
 {
-    return use_open_source_fmha_ || use_trt_fmha_;
+    return use_open_source_fmha_ || use_trt_fmha_ || use_old_trt_fmha_;
 }
 
 template<typename T>
@@ -1071,6 +1113,11 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
     qkv_buf_   = (T*)allocator_->reMalloc(qkv_buf_,
                                         sizeof(T) * h_token_num * qkv_merged_size,
                                         false);
+    if (use_old_trt_fmha_ && !params_.is_causal_) {
+        qkv_buf_t_   = (T*)allocator_->reMalloc(qkv_buf_t_,
+                                            sizeof(T) * h_token_num * qkv_merged_size,
+                                            false);
+    }
 
     if (use_kvcache || params_.rotary_embedding_style_ != 0 || !UseFMHA()) {
         q_buf_2_   = (T*)allocator_->reMalloc(q_buf_2_,
@@ -1131,6 +1178,7 @@ void ParallelAttentionWrapper<T>::freeBuffer()
         allocator_->free((void**)(&qkv_buf_3_));
         allocator_->free((void**)(&qkv_buf_2_));
         allocator_->free((void**)(&softmax_lse_));
+        allocator_->free((void**)(&qkv_buf_t_));
 
         if (is_qk_buf_float_ == true) {
             allocator_->free((void**)(&qk_buf_float_));

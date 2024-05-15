@@ -91,6 +91,10 @@ void invokeInputIdsEmbeddingLookupPosEncodingSoftPrompt(inputIdsEmbeddingLookupP
 template<typename T>
 void invokeTransposeAxis012(T* out, T* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
 
+// from [b, s, h, d] to [b, h, s, d]
+template<typename T>
+void invokeTransposeAxis12(T* out, T* in, const int dim0, const int dim1, const int dim2, const int dim_3, cudaStream_t stream);
+
 template<typename T>
 void invokeTransposeAxis01(
     T* out, T* in, const int dim0, const int dim1, cudaStream_t stream);

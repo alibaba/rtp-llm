@@ -10,6 +10,7 @@
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/kernels/quantization_tensor.h"
+#include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
 
 namespace fastertransformer {
 
@@ -20,6 +21,7 @@ private:
 
     const size_t hidden_units_;
     const size_t local_head_num_;
+    const size_t size_per_head_;
     const size_t local_head_num_kv_;
     const size_t local_hidden_units_;
 
@@ -33,12 +35,18 @@ private:
     const std::vector<int64_t> local_layer_head_num_;
     const std::vector<int64_t> local_layer_head_num_kv_;
 
+#ifdef USE_OLD_TRT_FMHA
+    // old trt fmha
+    std::unique_ptr<MHARunner> dispatcher_fp16;
+#endif
+
     // fmha runner
     int              sm_ = getSMVersion();
     Flash_fwd_params flash_fwd_params_;
 
     bool                                              use_trt_fmha_         = false;
     bool                                              use_open_source_fmha_ = false;
+    bool                                              use_old_trt_fmha_     = false;    
     std::unique_ptr<tensorrt_llm::kernels::MHARunner> mFMHARunner;
     bool                                              mFMHAForceFP32Acc = false;
     bool                                              mRemovePadding    = true;
@@ -68,6 +76,7 @@ protected:
     using BaseAttentionLayer<T>::stream_;
     using BaseAttentionLayer<T>::sparse_;
     T*     qkv_buf_              = nullptr;
+    T*     qkv_buf_t_            = nullptr;
     T*     q_buf_2_              = nullptr;
     T*     k_buf_2_              = nullptr;
     T*     v_buf_2_              = nullptr;
@@ -156,6 +165,7 @@ public:
     void Attention(TensorMap* output_tensors, TensorMap* input_tensors, const AttentionWeight<T>* attention_weights);
     bool CheckUseFMHA() const;
     bool UseOpenSourceFMHA() const;
+    bool UseOldTRTFMHA() const;
     bool UseTRTFMHA() const;
     bool UseMultiBlockMode() const;
 
@@ -172,7 +182,7 @@ public:
                         T*           out,
                         cudaStream_t stream);
     
-    bool UseFMHA();
+    bool UseFMHA() override;
 };
 
 }  // namespace fastertransformer
