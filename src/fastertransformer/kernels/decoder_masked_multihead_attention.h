@@ -178,6 +178,10 @@ struct Multihead_attention_params_base {
     int* block_counter = nullptr;
 
     const int* memory_length_per_sample = nullptr;
+
+    bool enable_multi_block_mode(){
+        return seq_len_tile > 1;
+    }
 };
 
 template<typename T, bool USE_CROSS_ATTENTION = false>

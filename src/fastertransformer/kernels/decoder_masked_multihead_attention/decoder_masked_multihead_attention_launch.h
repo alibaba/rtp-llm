@@ -77,6 +77,30 @@ inline size_t smem_size_in_bytes(Multihead_attention_params<T, DO_CROSS_ATTENTIO
     return max(max(max(softmax_sz, red_sz), transpose_rotary_size), out_oi_sz);
 }
 
+template<typename T, int Dh, bool DO_MULTI_BLOCK, bool DO_CROSS_ATTENTION>
+inline size_t smem_size_for_threads(Multihead_attention_params<T, DO_CROSS_ATTENTION>& params, int threads_per_block)
+{
+    using Tk = typename kernel_type_t<T>::Type;
+    auto constexpr threads_per_value_ = threads_per_value<T>(dh_max(Dh));
+    
+    size_t red_sz = 0;
+
+    if (DO_MULTI_BLOCK) {
+        // The number of partial rows to reduce in the final reduction.
+        int rows_per_red = threads_per_block / threads_per_value_;
+        // The amount of storage needed to finalize the outputs.
+        red_sz = rows_per_red * params.hidden_size_per_head * sizeof(Tk) / 2;
+    }
+
+    size_t transpose_rotary_size = 0;
+    if (params.rotary_embedding_dim > 0) {
+        assert(params.rotary_embedding_dim > 0);
+        transpose_rotary_size = 2 * params.rotary_embedding_dim * sizeof(Tk);
+    }
+
+    return max(red_sz, transpose_rotary_size);
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename T, int Dh, bool DO_CROSS_ATTENTION>
@@ -85,33 +109,32 @@ inline void multi_block_grid_setup(dim3&                                        
                                    int                                                blocks_per_sm,
                                    int                                                block_size,
                                    int                                                tlength,
-                                   bool                                               do_multi_block)
+                                   bool                                               do_multi_block,
+                                   int                                                min_seq_len_tile)
 {
     if (!do_multi_block) {
-        params.multi_block_mode = false;
         return;
     }
 
     const int threads_per_value_ = threads_per_value<T>(dh_max(Dh));
 
-    params.seq_len_tile = divUp(params.multi_processor_count * blocks_per_sm, params.batch_size * params.num_heads);
+    // Make sure high occupancy for device
+    const int seq_len_tile_from_occupancy = divUp(params.multi_processor_count * blocks_per_sm, params.batch_size * params.num_heads);
 
     // Make sure that each block at least processes one loop of kv (unroll size is default at 8).
     const int seq_len_per_kv_loop = divUp(block_size, threads_per_value_) * 8;
     const int max_seq_len_tile    = std::min(divUp(tlength + 1, seq_len_per_kv_loop), params.max_seq_len_tile);
 
-    params.seq_len_tile = std::min(params.seq_len_tile, max_seq_len_tile);
+    // force set multi block mode for tlength too large to cause insufficient smem
+    params.seq_len_tile = std::max(std::min(seq_len_tile_from_occupancy, max_seq_len_tile), min_seq_len_tile);
 
-    // We should consider the new timestep.
     params.timesteps_per_block = divUp(tlength + 1, params.seq_len_tile);
-
-    params.multi_block_mode = (params.seq_len_tile > 1);
 
     grid.z = params.seq_len_tile;
 }
 
 #define MMHA_LAUNCH_CHECK(DYNAMIC_THDS_PER_BLOCK)                                                                      \
-    std::size_t const dynamic_smem_sz{smem_size_in_bytes<T, Dh, DO_MULTI_BLOCK>(params, DYNAMIC_THDS_PER_BLOCK)};      \
+    std::size_t const dynamic_smem_sz{smem_size_for_threads<T, Dh, DO_MULTI_BLOCK>(params, DYNAMIC_THDS_PER_BLOCK)};   \
     /* Set 46KB threshold here because we have to take static/driver shared memory into consideration. */              \
     if (dynamic_smem_sz >= 46 * 1024) {                                                                                \
         cudaError_t res = cudaFuncSetAttribute(masked_multihead_attention_kernel<T,                                    \
@@ -210,13 +233,7 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
 {
     dim3 grid{static_cast<unsigned>(params.num_heads), static_cast<unsigned>(params.batch_size), 1};
 
-    const int kernel_total_blocks = params.batch_size * params.num_heads;
-    // Don't tune the block size if batchxhead is large enough.
-    // The max number of warps we can launch per SM is 32 limited by registers.
-    if (kernel_total_blocks >= params.multi_processor_count * 4 && tlength < 16384) {
-        MMHA_KERNEL(THDS_PER_BLOCK, false);
-        return;
-    }
+    int min_seq_len_tile = 0;
 
     // Tune block size based on batchxhead to increase occupancy.
     int num_blocks_per_sm = -1;
@@ -235,12 +252,14 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
         THDS_PER_BLOCK,
         0));
 
+    const int kernel_total_blocks = params.batch_size * params.num_heads;
+
     int block_size_factor =
         min(divUp(params.multi_processor_count * num_blocks_per_sm, kernel_total_blocks), num_blocks_per_sm);
     // Max block size is 1024.
     int dynamic_block_size = min(THDS_PER_BLOCK * block_size_factor, 1024);
 
-    // Check if resources are enough for launch.
+    // MMHA_LAUNCH_CHECK to get max dynamic_block_size. 
     int available_blocks = -1;
     if (dynamic_block_size < 512) {
         MMHA_LAUNCH_CHECK(256);
@@ -253,13 +272,36 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
         MMHA_1024_BLOCKSIZE_CHECK();
     }
 
+    // check smem to decide if force enable multi block mode
+    int device;
+    check_cuda_error(cudaGetDevice(&device));
+    
+    // max smem on device
+    int max_dsmem_sz_on_device = -1;
+    check_cuda_error(cudaDeviceGetAttribute(
+        &max_dsmem_sz_on_device,
+        cudaDevAttrMaxSharedMemoryPerMultiprocessor,
+        device));
+    
+    // required smem for current tlength when not using multi block mode
+    size_t dsmem_smem_sz_for_kernel{smem_size_in_bytes<T, Dh, false>(params, dynamic_block_size)};
+    
+    if(dsmem_smem_sz_for_kernel > max_dsmem_sz_on_device){
+        if (DO_MULTI_BLOCK){
+            min_seq_len_tile = dsmem_smem_sz_for_kernel / max_dsmem_sz_on_device + 1;
+        }
+        else {
+            FT_CHECK_WITH_INFO(false, "Sequence Length is too long for the MMHA kernel (not enough shared memory): %d", tlength);
+        }
+    }
+
     // If blocks with larger block size already fill all SMs, then disable the multi blocks mode.
-    multi_block_grid_setup<T, Dh>(grid, params, available_blocks, dynamic_block_size, tlength, DO_MULTI_BLOCK);
+    multi_block_grid_setup<T, Dh>(grid, params, available_blocks, dynamic_block_size, tlength, DO_MULTI_BLOCK, min_seq_len_tile);
 
     // Launch kernels based on the valid block size.
     switch (dynamic_block_size) {
         case 256:
-            if (params.multi_block_mode) {
+            if (params.enable_multi_block_mode()) {
                 MMHA_KERNEL(256, true);
             }
             else {
@@ -267,7 +309,7 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
             }
             break;
         case 512:
-            if (params.multi_block_mode) {
+            if (params.enable_multi_block_mode()) {
                 MMHA_KERNEL(512, true);
             }
             else {
@@ -275,7 +317,7 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
             }
             break;
         case 1024:
-            if (params.multi_block_mode) {
+            if (params.enable_multi_block_mode()) {
                 MMHA_KERNEL(1024, true);
             }
             else {
