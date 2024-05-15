@@ -45,7 +45,13 @@ public:
 class OpException : public std::exception {
 public:
     OpException(const OpStatus& status)
-    : status_(status) {}
+    : status_(status) {
+        if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
+            fflush(stdout);
+            fflush(stderr);
+            abort();
+        }
+    }
 
     const char* what() const noexcept override {
         std::stringstream ss;
@@ -319,13 +325,17 @@ struct GreedyParams {
     const Buffer& logits;                    // [batch_size, vocab_size_padded]
     const Buffer& input_lengths;             // [batch_size]
     Buffer& token_ids;                       // [max_input_length + 1, batch_size]
+    const size_t step;
 
     const Buffer& top_k;
     const Buffer& top_p;
     const Buffer& temperature;
     OptionalBufferRef random_seed;
     OptionalBufferRef repetition_penalty;
-    OptionalBufferRef length_penalty;
+    OptionalBufferRef min_lengths;
+    OptionalBufferRef top_p_decay;
+    OptionalBufferRef top_p_min;
+    OptionalBufferRef top_p_reset_ids;
 
     OptionalBufferRef cum_log_probs;
     OptionalBufferRef output_log_probs;

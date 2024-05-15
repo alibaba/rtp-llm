@@ -12,10 +12,5 @@ namespace fastertransformer {
     }                                                                        \
 }
 
-#define RUNTIME_ASSERT(predicate) {                                         \
-    if (status != OpStatus::SUCCESS) {                                      \
-        throw OpException(OpStatus);                                        \
-    }                                                                       \
-
 } // namespace fastertransformer
 

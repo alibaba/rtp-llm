@@ -9,7 +9,15 @@ namespace rtp_llm {
 
 Sampler::Sampler(const SamplerInitParams& params)
     : device_(params.device)
-    {};
+    , max_batch_size_(params.max_batch_size)
+    {
+        auto eos_ids_host = device_->allocateBuffer(
+            {DataType::TYPE_INT32, {max_batch_size_}, AllocationType::HOST});
+        std::fill_n(eos_ids_host->data<int32_t>(), max_batch_size_, params.eos_id);
+        eos_ids_ = device_->allocateBuffer(
+            {DataType::TYPE_INT32, {max_batch_size_}, AllocationType::DEVICE});
+        device_->copy({*eos_ids_, *eos_ids_host});
+    };
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     size_t from_batch_idx = 0;
@@ -34,7 +42,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         const auto sample_to_token_idx = from_token_idx + sample_token_batch_size;
 
         auto sample_tokens = device_->allocateBuffer(
-            {input_tokens.type(), {sample_batch_size * current_beam_size, inputs.step}});
+            {input_tokens.type(), {sample_batch_size * current_beam_size, inputs.step + 1}});
         auto sequence_lengths = device_->allocateBuffer(
                 {inputs.sequence_lengths->type(), inputs.sequence_lengths->shape()});
         device_->copy({*sequence_lengths, *inputs.sequence_lengths});
@@ -43,21 +51,31 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         auto sample_logits = inputs.logits->view(from_token_idx, sample_token_batch_size);
         auto sample_cum_log_probs = inputs.cum_log_probs->view(from_batch_idx, sample_batch_size);
 
+#define MAY_GET_BUFFER_VIEW(buffer_ptr) \
+        (buffer_ptr.get() ? buffer_ptr->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer())
+
         if (current_beam_size == 1) {
-            auto batch_random_seeds = inputs.random_seeds.get() ? inputs.random_seeds->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer();
-            auto batch_repetition_penalty = inputs.repetition_penalty.get() ? inputs.repetition_penalty->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer();
-            auto batch_length_penalty = inputs.length_penalty.get() ? inputs.length_penalty->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer();
+            auto random_seeds = MAY_GET_BUFFER_VIEW(inputs.random_seeds);
+            auto repetition_penalty = MAY_GET_BUFFER_VIEW(inputs.repetition_penalty);
+            auto min_lengths = MAY_GET_BUFFER_VIEW(inputs.min_lengths);
+            auto top_p_decay = MAY_GET_BUFFER_VIEW(inputs.top_p_decay);
+            auto top_p_min = MAY_GET_BUFFER_VIEW(inputs.top_p_min);
+            auto top_p_reset_ids = MAY_GET_BUFFER_VIEW(inputs.top_p_reset_ids);
 
             device_->sampleGreedy({
                 sample_logits,
                 *sequence_lengths,
                 *transposed_tokens,
+                inputs.step,
                 *inputs.top_k,
                 *inputs.top_p,
                 *inputs.temperature,
-                inputs.random_seeds ? (OptionalBufferRef)batch_random_seeds : nullopt,
-                inputs.repetition_penalty ? (OptionalBufferRef)batch_repetition_penalty : nullopt,
-                inputs.length_penalty ? (OptionalBufferRef)batch_length_penalty : nullopt,
+                inputs.random_seeds ? (OptionalBufferRef)random_seeds : nullopt,
+                inputs.repetition_penalty ? (OptionalBufferRef)repetition_penalty : nullopt,
+                inputs.min_lengths ? (OptionalBufferRef)min_lengths : nullopt,
+                inputs.top_p_decay ? (OptionalBufferRef)top_p_decay : nullopt,
+                inputs.top_p_min ? (OptionalBufferRef)top_p_min : nullopt,
+                inputs.top_p_reset_ids ? (OptionalBufferRef)top_p_reset_ids : nullopt,
                 sample_cum_log_probs,
                 nullopt, // output_log_probs
                 inputs.index_log_prob.get() ? (OptionalBufferRef)*inputs.index_log_prob: nullopt

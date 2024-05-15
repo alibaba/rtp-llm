@@ -163,7 +163,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     assert(!stream_groups.empty());
     SamplerInputs sampler_inputs;
     int    max_seq_len      = stream_groups.maxSeqLen();
-    sampler_inputs.step     = max_seq_len + 1;
+    sampler_inputs.step     = max_seq_len;
     size_t total_batch_size = stream_groups.totalSamplerBatchSize();
 
     sampler_inputs.top_k         = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
@@ -175,7 +175,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
 
     sampler_inputs.batch_size = total_batch_size;
     sampler_inputs.token_ids = device_->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {total_batch_size, sampler_inputs.step}, ft::AllocationType::HOST}, {});
+            {ft::DataType::TYPE_INT32, {total_batch_size, sampler_inputs.step + 1}, ft::AllocationType::HOST}, {});
 
     int                     batch_idx   = 0;
     int32_t*                token_ids   = sampler_inputs.token_ids->data<int32_t>();

@@ -25,6 +25,7 @@ NormalExecutor::NormalExecutor(
     SamplerInitParams sampler_params;
     device_               = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     sampler_params.device = device_;
+    sampler_params.eos_id = params.gpt_init_parameter->special_tokens_->eos_token_id_;
     sampler_.reset(new Sampler(sampler_params));
 
     model_wrapper_.reset(

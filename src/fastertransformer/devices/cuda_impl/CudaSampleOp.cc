@@ -22,7 +22,10 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     const auto& logits = params.logits;
     const auto batch_size = logits.shape()[0];
     const auto vocab_size_padded = logits.shape()[1];
-    const auto step = params.token_ids.shape()[0] - 1;
+    const auto step = params.step;
+    RUNTIME_ASSERT_OP_ARG((step == params.token_ids.shape()[0] - 1),
+                          "step should equal to token_ids.shape[0] - 1, but %d vs %d",
+                          step, params.token_ids.shape()[0] - 1);
 
     // 1. confirm buffer sizes
     auto& top_k = params.top_k;
@@ -117,8 +120,6 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     auto runtime_top_p_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
     copy({*runtime_top_p_buf, top_p});
 
-    // TODO: integrate TopPSamplingLayer
-
     // 3. prepare kernel inputs
 
     // 3.1. base sampling layer setup
@@ -192,6 +193,10 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
             vocab_size_padded,
             stream_);
     }
+
+    // TODO: apply repetition_penalty in generate_config
+    // TODO: maybe support min_new_tokens (need to consider eos_id)
+    // TODO: support top_p_decay, top_p_min, top_p_reset_ids
 
     // run top_k
     invokeBatchTopKSampling(

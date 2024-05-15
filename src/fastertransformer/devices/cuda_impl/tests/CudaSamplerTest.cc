@@ -18,10 +18,10 @@ TEST_F(CudaSamplerTest, testTopK) {
         0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
         0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
     });
-    int32_t step = 5; // also max_input_length
+    size_t step = 5; // also max_input_length
     BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
     // BufferPtr finished = createBuffer<bool>({1}, {0});
-    BufferPtr output_token_ids = createBuffer<int32_t>({(uint)step + 1, batch_size}, {
+    BufferPtr output_token_ids = createBuffer<int32_t>({step + 1, batch_size}, {
         100, 1, 1, 1,
         1, 1, 0, 0,
         1, 0, 1, 0,
@@ -35,7 +35,6 @@ TEST_F(CudaSamplerTest, testTopK) {
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
 
     BufferPtr repetition_penalty = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
-    BufferPtr length_penalty = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
     BufferPtr rand_seed = createBuffer<int64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
 
     auto top_k = createBuffer<int32_t>({4}, {1, 1, 2, 2}, AllocationType::HOST);
@@ -43,10 +42,10 @@ TEST_F(CudaSamplerTest, testTopK) {
     auto temperture = createBuffer<float>({4}, {1.0, 1.0, 10.0, 10.0}, AllocationType::HOST);
 
     GreedyParams params({
-        *logits, *input_lengths, *output_token_ids,
+        *logits, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
-        *repetition_penalty, *length_penalty,
-        *cum_log_probs, nullopt
+        *repetition_penalty, nullopt, nullopt, nullopt, nullopt,
+        *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);
     sync_check_cuda_error();
@@ -71,10 +70,10 @@ TEST_F(CudaSamplerTest, testTopP) {
         0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
         0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
     });
-    int32_t step = 5; // also max_input_length
+    size_t step = 5; // also max_input_length
     BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
     // BufferPtr finished = createBuffer<bool>({1}, {0});
-    BufferPtr output_token_ids = createBuffer<int32_t>({(uint)step + 1, batch_size}, {
+    BufferPtr output_token_ids = createBuffer<int32_t>({step + 1, batch_size}, {
         100, 1, 1, 1,
         1, 1, 0, 0,
         1, 0, 1, 0,
@@ -88,7 +87,6 @@ TEST_F(CudaSamplerTest, testTopP) {
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
 
     BufferPtr repetition_penalty = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
-    BufferPtr length_penalty = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
     BufferPtr rand_seed = createBuffer<int64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
 
     auto top_k = createBuffer<int32_t>({4}, {0, 0, 0, 0}, AllocationType::HOST);
@@ -96,10 +94,10 @@ TEST_F(CudaSamplerTest, testTopP) {
     auto temperture = createBuffer<float>({4}, {0.01, 0.5, 0.9, 0.9}, AllocationType::HOST);
 
     GreedyParams params({
-        *logits, *input_lengths, *output_token_ids,
+        *logits, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
-        *repetition_penalty, *length_penalty,
-        *cum_log_probs, nullopt
+        *repetition_penalty, nullopt, nullopt, nullopt, nullopt,
+        *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);
     sync_check_cuda_error();

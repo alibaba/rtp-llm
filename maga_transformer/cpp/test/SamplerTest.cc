@@ -29,9 +29,9 @@ TEST_F(SamplerTest, testSimple) {
         0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93, 0.92,
     });
 
-    int32_t step = 4; // also max_input_length
+    int32_t step = 3; // also max_input_length
     // BufferPtr finished = createBuffer<bool>({1}, {0});
-    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, (uint)step}, {
+    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, (uint)step + 1}, {
         1, 0, 0, 0,
         1, 1, 0, 0,
         1, 1, 2, 0,
@@ -62,6 +62,9 @@ TEST_F(SamplerTest, testSimple) {
         move(top_k),
         move(top_p),
         move(temperature),
+        nullptr,
+        nullptr,
+        nullptr,
         nullptr,
         nullptr,
         nullptr,

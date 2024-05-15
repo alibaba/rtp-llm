@@ -7,8 +7,12 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
+static const size_t DEFAULT_MAX_BATCH_SIZE = 256;
+
 struct SamplerInitParams {
     ft::DeviceBase* device;
+    int32_t eos_id;
+    size_t max_batch_size = DEFAULT_MAX_BATCH_SIZE;
 };
 
 struct SamplerInputs {
@@ -25,7 +29,10 @@ public:
     ft::BufferPtr temperature;         // shape: [batch_size]
     ft::BufferPtr random_seeds;        // shape: [batch_size]
     ft::BufferPtr repetition_penalty;  // shape: [batch_size]
-    ft::BufferPtr length_penalty;      // shape: [batch_size]
+    ft::BufferPtr min_lengths;         // shape: [batch_size]
+    ft::BufferPtr top_p_decay;         // shape: [batch_size]
+    ft::BufferPtr top_p_min;           // shape: [batch_size]
+    ft::BufferPtr top_p_reset_ids;     // shape: [batch_size]
 
     ft::BufferPtr kv_cache_blocks;     // shape: [batch_size * num_beams, block_length], int64 block pointers
     mutable ft::BufferPtr cum_log_probs;       // shape: [batch_size * num_beams]
@@ -50,6 +57,8 @@ public:
 
 private:
     ft::DeviceBase* device_;
+    size_t max_batch_size_;
+    ft::BufferPtr eos_ids_;
 };
 
 }  // namespace rtp_llm
