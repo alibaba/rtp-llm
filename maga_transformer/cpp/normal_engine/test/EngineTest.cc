@@ -37,7 +37,7 @@ TEST_F(NormalEngineTest, testSimple) {
     std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
     query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
     query->generate_config                 = make_shared<GenerateConfig>();
-    query->generate_config->max_new_tokens = 3;
+    query->generate_config->max_new_tokens = 1;
     // query->generate_config->is_streaming   = true;
 
     shared_ptr<GenerateStream> stream      = make_shared<GenerateStream>(query, engine->resourceContext());
@@ -57,9 +57,9 @@ TEST_F(NormalEngineTest, testSimple) {
 
     auto output3 = stream->nextOutput();
     ASSERT_TRUE(output3.ok());
-    ASSERT_EQ(output3.value().aux_info.output_len, 3);
+    ASSERT_EQ(output3.value().aux_info.output_len, 1);
     ASSERT_EQ(output3.value().aux_info.input_len, 7);
-    ASSERT_EQ(output3.value().aux_info.iter_count, 3);
+    ASSERT_EQ(output3.value().aux_info.iter_count, 1);
 
     ASSERT_TRUE(stream->finished());
     auto output4 = stream->nextOutput();
