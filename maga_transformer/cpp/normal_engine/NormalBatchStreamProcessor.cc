@@ -3,6 +3,7 @@
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "maga_transformer/cpp/utils/KvCacheUtils.h"
 #include "src/fastertransformer/core/Types.h"
+#include "maga_transformer/cpp/utils/TimeUtility.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include <cstring>
 
@@ -161,12 +162,12 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     sampler_inputs.step       = max_seq_len + 1;
     size_t total_batch_size = stream_groups.totalSamplerBatchSize();
 
-    sampler_inputs.top_k      = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.top_p      = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.temperature = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.num_beams  = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.cum_log_probs  = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}}, {});
-
+    sampler_inputs.top_k         = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.top_p         = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.temperature   = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.num_beams     = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.random_seeds  = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.cum_log_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}}, {});
 
     sampler_inputs.batch_size = total_batch_size;
     sampler_inputs.token_ids = device_->allocateBuffer(
@@ -183,6 +184,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     float* top_p              = sampler_inputs.top_p->data<float>();
     float* temperature        = sampler_inputs.temperature->data<float>();
     uint64_t* num_beams       = sampler_inputs.num_beams->data<uint64_t>();
+    uint64_t* random_seeds    = sampler_inputs.random_seeds->data<uint64_t>();
     for (auto& stream : all_streams) {
         const auto& complete_token_ids = stream->completeTokenIds();
         auto        complete_seq_len   = complete_token_ids->shape()[1];
@@ -190,9 +192,10 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
         auto        current_batch_size = stream->batchSize();
         for (int i = 0; i < current_batch_size; ++i) {
             num_beams[batch_idx]        = 1;
-            top_k[i]                    = stream->generateConfig()->top_k.value_or(0);
-            top_p[i]                    = stream->generateConfig()->top_p.value_or(0.95);
-            temperature[i]              = stream->generateConfig()->temperature.value_or(1.0);
+            random_seeds[batch_idx]     = TimeUtility::currentTimeInMicroSeconds();
+            top_k[batch_idx]            = stream->generateConfig()->top_k.value_or(0);
+            top_p[batch_idx]            = stream->generateConfig()->top_p.value_or(0.95);
+            temperature[batch_idx]      = stream->generateConfig()->temperature.value_or(1.0);
             sequence_lengths[batch_idx] = stream->seqLength();
             memcpy(sampler_inputs.token_ids->dataWithOffset<int32_t>((batch_idx) * sampler_inputs.step),
                    complete_token_ids->dataWithOffset<int32_t>(i * complete_seq_len),

@@ -127,7 +127,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         if (seeds.size() == 1) {
             invokeCurandInitialize(
                 (curandState_t *)curandstate_buf->data(), batch_size,
-                seeds.data<int64_t>()[0], stream_);
+                seeds.data<uint64_t>()[0], stream_);
         } else {
             assert(seeds.size() == batch_size);
             copy({*random_seeds_buf, seeds});

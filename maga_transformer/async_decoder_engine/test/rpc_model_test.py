@@ -4,6 +4,7 @@ import socket
 import random
 import torch
 from contextlib import closing
+import unittest
 from unittest import TestCase, main
 from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.test.model_test.test_util.fake_model_loader import FakeModelLoader
