@@ -28,8 +28,9 @@ TEST_F(CudaSamplerTest, testTopK) {
         1, 0, 0, 0, 0, 0,
     });
 
+    // TODO: test lengths
     BufferPtr input_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
-    BufferPtr sequence_lengths = createBuffer<int32_t>({1}, {-1});
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
 
     BufferPtr repetition_penalty = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
@@ -40,7 +41,7 @@ TEST_F(CudaSamplerTest, testTopK) {
     auto temperture = createBuffer<float>({4}, {1.0, 1.0, 10.0, 10.0}, AllocationType::HOST);
 
     GreedyParams params({
-        *logits, *input_lengths, *output_token_ids, step,
+        *logits, *sequence_lengths, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
         *repetition_penalty, nullopt, nullopt, nullopt, nullopt, nullopt,
         *cum_log_probs, nullopt, nullopt
@@ -79,7 +80,7 @@ TEST_F(CudaSamplerTest, testTopP) {
     });
 
     BufferPtr input_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
-    BufferPtr sequence_lengths = createBuffer<int32_t>({1}, {-1});
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
 
     BufferPtr repetition_penalty = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
@@ -90,7 +91,7 @@ TEST_F(CudaSamplerTest, testTopP) {
     auto temperture = createBuffer<float>({4}, {0.01, 0.5, 0.9, 0.9}, AllocationType::HOST);
 
     GreedyParams params({
-        *logits, *input_lengths, *output_token_ids, step,
+        *logits, *sequence_lengths, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
         *repetition_penalty, nullopt, nullopt, nullopt, nullopt, nullopt,
         *cum_log_probs, nullopt, nullopt

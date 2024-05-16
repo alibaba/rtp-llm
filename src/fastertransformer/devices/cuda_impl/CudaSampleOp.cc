@@ -218,10 +218,11 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                 batch_size, // local_batch_size
                 vocab_size_padded,
                 params.input_lengths.data<int32_t>(),
-                step, // max_input_length
-                step,
+                step - 1, // max_input_length
+                step - 1, // step
                 repetition_penalty_type,
                 stream_);
+            // NOTE: here step uses step - 1 is to use same input_lengths as passed into ModelInputs.
         }
     }
 

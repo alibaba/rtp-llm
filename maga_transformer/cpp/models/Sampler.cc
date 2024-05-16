@@ -41,12 +41,14 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         const auto sample_seq_num = sample_batch_size * current_beam_size;
         const auto sample_to_seq_idx = from_seq_idx + sample_seq_num;
 
-        auto sequence_lengths = device_->allocateBuffer(
-                {inputs.sequence_lengths->type(), inputs.sequence_lengths->shape()});
-        device_->copy({*sequence_lengths, *inputs.sequence_lengths});
-
         auto sample_tokens = input_tokens.view(from_seq_idx, sample_seq_num);
         auto sample_logits = inputs.logits->view(from_seq_idx, sample_seq_num);
+        auto input_lengths = inputs.input_lengths->view(from_batch_idx, sample_batch_size);
+        const auto decoder_batch_size = inputs.sequence_lengths->shape()[0];
+        auto sequence_lengths = from_batch_idx < decoder_batch_size
+            ? inputs.sequence_lengths->view(from_batch_idx,
+                                            min(sample_batch_size, decoder_batch_size - from_batch_idx))
+            : Buffer::emptyBuffer();
         auto sample_cum_log_probs = inputs.cum_log_probs->view(from_batch_idx, sample_batch_size);
 
 #define MAY_GET_BUFFER_VIEW(buffer_ptr) \
@@ -62,7 +64,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
             device_->sampleGreedy({
                 sample_logits,
-                *sequence_lengths,
+                sequence_lengths,
+                input_lengths,
                 sample_tokens,
                 inputs.step,
                 *inputs.top_k,

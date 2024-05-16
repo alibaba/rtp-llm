@@ -324,6 +324,7 @@ struct FfnLayerParams {
 struct GreedyParams {
     const Buffer& logits;                    // [batch_size, vocab_size_padded]
     const Buffer& input_lengths;             // [batch_size]
+    const Buffer& sequence_lengths;          // [batch_size]
     Buffer& token_ids;                       // [batch_size, max_input_length + 1]
     const size_t step;
 
