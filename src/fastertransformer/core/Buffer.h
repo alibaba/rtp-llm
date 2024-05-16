@@ -61,7 +61,33 @@ public:
     Buffer view(size_t offset, size_t size) const; // only from 0-d
     Buffer operator[](size_t offset) const;
 
-    std::string debugString() const;
+    std::string debugString() const {
+        return debugStringMeta();
+    }
+
+    template<typename T>
+    std::string debugStringWithData() const {
+        return debugStringMeta() + ", " + debugDataString<T>(size());
+    }
+
+    template<typename T>
+    std::string debugStringWithData(size_t count) const {
+        return debugStringMeta() + ", " + debugDataString<T>(count);
+    }
+
+private:
+    template<typename T>
+    std::string debugDataString(size_t count) const {
+        auto base = data<T>();
+        std::ostringstream oss;
+        auto data_size = std::min(count, size());
+        for (size_t i = 0; i < data_size; i++) {
+            oss << base[i] << ", ";
+        }
+        return "BufferData Detail(" + oss.str() + ")";
+    }
+
+    std::string debugStringMeta() const;
 
 private:
     MemoryType          where_;

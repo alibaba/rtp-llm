@@ -95,6 +95,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
 struct GptModelOutputs {
     ft::BufferPtr logits;
     ft::BufferPtr hidden_states;
+    ft::BufferPtr all_hidden_states;
 };
 
 class GptModel {

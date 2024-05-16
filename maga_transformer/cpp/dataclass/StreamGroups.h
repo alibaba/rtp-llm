@@ -29,7 +29,7 @@ public:
             } else {
                 decode_streams_.push_back(stream);
                 model_execute_token_size_ += stream->currentExecuteTokenSize();
-                total_model_batch_size_ += 1;
+                total_model_batch_size_ += stream->batchSize();
                 total_sampler_batch_size_ += stream->batchSize();
                 max_block_size_ = std::max(max_block_size_, stream->maxBlockSize());
                 max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());

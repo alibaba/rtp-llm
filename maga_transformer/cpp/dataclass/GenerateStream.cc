@@ -22,7 +22,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const Res
     begin_time_us_      = TimeUtility::currentTimeInMicroSeconds();
     device_             = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     complete_token_ids_ = device_->allocateBuffer(
-        {ft::DataType::TYPE_INT32, {(size_t)numBeams(), (size_t)max_seq_len}, ft::AllocationType::HOST}, {});
+        {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len}, ft::AllocationType::HOST}, {});
+    // TODO(xinfei.sxf) copy batch
     memcpy(complete_token_ids_->data(), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
     updatePrefix(resource_context.system_prompt);
 
@@ -128,10 +129,9 @@ vector<int> GenerateStream::currentExecuteTokens() const {
 void GenerateStream::update(ft::BufferPtr&           new_tokens,
                             int                      num_new_tokens,
                             bool                     finished,
-                            optional<ft::BufferPtr> hidden_states,
-                            optional<ft::BufferPtr> logits,
-                            optional<ft::BufferPtr> cum_log_probs,
-                            optional<ft::BufferPtr> loss,
+                            optional<ft::BufferPtr>  hidden_states,
+                            optional<ft::BufferPtr>  logits,
+                            optional<ft::BufferPtr>  cum_log_probs,
                             bool not_update_output) {
     if (stoppedWithoutLock()) {
         return;
@@ -164,15 +164,14 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
     }
 
     if (isStreaming() || finished) {
-        updateOutput(finished, std::move(hidden_states), std::move(logits), std::move(cum_log_probs), std::move(loss));
+        updateOutput(finished, std::move(hidden_states), std::move(logits), std::move(cum_log_probs));
     }
 }
 
 void GenerateStream::updateOutput(bool finished,
                                   optional<ft::BufferPtr> hidden_states,
                                   optional<ft::BufferPtr> logits,
-                                  optional<ft::BufferPtr> cum_log_probs,
-                                  optional<ft::BufferPtr> loss) {
+                                  optional<ft::BufferPtr> cum_log_probs) {
     size_t output_len = seq_length_ - inputLength();
     generate_output_->output_ids =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)batchSize(), output_len}, ft::AllocationType::HOST}, {});
@@ -195,8 +194,12 @@ void GenerateStream::updateOutput(bool finished,
     if (generate_input_->generate_config->return_hidden_states) {
         generate_output_->hidden_states = std::move(hidden_states.value());
     }
-    if (generate_input_->generate_config->calculate_loss) {
-        generate_output_->loss = std::move(loss.value());
+    if (generate_input_->generate_config->calculate_loss == 1) {
+        auto x = device_->allocateBuffer(
+        {ft::DataType::TYPE_FP32, {1}, ft::AllocationType::HOST}, {});
+        // TODO(xinfei.sxf) fix this loss
+        // *((float*)x->data()) = 1.0f;
+        generate_output_->loss = std::move(x);
     }
 
     generate_output_->finished              = finished;

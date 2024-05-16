@@ -6,6 +6,7 @@ import grpc
 
 from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import ModelRpcServiceStub
 from maga_transformer.models.base_model import GenerateInput, GenerateOutput, AuxInfo
+from maga_transformer.utils.util import AtomicCounter
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import TensorPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateConfigPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateInputPB
@@ -15,6 +16,7 @@ import numpy as np
 import torch
 from maga_transformer.distribute.worker_info import g_master_info
 
+request_counter = AtomicCounter()
 
 def trans_option(pb_object, py_object, name):
     if getattr(py_object, name):
@@ -23,6 +25,7 @@ def trans_option(pb_object, py_object, name):
 
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
+    input_pb.request_id = request_counter.increment()
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     generate_config_pb = GenerateConfigPB()
     generate_config_pb = input_pb.generate_config

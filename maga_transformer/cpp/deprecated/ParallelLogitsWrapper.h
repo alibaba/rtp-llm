@@ -35,7 +35,7 @@ public:
     void allocateBuffer(size_t h_token_num);
     void allocateBuffer() override{};
     void freeBuffer() override;
-    void forward(ft::Tensor& embeddings, const ft::Tensor last_hidden_states);
+    void forward(ft::Tensor& logits, const ft::Tensor last_hidden_states);
 };
 
 }  // namespace rtp_llm

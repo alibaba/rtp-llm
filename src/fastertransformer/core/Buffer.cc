@@ -121,7 +121,7 @@ Buffer Buffer::operator[](size_t offset) const {
     return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), nullptr);
 }
 
-std::string Buffer::debugString() const {
+std::string Buffer::debugStringMeta() const {
     std::string debugStr = "Buffer( ";
     debugStr += "where=" + std::to_string(where_) + ", ";
     debugStr += "type=" + std::to_string(type_) + ", ";

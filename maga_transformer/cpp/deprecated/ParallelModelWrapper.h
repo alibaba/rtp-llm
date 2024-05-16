@@ -37,7 +37,7 @@ public:
             const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
             const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights);
     ~ParallelModelWrapperImpl();
-    void                             allocateBuffer(size_t total_batch_size, size_t h_token_num);
+    void                             allocateBuffer(size_t total_batch_size, size_t h_token_num, std::unique_ptr<GptModelOutputs>& model_output);
     void                             freeBuffer();
     void                             initialize();
     bool                             useFMHA() override;

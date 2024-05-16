@@ -261,14 +261,12 @@ public:
                 std::optional<ft::BufferPtr> hidden_states,
                 std::optional<ft::BufferPtr> logits,
                 std::optional<ft::BufferPtr> cum_log_probs,
-                std::optional<ft::BufferPtr> loss,
                 bool not_update_output = false);
 
     void updateOutput(bool finished,
                       std::optional<ft::BufferPtr> hidden_states,
                       std::optional<ft::BufferPtr> logits,
-                      std::optional<ft::BufferPtr> cum_log_probs,
-                      std::optional<ft::BufferPtr> loss);
+                      std::optional<ft::BufferPtr> cum_log_probs);
 
     void setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {
         metrics_reporter_ = metrics_reporter;

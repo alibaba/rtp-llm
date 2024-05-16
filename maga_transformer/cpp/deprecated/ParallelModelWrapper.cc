@@ -88,11 +88,18 @@ ParallelModelWrapperImpl<T>::~ParallelModelWrapperImpl() {
 }
 
 template<typename T>
-void ParallelModelWrapperImpl<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num) {
+void ParallelModelWrapperImpl<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num, std::unique_ptr<GptModelOutputs>& model_output) {
     size_t hidden_units = params_.hidden_size_;
-    all_hidden_states_  = (T*)allocator_->reMalloc(all_hidden_states_, sizeof(T) * h_token_num * hidden_units, true);
-    last_hidden_states_ =
-        (T*)allocator_->reMalloc(last_hidden_states_, sizeof(T) * total_batch_size * hidden_units, true);
+    const auto& dtype = getTensorType<T>();
+    model_output->hidden_states = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
+        {dtype, {(size_t)total_batch_size, (size_t)hidden_units}, ft::AllocationType::DEVICE},
+        {});
+    model_output->all_hidden_states = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
+        {dtype, {(size_t)h_token_num, (size_t)hidden_units}, ft::AllocationType::DEVICE},
+        {});
+    last_hidden_states_ = (T*)model_output->hidden_states->data();
+    all_hidden_states_  = (T*)model_output->all_hidden_states->data();
+    
     combo_tokens_   = (int*)allocator_->reMalloc(combo_tokens_, sizeof(int) * h_token_num, true);
     padding_offset_ = reinterpret_cast<int*>(allocator_->reMalloc(padding_offset_, sizeof(int) * (h_token_num), false));
     cu_seqlens_ =
@@ -161,7 +168,8 @@ template<typename T>
 std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_request) {
     const uint   total_batch_size = model_request.generate_batch_size + model_request.context_batch_size;
     const size_t h_token_num      = model_request.combo_tokens->shape()[0];
-    allocateBuffer(total_batch_size, h_token_num);
+    std::unique_ptr<GptModelOutputs> model_output = make_unique<GptModelOutputs>();
+    allocateBuffer(total_batch_size, h_token_num, model_output);
     assert(params_.head_num_ % tensor_para_.world_size_ == 0);
     const int    local_head_num      = params_.head_num_ / tensor_para_.world_size_;
     const size_t hidden_units        = params_.head_num_ * params_.size_per_head_;
@@ -188,7 +196,6 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
                               ft::DataType::TYPE_INT64,
                               model_request.kv_cache_blocks->shape(),
                               model_request.kv_cache_blocks->data());
-    std::unique_ptr<GptModelOutputs> model_output = make_unique<GptModelOutputs>();
     model_output->logits                          = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
         {ft::DataType::TYPE_FP32, {(size_t)total_batch_size, (size_t)params_.vocab_size_}, ft::AllocationType::DEVICE},
         {});

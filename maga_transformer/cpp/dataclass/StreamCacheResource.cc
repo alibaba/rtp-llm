@@ -12,14 +12,12 @@ void StreamCacheResource::releaseResource() {
     if (!need_release_resource_) {
         return ;
     }
-
-    FT_LOG_DEBUG("stream [%ld] release resource", stream_->streamId());
-
     // for test
     if (!resource_context_.cache_manager) {
         return;
     }
     if (!kv_cache_block_addr_.k_ptr.empty()) {
+        FT_LOG_DEBUG("stream [%ld] release resource", stream_->streamId());
         for (auto& batch : kv_cache_block_addr_.k_ptr) {
             const auto& blocks = batch[0];
             if (resource_context_.reuse_cache) {

@@ -47,9 +47,10 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
             FT_LOG_DEBUG("req:%ld generate error %s", request->request_id(), output_status.status().ToString().c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, output_status.status().ToString());
         }
-        FT_LOG_DEBUG("req:%ld generate next output suc", request->request_id());
+        FT_LOG_DEBUG("req:%ld generate next output success", request->request_id());
         GenerateOutputPB output_pb;
         QueryConverter::transResponse(&output_pb, &(output_status.value()));
+        // TODO(xinfei.sxf) 处理write的返回值
         writer->Write(output_pb);
     }
     FT_LOG_DEBUG("req:%ld generate over", request->request_id());

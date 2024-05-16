@@ -39,7 +39,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
 
 std::shared_ptr<GenerateStream> QueryConverter::transQuery(const ResourceContext& resource_context, const GenerateInputPB* input) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
-
+    generate_input->request_id = input->request_id();
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
     }

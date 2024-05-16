@@ -47,6 +47,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     for (auto& stream : decode_streams) {
         auto currentTokens      = stream->currentExecuteTokens();
         auto current_batch_size = stream->batchSize();
+        // TODO(xinfei.sxf) consider batch
         memcpy(merged_tokens + batch_idx, currentTokens.data(), currentTokens.size() * sizeof(int));
         auto kv_cache = stream->kvCache();
         FT_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
@@ -159,7 +160,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     assert(!stream_groups.empty());
     SamplerInputs sampler_inputs;
     int    max_seq_len      = stream_groups.maxSeqLen();
-    sampler_inputs.step       = max_seq_len + 1;
+    sampler_inputs.step     = max_seq_len + 1;
     size_t total_batch_size = stream_groups.totalSamplerBatchSize();
 
     sampler_inputs.top_k         = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
@@ -202,12 +203,15 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
                    seq_len * sizeof(int));
             batch_idx += 1;
         }
+
+        FT_LOG_DEBUG("stream [%d], complete_token_ids = [%s]\n", stream->streamId(), complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
+        FT_LOG_DEBUG("stream [%d], sampler_inputs = [%s]\n", stream->streamId(), complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
     }
+
     sampler_inputs.logits.reset(new ft::Buffer(ft::MemoryType::MEMORY_GPU,
                                                ft::DataType::TYPE_FP32,
                                                model_output.logits->shape(),
                                                model_output.logits->data()));
-
     return sampler_inputs;
 }
 
@@ -227,11 +231,11 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         auto          current_batch_size = stream->batchSize();
         ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)current_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
         for (int i = 0; i < current_batch_size; ++i) {
-            memcpy(new_tokens->dataWithOffset<int32_t>(i * 1), new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1), sizeof(int32_t));
+            memcpy(new_tokens->dataWithOffset<int32_t>(i), new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1), sizeof(int32_t));
             batch_idx += 1;
         }
-        stream->update(new_tokens, 1, false, nullopt, nullopt, nullopt, nullopt);
-
+        FT_LOG_DEBUG("stream [%d], new_tokens = [%s]\n", stream->streamId(), new_tokens->debugStringWithData<int32_t>(step).c_str());
+        stream->update(new_tokens, 1, false, nullopt, nullopt, nullopt);
     }
     return absl::OkStatus();
 }

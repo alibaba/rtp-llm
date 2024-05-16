@@ -120,7 +120,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
     list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         if (evaluateNewStream(new_streams, *it)) {
-            FT_LOG_DEBUG("stream [%ld] add to new queue", (*it)->streamId());
+            FT_LOG_DEBUG("stream [%ld %p] add to new queue", (*it)->streamId(), (*it).get());
             new_streams.emplace_back(*it);
             it = waiting_streams_.erase(it);
         } else if (running_streams_.empty() && new_streams.empty()) {
@@ -129,7 +129,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
             (*it)->setStop("can not be add input queue");
             it++;
         } else {
-            // try to join new_streams in the next schedule cycle
+            // try to join new streams in the next schedule cycle
             break;
         }
     }
