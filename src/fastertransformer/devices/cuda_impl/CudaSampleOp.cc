@@ -23,9 +23,13 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     const auto batch_size = logits.shape()[0];
     const auto vocab_size_padded = logits.shape()[1];
     const auto step = params.step;
-    RUNTIME_ASSERT_OP_ARG((step == params.token_ids.shape()[0] - 1),
-                          "step should equal to token_ids.shape[0] - 1, but %d vs %d",
-                          step, params.token_ids.shape()[0] - 1);
+    RUNTIME_ASSERT_OP_ARG(batch_size == params.token_ids.shape()[0],
+                          "logits.shape[0] should equal to token_ids.shape[0], but %d vs %d",
+                          batch_size, params.token_ids.shape()[0]);
+    RUNTIME_ASSERT_OP_ARG((step == params.token_ids.shape()[1] - 1),
+                          "step should equal to token_ids.shape[1] - 1, but %d vs %d",
+                          step, params.token_ids.shape()[1] - 1);
+    auto transposed_tokens = transpose({params.token_ids});
 
     // 1. confirm buffer sizes
     auto& top_k = params.top_k;
@@ -50,7 +54,8 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     size_t topp_ws_size;
     size_t cub_temp_storage_size; // useless variable
 
-    // query workspace size
+    // these two kernel calls are only for querying workspace size,
+    // all the args are ignored.
     invokeTopKSampling<SamplerT>(nullptr,
                                 topk_ws_size,
                                 nullptr,
@@ -71,18 +76,18 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                                 nullptr);
 
     invokeTopPSampling<SamplerT>(nullptr,  // workspace
-                                 topp_ws_size,
-                                 cub_temp_storage_size,
-                                nullptr,  // output_ids
-                                nullptr,  // sequence_length
-                                nullptr,  // finished_buffer
-                                nullptr,  // cum_log_probs
-                                nullptr,  // output_log_probs
-                                nullptr,  // log_probs
-                                nullptr,  // topp_id_vals_buf_,
-                                nullptr,  // topp_offset_buf_,
-                                nullptr,  // begin_topp_offset_buf,
-                                nullptr,  // curandstate_buf_,
+                                topp_ws_size,
+                                cub_temp_storage_size,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                nullptr,
+                                nullptr,
                                 batch_size,
                                 vocab_size_padded,
                                 nullptr,
@@ -94,13 +99,10 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     FT_LOG_DEBUG("topk_ws_size: %d, topp_ws_size: %d", topk_ws_size, topp_ws_size);
 
     auto default_top_p = 0.0f;
-    auto repetition_penalty_type = RepetitionPenaltyType::None;
-
     // 2. allocate buffers
 
     // see BaseSamplingLayer<T>::allocateBuffer ------------------
     auto curandstate_buf = allocateBuffer({batch_size * sizeof(curandState_t)});
-    auto random_seeds_buf = allocateBuffer({DataType::TYPE_UINT64, {batch_size}});
     auto skip_top_k_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
     auto skip_top_p_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
 
@@ -123,6 +125,8 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     // 3. prepare kernel inputs
 
     // 3.1. base sampling layer setup
+    // TODO: this curandstate buf might should be moved to cuda device state,
+    //       so that do not need to be reinitialized on every request.
     if (random_seed) {
         auto& seeds = random_seed.value().get();
         if (seeds.size() == 1) {
@@ -130,6 +134,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                 (curandState_t *)curandstate_buf->data(), batch_size,
                 seeds.data<uint64_t>()[0], stream_);
         } else {
+            auto random_seeds_buf = allocateBuffer({DataType::TYPE_UINT64, {batch_size}});
             assert(seeds.size() == batch_size);
             copy({*random_seeds_buf, seeds});
             invokeCurandBatchInitialize(
@@ -194,6 +199,35 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
             stream_);
     }
 
+    if (step > 1 && params.repetition_penalty) {
+        auto& repetition_penalty = params.repetition_penalty->get();
+        if (std::any_of(repetition_penalty.data<float>(),
+                        repetition_penalty.data<float>() + batch_size,
+                        [&](auto t) { return t == 1.0f; }))
+        {
+            const auto repetition_penalty_type = RepetitionPenaltyType::Multiplicative;
+            auto repetition_penalty_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
+            auto penalty_logits = allocateBuffer({DataType::TYPE_FP32, {batch_size * 64 * 1024}});
+            copy({*repetition_penalty_buf, repetition_penalty});
+            invokeBatchApplyRepetitionPenalty(
+                logits.data<float>(),
+                penalty_logits->data<float>(),
+                repetition_penalty_buf->data<float>(),
+                transposed_tokens->data<int32_t>(),
+                batch_size,
+                batch_size, // local_batch_size
+                vocab_size_padded,
+                params.input_lengths.data<int32_t>(),
+                step, // max_input_length
+                step,
+                repetition_penalty_type,
+                stream_);
+        }
+    }
+
+    if (params.min_lengths) {
+    }
+
     // TODO: apply repetition_penalty in generate_config
     // TODO: maybe support min_new_tokens (need to consider eos_id)
     // TODO: support top_p_decay, top_p_min, top_p_reset_ids
@@ -203,7 +237,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         top_k_workspace->data(),
         topk_ws_size,
         logits.data<float>(),
-        params.token_ids.dataWithOffset<int32_t>(step * batch_size),
+        transposed_tokens->dataWithOffset<int32_t>(step * batch_size),
         params.input_lengths.data<int32_t>(),
         nullptr, // finished
         cum_log_probs,
@@ -246,7 +280,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         top_p_workspace->data(),
         topp_ws_size,
         cub_temp_storage_size,
-        params.token_ids.dataWithOffset<int32_t>(step * batch_size),
+        transposed_tokens->dataWithOffset<int32_t>(step * batch_size),
         params.input_lengths.data<int32_t>(),
         nullptr, // finished
         cum_log_probs,
@@ -269,12 +303,15 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     invokeComputeToppDecay(
         runtime_top_p_buf->data<float>(),
         initial_top_p_buf->data<float>(),
-        params.token_ids.dataWithOffset<int32_t>(step * batch_size),
+        transposed_tokens->dataWithOffset<int32_t>(step * batch_size),
         top_p_decay_buf->data<float>(),
         top_p_min_buf->data<float>(),
         top_p_reset_ids_buf->data<int32_t>(),
         batch_size,
         stream_);
+
+    auto output_tokens = transpose({*transposed_tokens});
+    copy({params.token_ids, *output_tokens});
     sync_check_cuda_error();
 }
 

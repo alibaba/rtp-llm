@@ -22,10 +22,16 @@ struct DeviceInitParams {
     int64_t master_port    = 0;
 };
 
-// hardware-specific device properties, such as op fusion options. should be const.
+// immutable device properties. Can not change since device is initialized.
 struct DeviceProperties {
     DeviceType type;
     size_t id = 0;
+
+    /* -- properties related to request construction -- */
+    size_t max_batch_size = -1; // -1 indicates no limitation
+    bool need_attention_mask = true;
+
+    /* -- distributed properties -- */
     size_t tp_rank = 0;
     size_t tp_size = 1;
 };

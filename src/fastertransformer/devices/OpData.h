@@ -324,7 +324,7 @@ struct FfnLayerParams {
 struct GreedyParams {
     const Buffer& logits;                    // [batch_size, vocab_size_padded]
     const Buffer& input_lengths;             // [batch_size]
-    Buffer& token_ids;                       // [max_input_length + 1, batch_size]
+    Buffer& token_ids;                       // [batch_size, max_input_length + 1]
     const size_t step;
 
     const Buffer& top_k;
@@ -336,6 +336,7 @@ struct GreedyParams {
     OptionalBufferRef top_p_decay;
     OptionalBufferRef top_p_min;
     OptionalBufferRef top_p_reset_ids;
+    OptionalBufferRef eos_ids;
 
     OptionalBufferRef cum_log_probs;
     OptionalBufferRef output_log_probs;

@@ -21,13 +21,11 @@ TEST_F(CudaSamplerTest, testTopK) {
     size_t step = 5; // also max_input_length
     BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
     // BufferPtr finished = createBuffer<bool>({1}, {0});
-    BufferPtr output_token_ids = createBuffer<int32_t>({step + 1, batch_size}, {
-        100, 1, 1, 1,
-        1, 1, 0, 0,
-        1, 0, 1, 0,
-        1, 0, 0, 0,
-        1, 0, 0, 0,
-        0, 0, 0, 0,
+    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, step + 1}, {
+        100, 1, 1, 1, 1, 0,
+        1, 1, 0, 0, 0, 0,
+        1, 0, 1, 0, 0, 0,
+        1, 0, 0, 0, 0, 0,
     });
 
     BufferPtr input_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
@@ -44,7 +42,7 @@ TEST_F(CudaSamplerTest, testTopK) {
     GreedyParams params({
         *logits, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
-        *repetition_penalty, nullopt, nullopt, nullopt, nullopt,
+        *repetition_penalty, nullopt, nullopt, nullopt, nullopt, nullopt,
         *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);
@@ -54,9 +52,9 @@ TEST_F(CudaSamplerTest, testTopK) {
     printBuffer<float>(*cum_log_probs, "cum_log_probs");
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
     auto cum_log_probs_host = getBufferValues<float>(*cum_log_probs);
-    ASSERT_EQ(output_token_ids_host[20], 5);
-    ASSERT_EQ(output_token_ids_host[21], 2);
-    ASSERT_EQ(output_token_ids_host[22], 8);
+    ASSERT_EQ(output_token_ids_host[5], 5);
+    ASSERT_EQ(output_token_ids_host[11], 2);
+    ASSERT_EQ(output_token_ids_host[17], 8);
     ASSERT_EQ(output_token_ids_host[23], 7);
     ASSERT_NEAR(cum_log_probs_host[2], -3.693, 1e-3);
     ASSERT_NEAR(cum_log_probs_host[3], -3.693, 1e-3);
@@ -73,13 +71,11 @@ TEST_F(CudaSamplerTest, testTopP) {
     size_t step = 5; // also max_input_length
     BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
     // BufferPtr finished = createBuffer<bool>({1}, {0});
-    BufferPtr output_token_ids = createBuffer<int32_t>({step + 1, batch_size}, {
-        100, 1, 1, 1,
-        1, 1, 0, 0,
-        1, 0, 1, 0,
-        1, 0, 0, 0,
-        1, 0, 0, 0,
-        0, 0, 0, 0,
+    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, step + 1}, {
+        100, 1, 1, 1, 1, 0,
+        1, 1, 0, 0, 0, 0,
+        1, 0, 1, 0, 0, 0,
+        1, 0, 0, 0, 0, 0,
     });
 
     BufferPtr input_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
@@ -96,7 +92,7 @@ TEST_F(CudaSamplerTest, testTopP) {
     GreedyParams params({
         *logits, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
-        *repetition_penalty, nullopt, nullopt, nullopt, nullopt,
+        *repetition_penalty, nullopt, nullopt, nullopt, nullopt, nullopt,
         *cum_log_probs, nullopt, nullopt
     });
     device_->sampleGreedy(params);
@@ -107,9 +103,9 @@ TEST_F(CudaSamplerTest, testTopP) {
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
     auto cum_log_probs_host = getBufferValues<float>(*cum_log_probs);
 
-    ASSERT_EQ(output_token_ids_host[20], 5);
-    ASSERT_EQ(output_token_ids_host[21], 8);
-    ASSERT_EQ(output_token_ids_host[22], 7);
+    ASSERT_EQ(output_token_ids_host[5], 5);
+    ASSERT_EQ(output_token_ids_host[11], 8);
+    ASSERT_EQ(output_token_ids_host[17], 7);
     ASSERT_EQ(output_token_ids_host[23], 0);
     ASSERT_NEAR(cum_log_probs_host[0], -1.0, 1e-3);
     ASSERT_NEAR(cum_log_probs_host[1], -3.745, 1e-3);

@@ -22,7 +22,7 @@ Sampler::Sampler(const SamplerInitParams& params)
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     size_t from_batch_idx = 0;
     size_t sample_to_batch_idx = 0;
-    size_t from_token_idx = 0; // accumulates batch_size * num_beams
+    size_t from_seq_idx = 0; // accumulates batch_size * num_beams
 
     auto beam_sizes = inputs.num_beams->data<uint64_t>();
     auto current_beam_size = beam_sizes[0];
@@ -38,17 +38,15 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
         // now from_batch_idx to sample_to_batch_idx have the same beam size, sample once.
         const auto sample_batch_size = sample_to_batch_idx - from_batch_idx + 1;
-        const auto sample_token_batch_size = sample_batch_size * current_beam_size;
-        const auto sample_to_token_idx = from_token_idx + sample_token_batch_size;
+        const auto sample_seq_num = sample_batch_size * current_beam_size;
+        const auto sample_to_seq_idx = from_seq_idx + sample_seq_num;
 
-        auto sample_tokens = device_->allocateBuffer(
-            {input_tokens.type(), {sample_batch_size * current_beam_size, inputs.step + 1}});
         auto sequence_lengths = device_->allocateBuffer(
                 {inputs.sequence_lengths->type(), inputs.sequence_lengths->shape()});
         device_->copy({*sequence_lengths, *inputs.sequence_lengths});
-        device_->copy({*sample_tokens, input_tokens, 0, from_token_idx, sample_token_batch_size});
-        auto transposed_tokens = device_->transpose({*sample_tokens});
-        auto sample_logits = inputs.logits->view(from_token_idx, sample_token_batch_size);
+
+        auto sample_tokens = input_tokens.view(from_seq_idx, sample_seq_num);
+        auto sample_logits = inputs.logits->view(from_seq_idx, sample_seq_num);
         auto sample_cum_log_probs = inputs.cum_log_probs->view(from_batch_idx, sample_batch_size);
 
 #define MAY_GET_BUFFER_VIEW(buffer_ptr) \
@@ -65,7 +63,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             device_->sampleGreedy({
                 sample_logits,
                 *sequence_lengths,
-                *transposed_tokens,
+                sample_tokens,
                 inputs.step,
                 *inputs.top_k,
                 *inputs.top_p,
@@ -76,6 +74,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 inputs.top_p_decay ? (OptionalBufferRef)top_p_decay : nullopt,
                 inputs.top_p_min ? (OptionalBufferRef)top_p_min : nullopt,
                 inputs.top_p_reset_ids ? (OptionalBufferRef)top_p_reset_ids : nullopt,
+                *eos_ids_,
                 sample_cum_log_probs,
                 nullopt, // output_log_probs
                 inputs.index_log_prob.get() ? (OptionalBufferRef)*inputs.index_log_prob: nullopt
@@ -84,13 +83,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
 
-        auto output_tokens = device_->transpose({*transposed_tokens});
-        device_->copy({input_tokens, *output_tokens, from_token_idx, 0, sample_token_batch_size});
-
-        // current sampling done, update indices
         from_batch_idx = sample_to_batch_idx + 1;
         sample_to_batch_idx = from_batch_idx;
-        from_token_idx = sample_to_token_idx;
+        from_seq_idx = sample_to_seq_idx;
     } while (from_batch_idx < inputs.batch_size);
     return SamplerOutput({move(inputs.token_ids), move(inputs.cum_log_probs), move(inputs.index_log_prob)});
 }
