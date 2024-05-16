@@ -10,6 +10,7 @@ cc_library(
         "//maga_transformer/cpp:cache",
         "//maga_transformer/cpp:dataclass",
         "//src/fastertransformer/devices:device_utils",
+        "//:gpt_init_params",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
