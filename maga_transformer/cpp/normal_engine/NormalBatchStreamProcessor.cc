@@ -159,6 +159,7 @@ void NormalBatchStreamProcessor::createAttentionMask(const StreamGroups& stream_
 
 absl::StatusOr<SamplerInputs>
 NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_groups,
+                                               const GptModelInputs&  model_inputs,
                                                const GptModelOutputs& model_output) const {
     assert(!stream_groups.empty());
     SamplerInputs sampler_inputs;
@@ -180,10 +181,6 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     int                     batch_idx   = 0;
     int32_t*                token_ids   = sampler_inputs.token_ids->data<int32_t>();
     list<GenerateStreamPtr> all_streams = stream_groups.allStreams();
-    sampler_inputs.sequence_lengths =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    int*      sequence_lengths = sampler_inputs.sequence_lengths->data<int32_t>();
-
     int32_t* top_k            = sampler_inputs.top_k->data<int32_t>();
     float* top_p              = sampler_inputs.top_p->data<float>();
     float* temperature        = sampler_inputs.temperature->data<float>();
@@ -200,7 +197,6 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
             top_k[batch_idx]            = stream->generateConfig()->top_k.value_or(0);
             top_p[batch_idx]            = stream->generateConfig()->top_p.value_or(0.95);
             temperature[batch_idx]      = stream->generateConfig()->temperature.value_or(1.0);
-            sequence_lengths[batch_idx] = stream->seqLength();
             memcpy(sampler_inputs.token_ids->dataWithOffset<int32_t>((batch_idx) * sampler_inputs.step),
                    complete_token_ids->dataWithOffset<int32_t>(i * complete_seq_len),
                    seq_len * sizeof(int));
@@ -210,11 +206,29 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
         FT_LOG_DEBUG("stream [%d], complete_token_ids = [%s]\n", stream->streamId(), complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
         FT_LOG_DEBUG("stream [%d], sampler_inputs = [%s]\n", stream->streamId(), complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
     }
+    sampler_inputs.sequence_lengths = model_inputs.sequence_lengths;
+    sampler_inputs.input_lengths    = model_inputs.input_lengths;
+    sampler_inputs.logits = model_output.logits;
+    sampler_inputs.batch_size = total_batch_size;
+    sampler_inputs.top_k      = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.top_p      = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.temperature = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.num_beams  = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.cum_log_probs  = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}}, {});
 
-    sampler_inputs.logits.reset(new ft::Buffer(ft::MemoryType::MEMORY_GPU,
-                                               ft::DataType::TYPE_FP32,
-                                               model_output.logits->shape(),
-                                               model_output.logits->data()));
+
+    int32_t* top_k            = sampler_inputs.top_k->data<int32_t>();
+    float* top_p              = sampler_inputs.top_p->data<float>();
+    float* temperature        = sampler_inputs.temperature->data<float>();
+    uint64_t* num_beams       = sampler_inputs.num_beams->data<uint64_t>();
+
+    for (int i = 0; i < total_batch_size; ++i) {
+
+        num_beams[i] = 1;
+        top_k[i]     = 1;
+        top_p[i]     = 1.0;
+        temperature[i] = 1.0;
+    }
     return sampler_inputs;
 }
 

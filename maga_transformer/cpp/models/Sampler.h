@@ -18,9 +18,10 @@ struct SamplerInitParams {
 struct SamplerInputs {
 public:
     ft::BufferPtr logits;            // shape: [batch_size * num_beams, vocab_size]
-    mutable ft::BufferPtr token_ids;         // shape: [batch_size * num_beams, max_length]
+    mutable ft::BufferPtr token_ids; // shape: [batch_size * num_beams, max_length]
+    ft::BufferPtr input_lengths;     // shape: [batch_size]
     ft::BufferPtr sequence_lengths;  // shape: [batch_size]
-    size_t    step;              // typically largest sequence length in the batch
+    size_t    step;                  // typically largest sequence length in the batch
 
     size_t    batch_size;
     ft::BufferPtr num_beams;           // shape: [batch_size]

@@ -21,6 +21,7 @@ public:
                                             const std::unique_ptr<MergedOutput>& merge_outputs) const;
     absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
     absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
+                                                      const GptModelInputs&  model_inputs,
                                                       const GptModelOutputs& model_output) const;
     void createAttentionMask(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 

@@ -50,11 +50,11 @@ ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input
     ModelRequest model_request;
     model_request.generate_batch_size = model_input.sequence_lengths->shape()[0];
     model_request.context_batch_size  = model_input.input_lengths->shape()[0] - model_request.generate_batch_size;
-    model_request.combo_tokens        = std::move(model_input.combo_tokens);
-    model_request.input_lengths       = std::move(model_input.input_lengths);
-    model_request.sequence_lengths    = std::move(model_input.sequence_lengths);
-    model_request.kv_cache_blocks     = std::move(model_input.kv_cache_blocks);
-    model_request.attention_mask      = std::move(model_input.attention_mask);
+    model_request.combo_tokens        = model_input.combo_tokens;
+    model_request.input_lengths       = model_input.input_lengths;
+    model_request.sequence_lengths    = model_input.sequence_lengths;
+    model_request.kv_cache_blocks     = model_input.kv_cache_blocks;
+    model_request.attention_mask      = model_input.attention_mask;
     return model_request;
 }
 
@@ -72,7 +72,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (device_->getDeviceProperties().tp_rank > 0) {
         return absl::OkStatus();
     }
-    auto         sampler_input_status = batch_stream_processor_->gatherSamplerInput(stream_groups, *model_output);
+    auto sampler_input_status = batch_stream_processor_->gatherSamplerInput(
+            stream_groups, model_input, *model_output);
     RETURN_IF_STATUS_OR_ERROR(sampler_input_status);
     auto& sampler_input           = sampler_input_status.value();
     merged_output->sampler_output = std::move(sampler_->forward(sampler_input));

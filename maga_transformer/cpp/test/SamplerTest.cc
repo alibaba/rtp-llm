@@ -56,6 +56,7 @@ TEST_F(SamplerTest, testSimple) {
         move(logits),
         move(output_token_ids),
         move(input_lengths),
+        move(sequence_lengths),
         size_t(step),
         batch_size,
         move(num_beams),

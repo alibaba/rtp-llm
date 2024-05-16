@@ -228,7 +228,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     if (params.min_lengths) {
     }
 
-    // TODO: apply repetition_penalty in generate_config
+    // TODO: test repetition_penalty
     // TODO: maybe support min_new_tokens (need to consider eos_id)
     // TODO: support top_p_decay, top_p_min, top_p_reset_ids
 
@@ -238,7 +238,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         topk_ws_size,
         logits.data<float>(),
         transposed_tokens->dataWithOffset<int32_t>(step * batch_size),
-        params.input_lengths.data<int32_t>(),
+        nullptr, // sequence_length
         nullptr, // finished
         cum_log_probs,
         output_log_probs,
@@ -254,7 +254,6 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         stream_,
         batch_size,
         skip_top_k_decode_buf->data<bool>());
-    sync_check_cuda_error();
 
     // run top_p
     invokeTopPInitialize(
@@ -274,14 +273,13 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         vocab_size_padded,
         vocab_size_padded,
         stream_);
-    sync_check_cuda_error();
 
     invokeBatchTopPSampling(
         top_p_workspace->data(),
         topp_ws_size,
         cub_temp_storage_size,
         transposed_tokens->dataWithOffset<int32_t>(step * batch_size),
-        params.input_lengths.data<int32_t>(),
+        nullptr, // sequence_length
         nullptr, // finished
         cum_log_probs,
         output_log_probs,
