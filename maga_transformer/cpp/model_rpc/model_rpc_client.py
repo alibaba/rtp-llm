@@ -23,7 +23,7 @@ def trans_option(pb_object, py_object, name):
 
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
-    input_pb.token_ids.extend(input_py.token_ids.tolist())
+    input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     generate_config_pb = GenerateConfigPB()
     generate_config_pb = input_pb.generate_config
 

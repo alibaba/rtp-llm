@@ -72,6 +72,8 @@ class OpenaiEndopoint():
     def _extract_generation_config(self, request: ChatCompletionRequest) -> GenerateConfig:
         # TODO(wangyin): implement this
         config = GenerateConfig()
+        if request.stream != None:
+            config.is_streaming = request.stream
         if request.temperature != None:
             config.temperature = request.temperature
         if request.top_p != None:
