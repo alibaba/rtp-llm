@@ -1,6 +1,7 @@
 #include "src/fastertransformer/devices/BufferManager.h"
 
 #include <numeric>
+#include <mutex>
 
 using namespace std;
 using ReadLock = shared_lock<shared_mutex>;

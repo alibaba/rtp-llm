@@ -10,9 +10,12 @@ cc_library(
     ]),
     deps = [
         "//src/fastertransformer/devices:devices_base",
-        "//src/fastertransformer/devices:devices_base_impl",
         "//src/fastertransformer/core:cpu_allocator",
+        "//src/fastertransformer/devices:device_utils",
+        "//src/fastertransformer/devices:devices_base_impl",
+        "//3rdparty/xft:xft_header",
+        "//3rdparty/xft:libxfastertransformer",
     ],
     visibility = ["//visibility:public"],
-    copts = copts(),
+    copts = copts() + ["-mavx512f", "-mavx512bw", "-mavx512vl"],
 )

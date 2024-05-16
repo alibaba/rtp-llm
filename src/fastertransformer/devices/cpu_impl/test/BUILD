@@ -14,6 +14,18 @@ test_deps = [
     "//src/fastertransformer/devices/testing:device_test_utils",
 ] + torch_deps()
 
+
+cc_test(
+    name = "cpu_ffn_op_test",
+    srcs = [
+        "ops/CpuFFnOpTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
+
 cc_test(
     name = "cpu_ops_test",
     srcs = [
