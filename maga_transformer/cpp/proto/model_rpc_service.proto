@@ -46,7 +46,7 @@ message GenerateInputPB {
 }
 
 message AuxInfoPB {
-    int32 cost_time_ms = 1;
+    int32 cost_time_us = 1;
     int32 iter_count = 2;
     int32 input_len = 3;
     int32 output_len = 4;

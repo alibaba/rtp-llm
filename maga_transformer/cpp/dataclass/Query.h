@@ -52,7 +52,7 @@ public:
 
 class AuxInfo {
 public:
-    int                                              cost_time_ms   = 0;
+    int                                              cost_time_us   = 0;
     int                                              iter_count     = 0;
     int                                              input_len      = 0;
     int                                              prefix_len     = 0;

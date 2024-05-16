@@ -78,7 +78,7 @@ void QueryConverter::transTensor(TensorPB* t, const ft::Buffer* buffer) {
 void QueryConverter::transResponse(GenerateOutputPB* output, const GenerateOutput* response) {
     output->set_finished(response->finished);
     auto aux_info = output->mutable_aux_info();
-    aux_info->set_cost_time_ms(response->aux_info.cost_time_ms);
+    aux_info->set_cost_time_us(response->aux_info.cost_time_us);
     aux_info->set_iter_count(response->aux_info.iter_count);
     aux_info->set_input_len(response->aux_info.input_len);
     aux_info->set_output_len(response->aux_info.output_len);

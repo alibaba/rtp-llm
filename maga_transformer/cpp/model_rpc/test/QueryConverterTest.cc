@@ -58,7 +58,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
     GenerateOutput res;
     res.output_ids            = std::move(output_token_ids);
     res.finished              = true;
-    res.aux_info.cost_time_ms = 1000;
+    res.aux_info.cost_time_us = 1000;
     res.aux_info.iter_count   = 9;
     res.aux_info.input_len    = 8;
     res.aux_info.output_len   = 7;
@@ -71,7 +71,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
     GenerateOutputPB output_pb;
     QueryConverter::transResponse(&output_pb, &res);
     auto aux_info_pb = output_pb.aux_info();
-    EXPECT_EQ(aux_info_pb.cost_time_ms(), 1000);
+    EXPECT_EQ(aux_info_pb.cost_time_us(), 1000);
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
     EXPECT_EQ(aux_info_pb.input_len(), 8);
     EXPECT_EQ(aux_info_pb.output_len(), 7);

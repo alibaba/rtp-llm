@@ -68,7 +68,7 @@ def trans_tensor(t: TensorPB):
 def trans_output(output_pb: GenerateOutputPB):
     output_py = GenerateOutput()
     output_py.finished = output_pb.finished
-    output_py.aux_info = AuxInfo(cost_time=output_pb.aux_info.cost_time_ms,
+    output_py.aux_info = AuxInfo(cost_time=output_pb.aux_info.cost_time_us / 1000.0,
                                  iter_count=output_pb.aux_info.iter_count,
                                  input_len=output_pb.aux_info.input_len,
                                  output_len=output_pb.aux_info.output_len,

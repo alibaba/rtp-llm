@@ -200,7 +200,7 @@ void GenerateStream::updateOutput(bool finished,
     }
 
     generate_output_->finished              = finished;
-    generate_output_->aux_info.cost_time_ms = (TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
+    generate_output_->aux_info.cost_time_us = TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     generate_output_->aux_info.input_len    = generate_input_->promptLength();
     generate_output_->aux_info.prefix_len   = generate_input_->prefix_length;
     generate_output_->aux_info.output_len   = seq_length_ - generate_input_->inputLength();
