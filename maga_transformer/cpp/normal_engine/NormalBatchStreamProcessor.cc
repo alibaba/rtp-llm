@@ -150,8 +150,11 @@ void NormalBatchStreamProcessor::createAttentionMask(const StreamGroups& stream_
             }
         }
     }
+    auto attention_mask_gpu =
+        device_->allocateBuffer({attention_mask->type(), attention_mask->shape()});
+    device_->copy({*attention_mask_gpu, *attention_mask});
     // TODO(xinfei.sxf) add convert to target data type
-    model_input.attention_mask = attention_mask;
+    model_input.attention_mask = std::move(attention_mask_gpu);
 }
 
 absl::StatusOr<SamplerInputs>

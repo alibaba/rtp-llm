@@ -288,8 +288,9 @@ protected:
                 i
             );
         }
-
-        return move(kv_blocks_buf);
+        auto kv_blocks_gpu_buf = device_->allocateBuffer({kv_blocks_buf->type(), kv_blocks_buf->shape()});
+        device_->copy({*kv_blocks_gpu_buf, *kv_blocks_buf});
+        return move(kv_blocks_gpu_buf);
     }
 
     void assertTensorClose(const torch::Tensor& a, const torch::Tensor& b,
