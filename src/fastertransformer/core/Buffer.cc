@@ -27,7 +27,7 @@ Buffer::~Buffer() {
 }
 
 Buffer Buffer::emptyBuffer() {
-    return Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INVALID, {}, nullptr);
+    return Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INVALID, {0}, nullptr);
 }
 
 MemoryType Buffer::where() const {

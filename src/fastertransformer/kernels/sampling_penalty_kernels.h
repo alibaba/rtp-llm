@@ -80,6 +80,16 @@ void invokeMinLengthPenalty(T*           logits,
                             cudaStream_t stream);
 
 template<typename T>
+void invokeMinLengthPenaltyNew(T*           logits,
+                               const int*   min_lengths,
+                               const int*   end_ids,
+                               const int*   sequnece_lengths,
+                               const int*   input_lengths,
+                               const int    decoder_batch_size,
+                               const int    vocab_size_padded,
+                               cudaStream_t stream);
+
+template<typename T>
 void invokeCopyLogits(float*       output_logits_buf,
                       int*         logit_index_buf,
                       T*           runtime_logits_buf,

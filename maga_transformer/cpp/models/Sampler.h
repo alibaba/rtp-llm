@@ -31,9 +31,6 @@ public:
     ft::BufferPtr random_seeds;        // shape: [batch_size]
     ft::BufferPtr repetition_penalty;  // shape: [batch_size]
     ft::BufferPtr min_lengths;         // shape: [batch_size]
-    ft::BufferPtr top_p_decay;         // shape: [batch_size]
-    ft::BufferPtr top_p_min;           // shape: [batch_size]
-    ft::BufferPtr top_p_reset_ids;     // shape: [batch_size]
 
     ft::BufferPtr kv_cache_blocks;     // shape: [batch_size * num_beams, block_length], int64 block pointers
     mutable ft::BufferPtr cum_log_probs;       // shape: [batch_size * num_beams]

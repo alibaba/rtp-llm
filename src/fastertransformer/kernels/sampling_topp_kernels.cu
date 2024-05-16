@@ -1489,28 +1489,31 @@ static __global__ void set_topp_runtime_args(int             batch_size,
         skip_decode[i] = k > 0;
 
         initial_top_p_buf[i] = top_ps[i];
-        top_p_decay_buf[i]   = top_p_decay == nullptr ? 1.0f : top_p_decay[i];
-        if (top_p_decay_buf[i] > 1.0f || top_p_decay_buf[i] <= 0.0f) {
-            printf("[WARNING] top_p_decay_buf (%f) is out of range ([0.0, 1.0f]) for token %d,"
-                   " change to 1.0f.\n",
-                   top_p_decay_buf[i],
-                   i);
-            top_p_decay_buf[i] = 1.0f;
+
+        if (top_p_decay_buf) {
+            top_p_decay_buf[i]   = top_p_decay == nullptr ? 1.0f : top_p_decay[i];
+            if (top_p_decay_buf[i] > 1.0f || top_p_decay_buf[i] <= 0.0f) {
+                printf("[WARNING] top_p_decay_buf (%f) is out of range ([0.0, 1.0f]) for token %d,"
+                    " change to 1.0f.\n",
+                    top_p_decay_buf[i],
+                    i);
+                top_p_decay_buf[i] = 1.0f;
+            }
+            top_p_min_buf[i] = top_p_min == nullptr ? 1e-6f : top_p_min[i];  // prevent topp becoming 0.0
+            if (top_p_min_buf[i] > 1.0f || top_p_min_buf[i] <= 0.0f) {
+                printf("[WARNING] top_p_min_buf (%f) is out of range ([0.0, 1.0f]) for token %d,"
+                    " change to 0.5f.\n",
+                    top_p_min_buf[i],
+                    i);
+                top_p_min_buf[i] = 0.5f;
+            }
+            if (top_p_reset_ids == nullptr) {
+                top_p_reset_ids_buf[i] = -1;
+            } else {
+                top_p_reset_ids_buf[i] = top_p_reset_ids[i];
+            }
+            // top_p_reset_ids_buf[i] = (int32_t)(top_p_reset_ids == nullptr ? -1 : top_p_reset_ids[i]);
         }
-        top_p_min_buf[i] = top_p_min == nullptr ? 1e-6f : top_p_min[i];  // prevent topp becoming 0.0
-        if (top_p_min_buf[i] > 1.0f || top_p_min_buf[i] <= 0.0f) {
-            printf("[WARNING] top_p_min_buf (%f) is out of range ([0.0, 1.0f]) for token %d,"
-                   " change to 0.5f.\n",
-                   top_p_min_buf[i],
-                   i);
-            top_p_min_buf[i] = 0.5f;
-        }
-        if (top_p_reset_ids == nullptr) {
-            top_p_reset_ids_buf[i] = -1;
-        } else {
-            top_p_reset_ids_buf[i] = top_p_reset_ids[i];
-        }
-        // top_p_reset_ids_buf[i] = (int32_t)(top_p_reset_ids == nullptr ? -1 : top_p_reset_ids[i]);
     }
 }
 

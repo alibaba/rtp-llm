@@ -66,9 +66,6 @@ TEST_F(SamplerTest, testSimple) {
         nullptr,
         nullptr,
         nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
         move(kv_blocks),
         move(cum_log_probs)
     };

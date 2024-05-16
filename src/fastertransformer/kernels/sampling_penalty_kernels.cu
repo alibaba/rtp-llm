@@ -613,6 +613,21 @@ __global__ void batchApplyMinLengthPenalty(T*         logits,
 }
 
 template<typename T>
+__global__ void batchApplyMinLengthPenaltyNew(T*         logits,
+                                              const int* min_lengths,
+                                              const int* end_ids,
+                                              const int* sequence_lengths,
+                                              const int* input_lengths,
+                                              const int  vocab_size_padded)
+{
+    int bid = threadIdx.x + blockIdx.x * blockDim.x;  // batch index
+    if (sequence_lengths[bid] - input_lengths[bid] < min_lengths[bid]) {
+        T mask_val                                     = (std::is_same<T, half>::value) ? -65504.0f : -FLT_MAX;
+        logits[bid * vocab_size_padded + end_ids[bid]] = mask_val;
+    }
+}
+
+template<typename T>
 void invokeMinLengthPenalty(T*           logits,
                             const int*   min_lengths,
                             const int*   end_ids,
@@ -627,6 +642,22 @@ void invokeMinLengthPenalty(T*           logits,
     const int grid_size  = (batch_size + block_size - 1) / block_size;
     batchApplyMinLengthPenalty<<<grid_size, block_size, 0, stream>>>(
         logits, min_lengths, end_ids, sequnece_lengths, max_input_length, vocab_size_padded);
+}
+
+template<typename T>
+void invokeMinLengthPenaltyNew(T*           logits,
+                               const int*   min_lengths,
+                               const int*   end_ids,
+                               const int*   sequnece_lengths,
+                               const int*   input_lengths,
+                               const int    decoder_batch_size,
+                               const int    vocab_size_padded,
+                               cudaStream_t stream)
+{
+    const int block_size = min(decoder_batch_size, 1024);
+    const int grid_size  = (decoder_batch_size + block_size - 1) / block_size;
+    batchApplyMinLengthPenaltyNew<<<grid_size, block_size, 0, stream>>>(
+        logits, min_lengths, end_ids, sequnece_lengths, input_lengths, vocab_size_padded);
 }
 
 template void invokeMinLengthPenalty(float*       logits,
@@ -646,5 +677,14 @@ template void invokeMinLengthPenalty(half*        logits,
                                      const int    batch_size,
                                      const int    vocab_size_padded,
                                      cudaStream_t stream);
+
+template void invokeMinLengthPenaltyNew(float*           logits,
+                                        const int*   min_lengths,
+                                        const int*   end_ids,
+                                        const int*   sequnece_lengths,
+                                        const int*   input_lengths,
+                                        const int    decoder_batch_size,
+                                        const int    vocab_size_padded,
+                                        cudaStream_t stream);
 
 }  // namespace fastertransformer

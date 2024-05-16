@@ -107,9 +107,6 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     auto skip_top_p_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
 
     auto initial_top_p_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
-    auto top_p_decay_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
-    auto top_p_min_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
-    auto top_p_reset_ids_buf = allocateBuffer({DataType::TYPE_INT32, {batch_size}});
     auto topp_id_vals_buf = allocateBuffer({DataType::TYPE_INT32, {batch_size * vocab_size_padded}});
     auto topp_offset_buf = allocateBuffer({DataType::TYPE_INT32, {batch_size + 1}});
     auto begin_topp_offset_buf = allocateBuffer({DataType::TYPE_INT32, {batch_size + 1}});
@@ -167,12 +164,12 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                                batch_size,
                                skip_top_p_decode_buf->data<bool>(),
                                initial_top_p_buf->data<float>(),
-                               top_p_decay_buf->data<float>(),
-                               nullptr, // top_p_decay
-                               top_p_min_buf->data<float>(),
-                               nullptr, // top_p_min
-                               top_p_reset_ids_buf->data<int32_t>(),
-                               nullptr, // top_p_reset_ids
+                               nullptr, // top_p_decay_buf,
+                               nullptr,
+                               nullptr, // top_p_min_buf,
+                               nullptr,
+                               nullptr, // top_p_reset_ids_buf,
+                               nullptr,
                                stream_);
     sync_check_cuda_error();
 
@@ -199,39 +196,54 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
             stream_);
     }
 
-    if (step > 1 && params.repetition_penalty) {
-        auto& repetition_penalty = params.repetition_penalty->get();
-        if (std::any_of(repetition_penalty.data<float>(),
-                        repetition_penalty.data<float>() + batch_size,
-                        [&](auto t) { return t == 1.0f; }))
-        {
-            const auto repetition_penalty_type = RepetitionPenaltyType::Multiplicative;
-            auto repetition_penalty_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
-            auto penalty_logits = allocateBuffer({DataType::TYPE_FP32, {batch_size * 64 * 1024}});
-            copy({*repetition_penalty_buf, repetition_penalty});
-            invokeBatchApplyRepetitionPenalty(
+    const auto decoder_batch_size = params.sequence_lengths.shape()[0];
+    if (decoder_batch_size) {
+        auto sequence_lengths = clone({params.sequence_lengths});
+        auto input_lengths = clone({params.input_lengths});
+
+        if (step > 1 && params.repetition_penalty && decoder_batch_size) {
+            auto& repetition_penalty = params.repetition_penalty->get();
+            if (std::any_of(repetition_penalty.data<float>(),
+                            repetition_penalty.data<float>() + batch_size,
+                            [&](auto t) { return t == 1.0f; }))
+            {
+                const auto repetition_penalty_type = RepetitionPenaltyType::Multiplicative;
+                auto repetition_penalty_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
+                auto penalty_logits = allocateBuffer({DataType::TYPE_FP32, {batch_size * 64 * 1024}});
+                copy({*repetition_penalty_buf, repetition_penalty});
+                invokeBatchApplyRepetitionPenalty(
+                    logits.data<float>(),
+                    penalty_logits->data<float>(),
+                    repetition_penalty_buf->data<float>(),
+                    transposed_tokens->data<int32_t>(),
+                    batch_size,
+                    batch_size, // local_batch_size
+                    vocab_size_padded,
+                    sequence_lengths->data<int32_t>(),
+                    step - 1, // max_input_length
+                    step - 1, // step
+                    repetition_penalty_type,
+                    stream_);
+                // NOTE: here step uses step - 1 is to use same input_lengths as passed into ModelInputs.
+            }
+        }
+
+        if (params.min_lengths && params.eos_ids) {
+            auto min_lengths_buf = clone({params.min_lengths.value().get()});
+            invokeMinLengthPenaltyNew(
                 logits.data<float>(),
-                penalty_logits->data<float>(),
-                repetition_penalty_buf->data<float>(),
-                transposed_tokens->data<int32_t>(),
-                batch_size,
-                batch_size, // local_batch_size
+                min_lengths_buf->data<int32_t>(),
+                params.eos_ids.value().get().data<int32_t>(),
+                sequence_lengths->data<int32_t>(),
+                input_lengths->data<int32_t>(),
+                decoder_batch_size,
                 vocab_size_padded,
-                params.input_lengths.data<int32_t>(),
-                step - 1, // max_input_length
-                step - 1, // step
-                repetition_penalty_type,
                 stream_);
-            // NOTE: here step uses step - 1 is to use same input_lengths as passed into ModelInputs.
         }
     }
 
-    if (params.min_lengths) {
-    }
-
     // TODO: test repetition_penalty
-    // TODO: maybe support min_new_tokens (need to consider eos_id)
-    // TODO: support top_p_decay, top_p_min, top_p_reset_ids
+    // TODO: test min_new_tokens
 
     // run top_k
     invokeBatchTopKSampling(
@@ -297,17 +309,6 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         stream_,
         &device_prop_,
         skip_top_p_decode_buf->data<bool>());
-    sync_check_cuda_error();
-
-    invokeComputeToppDecay(
-        runtime_top_p_buf->data<float>(),
-        initial_top_p_buf->data<float>(),
-        transposed_tokens->dataWithOffset<int32_t>(step * batch_size),
-        top_p_decay_buf->data<float>(),
-        top_p_min_buf->data<float>(),
-        top_p_reset_ids_buf->data<int32_t>(),
-        batch_size,
-        stream_);
 
     auto output_tokens = transpose({*transposed_tokens});
     copy({params.token_ids, *output_tokens});

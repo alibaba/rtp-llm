@@ -334,9 +334,6 @@ struct GreedyParams {
     OptionalBufferRef random_seed;
     OptionalBufferRef repetition_penalty;
     OptionalBufferRef min_lengths;
-    OptionalBufferRef top_p_decay;
-    OptionalBufferRef top_p_min;
-    OptionalBufferRef top_p_reset_ids;
     OptionalBufferRef eos_ids;
 
     OptionalBufferRef cum_log_probs;
