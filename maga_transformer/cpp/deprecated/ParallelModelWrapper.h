@@ -61,6 +61,7 @@ private:
     std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*> gpt_lora_layer_weights_;
 
     T*   all_hidden_states_  = nullptr;
+    T*   last_hidden_states_  = nullptr;
     T*   attention_mask_     = nullptr;
     int* combo_tokens_       = nullptr;
     int* combo_token_types_  = nullptr;

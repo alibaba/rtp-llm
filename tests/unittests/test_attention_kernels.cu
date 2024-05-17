@@ -233,6 +233,7 @@ private:
                                         batch_size,
                                         max_q_length,
                                         max_prompt_length,
+                                        true,
                                         stream);
         sync_check_cuda_error();
         return attn_mask;

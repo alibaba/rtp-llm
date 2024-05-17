@@ -101,7 +101,4 @@ unique_ptr<const Weights> WeightsConverter::convertPythonWeights(const PyModelWe
     return unique_ptr<const Weights>(weights);
 }
 
-DECLARE_TORCH_JIT_CLASS_WITH_DEFAULT_CONSTRUCTOR(MagaInitParams)
-ADD_TORCH_JIT_PROPERTY(MagaInitParams, gpt_init_parameter);
-
 }  // namespace rtp_llm

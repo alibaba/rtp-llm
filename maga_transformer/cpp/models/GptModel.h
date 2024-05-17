@@ -33,10 +33,11 @@ struct GptModelInputs {
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
     ft::BufferPtr combo_tokens;      // [cumulated_seq_len]
-    ft::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
-    ft::BufferPtr combo_position_ids;      // [cumulated_seq_len]
     ft::BufferPtr input_lengths;     // [batch_size]
     ft::BufferPtr sequence_lengths;  // [decoder_batch_size]
+
+    ft::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
+    ft::BufferPtr combo_position_ids;      // [cumulated_seq_len]
 
     ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
     ft::BufferPtr position_ids;    // [batch_size, seq_len]
@@ -52,8 +53,10 @@ public:
                      << "combo_tokens: " << combo_tokens->debugString()
                      << ", input_lengths: " << input_lengths->debugString()
                      << ", sequence_lengths: " << sequence_lengths->debugString()
-                     << ", prefix_lengths: " << prefix_lengths->debugString()
-                     << ", kv_cache_blocks: " << kv_cache_blocks->debugString() << "}";
+                     << ", prefix_lengths: " << prefix_lengths->debugString();
+        if (kv_cache_blocks != nullptr) {
+            debug_string << ", kv_cache_blocks: " << kv_cache_blocks->debugString() << "}";
+        }                     
         return debug_string.str();
     }
 };

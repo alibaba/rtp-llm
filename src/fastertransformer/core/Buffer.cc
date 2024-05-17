@@ -149,22 +149,7 @@ std::string Buffer::debugStringMeta() const {
         }
     }
     debugStr += "], ";
-    debugStr += "data=";
-    if (where_ != MemoryType::MEMORY_GPU) {
-        if (type_ == DataType::TYPE_INT64) {
-            for (auto i = 0; i < size(); i++) {
-                debugStr += std::to_string(((int64_t*)data_)[i]);
-                debugStr += ",";
-            } 
-        } else if (type_ == DataType::TYPE_INT32) {
-            for (auto i = 0; i < size(); i++) {
-                debugStr += std::to_string(((int*)data_)[i]);
-                debugStr += ",";
-            }
-        }
-    } else {
-        debugStr += "gpu omited";
-    }
+    debugStr += "data=" + std::to_string(reinterpret_cast<uintptr_t>(data_));
     debugStr += " )";
     return debugStr;
 }

@@ -9,7 +9,6 @@ EmbeddingEngine::EmbeddingEngine(const MagaInitParams&                          
                                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
                                  const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
                                  const HandlerBase&                                                      handler) : params_(params) {
-    ft::ftNcclInitialize(tensor_para_, pipeline_para_, params.gpt_init_parameter->tp_size_, params.gpt_init_parameter->pp_size_, params.gpt_init_parameter->nccl_ip_, params.gpt_init_parameter->nccl_port_);
     executor_.reset(new EmbeddingExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights, handler));
     scheduler_.reset(new EmbeddingScheduler(params));
     (void)startLoop();

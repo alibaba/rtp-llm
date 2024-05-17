@@ -206,10 +206,6 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
         ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {total_batch_size}, model_request.input_lengths->data());
     ft::Tensor lora_ids(ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {0}, nullptr);
 
-    ft::Tensor                       block_pointers(ft::MEMORY_CPU,
-                              ft::DataType::TYPE_INT64,
-                              model_request.kv_cache_blocks->shape(),
-                              model_request.kv_cache_blocks->data());
     model_output->logits                          = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
         {ft::DataType::TYPE_FP32, {(size_t)total_batch_size, (size_t)params_.vocab_size_}, ft::AllocationType::DEVICE},
         {});
