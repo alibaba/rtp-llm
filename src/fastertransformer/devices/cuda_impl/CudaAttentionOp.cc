@@ -30,7 +30,7 @@ void writeContextKvCache(
         kv_blocks.shape()[0] == batch_size,
         "context attention kv blocks batch size expected [%d] but got shape [%s]",
         batch_size, kv_blocks.debugString().c_str());
-    const auto max_blocks_per_batch = kv_blocks.shape()[1];
+    const auto max_blocks_per_batch = kv_blocks.shape()[2];
     KVBlockArray kv_block_array(
         batch_size, max_blocks_per_batch, params.configs.tokens_per_block, 0);
     KvCacheDataType cache_type = KvCacheDataType::BASE;
@@ -242,7 +242,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     if (!params.common.kv_cache_blocks.has_value()) {
         throw std::runtime_error("kv cache block pointers can not be null");
     }
-    const auto max_blocks_per_seq = params.common.kv_cache_blocks.value().get().shape()[1];
+    const auto max_blocks_per_seq = params.common.kv_cache_blocks.value().get().shape()[2];
     KVBlockArray kv_block_array(batch_size, max_blocks_per_seq, params.configs.tokens_per_block, 0);
     kv_block_array.data = reinterpret_cast<int64_t*>(
         params.common.kv_cache_blocks.value().get().data());
