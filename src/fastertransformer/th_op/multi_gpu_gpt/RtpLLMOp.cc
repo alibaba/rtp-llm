@@ -27,10 +27,8 @@ void RtpLLMOp::init(const c10::intrusive_ptr<ft::GptInitParameter>              
 
     auto global_params = ft::DeviceFactory::getDefaultGlobalDeviceParams();
     auto& default_device_params = global_params.device_params[0].second;
-    const auto rank       = stoi(string(getenv("WORLD_RANK") ? getenv("WORLD_RANK") : "0"));
-    const auto world_size = stoi(string(getenv("WORLD_SIZE") ? getenv("WORLD_SIZE") : "1"));
-    default_device_params.tp_size = rank;
-    default_device_params.tp_rank = world_size;
+    default_device_params.tp_size = gpt_init_params->tp_size_;
+    default_device_params.tp_rank = gpt_init_params->tp_rank_;
     default_device_params.master_ip = gpt_init_params->nccl_ip_;
     default_device_params.master_port = gpt_init_params->nccl_port_;
     ft::DeviceFactory::initDevices(global_params);

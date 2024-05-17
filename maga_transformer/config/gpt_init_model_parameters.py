@@ -96,7 +96,7 @@ class GptInitModelParameters:
         "ref_module",
         "ref_dict",
         "tie_word_embeddings",
-        "need_ffn_act_scale"       
+        "need_ffn_act_scale"
     }
 
     def __init__(self,
@@ -134,7 +134,7 @@ class GptInitModelParameters:
         self.nccl_port = g_master_info.gpt_nccl_port
         self.model_rpc_port = g_master_info.model_rpc_port if g_parallel_info.tp_rank == 0 else -1
         self.tp_size = g_parallel_info.tp_size
-        self.pp_size = g_parallel_info.pp_size
+        self.tp_rank = g_parallel_info.tp_rank
 
         for k, v in kwargs.items():
             setattr(self, k, v)
@@ -303,7 +303,7 @@ class GptInitModelParameters:
         logging.info(f'kv_cache_mem_mb: {self.kv_cache_mem_mb}')
         self.block_nums = int(os.environ.get('TEST_BLOCK_NUM', 0))
         logging.info(f'block_nums: {self.block_nums}')
-        # TODO(xinfei.sxf) deal with old option : USE_BLOCK_CACHE 
+        # TODO(xinfei.sxf) deal with old option : USE_BLOCK_CACHE
         self.reuse_cache = bool(int(os.environ.get('REUSE_CACHE', 0)))
         logging.info(f'reuse_cache: {self.reuse_cache}')
         self.pre_allocate_op_mem = bool(int(os.environ.get('PRE_ALLOCATE_OP_MEM', 1)))
