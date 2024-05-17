@@ -4,7 +4,10 @@ using namespace std;
 
 namespace fastertransformer {
 
-DeviceBase::DeviceBase(const DeviceInitParams& params) : device_id_(params.device_id) {}
+DeviceBase::DeviceBase(const DeviceInitParams& params)
+    : device_id_(params.device_id)
+    , init_params_(params)
+    {}
 
 void DeviceBase::init() {
     buffer_manager_.reset(new BufferManager(getAllocator(), getHostAllocator()));

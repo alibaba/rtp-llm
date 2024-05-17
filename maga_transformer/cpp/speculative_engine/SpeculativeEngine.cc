@@ -15,7 +15,9 @@ namespace rtp_llm {
 SpeculativeEngine::SpeculativeEngine(
     const MagaInitParams&                                                   params,
     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-    const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) {
+    const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights)
+    : EngineBase(params)
+{
     draft_executor_.reset(new NormalExecutor(params, layer_weights, weights));
     target_executor_.reset(new SpeculativeExecutor(params, layer_weights, weights));
     // TODO(xinfei.sxf) deal with sp cache config and sp system prompt

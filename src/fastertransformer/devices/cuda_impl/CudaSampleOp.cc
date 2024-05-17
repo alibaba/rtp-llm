@@ -21,9 +21,9 @@ using SamplerT = float;
 void CudaDevice::sampleGreedy(const GreedyParams& params) {
     const auto& logits = params.logits;
     const auto batch_size = logits.shape()[0];
-    RUNTIME_ASSERT_OP_ARG(batch_size < getDeviceProperties().max_batch_size,
+    RUNTIME_ASSERT_OP_ARG(batch_size < init_params_.max_batch_size,
                           "batch_size exceeded device limit %d: %d",
-                          getDeviceProperties().max_batch_size, batch_size);
+                          init_params_.max_batch_size, batch_size);
     const auto vocab_size_padded = logits.shape()[1];
     const auto step = params.step;
     RUNTIME_ASSERT_OP_ARG(batch_size == params.token_ids.shape()[0],
@@ -32,7 +32,8 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     RUNTIME_ASSERT_OP_ARG((step == params.token_ids.shape()[1] - 1),
                           "step should equal to token_ids.shape[1] - 1, but %d vs %d",
                           step, params.token_ids.shape()[1] - 1);
-    auto transposed_tokens = transpose({params.token_ids});
+    auto device_tokens = clone({params.token_ids});
+    auto transposed_tokens = transpose({*device_tokens});
 
     // 1. confirm buffer sizes
     auto& top_k = params.top_k;

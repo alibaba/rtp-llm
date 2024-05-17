@@ -184,6 +184,9 @@ cc_library(
     hdrs = glob([
         "engine_base/*.h",
     ]),
+    srcs = glob([
+        "engine_base/*.cc",
+    ]),
     deps = torch_deps() + [
         ":dataclass",
         ":models",

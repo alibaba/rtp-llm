@@ -10,6 +10,7 @@ namespace rtp_llm {
 struct SamplerInitParams {
     ft::DeviceBase* device;
     int32_t eos_id;
+    size_t max_batch_size = 256; // default max batch size
 };
 
 struct SamplerInputs {

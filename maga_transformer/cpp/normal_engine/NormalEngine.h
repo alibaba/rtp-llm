@@ -66,7 +66,6 @@ private:
     MagaInitParams                        params_;
     ResourceContext                       resource_context_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
-    ft::DeviceBase*                       device_;
 };
 
 }  // namespace rtp_llm

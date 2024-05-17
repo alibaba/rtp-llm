@@ -81,7 +81,8 @@ CudaDevice::~CudaDevice() {
 
 void CudaDevice::init() {
     DeviceBase::init();
-    curandstate_buf_ = allocateBuffer({getDeviceProperties().max_batch_size * sizeof(curandState_t)});
+    printf("max batch size: %d\n", init_params_.max_batch_size);
+    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)});
 }
 
 void CudaDevice::syncAndCheck() {
@@ -103,9 +104,6 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop = new DeviceProperties();
         prop->type = DeviceType::Cuda;
         prop->id = device_id_;
-        prop->max_batch_size = DEFAULT_MAX_BATCH_SIZE;
-        // TODO(wangyin.yx): set this value by whether flash-attention is enabled when its ready.
-        prop->need_attention_mask;
         prop->tp_rank = nccl_param_.rank_;
         prop->tp_size = nccl_param_.world_size_;
     }

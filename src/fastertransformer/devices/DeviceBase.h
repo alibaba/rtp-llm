@@ -41,6 +41,7 @@ private:
 
 protected:
     int device_id_;
+    DeviceInitParams init_params_;
 
 private:
     std::unique_ptr<BufferManager> buffer_manager_;

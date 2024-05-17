@@ -29,6 +29,8 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
     params.block_nums_  = 100;
     params.reuse_cache_ = config.reuse_cache;
     params.multi_task_prompt_tokens = config.multi_task_prompt_tokens;
+    params.max_generate_batch_size_ = 128;
+    params.max_context_batch_size_  = 128;
 
     const size_t inter_size    = 512;
     params.inter_size_         = inter_size;

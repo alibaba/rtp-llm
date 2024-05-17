@@ -12,7 +12,7 @@ public:
 
     void SetUp() override {
         DeviceTestBase::SetUp();
-        sampler_.reset(new Sampler({device_}));
+        sampler_.reset(new Sampler({device_, 0, 256}));
     }
 
 protected:
