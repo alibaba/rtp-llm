@@ -51,7 +51,7 @@ class QwenVLRenderer(CustomChatRenderer):
         messages = copy.deepcopy(request.messages)
         prompt_and_images = self._render_messages(messages)
         input_ids = self.tokenizer.encode(prompt_and_images.prompt)
-        return RenderedInputs(input_ids=input_ids, input_images=prompt_and_images.image_urls)
+        return RenderedInputs(input_ids=input_ids, input_images=prompt_and_images.image_urls, rendered_prompt=prompt_and_images.prompt)
 
 register_renderer('qwen_vl', QwenVLRenderer)
 register_renderer('qwen_vl_1b8', QwenVLRenderer)

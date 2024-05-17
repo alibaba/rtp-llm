@@ -33,6 +33,7 @@ class RendererParams:
 class RenderedInputs:
     input_ids: List[int] = field(default_factory=list)
     input_images: List[str] = field(default_factory=list)
+    rendered_prompt: str = field(default_factory=str)
 
 class CustomChatRenderer():
     def __init__(self,

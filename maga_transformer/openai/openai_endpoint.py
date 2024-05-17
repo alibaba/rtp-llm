@@ -167,7 +167,10 @@ class OpenaiEndopoint():
 
     def _get_debug_info(self, renderer: CustomChatRenderer,
                         renderered_input: RenderedInputs, gen_config: GenerateConfig) -> DebugInfo:
-        prompt = self.tokenizer.decode(renderered_input.input_ids)
+        if renderered_input.rendered_prompt != "":
+            prompt = renderered_input.rendered_prompt
+        else:
+            prompt = self.tokenizer.decode(renderered_input.input_ids)
         return DebugInfo(
             input_prompt=prompt,
             input_ids=renderered_input.input_ids,
