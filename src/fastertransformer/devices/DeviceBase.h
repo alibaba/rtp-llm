@@ -10,7 +10,7 @@ class DeviceBase : public DeviceOps {
 public:
     DeviceBase(const DeviceInitParams& params);
 
-    void init();
+    virtual void init();
     virtual DeviceProperties getDeviceProperties() = 0;
     virtual DeviceStatus getDeviceStatus();
     BufferPtr allocateBuffer(const BufferParams& params, const BufferHints& hints = {});

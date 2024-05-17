@@ -7,12 +7,9 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-static const size_t DEFAULT_MAX_BATCH_SIZE = 256;
-
 struct SamplerInitParams {
     ft::DeviceBase* device;
     int32_t eos_id;
-    size_t max_batch_size = DEFAULT_MAX_BATCH_SIZE;
 };
 
 struct SamplerInputs {
@@ -55,7 +52,6 @@ public:
 
 private:
     ft::DeviceBase* device_;
-    size_t max_batch_size_;
     ft::BufferPtr eos_ids_;
 };
 

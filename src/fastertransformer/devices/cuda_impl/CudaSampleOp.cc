@@ -21,6 +21,9 @@ using SamplerT = float;
 void CudaDevice::sampleGreedy(const GreedyParams& params) {
     const auto& logits = params.logits;
     const auto batch_size = logits.shape()[0];
+    RUNTIME_ASSERT_OP_ARG(batch_size < getDeviceProperties().max_batch_size,
+                          "batch_size exceeded device limit %d: %d",
+                          getDeviceProperties().max_batch_size, batch_size);
     const auto vocab_size_padded = logits.shape()[1];
     const auto step = params.step;
     RUNTIME_ASSERT_OP_ARG(batch_size == params.token_ids.shape()[0],
@@ -68,7 +71,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                                 nullptr,
                                 nullptr,
                                 max_top_k,
-                                1.0f,
+                                max_top_p,
                                 vocab_size_padded,
                                 nullptr,
                                 stream_,
@@ -102,7 +105,6 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     // 2. allocate buffers
 
     // see BaseSamplingLayer<T>::allocateBuffer ------------------
-    auto curandstate_buf = allocateBuffer({batch_size * sizeof(curandState_t)});
     auto skip_top_k_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
     auto skip_top_p_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
 
@@ -128,19 +130,19 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         auto& seeds = random_seed.value().get();
         if (seeds.size() == 1) {
             invokeCurandInitialize(
-                (curandState_t *)curandstate_buf->data(), batch_size,
+                (curandState_t *)curandstate_buf_->data(), batch_size,
                 seeds.data<uint64_t>()[0], stream_);
         } else {
             auto random_seeds_buf = allocateBuffer({DataType::TYPE_UINT64, {batch_size}});
             assert(seeds.size() == batch_size);
             copy({*random_seeds_buf, seeds});
             invokeCurandBatchInitialize(
-                (curandState_t *)curandstate_buf->data(), batch_size,
+                (curandState_t *)curandstate_buf_->data(), batch_size,
                 (unsigned long long *)random_seeds_buf->data(), stream_);
         }
     } else {
         // Initialize curand states using the default seed 0.
-        invokeCurandInitialize((curandState_t *)curandstate_buf->data(), batch_size, 0, stream_);
+        invokeCurandInitialize((curandState_t *)curandstate_buf_->data(), batch_size, 0, stream_);
     }
 
     // 3.2. topk setup
@@ -257,7 +259,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         output_log_probs,
         nullptr, // output_index_logits
         nullptr, // token_id_for_index_prob,
-        (curandState_t *)curandstate_buf->data(),
+        (curandState_t *)curandstate_buf_->data(),
         max_top_k,  // useless because runtime_top_k_buf_ is never nullptr. Keep for legacy.
         (int32_t*)runtime_top_k_buf->data<uint32_t>(),
         1.0f,  // useless because runtime_top_p_buf_ is never nullptr. Keep for legacy.
@@ -300,7 +302,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         topp_id_vals_buf->data<int32_t>(),
         topp_offset_buf->data<int32_t>(),
         begin_topp_offset_buf->data<int32_t>(),
-        (curandState_t *)curandstate_buf->data(),
+        (curandState_t *)curandstate_buf_->data(),
         batch_size,
         vocab_size_padded,
         nullptr, // end_id

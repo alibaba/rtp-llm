@@ -9,13 +9,13 @@ namespace rtp_llm {
 
 Sampler::Sampler(const SamplerInitParams& params)
     : device_(params.device)
-    , max_batch_size_(params.max_batch_size)
     {
+        const auto max_batch_size = device_->getDeviceProperties().max_batch_size;
         auto eos_ids_host = device_->allocateBuffer(
-            {DataType::TYPE_INT32, {max_batch_size_}, AllocationType::HOST});
-        std::fill_n(eos_ids_host->data<int32_t>(), max_batch_size_, params.eos_id);
+            {DataType::TYPE_INT32, {max_batch_size}, AllocationType::HOST});
+        std::fill_n(eos_ids_host->data<int32_t>(), max_batch_size, params.eos_id);
         eos_ids_ = device_->allocateBuffer(
-            {DataType::TYPE_INT32, {max_batch_size_}, AllocationType::DEVICE});
+            {DataType::TYPE_INT32, {max_batch_size}, AllocationType::DEVICE});
         device_->copy({*eos_ids_, *eos_ids_host});
     };
 

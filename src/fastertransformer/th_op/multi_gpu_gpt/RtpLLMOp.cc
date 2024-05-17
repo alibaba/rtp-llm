@@ -24,7 +24,17 @@ void RtpLLMOp::init(const c10::intrusive_ptr<ft::GptInitParameter>              
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
     rtp_llm::MagaInitParams params;
     params.gpt_init_parameter = gpt_init_params;
-    ft::DeviceFactory::initDevices(ft::DeviceFactory::getDefaultGlobalDeviceParams());
+
+    auto global_params = ft::DeviceFactory::getDefaultGlobalDeviceParams();
+    auto& default_device_params = global_params.device_params[0].second;
+    const auto rank       = stoi(string(getenv("WORLD_RANK") ? getenv("WORLD_RANK") : "0"));
+    const auto world_size = stoi(string(getenv("WORLD_SIZE") ? getenv("WORLD_SIZE") : "1"));
+    default_device_params.tp_size = rank;
+    default_device_params.tp_rank = world_size;
+    default_device_params.master_ip = gpt_init_params->nccl_ip_;
+    default_device_params.master_port = gpt_init_params->nccl_port_;
+    ft::DeviceFactory::initDevices(global_params);
+
     std::unordered_map<std::string, ft::ConstBufferPtr>              global_weights;
     std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layer_weights_;
     for (auto& it : weights) {

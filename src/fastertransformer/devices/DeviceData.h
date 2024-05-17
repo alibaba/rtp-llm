@@ -28,7 +28,7 @@ struct DeviceProperties {
     size_t id = 0;
 
     /* -- properties related to request construction -- */
-    size_t max_batch_size = -1; // -1 indicates no limitation
+    size_t max_batch_size = 256;
     bool need_attention_mask = true;
 
     /* -- distributed properties -- */

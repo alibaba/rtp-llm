@@ -9,13 +9,13 @@
 
 namespace fastertransformer {
 
-// TODO(wangyin.yx): add api for query device status.
 class CudaDevice : public DeviceBase {
 public:
     CudaDevice(const DeviceInitParams& params);
     ~CudaDevice();
 
 public:
+    void init() override;
     DeviceProperties getDeviceProperties() override;
     DeviceStatus getDeviceStatus() override;
     IAllocator* getAllocator() override { return allocator_.get(); }
@@ -51,6 +51,7 @@ public:
 private:
     std::unique_ptr<IAllocator> allocator_;
     std::unique_ptr<IAllocator> host_allocator_;
+
     cudaStream_t stream_;
     cublasHandle_t cublas_handle_;
     cublasLtHandle_t cublaslt_handle_;
@@ -61,8 +62,9 @@ private:
     std::unique_ptr<cublasMMWrapper> cublas_mm_wrapper_;
 
     nvmlDevice_t nvml_device_;
-
     NcclParam nccl_param_;
+
+    BufferPtr curandstate_buf_; // for sampler use.
 };
 
 } // namespace fastertransformer

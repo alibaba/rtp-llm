@@ -6,9 +6,12 @@
 #include "src/fastertransformer/utils/logger.h"
 
 #include <cuda_runtime.h>
+#include <curand_kernel.h>
 #include <unistd.h>
 
 namespace fastertransformer {
+
+static const size_t DEFAULT_MAX_BATCH_SIZE = 256;
 
 CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     FT_LOG_INFO("Initialize CudaDevice. %d", device_id_);
@@ -66,6 +69,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
 }
 
 CudaDevice::~CudaDevice() {
+    curandstate_buf_.reset();
     cublas_mm_wrapper_.reset();
     check_cuda_error(cudaStreamDestroy(stream_));
     check_cuda_error(cublasDestroy(cublas_handle_));
@@ -73,6 +77,11 @@ CudaDevice::~CudaDevice() {
     if (nccl_param_.nccl_comm_) {
         ncclCommDestroy(nccl_param_.nccl_comm_);
     }
+}
+
+void CudaDevice::init() {
+    DeviceBase::init();
+    curandstate_buf_ = allocateBuffer({getDeviceProperties().max_batch_size * sizeof(curandState_t)});
 }
 
 void CudaDevice::syncAndCheck() {
@@ -94,6 +103,9 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop = new DeviceProperties();
         prop->type = DeviceType::Cuda;
         prop->id = device_id_;
+        prop->max_batch_size = DEFAULT_MAX_BATCH_SIZE;
+        // TODO(wangyin.yx): set this value by whether flash-attention is enabled when its ready.
+        prop->need_attention_mask;
         prop->tp_rank = nccl_param_.rank_;
         prop->tp_size = nccl_param_.world_size_;
     }
