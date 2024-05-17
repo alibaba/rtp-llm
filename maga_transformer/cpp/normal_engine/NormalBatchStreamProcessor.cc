@@ -167,6 +167,10 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     sampler_inputs.step     = max_seq_len;
     size_t total_batch_size = stream_groups.totalSamplerBatchSize();
 
+    sampler_inputs.sequence_lengths = model_inputs.sequence_lengths;
+    sampler_inputs.input_lengths    = model_inputs.input_lengths;
+    sampler_inputs.logits           = model_output.logits;
+
     sampler_inputs.top_k         = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.top_p         = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.temperature   = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
@@ -206,30 +210,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
         FT_LOG_DEBUG("stream [%d], complete_token_ids = [%s]\n", stream->streamId(), complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
         FT_LOG_DEBUG("stream [%d], sampler_inputs = [%s]\n", stream->streamId(), complete_token_ids->debugStringWithData<int32_t>(sampler_inputs.step).c_str());
     }
-    sampler_inputs.sequence_lengths = model_inputs.sequence_lengths;
-    sampler_inputs.input_lengths    = model_inputs.input_lengths;
-    sampler_inputs.logits = model_output.logits;
-    sampler_inputs.batch_size = total_batch_size;
-    sampler_inputs.top_k      = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.top_p      = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.temperature = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.num_beams  = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.cum_log_probs  = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}}, {});
-
-
-    int32_t* top_k            = sampler_inputs.top_k->data<int32_t>();
-    float* top_p              = sampler_inputs.top_p->data<float>();
-    float* temperature        = sampler_inputs.temperature->data<float>();
-    uint64_t* num_beams       = sampler_inputs.num_beams->data<uint64_t>();
-
-    for (int i = 0; i < total_batch_size; ++i) {
-
-        num_beams[i] = 1;
-        top_k[i]     = 1;
-        top_p[i]     = 1.0;
-        temperature[i] = 1.0;
-    }
-    return sampler_inputs;
+    return move(sampler_inputs);
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&                  stream_groups,
