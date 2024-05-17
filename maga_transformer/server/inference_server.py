@@ -173,9 +173,7 @@ class InferenceServer(object):
                 result = await self._embedding_endpoint.handle(request)
                 log_result = copy.copy(result)
                 # do not log result since too big
-                if 'data' in log_result:
-                    log_result['data'] = []
-                if  '__@_pos_@__' not in log_result:                    
+                if 'data' not in log_result:                    
                     self._access_logger.log_success_access(request, log_result, id)
                 return ORJSONResponse(result)
             except BaseException as e:

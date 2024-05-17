@@ -43,16 +43,17 @@ def _is_classifier_task(ckpt_path: str) -> bool:
     return False
 
 def create_custom_module(task_type: TaskType, config: GptInitModelParameters, tokenizer: Optional[PreTrainedTokenizerBase]):
-    from maga_transformer.models.downstream_modules.mainse.mainse_module import MainseModule
-    return MainseModule(config, tokenizer)
+    # try import internal module
+    try:
+        from internal_source.maga_transformer.models.downstream_modules.utils import create_custom_module
+        internal_module = create_custom_module(task_type, config, tokenizer)
+        if internal_module is not None:
+            return internal_module
+    except ImportError:
+        pass
+
     if task_type == TaskType.LANGUAGE_MODEL:
         return None
-    if task_type == TaskType.PLUGIN_TASK:
-        if 'USER_MODULE_PATH' not in os.environ:
-            raise Exception("USER_MODULE_PATH is needed when use task_type==PLUGIN_TASK")
-        module_path = os.environ['USER_MODULE_PATH']
-        return UserModuleLoader.load(os.path.join(config.ckpt_path, module_path))(config, tokenizer)
-
     assert tokenizer is not None, "tokenizer should not be None"
     if task_type == TaskType.DENSE_EMBEDDING:
         return DenseEmbeddingModule(config, tokenizer)

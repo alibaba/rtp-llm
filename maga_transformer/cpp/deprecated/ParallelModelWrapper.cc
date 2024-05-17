@@ -127,6 +127,7 @@ void ParallelModelWrapperImpl<T>::freeBuffer() {
     allocator_->free((void**)input_lengths_);
     allocator_->free((void**)sequence_lengths_);
     allocator_->free((void**)prefix_lengths_);
+    allocator_->free((void**)attention_mask_);
 }
 
 template<typename T>
@@ -167,6 +168,12 @@ void ParallelModelWrapperImpl<T>::setPaddingOffsetAndCuSeqLens(ft::Tensor& paddi
 template<typename T>
 bool ParallelModelWrapperImpl<T>::useFMHA() {
     return parallel_gpt_decoder_->UseFMHA();
+}
+template<typename T>
+void ParallelModelWrapperImpl<T>::createAttentionMask(size_t context_batch_size, size_t max_context_seq_length, int* input_lengths_host) {
+    cudaMemcpyAsync(input_lengths_, input_lengths_host, sizeof(int) * context_batch_size, cudaMemcpyHostToDevice, stream_);
+    attention_mask_  = (T*)allocator_->reMalloc(attention_mask_, sizeof(T) * context_batch_size * max_context_seq_length * max_context_seq_length, false);
+    invokeBuildDecoderAttentionMask<T>(attention_mask_, input_lengths_host, nullptr, context_batch_size, max_context_seq_length, 0, params_.is_causal_, stream_);
 }
 
 template<typename T>
@@ -245,19 +252,30 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
                                      (int*)model_request.input_lengths->data() + model_request.generate_batch_size);
     }
     ft::Tensor attention_mask;
-    if (model_request.attention_mask) {
+    if (!parallel_gpt_decoder_->UseFMHA() && model_request.attention_mask.get() == nullptr && model_request.context_batch_size > 0) {
+        createAttentionMask(model_request.context_batch_size, max_context_seq_length_, model_request.input_lengths->data<int>() + model_request.generate_batch_size);
+        attention_mask = ft::Tensor(
+            ft::MEMORY_GPU,
+            data_type_,
+            {(size_t)model_request.context_batch_size, max_context_seq_length_, max_context_seq_length_},
+        attention_mask_);
+    } else if (model_request.attention_mask) {
         const auto& attention_mask_shape = model_request.attention_mask->shape();
         attention_mask = ft::Tensor(
             ft::MEMORY_GPU,
-            ft::DataType::TYPE_FP16,
+            data_type_,
             {attention_mask_shape[0], attention_mask_shape[1], attention_mask_shape[2]},
             model_request.attention_mask->data());
     } else {
         attention_mask = ft::Tensor(
         ft::MEMORY_GPU,
-        ft::DataType::TYPE_FP16,
+        data_type_,
         {(size_t)model_request.context_batch_size, max_context_seq_length_, max_context_seq_length_},
         nullptr);
+    }
+
+    if (attention_mask.data() != nullptr) {
+        print_bsd(-1, "attention_mask", attention_mask.getPtr<T>(), model_request.context_batch_size, max_context_seq_length_, max_context_seq_length_);
     }
 
     ft::Tensor position_ids;

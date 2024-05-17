@@ -481,7 +481,7 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
 
-    if (!use_kvcache && params_.rotary_embedding_style_ == 0) {
+    if (!use_kvcache && params_.rotary_embedding_style_ == 0 && UseFMHA()) {        
         gemm_runner_->GemmWithBias(h_token_num,
                     local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
                     hidden_units_,
@@ -657,7 +657,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
             : PrefixPromptBatchWeightsParam();
 
     PUSH_RANGE(stream_, "qkv_bias_add");
-    if (use_kvcache || params_.rotary_embedding_style_ != 0) {
+    if (use_kvcache || params_.rotary_embedding_style_ != 0 || !UseFMHA()) {
         if (padding_offset != nullptr) {
             // q_buf_2_, k_buf_2_ and v_buf_2_ are continuousd
             cudaMemsetAsync(q_buf_2_,

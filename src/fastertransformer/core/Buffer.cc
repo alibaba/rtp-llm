@@ -156,7 +156,7 @@ std::string Buffer::debugStringMeta() const {
                 debugStr += std::to_string(((int64_t*)data_)[i]);
                 debugStr += ",";
             } 
-        } else {
+        } else if (type_ == DataType::TYPE_INT32) {
             for (auto i = 0; i < size(); i++) {
                 debugStr += std::to_string(((int*)data_)[i]);
                 debugStr += ",";

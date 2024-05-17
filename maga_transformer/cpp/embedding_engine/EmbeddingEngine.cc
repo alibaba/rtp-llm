@@ -65,21 +65,18 @@ absl::Status EmbeddingEngine::step() {
         FT_LOG_WARNING("no query run and sleep");
         return absl::OkStatus();
     }
-    RETURN_IF_STATUS_ERROR(executor_->process(streams));
-    RETURN_IF_STATUS_OR_ERROR(streams_status);
-    // RETURN_IF_STATUS_ERROR(update_streams(streams));
+    try {
+        RETURN_IF_STATUS_ERROR(executor_->process(streams));
+        RETURN_IF_STATUS_OR_ERROR(streams_status);
+        // RETURN_IF_STATUS_ERROR(update_streams(streams));        
+    } catch (const exception& e) {
+        FT_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), e.what());
+        for (auto& stream: streams) {
+            stream->setError(e.what());
+            FT_LOG_WARNING("error_stream_info: length: %d", stream->inputLength());
+        }
+    }
     return absl::OkStatus();
 }
-
-// absl::Status EmbeddingEngine::update_streams(std::list<EmbeddingStreamPtr>& streams) {
-//     // if (streams.size() != generate_outputs.hidden_states->shape()[0]) {
-//     //     return absl::InternalError("length not equal");
-//     // }
-//     // int index = 0;
-//     for (auto& stream: streams) {
-//         stream->updateOutput(new_buffer_ptr);
-//     // }
-//     return absl::OkStatus();
-// }
 
 }  // namespace rtp_llm

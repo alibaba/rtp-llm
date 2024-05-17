@@ -16,6 +16,9 @@ class CustomModule(object):
     def __init__(self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase):
         self.config_ = config
         self.tokenizer_ = tokenizer
+        
+    def create_cpp_handler(self) -> Any:
+        raise NotImplementedError("not support cpp handler")
 
 # Class for c++
 class CustomHandler(object):    
@@ -27,7 +30,6 @@ class CustomHandler(object):
 
     def init(self, tensor_map: Dict[str, torch.Tensor]) -> None:
         pass
-    
     # 输出
     # input_ids: [token_len]
     # hidden_states: [token_len, hidden_size]

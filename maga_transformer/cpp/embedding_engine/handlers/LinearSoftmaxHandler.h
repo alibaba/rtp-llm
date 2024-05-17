@@ -9,9 +9,9 @@
 namespace rtp_llm {
 
 template<typename T>
-class MainseHandlerImpl: public IHandlerImpl {
+class LinearSoftmaxHandlerImpl: public IHandlerImpl {
 public:
-    MainseHandlerImpl(const GptInitParameter& params);
+    LinearSoftmaxHandlerImpl(const ft::GptInitParameter& params);
     std::vector<std::string> tensorInfo();
     absl::Status loadTensor(std::unordered_map<std::string, ft::ConstBufferPtr>& tensors);
     absl::StatusOr<std::unique_ptr<GptModelOutputs>> forward(const ModelRequest& model_input, const GptModelOutputs& model_output) const;    
@@ -26,12 +26,9 @@ private:
     ft::BufferPtr        transposed_weight_;
 };
 
-class MainseHandler: public HandlerBase {
+class LinearSoftmaxHandler: public HandlerBase {
 public:
-    MainseHandler(const GptInitParameter& params);    
-    std::vector<std::string> tensorInfo();
-    absl::Status loadTensor(std::unordered_map<std::string, ft::ConstBufferPtr>& tensors);
-    absl::StatusOr<std::unique_ptr<GptModelOutputs>> forward(const ModelRequest& model_input, const GptModelOutputs& model_output) const;    
+    LinearSoftmaxHandler(const ft::GptInitParameter& params);    
 };
 
 } // namespace rtp_llm

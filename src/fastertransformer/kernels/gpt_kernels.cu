@@ -517,7 +517,7 @@ template void
 invokeTransposeAxis12(__nv_bfloat16* out, __nv_bfloat16* in, const int dim0, const int dim1, const int dim2, const int dim_3, cudaStream_t stream);
 #endif
 
-template<typename T, bool PREFIX_PROMPT>
+template<typename T, bool PREFIX_PROMPT, bool IS_CAUSAL>
 __global__ void buildDecoderAttentionMaskKernel(T*         attention_mask,
                                                 const int* sequence_lengths,
                                                 const int* prefix_prompt_lengths,
@@ -534,7 +534,8 @@ __global__ void buildDecoderAttentionMaskKernel(T*         attention_mask,
     for (int i = threadIdx.x; i < mask_size_per_seq; i += blockDim.x) {
         int row_id = i / max_prompt_seq_length;
         int col_id = i % max_prompt_seq_length;
-        if (row_id < seq_length && col_id <= (row_id + prompt_length)) {
+        int column_bound = IS_CAUSAL ? row_id + prompt_length: seq_length - 1;
+        if (row_id < seq_length && col_id <= (column_bound)) {
             attention_mask[i] = (T)(1.0f);
         }
         else {
@@ -550,15 +551,26 @@ void invokeBuildDecoderAttentionMask(T*           attention_mask,
                                      const int    batch_size,
                                      const int    max_seq_len,
                                      const int    max_prompt_length,
+                                     const bool   is_causal,
                                      cudaStream_t stream)
 {
+    #define RUN_KERNEL(has_prefix, is_causal) \
+        buildDecoderAttentionMaskKernel<T, has_prefix, is_causal><<<batch_size, 256, 0, stream>>>( \
+            attention_mask, sequence_lengths, prefix_prompt_lengths, max_seq_len, max_prompt_length)
+
     if (max_prompt_length == 0) {
-        buildDecoderAttentionMaskKernel<T, false><<<batch_size, 256, 0, stream>>>(
-            attention_mask, sequence_lengths, prefix_prompt_lengths, max_seq_len, max_prompt_length);
+        if (is_causal) {
+            RUN_KERNEL(false, true);
+        } else {
+            RUN_KERNEL(false, false);
+        }
     }
     else {
-        buildDecoderAttentionMaskKernel<T, true><<<batch_size, 256, 0, stream>>>(
-            attention_mask, sequence_lengths, prefix_prompt_lengths, max_seq_len, max_prompt_length);
+        if (is_causal) {
+            RUN_KERNEL(true, true);
+        } else{
+            RUN_KERNEL(true, false);
+        }
     }
 }
 
@@ -568,6 +580,7 @@ template void invokeBuildDecoderAttentionMask(float*       attention_mask,
                                               const int    batch_size,
                                               const int    max_seq_len,
                                               const int    max_prompt_length,
+                                              const bool   is_causal,
                                               cudaStream_t stream);
 template void invokeBuildDecoderAttentionMask(half*        attention_mask,
                                               const int*   sequence_lengths,
@@ -575,6 +588,7 @@ template void invokeBuildDecoderAttentionMask(half*        attention_mask,
                                               const int    batch_size,
                                               const int    max_seq_len,
                                               const int    max_prompt_length,
+                                              const bool   is_causal,
                                               cudaStream_t stream);
 #ifdef ENABLE_BF16
 template void invokeBuildDecoderAttentionMask(__nv_bfloat16* attention_mask,
@@ -583,6 +597,7 @@ template void invokeBuildDecoderAttentionMask(__nv_bfloat16* attention_mask,
                                               const int      batch_size,
                                               const int      max_seq_len,
                                               const int      max_prompt_length,
+                                              const bool   is_causal,
                                               cudaStream_t   stream);
 #endif
 #ifdef ENABLE_FP8
@@ -592,6 +607,7 @@ template void invokeBuildDecoderAttentionMask(__nv_fp8_e4m3* attention_mask,
                                               const int      batch_size,
                                               const int      max_seq_len,
                                               const int      max_prompt_length,
+                                              const bool   is_causal,
                                               cudaStream_t   stream);
 #endif
 

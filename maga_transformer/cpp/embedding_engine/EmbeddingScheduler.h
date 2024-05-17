@@ -25,7 +25,7 @@ public:
     int runningStreamsSize();
 
 private:
-    GptInitParameter&                   config_;
+    ft::GptInitParameter&               config_;
     std::list<EmbeddingStreamPtr>       waiting_streams_;
     std::list<EmbeddingStreamPtr>       running_streams_;
     std::atomic<bool>                   stop_               = false;

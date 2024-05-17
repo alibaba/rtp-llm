@@ -106,6 +106,7 @@ void invokeBuildDecoderAttentionMask(T*           attention_mask,
                                      const int    batch_size,
                                      const int    max_seq_len,
                                      const int    max_prompt_length,
+                                     const bool   is_causal,
                                      cudaStream_t stream);
 
 template<typename T>

@@ -11,19 +11,19 @@ namespace th = torch;
 
 namespace torch_ext {
 
-RtpEmbeddingOp::RtpEmbeddingOp(const c10::intrusive_ptr<GptInitParameter> gpt_init_params) {
-    handler_ = std::move(rtp_llm::create_handler_from_factory(*gpt_init_params));
+RtpEmbeddingOp::RtpEmbeddingOp(const c10::intrusive_ptr<ft::GptInitParameter> gpt_init_params, const c10::intrusive_ptr<EmbeddingHandlerOp> handler_op): handler_(handler_op->getHandler()) {
 }
 
 std::vector<std::string> RtpEmbeddingOp::handlerTensorInfo() {
-    return handler_->tensorInfo();
+    return handler_.tensorInfo();
 }
 
-void RtpEmbeddingOp::init(const c10::intrusive_ptr<GptInitParameter>&               gpt_init_params,
+void RtpEmbeddingOp::init(const c10::intrusive_ptr<ft::GptInitParameter>&               gpt_init_params,
                     const std::vector<std::unordered_map<std::string, th::Tensor>>& layer_weights,
                     const c10::Dict<std::string, th::Tensor>&                       weights) {
     rtp_llm::MagaInitParams params;
     params.gpt_init_parameter = gpt_init_params;
+    ft::DeviceFactory::initDevices(ft::DeviceFactory::getDefaultGlobalDeviceParams());
     for (auto& it : weights) {
         global_weights_.emplace(it.key(), ft::torchTensor2Buffer(it.value()));
     }
@@ -34,8 +34,8 @@ void RtpEmbeddingOp::init(const c10::intrusive_ptr<GptInitParameter>&           
         }
         layer_weights_.emplace_back(std::move(__weights));
     }
-    THROW_IF_STATUS_ERROR(handler_->loadTensor(global_weights_));
-    embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, layer_weights_, global_weights_, *handler_));
+    THROW_IF_STATUS_ERROR(handler_.loadTensor(global_weights_));
+    embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, layer_weights_, global_weights_, handler_));
 }
 
 void RtpEmbeddingOp::stop() {
@@ -45,7 +45,10 @@ void RtpEmbeddingOp::stop() {
     }
 }
 
-th::Tensor RtpEmbeddingOp::handle(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id) {
+th::Tensor RtpEmbeddingOp::decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id) {
+    if (is_server_shutdown_) {
+        throw std::runtime_error("server is shut down, can't handle request");
+    }
     auto embedding_stream = rtp_llm::EmbeddingQueryConverter::convertEmbeddingInputs(token_ids, token_type_ids, input_lengths, request_id);
     THROW_IF_STATUS_ERROR(embedding_engine_->enqueue(embedding_stream));
     embedding_stream->waitFinish();
@@ -59,15 +62,15 @@ RtpEmbeddingOp::~RtpEmbeddingOp() {
 }  // namespace torch_ext
 
 
-static auto fasterTransformerGptTHS =
+static auto rtpEmbeddingOpTHS =
 #ifdef LEGACY_THS
     torch::jit::class_<torch_ext::RtpEmbeddingOp>("FasterTransformerRtpEmbeddingOp")
 #else
     torch::jit::class_<torch_ext::RtpEmbeddingOp>("FasterTransformer", "RtpEmbeddingOp")
 #endif
-        .def(torch::jit::init<c10::intrusive_ptr<GptInitParameter>>())  // quant_pre_scales
+        .def(torch::jit::init<c10::intrusive_ptr<ft::GptInitParameter>, c10::intrusive_ptr<torch_ext::EmbeddingHandlerOp>>())  // quant_pre_scales
         .def("init", &torch_ext::RtpEmbeddingOp::init)
         .def("stop", &torch_ext::RtpEmbeddingOp::stop)
-        .def("handle", &torch_ext::RtpEmbeddingOp::handle)
+        .def("decode", &torch_ext::RtpEmbeddingOp::decode)
         .def("handler_tensor_info", &torch_ext::RtpEmbeddingOp::handlerTensorInfo);
 

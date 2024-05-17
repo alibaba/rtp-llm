@@ -1,12 +1,12 @@
-#include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/kernels/sampling_topp_kernels.h"
-#include "maga_transformer/cpp/embedding_engine/handlers/MainseHandler.h"
+#include "maga_transformer/cpp/embedding_engine/handlers/LinearSoftmaxHandler.h"
 
 using namespace fastertransformer;
 namespace rtp_llm {
 
 template<typename T>
-MainseHandlerImpl<T>::MainseHandlerImpl(const GptInitParameter& params): IHandlerImpl(params), is_initalized_(false) {
+LinearSoftmaxHandlerImpl<T>::LinearSoftmaxHandlerImpl(const GptInitParameter& params): IHandlerImpl(params), is_initalized_(false) {
+    ft::DeviceFactory::initDevices(ft::DeviceFactory::getDefaultGlobalDeviceParams());
     device_ = dynamic_cast<CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda));
     allocator_      = device_->getAllocator();
     cublas_wrapper_ = device_->cublasMMWrapperPtr();
@@ -14,12 +14,12 @@ MainseHandlerImpl<T>::MainseHandlerImpl(const GptInitParameter& params): IHandle
 }
 
 template<typename T>
-std::vector<std::string> MainseHandlerImpl<T>::tensorInfo() {
+std::vector<std::string> LinearSoftmaxHandlerImpl<T>::tensorInfo() {
     return {"w_out.weight", "w_out.bias"};
 }
 
 template<typename T>
-absl::Status MainseHandlerImpl<T>::loadTensor(std::unordered_map<std::string, ft::ConstBufferPtr>& tensors) {
+absl::Status LinearSoftmaxHandlerImpl<T>::loadTensor(std::unordered_map<std::string, ft::ConstBufferPtr>& tensors) {
     // weight
     auto weight_it = tensors.find("w_out.weight");
     if (weight_it == tensors.end()) {
@@ -41,7 +41,7 @@ absl::Status MainseHandlerImpl<T>::loadTensor(std::unordered_map<std::string, ft
 }
 
 template<typename T>
-absl::StatusOr<std::unique_ptr<GptModelOutputs>> MainseHandlerImpl<T>::forward(const ModelRequest& model_input, const GptModelOutputs& model_output) const {
+absl::StatusOr<std::unique_ptr<GptModelOutputs>> LinearSoftmaxHandlerImpl<T>::forward(const ModelRequest& model_input, const GptModelOutputs& model_output) const {
     if (!is_initalized_) {
         return absl::InternalError("mainse handler not initalized!");
     }
@@ -80,37 +80,26 @@ absl::StatusOr<std::unique_ptr<GptModelOutputs>> MainseHandlerImpl<T>::forward(c
     return mainse_output;
 }
 
-std::vector<std::string> MainseHandler::tensorInfo() {
-    return handler_impl_->tensorInfo();
-}
-
-absl::Status MainseHandler::loadTensor(std::unordered_map<std::string, ft::ConstBufferPtr>& tensors) {
-    return handler_impl_->loadTensor(tensors);
-}
-
-absl::StatusOr<std::unique_ptr<GptModelOutputs>> MainseHandler::forward(const ModelRequest& model_input, const GptModelOutputs& model_output) const {
-    return handler_impl_->forward(model_input, model_output);
-}
-
-MainseHandler::MainseHandler(const GptInitParameter& params): HandlerBase(params) {
+LinearSoftmaxHandler::LinearSoftmaxHandler(const GptInitParameter& params): HandlerBase(params) {
     //@miji FIXME
     DataType data_type = DataType::TYPE_FP16;
     switch (data_type) {
         case DataType::TYPE_FP32:
-            handler_impl_ = std::make_unique<MainseHandlerImpl<float>>(params);
+            handler_impl_ = std::make_unique<LinearSoftmaxHandlerImpl<float>>(params);
             break;
         case DataType::TYPE_FP16:
-            handler_impl_ = std::make_unique<MainseHandlerImpl<half>>(params);
+            handler_impl_ = std::make_unique<LinearSoftmaxHandlerImpl<half>>(params);
             break;
         case DataType::TYPE_BF16:            
+            // bfloat16 add_bias_softmax not implemented
             throw std::runtime_error("not support bfloat16");                            
             break;
         default:
-            throw std::runtime_error("Wrong tensor type.");
+            throw std::runtime_error("Wrong tensor type::" + std::to_string(data_type));
     }
 }
 
-template class MainseHandlerImpl<float>;
-template class MainseHandlerImpl<half>;
+template class LinearSoftmaxHandlerImpl<float>;
+template class LinearSoftmaxHandlerImpl<half>;
 
-} // namespace rtp_llm
+} // namespace rtp_llmπ

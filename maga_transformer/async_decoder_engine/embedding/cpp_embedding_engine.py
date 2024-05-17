@@ -10,8 +10,9 @@ from maga_transformer.async_decoder_engine.embedding.embedding_stream import Emb
 class EmbeddingCppEngine(object):
     def __init__(self, model: BaseModel):
         self.model = model
-        self.cpp_engine = torch.classes.FasterTransformer.RtpEmbeddingOp(model.config.gpt_init_params)
-        self.executor = ThreadPoolExecutor(100)
+        assert self.model.custom_module is not None, "embedding custom module should not be None"
+        self.cpp_handler = self.model.custom_module.create_cpp_handler()
+        self.cpp_engine = torch.classes.FasterTransformer.RtpEmbeddingOp(model.config.gpt_init_params, self.cpp_handler)
 
     def start(self):
         self.cpp_engine.init(self.model.config.gpt_init_params, self.model.weight.weights, self.model.weight.global_weights)
@@ -19,7 +20,7 @@ class EmbeddingCppEngine(object):
     def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):
         try:
             start_time = time.time()
-            results = self.cpp_engine.handle(inputs.token_ids, inputs.token_type_ids, inputs.input_lengths, 0)
+            results = self.cpp_engine.decode(inputs.token_ids, inputs.token_type_ids, inputs.input_lengths, 0)
             end_time = time.time()
             kmonitor.report(GaugeMetrics.ASYNC_ITERATE_LANTENCY, (end_time - start_time) * 1000)
             kmonitor.report(GaugeMetrics.ASYNC_BATCH_SIZE_METRIC, len(inputs.token_ids))

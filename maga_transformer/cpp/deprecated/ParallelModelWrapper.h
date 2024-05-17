@@ -15,9 +15,6 @@
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLoRALayerWeight.h"
 #include <memory>
 
-namespace ft = fastertransformer;
-namespace th = torch;
-
 namespace rtp_llm {
 
 class IModelWrapper {
@@ -38,6 +35,7 @@ public:
             const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights);
     ~ParallelModelWrapperImpl();
     void                             allocateBuffer(size_t total_batch_size, size_t h_token_num, std::unique_ptr<GptModelOutputs>& model_output);
+    void                             createAttentionMask(size_t context_batch_size, size_t max_context_seq_length, int* input_lengths_host);
     void                             freeBuffer();
     void                             initialize();
     bool                             useFMHA() override;
@@ -63,7 +61,7 @@ private:
     std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*> gpt_lora_layer_weights_;
 
     T*   all_hidden_states_  = nullptr;
-    T*   last_hidden_states_ = nullptr;
+    T*   attention_mask_     = nullptr;
     int* combo_tokens_       = nullptr;
     int* combo_token_types_  = nullptr;
     int* combo_position_ids_ = nullptr;

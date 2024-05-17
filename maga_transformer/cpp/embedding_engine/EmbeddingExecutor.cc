@@ -1,7 +1,7 @@
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
-#include "maga_transformer/cpp/embedding_engine/handlers/HandlerFactory.h"
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
+#include "src/fastertransformer/core/Types.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 
@@ -16,7 +16,7 @@ EmbeddingExecutor::EmbeddingExecutor(
         ft::NcclParam                                        pipeline_para,
         const vector<unordered_map<string, ConstBufferPtr>>& layer_weights,
         const unordered_map<string, ConstBufferPtr>&         weights,
-        const HandlerBase&                                   handler): 
+        const HandlerBase&                                   handler):
     handler_(handler),
     tensor_para_(tensor_para),
     pipeline_para_(pipeline_para)
@@ -26,9 +26,10 @@ EmbeddingExecutor::EmbeddingExecutor(
     // model_.reset(new GptModel(*model_params));
     SamplerInitParams sampler_params;
     device_               = ft::DeviceFactory::getDevice(DeviceType::Cuda);
+    data_type_ = ft::getDataType(params.gpt_init_parameter->data_type_);
     sampler_params.device = device_;
     model_wrapper_.reset(
-        new ParallelModelWrapper(*params.gpt_init_parameter, tensor_para_, pipeline_para_, weights, layer_weights)
+        new ParallelModelWrapper(*params.gpt_init_parameter, weights, layer_weights)
     );
     init_position_ids(params.gpt_init_parameter->max_seq_len_);
 }
@@ -69,12 +70,12 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         int length = stream->inputLength();
         int batchSize = stream->batchSize();
         memcpy(merged_tokens + (int)token_idx, stream->embeddingInput()->token_ids->data(), length * sizeof(int32_t));
-        memcpy(merged_token_type_ids + (int)token_idx, stream->embeddingInput()->token_type_ids->data(), length * sizeof(int32_t));        
+        memcpy(merged_token_type_ids + (int)token_idx, stream->embeddingInput()->token_type_ids->data(), length * sizeof(int32_t));
         memcpy(input_lengths + (int)batch_idx, stream->embeddingInput()->input_lengths->data(), stream->batchSize() * sizeof(int32_t));
         int length_idx = 0;
         for (int i = 0; i < batchSize; i++) {
             int seqLen = stream->embeddingInput()->input_lengths->data<int32_t>()[i];
-            memcpy(merged_positon_ids + token_idx + length_idx, max_position_ids_buf_->data(), seqLen * sizeof(int32_t));    
+            memcpy(merged_positon_ids + token_idx + length_idx, max_position_ids_buf_->data(), seqLen * sizeof(int32_t));
             length_idx += seqLen;
         }
         if (length_idx != length) {
@@ -83,8 +84,6 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         batch_idx += stream->batchSize();
         token_idx += length;
     }
-    // std::cout << "combo_tokens: " << model_input.combo_tokens->debugString() << ", combo_token_type_ids: " << model_input.combo_tokens_type_ids->debugString()
-    // << "combo_position_ids: " << model_input.combo_position_ids->debugString() << "input_lengths: " << model_input.input_lengths->debugString() << std::endl;
 
     return model_input;
 }
@@ -99,6 +98,7 @@ ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_in
     model_request.input_lengths        = std::move(model_input.input_lengths);
     model_request.sequence_lengths     = std::move(model_input.sequence_lengths);
     model_request.prefix_lengths       = std::move(model_input.prefix_lengths);
+    model_request.attention_mask       = std::move(model_input.attention_mask);
     return model_request;
 }
 
@@ -138,8 +138,6 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto         merged_output        = std::make_unique<MergedOutput>();
     ModelRequest model_request        = std::move(generateOldModelRequest(model_input));
-    // std::cout << "5` " << model_request.combo_tokens->debugString() << ", combo_token_type_ids: " << model_request.combo_token_type_ids->debugString()
-    // << "combo_position_ids: " << model_request.combo_position_ids->debugString() << "input_lengths: " << model_request.input_lengths->debugString() << std::endl;
 
     auto output = model_wrapper_->forward(model_request);
     auto handler_output = handler_.forward(model_request, *output);
