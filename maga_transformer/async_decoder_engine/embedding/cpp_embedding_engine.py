@@ -5,7 +5,7 @@ from typing import List
 from concurrent.futures import ThreadPoolExecutor
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.metrics import kmonitor, GaugeMetrics
-from maga_transformer.async_decoder_engine.embedding.embedding_stream import EmbeddingInput, EngineInputs, EngineOutputs
+from maga_transformer.async_decoder_engine.embedding.embedding_stream import EngineInputs, EngineOutputs
 
 class EmbeddingCppEngine(object):
     def __init__(self, model: BaseModel):

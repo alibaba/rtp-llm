@@ -25,15 +25,16 @@ class EmbeddingModelExecutor(object):
                                          self.config_.tp_split_emb_and_lm_head and g_parallel_info.tp_size > 1)
 
     def _pre_process(self, batch_input: EmbeddingBatchedInput):
-        combo_tokens_tensor = to_cuda(torch.IntTensor(batch_input.combo_tokens))
+        combo_tokens_tensor = to_cuda(batch_input.combo_tokens)
         position_ids_tensor = to_cuda(self.model_.create_context_position_ids(batch_input.context_lengths_list))
-        token_type_ids_tensor = to_cuda(torch.IntTensor(batch_input.combo_token_type_ids))
+        token_type_ids_tensor = to_cuda(batch_input.combo_token_type_ids)
         input_embeds = self.embedding_op_.forward(combo_tokens_tensor, position_ids_tensor, token_type_ids_tensor)        
         if self.model_.pre_decoder_layernorm is not None:
             input_embeds = self.model_.pre_decoder_layernorm(input_embeds)
         return input_embeds, position_ids_tensor
+            
 
-    def process(self, batch_input: EmbeddingBatchedInput) -> Union[torch.Tensor, List[Any]]:
+    def process(self, batch_input: EmbeddingBatchedInput) -> Union[torch.Tensor, List[Any]]:        
         with torch.cuda.nvtx.range("embedding kernel"):
             input_embeds, position_ids = self._pre_process(batch_input)
             hidden_states = self.gpt_op_.forward(
@@ -42,7 +43,7 @@ class EmbeddingModelExecutor(object):
                 value_cache=None,
                 key_cache_scale=None,
                 value_cache_scale=None,
-                input_lengths=torch.IntTensor(batch_input.context_lengths_list),
+                input_lengths=batch_input.context_lengths_list,
                 sequence_lengths=torch.IntTensor([]),
                 block_index_map=torch.IntTensor([1]),
                 position_ids=position_ids,
@@ -53,8 +54,8 @@ class EmbeddingModelExecutor(object):
                 max_prefix_length=torch.IntTensor([0]),
                 lora_ids=torch.IntTensor([-1] * batch_input.batch_size))
         return self.custom_model_.handler.forward(
-            torch.IntTensor(batch_input.combo_tokens), 
+            batch_input.combo_tokens, 
             hidden_states, 
-            torch.IntTensor(batch_input.context_lengths_list), 
+            batch_input.context_lengths_list, 
             batch_input.config
         )

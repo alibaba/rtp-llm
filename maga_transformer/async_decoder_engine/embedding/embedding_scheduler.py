@@ -11,7 +11,7 @@ class EmbeddingScheduler(object):
     def __init__(self, config: GptInitModelParameters):
         self.config_ = config    
         self.waiting_streams_: Deque[EmbeddingStream] = deque()
-        self.lock_ = Lock()
+        self.lock_ = Lock()        
 
     def enqueue(self, inputs: EngineInputs) -> EmbeddingStream:
         with self.lock_:                        
@@ -20,7 +20,7 @@ class EmbeddingScheduler(object):
         return stream
     
     def _calc_length(self, stream: EmbeddingStream):
-        return sum([len(x.token_ids) for x in stream.inputs.inputs])
+        return stream.inputs.input_length
 
     def schedule(self) -> List[EmbeddingStream]:
         with self.lock_:

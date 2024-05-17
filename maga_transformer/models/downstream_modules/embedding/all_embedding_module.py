@@ -35,14 +35,15 @@ class ALLEmbeddingRenderer(EmbeddingRendererBase):
 
     async def _render_embedding_output(self, request: OpenAIEmbeddingRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
         usage = Usage(prompt_tokens=outputs.input_length, total_tokens=outputs.input_length)
-        data = [
-            ALLEmbeddingResponseFormat(
+        data: List[ALLEmbeddingResponseFormat] = []
+        bias = 0
+        for i in range(len(outputs.outputs)):
+            data.append(ALLEmbeddingResponseFormat(
                 object=self.embedding_type,
-                embedding=self.embedding_func(x),
-                token_ids=inputs.inputs[i].token_ids,
-                index=i)
-            for i, x in enumerate(outputs.outputs)
-        ]
+                embedding=self.embedding_func(outputs.outputs[i]),
+                token_ids=inputs.token_ids[bias: bias + inputs.input_lengths[i]].tolist(),
+                index=i))
+            bias += inputs.input_lengths[i]
         return ALLEmbeddingResponse(data=data, usage=usage).model_dump()
 
 class NormalHandler(CustomHandler):

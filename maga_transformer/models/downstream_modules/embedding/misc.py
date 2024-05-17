@@ -53,10 +53,10 @@ class EmbeddingRendererBase(CustomRenderer):
 
     async def create_input(self, request: Union[OpenAIEmbeddingRequest, SimilarityRequest]):
         if isinstance(request, OpenAIEmbeddingRequest):
-            inputs, length = await self.generator.generate(request.input)
+            engine_inputs = await self.generator.generate(request.input)
         else:
-            inputs, length = await self.generator.generate(request.left + request.right)
-        return EngineInputs(inputs=inputs, input_length=length)
+            engine_inputs = await self.generator.generate(request.left + request.right)
+        return engine_inputs
 
     def embedding_func(self, res: Any) -> Union[List[float], Dict[str, float]]:
         raise NotImplementedError

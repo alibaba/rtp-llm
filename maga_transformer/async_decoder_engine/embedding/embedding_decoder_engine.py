@@ -35,8 +35,8 @@ class EmbeddingDecoderEngine(object):
             if stream.finished:
                 break
             await asyncio.sleep(0.001)
-        assert stream.output is not None, "stream output should not be None"
-        return stream.output
+        assert stream.outputs is not None, "stream output should not be None"
+        return stream.outputs
 
     @torch.inference_mode()
     def step(self):
@@ -70,8 +70,8 @@ class EmbeddingDecoderEngine(object):
     def update_output(self, streams: List[EmbeddingStream], embedding_outputs: Union[torch.Tensor, List[Any]]):
         bias = 0
         for stream in streams:
-            stream.update(embedding_outputs[bias: bias + len(stream.inputs.inputs)])
-            bias += len(stream.inputs.inputs)
+            stream.update(embedding_outputs[bias: bias + stream.inputs.batch_size])
+            bias += stream.inputs.batch_size
 
     def report_metric(self, batch_size: int, cost_time: float):
         kmonitor.report(GaugeMetrics.ASYNC_BATCH_SIZE_METRIC, batch_size)

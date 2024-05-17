@@ -32,7 +32,7 @@ class DenseEmbeddingRenderer(EmbeddingRendererBase):
         super().__init__(*args, ** kwargs)
         self.embedding_type = EmbeddingResponseType.DENSE
 
-    def similar_func(self, left: Any, right: Any) -> float:
+    def similar_func(self, left: Any, right: Any) -> float:        
         assert isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor)
         return float(left @ right.T) 
     
