@@ -199,54 +199,54 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
             stream_);
     }
 
-    const auto decoder_batch_size = params.sequence_lengths.shape()[0];
-    if (decoder_batch_size) {
-        auto sequence_lengths = clone({params.sequence_lengths});
-        auto input_lengths = clone({params.input_lengths});
+    // const auto decoder_batch_size = params.sequence_lengths.shape()[0];
+    // if (decoder_batch_size) {
+    //     auto sequence_lengths = clone({params.sequence_lengths});
+    //     auto input_lengths = clone({params.input_lengths});
 
-        if (step > 1 && params.repetition_penalty && decoder_batch_size) {
-            auto& repetition_penalty = params.repetition_penalty->get();
-            if (std::any_of(repetition_penalty.data<float>(),
-                            repetition_penalty.data<float>() + batch_size,
-                            [&](auto t) { return t == 1.0f; }))
-            {
-                const auto repetition_penalty_type = RepetitionPenaltyType::Multiplicative;
-                auto repetition_penalty_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
-                auto penalty_logits = allocateBuffer({DataType::TYPE_FP32, {batch_size * 64 * 1024}});
-                copy({*repetition_penalty_buf, repetition_penalty});
-                invokeBatchApplyRepetitionPenalty(
-                    logits.data<float>(),
-                    penalty_logits->data<float>(),
-                    repetition_penalty_buf->data<float>(),
-                    transposed_tokens->data<int32_t>(),
-                    batch_size,
-                    batch_size, // local_batch_size
-                    vocab_size_padded,
-                    sequence_lengths->data<int32_t>(),
-                    step - 1, // max_input_length
-                    step - 1, // step
-                    repetition_penalty_type,
-                    stream_);
-                // NOTE: here step uses step - 1 is to use same input_lengths as passed into ModelInputs.
-            }
-        }
+    //     if (step > 1 && params.repetition_penalty && decoder_batch_size) {
+    //         auto& repetition_penalty = params.repetition_penalty->get();
+    //         if (std::any_of(repetition_penalty.data<float>(),
+    //                         repetition_penalty.data<float>() + batch_size,
+    //                         [&](auto t) { return t == 1.0f; }))
+    //         {
+    //             const auto repetition_penalty_type = RepetitionPenaltyType::Multiplicative;
+    //             auto repetition_penalty_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
+    //             auto penalty_logits = allocateBuffer({DataType::TYPE_FP32, {batch_size * 64 * 1024}});
+    //             copy({*repetition_penalty_buf, repetition_penalty});
+    //             invokeBatchApplyRepetitionPenalty(
+    //                 logits.data<float>(),
+    //                 penalty_logits->data<float>(),
+    //                 repetition_penalty_buf->data<float>(),
+    //                 transposed_tokens->data<int32_t>(),
+    //                 batch_size,
+    //                 batch_size, // local_batch_size
+    //                 vocab_size_padded,
+    //                 sequence_lengths->data<int32_t>(),
+    //                 step - 1, // max_input_length
+    //                 step - 1, // step
+    //                 repetition_penalty_type,
+    //                 stream_);
+    //             // NOTE: here step uses step - 1 is to use same input_lengths as passed into ModelInputs.
+    //         }
+    //     }
 
-        if (params.min_lengths && params.eos_ids) {
-            auto min_lengths_buf = clone({params.min_lengths.value().get()});
-            invokeMinLengthPenaltyNew(
-                logits.data<float>(),
-                min_lengths_buf->data<int32_t>(),
-                params.eos_ids.value().get().data<int32_t>(),
-                sequence_lengths->data<int32_t>(),
-                input_lengths->data<int32_t>(),
-                decoder_batch_size,
-                vocab_size_padded,
-                stream_);
-        }
-    }
+    //     if (params.min_lengths && params.eos_ids) {
+    //         auto min_lengths_buf = clone({params.min_lengths.value().get()});
+    //         invokeMinLengthPenaltyNew(
+    //             logits.data<float>(),
+    //             min_lengths_buf->data<int32_t>(),
+    //             params.eos_ids.value().get().data<int32_t>(),
+    //             sequence_lengths->data<int32_t>(),
+    //             input_lengths->data<int32_t>(),
+    //             decoder_batch_size,
+    //             vocab_size_padded,
+    //             stream_);
+    //     }
+    // }
 
-    // TODO: test repetition_penalty
-    // TODO: test min_new_tokens
+    // TODO: add repetition_penalty back
+    // TODO: add min_new_tokens back
 
     // run top_k
     invokeBatchTopKSampling(
