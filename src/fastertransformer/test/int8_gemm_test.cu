@@ -53,7 +53,7 @@ void int8_gemm_test(
     const int k, 
     const int iters)
 {
-    tk::QuantMode quant_mode = tk::QuantMode::fromDescription(true, false, true, true, false, false, false, false);
+    tk::QuantMode quant_mode = tk::QuantMode::fromDescription(true, true, true, true, false, false, false, false);
     const bool per_token_quant = quant_mode.hasPerTokenScaling();
     const bool per_channel_quant = quant_mode.hasPerChannelScaling();
     const int row_scale_size = per_token_quant ? m : 1;

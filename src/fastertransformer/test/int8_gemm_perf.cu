@@ -28,7 +28,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream)
     int n = dim2.n;
     int k = dim2.k;
     // quantizeWeights quantizeActivations perToken perChannel useInt4Weights useInt8KvCache useFp8KvCache useFp8Qdq
-    tk::QuantMode quant_mode = tk::QuantMode::fromDescription(true, false, true, false, false, false, false, false);
+    tk::QuantMode quant_mode = tk::QuantMode::fromDescription(true, true, true, true, false, false, false, false);
 
     half* in_ptr1 = nullptr;
     deviceMalloc(&in_ptr1, m * k);
