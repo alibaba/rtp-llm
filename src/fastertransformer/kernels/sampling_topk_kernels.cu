@@ -197,7 +197,9 @@ __global__ void topk_stage1(const T* __restrict log_probs,
             const int index         = tmp_topk_buf_index + ite;
             topk_tmp_id_buf[index]  = total.p;
             topk_tmp_val_buf[index] = total.u;
-            tmp_log_probs[total.p]  = -MAX_T_VAL;
+            if (total.p >= 0) {
+                tmp_log_probs[total.p]  = -MAX_T_VAL;
+            }
         }
         __syncthreads();
     }

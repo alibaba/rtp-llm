@@ -19,7 +19,7 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
     params_(params),
     metrics_reporter_(metrics_reporter)
 {
-    device_ = ft::DeviceFactory::getDefaultDevice();;
+    device_ = ft::DeviceFactory::getDefaultDevice();
     executor_.reset(new NormalExecutor(params, layer_weights, weights, metrics_reporter_));
     initCacheManager();
     scheduler_.reset(new FIFOScheduler(params, resource_context_.cache_manager, metrics_reporter));
