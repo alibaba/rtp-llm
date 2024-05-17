@@ -47,8 +47,6 @@ inline ActivationType getActivationType(std::string activation_type_str) {
         return ActivationType::Silu;
     } else if (activation_type_str == "SiGLU" || activation_type_str == "gated-silu") {
         return ActivationType::Swiglu;
-    } else if (activation_type_str == "GeluNoneApproximate" || activation_type_str == "gelu-none-approximate") {
-        return ActivationType::GeluNoneApproximate;
     } else if (activation_type_str == "GeGluNoneApproximate" || activation_type_str == "geglu-none-approximate") {
         return ActivationType::GeGluNoneApproximate;
     } else {
