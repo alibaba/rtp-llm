@@ -53,6 +53,10 @@ struct TileConfig{
 TileConfig
 get_tile_config_from_config(CutlassTileConfig tile_config) {
     switch (tile_config) {
+        case CutlassTileConfig::CtaShape16x128x64_WarpShape16x32x64:
+            return TileConfig{16, 128, 64, 16, 32, 64};
+        case CutlassTileConfig::CtaShape16x256x64_WarpShape16x64x64:
+            return TileConfig{16, 256, 64, 16, 64, 64};
         case CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64:
             return TileConfig{32, 128, 64, 32, 32, 64};
         case CutlassTileConfig::CtaShape64x64x128_WarpShape32x64x64:
@@ -166,6 +170,8 @@ std::vector<CutlassTileConfig> get_candidate_tiles(
         if (sm >= 75)
         {
             return {CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64,
+                CutlassTileConfig::CtaShape16x128x64_WarpShape16x32x64,
+                CutlassTileConfig::CtaShape16x256x64_WarpShape16x64x64,
                 CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64,
                 CutlassTileConfig::CtaShape128x128x64_WarpShape128x32x64};
         }
@@ -227,7 +233,7 @@ CutlassGemmConfig estimate_best_config_from_occupancies(const std::vector<Cutlas
     }
 
     CutlassGemmConfig best_config;
-    // Score will be [0, 1]. The objective is to minimize this score.
+        // Score will be [0, 1]. The objective is to minimize this score.
     // It represents the fraction of SM resources unused in the last wave.
     float config_score = 1.0f;
     int config_waves = INT_MAX;

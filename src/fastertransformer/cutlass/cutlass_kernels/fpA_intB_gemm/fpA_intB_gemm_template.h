@@ -306,6 +306,24 @@ void dispatch_gemm_to_cutlass(const T* A, const WeightType* B, const T* weight_s
     // for mixed type gemms.
     switch (gemm_config.tile_config)
     {
+    case tkc::CutlassTileConfig::CtaShape16x128x64_WarpShape16x32x64:
+        FT_CHECK_WITH_INFO(arch::kMinComputeCapability >= 75, "Invalid config on Volta");
+        if constexpr (arch::kMinComputeCapability >= 75)
+        {
+        dispatch_gemm_config<T, WeightType, arch, QuantOp, EpilogueTag, cutlass::gemm::GemmShape<16, 128, 64>,
+            cutlass::gemm::GemmShape<16, 32, 64>>(A, B, weight_scales, weight_zero_points, biases, C, m, n, k,
+            group_size, gemm_config, workspace, workspace_bytes, stream, occupancy);
+        }
+        break;
+    case tkc::CutlassTileConfig::CtaShape16x256x64_WarpShape16x64x64:
+        FT_CHECK_WITH_INFO(arch::kMinComputeCapability >= 75, "Invalid config on Volta");
+        if constexpr (arch::kMinComputeCapability >= 75)
+        {
+        dispatch_gemm_config<T, WeightType, arch, QuantOp, EpilogueTag, cutlass::gemm::GemmShape<16, 256, 64>,
+            cutlass::gemm::GemmShape<16, 64, 64>>(A, B, weight_scales, weight_zero_points, biases, C, m, n, k,
+            group_size, gemm_config, workspace, workspace_bytes, stream, occupancy);
+        }
+        break;
     case tkc::CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64:
         dispatch_gemm_config<T, WeightType, arch, QuantOp, EpilogueTag, cutlass::gemm::GemmShape<32, 128, 64>,
             cutlass::gemm::GemmShape<32, 32, 64>>(A, B, weight_scales, weight_zero_points, biases, C, m, n, k,
@@ -317,11 +335,8 @@ void dispatch_gemm_to_cutlass(const T* A, const WeightType* B, const T* weight_s
             group_size, gemm_config, workspace, workspace_bytes, stream, occupancy);
         break;
     case tkc::CutlassTileConfig::CtaShape128x128x64_WarpShape128x32x64:
-        if (arch::kMinComputeCapability < 75)
-        {
-            FT_CHECK_WITH_INFO(false, "Invalid config on Volta");
-        }
-        else
+        FT_CHECK_WITH_INFO(arch::kMinComputeCapability >= 75, "Invalid config on Volta");
+        if constexpr (arch::kMinComputeCapability >= 75)
         {
             dispatch_gemm_config<T, WeightType, arch, QuantOp, EpilogueTag, cutlass::gemm::GemmShape<128, 128, 64>,
                 cutlass::gemm::GemmShape<128, 32, 64>>(A, B, weight_scales, weight_zero_points, biases, C, m, n, k,
