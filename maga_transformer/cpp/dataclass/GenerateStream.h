@@ -7,11 +7,11 @@
 #include <queue>
 #include <condition_variable>
 #include "src/fastertransformer/core/Buffer.h"
-#include "maga_transformer/cpp/utils/TimeUtility.h"
+#include "autil/TimeUtility.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
-#include "maga_transformer/cpp/utils/SynchronizedQueue.h"
+#include "autil/SynchronizedQueue.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "absl/status/statusor.h"
@@ -46,7 +46,7 @@ public:
         return stream_cache_resource_.tryReleaseKVBlock(nums);
     }
     virtual bool initKVBlock() {
-        wait_time_us_ = TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
         return stream_cache_resource_.initKVBlock();
     }
     virtual bool incrKVBlock() {
@@ -212,15 +212,11 @@ public:
     }
 
     void check_timeout() {
-        auto running_time = TimeUtility::currentTimeInMilliSeconds() - begin_time_us_;
+        auto running_time = autil::TimeUtility::currentTimeInMilliSeconds() - begin_time_us_;
         auto timeout_ms = generate_input_->generate_config->timeout_ms;
         if (timeout_ms > 0 && timeout_ms < running_time) {
             stopAndRelease("query has been running " + std::to_string(running_time) + " ms, it's timeout");
         }
-    }
-
-    void reportWaitTime() {
-        // kmonitor.report(GaugeMetrics.ASYNC_WAIT_WAIT_TIME_METRIC, TimeUtility::currentTimeInMilliSeconds() - begin_time_)
     }
 
     // void setLoss(th::Tensor& loss) {
@@ -291,7 +287,6 @@ protected:
     ft::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;
     std::shared_ptr<GenerateOutput>     generate_output_;
-    SynchronizedQueue<GenerateOutput>   generate_outputs_;
     GenerateStatus                      generate_status_;
     std::vector<GenerateStatus>         sub_generate_status_;
     int                                 max_seq_len_;
@@ -312,6 +307,7 @@ protected:
     bool                                need_release_resource_ = true;
     kmonitor::MetricsReporterPtr        metrics_reporter_      = nullptr;
     ft::SpecialTokens                   special_tokens_;
+    autil::SynchronizedQueue<GenerateOutput> generate_outputs_;
 
     friend class StreamCacheResource;
 };

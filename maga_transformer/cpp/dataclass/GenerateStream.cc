@@ -19,7 +19,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const Res
     seq_length_ = generate_input_->inputLength();
 
     max_seq_len_        = max_seq_len;
-    begin_time_us_      = TimeUtility::currentTimeInMicroSeconds();
+    begin_time_us_      = autil::TimeUtility::currentTimeInMicroSeconds();
     device_             = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len}, ft::AllocationType::HOST}, {});
@@ -137,7 +137,7 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
         return;
     }
     if (generate_output_->aux_info.iter_count == 0) {
-        first_token_time_us_ = TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     }
     generate_output_->aux_info.iter_count += 1;
     // # NOTE: new tokens indicate num of newly genearted tokens
@@ -203,7 +203,7 @@ void GenerateStream::updateOutput(bool finished,
     }
 
     generate_output_->finished              = finished;
-    generate_output_->aux_info.cost_time_us = TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+    generate_output_->aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     generate_output_->aux_info.input_len    = generate_input_->promptLength();
     generate_output_->aux_info.prefix_len   = generate_input_->prefix_length;
     generate_output_->aux_info.output_len   = seq_length_ - generate_input_->inputLength();
@@ -229,7 +229,7 @@ void GenerateStream::reportMetric() {
             collector.output_token_length = seq_length_ - generate_input_->inputLength();
             collector.iterate_cout = generate_output_->aux_info.iter_count;
             collector.query_batch_size = tileNum();
-            collector.total_latency_us = TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+            collector.total_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             collector.first_token_latency_us = first_token_time_us_;
             collector.wait_latency_us = wait_time_us_;
         }

@@ -7,7 +7,7 @@
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/utils/logger.h"
-#include "maga_transformer/cpp/utils/TimeUtility.h"
+#include "autil/TimeUtility.h"
 
 using namespace std;
 namespace rtp_llm {
@@ -81,13 +81,13 @@ absl::Status NormalEngine::stop() {
 void NormalEngine::loop() {
     FT_LOG_INFO("loop begin");
     while (running_) {
-        int64_t step_begin_time_us = TimeUtility::currentTimeInMicroSeconds();
+        int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         auto status = step();
         if (!status.ok()) {
             FT_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
-        reportMetrics({false, false, TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us});
+        reportMetrics({false, false, autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us});
     }
 }
 

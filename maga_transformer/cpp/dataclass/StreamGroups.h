@@ -1,6 +1,6 @@
 #pragma once
+
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
-#include "maga_transformer/cpp/utils/TimeUtility.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include <assert.h>
 #include <condition_variable>

@@ -3,7 +3,7 @@
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "maga_transformer/cpp/utils/KvCacheUtils.h"
 #include "src/fastertransformer/core/Types.h"
-#include "maga_transformer/cpp/utils/TimeUtility.h"
+#include "autil/TimeUtility.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include <cstring>
 
@@ -197,7 +197,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
         auto        current_batch_size = stream->batchSize();
         for (int i = 0; i < current_batch_size; ++i) {
             num_beams[batch_idx]        = 1;
-            random_seeds[batch_idx]     = TimeUtility::currentTimeInMicroSeconds();
+            random_seeds[batch_idx]     = autil::TimeUtility::currentTimeInMicroSeconds();
             top_k[batch_idx]            = stream->generateConfig()->top_k.value_or(0);
             top_p[batch_idx]            = stream->generateConfig()->top_p.value_or(0.95);
             temperature[batch_idx]      = stream->generateConfig()->temperature.value_or(1.0);

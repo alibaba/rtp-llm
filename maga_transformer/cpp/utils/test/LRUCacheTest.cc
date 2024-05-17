@@ -3,7 +3,6 @@
 
 #define private public
 #include "maga_transformer/cpp/utils/LRUCache.h"
-#include "maga_transformer/cpp/utils/TimeUtility.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 
 #include <chrono>
