@@ -161,6 +161,7 @@ class StarCoder(GPT):
         config.has_post_decoder_layernorm = True
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         GPT._load_quant_config(ckpt_path, config_json, config)
+        config.need_ffn_act_scale = config.quant_algo.isAwq()
         return config
 
     @classmethod

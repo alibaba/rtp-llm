@@ -244,14 +244,16 @@ class ModelWeightsLoader:
             else:
                 convert_weight(ffn_weight_lists, self.preprocess_groupwise_weight_params)
         # load act_scales 
-        try:
-            ffn_act_scales_weight = [weight for weight in layer_weights if weight.name == W.ffn_act_s]
-            if len(ffn_act_scales_weight) == 1:
-                ffn_act_scales_tensor = self._load_and_convert_tensor(ffn_act_scales_weight[0], layer_id=layer_id, datatype=torch.float16)
-                ffn_act_scales_tensor = self._split_tensor(ffn_act_scales_weight[0].name, ffn_act_scales_tensor).contiguous().clone().to(device)
-                results.append((layer_id, ffn_act_scales_weight[0].name, ffn_act_scales_tensor))
-        except Exception as e:
-            logging.error(f'load ffn_act_scales_weight in layer {layer_id}.{W.ffn_act_s} failed:{e}')
+        if self._weights_info.need_ffn_act_scale:
+            try:
+                ffn_act_scales_weight = [weight for weight in layer_weights if weight.name == W.ffn_act_s]
+                if len(ffn_act_scales_weight) == 1:
+                    ffn_act_scales_tensor = self._load_and_convert_tensor(ffn_act_scales_weight[0], layer_id=layer_id, datatype=torch.float16)
+                    ffn_act_scales_tensor = self._split_tensor(ffn_act_scales_weight[0].name, ffn_act_scales_tensor).contiguous().clone().to(device)
+                    results.append((layer_id, ffn_act_scales_weight[0].name, ffn_act_scales_tensor))
+            except Exception as e:
+                logging.error(f'load ffn_act_scales_weight in layer {layer_id}.{W.ffn_act_s} failed:{e}')
+                raise e
         return results
 
     def _load_int8_layer_weight(self, layer_weights, layer_id: int, device: str):

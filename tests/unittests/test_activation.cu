@@ -58,6 +58,7 @@ void testActivationKernel(TestCase tc)
                                             0,
                                             (const float*) nullptr,
                                             (const float*) nullptr,
+                                            (const T*) nullptr,
                                             stream);
     invokeAddBiasGeluV2(output_opt1, bias, (const int*) nullptr, (const T*) nullptr, m, n, stream);
     bool passed = checkResult(tc.name, output_baseline, output_opt1, m * n, true, true);
@@ -78,6 +79,7 @@ void testActivationKernel(TestCase tc)
                                                 0,
                                                 (const float*) nullptr,
                                                 (const float*) nullptr,
+                                                (const T*) nullptr,
                                                 stream);
     }
     cuda_timer_baseline.start();
@@ -93,6 +95,7 @@ void testActivationKernel(TestCase tc)
                                                 0,
                                                 (const float*) nullptr,
                                                 (const float*) nullptr,
+                                                (const T*) nullptr,
                                                 stream);
     }
     float total_time_baseline = cuda_timer_baseline.stop();

@@ -736,6 +736,7 @@ class ModelDeployWeightInfo:
         self.moe_style_ = config.gpt_init_params.moe_style
 
         self.tie_word_embeddings = config.tie_word_embeddings
+        self.need_ffn_act_scale = config.need_ffn_act_scale
 
     def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:
         # auto create weight info based on exist tensor names
