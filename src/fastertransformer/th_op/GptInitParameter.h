@@ -192,7 +192,9 @@ public:
     int64_t     tp_size_        = 1;
     int64_t     tp_rank_        = 0;
 
-    std::map<int, std::vector<int>> multi_task_prompt_tokens;
+    bool use_rpc_ = false;
+
+    std::map<int, std::vector<int>> multi_task_prompt_tokens_;
 
     GptInitParameter();
 
@@ -200,6 +202,7 @@ public:
         int64_t head_num, int64_t size_per_head, int64_t num_layers, int64_t max_seq_len,
         int64_t vocab_size, int64_t hidden_size);
 
+    void insertMultiTaskPromptTokens(int64_t task_id, std::vector<int64_t> tokens_id);
     void setLayerNormType();
     void setNormType();
     void setActivationType();

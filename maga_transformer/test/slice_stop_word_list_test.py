@@ -3,7 +3,7 @@ import torch
 from unittest import TestCase, main, mock
 from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.pipeline.pipeline import Pipeline
-from maga_transformer.models.base_model import GenerateOutput
+from maga_transformer.models.base_model import GenerateOutput, GenerateOutputs
 from maga_transformer.test.model_test.test_util.fake_model_loader import  FakeModelLoader
 
 os.environ['KV_CACHE_MEM_MB'] = '100'
@@ -20,11 +20,11 @@ class SliceStopWordListTest(TestCase):
         self.pipeline = Pipeline(model, model.tokenizer)
 
     async def mock_generate(self):
-        yield GenerateOutput(output_ids=torch.tensor([[[29892]]]), finished=False)
-        yield GenerateOutput(output_ids=torch.tensor([[[29892, 825]]]), finished=False)
-        yield GenerateOutput(output_ids=torch.tensor([[[29892, 825, 29915]]]), finished=False)
-        yield GenerateOutput(output_ids=torch.tensor([[[29892, 825, 29915, 29879]]]), finished=False)
-        yield GenerateOutput(output_ids=torch.tensor([[[29892, 825, 29915, 29879, 596]]]), finished=False)
+        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29892]]]), finished=False)])
+        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29892, 825]]]), finished=False)])
+        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29892, 825, 29915]]]), finished=False)])
+        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29892, 825, 29915, 29879]]]), finished=False)])
+        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29892, 825, 29915, 29879, 596]]]), finished=False)])
 
     @mock.patch("maga_transformer.async_decoder_engine.async_model.AsyncModel.enqueue")
     def test_slice(self, mock_enqueue):

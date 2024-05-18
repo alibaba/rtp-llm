@@ -5,13 +5,17 @@ import "google/protobuf/wrappers.proto";
 
 message TensorPB {
     enum DataType {
-        FLOAT32 = 0;
+        FP32 = 0;
         INT32 = 1;
+        FP16 = 2;
+        BF16 = 3;
     }
     DataType data_type = 1;
     repeated int64 shape = 2;
-    repeated float data_float32 = 3;
-    repeated int32 data_int32 = 4;
+    bytes fp32_data = 3;
+    bytes int32_data = 4;
+    bytes fp16_data = 5;
+    bytes bf16_data = 6;
 }
 
 message GenerateConfigPB {
@@ -49,21 +53,26 @@ message AuxInfoPB {
     int32 cost_time_us = 1;
     int32 iter_count = 2;
     int32 input_len = 3;
-    int32 output_len = 4;
-    int32 reuse_len = 5;
-    TensorPB cum_log_probs = 6;
+    int32 reuse_len = 4;
+    int32 prefix_len = 5;
+    int32 output_len = 6;
+    TensorPB cum_log_probs = 7;
 }
 
 message GenerateOutputPB {
+    bool finished = 1;
+    AuxInfoPB aux_info = 2;
+    TensorPB output_ids = 3;
+    TensorPB hidden_states = 4;
+    TensorPB loss = 5;
+    TensorPB logits = 6;
+}
+
+message GenerateOutputsPB {
     int64 request_id = 1;
-    bool finished = 3;
-    AuxInfoPB aux_info = 4;
-    TensorPB output_ids = 2;
-    TensorPB hidden_states = 5;
-    TensorPB loss = 6;
-    TensorPB logits = 7;
+    repeated GenerateOutputPB generate_outputs = 2;
 }
 
 service ModelRpcService {
-    rpc generate_stream(GenerateInputPB) returns (stream GenerateOutputPB);
+    rpc generate_stream(GenerateInputPB) returns (stream GenerateOutputsPB);
 }

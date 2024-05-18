@@ -5,9 +5,7 @@
 #define RAISE_FATAL_ERROR(msg) {                      \
     FT_LOG_ERROR("FATAL ERROR!!! %s", msg);           \
     fflush(stdout);                                   \
+    fflush(stderr);                                   \
     throw std::runtime_error(msg);                    \
     abort();                                          \
 }
-
-
-

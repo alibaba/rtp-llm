@@ -55,6 +55,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
     for (int i = 0; i < 3; ++i) {
         data[i] = i;
     }
+    GenerateOutputs outputs;
     GenerateOutput res;
     res.output_ids            = std::move(output_token_ids);
     res.finished              = true;
@@ -68,8 +69,11 @@ TEST_F(QueryConverterTest, testTransOutput) {
         hidden_states_data[i] = i;
     }
     res.hidden_states.emplace(std::move(hidden_states));
-    GenerateOutputPB output_pb;
-    QueryConverter::transResponse(&output_pb, &res);
+    outputs.generate_outputs.push_back(res);
+
+    GenerateOutputsPB outputs_pb;
+    QueryConverter::transResponse(&outputs_pb, &outputs);
+    auto& output_pb = outputs_pb.generate_outputs(0);
     auto aux_info_pb = output_pb.aux_info();
     EXPECT_EQ(aux_info_pb.cost_time_us(), 1000);
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
@@ -80,17 +84,25 @@ TEST_F(QueryConverterTest, testTransOutput) {
     ASSERT_EQ(output_ids_pb.shape_size(), 2);
     ASSERT_EQ(output_ids_pb.shape(0), 1);
     ASSERT_EQ(output_ids_pb.shape(1), 3);
+    auto output_ids_string = output_ids_pb.int32_data();
+    vector<int32_t> output_ids_vector;
+    output_ids_vector.resize(output_ids_string.size() / sizeof(int32_t));
+    std::memcpy(output_ids_vector.data(), output_ids_string.data(), output_ids_string.size());
     for (int i = 0; i < 3; ++i) {
-        ASSERT_EQ(output_ids_pb.data_int32(i), i);
+        ASSERT_EQ(output_ids_vector[i], i);
     }
     ASSERT_TRUE(output_pb.has_hidden_states());
     auto hidden_states_pb = output_pb.hidden_states();
-    ASSERT_EQ(hidden_states_pb.data_type(), TensorPB_DataType::TensorPB_DataType_FLOAT32);
+    ASSERT_EQ(hidden_states_pb.data_type(), TensorPB_DataType::TensorPB_DataType_FP32);
     ASSERT_EQ(hidden_states_pb.shape_size(), 2);
     ASSERT_EQ(hidden_states_pb.shape(0), 3);
     ASSERT_EQ(hidden_states_pb.shape(1), 2);
+    auto hidden_states_string = hidden_states_pb.fp32_data();
+    vector<float> hidden_states_vector;
+    hidden_states_vector.resize(hidden_states_string.size() / sizeof(float));
+    std::memcpy(hidden_states_vector.data(), hidden_states_string.data(), hidden_states_string.size());
     for (int i = 0; i < 6; ++i) {
-        ASSERT_FLOAT_EQ(hidden_states_pb.data_float32(i), i);
+        ASSERT_FLOAT_EQ(hidden_states_vector[i], i);
     }
 }
 

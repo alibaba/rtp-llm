@@ -22,7 +22,7 @@ namespace rtp_llm {
 
 std::unordered_map<int, SystemPromptParams> SystemPromptConstructor::construct(const ft::GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager) {
     std::unordered_map<int, SystemPromptParams> multi_task_prompt_args;
-    for (const auto& item: params.multi_task_prompt_tokens) {
+    for (const auto& item: params.multi_task_prompt_tokens_) {
         const auto& task_id = item.first;
         const auto& tokens_id = item.second;
 
@@ -40,7 +40,7 @@ std::unordered_map<int, SystemPromptParams> SystemPromptConstructor::construct(c
 
         auto output1 = stream->nextOutput();
         assert(output1.ok());
-        assert(output1.value().aux_info.output_len == 1);
+        assert(output1.value().generate_outputs[0].aux_info.output_len == 1);
         assert(stream->finished());
 
         const auto& kv_cache = stream->kvCache();

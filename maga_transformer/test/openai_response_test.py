@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGener
 from transformers import AutoTokenizer, PreTrainedTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.base_model import BaseModel, GenerateOutput, AuxInfo
+from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateOutputs, AuxInfo
 from maga_transformer.pipeline.chatapi_format import encode_chatapi
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from maga_transformer.tokenizer.tokenization_chatglm3 import ChatGLMTokenizer
@@ -19,21 +19,23 @@ from maga_transformer.openai.renderer_factory import ChatRendererFactory, Custom
 
 async def fake_output_generator(
         output_ids: List[int], max_seq_len: int, eos_id: int
-) -> AsyncGenerator[GenerateOutput, None]:
+) -> AsyncGenerator[GenerateOutputs, None]:
     for i in range(0, len(output_ids)):
         output_tensor = torch.full((1, max_seq_len), eos_id, dtype=torch.int)
 
         output_tensor[0, :len(output_ids[:i + 1])] = torch.tensor(output_ids[:i + 1], dtype=torch.int)
         finished = torch.full((1,), (i == (len(output_ids) - 1)), dtype=torch.bool)
         logging.info(f"i={i}, finished={finished}")
-        yield GenerateOutput(
+        outputs = GenerateOutputs()
+        outputs.generate_outputs.append(GenerateOutput(
             hidden_states=None,
             output_ids=output_tensor,
             finished=finished,
             aux_info=AuxInfo(),
             loss=None,
             logits=None
-        )
+        ))
+        yield outputs
 
 MAX_SEQ_LEN=1024
 

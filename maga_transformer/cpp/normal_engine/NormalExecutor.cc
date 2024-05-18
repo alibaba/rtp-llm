@@ -57,6 +57,7 @@ ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input
     model_request.input_lengths       = model_input.input_lengths;
     model_request.sequence_lengths    = model_input.sequence_lengths;
     model_request.kv_cache_blocks     = model_input.kv_cache_blocks;
+    model_request.kv_cache_scales     = model_input.kv_cache_scales;
     model_request.attention_mask      = model_input.attention_mask;
     return model_request;
 }
@@ -72,6 +73,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     auto         merged_output        = std::make_unique<MergedOutput>();
     ModelRequest model_request        = std::move(generateOldModelRequest(model_input));
     auto         model_output         = std::move(model_wrapper_->forward(model_request));
+    FT_LOG_DEBUG("model forward done");
     if (device_->getDeviceProperties().tp_rank > 0) {
         return absl::OkStatus();
     }
@@ -79,7 +81,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             stream_groups, model_input, *model_output);
     RETURN_IF_STATUS_OR_ERROR(sampler_input_status);
     auto& sampler_input           = sampler_input_status.value();
+    merged_output->model_output   = *model_output;
     merged_output->sampler_output = std::move(sampler_->forward(sampler_input));
+    FT_LOG_DEBUG("sampler forward done");
     return batch_stream_processor_->dispatch(stream_groups, merged_output);
 }
 

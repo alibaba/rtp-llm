@@ -21,6 +21,7 @@ Sampler::Sampler(const SamplerInitParams& params)
     };
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     size_t from_batch_idx = 0;
     size_t sample_to_batch_idx = 0;
     size_t from_seq_idx = 0; // accumulates batch_size * num_beams
@@ -50,7 +51,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             ? inputs.sequence_lengths->view(from_batch_idx,
                                             min(sample_batch_size, decoder_batch_size - from_batch_idx))
             : Buffer::emptyBuffer();
-        auto sample_cum_log_probs = inputs.cum_log_probs->view(from_batch_idx, sample_batch_size);
+        auto sample_cum_log_probs = device_->allocateBuffer(
+            {inputs.cum_log_probs->type(), {sample_seq_num}});
+        device_->copy({*sample_cum_log_probs, *inputs.cum_log_probs, 0, from_seq_idx, sample_seq_num});
 
 #define MAY_GET_BUFFER_VIEW(buffer_ptr) \
         (buffer_ptr.get() ? buffer_ptr->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer())
@@ -59,7 +62,6 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto random_seeds = MAY_GET_BUFFER_VIEW(inputs.random_seeds);
             auto repetition_penalty = MAY_GET_BUFFER_VIEW(inputs.repetition_penalty);
             auto min_lengths = MAY_GET_BUFFER_VIEW(inputs.min_lengths);
-
             device_->sampleGreedy({
                 sample_logits,
                 sequence_lengths,
@@ -73,13 +75,15 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 inputs.repetition_penalty ? (OptionalBufferRef)repetition_penalty : nullopt,
                 inputs.min_lengths ? (OptionalBufferRef)min_lengths : nullopt,
                 *eos_ids_,
-                sample_cum_log_probs,
+                *sample_cum_log_probs,
                 nullopt, // output_log_probs
                 inputs.index_log_prob.get() ? (OptionalBufferRef)*inputs.index_log_prob: nullopt
             });
         } else {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
+
+        device_->copy({*inputs.cum_log_probs, *sample_cum_log_probs, from_seq_idx, 0, sample_seq_num});
 
         from_batch_idx = sample_to_batch_idx + 1;
         sample_to_batch_idx = from_batch_idx;

@@ -57,44 +57,65 @@ std::shared_ptr<GenerateStream> QueryConverter::transQuery(const ResourceContext
 
 void QueryConverter::transTensor(TensorPB* t, const ft::Buffer* buffer) {
     assert(t);
-    t->set_data_type(buffer->type() == ft::DataType::TYPE_FP32 ? TensorPB_DataType::TensorPB_DataType_FLOAT32 :
-                                                                 TensorPB_DataType::TensorPB_DataType_INT32);
     auto shape       = t->mutable_shape();
     auto shape_array = buffer->shape();
     shape->Resize(shape_array.size(), 0);
     memcpy(shape->mutable_data(), shape_array.data(), shape_array.size() * sizeof(int64_t));
-    if (buffer->type() == ft::DataType::TYPE_FP32) {
-        auto tensor = t->mutable_data_float32();
-        tensor->Resize(buffer->size(), 0);
-        memcpy(tensor->mutable_data(), buffer->data(), buffer->sizeBytes());
-    } else if (buffer->type() == ft::DataType::TYPE_INT32) {
-        auto tensor = t->mutable_data_int32();
-        tensor->Resize(buffer->size(), 0);
-        memcpy(tensor->mutable_data(), buffer->data(), buffer->sizeBytes());
-    } else {
-        throw std::invalid_argument("unsupport tensor type");
+
+    TensorPB_DataType data_type;
+    switch(buffer->type()) {
+        case ft::DataType::TYPE_FP32: 
+            data_type = TensorPB_DataType::TensorPB_DataType_FP32;
+            t->set_fp32_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
+            break;
+        case ft::DataType::TYPE_INT32:
+            data_type = TensorPB_DataType::TensorPB_DataType_INT32;
+            t->set_int32_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
+            break;
+        case ft::DataType::TYPE_FP16:
+            data_type = TensorPB_DataType::TensorPB_DataType_FP16;
+            t->set_fp16_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
+            break;
+        case ft::DataType::TYPE_BF16:
+            data_type = TensorPB_DataType::TensorPB_DataType_BF16;
+            t->set_bf16_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
+            break;
+        default:
+            throw std::invalid_argument("unsupport buffer data type: " + std::to_string(buffer->type()));
+            break; 
     }
+    t->set_data_type(data_type);
 }
 
-void QueryConverter::transResponse(GenerateOutputPB* output, const GenerateOutput* response) {
-    output->set_finished(response->finished);
-    auto aux_info = output->mutable_aux_info();
-    aux_info->set_cost_time_us(response->aux_info.cost_time_us);
-    aux_info->set_iter_count(response->aux_info.iter_count);
-    aux_info->set_input_len(response->aux_info.input_len);
-    aux_info->set_output_len(response->aux_info.output_len);
-    // aux_info->mutable_cum_log_probs()
-
-    transTensor(output->mutable_output_ids(), response->output_ids.get());
-    if (response->hidden_states.has_value()) {
-        transTensor(output->mutable_hidden_states(), response->hidden_states.value().get());
+void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOutputs* responses) {
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    outputs->set_request_id(responses->request_id);
+    for (size_t i = 0; i < responses->generate_outputs.size(); i++) {
+        const auto& response = responses->generate_outputs[i];
+        GenerateOutputPB* output = outputs->add_generate_outputs();
+        output->set_finished(response.finished);
+        auto aux_info = output->mutable_aux_info();
+        aux_info->set_cost_time_us(response.aux_info.cost_time_us);
+        aux_info->set_iter_count(response.aux_info.iter_count);
+        aux_info->set_input_len(response.aux_info.input_len);
+        aux_info->set_reuse_len(response.aux_info.reuse_len);
+        aux_info->set_prefix_len(response.aux_info.prefix_len);
+        aux_info->set_output_len(response.aux_info.output_len);
+        if (response.aux_info.cum_log_probs.has_value()) {
+            transTensor(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value().get());
+        }
+        transTensor(output->mutable_output_ids(), response.output_ids.get());
+        if (response.hidden_states.has_value()) {
+            transTensor(output->mutable_hidden_states(), response.hidden_states.value().get());
+        }
+        if (response.loss.has_value()) {
+            transTensor(output->mutable_loss(), response.loss.value().get());
+        }
+        if (response.logits.has_value()) {
+            transTensor(output->mutable_logits(), response.logits.value().get());
+        }
     }
-    if (response->loss.has_value()) {
-        transTensor(output->mutable_loss(), response->loss.value().get());
-    }
-    if (response->logits.has_value()) {
-        transTensor(output->mutable_logits(), response->logits.value().get());
-    }
+    FT_LOG_DEBUG("transResponse done");
 }
 
 }  // namespace rtp_llm

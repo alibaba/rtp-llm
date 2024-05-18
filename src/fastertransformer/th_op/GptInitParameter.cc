@@ -30,6 +30,14 @@ GptInitParameter::GptInitParameter(int64_t head_num,
     quant_algo_(c10::make_intrusive<QuantAlgo>()) {
 }
 
+void GptInitParameter::insertMultiTaskPromptTokens(int64_t task_id, std::vector<int64_t> tokens_id) {
+    std::vector<int> new_tokens_id; // to convert tokens of type int64_t to type int32_t
+    for (auto token_id : tokens_id) {
+        new_tokens_id.push_back(token_id);
+    }
+    multi_task_prompt_tokens_[(int)task_id] = new_tokens_id;
+}
+
 void GptInitParameter::setLayerNormType() {
     layernorm_type_ = getLayerNormType(layernorm_type_str_);
 }
@@ -233,7 +241,8 @@ static auto specialTokensTHS =
     DEF_PROPERTY(nccl_port, nccl_port_)                                 \
     DEF_PROPERTY(model_rpc_port, model_rpc_port_)                       \
     DEF_PROPERTY(tp_size, tp_size_)                                     \
-    DEF_PROPERTY(tp_rank, tp_rank_)
+    DEF_PROPERTY(tp_rank, tp_rank_)                                     \
+    DEF_PROPERTY(use_rpc, use_rpc_)
 
 
 static auto fasterTransformerGptInitParameterTHS =
@@ -249,6 +258,7 @@ static auto fasterTransformerGptInitParameterTHS =
          int64_t,     // vocab_size
          int64_t      // hidden_size
          >())
+    .def("insertMultiTaskPromptTokens", &GptInitParameter::insertMultiTaskPromptTokens)
     .def("setLayerNormType", &GptInitParameter::setLayerNormType)
     .def("setNormType", &GptInitParameter::setNormType)
     .def("setActivationType", &GptInitParameter::setActivationType)

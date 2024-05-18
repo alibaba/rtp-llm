@@ -33,6 +33,7 @@ NormalEngine::~NormalEngine() {
 
 void NormalEngine::initCacheManager() {
     auto result = CacheConfigCreator::createConfig(*params_.gpt_init_parameter);
+    // TODO(xinfei.sxf) test create cache config exception
     THROW_IF_STATUS_ERROR(result.status());
     resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device_, metrics_reporter_);
 }

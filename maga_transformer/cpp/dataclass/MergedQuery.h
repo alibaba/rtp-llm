@@ -68,8 +68,6 @@ public:
 
 struct MergedInput {
 public:
-    // std::unique_ptr<GptModelInputs> model_input;
-    // std::unique_ptr<SamplerInputs> sampler_input;
     GptModelInputs model_input;
     SamplerInputs  sampler_input;
 };
@@ -78,9 +76,6 @@ struct MergedOutput {
 public:
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
-
-    // std::unique_ptr<GptModelOutputs> model_output;
-    // std::unique_ptr<SamplerOutput> sampler_output;
 };
 
 }  // namespace rtp_llm

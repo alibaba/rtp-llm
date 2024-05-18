@@ -29,7 +29,7 @@ bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(first_token_latency_us_metric, "rtp_llm_first_token_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(wait_latency_us_metric, "rtp_llm_wait_latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(iterate_cout_metric, "rtp_llm_iterate_cout");
+    REGISTER_GAUGE_MUTABLE_METRIC(iterate_count_metric, "rtp_llm_iterate_count");
     REGISTER_GAUGE_MUTABLE_METRIC(reuse_length_metric, "rtp_llm_reuse_length");
     REGISTER_GAUGE_MUTABLE_METRIC(input_token_length_metric, "rtp_llm_input_token_length");
     REGISTER_GAUGE_MUTABLE_METRIC(output_token_length_metric, "rtp_llm_output_token_length");
@@ -45,7 +45,7 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_GAUGE(total_latency_us);
     REPORT_GAUGE(first_token_latency_us);
     REPORT_GAUGE(wait_latency_us);
-    REPORT_GAUGE(iterate_cout);
+    REPORT_GAUGE(iterate_count);
     REPORT_GAUGE(reuse_length);
     REPORT_GAUGE(input_token_length);
     REPORT_GAUGE(output_token_length);

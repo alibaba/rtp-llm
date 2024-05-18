@@ -154,7 +154,7 @@ class DecoderEngineTest(TestCase):
                 gen = pipeline("hello, what's your name?")
                 results = [result for result in gen]
             # just ensure every input has result
-            time.sleep(0.01)
+            time.sleep(1)
             self.assertFalse(pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             pipeline.model.stop()

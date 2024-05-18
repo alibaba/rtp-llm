@@ -19,7 +19,7 @@ public:
     int64_t total_latency_us       = 0;
     int64_t first_token_latency_us = 0;
     int64_t wait_latency_us        = 0;
-    int64_t iterate_cout           = 0;
+    int64_t iterate_count          = 0;
     int64_t reuse_length           = 0;
     int64_t input_token_length     = 0;
     int64_t output_token_length    = 0;
@@ -38,7 +38,7 @@ public:
     kmonitor::MutableMetric* total_latency_us_metric       = nullptr;
     kmonitor::MutableMetric* first_token_latency_us_metric = nullptr;
     kmonitor::MutableMetric* wait_latency_us_metric        = nullptr;
-    kmonitor::MutableMetric* iterate_cout_metric           = nullptr;
+    kmonitor::MutableMetric* iterate_count_metric          = nullptr;
     kmonitor::MutableMetric* reuse_length_metric           = nullptr;
     kmonitor::MutableMetric* input_token_length_metric     = nullptr;
     kmonitor::MutableMetric* output_token_length_metric    = nullptr;

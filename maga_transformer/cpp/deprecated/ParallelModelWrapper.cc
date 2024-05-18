@@ -316,6 +316,15 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
             model_request.kv_cache_blocks->data());
         output_tensors.insert("block_pointers", block_pointers);
     }
+    if (model_request.kv_cache_scales != nullptr) {
+        ft::Tensor block_scale_pointers(
+            ft::MEMORY_CPU,
+            ft::DataType::TYPE_INT64,
+            model_request.kv_cache_scales->shape(),
+            model_request.kv_cache_scales->data());
+        output_tensors.insert("block_scale_pointers", block_scale_pointers);
+    }
+
     parallel_gpt_decoder_->forward(&output_tensors, &input_tensors, &gpt_layer_weights_);
     sync_check_cuda_error();
     // last hidden states

@@ -56,8 +56,8 @@ class PtuningConstructor(object):
             self.decoder_engine.step()
             if g_parallel_info.tp_rank > 0:
                 return None
-            assert stream is not None, "stram should not be none"
-            assert stream.output.hidden_states is not None, "stream should be run once"
+            assert stream is not None, "stream should not be none"
+            assert stream.output.generate_outputs[0].hidden_states is not None, "stream should be run once"
             assert len(stream.block_indice[0]) > 0, "stream should have block indice"
             multi_task_prompt_args[id] = PrefixParams(prefix_type=PrefixType.PromptTuning, prefix_length=len(input_tokens), block_cache=stream.block_indice[0], prefix_tensor=input_tokens)
         return multi_task_prompt_args

@@ -15,7 +15,7 @@ from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 
-from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateResponse
+from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateOutputs, GenerateResponse
 from maga_transformer.model_factory import ModelFactory, AsyncModel, ModelConfig
 from maga_transformer.pipeline.pipeline_custom_func import PipelineCustomFunc, get_piple_custom_func
 from maga_transformer.async_decoder_engine.generate_stream import GenerateInput
@@ -146,14 +146,18 @@ class Pipeline(object):
         return self.generate_stream(token_ids, images, generate_config, **kwargs)
 
     def decode_tokens(self,
-                      generate_output: GenerateOutput,
+                      generate_outputs: GenerateOutputs,
                       generate_config: GenerateConfig,
                       stop_word_str_list: List[str],
                       stop_word_str_slice_list: List[str],
                       decoding_state: Optional[DecodingState],
                       token_buffer: List[str],
                       **kwargs: Any) -> Tuple[List[Any], List[List[int]], List[str]]:
-        tokens = generate_output.output_ids.cpu()
+        tokens = []
+        for generate_output in generate_outputs.generate_outputs:
+            one_tokens = generate_output.output_ids.cpu()
+            tokens.append(one_tokens)
+        
         tokens = remove_padding_eos(tokens, self._special_tokens.eos_token_id)
         output_lens = [t.nelement() for t in tokens]
         texts = [self.piple_funcs.process_decode_func(tokens.tolist(),
@@ -217,27 +221,25 @@ class Pipeline(object):
 
         token_buffer: List[str] = []
 
-        async for generate_output in stream:
+        async for generate_outputs in stream:
             begin_time = current_time_ms()
             generate_texts, output_lens, token_buffer = self.decode_tokens(
-                generate_output,
+                generate_outputs,
                 input.generate_config,
                 stop_word_strs, stop_word_str_slices, decoding_state, token_buffer, **kwargs)
 
-            hidden_states = generate_output.hidden_states
             if num_beams == 1:
                 generate_texts[0] = self.piple_funcs.modify_response_func(
-                    generate_texts[0], hidden_states=hidden_states,
+                    generate_texts[0], hidden_states=generate_outputs.generate_outputs[0].hidden_states,
                     generate_config=input.generate_config.model_dump(),
                     **kwargs)
 
             kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
 
-            yield GenerateResponse(generate_output=generate_output, generate_texts=generate_texts)
+            yield GenerateResponse(generate_outputs=generate_outputs, generate_texts=generate_texts)
 
-            if generate_output.finished:
-                kmonitor.report(GaugeMetrics.FT_ITERATE_COUNT_METRIC, generate_output.aux_info.iter_count)
+            if generate_outputs.generate_outputs[0].finished:
+                kmonitor.report(GaugeMetrics.FT_ITERATE_COUNT_METRIC, generate_outputs.generate_outputs[0].aux_info.iter_count)
                 for l in output_lens:
                     kmonitor.report(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, l)
                 break
-

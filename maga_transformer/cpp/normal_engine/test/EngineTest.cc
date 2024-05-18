@@ -27,6 +27,8 @@ public:
 
 TEST_F(NormalEngineTest, testSimple) {
     CustomConfig config;
+    // TODO(xinfei.sxf) split case
+    config.int8_kv_cache = true;
     auto engine = createMockEngine(device_, config);
 
     ASSERT_TRUE(engine->resourceContext().cache_manager);
@@ -45,21 +47,21 @@ TEST_F(NormalEngineTest, testSimple) {
     ASSERT_TRUE(engine->enqueue(stream).ok());
     // auto output1 = stream->nextOutput();
     // ASSERT_TRUE(output1.ok());
-    // ASSERT_EQ(output1.value().aux_info.output_len, 1);
-    // ASSERT_EQ(output1.value().aux_info.input_len, 7);
-    // ASSERT_EQ(output1.value().aux_info.iter_count, 1);
+    // ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+    // ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
+    // ASSERT_EQ(output1.value().generate_outputs[0].aux_info.iter_count, 1);
 
     // auto output2 = stream->nextOutput();
     // ASSERT_TRUE(output2.ok());
-    // ASSERT_EQ(output2.value().aux_info.output_len, 2);
-    // ASSERT_EQ(output2.value().aux_info.input_len, 7);
-    // ASSERT_EQ(output2.value().aux_info.iter_count, 2);
+    // ASSERT_EQ(output2.value().generate_outputs[0].aux_info.output_len, 2);
+    // ASSERT_EQ(output2.value().generate_outputs[0].aux_info.input_len, 7);
+    // ASSERT_EQ(output2.value().generate_outputs[0].aux_info.iter_count, 2);
 
     auto output3 = stream->nextOutput();
     ASSERT_TRUE(output3.ok());
-    ASSERT_EQ(output3.value().aux_info.output_len, 1);
-    ASSERT_EQ(output3.value().aux_info.input_len, 7);
-    ASSERT_EQ(output3.value().aux_info.iter_count, 1);
+    ASSERT_EQ(output3.value().generate_outputs[0].aux_info.output_len, 1);
+    ASSERT_EQ(output3.value().generate_outputs[0].aux_info.input_len, 7);
+    ASSERT_EQ(output3.value().generate_outputs[0].aux_info.iter_count, 1);
 
     ASSERT_TRUE(stream->finished());
     auto output4 = stream->nextOutput();
@@ -87,10 +89,10 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
         ASSERT_TRUE(engine->enqueue(stream).ok());
         auto output1 = stream->nextOutput();
         ASSERT_TRUE(output1.ok());
-        ASSERT_EQ(output1.value().aux_info.output_len, 1);
-        ASSERT_EQ(output1.value().aux_info.prefix_len, 0);
-        ASSERT_EQ(output1.value().aux_info.reuse_len, 2);
-        ASSERT_EQ(output1.value().aux_info.input_len, 7);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 2);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
         ASSERT_TRUE(stream->finished());
         auto output2 = stream->nextOutput();
@@ -106,10 +108,10 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
         ASSERT_TRUE(engine->enqueue(stream).ok());
         auto output1 = stream->nextOutput();
         ASSERT_TRUE(output1.ok());
-        ASSERT_EQ(output1.value().aux_info.output_len, 1);
-        ASSERT_EQ(output1.value().aux_info.prefix_len, 0);
-        ASSERT_EQ(output1.value().aux_info.reuse_len, 0);
-        ASSERT_EQ(output1.value().aux_info.input_len, 7);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
         ASSERT_TRUE(stream->finished());
         auto output2 = stream->nextOutput();
@@ -126,10 +128,10 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
         ASSERT_TRUE(engine->enqueue(stream).ok());
         auto output1 = stream->nextOutput();
         ASSERT_TRUE(output1.ok());
-        ASSERT_EQ(output1.value().aux_info.output_len, 1);
-        ASSERT_EQ(output1.value().aux_info.prefix_len, 6);
-        ASSERT_EQ(output1.value().aux_info.reuse_len, 4);
-        ASSERT_EQ(output1.value().aux_info.input_len, 7);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 6);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 4);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
         ASSERT_TRUE(stream->finished());
         auto output2 = stream->nextOutput();
@@ -166,10 +168,10 @@ TEST_F(NormalEngineTest, testReuseCache) {
         ASSERT_TRUE(engine->enqueue(stream).ok());
         auto output1 = stream->nextOutput();
         ASSERT_TRUE(output1.ok());
-        ASSERT_EQ(output1.value().aux_info.output_len, 1);
-        ASSERT_EQ(output1.value().aux_info.prefix_len, 0);
-        ASSERT_EQ(output1.value().aux_info.reuse_len, 0);
-        ASSERT_EQ(output1.value().aux_info.input_len, 7);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
         ASSERT_TRUE(stream->finished());
         auto output2 = stream->nextOutput();
@@ -186,10 +188,10 @@ TEST_F(NormalEngineTest, testReuseCache) {
         ASSERT_TRUE(engine->enqueue(stream).ok());
         auto output1 = stream->nextOutput();
         ASSERT_TRUE(output1.ok());
-        ASSERT_EQ(output1.value().aux_info.output_len, 1);
-        ASSERT_EQ(output1.value().aux_info.prefix_len, 0);
-        ASSERT_EQ(output1.value().aux_info.reuse_len, 4);
-        ASSERT_EQ(output1.value().aux_info.input_len, 7);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 0);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 4);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
         ASSERT_TRUE(stream->finished());
         auto output2 = stream->nextOutput();

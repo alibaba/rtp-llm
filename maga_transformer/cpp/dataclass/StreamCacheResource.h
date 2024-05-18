@@ -47,7 +47,7 @@ public:
     }
 
     std::string debugString() const {
-        std::stringstream debug_string, k_ptr_string, v_ptr_string;
+        std::stringstream debug_string, k_ptr_string, v_ptr_string, k_scale_ptr_string, v_scale_ptr_string;
         for (int i = 0; i < k_ptr.size(); i++) {
             k_ptr_string << "batch: " << i << " ";
             v_ptr_string << "batch: " << i << " ";
@@ -62,9 +62,29 @@ public:
                 }
             }
         }
+
+        if (!k_scale_ptr.empty()) {
+            for (int i = 0; i < k_scale_ptr.size(); i++) {
+                k_scale_ptr_string << "batch: " << i << " ";
+                v_scale_ptr_string << "batch: " << i << " ";
+                for (int j = 0; j < k_scale_ptr[0].size(); ++j) {
+                    k_scale_ptr_string << "layer:" << j << ";";
+                    v_scale_ptr_string << "layer:" << j << ";";
+                    for (auto &v: k_scale_ptr[i][j]) {
+                        k_scale_ptr_string << (int64_t)v << ", ";
+                    }
+                    for (auto &v: v_scale_ptr[i][j]) {
+                        v_scale_ptr_string << (int64_t)v << ", ";
+                    }
+                }
+            }
+        }
+
         debug_string << "BatchKVCacheBlockAddr {"
                      << "k_ptr: " << k_ptr_string.str()
                      << "v_ptr: " << v_ptr_string.str()
+                     << "k_scale_ptr: " << k_scale_ptr_string.str()
+                     << "v_scale_ptr: " << v_scale_ptr_string.str()
                      << "}";
         return debug_string.str();
     }

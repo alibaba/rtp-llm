@@ -6,7 +6,7 @@ import torch
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGenerator
 
-from maga_transformer.models.base_model import GenerateOutput
+from maga_transformer.models.base_model import GenerateOutput, GenerateOutputs
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.tokenizer.tokenization_qwen import QWenTokenizer
 from transformers import Qwen2Tokenizer
@@ -303,7 +303,7 @@ class QwenRenderer(CustomChatRenderer):
 
     async def render_response_stream(
             self,
-            output_generator: AsyncGenerator[GenerateOutput, None],
+            output_generator: AsyncGenerator[GenerateOutputs, None],
             request: ChatCompletionRequest,
             generate_config: GenerateConfig,
             input_token_length: int,
@@ -328,7 +328,7 @@ class QwenRenderer(CustomChatRenderer):
                         ),
                     )]
                 )
-
+            output = output.generate_outputs[0]
             processed_output = self._process_output_ids_tensor(
                 input_token_length, output.output_ids, output.finished)
             output_string = processed_output.output_str.strip()

@@ -29,7 +29,7 @@ public:
         std::stringstream debug_string;
         debug_string << "GenerateInput {"
                      << "request_id: " << request_id << ", generate_config:" << generate_config->debugString()
-                     << ", input_ids:" << input_ids->debugString() << ", prefix_length:" << prefix_length << "}";
+                     << ", input_ids:" << input_ids->debugStringWithData<int32_t>() << ", prefix_length:" << prefix_length << "}";
         return debug_string.str();
     }
 
@@ -58,7 +58,7 @@ public:
     int                                              prefix_len     = 0;
     int                                              reuse_len      = 0;
     int                                              output_len     = 0;
-    std::optional<std::shared_ptr<const ft::Buffer>> cum_log_probs;
+    std::optional<ft::ConstBufferPtr>                cum_log_probs;
 };
 
 // TODO: add error code.
@@ -70,14 +70,20 @@ public:
 
 class GenerateOutput {
 public:
-    std::shared_ptr<const ft::Buffer> output_ids;
-    bool                              finished;
-    ErrorInfo                         error_info;
-    AuxInfo                           aux_info;
+    ft::ConstBufferPtr              output_ids;
+    bool                            finished;
+    ErrorInfo                       error_info;
+    AuxInfo                         aux_info;
 
-    std::optional<std::shared_ptr<const ft::Buffer>> hidden_states;
-    std::optional<std::shared_ptr<const ft::Buffer>> logits;
-    std::optional<std::shared_ptr<const ft::Buffer>> loss;
+    std::optional<ft::ConstBufferPtr> hidden_states;
+    std::optional<ft::ConstBufferPtr> logits;
+    std::optional<ft::ConstBufferPtr> loss;
+};
+
+class GenerateOutputs {
+public:
+    std::vector<GenerateOutput> generate_outputs;
+    int64_t                     request_id;
 };
 
 enum class GenerateState {

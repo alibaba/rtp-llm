@@ -26,8 +26,9 @@ class Request(NamedTuple):
         return self.generate_configs[0].return_incremental
 
 class RequestExtractor:
-    def __init__(self, default_generate_config: GenerateConfig):
+    def __init__(self, default_generate_config: GenerateConfig, use_rpc: bool):
         self.default_generate_config = default_generate_config
+        self.use_rpc = use_rpc
 
     def extract_request(self, kwargs: Dict[str, Any]) -> Tuple[Request, Dict[str, Any]]:
         generate_config, remain_args = self._format_request(kwargs)
@@ -58,7 +59,7 @@ class RequestExtractor:
         update_optional('return_hidden_states', ['return_hidden_states', 'output_hidden_states'])
         update_optional('return_logits', ['return_logits', 'output_logits'])
         update_optional('return_input_ids', ['return_input_ids', 'output_input_ids'])
-        update_optional('max_new_tokens', ['gen_length', 'max_new_tokens'])
+        update_optional('max_new_tokens', ['gen_length', 'max_new_tokens'])        
         generate_config.is_streaming = self.is_streaming(kwargs) or kwargs.get('stream', False)
         return generate_config, remain_kwargs
 
@@ -135,7 +136,7 @@ class RequestExtractor:
         # check adapter_name size is same with prompt
         def repeat_elements(lst, n):
             return [e for e in lst for _ in range(n)]
-        if num_return_sequences > 0:
+        if num_return_sequences > 0 and not self.use_rpc:
             input_texts = repeat_elements(input_texts, num_return_sequences)
             input_images = repeat_elements(input_images, num_return_sequences)
             generate_configs = repeat_elements(generate_configs, num_return_sequences)

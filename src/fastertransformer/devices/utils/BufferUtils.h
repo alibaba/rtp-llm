@@ -40,7 +40,7 @@ inline void bufferConcat(const BufferPtr& src1, const BufferPtr& src2, const Buf
 }
 
 template<typename T>
-inline void bufferIndexSelect(BufferPtr& dst, const BufferPtr& src, std::vector<size_t>& select_index) {
+inline void bufferIndexSelect(const BufferPtr& dst, const BufferPtr& src, std::vector<size_t>& select_index) {
     assert(src->size() == select_index.size());
     assert(src->type() == dst->type());
     T* src_data = (T*)src->data();

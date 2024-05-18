@@ -52,7 +52,7 @@ class AuxInfo(PyBaseModel):
     output_len: int = 0
     cum_log_probs: List[float] = []
     beam_responses: List[str] = []
-
+    
 class GenerateOutput(PyBaseModel):
     hidden_states: Optional[torch.Tensor] = None
     output_ids: Optional[torch.Tensor] = None
@@ -65,8 +65,11 @@ class GenerateOutput(PyBaseModel):
     class Config:
         arbitrary_types_allowed = True
 
+class GenerateOutputs(PyBaseModel):
+    generate_outputs: List[GenerateOutput] = []
+
 class GenerateResponse(PyBaseModel):
-    generate_output: GenerateOutput
+    generate_outputs: GenerateOutputs
     generate_texts: List[str]
 
 class GenerateContext(NamedTuple):
@@ -146,6 +149,7 @@ class BaseModel(object):
         config: GptInitModelParameters = cls._create_config(model_config.ckpt_path)
         if config.hidden_size == 0:
             config.hidden_size = config.size_per_head * config.head_num
+        config.use_rpc = model_config.use_rpc
         config.update_common(
             ckpt_path=model_config.ckpt_path,
             tokenizer_path=model_config.tokenizer_path,

@@ -77,7 +77,7 @@ absl::Status SpeculativeEngine::updateDraftProb(const list<GenerateStreamPtr>& s
     for (auto &stream: streams) {
         SpeculativeStream *stream_ = dynamic_cast<SpeculativeStream*>(stream.get());
         auto output = stream_->nextOutput();
-        stream_->updateDraftProb(*(output.value().logits.value()), index);
+        stream_->updateDraftProb(*(output.value().generate_outputs[0].logits.value()), index);
     }
     return absl::OkStatus();
 }

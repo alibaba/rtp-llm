@@ -123,6 +123,7 @@ class GPT(BaseModel):
             self.tokenizer = self.get_tokenizer(self.config)
             if hasattr(self.tokenizer, 'eos_token_id') and self.tokenizer.eos_token_id:
                 self.config.special_tokens.eos_token_id = self.tokenizer.eos_token_id
+            self.config.update_task_prompt_tokens_id(self.tokenizer)
 
     @staticmethod
     def get_weight_cls() -> ModelDeployWeightInfo:

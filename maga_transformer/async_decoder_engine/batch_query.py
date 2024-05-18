@@ -266,7 +266,7 @@ class BatchQuery:
             self.seq_lengths_list.extend([stream.seq_length])
             self.reuse_lengths_list.append(stream.reuse_length)
             self.context_lengths_list.append(stream.seq_length - stream.reuse_length * int(self._ptuning_info.count_prefix_length))
-
+   
         lora_ids = []
         for stream in self.streams:
             lora_ids.append(stream.lora_id)

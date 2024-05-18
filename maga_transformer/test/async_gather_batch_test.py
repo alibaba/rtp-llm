@@ -27,7 +27,7 @@ class query_thread(threading.Thread):
         try:
             gen = self.pipeline(prompt, generate_config = {'top_p': 0, 'top_k': 1, 'max_new_tokens': 200})
             res = [re for re in gen]
-            self.time = res[-1].generate_output.aux_info.cost_time
+            self.time = res[-1].generate_outputs.generate_outputs[0].aux_info.cost_time
         except Exception as e:
             self.exit_code = -1
             self.exception = e

@@ -1,19 +1,20 @@
-import asyncio
+
 import sys
-
 from typing import Any, Optional
+import asyncio
+import numpy as np
+import logging
 import grpc
+import torch
 
-from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import ModelRpcServiceStub
-from maga_transformer.models.base_model import GenerateInput, GenerateOutput, AuxInfo
 from maga_transformer.utils.util import AtomicCounter
+from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import ModelRpcServiceStub
+from maga_transformer.models.base_model import GenerateInput, GenerateOutput, GenerateOutputs, AuxInfo
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import TensorPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateConfigPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import AuxInfoPB
-from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputPB
-import numpy as np
-import torch
+from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputPB, GenerateOutputsPB
 from maga_transformer.distribute.worker_info import g_master_info
 
 request_counter = AtomicCounter()
@@ -58,32 +59,43 @@ def trans_input(input_py: GenerateInput):
 
 
 def trans_tensor(t: TensorPB):
-    if t.data_type == TensorPB.DataType.FLOAT32:
-        return torch.tensor(list(t.data_float32),
-                            dtype=torch.float32).reshape(list(t.shape))
+    if t.data_type == TensorPB.DataType.FP32:
+        return torch.frombuffer(t.fp32_data, dtype=torch.float32).reshape(list(t.shape))
     elif t.data_type == TensorPB.DataType.INT32:
-        return torch.tensor(list(t.data_int32),
-                            dtype=torch.int32).reshape(list(t.shape))
+        return torch.frombuffer(t.int32_data, dtype=torch.int32).reshape(list(t.shape))
+    elif t.data_type == TensorPB.DataType.FP16:
+        return torch.frombuffer(t.fp16_data, dtype=torch.float16).reshape(list(t.shape))
+    elif t.data_type == TensorPB.DataType.BF16:
+        return torch.frombuffer(t.bf16_data, dtype=torch.bfloat16).reshape(list(t.shape))
     else:
         raise Exception("unkown error type")
+    
 
-
-def trans_output(output_pb: GenerateOutputPB):
-    output_py = GenerateOutput()
-    output_py.finished = output_pb.finished
-    output_py.aux_info = AuxInfo(cost_time=output_pb.aux_info.cost_time_us / 1000.0,
-                                 iter_count=output_pb.aux_info.iter_count,
-                                 input_len=output_pb.aux_info.input_len,
-                                 output_len=output_pb.aux_info.output_len,
-                                 reuse_len=output_pb.aux_info.reuse_len)
-    output_py.output_ids = trans_tensor(output_pb.output_ids)
-    if output_pb.HasField('hidden_states'):
-        output_py.hidden_states = trans_tensor(output_pb.hidden_states)
-    if output_pb.HasField('loss'):
-        output_py.loss = trans_tensor(output_pb.loss)
-    if output_pb.HasField('logits'):
-        output_py.logits = trans_tensor(output_pb.logits)
-    return output_py
+def trans_output(outputs_pb: GenerateOutputsPB):
+    logging.debug("outputs_pb = ", outputs_pb)
+    outputs_py = GenerateOutputs()
+    for output_pb in outputs_pb.generate_outputs:
+        output_py = GenerateOutput()
+        output_py.finished = output_pb.finished
+        output_py.aux_info = AuxInfo(cost_time=output_pb.aux_info.cost_time_us / 1000.0,
+                                    iter_count=output_pb.aux_info.iter_count,
+                                    input_len=output_pb.aux_info.input_len,
+                                    reuse_len=output_pb.aux_info.reuse_len,
+                                    prefix_len=output_pb.aux_info.prefix_len,
+                                    output_len=output_pb.aux_info.output_len
+                                    )
+        if output_pb.aux_info.HasField('cum_log_probs'):
+            output_py.aux_info.cum_log_probs = trans_tensor(output_pb.aux_info.cum_log_probs).tolist()
+        output_py.output_ids = trans_tensor(output_pb.output_ids)
+        if output_pb.HasField('hidden_states'):
+            output_py.hidden_states = trans_tensor(output_pb.hidden_states)
+        if output_pb.HasField('loss'):
+            output_py.loss = trans_tensor(output_pb.loss)
+        if output_pb.HasField('logits'):
+            output_py.logits = trans_tensor(output_pb.logits)
+        outputs_py.generate_outputs.append(output_py)
+        
+    return outputs_py
 
 
 class ModelRpcClient(object):
@@ -106,7 +118,6 @@ class ModelRpcClient(object):
                 async for response in response_iterator.__aiter__():
                     count += 1
                     yield trans_output(response)
-                    # print(f"Received response:{type(response)} {response.finished}")
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()

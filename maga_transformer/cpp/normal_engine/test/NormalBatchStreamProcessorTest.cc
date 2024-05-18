@@ -97,7 +97,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(prefix_lengths, buffer2vector<int>(*model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_blocks, buffer2vector<uint64_t>(*model_input.kv_cache_blocks));
         EXPECT_EQ(kv_cache_scales, buffer2vector<uint64_t>(*model_input.kv_cache_scales));
-        EXPECT_EQ(model_input.attention_mask->size(), 2 * 4 * 5);
+        EXPECT_EQ(model_input.attention_mask->size(), 2 * 3 * 4);
     }
 
     {

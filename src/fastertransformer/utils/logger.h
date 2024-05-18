@@ -120,6 +120,10 @@ private:
         if (fastertransformer::Logger::getLogger().getLevel() <= level) {                                              \
             fastertransformer::Logger::getLogger().log(level, __VA_ARGS__);                                            \
         }                                                                                                              \
+        if (level == fastertransformer::Logger::DEBUG) {                                                               \
+            fflush(stdout);                                                                                            \
+            fflush(stderr);                                                                                            \
+        }                                                                                                              \
     } while (0)
 
 #define FT_LOG_TRACE(...) FT_LOG(fastertransformer::Logger::TRACE, __VA_ARGS__)

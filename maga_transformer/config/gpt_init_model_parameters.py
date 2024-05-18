@@ -122,6 +122,7 @@ class GptInitModelParameters:
         self.medusa_config = None
 
         self.ptuning_path = None
+        self.multi_task_prompt = None
         self.pre_seq_len = 0
         self.prefix_projection = False
         self.vit_related_params: VitParameters = VitParameters()
@@ -217,6 +218,14 @@ class GptInitModelParameters:
         if self.moe_inter_padding_size <= 0:
             self.moe_inter_padding_size = self.inter_size
 
+    def update_task_prompt_tokens_id(self, tokenizer):
+        if self.multi_task_prompt:
+            for info in self.multi_task_prompt:
+                task_id: int = info['task_id']
+                prompt: str = info['prompt']
+                tokens_id = tokenizer.encode(prompt)
+                self.insertMultiTaskPromptTokens(task_id, tokens_id)
+        
     def update_task_prompt_config(self):
         prompt_file_path =  os.environ.get('MULTI_TASK_PROMPT', None)
         if not prompt_file_path:

@@ -63,7 +63,7 @@ class InferenceWorker():
         return token_ids, tokens
 
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
-        request_extractor = RequestExtractor(self.model.default_generate_config)
+        request_extractor = RequestExtractor(self.model.default_generate_config, self.model.config.use_rpc)
         request, kwargs = request_extractor.extract_request(kwargs)
 
         if request.is_streaming is False and request.incremental:
@@ -94,16 +94,15 @@ class InferenceWorker():
 
     def _format_response(self, gen_responses: GenerateResponse, generate_config: GenerateConfig) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
-        finished = gen_responses.generate_output.finished
-        beam_width = gen_responses.generate_output.output_ids.shape[0]
-        aux_info = gen_responses.generate_output.aux_info
-        hidden_states = gen_responses.generate_output.hidden_states
-        output_ids = gen_responses.generate_output.output_ids
-        input_ids = gen_responses.generate_output.input_ids
-        loss = gen_responses.generate_output.loss
-        logits = gen_responses.generate_output.logits
+        finished = gen_responses.generate_outputs.generate_outputs[0].finished
+        aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
+        hidden_states = gen_responses.generate_outputs.generate_outputs[0].hidden_states
+        output_ids = gen_responses.generate_outputs.generate_outputs[0].output_ids
+        input_ids = gen_responses.generate_outputs.generate_outputs[0].input_ids
+        loss = gen_responses.generate_outputs.generate_outputs[0].loss
+        logits = gen_responses.generate_outputs.generate_outputs[0].logits
 
-        if beam_width > 1:
+        if generate_config.num_beams > 1:
             aux_info.beam_responses = generate_texts
         response = PipelineResponse(
             response=generate_texts[0],
@@ -118,10 +117,25 @@ class InferenceWorker():
 
         return response
 
+    def _format_response_new(self, gen_responses: GenerateResponse, generate_config: GenerateConfig) -> Dict[str, Any]:
+        generate_texts = gen_responses.generate_texts
+        if generate_config.num_return_sequences > 0:
+            sequences_pipeline_response = MultiSequencesPipelineResponse(
+                response=generate_texts,
+                finished=all([seq.finished for seq in gen_responses.generate_outputs.generate_outputs]),
+                aux_info=[seq.aux_info.model_dump(mode='json') for seq in gen_responses.generate_outputs.generate_outputs]
+            )
+            return sequences_pipeline_response
+        else:
+            return self._format_response(gen_responses, generate_config)
+
     async def _yield_generate(self, text: str, images: List[str], generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[Dict[str, Any], None]:
         stream = self.pipeline.pipeline_async(prompt=text, images=images, generate_config=generate_config, **kwargs)
         async for generate_response in stream:
-            yield self._format_response(generate_response, generate_config)
+            if self.model.config.use_rpc:
+                yield self._format_response_new(generate_response, generate_config)
+            else:
+                yield self._format_response(generate_response, generate_config)
 
     def is_streaming(self, req: Dict[str, Any]):
         return RequestExtractor.is_streaming(req) or req.get('stream', False)
@@ -132,9 +146,7 @@ class InferenceWorker():
             lora_infos = version_info.peft_info.get("lora_info", {})
         return self.model.update(lora_infos)
 
-
-    @staticmethod
-    async def _batch_async_generators(incremental: bool, num_return_sequences: int,
+    async def _batch_async_generators(self, incremental: bool, num_return_sequences: int,
                                       generators: List[AsyncGenerator[Dict[str, Any], None]],
                                       batch_infer: bool) -> AsyncGenerator[Dict[str, Any], None]:
         iterators = [gen.__aiter__() for gen in generators]
@@ -154,7 +166,7 @@ class InferenceWorker():
             if len(done_idxs) == len(iterators):
                 break
             batch = batch_state
-            if num_return_sequences > 0:
+            if num_return_sequences > 0 and not self.model.config.use_rpc:
                 batch_size = int(len(batch_state) / num_return_sequences)
                 new_batch: List[Any] = []
                 for batch_idx in range(batch_size):
@@ -171,6 +183,7 @@ class InferenceWorker():
             else:
                 yield batch[0]
 
+    #TODO(xinfei.sxf) 这个函数将逻辑又写了一遍
     @staticmethod
     async def collect_complete_response(
         all_responses: List[Union[PipelineResponse, MultiSequencesPipelineResponse, BatchPipelineResponse]],

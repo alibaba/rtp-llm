@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.utils.stop_utils import create_stop_criteria_list
 from maga_transformer.metrics import kmonitor, GaugeMetrics
-from maga_transformer.models.base_model import GenerateInput, GenerateOutput
+from maga_transformer.models.base_model import GenerateInput, GenerateOutput, GenerateOutputs
 from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
 from maga_transformer.utils.util import AtomicCounter
 
@@ -133,11 +133,16 @@ class GenerateStream(BaseModel):
         return self._input.lora_id
 
     @property
-    def output(self):
+    def output(self) -> GenerateOutputs:
         with self._lock:
-            output = copy.copy(self._output)
-            output.aux_info = copy.copy(output.aux_info)
-            return output
+            outputs = GenerateOutputs()
+            for i in range(self._input.generate_config.num_beams):
+                output = copy.copy(self._output)
+                output.aux_info = copy.copy(output.aux_info)
+                output.output_ids = output.output_ids[i:i+1,]
+                outputs.generate_outputs.append(output)
+            
+            return outputs
 
     def set_stop(self, err: str):
         with self._lock:

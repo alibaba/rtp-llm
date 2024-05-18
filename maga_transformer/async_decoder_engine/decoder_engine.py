@@ -69,7 +69,7 @@ class DecoderEngine:
                 
             output = stream.output
             yield output
-            if output.finished:
+            if output.generate_outputs[0].finished:
                 break
 
     def report_metric(self, cost_ms: float):

@@ -347,6 +347,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     POP_RANGE;
 
     const size_t context_batch_size = total_batch_size - batch_size;
+
     int*         input_lengths      = input_tensors->getPtr<int>("input_lengths");
     cudaMemcpyAsync(context_lengths_, input_lengths, sizeof(int) * total_batch_size, cudaMemcpyHostToDevice, stream_);
     size_t max_input_length = 0;
@@ -382,10 +383,20 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             assert(block_pointers.shape()[2] == 2);
             max_blocks_per_batch = block_pointers.shape()[3];
             block_stride = total_batch_size * 2 * max_blocks_per_batch;
-            cudaMemcpyAsync(block_pointers_, block_pointers.data(), sizeof(int64_t) * params_.num_layers_ * total_batch_size * max_blocks_per_batch * 2, cudaMemcpyHostToDevice, stream_);
+            size_t data_nums = params_.num_layers_ * total_batch_size * max_blocks_per_batch * 2;
+            size_t data_size = sizeof(int64_t) * data_nums;
+            cudaMemcpyAsync(block_pointers_, block_pointers.data(), data_size, cudaMemcpyHostToDevice, stream_);
             block_pointers_vector_.clear();
-            block_pointers_vector_.resize(params_.num_layers_ * total_batch_size * max_blocks_per_batch * 2);
-            memcpy(block_pointers_vector_.data(), block_pointers.data(), sizeof(int64_t) * params_.num_layers_ * total_batch_size * max_blocks_per_batch * 2);
+            block_pointers_vector_.resize(data_nums);
+            memcpy(block_pointers_vector_.data(), block_pointers.data(), data_size);
+        
+            if (params_.int8_kv_cache_) {
+                Tensor block_scale_pointers = output_tensors->at("block_scale_pointers");
+                cudaMemcpyAsync(block_scale_pointers_, block_scale_pointers.data(), data_size, cudaMemcpyHostToDevice, stream_);
+                block_scale_pointers_vector_.clear();
+                block_scale_pointers_vector_.resize(data_nums);
+                memcpy(block_scale_pointers_vector_.data(), block_scale_pointers.data(), data_size);
+            }
         } else {
             convert_to_block_pointers(output_tensors, input_tensors, total_batch_size);
             max_blocks_per_batch = (uint)(input_tensors->at("block_index_map").shape()[1]);

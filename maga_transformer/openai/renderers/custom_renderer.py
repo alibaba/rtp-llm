@@ -7,7 +7,7 @@ from concurrent.futures import Future
 
 from transformers import PreTrainedTokenizerBase
 
-from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, AuxInfo
+from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, GenerateOutputs, AuxInfo
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.multimodal_download import DownloadEngine
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
@@ -134,7 +134,7 @@ class CustomChatRenderer():
 
     async def render_response_stream(
             self,
-            output_generator: AsyncGenerator[GenerateOutput, None],
+            output_generator: AsyncGenerator[GenerateOutputs, None],
             request: ChatCompletionRequest,
             generate_config: GenerateConfig,
             input_token_length: int
@@ -175,7 +175,7 @@ class CustomChatRenderer():
                 )
 
             index += 1
-            output_ids = self._clean_output_ids(output.output_ids)
+            output_ids = self._clean_output_ids(output.generate_outputs[0].output_ids)
             output_token_length = len(output_ids)
             finish_reason = self._check_finish_reason(output_ids, input_token_length)
             output_ids = self._remove_stop_word_ids(output_ids)

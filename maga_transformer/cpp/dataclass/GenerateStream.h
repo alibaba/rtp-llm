@@ -28,14 +28,14 @@ public:
     GenerateStream(const std::shared_ptr<GenerateInput>& query, const ResourceContext& resource_context, int max_seq_len = 2048);
     virtual ~GenerateStream() {
         reportMetric();
-        generate_outputs_.wakeup();
+        generate_outputs_queue_.wakeup();
     }
 
 public:
     // Exported to python world.
     void                                cancel();
+    absl::StatusOr<GenerateOutputs>     nextOutput();
 
-    absl::StatusOr<GenerateOutput>     nextOutput();
     // Only used in C++ world.
     
     bool isContextStream() const;
@@ -99,8 +99,9 @@ public:
         return generate_input_->inputLength();
     }
 
+    // TODO(xinfei.sxf) consider reuse when fallback
     int contextLength() const {
-        return seq_length_;
+        return seq_length_- reuse_length_;
     }
 
     int needKVCacheBlockNums() const {
@@ -266,15 +267,15 @@ public:
     void update(ft::BufferPtr& new_tokens,
                 int num_new_tokens,
                 bool finished,
-                std::optional<ft::BufferPtr> hidden_states,
-                std::optional<ft::BufferPtr> logits,
-                std::optional<ft::BufferPtr> cum_log_probs,
+                const ft::BufferPtr& hidden_states,
+                const ft::BufferPtr& logits,
+                const ft::BufferPtr& cum_log_probs,
                 bool not_update_output = false);
 
     void updateOutput(bool finished,
-                      std::optional<ft::BufferPtr> hidden_states,
-                      std::optional<ft::BufferPtr> logits,
-                      std::optional<ft::BufferPtr> cum_log_probs);
+                      const ft::BufferPtr& hidden_states,
+                      const ft::BufferPtr& logits,
+                      const ft::BufferPtr& cum_log_probs);
 
     void setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {
         metrics_reporter_ = metrics_reporter;
@@ -295,10 +296,14 @@ public:
         return debug_string.str();
     }
 
+    const ft::BufferPtr& cumLogProbs() const {
+        return cum_log_probs_;
+    }
+
 protected:
     ft::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;
-    std::shared_ptr<GenerateOutput>     generate_output_;
+    std::shared_ptr<GenerateOutputs>    generate_outputs_;
     GenerateStatus                      generate_status_;
     std::vector<GenerateStatus>         sub_generate_status_;
     int                                 max_seq_len_;
@@ -312,6 +317,7 @@ protected:
     StreamCacheResource                 stream_cache_resource_;
     SystemPromptParams                  prompt_param_;
     bool                                is_context_stream_     = true;
+    size_t                              iter_count_            = 0;
     size_t                              batch_size_            = 1;
     int                                 reuse_length_          = 0;
     bool                                done_                  = false;
@@ -320,7 +326,9 @@ protected:
     bool                                need_release_resource_ = true;
     kmonitor::MetricsReporterPtr        metrics_reporter_      = nullptr;
     ft::SpecialTokens                   special_tokens_;
-    autil::SynchronizedQueue<GenerateOutput> generate_outputs_;
+    ft::BufferPtr                       cum_log_probs_;
+
+    autil::SynchronizedQueue<GenerateOutputs>  generate_outputs_queue_;
 
     friend class StreamCacheResource;
 };

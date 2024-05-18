@@ -17,8 +17,9 @@ namespace ft = fastertransformer;
 namespace rtp_llm {
 
 struct CustomConfig {
-    std::map<int, std::vector<int>> multi_task_prompt_tokens;
     bool reuse_cache = false;
+    bool int8_kv_cache = false;
+    std::map<int, std::vector<int>> multi_task_prompt_tokens;
 };
 
 std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomConfig& config) {
@@ -28,9 +29,10 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
     params.head_num_kv_ = 2;
     params.block_nums_  = 100;
     params.reuse_cache_ = config.reuse_cache;
-    params.multi_task_prompt_tokens = config.multi_task_prompt_tokens;
+    params.multi_task_prompt_tokens_ = config.multi_task_prompt_tokens;
     params.max_generate_batch_size_ = 128;
     params.max_context_batch_size_  = 128;
+    params.int8_kv_cache_ = config.int8_kv_cache;
 
     const size_t inter_size    = 512;
     params.inter_size_         = inter_size;
