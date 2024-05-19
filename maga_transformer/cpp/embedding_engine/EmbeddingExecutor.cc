@@ -4,33 +4,29 @@
 #include "src/fastertransformer/core/Types.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 
 using namespace std;
 using namespace fastertransformer;
 
 namespace rtp_llm {
 
-EmbeddingExecutor::EmbeddingExecutor(
-        const MagaInitParams&                                params,
-        ft::NcclParam                                        tensor_para,
-        ft::NcclParam                                        pipeline_para,
-        const vector<unordered_map<string, ConstBufferPtr>>& layer_weights,
-        const unordered_map<string, ConstBufferPtr>&         weights,
-        const HandlerBase&                                   handler):
-    handler_(handler),
-    tensor_para_(tensor_para),
-    pipeline_para_(pipeline_para)
-{
+EmbeddingExecutor::EmbeddingExecutor(const MagaInitParams&                                params,
+                                     ft::NcclParam                                        tensor_para,
+                                     ft::NcclParam                                        pipeline_para,
+                                     const vector<unordered_map<string, ConstBufferPtr>>& layer_weights,
+                                     const unordered_map<string, ConstBufferPtr>&         weights,
+                                     const HandlerBase&                                   handler,
+                                     const kmonitor::MetricsReporterPtr                   metrics_reporter):
+    handler_(handler), tensor_para_(tensor_para), pipeline_para_(pipeline_para), metrics_reporter_(metrics_reporter) {
     // need init model and sampler
     unique_ptr<GptModelInitParams> model_params;
     // model_.reset(new GptModel(*model_params));
     SamplerInitParams sampler_params;
     device_               = ft::DeviceFactory::getDevice(DeviceType::Cuda);
-    data_type_ = ft::getDataType(params.gpt_init_parameter->data_type_);
+    data_type_            = ft::getDataType(params.gpt_init_parameter->data_type_);
     sampler_params.device = device_;
-    model_wrapper_.reset(
-        new ParallelModelWrapper(*params.gpt_init_parameter, weights, layer_weights)
-    );
+    model_wrapper_.reset(new ParallelModelWrapper(*params.gpt_init_parameter, weights, layer_weights));
     init_position_ids(params.gpt_init_parameter->max_seq_len_);
 }
 
@@ -59,10 +55,10 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {0}, ft::AllocationType::HOST}, {});
     model_input.prefix_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {0}, ft::AllocationType::HOST}, {});
-    int*      merged_tokens    = (int*)model_input.combo_tokens->data();
-    int*      input_lengths    = (int*)model_input.input_lengths->data();
-    int*      merged_positon_ids = (int*)model_input.combo_position_ids->data();
-    int*      merged_token_type_ids = (int*)model_input.combo_tokens_type_ids->data();
+    int*      merged_tokens    = model_input.combo_tokens->data<int>();
+    int*      input_lengths    = model_input.input_lengths->data<int>();
+    int*      merged_positon_ids = model_input.combo_position_ids->data<int>();
+    int*      merged_token_type_ids = model_input.combo_tokens_type_ids->data<int>();
     int token_idx = 0;
     int batch_idx = 0;
 
@@ -84,6 +80,8 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         batch_idx += stream->batchSize();
         token_idx += length;
     }
+    size_t max_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
+    reportMetrics(batch_size, token_num, token_num);
 
     return model_input;
 }
@@ -145,4 +143,16 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     return updateStreams(handler_output.value(), streams);
     // return updateStreams(output, streams);
 }
+
+void EmbeddingExecutor::reportMetrics(size_t context_batch_size, size_t combo_token_num, size_t max_seq_len) const {
+    if (metrics_reporter_) {
+        RtpLLMExecutorMetricsCollector collector;
+        collector.context_batch_size = context_batch_size;
+        collector.generate_batch_size = 0;
+        collector.execute_token_size = combo_token_num;
+        collector.max_seq_len = max_seq_len;
+        metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &collector);
+    }
+}
+
 }  // namespace rtp_llma

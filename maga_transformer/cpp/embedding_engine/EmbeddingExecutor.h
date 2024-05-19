@@ -15,7 +15,8 @@ public:
                                ft::NcclParam                                                           pipeline_para,
                                const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
                                const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
-                               const HandlerBase&                                                      handler);
+                               const HandlerBase&                                                      handler,
+                               const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
 
     absl::Status process(const std::list<EmbeddingStreamPtr>& streams);
 
@@ -27,6 +28,7 @@ private:
     ft::DeviceBase*                       device_;
     ft::BufferPtr                         max_position_ids_buf_;
     ft::DataType                          data_type_;
+    kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
 
     ModelRequest generateOldModelRequest(GptModelInputs& model_input);
     absl::StatusOr<GptModelInputs> gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const;
@@ -35,5 +37,6 @@ private:
     absl::Status createAttentionMask(GptModelInputs& model_input) const;
     void calcTokenNum(const std::list<EmbeddingStreamPtr>& streams, int64_t& token_num, int64_t& batch_size) const;    
     void init_position_ids(int max_seq_len);
+    void reportMetrics(size_t context_batch_size, size_t combo_token_num, size_t max_seq_len) const;
 };
 }  // namespace rtp_llm

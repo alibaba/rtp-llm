@@ -11,6 +11,10 @@ EmbeddingEngine::EmbeddingEngine(const MagaInitParams&                          
                                  const HandlerBase&                                                      handler) : params_(params) {
     executor_.reset(new EmbeddingExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights, handler));
     scheduler_.reset(new EmbeddingScheduler(params));
+    (void)initKmonitorFactory();
+    auto kmon_tags = getHippoTags();
+    metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+
     (void)startLoop();
 }
 
@@ -67,7 +71,7 @@ absl::Status EmbeddingEngine::step() {
     try {
         RETURN_IF_STATUS_ERROR(executor_->process(streams));
         RETURN_IF_STATUS_OR_ERROR(streams_status);
-        // RETURN_IF_STATUS_ERROR(update_streams(streams));        
+        // RETURN_IF_STATUS_ERROR(update_streams(streams));
     } catch (const exception& e) {
         FT_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), e.what());
         for (auto& stream: streams) {

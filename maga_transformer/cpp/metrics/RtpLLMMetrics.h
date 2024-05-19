@@ -44,6 +44,28 @@ public:
     kmonitor::MutableMetric* output_token_length_metric    = nullptr;
     kmonitor::MutableMetric* query_batch_size_metric       = nullptr;
 
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+class RtpEmbeddingStreamMetricsCollector final {
+public:
+    int64_t total_latency_us       = 0;
+    int64_t wait_latency_us        = 0;
+    int64_t input_token_length     = 0;
+};
+
+class RtpEmbeddingStreamMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpEmbeddingStreamMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* total_latency_us_metric       = nullptr;
+    kmonitor::MutableMetric* wait_latency_us_metric        = nullptr;
+    kmonitor::MutableMetric* input_token_length_metric     = nullptr;
+
 private:
     AUTIL_LOG_DECLARE();
 };

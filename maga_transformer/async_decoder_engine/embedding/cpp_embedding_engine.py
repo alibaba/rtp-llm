@@ -22,8 +22,6 @@ class EmbeddingCppEngine(object):
             start_time = time.time()
             results = self.cpp_engine.decode(inputs.token_ids, inputs.token_type_ids, inputs.input_lengths, 0)
             end_time = time.time()
-            kmonitor.report(GaugeMetrics.ASYNC_ITERATE_LANTENCY, (end_time - start_time) * 1000)
-            kmonitor.report(GaugeMetrics.ASYNC_BATCH_SIZE_METRIC, len(inputs.token_ids))
             # print("engine cost:" , end_time - start_time)        
             outputs.outputs = results[:, -1].tolist()
         except Exception as e:

@@ -22,8 +22,9 @@ namespace rtp_llm {
 
 class EmbeddingStream {
 public:
-    EmbeddingStream(const std::shared_ptr<EmbeddingInput>& query);
-    ~EmbeddingStream() {        }
+    EmbeddingStream(const std::shared_ptr<EmbeddingInput>& query,
+                    const kmonitor::MetricsReporterPtr     metric_reporter = nullptr);
+    ~EmbeddingStream() {}
 
 public:
     // Exported to python world.
@@ -39,6 +40,8 @@ public:
     void updateOutput(ft::BufferPtr& output);
 
     void waitFinish();
+
+    void setStart();
 
     void setError(const std::string& error_info);
 
@@ -56,13 +59,18 @@ public:
     }
 
 protected:
-    ft::DeviceBase* device_;
-    std::shared_ptr<EmbeddingInput>      embedding_input_;
-    std::shared_ptr<EmbeddingOutput>     embedding_output_;
-    int64_t                              begin_time_;
-    std::condition_variable              cond_;
-    std::mutex                           lock_;
-    GenerateState                        generate_state_;
+    ft::DeviceBase*                  device_;
+    std::shared_ptr<EmbeddingInput>  embedding_input_;
+    std::shared_ptr<EmbeddingOutput> embedding_output_;
+    int64_t                          begin_time_;
+    std::condition_variable          cond_;
+    std::mutex                       lock_;
+    GenerateState                    generate_state_;
+    size_t                           begin_time_us_    = 0;
+    size_t                           wait_time_us_     = 0;
+    kmonitor::MetricsReporterPtr     metrics_reporter_ = nullptr;
+
+    void reportMetrics();
 };
 
 typedef std::shared_ptr<EmbeddingStream> EmbeddingStreamPtr;

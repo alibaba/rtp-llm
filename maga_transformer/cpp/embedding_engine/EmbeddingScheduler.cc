@@ -1,4 +1,5 @@
 #include "maga_transformer/cpp/embedding_engine/EmbeddingScheduler.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/utils/logger.h"
 #include <mutex>
@@ -6,7 +7,9 @@
 using namespace std;
 namespace rtp_llm {
 
-EmbeddingScheduler::EmbeddingScheduler(const MagaInitParams& config) : config_(*config.gpt_init_parameter) {}
+EmbeddingScheduler::EmbeddingScheduler(const MagaInitParams&              config,
+                                       const kmonitor::MetricsReporterPtr metrics_reporter):
+    config_(*config.gpt_init_parameter), metrics_reporter_(metrics_reporter) {}
 
 EmbeddingScheduler::~EmbeddingScheduler() {
     (void)stop();
@@ -30,7 +33,7 @@ absl::Status EmbeddingScheduler::enqueue(EmbeddingStreamPtr stream) {
 
 absl::StatusOr<list<EmbeddingStreamPtr>> EmbeddingScheduler::scheduleNew() {
     unique_lock<mutex> lock(lock_);
-    cond_.wait(lock, [this]{return stop_ || !waiting_streams_.empty() || !running_streams_.empty();});
+    cond_.wait(lock, [this]{return stop_ || !waiting_streams_.empty();});
     std::list<EmbeddingStreamPtr> new_streams;
     int total_len = 0;
     auto it = waiting_streams_.begin();
@@ -39,25 +42,33 @@ absl::StatusOr<list<EmbeddingStreamPtr>> EmbeddingScheduler::scheduleNew() {
         if (total_len + stream->inputLength() > config_.max_context_batch_size_ * config_.max_seq_len_) {
             break;
         }
+        stream->setStart();
         new_streams.push_back(stream);
         total_len += stream->inputLength();
         it = waiting_streams_.erase(it);
     }
+    // if new streams is empty, meaning that first stream is too big
     if (waiting_streams_.size() != 0 && new_streams.size() == 0) {            
         it = waiting_streams_.begin();
         const auto& stream = *it;
         stream->setError("long prompt error, not scheduled");
         it = waiting_streams_.erase(it);
     }
+    reportMetrics(new_streams.size());
     return new_streams;
+}
+
+void EmbeddingScheduler::reportMetrics(size_t new_stream_size) {
+    if (metrics_reporter_) {
+        RtpLLMSchedulerMetricsCollector collector;
+        collector.wait_stream_size = waitingStreamsSize();
+        collector.running_stream_size = new_stream_size;
+        metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerMetricsCollector>(nullptr, &collector);
+    }
 }
 
 int EmbeddingScheduler::waitingStreamsSize() {
     return waiting_streams_.size();
-}
-
-int EmbeddingScheduler::runningStreamsSize() {
-    return running_streams_.size();
 }
 
 }  // namespace rtp_llm

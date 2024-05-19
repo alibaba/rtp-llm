@@ -9,10 +9,11 @@ namespace rtp_llm {
 
 class EmbeddingScheduler {
 public:
-    explicit EmbeddingScheduler(const MagaInitParams& config);
+    explicit EmbeddingScheduler(const MagaInitParams&              config,
+                                const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
 
     ~EmbeddingScheduler();
-    
+
     absl::Status enqueue(EmbeddingStreamPtr stream);
 
     absl::StatusOr<std::list<EmbeddingStreamPtr>> scheduleNew();
@@ -22,16 +23,17 @@ public:
 public:
     // for test
     int waitingStreamsSize();
-    int runningStreamsSize();
 
 private:
-    ft::GptInitParameter&               config_;
-    std::list<EmbeddingStreamPtr>       waiting_streams_;
-    std::list<EmbeddingStreamPtr>       running_streams_;
-    std::atomic<bool>                   stop_               = false;
-    std::mutex                          lock_;
-    std::condition_variable             cond_;
+    void reportMetrics(size_t new_stream_size);
 
+    ft::GptInitParameter&         config_;
+    std::list<EmbeddingStreamPtr> waiting_streams_;
+    std::atomic<bool>             stop_ = false;
+    std::mutex                    lock_;
+    std::condition_variable       cond_;
+
+    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 };
 
 }  // namespace rtp_llm

@@ -4,6 +4,7 @@
 #include "maga_transformer/cpp/embedding_engine/handlers/HandlerBase.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingStream.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingScheduler.h"
 #include <atomic>
@@ -49,6 +50,7 @@ private:
     ResourceContext                       resource_context_;
     ft::NcclParam                         tensor_para_;
     ft::NcclParam                         pipeline_para_;
+    kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
 };
 
 }  // namespace rtp_llm

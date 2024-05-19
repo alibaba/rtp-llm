@@ -29,6 +29,7 @@ public:
     int64_t                             request_id;    
     int64_t                             total_length;
 
+    void checkVaild();
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "GenerateInput {"

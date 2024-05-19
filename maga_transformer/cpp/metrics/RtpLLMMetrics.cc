@@ -5,6 +5,7 @@
 namespace rtp_llm {
 
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSchedulerMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
@@ -49,6 +50,19 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
     REPORT_GAUGE(input_token_length);
     REPORT_GAUGE(output_token_length);
     REPORT_GAUGE(query_batch_size);
+}
+
+bool RtpEmbeddingStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_latency_us");    
+    REGISTER_GAUGE_MUTABLE_METRIC(wait_latency_us_metric, "rtp_llm_wait_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(input_token_length_metric, "rtp_llm_input_token_length");
+    return true;
+}
+
+void RtpEmbeddingStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpEmbeddingStreamMetricsCollector* collector) {
+    REPORT_GAUGE(total_latency_us);
+    REPORT_GAUGE(wait_latency_us);
+    REPORT_GAUGE(input_token_length);
 }
 
 bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {

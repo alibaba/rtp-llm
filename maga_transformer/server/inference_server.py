@@ -165,6 +165,7 @@ class InferenceServer(object):
             return JSONResponse(format_exception(e), status_code=500)
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
+        start_time = time.time()
         id = self._atomic_count.increment()
         kmonitor.report(AccMetrics.QPS_METRIC, 1)
         with self._controller:
@@ -175,6 +176,8 @@ class InferenceServer(object):
                 # do not log result since too big
                 if 'data' not in log_result:                    
                     self._access_logger.log_success_access(request, log_result, id)
+                end_time = time.time()
+                kmonitor.report(GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000)
                 return ORJSONResponse(result)
             except BaseException as e:
                 return self._handle_exception(request, e, id)
@@ -200,7 +203,7 @@ class InferenceServer(object):
         return rep
 
     async def _call_generate_with_report(self, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
-        async def __gen_response_with_report(start_time, response_generator):
+        async def __gen_response_with_report(start_time: float, response_generator):
             try:
                 last_iterate_time = current_time_ms()
                 first_token = True
