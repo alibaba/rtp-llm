@@ -192,8 +192,8 @@ std::vector<CutlassGemmConfig> get_candidate_configs(int sm, const bool is_weigh
         = get_candidate_tiles(sm, is_weight_only, simt_configs_only, int8_configs_only);
 
     std::vector<CutlassGemmConfig> candidate_configs;
-    const int min_stages = int8_configs_only ? 3 : 2;
-    const int max_stages = int8_configs_only ? 6 : (sm >= 80 ? 4 : 2);
+    const int min_stages = int8_configs_only ? (sm >= 80 ? 3 : 2) : 2;
+    const int max_stages = int8_configs_only ? (sm >= 80 ? 6 : 2) : (sm >= 80 ? 4 : 2);
     for (const auto& tile_config : tiles)
     {
         for (int stages = min_stages; stages <= max_stages; ++stages)
