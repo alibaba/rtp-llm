@@ -172,8 +172,9 @@ bool ParallelModelWrapperImpl<T>::useFMHA() {
 template<typename T>
 void ParallelModelWrapperImpl<T>::createAttentionMask(size_t context_batch_size, size_t max_context_seq_length, int* input_lengths_host) {
     cudaMemcpyAsync(input_lengths_, input_lengths_host, sizeof(int) * context_batch_size, cudaMemcpyHostToDevice, stream_);
-    attention_mask_  = (T*)allocator_->reMalloc(attention_mask_, sizeof(T) * context_batch_size * max_context_seq_length * max_context_seq_length, false);
-    invokeBuildDecoderAttentionMask<T>(attention_mask_, input_lengths_host, nullptr, context_batch_size, max_context_seq_length, 0, params_.is_causal_, stream_);
+    attention_mask_  = (T*)allocator_->reMalloc(attention_mask_, sizeof(T) * context_batch_size * max_context_seq_length * max_context_seq_length, false);    
+    invokeBuildDecoderAttentionMask<T>(attention_mask_, input_lengths_, nullptr, context_batch_size, max_context_seq_length, 0, params_.is_causal_, stream_);
+    sync_check_cuda_error();
 }
 
 template<typename T>
