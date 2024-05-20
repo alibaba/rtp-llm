@@ -1,14 +1,15 @@
-package(default_visibility = ["//visibility:public"])
-
-cc_import(
-    name = "libxfastertransformer",
-    shared_library = "libxfastertransformer.so",
-)
-
 cc_library(
-    name = "xft_header",
+    name = "xft_pip",
+    srcs = [
+         "xfastertransformer-devel/lib/libxfastertransformer.so",
+    ],
     hdrs = glob([
-        "include/*.h"
+        "xfastertransformer-devel/include/*.h",
     ]),
-    visibility = ["//visibility:public"],    
+    deps = [
+        "@local_config_python//:python_headers",
+    ],
+    strip_include_prefix = "xfastertransformer-devel",
+    include_prefix = "xfastertransformer",
+    visibility = ["//visibility:public"],
 )

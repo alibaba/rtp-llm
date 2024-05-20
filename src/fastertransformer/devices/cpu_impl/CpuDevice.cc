@@ -2,7 +2,7 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/core/cpu_allocator.h"
-#include "3rdparty/xft/include/layers_mlp.h"
+#include "xfastertransformer/include/layers_mlp.h"
 #include <cstring>
 #include <cmath>
 #include <immintrin.h>

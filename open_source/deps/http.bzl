@@ -37,3 +37,23 @@ def http_deps():
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
     )
+
+    http_archive(
+        name = "xfastertransformer_devel_icx",
+        sha256 = "d61c8351f979037268672c52450fe4d0830414afe5bfba4e52c48f596ef1bdbb",
+        urls = [
+            "https://mirrors.aliyun.com/pypi/packages/b2/d4/04e803482699efde89baa02f5cfbb34aeabaac5e661a57182c19ec93290c/xfastertransformer_devel_icx-1.6.0.0-py3-none-any.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("//3rdparty/xft:BUILD"),
+    )
+
+    http_archive(
+        name = "xfastertransformer_devel",
+        sha256 = "a61ae91776299c44c0da399fc844cabc2278697bcad0b233d5879189178b5e77",
+        urls = [
+            "https://mirrors.aliyun.com/pypi/packages/c4/a6/e05e09f31f999619743009a6c21e85350d2969a2e8bc8c60657add275eed/xfastertransformer_devel-1.6.0-py3-none-any.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("//3rdparty/xft:BUILD"),
+    )

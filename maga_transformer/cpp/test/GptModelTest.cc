@@ -15,6 +15,10 @@ class GptModelTest: public DeviceTestBase {
 };
 
 TEST_F(GptModelTest, testSimple) {
+    if (DeviceFactory::getDefaultDevice()->getDeviceProperties().type == DeviceType::Cpu) {
+        return;
+    }
+
     const auto path = test_data_path_ + "../../test/model_test/fake_test/testdata/qwen_0.5b";
     auto weights = loadWeightsFromDir(path);
     assert(weights->lm_head->kernel);

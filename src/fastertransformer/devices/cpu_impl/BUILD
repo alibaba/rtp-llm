@@ -1,5 +1,7 @@
 load("//:def.bzl", "copts")
 
+#TODO(wangyin): maybe add build option to select icx version of xft-devel package.
+
 cc_library(
     name = "cpu_impl",
     hdrs = glob([
@@ -13,8 +15,7 @@ cc_library(
         "//src/fastertransformer/core:cpu_allocator",
         "//src/fastertransformer/devices:device_utils",
         "//src/fastertransformer/devices:devices_base_impl",
-        "//3rdparty/xft:xft_header",
-        "//3rdparty/xft:libxfastertransformer",
+        "@xfastertransformer_devel_icx//:xft_pip",
     ],
     visibility = ["//visibility:public"],
     copts = copts() + ["-mavx512f", "-mavx512bw", "-mavx512vl"],
