@@ -1,6 +1,8 @@
 #include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 
+#include "maga_transformer/cpp/cache/CacheConfig.h"
+
 #include <torch/torch.h>
 
 using namespace std;
@@ -191,11 +193,6 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto value_states_host = torch::rand(
         {(int)batch_size, (int)seq_len, (int)num_key_value_heads, (int)head_dim}, tensor_options);
 
-    auto k_cache_host = torch::zeros(
-        {(int)batch_size, (int)num_key_value_heads, (int)kv_seq_len, (int)head_dim}, tensor_options);
-
-    auto v_cache_host = torch::zeros(
-        {(int)batch_size, (int)num_key_value_heads, (int)kv_seq_len, (int)head_dim}, tensor_options);
 
     auto qkv_states_host = torch::cat(
         {query_states_host.view({(int)batch_size * (int)seq_len , (int)num_heads, (int)head_dim}),
@@ -214,6 +211,21 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto sequence_lengths_host = torch::from_blob((void*)sequence_lengths.data(), {(int)batch_size}, int_tensor_options);
     auto input_lengths_host = torch::from_blob((void*)input_lengths.data(), {(int)batch_size}, int_tensor_options);
 
+    size_t tokensPerBlock = 8;
+    
+    size_t padding_kv_seq_len = ((kv_seq_len + tokensPerBlock) / tokensPerBlock) * tokensPerBlock;
+    auto kvcache_pad = torch::zeros(
+        {1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim},
+        tensor_options);
+
+    auto k_cache_host = kvcache_pad.index(
+        {0, torch::indexing::Slice(), 0, torch::indexing::Slice(0, kv_seq_len), torch::indexing::Slice()}
+    ).reshape({(int)batch_size, (int)kv_seq_len, (int)num_key_value_heads, (int)head_dim}).transpose(1, 2).contiguous().clone();
+
+    auto v_cache_host = kvcache_pad.index(
+        {0, torch::indexing::Slice(), 1, torch::indexing::Slice(0, kv_seq_len), torch::indexing::Slice()}
+    ).reshape({(int)batch_size, (int)kv_seq_len, (int)num_key_value_heads, (int)head_dim}).transpose(1, 2).contiguous().clone();
+
     auto attention_mask_host = torch::zeros(
         {(int)batch_size, (int)seq_len, (int)kv_seq_len + (int)seq_len}, tensor_options);
 
@@ -228,62 +240,9 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto input_lengths_device       = createDeviceBuffer<int>(input_lengths_host);
 
     auto rope_config = RopeConfig({RopeType::NOROPE, head_dim, 10000, 1, 2048, 1, 1});
-
-    size_t tokensPerBlock = 4;
-    size_t maxBlocksPerSeq = ((kv_seq_len + seq_len + 1) % tokensPerBlock == 0) ?
-                             ((kv_seq_len + seq_len + 1) / tokensPerBlock) :
-                             ((kv_seq_len + seq_len + 1) / tokensPerBlock) + 1;
-
-    // k, v tensor shape is [batch_size, head_kv_size, kv_seq_len, head_dim].
-    // split tensor to small tensor which shape is [head_size, tokensPerBlock, head_dim].
-    // and the tensor map is [block_size, 2, block_num]
-
-    EXPECT_GE(maxBlocksPerSeq * tokensPerBlock, kv_seq_len + seq_len);
-    EXPECT_EQ(kv_seq_len % tokensPerBlock, 0);
-    auto k_tensor = k_cache_host.view({(int)batch_size,
-                                    (int)num_key_value_heads,
-                                    (int)(kv_seq_len / tokensPerBlock),
-                                    (int)tokensPerBlock,
-                                    (int)head_dim});
-    k_tensor = k_tensor.transpose(1, 2);
-
-    auto v_tensor = v_cache_host.view({(int)batch_size,
-                                    (int)num_key_value_heads,
-                                    (int)(kv_seq_len / tokensPerBlock),
-                                    (int)tokensPerBlock,
-                                    (int)head_dim});
-    v_tensor = v_tensor.transpose(1, 2);
-
-    std::vector<void*> block_pointers(batch_size * 2 * maxBlocksPerSeq, nullptr);
-
-    for (int i = 0; i < batch_size; i++) {
-        for (int j = 0; j < maxBlocksPerSeq; j++) {
-            if (j < (int)(kv_seq_len / tokensPerBlock)) {
-                auto k_tmp = k_tensor.index({i, j, "..."});
-                auto v_tmp = v_tensor.index({i, j, "..."});
-                auto k_buffer = createDeviceBuffer<half>(k_tmp);
-                auto v_buffer = createDeviceBuffer<half>(v_tmp);
-                block_pointers[i * maxBlocksPerSeq * 2 + j] = k_buffer->data();
-                block_pointers[i * maxBlocksPerSeq * 2 + maxBlocksPerSeq + j] = v_buffer->data();
-            } else {
-                auto k_tmp = torch::zeros({1, 1, (int)num_key_value_heads, (int)tokensPerBlock, (int)head_dim});
-                auto v_tmp = torch::zeros({1, 1, (int)num_key_value_heads, (int)tokensPerBlock, (int)head_dim});
-                auto k_buffer = createDeviceBuffer<half>(k_tmp);
-                auto v_buffer = createDeviceBuffer<half>(v_tmp);
-                block_pointers[i * maxBlocksPerSeq * 2 + j] = k_buffer->data();
-                block_pointers[i * maxBlocksPerSeq * 2 + maxBlocksPerSeq + j] = v_buffer->data();
-            }
-        }
-    }
-    for (auto ptr : block_pointers) {
-        EXPECT_NE(ptr, nullptr);
-    }
-
-
-    auto kv_cache = device_->allocateBuffer(
-            {DataType::TYPE_UINT64, {(size_t)batch_size, 2, maxBlocksPerSeq}});
-    Buffer block_pointers_buffer(MemoryType::MEMORY_CPU, DataType::TYPE_UINT64, {(size_t)batch_size, 2, maxBlocksPerSeq}, block_pointers.data());
-    device_->copy({*kv_cache, block_pointers_buffer});
+    
+    rtp_llm::CacheConfig cache_conf(1, 4096, num_heads, head_dim, tokensPerBlock, DataType::TYPE_FP16);
+    auto kv_cache = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
 
     auto common_inputs = AttentionCommonInputs(*input_lengths_device, *sequence_lengths_device);
     common_inputs.kv_cache_blocks = *kv_cache;
@@ -293,7 +252,7 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     common_inputs.decoder_max_seq_len = step - 1;
 
     auto buffer_nullptr = BufferPtr(nullptr);
-    auto attention_weight   = AttentionLayerWeights(std::make_unique<const DenseWeights>(
+    auto attention_weight = AttentionLayerWeights(std::make_unique<const DenseWeights>(
                                                     DenseWeights(buffer_nullptr, bias_device)));
 
 
@@ -326,26 +285,27 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
 }
 
 
-// TEST_F(CudaAttentionOpTest, SelfAttentionOpTest) {
-//     std::vector<size_t> batch = {1};
-//     std::vector<size_t> seq   = {1};
-//     std::vector<size_t> kv_seq = {16};
-//     for (auto batch_size : batch) {
-//         for (auto seq_len : seq) {
-//             for (auto kv_seq_len: kv_seq) {
-//                 size_t num_heads = 64;
-//                 size_t num_key_value_heads = num_heads;
-//                 size_t head_dim = 64;
-//                 selfAttentionOpTest(batch_size,
-//                                     seq_len,
-//                                     kv_seq_len,
-//                                     num_heads,
-//                                     num_key_value_heads,
-//                                     head_dim);
-//             }
-//         }
-//     }
-// }
+TEST_F(CudaAttentionOpTest, SelfAttentionOpTest) {
+    // batch size > 8 may exceed cache manager buffer size.
+    std::vector<size_t> batch = {2, 4, 8};
+    std::vector<size_t> seq   = {1};
+    std::vector<size_t> kv_seq = {0, 1, 2, 4, 8};
+    for (auto batch_size : batch) {
+        for (auto seq_len : seq) {
+            for (auto kv_seq_len: kv_seq) {
+                size_t num_heads = 64;
+                size_t num_key_value_heads = num_heads;
+                size_t head_dim = 64;
+                selfAttentionOpTest(batch_size,
+                                    seq_len,
+                                    kv_seq_len,
+                                    num_heads,
+                                    num_key_value_heads,
+                                    head_dim);
+            }
+        }
+    }
+}
 
 
 TEST_F(CudaAttentionOpTest, ContextAttentionOpTest) {

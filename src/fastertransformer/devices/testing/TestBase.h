@@ -194,77 +194,16 @@ protected:
         ).clone();
     }
 
-    template <typename T>
-    BufferPtr CreateKVBlockArray(torch::Tensor& k_cache,
-                                torch::Tensor& v_cache,
-                                size_t seq_len,
-                                size_t maxBlocksPerSeq,
-                                size_t tokensPerBlock) {
-        // k, v tensor shape is [batch_size, head_kv_size, kv_seq_len, head_dim].
-        // split tensor to small tensor which shape is [head_size, tokensPerBlock, head_dim].
-        // and the tensor map is [block_size, 2, block_num]
 
-        auto batch_size     = k_cache.size(0);
-        auto head_kv_size   = k_cache.size(1);
-        auto kv_seq_len     = k_cache.size(2);
-        auto head_dim       = k_cache.size(3);
-
-        EXPECT_GE(maxBlocksPerSeq * tokensPerBlock, kv_seq_len + seq_len);
-        EXPECT_EQ(kv_seq_len % tokensPerBlock, 0);
-        auto k_tensor = k_cache.view({(int)batch_size,
-                                      (int)head_kv_size,
-                                      (int)(kv_seq_len / tokensPerBlock),
-                                      (int)tokensPerBlock,
-                                      (int)head_dim});
-        k_tensor = k_tensor.transpose(1, 2);
-
-        auto v_tensor = v_cache.view({(int)batch_size,
-                                      (int)head_kv_size,
-                                      (int)(kv_seq_len / tokensPerBlock),
-                                      (int)tokensPerBlock,
-                                      (int)head_dim});
-        v_tensor = v_tensor.transpose(1, 2);
-
-        std::vector<void*> block_pointers(batch_size * 2 * maxBlocksPerSeq, nullptr);
-
-        for (int i = 0; i < batch_size; i++) {
-            for (int j = 0; j < maxBlocksPerSeq; j++) {
-                if (j < (int)(kv_seq_len / tokensPerBlock)) {
-                    auto k_tmp = k_tensor.index({i, j, "..."});
-                    auto v_tmp = v_tensor.index({i, j, "..."});
-                    auto k_buffer = createDeviceBuffer<T>(k_tmp);
-                    auto v_buffer = createDeviceBuffer<T>(v_tmp);
-                    block_pointers[i * maxBlocksPerSeq * 2 + j] = k_buffer->data();
-                    block_pointers[i * maxBlocksPerSeq * 2 + maxBlocksPerSeq + j] = v_buffer->data();
-                } else {
-                    auto k_tmp = torch::zeros({1, 1, (int)head_kv_size, (int)tokensPerBlock, (int)head_dim});
-                    auto v_tmp = torch::zeros({1, 1, (int)head_kv_size, (int)tokensPerBlock, (int)head_dim});
-                    auto k_buffer = createDeviceBuffer<T>(k_tmp);
-                    auto v_buffer = createDeviceBuffer<T>(v_tmp);
-                    block_pointers[i * maxBlocksPerSeq * 2 + j] = k_buffer->data();
-                    block_pointers[i * maxBlocksPerSeq * 2 + maxBlocksPerSeq + j] = v_buffer->data();
-                }
-            }
-        }
-        for (auto ptr : block_pointers) {
-            EXPECT_NE(ptr, nullptr);
-        }
-
-        auto buffer = device_->allocateBuffer(
-            {DataType::TYPE_UINT64, {(size_t)batch_size, maxBlocksPerSeq}, AllocationType::HOST}, {});
-
-        std::memcpy(buffer->data(), block_pointers.data(), block_pointers.size() * sizeof(void*));
-        return std::move(buffer);
-    }
 
     BufferPtr allocateKVBlocks(const rtp_llm::CacheConfig& cache_config,
                                const std::vector<int32_t>& input_lengths,
-                               const std::vector<int32_t>& sequence_lengths)
+                               torch::Tensor& kvCache)
     {
         cache_manager_ = std::make_shared<rtp_llm::CacheManager>(cache_config, device_);
         const auto max_seq_len = *std::max_element(input_lengths.begin(), input_lengths.end());
-        const auto batch_layer_kv_block_num =
-            ((max_seq_len / cache_config.seq_size_per_block) + 2) * input_lengths.size();
+
+        const auto batch_layer_kv_block_num = (max_seq_len / cache_config.seq_size_per_block) + 2;
         const auto batch_size = input_lengths.size();
 
         auto kv_blocks_buf = device_->allocateBuffer({
@@ -287,6 +226,24 @@ protected:
                 batch_size,
                 i
             );
+            // [batch(i), layer_num(j), ...]
+            if (kvCache.dim() == 5) {
+                // [layernum, batch, 2, max_pad_seq, dim]
+                auto max_pad_seq = kvCache.sizes()[3];
+                auto kv_indexs = cache_manager_->convertAddrToIndex(batch_kv_cache.k_ptr[i][0]);
+                for (auto k = 0; k < (max_pad_seq / cache_config.seq_size_per_block); k++) {
+                    auto kblock = kvCache.index(
+                        {torch::indexing::Slice(), i, 0, k, torch::indexing::Slice()}).contiguous();
+                    auto vblock = kvCache.index(
+                        {torch::indexing::Slice(), i, 1, k, torch::indexing::Slice()}).contiguous();
+                    auto kblock_buffer = torchTensor2Buffer(kblock);
+                    auto vblock_buffer = torchTensor2Buffer(vblock);
+                    cache_manager_->setKVBlockValue(kv_indexs[k],
+                                                    kblock_buffer,
+                                                    vblock_buffer);
+                }
+            }
+            
         }
         auto kv_blocks_gpu_buf = device_->allocateBuffer({kv_blocks_buf->type(), kv_blocks_buf->shape()});
         device_->copy({*kv_blocks_gpu_buf, *kv_blocks_buf});
@@ -307,6 +264,8 @@ protected:
             a_cmp = a_cmp.to(cmp_type);
             b_cmp = b_cmp.to(cmp_type);
         }
+        a_cmp = a_cmp.squeeze();
+        b_cmp = b_cmp.squeeze();
 
         const auto close = torch::allclose(a_cmp, b_cmp, rtol, atol);
         if (!close) {

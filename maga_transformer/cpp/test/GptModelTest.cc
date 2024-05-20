@@ -51,7 +51,8 @@ TEST_F(GptModelTest, testSimple) {
     auto combo_tokens = createBuffer<int32_t>({3}, {13048, 11, 220});
     auto input_lengths = createBuffer<int32_t>({1}, input_lengths_vec);
     auto sequence_lengths = createBuffer<int32_t>({0}, sequence_lengths_vec);
-    auto kv_cache_blocks = allocateKVBlocks(cache_config, input_lengths_vec, sequence_lengths_vec);
+    auto kv_cache = torch::empty(0);
+    auto kv_cache_blocks = allocateKVBlocks(cache_config, input_lengths_vec, kv_cache);
     const auto mask_tensor = create_context_mask(input_lengths_vec).to(torch::kFloat16);
     const auto mask_buf = tensorToBuffer(mask_tensor);
 
