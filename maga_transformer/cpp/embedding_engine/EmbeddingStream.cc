@@ -1,4 +1,5 @@
 #include "maga_transformer/cpp/embedding_engine/EmbeddingStream.h"
+#include "autil/TimeUtility.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include <memory>
 
@@ -10,11 +11,11 @@ EmbeddingStream::EmbeddingStream(const shared_ptr<rtp_llm::EmbeddingInput>& quer
     if (!query.get()) {
         return;
     }
-    begin_time_       = TimeUtility::currentTimeInMilliSeconds();
+    begin_time_       = autil::TimeUtility::currentTimeInMilliSeconds();
     device_           = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     embedding_output_ = make_shared<EmbeddingOutput>();
     generate_state_   = GenerateState::WAITING;
-    begin_time_us_    = TimeUtility::currentTimeInMicroSeconds();
+    begin_time_us_    = autil::TimeUtility::currentTimeInMicroSeconds();
 }
 
 int64_t EmbeddingStream::streamId() const {
@@ -56,7 +57,7 @@ void EmbeddingStream::reportMetrics() {
         RtpEmbeddingStreamMetricsCollector collector;
         collector.input_token_length = inputLength();
         collector.wait_latency_us    = wait_time_us_;
-        collector.total_latency_us   = TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        collector.total_latency_us   = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
         metrics_reporter_->report<RtpEmbeddingStreamMetrics, RtpEmbeddingStreamMetricsCollector>(nullptr, &collector);
     }
 }
@@ -68,7 +69,7 @@ void EmbeddingStream::setError(const std::string& error_info) {
 }
 
 void EmbeddingStream::setStart() {
-    wait_time_us_   = TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+    wait_time_us_   = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     generate_state_ = GenerateState::RUNNING;
 }
 

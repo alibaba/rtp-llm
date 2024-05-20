@@ -7,11 +7,10 @@
 #include <queue>
 #include <condition_variable>
 #include "src/fastertransformer/core/Buffer.h"
-#include "maga_transformer/cpp/utils/TimeUtility.h"
+#include "autil/TimeUtility.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingQuery.h"
 #include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
-#include "maga_transformer/cpp/utils/SynchronizedQueue.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "absl/status/statusor.h"
