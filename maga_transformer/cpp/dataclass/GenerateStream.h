@@ -248,6 +248,10 @@ public:
 
     bool needFinishBySPTokens() const;
 
+    bool matchEosToken() const;
+
+    bool matchStopWordsList() const;
+
     void setSeqLength(uint seq_length) {
         seq_length_ = seq_length;
     };

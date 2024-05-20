@@ -67,6 +67,12 @@ def truncate_response_with_stop_words(response: str, stop_word_strs: List[str]):
             response = response[:(-len(stop_word))]
     return response
 
+def match_stop_words(response: str, stop_word_strs: List[str]) -> bool:
+    for stop_word in stop_word_strs:
+        if stop_word and response.endswith(stop_word):
+            return True
+    return False
+
 # main
 if __name__ == "__main__":
     # word_list = [[20490, 25]]

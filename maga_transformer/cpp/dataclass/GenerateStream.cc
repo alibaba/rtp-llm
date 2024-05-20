@@ -51,8 +51,31 @@ absl::StatusOr<GenerateOutput> GenerateStream::nextOutput() {
 
 bool GenerateStream::needFinishBySPTokens() const {
     // TODO: support batch
+    return matchEosToken() || matchStopWordsList();
+}
+
+bool GenerateStream::matchEosToken() const {
     int* token_ids_ = (int*)complete_token_ids_->data();
     return special_tokens_.eos_token_id_ == token_ids_[seq_length_ - 1];
+}
+
+bool GenerateStream::matchStopWordsList() const {
+    int* token_ids_ = (int*)complete_token_ids_->data();
+    auto& stop_words_list = special_tokens_.stop_words_list_;
+    for (auto& stop_words: stop_words_list) {
+        bool match = true;
+        size_t begin_index = seq_length_ - 1 - stop_words.size();
+        for (auto& token: stop_words) {
+            if (token != token_ids_[begin_index++]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void GenerateStream::cancel() {

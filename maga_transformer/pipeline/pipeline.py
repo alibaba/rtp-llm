@@ -19,7 +19,7 @@ from maga_transformer.models.base_model import BaseModel, GenerateOutput, Genera
 from maga_transformer.model_factory import ModelFactory, AsyncModel, ModelConfig
 from maga_transformer.pipeline.pipeline_custom_func import PipelineCustomFunc, get_piple_custom_func
 from maga_transformer.async_decoder_engine.generate_stream import GenerateInput
-from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slice_list, truncate_response_with_stop_words
+from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slice_list, truncate_response_with_stop_words, match_stop_words
 from maga_transformer.utils.tokenizer_utils import DecodingState
 from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.utils.multimodal_download import DownloadEngine
@@ -168,6 +168,8 @@ class Pipeline(object):
             token_buffer = [""] * len(texts)
 
         generate_output.finished = self.piple_funcs.stop_generate_func(texts[0], **kwargs) or generate_output.finished
+        if stop_word_str_list and not generate_output.finished and match_stop_words(texts[0], stop_word_str_list):
+            generate_output.finished = True
         if not generate_config.print_stop_words:
             if not generate_config.return_incremental:
                 if not generate_output.finished:
@@ -201,10 +203,15 @@ class Pipeline(object):
                               images=images,
                               generate_config=generate_config,
                               tokenizer=self.tokenizer)
-        stream = self.model.enqueue(input)
 
         stop_word_strs = self._get_stop_word_strs(self.tokenizer, input.generate_config)
         stop_word_str_slices = get_stop_word_slice_list(stop_word_strs)
+        if stop_word_strs:
+            generate_config.is_streaming = True
+
+        stream = self.model.enqueue(input)
+
+
         num_beams = input.generate_config.num_beams
         decoding_state = DecodingState() if num_beams == 1 else None
 
@@ -224,10 +231,11 @@ class Pipeline(object):
                     generate_config=input.generate_config.model_dump(),
                     **kwargs)
 
+            kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
             if generate_output.finished:
                 kmonitor.report(GaugeMetrics.FT_ITERATE_COUNT_METRIC, generate_output.aux_info.iter_count)
                 for l in output_lens:
                     kmonitor.report(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, l)
-            kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
+                break
 
             yield GenerateResponse(generate_output=generate_output, generate_texts=generate_texts)

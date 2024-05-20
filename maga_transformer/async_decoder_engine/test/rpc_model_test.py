@@ -57,7 +57,6 @@ class RpcModelTest(TestCase):
         pipeline = Pipeline(model, model.tokenizer)
         return pipeline
 
-    @unittest.skip("trt flash attention need fix")
     def test_simple(self) -> None:
         pipeline = self.create_pipeline()
         try:
