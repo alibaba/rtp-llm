@@ -171,11 +171,10 @@ class InferenceServer(object):
         with self._controller:
             try:
                 assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
-                result = await self._embedding_endpoint.handle(request)
-                log_result = copy.copy(result)
+                result, logable_result = await self._embedding_endpoint.handle(request)
                 # do not log result since too big
-                if 'data' not in log_result:                    
-                    self._access_logger.log_success_access(request, log_result, id)
+                if logable_result is not None:
+                    self._access_logger.log_success_access(request, logable_result, id)
                 end_time = time.time()
                 kmonitor.report(GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000)
                 return ORJSONResponse(result)

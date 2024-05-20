@@ -1,6 +1,6 @@
 import os
 import json
-import numpy as np
+import copy
 from collections import OrderedDict
 import torch
 import torch.nn as nn
@@ -39,6 +39,12 @@ class DenseEmbeddingRenderer(EmbeddingRendererBase):
     def embedding_func(self, x: Any) -> List[float]:
         assert isinstance(x, torch.Tensor)
         return x.tolist()
+    
+    async def render_log_response(self, response: Dict[str, Any]):
+        log_response = copy.copy(response)
+        if 'data' in log_response:
+            del log_response['data']
+        return log_response
 
 
 class NormalHandler(CustomHandler):

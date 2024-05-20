@@ -15,5 +15,5 @@ def get_handler(file_name: str) -> Optional[logging.Handler]:
             filename=f'{log_path}/{file_name}',
             mode='a',
             maxBytes=256000000,
-            backupCount=int(os.environ.get('LOG_FILE_BACKUP_COUNT', 32))
+            backupCount=int(os.environ.get('LOG_FILE_BACKUP_COUNT', 16))
         )
