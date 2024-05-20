@@ -81,7 +81,7 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         token_idx += length;
     }
     size_t max_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
-    reportMetrics(batch_size, token_num, token_num);
+    reportMetrics(batch_size, token_num, max_seq_len);
 
     return model_input;
 }
