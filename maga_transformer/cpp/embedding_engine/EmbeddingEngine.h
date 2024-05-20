@@ -20,7 +20,8 @@ public:
     EmbeddingEngine(const MagaInitParams&                                                   params,
                     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
                     const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
-                    const HandlerBase&                                                      handler);
+                    const HandlerBase&                                                      handler,
+                    const kmonitor::MetricsReporterPtr                                      metrics_reporter = nullptr);
     ~EmbeddingEngine();
 
     absl::Status enqueue(EmbeddingStreamPtr stream);    

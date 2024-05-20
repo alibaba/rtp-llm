@@ -3,6 +3,7 @@
 #include <vector>
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingEngine.h"
 #include "src/fastertransformer/th_op/multi_gpu_gpt/EmbeddingHandlerOp.h"
 
@@ -35,6 +36,7 @@ private:
     std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layer_weights_;
 
     std::atomic<bool>             is_server_shutdown_{false};
+    kmonitor::MetricsReporterPtr  metrics_reporter_ = nullptr;
 };
 
 }  // namespace torch_ext

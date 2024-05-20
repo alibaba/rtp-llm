@@ -21,6 +21,12 @@ std::vector<std::string> RtpEmbeddingOp::handlerTensorInfo() {
 void RtpEmbeddingOp::init(const c10::intrusive_ptr<ft::GptInitParameter>&               gpt_init_params,
                     const std::vector<std::unordered_map<std::string, th::Tensor>>& layer_weights,
                     const c10::Dict<std::string, th::Tensor>&                       weights) {
+    AUTIL_ROOT_LOG_CONFIG();
+    AUTIL_ROOT_LOG_SETLEVEL(INFO);
+    (void)rtp_llm::initKmonitorFactory();
+    auto kmon_tags = rtp_llm::getHippoTags();
+    metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+
     rtp_llm::MagaInitParams params;
     params.gpt_init_parameter = gpt_init_params;
     ft::DeviceFactory::initDevices(ft::DeviceFactory::getDefaultGlobalDeviceParams());
@@ -35,7 +41,7 @@ void RtpEmbeddingOp::init(const c10::intrusive_ptr<ft::GptInitParameter>&       
         layer_weights_.emplace_back(std::move(__weights));
     }
     THROW_IF_STATUS_ERROR(handler_.loadTensor(global_weights_));
-    embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, layer_weights_, global_weights_, handler_));
+    embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, layer_weights_, global_weights_, handler_, metrics_reporter_));
 }
 
 void RtpEmbeddingOp::stop() {
@@ -50,6 +56,7 @@ th::Tensor RtpEmbeddingOp::decode(th::Tensor token_ids, th::Tensor token_type_id
         throw std::runtime_error("server is shut down, can't handle request");
     }
     auto embedding_stream = rtp_llm::EmbeddingQueryConverter::convertEmbeddingInputs(token_ids, token_type_ids, input_lengths, request_id);
+    embedding_stream->setMetricReporter(metrics_reporter_);
     THROW_IF_STATUS_ERROR(embedding_engine_->enqueue(embedding_stream));
     embedding_stream->waitFinish();
     return rtp_llm::EmbeddingQueryConverter::convertEmbeddingOutputs(embedding_stream);

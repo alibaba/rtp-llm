@@ -8,12 +8,11 @@ namespace rtp_llm {
 EmbeddingEngine::EmbeddingEngine(const MagaInitParams&                                                   params,
                                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
                                  const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
-                                 const HandlerBase&                                                      handler) : params_(params) {
-    executor_.reset(new EmbeddingExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights, handler));
-    scheduler_.reset(new EmbeddingScheduler(params));
-    (void)initKmonitorFactory();
-    auto kmon_tags = getHippoTags();
-    metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+                                 const HandlerBase&                                                      handler,
+                                 const kmonitor::MetricsReporterPtr metrics_reporter):
+    params_(params), metrics_reporter_(metrics_reporter) {
+    executor_.reset(new EmbeddingExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights, handler, metrics_reporter_));
+    scheduler_.reset(new EmbeddingScheduler(params, metrics_reporter_));
 
     (void)startLoop();
 }

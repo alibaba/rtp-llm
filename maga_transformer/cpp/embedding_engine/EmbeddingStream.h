@@ -22,8 +22,7 @@ namespace rtp_llm {
 
 class EmbeddingStream {
 public:
-    EmbeddingStream(const std::shared_ptr<EmbeddingInput>& query,
-                    const kmonitor::MetricsReporterPtr     metric_reporter = nullptr);
+    EmbeddingStream(const std::shared_ptr<EmbeddingInput>& query);
     ~EmbeddingStream() {}
 
 public:
@@ -38,6 +37,8 @@ public:
     int64_t batchSize() const;
 
     void updateOutput(ft::BufferPtr& output);
+
+    void setMetricReporter(const kmonitor::MetricsReporterPtr& metric_reporter);
 
     void waitFinish();
 
