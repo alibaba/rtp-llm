@@ -56,7 +56,7 @@ public:
                      << ", prefix_lengths: " << prefix_lengths->debugString();
         if (kv_cache_blocks != nullptr) {
             debug_string << ", kv_cache_blocks: " << kv_cache_blocks->debugString() << "}";
-        }                     
+        }
         return debug_string.str();
     }
 };
@@ -115,6 +115,7 @@ private:
 
 private:
     ft::DeviceBase* device_;
+    const ft::DeviceProperties device_props_;
     const ft::Weights& weights_;
     const GptModelDescription& description_;
 };

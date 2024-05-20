@@ -9,6 +9,7 @@ namespace rtp_llm {
 
 GptModel::GptModel(const GptModelInitParams& params)
     : device_(params.device)
+    , device_props_(params.device->getDeviceProperties())
     , weights_(params.weights)
     , description_(params.description)
     {};
@@ -138,6 +139,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             description_.attention_conf,
             layer.self_attention_weights,
             attention_common_inputs,
+            device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt
         }));
         auto attn_hidden = move(attn_output.hidden_states);
         printBufferData(*attn_hidden, "layer_" + to_string(i) + "_attn_output");
@@ -147,7 +149,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             // hidden = layernorm(attn_hidden)
             device_->layernorm(LayernormParams(
                 *attn_hidden, *hidden, *attn_hidden,
-                norm_type, mayGetRef(layer.post_layernorm), norm_eps, *residual));
+                norm_type, mayGetRef(layer.post_layernorm), norm_eps,
+                device_props_.attn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual
+            ));
             residual.swap(attn_hidden);
         } else {
             hidden.swap(attn_hidden);
@@ -158,6 +162,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             *hidden,
             layer.ffn_weights,
             description_.activation_type,
+            device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt
         }));
         hidden.swap(ffn_output.hidden_states);
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_output");
@@ -165,7 +170,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         // TODO: maybe move this layernorm to ffn layer
         device_->layernorm(LayernormParams(
             *hidden, *hidden, nullopt,
-            norm_type, mayGetRef(layer.post_ffn_layernorm), norm_eps, *residual
+            norm_type, mayGetRef(layer.post_ffn_layernorm), norm_eps,
+            device_props_.ffn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual
         ));
         printBufferData(*hidden, "layer_" + to_string(i) + "_final_hidden");
     }

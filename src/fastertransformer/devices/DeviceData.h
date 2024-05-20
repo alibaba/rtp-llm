@@ -31,6 +31,12 @@ struct DeviceProperties {
     /* -- distributed properties -- */
     size_t tp_rank = 0;
     size_t tp_size = 1;
+
+    /* -- device implementation detail -- */
+    // These two options are prepared for intel cpu device.
+    // xfastertransformer fuses adding residual in their layer implementation.
+    bool attn_fuse_add_residual = false;
+    bool ffn_fuse_add_residual  = false;
 };
 
 struct MemroyStatus {

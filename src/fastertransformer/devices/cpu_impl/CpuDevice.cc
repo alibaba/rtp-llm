@@ -19,9 +19,14 @@ CpuDevice::~CpuDevice() {
 }
 
 DeviceProperties CpuDevice::getDeviceProperties() {
-    DeviceProperties props;
-    props.type = DeviceType::Cpu;
-    return props;
+    static DeviceProperties* prop = nullptr;
+    if (prop == nullptr) {
+        prop = new DeviceProperties();
+        prop->type = DeviceType::Cpu;
+        prop->attn_fuse_add_residual = true;
+        prop->ffn_fuse_add_residual = true;
+    }
+    return *prop;
 }
 
 void CpuDevice::copy(const CopyParams& params) {
@@ -131,7 +136,6 @@ void CpuDevice::sampleGreedy(const GreedyParams& params) {
 void CpuDevice::sampleBeamSearch(const BeamSearchParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
-
 
 void CpuDevice::broadcast(const BroadcastParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);

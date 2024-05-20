@@ -39,6 +39,8 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     const auto& up_weight = *(params.weights.up_weight->kernel);
     const auto& down_weight = *(params.weights.down_weight->kernel);
 
+    RUNTIME_ASSERT_OP_ARG(!params.residual, "default FFN implementation does not support residual!");
+
     auto up_buf = gemm({params.input, up_weight});
 
     auto up_output = loraLinear({params.input,

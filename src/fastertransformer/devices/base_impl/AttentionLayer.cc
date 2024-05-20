@@ -15,6 +15,8 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     const auto &qkv_weight = params.weights.qkv_weight;
     const auto &output_weight = params.weights.output_weight;
 
+    RUNTIME_ASSERT_OP_ARG(!params.residual, "default attention layer impl does not support residual!");
+
     const auto &kv_cache_blocks = params.common.kv_cache_blocks;
     if (kv_cache_blocks.has_value()) {
         const auto &shape = kv_cache_blocks.value().get().shape();

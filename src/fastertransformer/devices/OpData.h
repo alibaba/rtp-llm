@@ -297,6 +297,7 @@ struct AttentionLayerParams {
     const AttentionConfigs&         configs;
     const AttentionLayerWeights&    weights;
     AttentionCommonInputs&          common;
+    const OptionalConstBufferRef    residual; // for intel xft
 };
 
 struct FfnLayerOutput {
@@ -306,16 +307,20 @@ struct FfnLayerOutput {
 struct FfnLayerParams {
     FfnLayerParams(const Buffer& input,
                    const FfnLayerWeights& weights,
-                   const ActivationType atype) :
-                   input(input),
-                   weights(weights),
-                   activation_type(atype)
-                   {}
+                   const ActivationType atype,
+                   const OptionalConstBufferRef residual = std::nullopt) :
+    input(input),
+    weights(weights),
+    activation_type(atype),
+    residual(residual)
+    {}
 
     const Buffer& input;
 
     const FfnLayerWeights&       weights;
     const ActivationType         activation_type;
+
+    const OptionalConstBufferRef residual; // for intel xft
 
     const OptionalConstBufferRef lora_ids;
     const OptionalConstBufferRef lora_input_lengths;
