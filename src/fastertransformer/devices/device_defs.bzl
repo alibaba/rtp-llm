@@ -30,6 +30,11 @@ def device_test_envs():
         },
         "//conditions:default": {
             "TEST_USING_DEVICE": "CPU",
+            # NOTE: libxfastertransformer.so has conflict of std::regex related symbols with torch,
+            # which causes SIGABRT on munmap_chunk() called via std::regex compiler.
+            # a related discussion: https://github.com/apache/tvm/issues/9362
+            # force preloading torch so to avoid the conflict.
+            "LD_PRELOAD": "libtorch_cpu.so",
         },
     })
 
