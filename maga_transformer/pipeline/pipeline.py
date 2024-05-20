@@ -232,10 +232,12 @@ class Pipeline(object):
                     **kwargs)
 
             kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
+
+            yield GenerateResponse(generate_output=generate_output, generate_texts=generate_texts)
+
             if generate_output.finished:
                 kmonitor.report(GaugeMetrics.FT_ITERATE_COUNT_METRIC, generate_output.aux_info.iter_count)
                 for l in output_lens:
                     kmonitor.report(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, l)
                 break
 
-            yield GenerateResponse(generate_output=generate_output, generate_texts=generate_texts)
