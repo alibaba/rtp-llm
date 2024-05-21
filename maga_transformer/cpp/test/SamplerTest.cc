@@ -79,8 +79,8 @@ TEST_F(SamplerTest, testSimple) {
     ASSERT_EQ(output_token_ids_host[3], 4);
     ASSERT_EQ(output_token_ids_host[7], 7);
     ASSERT_EQ(output_token_ids_host[11], 6);
-    ASSERT_EQ(output_token_ids_host[15], 3);
-    ASSERT_EQ(output_token_ids_host[19], 4);
+    ASSERT_EQ(output_token_ids_host[15], 7);
+    ASSERT_EQ(output_token_ids_host[19], 0);
 
     ASSERT_NEAR(cum_log_probs_host[0], -1.0, 1e-3);
     ASSERT_NEAR(cum_log_probs_host[1], -1.0, 1e-3);

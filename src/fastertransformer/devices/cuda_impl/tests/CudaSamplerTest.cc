@@ -34,7 +34,7 @@ TEST_F(CudaSamplerTest, testTopK) {
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
 
     BufferPtr repetition_penalty = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
-    BufferPtr rand_seed = createBuffer<int64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
+    BufferPtr rand_seed = createBuffer<uint64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
 
     auto top_k = createBuffer<int32_t>({4}, {1, 1, 2, 2}, AllocationType::HOST);
     auto top_p = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
@@ -84,7 +84,7 @@ TEST_F(CudaSamplerTest, testTopP) {
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
 
     BufferPtr repetition_penalty = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
-    BufferPtr rand_seed = createBuffer<int64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
+    BufferPtr rand_seed = createBuffer<uint64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
 
     auto top_k = createBuffer<int32_t>({4}, {0, 0, 0, 0}, AllocationType::HOST);
     auto top_p = createBuffer<float>({4}, {0.01, 0.7, 0.001, 0.9}, AllocationType::HOST);
@@ -136,7 +136,7 @@ TEST_F(CudaSamplerTest, testRandom) {
     BufferPtr input_lengths = createBuffer<int32_t>({1}, {5});
     BufferPtr sequence_lengths = createBuffer<int32_t>({1}, {-1});
     BufferPtr cum_log_probs = createBuffer<float>({1}, {-1.0});
-    BufferPtr rand_seed = createBuffer<int64_t>({1}, {1}, AllocationType::HOST);
+    BufferPtr rand_seed = createBuffer<uint64_t>({1}, {1}, AllocationType::HOST);
 
     auto top_k = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
     auto top_p = createBuffer<float>({1}, {0.5f}, AllocationType::HOST);
@@ -156,7 +156,7 @@ TEST_F(CudaSamplerTest, testRandom) {
 
     std::vector<size_t> counts(vocab_size, 0);
     for (int i = 0; i < 10000; i++) {
-        rand_seed->data<int64_t>()[0] = i * 100;
+        rand_seed->data<uint64_t>()[0] = i * 100;
         device_->sampleGreedy(params);
         printBuffer<int32_t>(*output_token_ids, "output_token_ids");
         output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
@@ -175,7 +175,7 @@ TEST_F(CudaSamplerTest, testRandom) {
     top_p->data<float>()[0] = 0.0f;
     counts = std::vector<size_t>(vocab_size, 0);
     for (int i = 0; i < 10000; i++) {
-        rand_seed->data<int64_t>()[0] += i * 100;
+        rand_seed->data<uint64_t>()[0] += i * 100;
         device_->sampleGreedy(params);
         printBuffer<int32_t>(*output_token_ids, "output_token_ids");
         output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);

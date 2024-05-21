@@ -128,14 +128,12 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     // 3. prepare common inputs
 
     // 3.1. setup random seeds
-    // TODO: this curandstate buf might should be moved to cuda device state,
-    //       so that do not need to be reinitialized on every request.
     if (random_seed) {
         auto& seeds = random_seed.value().get();
         if (seeds.size() == 1) {
             invokeCurandInitialize(
                 (curandState_t *)curandstate_buf_->data(), batch_size,
-                seeds.data<int64_t>()[0], stream_);
+                seeds.data<uint64_t>()[0], stream_);
         } else {
             auto random_seeds_buf = allocateBuffer({DataType::TYPE_UINT64, {batch_size}});
             RUNTIME_ASSERT_OP_ARG((seeds.size() == batch_size),
