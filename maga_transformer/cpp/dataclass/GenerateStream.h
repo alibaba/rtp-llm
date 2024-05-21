@@ -57,7 +57,7 @@ public:
         return stream_cache_resource_.incrKVBlock();
     }
     int nextNeedBlockNums() const {
-        return stream_cache_resource_.nextNeedBlockNums();
+        return stream_cache_resource_.needKVCacheBlockNums();
     }
 
     std::shared_ptr<GenerateInput> generateInput() const;
@@ -103,8 +103,8 @@ public:
         return seq_length_;
     }
 
-    int initalKVCacheCount() const {
-        return stream_cache_resource_.initalKVCacheCount();
+    int needKVCacheBlockNums() const {
+        return stream_cache_resource_.needKVCacheBlockNums();
     }
 
     size_t maxBlockSize() const {

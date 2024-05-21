@@ -58,7 +58,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 }
 
 bool StreamCacheResource::initKVBlock() {
-    auto             block_num = initalKVCacheCount();
+    auto             block_num = needKVCacheBlockNums();
     KVCacheBlockAddr kv_cache_block_addr;
     int              reuse_length;
     bool             success;
@@ -83,22 +83,12 @@ bool StreamCacheResource::initKVBlock() {
     return success;
 }
 
-// TODO(xinfei.sxf) fix this to reduce waste
-int StreamCacheResource::initalKVCacheCount() const {
-    return (stream_->contextLength() - 2 + gen_num_per_circle_) / resource_context_.cache_manager->cacheConfig().seq_size_per_block + 1;
-}
-
-// TODO(xinfei.sxf) fix this to reduce waste
-int StreamCacheResource::nextNeedBlockNums() const {
-    auto next_length = stream_->seqLength() + gen_num_per_circle_;
-    int seq_size_per_block = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
-    // TODO(xinfei.sxf) deal with system prompt
-    int current_block_length = maxBlockSize() * seq_size_per_block;
-    return std::max(0, ((next_length - current_block_length + seq_size_per_block - 1) / seq_size_per_block));
+int StreamCacheResource::needKVCacheBlockNums() const {
+    return std::max((stream_->seqLength() + seqSizePerBlock() - 1) / seqSizePerBlock() - maxBlockSize(), 0);
 }
 
 bool StreamCacheResource::incrKVBlock() {
-    auto blocks_num = nextNeedBlockNums();
+    auto blocks_num = needKVCacheBlockNums();
     if (blocks_num <= 0) {
         return true;
     }
@@ -130,7 +120,7 @@ bool StreamCacheResource::incrKVBlock() {
     return true;
 }
 
-size_t StreamCacheResource::maxBlockSize() const {
+int StreamCacheResource::maxBlockSize() const {
     size_t max_block_size = 0;
     if (!kv_cache_block_addr_.k_ptr.empty()) {
         for (auto& batch_blocks : kv_cache_block_addr_.k_ptr) {

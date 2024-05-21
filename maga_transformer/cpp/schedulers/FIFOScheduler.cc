@@ -12,7 +12,7 @@ FIFOScheduler::FIFOScheduler(const MagaInitParams& config,
                              const kmonitor::MetricsReporterPtr   metrics_reporter):
     cache_manager_(cache_manager),
     max_seq_len_(config.gpt_init_parameter->max_seq_len_),
-    reserve_block_num_(config.gpt_init_parameter->stream_reserve_block_nums_),
+    reserve_block_num_(config.gpt_init_parameter->scheduler_reserve_resource_ratio_ * cache_manager->freeBlockNums() / 100),
     metrics_reporter_(metrics_reporter) {}
 
 FIFOScheduler::~FIFOScheduler() {
@@ -55,7 +55,7 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
 int FIFOScheduler::runningNextBlockNum() const {
     int total_need_block_nums = 0;
     for (auto& stream : running_streams_) {
-        total_need_block_nums += stream->nextNeedBlockNums() + reserve_block_num_;
+        total_need_block_nums += stream->nextNeedBlockNums();
     }
     return total_need_block_nums;
 }
@@ -94,8 +94,8 @@ bool FIFOScheduler::evaluateRunningMemory(int total_token_size) const {
     return total_token_size < max_seq_len_;
 }
 
-bool FIFOScheduler::evaluateKVCacheMemory(int block_num) const {
-    return runningNextBlockNum() + block_num <= cache_manager_->freeBlockNums();
+bool FIFOScheduler::evaluateKVCacheMemory(int new_block_num) const {
+    return runningNextBlockNum() + new_block_num <= cache_manager_->freeBlockNums();
 }
 
 // TODO(xinfei.sxf) 在考虑reuse cache的情况下，评估不准确，应该立刻申请资源试试。
@@ -105,7 +105,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
     for (auto& stream : streams) {
         total_token_size += stream->contextLength();
     }
-    return evaluateKVCacheMemory(new_stream->initalKVCacheCount() + reserve_block_num_ * (streams.size() + 1))
+    return evaluateKVCacheMemory(new_stream->needKVCacheBlockNums() + reserve_block_num_)
            && evaluateRunningMemory(total_token_size) && new_stream->initKVBlock();
 }
 

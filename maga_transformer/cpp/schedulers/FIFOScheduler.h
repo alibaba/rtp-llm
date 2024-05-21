@@ -34,7 +34,7 @@ private:
     void evaluateRunningNext();
     int  runningNextBlockNum() const;
     bool evaluateRunningMemory(int total_seq_size) const;
-    bool evaluateKVCacheMemory(int block_num) const;
+    bool evaluateKVCacheMemory(int new_block_num) const;
     std::list<GenerateStreamPtr> scheduleNew();
 
 private:
@@ -42,7 +42,7 @@ private:
     std::list<GenerateStreamPtr>        running_streams_;
     std::shared_ptr<CacheManager>       cache_manager_;
     int                                 max_seq_len_        = 0;
-    int                                 reserve_block_num_  = 2;
+    int                                 reserve_block_num_  = 0;
     bool                                enable_fallback     = false;
     std::atomic<bool>                   stop_               = false;
     std::mutex                          lock_;

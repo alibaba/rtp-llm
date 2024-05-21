@@ -48,9 +48,7 @@ TEST_F(StreamCacheResourceTest, testSimple) {
     GenerateStream stream(generate_input, resource_context, max_seq_len);
 
     auto& resource = stream.streamCacheResource();
-    ASSERT_EQ(resource.nextNeedBlockNums(), 4);
-
-    ASSERT_EQ(resource.initalKVCacheCount(), 3);
+    ASSERT_EQ(resource.needKVCacheBlockNums(), 3);
 
     ASSERT_TRUE(resource.initKVBlock());
     ASSERT_EQ(cache_manager->freeBlockNums(), 1);
@@ -65,17 +63,10 @@ TEST_F(StreamCacheResourceTest, testSimple) {
     CHECK_FUNC(blocks.k_scale_ptr, 1, 3);
     CHECK_FUNC(blocks.v_scale_ptr, 1, 3);
 
-    ASSERT_EQ(resource.nextNeedBlockNums(), 1);
-    ASSERT_TRUE(resource.incrKVBlock());
-    ASSERT_EQ(cache_manager->freeBlockNums(), 0);
-
-    ASSERT_EQ(blocks.k_ptr[0][0].size(), 4);
-    ASSERT_EQ(blocks.v_ptr[0][0].size(), 4);
-    ASSERT_EQ(blocks.k_scale_ptr[0][0].size(), 4);
-    ASSERT_EQ(blocks.v_scale_ptr[0][0].size(), 4);
+    ASSERT_EQ(resource.needKVCacheBlockNums(), 0);
 
     stream.setSeqLength(7);
-    ASSERT_EQ(resource.nextNeedBlockNums(), 0);
+    ASSERT_EQ(resource.needKVCacheBlockNums(), 1);
     ASSERT_TRUE(resource.incrKVBlock());
     ASSERT_EQ(cache_manager->freeBlockNums(), 0);
 
@@ -85,12 +76,12 @@ TEST_F(StreamCacheResourceTest, testSimple) {
     CHECK_FUNC(blocks.v_scale_ptr, 1, 4);
 
     stream.releaseResource();
-    // ASSERT_EQ(cache_manager->freeBlockNums(), 4);
+    ASSERT_EQ(cache_manager->freeBlockNums(), 4);
 
-    // ASSERT_EQ(blocks.k_ptr.size(), 0);
-    // ASSERT_EQ(blocks.v_ptr.size(), 0);
-    // ASSERT_EQ(blocks.k_scale_ptr.size(), 0);
-    // ASSERT_EQ(blocks.v_scale_ptr.size(), 0);
+    ASSERT_EQ(blocks.k_ptr.size(), 0);
+    ASSERT_EQ(blocks.v_ptr.size(), 0);
+    ASSERT_EQ(blocks.k_scale_ptr.size(), 0);
+    ASSERT_EQ(blocks.v_scale_ptr.size(), 0);
 }
 
 TEST_F(StreamCacheResourceTest, testError) {}

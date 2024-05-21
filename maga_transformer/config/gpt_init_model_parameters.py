@@ -303,8 +303,8 @@ class GptInitModelParameters:
         logging.info(f'kv_cache_mem_mb: {self.kv_cache_mem_mb}')
         self.block_nums = int(os.environ.get('TEST_BLOCK_NUM', 0))
         logging.info(f'block_nums: {self.block_nums}')
-        self.stream_reserve_block_nums = int(os.environ.get('RESERVER_BLOCK_NUM', 2))
-        logging.info(f'stream_reserve_block_nums: {self.stream_reserve_block_nums}')
+        self.scheduler_reserve_resource_ratio = int(os.environ.get('SCHEDUlER_RESERVE_RESOURCE_RATIO', 5))
+        logging.info(f'scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}')
         # TODO(xinfei.sxf) deal with old option : USE_BLOCK_CACHE
         self.reuse_cache = bool(int(os.environ.get('REUSE_CACHE', 0)))
         logging.info(f'reuse_cache: {self.reuse_cache}')

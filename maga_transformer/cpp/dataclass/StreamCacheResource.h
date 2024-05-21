@@ -90,15 +90,18 @@ public:
     int     tryReleaseKVBlock(size_t nums);
     void    setNeedReleaseResource(bool need_release_resource);
     void    releaseResource();
-    int     initalKVCacheCount() const;
-    int     nextNeedBlockNums() const;
-    size_t  maxBlockSize() const;
+    int     needKVCacheBlockNums() const;
+    int     maxBlockSize() const;
 
     const BatchKVCacheBlockAddr& kvCache() const;
     void                         setKVCache(const BatchKVCacheBlockAddr& kv_cache_block_addr);
 
     const ResourceContext& resourceContext() const {
         return resource_context_;
+    }
+
+    int seqSizePerBlock() const {
+        return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     }
 
 private:

@@ -178,11 +178,11 @@ public:
     bool     pre_allocate_op_mem_ = true;
     int64_t  seq_size_per_block_  = 8;
 
-    int64_t  block_nums_                = 0;
-    int64_t  stream_reserve_block_nums_ = 2;
-    int64_t  reserve_runtime_mem_mb_    = 0;
-    int64_t  kv_cache_mem_mb_           = 0;
-    bool     reuse_cache_               = false;
+    int64_t  block_nums_                       = 0;
+    int64_t  scheduler_reserve_resource_ratio_ = 5;
+    int64_t  reserve_runtime_mem_mb_           = 0;
+    int64_t  kv_cache_mem_mb_                  = 0;
+    bool     reuse_cache_                      = false;
 
     bool use_medusa_ = false;
 
