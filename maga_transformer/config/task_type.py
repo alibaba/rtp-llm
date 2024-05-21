@@ -11,6 +11,7 @@ class TaskType(Enum):
     COLBERT_EMBEDDING         = "COLBERT_EMBEDDING"
     LANGUAGE_MODEL            = "LANGUAGE_MODEL"
     SEQ_CLASSIFICATION        = "SEQ_CLASSIFICATION"
+    RERANKER                  = "RERANKER"
     PLUGIN_TASK               = "PLUGIN_TASK"
     
     @staticmethod

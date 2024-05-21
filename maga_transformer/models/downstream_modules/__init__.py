@@ -4,3 +4,4 @@ from .embedding.sparse_emebdding_module import SparseEmbeddingModule
 from .embedding.colbert_embedding_module import ColBertEmbeddingModule
 from .classifier.classifier import ClassifierModule
 from .classifier.roberta_classifier import RobertaClassifierModule
+from .reranker.reranker_module import RerankerModule, RobertaRerankerModule

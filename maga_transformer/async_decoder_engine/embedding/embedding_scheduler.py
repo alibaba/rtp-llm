@@ -9,16 +9,16 @@ from maga_transformer.async_decoder_engine.embedding.embedding_stream import Emb
 
 class EmbeddingScheduler(object):
     def __init__(self, config: GptInitModelParameters):
-        self.config_ = config    
+        self.config_ = config
         self.waiting_streams_: Deque[EmbeddingStream] = deque()
-        self.lock_ = Lock()        
+        self.lock_ = Lock()
 
     def enqueue(self, inputs: EngineInputs) -> EmbeddingStream:
-        with self.lock_:                        
+        with self.lock_:
             stream = EmbeddingStream(inputs=inputs)
             self.waiting_streams_.append(stream)
         return stream
-    
+
     def _calc_length(self, stream: EmbeddingStream):
         return stream.inputs.input_length
 
@@ -29,6 +29,9 @@ class EmbeddingScheduler(object):
             for stream in copy.copy(self.waiting_streams_):
                 new_length = stream.inputs.input_length
                 if total_len + new_length > self.config_.max_context_batch_size * self.config_.max_seq_len:
+                    if len(new_streams) == 0:
+                        aborted_stream = self.waiting_streams_.popleft()
+                        aborted_stream.set_error(f"stream is not schedule since length exceed max length, max_length: {self.config_.max_context_batch_size} * {self.config_.max_seq_len}, acutal: {aborted_stream.inputs.input_length}")
                     break
                 # make sure embedding config is the same
                 if len(new_streams) > 0 and stream.inputs.config != new_streams[0].inputs.config:
@@ -37,5 +40,5 @@ class EmbeddingScheduler(object):
                 total_len += new_length
 
             for new_stream in new_streams:
-                self.waiting_streams_.remove(new_stream)        
+                self.waiting_streams_.remove(new_stream)
             return new_streams

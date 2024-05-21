@@ -17,8 +17,9 @@ class CommonInputGenerator(object):
     @torch.inference_mode()
     async def generate( # type: ignore
         self,
-        prompt: Union[List[str], str, List[Tuple[str, str]]]
-    ) -> EngineInputs:
+        prompt: Union[List[str], str, List[Tuple[str, str]]],
+        truncate: bool = True
+    ) -> EngineInputs:        
         if isinstance(prompt, str):
             prompt = [prompt]
         begin_time = current_time_ms()
@@ -26,7 +27,7 @@ class CommonInputGenerator(object):
         # do batch encode and split into embedding input per batch
         assert self.tokenizer_ is not None, "tokenizer should not be None"
         # truncate with tokenizer max_seq_len
-        encoded = self.tokenizer_(prompt, max_length=self.config_.max_seq_len, return_attention_mask=False, padding=False, return_length=True, truncation='longest_first', return_tensors='np')
+        encoded = self.tokenizer_(prompt, max_length=self.config_.max_seq_len, return_attention_mask=False, padding=False, return_length=True, truncation=truncate, return_tensors='np')
 
         combo_tokens = torch.from_numpy(np.concatenate(encoded['input_ids'])).to(torch.int32)
         if 'token_type_ids' in encoded:

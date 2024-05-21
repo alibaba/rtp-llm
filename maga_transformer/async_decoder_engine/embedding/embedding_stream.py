@@ -33,6 +33,7 @@ class EmbeddingStream(PyDanticModelBase):
 
     def set_error(self, error: str):
         self.error_info = error
+        self.finished = True
 
     def update(self, embedding_output: Union[torch.Tensor, List[Any]]):
         self.outputs = EngineOutputs(outputs=embedding_output, input_length=self.inputs.input_length)

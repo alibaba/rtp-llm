@@ -1,10 +1,11 @@
 import json
 import asyncio
-from typing import List, Tuple
+from typing import List, Tuple, Union
 from maga_transformer.config.base_model_config import PyDanticModelBase
 
 class ClassifierRequest(PyDanticModelBase):
-    input: List[Tuple[str, str]]
+    # support merge request pair or raw request
+    input: List[Union[Tuple[str, str], str]]
     model: str = ""
 
 class ClassifierResponse(PyDanticModelBase):
