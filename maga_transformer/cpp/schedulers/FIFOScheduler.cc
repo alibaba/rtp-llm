@@ -12,6 +12,7 @@ FIFOScheduler::FIFOScheduler(const MagaInitParams& config,
                              const kmonitor::MetricsReporterPtr   metrics_reporter):
     cache_manager_(cache_manager),
     max_seq_len_(config.gpt_init_parameter->max_seq_len_),
+    reserve_block_num_(config.gpt_init_parameter->stream_reserve_block_nums_),
     metrics_reporter_(metrics_reporter) {}
 
 FIFOScheduler::~FIFOScheduler() {
@@ -65,22 +66,14 @@ void FIFOScheduler::evaluateRunningNext() {
     }
 
     int running_next_block_num = runningNextBlockNum();
-    for (auto& stream : waiting_streams_) {
-        int need_block_num = running_next_block_num - cache_manager_->freeBlockNums();
-        if (need_block_num > 0) {
-            stream->tryReleaseKVBlock(need_block_num);
-        } else {
-            break;
-        }
-    }
     while (!running_streams_.empty()) {
         int need_block_num = (int)runningNextBlockNum() - (int)cache_manager_->freeBlockNums();
         if (need_block_num <= 0) {
             break;
         }
         auto& last_stream = *(running_streams_.rbegin());
-        last_stream->tryReleaseKVBlock(need_block_num);
-        FT_LOG_DEBUG("stream [%ld] fall back", last_stream->streamId());
+        last_stream->tryReleaseKVBlock(last_stream->maxBlockSize());
+        FT_LOG_INFO("lack mem, stream [%ld] fallback to wait and input_length:%d seq_length:%d", last_stream->streamId(), last_stream->inputLength(), last_stream->seqLength());
         waiting_streams_.emplace_front(last_stream);
         running_streams_.pop_back();
     }
@@ -89,7 +82,7 @@ void FIFOScheduler::evaluateRunningNext() {
         if (!(*it)->incrKVBlock()) {
             (*it)->setStop("incrKVBlock failed");
             (*it)->releaseResource();
-            FT_LOG_DEBUG("stream [%ld] incr block failed", (*it)->streamId());
+            FT_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
             it = running_streams_.erase(it);
         } else {
             it++;
@@ -112,7 +105,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
     for (auto& stream : streams) {
         total_token_size += stream->contextLength();
     }
-    return evaluateKVCacheMemory(new_stream->initalKVCacheCount() + reserve_block_num_ * streams.size())
+    return evaluateKVCacheMemory(new_stream->initalKVCacheCount() + reserve_block_num_ * (streams.size() + 1))
            && evaluateRunningMemory(total_token_size) && new_stream->initKVBlock();
 }
 

@@ -38,13 +38,13 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     if (kv_cache_block_addr_.k_ptr.empty() || kv_cache_block_addr_.k_ptr[0].empty()) {
         return 0;
     }
-    int           release_blocks_num;
+    size_t        release_blocks_num = 0;
     vector<void*> release_blocks;
     // TODO(xinfei.sxf) deal with v, scale etc
     for (auto& batch : kv_cache_block_addr_.k_ptr) {
         for (size_t layer_id = 0; layer_id < batch.size(); layer_id++) {
             auto& blocks = batch[layer_id];
-            auto reserver_blocks = std::max(0lu, blocks.size() - nums);
+            size_t reserver_blocks = std::max(0, int(blocks.size()) - int(nums));
             release_blocks_num   = blocks.size() - reserver_blocks;
             if (layer_id == 0) {
                 release_blocks.insert(release_blocks.end(), blocks.begin() + reserver_blocks, blocks.end());
@@ -85,15 +85,16 @@ bool StreamCacheResource::initKVBlock() {
 
 // TODO(xinfei.sxf) fix this to reduce waste
 int StreamCacheResource::initalKVCacheCount() const {
-    return (stream_->seqLength() - 2 + gen_num_per_circle_) / resource_context_.cache_manager->cacheConfig().seq_size_per_block + 1;
+    return (stream_->contextLength() - 2 + gen_num_per_circle_) / resource_context_.cache_manager->cacheConfig().seq_size_per_block + 1;
 }
 
 // TODO(xinfei.sxf) fix this to reduce waste
 int StreamCacheResource::nextNeedBlockNums() const {
     auto next_length = stream_->seqLength() + gen_num_per_circle_;
+    int seq_size_per_block = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     // TODO(xinfei.sxf) deal with system prompt
-    auto current_block_length = maxBlockSize() * resource_context_.cache_manager->cacheConfig().seq_size_per_block;
-    return ((next_length - current_block_length - 1) / resource_context_.cache_manager->cacheConfig().seq_size_per_block) + 1;
+    int current_block_length = maxBlockSize() * seq_size_per_block;
+    return std::max(0, ((next_length - current_block_length + seq_size_per_block - 1) / seq_size_per_block));
 }
 
 bool StreamCacheResource::incrKVBlock() {

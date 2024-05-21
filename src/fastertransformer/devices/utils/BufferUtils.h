@@ -51,19 +51,19 @@ inline void bufferIndexSelect(BufferPtr& dst, const BufferPtr& src, std::vector<
 }
 
 template<typename T>
-std::vector<T> buffer2vector(const BufferPtr& src, size_t num) {
-    assert(num <= src->size());
-    assert(sizeof(T) == src->typeSize());
+std::vector<T> buffer2vector(const Buffer& src, size_t num) {
+    assert(num <= src.size());
+    assert(sizeof(T) == src.typeSize());
     std::vector<T> dst;
     auto           size = num * sizeof(T);
     dst.resize(num);
-    memcpy(dst.data(), src->data(), size);
+    memcpy(dst.data(), src.data(), size);
     return dst;
 }
 
 template<typename T>
-std::vector<T> buffer2vector(const BufferPtr& src) {
-    return buffer2vector<T>(src, src->size());
+std::vector<T> buffer2vector(const Buffer& src) {
+    return buffer2vector<T>(src, src.size());
 }
 
 }  // namespace fastertransformer

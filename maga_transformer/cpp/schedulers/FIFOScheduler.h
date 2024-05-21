@@ -42,7 +42,7 @@ private:
     std::list<GenerateStreamPtr>        running_streams_;
     std::shared_ptr<CacheManager>       cache_manager_;
     int                                 max_seq_len_        = 0;
-    int                                 reserve_block_num_  = 0;
+    int                                 reserve_block_num_  = 2;
     bool                                enable_fallback     = false;
     std::atomic<bool>                   stop_               = false;
     std::mutex                          lock_;

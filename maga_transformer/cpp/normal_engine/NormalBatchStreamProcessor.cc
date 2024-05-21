@@ -80,10 +80,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int token_idx = batch_idx;
     for (auto& stream : context_streams) {
         auto input_tokens    = stream->currentExecuteTokens();
-        auto block_and_scale = stream->kvCache();
         memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
         token_idx += input_tokens.size();
-        input_lengths[batch_idx]  = stream->inputLength() - stream->reuseLength();
+        input_lengths[batch_idx]  = stream->contextLength() - stream->reuseLength();
         prefix_lengths[batch_idx] = stream->reuseLength();
         auto kv_cache             = stream->kvCache();
         FT_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());

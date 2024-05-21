@@ -40,14 +40,17 @@ public:
     
     bool isContextStream() const;
     int tileNum() const;
-    std::vector<int> inputTokens() const;
+    std::vector<int> contextTokens() const;
     std::vector<int> currentExecuteTokens() const;
 
     virtual int tryReleaseKVBlock(int nums) {
         return stream_cache_resource_.tryReleaseKVBlock(nums);
     }
     virtual bool initKVBlock() {
-        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        if (is_context_stream_) {
+            wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        }
+        is_context_stream_ = true;
         return stream_cache_resource_.initKVBlock();
     }
     virtual bool incrKVBlock() {
@@ -97,7 +100,7 @@ public:
     }
 
     int contextLength() const {
-        return generate_input_->inputLength();
+        return seq_length_;
     }
 
     int initalKVCacheCount() const {
@@ -114,7 +117,7 @@ public:
 
     // TODO(xinfei.sxf) batch?
     std::vector<int> completeTokenIdsVec() {
-        return fastertransformer::buffer2vector<int>(complete_token_ids_, seq_length_);
+        return fastertransformer::buffer2vector<int>(*complete_token_ids_, seq_length_);
     }
 
     int currentExecuteTokenSize() {
@@ -158,6 +161,10 @@ public:
     // for test
     void setSeqLength(int seq_length) {
         seq_length_ = seq_length;
+    }
+
+    void setIsContextStream(bool is_context_stream) {
+        is_context_stream_ = is_context_stream;
     }
 
     void updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
@@ -304,6 +311,7 @@ protected:
     std::condition_variable             update_cv_;
     StreamCacheResource                 stream_cache_resource_;
     SystemPromptParams                  prompt_param_;
+    bool                                is_context_stream_     = true;
     size_t                              batch_size_            = 1;
     int                                 reuse_length_          = 0;
     bool                                done_                  = false;

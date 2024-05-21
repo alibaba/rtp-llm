@@ -222,6 +222,7 @@ static auto specialTokensTHS =
     DEF_PROPERTY(pre_allocate_op_mem, pre_allocate_op_mem_)             \
     DEF_PROPERTY(seq_size_per_block, seq_size_per_block_)               \
     DEF_PROPERTY(block_nums, block_nums_)                               \
+    DEF_PROPERTY(stream_reserve_block_nums, stream_reserve_block_nums_) \
     DEF_PROPERTY(kv_cache_mem_mb, kv_cache_mem_mb_)                     \
     DEF_PROPERTY(reserve_runtime_mem_mb, reserve_runtime_mem_mb_)       \
     DEF_PROPERTY(reuse_cache, reuse_cache_)                             \

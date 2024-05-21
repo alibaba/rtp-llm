@@ -32,6 +32,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     addr1.k_scale_ptr = {{{(void*)11, (void*)(12)}, {(void*)13, (void*)(14)}}};
     addr1.v_scale_ptr = {{{(void*)15, (void*)(16)}, {(void*)17, (void*)(18)}}};
     stream1->setKVCache(addr1, 0);
+    stream1->setIsContextStream(false);
 
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
     query2->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
@@ -44,6 +45,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     addr2.k_scale_ptr = {{{(void*)110, (void*)(120)}, {(void*)130, (void*)(140)}}};
     addr2.v_scale_ptr = {{{(void*)150, (void*)(160)}, {(void*)170, (void*)(180)}}};
     stream2->setKVCache(addr2, 0);
+    stream2->setIsContextStream(false);
 
     std::shared_ptr<GenerateInput> query3 = make_shared<GenerateInput>();
     query3->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
@@ -89,12 +91,12 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         vector<uint64_t> kv_cache_scales  = {11,  12,    15,    16,    110,   120, 150,   160,   1100,  0,    1500,
                                              0,   11000, 12000, 15000, 16000, 13,  14,    17,    18,    130,  140,
                                              170, 180,   1300,  0,     1700,  0,   13000, 14000, 17000, 18000};
-        EXPECT_EQ(combo_tokens, buffer2vector<int>(model_input.combo_tokens));
-        EXPECT_EQ(input_lengths, buffer2vector<int>(model_input.input_lengths));
-        EXPECT_EQ(sequence_lengths, buffer2vector<int>(model_input.sequence_lengths));
-        EXPECT_EQ(prefix_lengths, buffer2vector<int>(model_input.prefix_lengths));
-        EXPECT_EQ(kv_cache_blocks, buffer2vector<uint64_t>(model_input.kv_cache_blocks));
-        EXPECT_EQ(kv_cache_scales, buffer2vector<uint64_t>(model_input.kv_cache_scales));
+        EXPECT_EQ(combo_tokens, buffer2vector<int>(*model_input.combo_tokens));
+        EXPECT_EQ(input_lengths, buffer2vector<int>(*model_input.input_lengths));
+        EXPECT_EQ(sequence_lengths, buffer2vector<int>(*model_input.sequence_lengths));
+        EXPECT_EQ(prefix_lengths, buffer2vector<int>(*model_input.prefix_lengths));
+        EXPECT_EQ(kv_cache_blocks, buffer2vector<uint64_t>(*model_input.kv_cache_blocks));
+        EXPECT_EQ(kv_cache_scales, buffer2vector<uint64_t>(*model_input.kv_cache_scales));
         EXPECT_EQ(model_input.attention_mask->size(), 2 * 4 * 5);
     }
 

@@ -1,6 +1,7 @@
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "src/fastertransformer/core/Buffer.h"
+#include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
@@ -83,8 +84,8 @@ void GenerateStream::cancel() {
     setStop("cancel stream");
 }
 
-vector<int> GenerateStream::inputTokens() const {
-    auto input_tokens = fastertransformer::buffer2vector<int>(generate_input_->input_ids);
+vector<int> GenerateStream::contextTokens() const {
+    auto input_tokens = fastertransformer::buffer2vector<int>({ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, {(size_t)seq_length_}, complete_token_ids_->data()});
     if (reuseLength() > 0) {
         return vector<int>(input_tokens.begin() + reuseLength(), input_tokens.end());
     } else {
@@ -97,7 +98,7 @@ int GenerateStream::tileNum() const {
 }
 
 bool GenerateStream::isContextStream() const {
-    return seqLength() == inputLength();
+    return is_context_stream_;
 }
 
 int GenerateStream::batchSize() const {
@@ -133,7 +134,7 @@ void GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_pr
 vector<int> GenerateStream::currentExecuteTokens() const {
     // TODO(xinfei.sxf) 在query回退，重运行case下，这个不对
     if (isContextStream()) {
-        return inputTokens();
+        return contextTokens();
     } else {
         int         tile_num = tileNum();
         vector<int> current_tokens;
@@ -156,6 +157,7 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
                             optional<ft::BufferPtr>  logits,
                             optional<ft::BufferPtr>  cum_log_probs,
                             bool not_update_output) {
+    is_context_stream_ = false;
     if (stoppedWithoutLock()) {
         return;
     }
