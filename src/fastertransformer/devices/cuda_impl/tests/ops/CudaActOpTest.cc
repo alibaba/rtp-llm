@@ -1,78 +1,23 @@
-#include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
+#include "src/fastertransformer/devices/base_tests/ActOpTest.hpp"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 
 using namespace std;
 using namespace fastertransformer;
 
-class CudaActOpTest: public DeviceTestBase {
-public:
-    void BasicActTest(ActivationType atype, size_t m, size_t n);
-    void GateActTest(ActivationType atype, size_t m, size_t n);
-
-};
-
-void CudaActOpTest::BasicActTest(ActivationType atype, size_t m, size_t n) {
-    auto input_host = torch::rand({(int)m, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
-    auto input_device = createDeviceBuffer<half>(input_host);
-
-    ActivationParams params {atype, *input_device};
-    device_->activation(params);
-
-    torch::Tensor output_host;
-
-    if (atype == ActivationType::Silu) {
-        output_host = torch::silu(input_host);
-    } else if (atype == ActivationType::Gelu) {
-        output_host = torch::gelu(input_host);
-    }
-    auto output_device = bufferToTensor(*input_device).to(output_host.dtype());
-
-    ASSERT_TRUE(torch::allclose(output_host, output_device, rtol_, atol_));
-}
-
-
-void CudaActOpTest::GateActTest(ActivationType atype, size_t m, size_t n) {
-    auto input_host = torch::rand({(int)m, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
-    auto gate_host = torch::rand({(int)m, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
-    auto gate_bias_host = torch::zeros({(int)m}, torch::Device(torch::kCPU)).to(torch::kFloat);
-
-    auto input_device = createDeviceBuffer<half>(input_host);
-    auto gate_device = createDeviceBuffer<half>(gate_host);
-    auto gate_bias_device = createDeviceBuffer<half>(gate_bias_host);
-
-    ActivationParams params {atype, *input_device, std::nullopt, *gate_device, * gate_bias_device};
-
-    device_->activation(params);
-
-    torch::Tensor output_host;
-
-    if (atype == ActivationType::Silu) {
-        output_host = torch::silu(input_host);
-    } else if (atype == ActivationType::Gelu) {
-        output_host = torch::gelu(input_host);
-    }
-    output_host = output_host * gate_host;
-
-    auto output_device = bufferToTensor(*input_device).to(output_host.dtype());
-
-    ASSERT_TRUE(torch::allclose(output_host, output_device, rtol_, atol_));
-}
-
+class CudaActOpTest: public ActOpTest {};
 
 TEST_F(CudaActOpTest, testSiluOp) {
-    BasicActTest(ActivationType::Silu, 100, 100);
-    BasicActTest(ActivationType::Silu, 1024, 1024);
-    BasicActTest(ActivationType::Silu, 1024, 4096);
-    GateActTest(ActivationType::Silu, 100, 100);
-    GateActTest(ActivationType::Silu, 1024, 1024);
-    GateActTest(ActivationType::Silu, 1024, 4096);
+    BasicActOpTest(ActivationType::Silu, 100, 100, DataType::TYPE_FP16);
+    BasicActOpTest(ActivationType::Silu, 1024, 1024, DataType::TYPE_FP16);
+    BasicActOpTest(ActivationType::Silu, 1024, 4096, DataType::TYPE_FP16);
+    GateActOpTest(ActivationType::Silu, 100, 100, DataType::TYPE_FP16);
+    GateActOpTest(ActivationType::Silu, 1024, 1024, DataType::TYPE_FP16);
+    GateActOpTest(ActivationType::Silu, 1024, 4096, DataType::TYPE_FP16);
 }
-
 
 TEST_F(CudaActOpTest, testGeluOp) {
-    BasicActTest(ActivationType::Gelu, 100, 100);
-    BasicActTest(ActivationType::Gelu, 1024, 1024);
-    GateActTest(ActivationType::Gelu, 100, 100);
-    GateActTest(ActivationType::Gelu, 1024, 1024);
+    BasicActOpTest(ActivationType::Gelu, 100, 100, DataType::TYPE_FP16);
+    BasicActOpTest(ActivationType::Gelu, 1024, 1024, DataType::TYPE_FP16);
+    GateActOpTest(ActivationType::Gelu, 100, 100, DataType::TYPE_FP16);
+    GateActOpTest(ActivationType::Gelu, 1024, 1024, DataType::TYPE_FP16);
 }
-
