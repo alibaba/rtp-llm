@@ -1,8 +1,8 @@
 #pragma once
-
+#include "src/fastertransformer/devices/testing/TestBase.h"
 #include <torch/torch.h>
 
-#include "src/fastertransformer/devices/testing/TestBase.h"
+
 
 torch::Tensor GeGluNoneApproximate(const torch::Tensor& tensor) {
     return torch::gelu(tensor, "tanh");
