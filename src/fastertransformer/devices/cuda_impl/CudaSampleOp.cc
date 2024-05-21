@@ -35,7 +35,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     auto device_tokens = clone({params.token_ids});
     auto transposed_tokens = transpose({*device_tokens});
 
-    // 1. confirm buffer sizes
+    // 1. prepare buffers
     auto& top_k = params.top_k;
     auto& top_p = params.top_p;
     auto& temperature = params.temperature;
@@ -44,7 +44,8 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     assert(top_p.size() == batch_size);
     assert(temperature.size() == batch_size);
 
-    auto default_top_k = 1;
+    auto default_top_k = top_k.data<int32_t>()[0];
+    auto default_top_p = top_p.data<float>()[0];
     auto max_top_k = *max_element(top_k.data<int32_t>(), top_k.dataWithOffset<int32_t>(top_k.size()));
     if (max_top_k == 0) {
         // for safety. TopKSamplingLayer handles a case of top_k=0 and top_p=0 as
@@ -102,14 +103,10 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
 
     FT_LOG_DEBUG("topk_ws_size: %d, topp_ws_size: %d", topk_ws_size, topp_ws_size);
 
-    auto default_top_p = 0.0f;
-    // 2. allocate buffers
-
     // see BaseSamplingLayer<T>::allocateBuffer ------------------
     auto skip_top_k_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
     auto skip_top_p_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
 
-    auto initial_top_p_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
     auto topp_id_vals_buf = allocateBuffer({DataType::TYPE_INT32, {batch_size * vocab_size_padded}});
     auto topp_offset_buf = allocateBuffer({DataType::TYPE_INT32, {batch_size + 1}});
     auto begin_topp_offset_buf = allocateBuffer({DataType::TYPE_INT32, {batch_size + 1}});
@@ -122,9 +119,15 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     auto runtime_top_p_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
     copy({*runtime_top_p_buf, top_p});
 
-    // 3. prepare kernel inputs
+    auto cum_log_probs = params.cum_log_probs.has_value() ?
+                         params.cum_log_probs.value().get().data<float>() : nullptr;
+    auto output_log_probs = params.output_log_probs.has_value() ?
+                            params.output_log_probs.value().get().data<float>() : nullptr;
 
-    // 3.1. base sampling layer setup
+
+    // 3. prepare common inputs
+
+    // 3.1. setup random seeds
     // TODO: this curandstate buf might should be moved to cuda device state,
     //       so that do not need to be reinitialized on every request.
     if (random_seed) {
@@ -132,57 +135,20 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         if (seeds.size() == 1) {
             invokeCurandInitialize(
                 (curandState_t *)curandstate_buf_->data(), batch_size,
-                seeds.data<uint64_t>()[0], stream_);
+                seeds.data<int64_t>()[0], stream_);
         } else {
             auto random_seeds_buf = allocateBuffer({DataType::TYPE_UINT64, {batch_size}});
-            assert(seeds.size() == batch_size);
+            RUNTIME_ASSERT_OP_ARG((seeds.size() == batch_size),
+                                  "random_seed.size() should equal to batch_size, but %d vs %d",
+                                  seeds.size(), batch_size);
             copy({*random_seeds_buf, seeds});
             invokeCurandBatchInitialize(
                 (curandState_t *)curandstate_buf_->data(), batch_size,
                 (unsigned long long *)random_seeds_buf->data(), stream_);
         }
-    } else {
-        // Initialize curand states using the default seed 0.
-        invokeCurandInitialize((curandState_t *)curandstate_buf_->data(), batch_size, 0, stream_);
     }
 
-    // 3.2. topk setup
-    invokeSetupTopKRuntimeArgs(batch_size,
-                               default_top_k,
-                               runtime_top_k_buf->data<uint>(),
-                               batch_size,
-                               default_top_p,
-                               runtime_top_p_buf->data<float>(),
-                               batch_size,
-                               skip_top_k_decode_buf->data<bool>(),
-                               stream_);
-
-    // 3.3 top_p setup
-    invokeSetupTopPRuntimeArgs(batch_size,
-                               default_top_k,
-                               runtime_top_k_buf->data<uint>(),
-                               batch_size,
-                               default_top_p,
-                               runtime_top_p_buf->data<float>(),
-                               batch_size,
-                               skip_top_p_decode_buf->data<bool>(),
-                               initial_top_p_buf->data<float>(),
-                               nullptr, // top_p_decay_buf,
-                               nullptr,
-                               nullptr, // top_p_min_buf,
-                               nullptr,
-                               nullptr, // top_p_reset_ids_buf,
-                               nullptr,
-                               stream_);
-    sync_check_cuda_error();
-
-    // 4. kernel call
-    auto cum_log_probs = params.cum_log_probs.has_value() ?
-                         params.cum_log_probs.value().get().data<float>() : nullptr;
-    auto output_log_probs = params.output_log_probs.has_value() ?
-                            params.output_log_probs.value().get().data<float>() : nullptr;
-
-    // base sampling layer forward
+    // 3.2. compute logits penalty
     if (std::any_of(temperature.data<float>(),
                     temperature.data<float>() + batch_size,
                     [&](auto t) { return t != 1.0f; }))
@@ -248,7 +214,18 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     // TODO: add repetition_penalty back
     // TODO: add min_new_tokens back
 
-    // run top_k
+    // 4. run sampling
+    // 4.1 run top_k
+    invokeSetupTopKRuntimeArgs(batch_size,
+                               default_top_k,
+                               runtime_top_k_buf->data<uint>(),
+                               batch_size,
+                               default_top_p,
+                               runtime_top_p_buf->data<float>(),
+                               batch_size,
+                               skip_top_k_decode_buf->data<bool>(),
+                               stream_);
+
     invokeBatchTopKSampling(
         top_k_workspace->data(),
         topk_ws_size,
@@ -271,7 +248,28 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         batch_size,
         skip_top_k_decode_buf->data<bool>());
 
-    // run top_p
+    // 4.2. run top_p
+    // NOTE: running top_k could write values to runtime bufs, so need to copy again.
+    copy({*runtime_top_k_buf, top_k});
+    copy({*runtime_top_p_buf, top_p});
+
+    invokeSetupTopPRuntimeArgs(batch_size,
+                               default_top_k,
+                               runtime_top_k_buf->data<uint>(),
+                               batch_size,
+                               default_top_p,
+                               runtime_top_p_buf->data<float>(),
+                               batch_size,
+                               skip_top_p_decode_buf->data<bool>(),
+                               nullptr, // initial_top_p_buf,
+                               nullptr, // top_p_decay_buf,
+                               nullptr,
+                               nullptr, // top_p_min_buf,
+                               nullptr,
+                               nullptr, // top_p_reset_ids_buf,
+                               nullptr,
+                               stream_);
+
     invokeTopPInitialize(
         topp_id_vals_buf->data<int32_t>(),
         topp_offset_buf->data<int32_t>(),

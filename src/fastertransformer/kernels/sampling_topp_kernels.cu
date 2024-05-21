@@ -1488,7 +1488,9 @@ static __global__ void set_topp_runtime_args(int             batch_size,
         }
         skip_decode[i] = k > 0;
 
-        initial_top_p_buf[i] = top_ps[i];
+        if (initial_top_p_buf) {
+            initial_top_p_buf[i] = top_ps[i];
+        }
 
         if (top_p_decay_buf) {
             top_p_decay_buf[i]   = top_p_decay == nullptr ? 1.0f : top_p_decay[i];

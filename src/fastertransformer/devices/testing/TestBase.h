@@ -22,7 +22,7 @@ static const std::string DEFAULT_DEVICE = "CPU";
 class DeviceTestBase : public ::testing::Test {
 public:
     void SetUp() override {
-        Logger::getLogger().setLevel(Logger::Level::DEBUG);
+        // Logger::getLogger().setLevel(Logger::Level::DEBUG);
         // setenv("FT_DEBUG_LEVEL", "DEBUG", 1);
         // setenv("FT_DEBUG_PRINT_LEVEL", "DEBUG", 1);
 
@@ -261,7 +261,7 @@ protected:
                                                     vblock_buffer);
                 }
             }
-            
+
         }
         auto kv_blocks_gpu_buf = device_->allocateBuffer({kv_blocks_buf->type(), kv_blocks_buf->shape()});
         device_->copy({*kv_blocks_gpu_buf, *kv_blocks_buf});
