@@ -56,101 +56,91 @@ struct MLPImpl : torch::nn::Module {
 
 TORCH_MODULE(MLP);
 
-template <typename TestT>
 class FfnLayerTest : public DeviceTestBase {
 public:
-    void FFNOpTest(size_t token_num,
-                   size_t hidden_size,
-                   size_t inter_size,
-                   ActivationType act_t)
+
+    struct FfnLayerTestInput {
+        torch::Tensor input;
+        torch::Tensor gate_proj;
+        torch::Tensor up_proj;
+        torch::Tensor down_proj;
+    };
+
+    struct FfnLayerTestOutput {
+        torch::Tensor out;
+    };
+
+    FfnLayerTestInput PrepareFfnLayerInput(size_t token_num,
+                                             size_t hidden_size,
+                                             size_t inter_size,
+                                             DataType type)
     {
-        MLP mlp(hidden_size, inter_size, act_t);
-        mlp.ptr()->to(torch::Device(torch::kCPU));
-        auto state_dict = mlp.ptr()->named_parameters();
-        torch::NoGradGuard no_grad;
+        auto dtype = dataTypeToTorchType(type);
+        auto input = 0.01 * torch::rand(
+            {(int)token_num, (int)hidden_size}, torch::Device(torch::kCPU)).to(dtype);
+        auto gate_proj = 0.01 * torch::rand(
+            {(int)hidden_size, (int)inter_size}, torch::Device(torch::kCPU)).to(dtype);
+        auto up_proj = 0.01 * torch::rand(
+            {(int)hidden_size, (int)inter_size}, torch::Device(torch::kCPU)).to(dtype);
+        auto down_proj = 0.01 * torch::rand(
+            {(int)inter_size, (int)hidden_size}, torch::Device(torch::kCPU)).to(dtype);
+        return FfnLayerTestInput({input, gate_proj, up_proj, down_proj});
+    }
 
-        auto input_host = 0.01 * torch::rand(
-            {(int)token_num, (int)hidden_size}, torch::Device(torch::kCPU)).to(torch::kFloat);
-        // gate
-        auto gate_proj_host = 0.01 * torch::rand(
-            {(int)hidden_size, (int)inter_size}, torch::Device(torch::kCPU)).to(torch::kFloat);
-        state_dict["gate_proj.weight"].set_data(gate_proj_host.t());
-        // up
-        auto up_proj_host = 0.01 * torch::rand(
-            {(int)hidden_size, (int)inter_size}, torch::Device(torch::kCPU)).to(torch::kFloat);
-        state_dict["up_proj.weight"].set_data(up_proj_host.t());
-        // down
-        auto down_proj_host = 0.01 * torch::rand(
-            {(int)inter_size, (int)hidden_size}, torch::Device(torch::kCPU)).to(torch::kFloat);
-        state_dict["down_proj.weight"].set_data(down_proj_host.t());
-
-        auto input_device = createDeviceBuffer<TestT>(input_host);
-        auto gate_proj_device = createDeviceBuffer<TestT>(gate_proj_host);
-        auto up_proj_device = createDeviceBuffer<TestT>(up_proj_host);
-        auto down_proj_device = createDeviceBuffer<TestT>(down_proj_host);
-
-        auto input      = this->bufferToTensor(*input_device);
-        auto gate_proj  = this->bufferToTensor(*gate_proj_device);
-        auto up_proj    = this->bufferToTensor(*up_proj_device);
-        auto down_proj  = this->bufferToTensor(*down_proj_device);
-
-        this->assertTensorClose(input, input_host);
-        this->assertTensorClose(gate_proj, gate_proj_host);
-        this->assertTensorClose(up_proj, up_proj_host);
-        this->assertTensorClose(down_proj, down_proj_host);
+    FfnLayerTestOutput FfnOpRun(FfnLayerTestInput& params,
+                                ActivationType Atype)
+    {
+        bool is_cpu     = (this->device_->getDeviceProperties().type == DeviceType::Cpu);
+        auto alloc_type = is_cpu ? AllocationType::HOST : AllocationType::DEVICE;
+        auto input      = tensorToBuffer(params.input, alloc_type);
+        auto gate_proj  = tensorToBuffer(params.gate_proj, alloc_type);
+        auto up_proj    = tensorToBuffer(params.up_proj, alloc_type);
+        auto down_proj  = tensorToBuffer(params.down_proj, alloc_type);
 
         FfnLayerWeights weights (
             std::make_unique<const DenseWeights>(
-                DenseWeights(up_proj_device)),
+                DenseWeights(up_proj)),
             std::make_unique<const DenseWeights>(
-                DenseWeights(gate_proj_device)),
+                DenseWeights(gate_proj)),
             std::make_unique<const DenseWeights>(
-                DenseWeights(down_proj_device))
+                DenseWeights(down_proj))
         );
 
-        FfnLayerParams params(*input_device,
-                            weights,
-                            act_t);
+        FfnLayerParams Opparams(*input,
+                                weights,
+                                Atype);
 
-        auto output_device  = this->device_->ffnLayer(params);
-        auto result         = this->bufferToTensor(*(output_device.hidden_states));
-        auto result_host    = mlp->forward(input_host).to(result.dtype());;
-        assertTensorClose(result, result_host);
+        auto output  = this->device_->ffnLayer(Opparams);
+        return FfnLayerTestOutput({bufferToTensor(*(output.hidden_states))});
+
     }
 
-    void FFNLoraOpTest(size_t token_num,
-                       size_t hidden_size,
-                       size_t inter_size,
-                       ActivationType act_t);
+    FfnLayerTestOutput FfnTorchRefRun(FfnLayerTestInput& params,
+                                      ActivationType Atype)
+    {
+        MLP mlp(params.input.sizes()[1], params.gate_proj.sizes()[0], Atype);
+        mlp.ptr()->to(torch::Device(torch::kCPU));
+        auto state_dict = mlp.ptr()->named_parameters();
+        torch::NoGradGuard no_grad;
+        state_dict["gate_proj.weight"].set_data(params.gate_proj.t().to(torch::kFloat));
+        state_dict["up_proj.weight"].set_data(params.up_proj.t().to(torch::kFloat));
+        state_dict["down_proj.weight"].set_data(params.down_proj.t().to(torch::kFloat));
+        return FfnLayerTestOutput({mlp->forward(params.input.to(torch::kFloat))});
 
-    void MoeOpTest(size_t token_num,
-                   size_t hidden_size,
-                   size_t inter_size,
-                   ActivationType act_t);
+    }
 
-    void MoeLoraOpTest(size_t token_num,
-                       size_t hidden_size,
-                       size_t inter_size,
-                       ActivationType act_t);
+    void FfnOpTest(size_t token_num,
+                         size_t hidden_size,
+                         size_t inter_size,
+                         ActivationType act,
+                         DataType type)
+    {
+        auto input = PrepareFfnLayerInput(token_num, hidden_size, inter_size, type);
+        auto OpResult = FfnOpRun(input, act);
+        auto RefResult = FfnTorchRefRun(input, act);
+        assertTensorClose(OpResult.out.to(RefResult.out.type()), RefResult.out);
+    }
+    
+    
 
 };
-
-class FfnLayerTestFp16 : public FfnLayerTest<half> {};
-
-TEST_F(FfnLayerTestFp16, FfnGatedActivationOp) {
-    FFNOpTest(4, 2048, 128, ActivationType::Swiglu);
-    FFNOpTest(4, 2048, 4096, ActivationType::Swiglu);
-    FFNOpTest(128, 2048, 128, ActivationType::Swiglu);
-    FFNOpTest(1000, 2048, 128, ActivationType::Swiglu);
-    FFNOpTest(1, 2, 4096, ActivationType::Swiglu);
-    FFNOpTest(1000, 2048, 128, ActivationType::Swiglu);
-}
-
-TEST_F(FfnLayerTestFp16, FfnNoGatedActivationOp) {
-    FFNOpTest(4, 2048, 128, ActivationType::Silu);
-    FFNOpTest(4, 2048, 4096, ActivationType::Silu);
-    FFNOpTest(128, 2048, 128, ActivationType::Silu);
-    FFNOpTest(1000, 2048, 128, ActivationType::Silu);
-    FFNOpTest(1, 2, 4096, ActivationType::Silu);
-    FFNOpTest(1000, 2048, 128, ActivationType::Silu);
-}

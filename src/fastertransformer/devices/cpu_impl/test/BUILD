@@ -12,6 +12,7 @@ test_linkopts = [
 test_deps = [
     "//src/fastertransformer/devices/cpu_impl:cpu_impl",
     "//src/fastertransformer/devices/testing:device_test_utils",
+    "//src/fastertransformer/devices/base_tests:base_tests",
 ] + torch_deps()
 
 
