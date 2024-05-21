@@ -2,8 +2,6 @@
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include <torch/torch.h>
 
-
-
 torch::Tensor GeGluNoneApproximate(const torch::Tensor& tensor) {
     return torch::gelu(tensor, "tanh");
 }
@@ -130,15 +128,15 @@ public:
     }
 
     void FfnOpTest(size_t token_num,
-                         size_t hidden_size,
-                         size_t inter_size,
-                         ActivationType act,
-                         DataType type)
+                   size_t hidden_size,
+                   size_t inter_size,
+                   ActivationType act,
+                   DataType type)
     {
         auto input = PrepareFfnLayerInput(token_num, hidden_size, inter_size, type);
-        auto OpResult = FfnOpRun(input, act);
-        auto RefResult = FfnTorchRefRun(input, act);
-        assertTensorClose(OpResult.out.to(RefResult.out.type()), RefResult.out);
+        auto result = FfnOpRun(input, act);
+        auto result_ref = FfnTorchRefRun(input, act);
+        assertTensorClose(result.out.to(result_ref.out.type()), result_ref.out);
     }
     
     

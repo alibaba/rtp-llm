@@ -2,7 +2,6 @@
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include <torch/torch.h>
 
-
 class SoftmaxOpTest: public DeviceTestBase {
 public:
 

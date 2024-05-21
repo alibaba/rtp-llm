@@ -1,145 +1,24 @@
-#include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
+#include "src/fastertransformer/devices/base_tests/GemmOpTest.hpp"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 
 using namespace std;
 using namespace fastertransformer;
 
-class CudaGemmOpTest: public DeviceTestBase {
-public:
-
-    void BasicGemmOP(size_t m, size_t n, size_t k);
-    void BatchGemmOP(size_t b, size_t m, size_t n, size_t k);
-
-    void TransposeBatchGemmOP(TransposeOperation op_a,
-                              TransposeOperation op_b,
-                              size_t b,
-                              size_t m1, size_t k1,
-                              size_t k2, size_t n2,
-                              size_t m3, size_t n3);
-
-    void TransposeBatchMixFloatGemmOP(TransposeOperation op_a,
-                              TransposeOperation op_b,
-                              size_t b,
-                              size_t m1, size_t k1,
-                              size_t k2, size_t n2,
-                              size_t m3, size_t n3);
-};
-
-void CudaGemmOpTest::BasicGemmOP(size_t m, size_t n, size_t k) {
-    auto A_host = torch::rand({(int)m, (int)k}, torch::Device(torch::kCPU)).to(torch::kFloat);
-    auto B_host = torch::rand({(int)k, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
-
-    auto A_device = createDeviceBuffer<half>(A_host);
-    auto B_device = createDeviceBuffer<half>(B_host);
-
-    GemmParams params {*A_device, *B_device};
-    auto C_device = device_->gemm(params);
-
-    auto C_host = torch::matmul(A_host, B_host).to(torch::kHalf);
-    auto A     = bufferToTensor(*A_device);
-    auto B     = bufferToTensor(*B_device);
-    auto C     = bufferToTensor(*C_device);
-
-    ASSERT_TRUE(torch::allclose(C, C_host, rtol_, atol_));
-}
-
-void CudaGemmOpTest::BatchGemmOP(size_t b, size_t m, size_t n, size_t k) {
-    auto A_host = torch::rand(
-        {(int)b, (int)m, (int)k}, torch::Device(torch::kCPU)).to(torch::kFloat);
-    auto B_host = torch::rand(
-        {(int)b, (int)k, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
-
-    auto A_device = createDeviceBuffer<half>(A_host);
-    auto B_device = createDeviceBuffer<half>(B_host);
-
-    GemmParams params {*A_device, *B_device};
-    auto C_device = device_->gemm(params);
-
-    auto C_host = torch::matmul(A_host, B_host).to(torch::kHalf);
-    auto A     = bufferToTensor(*A_device);
-    auto B     = bufferToTensor(*B_device);
-    auto C     = bufferToTensor(*C_device);
-
-    ASSERT_TRUE(torch::allclose(C, C_host, rtol_, atol_));
-}
-
-void CudaGemmOpTest::TransposeBatchGemmOP(TransposeOperation op_a,
-                                          TransposeOperation op_b,
-                                          size_t b,
-                                          size_t m1, size_t k1,
-                                          size_t k2, size_t n2,
-                                          size_t m3, size_t n3) {
-    auto A_host = torch::rand(
-        {(int)b, (int)m1, (int)k1}, torch::Device(torch::kCPU)).to(torch::kFloat);
-    auto B_host = torch::rand(
-        {(int)b, (int)k2, (int)n2}, torch::Device(torch::kCPU)).to(torch::kFloat);
-
-    auto A_device = createDeviceBuffer<half>(A_host);
-    auto B_device = createDeviceBuffer<half>(B_host);
-
-    GemmParams params {*A_device, *B_device, nullopt, DataType::TYPE_INVALID, op_a, op_b };
-    auto C_device = device_->gemm(params);
-
-    if (op_a == TransposeOperation::TRANSPOSE) {
-        A_host = A_host.transpose(1, 2);
-    }
-    if (op_b == TransposeOperation::TRANSPOSE) {
-        B_host = B_host.transpose(1, 2);
-    }
-    auto C_host = torch::matmul(A_host, B_host).to(torch::kHalf);
-    auto A     = bufferToTensor(*A_device);
-    auto B     = bufferToTensor(*B_device);
-    auto C     = bufferToTensor(*C_device);
-
-    ASSERT_TRUE(torch::allclose(C, C_host, rtol_, atol_));
-}
-
-void CudaGemmOpTest::TransposeBatchMixFloatGemmOP(TransposeOperation op_a,
-                                          TransposeOperation op_b,
-                                          size_t b,
-                                          size_t m1, size_t k1,
-                                          size_t k2, size_t n2,
-                                          size_t m3, size_t n3) {
-    auto A_host = torch::rand(
-        {(int)b, (int)m1, (int)k1}, torch::Device(torch::kCPU)).to(torch::kFloat);
-    auto B_host = torch::rand(
-        {(int)b, (int)k2, (int)n2}, torch::Device(torch::kCPU)).to(torch::kFloat);
-
-    auto A_device = createDeviceBuffer<half>(A_host);
-    auto B_device = createDeviceBuffer<half>(B_host);
-
-    GemmParams params {*A_device, *B_device, nullopt, DataType::TYPE_FP32, op_a, op_b };
-    auto C_device = device_->gemm(params);
-
-    if (op_a == TransposeOperation::TRANSPOSE) {
-        A_host = A_host.transpose(1, 2);
-    }
-    if (op_b == TransposeOperation::TRANSPOSE) {
-        B_host = B_host.transpose(1, 2);
-    }
-    auto C_host = torch::matmul(A_host, B_host);
-    auto A     = bufferToTensor(*A_device);
-    auto B     = bufferToTensor(*B_device);
-    auto C     = bufferToTensor(*C_device);
-
-    ASSERT_TRUE(torch::allclose(C, C_host, rtol_, atol_));
-}
-
+class CudaGemmOpTest: public GemmOpTest {};
 
 
 TEST_F(CudaGemmOpTest, BasicGemmOpTest) {
-    BasicGemmOP(2, 1024, 2048);
-    BasicGemmOP(4, 1024, 2048);
-    BasicGemmOP(8, 1024, 2048);
-    BasicGemmOP(1024, 1024, 2048);
-    BasicGemmOP(4096, 1024, 2048);
+    BasicGemmOpTest(2, 1024, 2048, DataType::TYPE_FP16);
+    BasicGemmOpTest(8, 1024, 2048, DataType::TYPE_FP16);
+    BasicGemmOpTest(1024, 1024, 2048, DataType::TYPE_FP16);
+    BasicGemmOpTest(4096, 1024, 2048, DataType::TYPE_FP16);
 }
 
 TEST_F(CudaGemmOpTest, BatchGemmOpTest) {
-    BatchGemmOP(1, 8, 16, 32);
-    BatchGemmOP(2, 8, 16, 32);
-    BatchGemmOP(4, 8, 16, 32);
-    BatchGemmOP(8, 8, 8, 8);
+    BatchGemmOpTest(1, 8, 16, 32, DataType::TYPE_FP16);
+    BatchGemmOpTest(2, 8, 16, 32, DataType::TYPE_FP16);
+    BatchGemmOpTest(4, 8, 16, 32, DataType::TYPE_FP16);
+    BatchGemmOpTest(8, 8, 8, 8, DataType::TYPE_FP16);
 }
 
 TEST_F(CudaGemmOpTest, TransposeBatchGemmOpTest) {
@@ -149,10 +28,10 @@ TEST_F(CudaGemmOpTest, TransposeBatchGemmOpTest) {
     size_t m = 64;
     size_t n = 8;
     size_t k = 16;
-    TransposeBatchGemmOP(none, none, b, m, k, k, n, m, n);
-    TransposeBatchGemmOP(none, tran, b, m, k, n, k, m, n);
-    TransposeBatchGemmOP(tran, tran, b, k, m, n, k, m, n);
-    TransposeBatchGemmOP(tran, none, b, k, m, k, n, m, n);
+    BatchTransposeGemmOp(none, none, b, m, k, k, n, DataType::TYPE_FP16);
+    BatchTransposeGemmOp(none, tran, b, m, k, n, k, DataType::TYPE_FP16);
+    BatchTransposeGemmOp(tran, tran, b, k, m, n, k, DataType::TYPE_FP16);
+    BatchTransposeGemmOp(tran, none, b, k, m, k, n, DataType::TYPE_FP16);
 
 }
 
@@ -163,10 +42,9 @@ TEST_F(CudaGemmOpTest, TransposeBatchMixFloatGemmOP) {
     size_t m = 64;
     size_t n = 8;
     size_t k = 16;
-    TransposeBatchMixFloatGemmOP(none, none, b, m, k, k, n, m, n);
-    TransposeBatchMixFloatGemmOP(none, tran, b, m, k, n, k, m, n);
-    TransposeBatchMixFloatGemmOP(tran, tran, b, k, m, n, k, m, n);
-    TransposeBatchMixFloatGemmOP(tran, none, b, k, m, k, n, m, n);
+    MixtureBatchTransposeGemmOp(none, none, b, m, k, k, n, DataType::TYPE_FP16, DataType::TYPE_FP32);
+    MixtureBatchTransposeGemmOp(none, tran, b, m, k, n, k, DataType::TYPE_FP16, DataType::TYPE_FP32);
+    MixtureBatchTransposeGemmOp(tran, tran, b, k, m, n, k, DataType::TYPE_FP16, DataType::TYPE_FP32);
+    MixtureBatchTransposeGemmOp(tran, none, b, k, m, k, n, DataType::TYPE_FP16, DataType::TYPE_FP32);
 
 }
-
