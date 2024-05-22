@@ -382,6 +382,9 @@ __global__ void batchApplyRepetitionPenalty(T*           logits,
     const int               input_length    = input_lengths != nullptr ? input_lengths[batch_idx] : max_input_length;
 
     logits += batch_idx * vocab_size;
+    if (penalty == 1.0f) {
+        return;
+    }
 
     // Phase 1. Find indices to penalize and keep the penalized values.
     // A vocab id can appear multiple times but should be penalized once.

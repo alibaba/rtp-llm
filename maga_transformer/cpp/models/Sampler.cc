@@ -64,8 +64,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto min_lengths = MAY_GET_BUFFER_VIEW(inputs.min_lengths);
             device_->sampleGreedy({
                 sample_logits,
-                sequence_lengths,
                 input_lengths,
+                sequence_lengths,
                 sample_tokens,
                 inputs.step,
                 *inputs.top_k,
