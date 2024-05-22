@@ -145,7 +145,9 @@ class Llava(Llama, MultiModalMixin):
                 ("mm_use_im_start_end", False),
                 ("image_aspect_ratio", None),
                 ("tune_mm_mlp_adapter", False),
+                ("image_grid_pinpoints", []),
                 ("mm_projector_type", "linear"),
+                ("mm_patch_merge_type", "flat"),
                 ("hidden_size", 0),
                 ("mm_vision_select_layer", None),
                 ("mm_vision_select_feature", "patch")
