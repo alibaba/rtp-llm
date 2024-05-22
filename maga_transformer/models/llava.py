@@ -76,7 +76,12 @@ class Llava(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         self.visual = LlavaImageEmbedding(config.vit_related_params.config)
         self.nccl_op_ = NcclOp()
-        config.vit_related_params.vit_weights = BaseVitWeights({"mm_projector": self.visual.mm_projector}, True)
+        vit_weight_dict: Dict[str, Any] = {"mm_projector": self.visual.mm_projector}
+        if config.vit_related_params.config["unfreeze_mm_vision_tower"]:
+            vit_weight_dict["vision_tower"] = self.visual.vision_tower
+        if "unpad" in config.vit_related_params.config.get("mm_patch_merge_type", "flat"):
+            vit_weight_dict["image_newline"] = self.visual.image_newline
+        config.vit_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
         Llama.__init__(self, config)
 
     @classmethod
@@ -150,7 +155,8 @@ class Llava(Llama, MultiModalMixin):
                 ("mm_patch_merge_type", "flat"),
                 ("hidden_size", 0),
                 ("mm_vision_select_layer", None),
-                ("mm_vision_select_feature", "patch")
+                ("mm_vision_select_feature", "patch"),
+                ("unfreeze_mm_vision_tower", False)
             ]
 
             for param_name, default_value in vit_related_params_list:
