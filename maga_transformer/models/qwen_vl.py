@@ -24,8 +24,8 @@ from maga_transformer.utils.model_weights_loader import get_model_weights_loader
 from maga_transformer.utils.database import CkptDatabase
 
 class QwenVLImageEmbedding(BaseImageEmbedding):
-    def __init__(self, config: Dict[str, Any], device="cuda:0"):
-        self.vit = QWen_VL_ViT(**config).to(device=device).half()
+    def __init__(self, config: Dict[str, Any]):
+        self.vit = QWen_VL_ViT(**config).cuda().half()
     
     def image_embedding(self, images: List[Any], device) -> torch.Tensor:
         images = self.vit.encode(images)
@@ -34,7 +34,8 @@ class QwenVLImageEmbedding(BaseImageEmbedding):
 
 class QWen_VL(QWen, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        self.visual = QwenVLImageEmbedding(config.vit_related_params.config)
+        with torch.cuda.device(torch.device('cuda:0')):
+            self.visual = QwenVLImageEmbedding(config.vit_related_params.config)
         self.nccl_op_ = NcclOp()
         config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.visual.vit})
         

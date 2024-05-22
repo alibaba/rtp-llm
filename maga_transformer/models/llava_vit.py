@@ -11,16 +11,16 @@ from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
 from maga_transformer.models.llava_utils import expand2square, process_anyres_image, unpad_image, get_anyres_image_grid_shape
 
 class LlavaImageEmbedding(BaseImageEmbedding):
-    def __init__(self, config: Dict[str, Any], device="cuda:0"):
+    def __init__(self, config: Dict[str, Any]):
         if config.get("vision_config", None) != None:
             raise Exception("llava-hf style config is not implemented yet")
-            # self.vision_tower = CLIPVisionModel(config["vision_config"]).to(device='cuda:0')
+            # self.vision_tower = CLIPVisionModel(config["vision_config"]).cuda().half()
         else:
-            self.vision_tower = self.build_vision_tower(config).to(device=device).half()
-        self.mm_projector = self.build_vision_projector(config).to(device=device).half()
+            self.vision_tower = self.build_vision_tower(config).cuda().half()
+        self.mm_projector = self.build_vision_projector(config).cuda().half()
         if "unpad" in config.get("mm_patch_merge_type", "flat"):
             self.image_newline = nn.Parameter(
-                torch.empty(config["hidden_size"]).to(device=device).half()
+                torch.empty(config["hidden_size"]).cuda().half()
             )
         self.config = config
     

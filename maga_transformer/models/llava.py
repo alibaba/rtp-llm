@@ -74,7 +74,8 @@ class LlavaTokenizer(object):
 
 class Llava(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        self.visual = LlavaImageEmbedding(config.vit_related_params.config)
+        with torch.cuda.device(torch.device('cuda:0')):
+            self.visual = LlavaImageEmbedding(config.vit_related_params.config)
         self.nccl_op_ = NcclOp()
         vit_weight_dict: Dict[str, Any] = {"mm_projector": self.visual.mm_projector}
         if config.vit_related_params.config["unfreeze_mm_vision_tower"]:
