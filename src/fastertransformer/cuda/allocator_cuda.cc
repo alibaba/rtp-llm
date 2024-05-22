@@ -4,7 +4,6 @@
 namespace fastertransformer {
 
 void* ICudaAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     size              = ((size + 31) / 32) * 32;  // make the buffer align with 32 bytes
     void* void_ptr    = (void*)ptr;
     void* ptr_address = void_ptr;
@@ -39,7 +38,6 @@ void ICudaAllocator::memSet(void* ptr, const int val, const size_t size) const {
 // cuda allocator
 
 Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocator(device_id) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     int device_count = 1;
     check_cuda_error(cudaGetDeviceCount(&device_count));
     cudaMemPool_t mempool;
@@ -67,7 +65,6 @@ Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocat
 }
 
 Allocator<AllocatorType::CUDA>::~Allocator() {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     while (!pointer_mapping_->empty()) {
         free((void**)(&pointer_mapping_->begin()->first));
     }
@@ -112,18 +109,15 @@ void Allocator<AllocatorType::CUDA>::free(void** ptr) {
 }
 
 Allocator<AllocatorType::CUDA_HOST>::Allocator(int device_id): PurePointerCudaAllocator(device_id) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 }
 
 Allocator<AllocatorType::CUDA_HOST>::~Allocator() {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     while (!pointer_mapping_->empty()) {
         free((void**)(&pointer_mapping_->begin()->first));
     }
 }
 
 void* Allocator<AllocatorType::CUDA_HOST>::malloc(size_t size, const bool is_set_zero) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (size == 0) {
         return nullptr;
     }
@@ -134,7 +128,6 @@ void* Allocator<AllocatorType::CUDA_HOST>::malloc(size_t size, const bool is_set
     if (is_set_zero) {
         memset(ptr, 0, size);
     }
-    FT_LOG_DEBUG("malloc cuda host buffer %p with size %ld", ptr, size);
     std::lock_guard<std::mutex> lock(lock_);
     pointer_mapping_->insert({ptr, size});
 
@@ -142,7 +135,6 @@ void* Allocator<AllocatorType::CUDA_HOST>::malloc(size_t size, const bool is_set
 }
 
 void Allocator<AllocatorType::CUDA_HOST>::free(void** ptr) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     void* address = *ptr;
     if (*ptr != nullptr) {
         int o_device = 0;

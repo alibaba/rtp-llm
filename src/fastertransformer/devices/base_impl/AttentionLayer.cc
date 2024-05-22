@@ -31,9 +31,9 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     // typically local_head_num * size_per_head + 2 * local_head_num_kv * size_per_head
     const auto qkv_merged_size = qkv_weight->kernel->shape()[1];
 
-    if (qkv_weight->bias) {
-        FT_LOG_WARNING("AttentionLayer bias is not supported yet, ignored");
-    }
+    // NOTE: Cuda implementation fused adding qkv_weight->bias in invokeAddFusedQKVBiasTranspose kernel call.
+    // other devices need to be careful about this.
+    // maybe add a device property here.
     const auto qkv = gemm({input, *(qkv_weight->kernel)});
     printBufferData(input, "qkv input");
     printBufferData(*(qkv_weight->kernel), "qkv kernel");
