@@ -382,7 +382,7 @@ __global__ void batchApplyRepetitionPenalty(T*           logits,
     const int               input_length    = input_lengths != nullptr ? input_lengths[batch_idx] : max_input_length;
 
     logits += batch_idx * vocab_size;
-    if (penalty == 1.0f) {
+    if (penalty == 1.0f && penalty_type == RepetitionPenaltyType::Multiplicative) {
         return;
     }
 
@@ -442,6 +442,10 @@ __global__ void batchApplyRepetitionPenaltyLongSeq(T*           logits,
     const int               batch_idx       = blockIdx.x;
     const float             penalty         = penalties[batch_idx];
     const int               input_length    = input_lengths != nullptr ? input_lengths[batch_idx] : max_input_length;
+
+    if (penalty == 1.0f && penalty_type == RepetitionPenaltyType::Multiplicative) {
+        return;
+    }
 
     logits += batch_idx * vocab_size;
 
