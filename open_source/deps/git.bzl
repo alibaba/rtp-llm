@@ -94,7 +94,7 @@ def git_deps():
         build_file = clean_dep("//3rdparty/kmonitor:kmonitor.BUILD"),
     )
 
-    tf_http_archive(
+    http_archive(
         name = "curl",
         build_file = clean_dep("//3rdparty/curl:curl.BUILD"),
         sha256 = "e9c37986337743f37fd14fe8737f246e97aec94b39d1b71e8a5973f72a9fc4f5",

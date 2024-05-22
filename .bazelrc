@@ -47,6 +47,7 @@ build --action_env CUDNN_INSTALL_PATH="/usr/local/cuda/"
 build --action_env TF_CUDNN_VERSION="8"
 build --action_env LIBRARY_PATH=/opt/conda310/lib
 build --define=grpc_no_ares=true
+build --define=use_experimental=true
 
 # 8.9 = L, 9.0 = H800
 build:cuda12 --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6,8.9,9.0"
