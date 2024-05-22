@@ -24,8 +24,8 @@ from maga_transformer.utils.model_weights_loader import get_model_weights_loader
 from maga_transformer.utils.database import CkptDatabase
 
 class QwenVLImageEmbedding(BaseImageEmbedding):
-    def __init__(self, config: Dict[str, Any]):
-        self.vit = QWen_VL_ViT(**config)
+    def __init__(self, config: Dict[str, Any], device="cuda:0"):
+        self.vit = QWen_VL_ViT(**config).to(device=device).half()
     
     def image_embedding(self, images: List[Any], device) -> torch.Tensor:
         images = self.vit.encode(images)

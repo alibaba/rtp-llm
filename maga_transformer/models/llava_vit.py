@@ -8,22 +8,77 @@ import torch.nn as nn
 from PIL import Image
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
+from maga_transformer.models.llava_utils import expand2square, process_anyres_image, unpad_image, get_anyres_image_grid_shape
 
 class LlavaImageEmbedding(BaseImageEmbedding):
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], device="cuda:0"):
         if config.get("vision_config", None) != None:
-            self.vision_tower = CLIPVisionModel(config["vision_config"]).to(device='cuda:0')
+            raise Exception("llava-hf style config is not implemented yet")
+            # self.vision_tower = CLIPVisionModel(config["vision_config"]).to(device='cuda:0')
         else:
-            self.vision_tower = self.build_vision_tower(config).to(device='cuda:0')
-        self.mm_projector = self.build_vision_projector(config).to(device='cuda:0')
+            self.vision_tower = self.build_vision_tower(config).to(device=device).half()
+        self.mm_projector = self.build_vision_projector(config).to(device=device).half()
+        if "unpad" in config.get("mm_patch_merge_type", "flat"):
+            self.image_newline = nn.Parameter(
+                torch.empty(config["hidden_size"]).to(device=device).half()
+            )
         self.config = config
     
     def image_embedding(self, images: List[Image.Image], device):
+        image_aspect_ratio = self.config["image_aspect_ratio"]
+        mm_patch_merge_type = self.config.get("mm_patch_merge_type", "flat")
+
         processed_images = process_images(images, 
-                                          self.config.get('image_aspect_ratio', None), 
+                                          image_aspect_ratio, 
                                           self.vision_tower.image_processor, 
-                                          device)
+                                          device,
+                                          image_grid_pinpoints = self.config.get("image_grid_pinpoints", []))
+        
+        processed_images = [image.unsqueeze(0) if image.ndim == 3 else image for image in processed_images]
+        split_sizes = [processed_image.shape[0] for processed_image in processed_images]
+        processed_images = torch.cat(processed_images)
         image_features = self.encode_images(processed_images)
+        image_features = list(torch.split(image_features, split_sizes, dim=0))
+
+        if mm_patch_merge_type == "flat":
+            image_features = [x.flatten(0, 1) for x in image_features]
+        elif mm_patch_merge_type.startswith("spatial"):
+            image_sizes = [image.size for image in images]
+            new_image_features = []
+            for image_idx, image_feature in enumerate(image_features):
+                if image_feature.shape[0] > 1:
+                    base_image_feature = image_feature[0]
+                    image_feature = image_feature[1:]
+                    height = width = self.vision_tower.num_patches_per_side
+                    assert height * width == base_image_feature.shape[0]
+                    if image_aspect_ratio == 'anyres':
+                        num_patch_width, num_patch_height = get_anyres_image_grid_shape(image_sizes[image_idx], self.config["image_grid_pinpoints"], self.vision_tower.config.image_size)
+                        image_feature = image_feature.view(num_patch_height, num_patch_width, height, width, -1)
+                    else:
+                        raise NotImplementedError
+                    if 'unpad' in mm_patch_merge_type:
+                        image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
+                        image_feature = image_feature.flatten(1, 2).flatten(2, 3)
+                        image_feature = unpad_image(image_feature, image_sizes[image_idx])
+                        image_feature = torch.cat((
+                            image_feature,
+                            self.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(image_feature.device)
+                        ), dim=-1)
+                        image_feature = image_feature.flatten(1, 2).transpose(0, 1)
+                    else:
+                        image_feature = image_feature.permute(0, 2, 1, 3, 4).contiguous()
+                        image_feature = image_feature.flatten(0, 3)
+                    image_feature = torch.cat((base_image_feature, image_feature), dim=0)
+                else:
+                    image_feature = image_feature[0]
+                    if 'unpad' in mm_patch_merge_type:
+                        image_feature = torch.cat((
+                            image_feature,
+                            self.image_newline[None].to(image_feature.device)
+                        ), dim=0)
+                new_image_features.append(image_feature)
+            image_features = new_image_features
+
         return image_features
     
     def encode_images(self, images):
@@ -136,6 +191,10 @@ class CLIPVisionTower(nn.Module):
         return self.config.hidden_size
 
     @property
+    def num_patches_per_side(self):
+        return self.config.image_size // self.config.patch_size
+
+    @property
     def num_patches(self):
         return (self.config.image_size // self.config.patch_size) ** 2
 
@@ -151,40 +210,25 @@ class IdentityMap(torch.nn.Module):
     def config(self):
         return {"mm_projector_type": 'identity'}
 
-# image preprocess
-def expand2square(pil_img, background_color):
-    width, height = pil_img.size
-    if width == height:
-        return pil_img
-    elif width > height:
-        result = Image.new(pil_img.mode, (width, width), background_color)
-        result.paste(pil_img, (0, (width - height) // 2))
-        return result
-    else:
-        result = Image.new(pil_img.mode, (height, height), background_color)
-        result.paste(pil_img, ((height - width) // 2, 0))
-        return result
-    
-def process_batch_images(batch_images, image_aspect_ratio, image_processor, device):
+def process_batch_images(batch_images, image_aspect_ratio, image_processor, device, **kwargs):
     batch_new_images = []
     for images in batch_images:
-        batch_new_images.append(process_images(images, image_aspect_ratio, image_processor, device))
+        batch_new_images.append(process_images(images, image_aspect_ratio, image_processor, device, **kwargs))
     return batch_new_images
 
-def process_images(images, image_aspect_ratio, image_processor, device):
+def process_images(images, image_aspect_ratio, image_processor, device, **kwargs):
     new_images = []
-    if image_aspect_ratio == 'pad':
+    if image_aspect_ratio == "pad":
         for image in images:
             image = expand2square(image, tuple(int(x*255) for x in image_processor.image_mean))
             image = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
             new_images.append(image)
+    elif image_aspect_ratio == "anyres":
+        for image in images:
+            image = process_anyres_image(image, image_processor, kwargs.get('image_grid_pinpoints', []))
+            new_images.append(image)
     else:
         return image_processor(images, return_tensors='pt')['pixel_values']
-    if all(x.shape == new_images[0].shape for x in new_images):
-        if len(new_images) == 0:
-            new_images = torch.tensor([])
-        else:
-            new_images = torch.stack(new_images, dim=0)
 
     if type(new_images) is list:
         new_images = [image.to(device, dtype=torch.float16) for image in new_images]

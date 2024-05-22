@@ -34,12 +34,16 @@ class BaseVitWeights:
         return self._ft_prefix
     
     def _get_vit_params(self, vit_part: Dict[str, Any], with_prefix: bool = False):
-        if len(vit_part) >= 2 or with_prefix:
-            for vit_name, vit in vit_part.items():
-                self.weight_names.extend([vit_name + '.' + w for w in vit.state_dict().keys()])
-        else:
-            for _, vit in vit_part.items():
-                self.weight_names.extend(list(vit.state_dict().keys()))
+        for vit_name, vit in vit_part.items():
+            if isinstance(vit, torch.nn.Module):
+                if len(vit_part) >= 2 or with_prefix:
+                    self.weight_names.extend([vit_name + '.' + w for w in vit.state_dict().keys()])
+                else:
+                    self.weight_names.extend(list(vit.state_dict().keys()))
+            elif isinstance(vit, torch.nn.Parameter):
+                self.weight_names.append(vit_name)
+            else:
+                raise Exception("Unknown vit part type")                
 
 class BaseMultiModalWeightInfo:
     def __init__(self, config: GptInitModelParameters):
