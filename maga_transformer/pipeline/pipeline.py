@@ -198,8 +198,12 @@ class Pipeline(object):
         # TODO(xinfei.sxf) stop words etc 直接带入raw query中去
 
         if self.model.is_multimodal() and len(images) > 0:
-            images = await self.download_engine.get(images)
-            token_ids, images = await self.model.expand_token_id(token_ids, images)
+            tasks = [asyncio.create_task(self.download_engine.get(images))]
+            await asyncio.wait(tasks)
+            images = tasks[0].result()
+            tasks = [asyncio.create_task(self.model.expand_token_id(token_ids, images))]
+            await asyncio.wait(tasks)
+            token_ids, images = tasks[0].result()
 
         token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
 

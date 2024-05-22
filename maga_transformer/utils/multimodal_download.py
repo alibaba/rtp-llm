@@ -29,16 +29,14 @@ class DownloadEngine:
     def __init__(self, thread_num: Optional[int] = None):
         self.executor = ThreadPoolExecutor(max_workers = thread_num)
     
-    def submit(self, urls: List[str]) -> List[Future[Image.Image]]:
-        return [self.executor.submit(download_image, url) for url in urls]
+    def submit(self, urls: List[str]):
+        return [asyncio.wrap_future(self.executor.submit(download_image, url)) for url in urls]
 
     @staticmethod
     async def get(futures: List[Future[Image.Image]], time_out: int = 10) -> List[Image.Image]:
         result = []
 
-        asyncio_futures = [asyncio.wrap_future(future) for future in futures]
-
-        for future in asyncio_futures:
+        for future in futures:
             try:
                 image = await asyncio.wait_for(future, timeout = time_out)
                 result.append(image.convert("RGB"))
