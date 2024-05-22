@@ -34,32 +34,17 @@ struct CudaGemmDispatch {
     enum GemmImplementType {
         cublas_basic_gemm,
         cublas_batch_gemm,
-        cublas_batch_gemm_float32,
         invalid,
     };
 
     static GemmImplementType dispatch(const GemmParams& params) {
         size_t dim = params.A.dim();
-        if (params.A.type() == DataType::TYPE_FP16 &&
-            params.B.type() == DataType::TYPE_FP16 &&
-            params.C == std::nullopt && dim == 2) {
+        if (params.C == std::nullopt && dim == 2) {
 
             return GemmImplementType::cublas_basic_gemm;
         }
 
-        else if (params.A.type() == DataType::TYPE_FP16 &&
-                 params.B.type() == DataType::TYPE_FP16 &&
-                 params.C == std::nullopt && dim > 2    &&
-                 params.compute_type == DataType::TYPE_FP32) {
-
-            return GemmImplementType::cublas_batch_gemm_float32;
-        }
-
-        else if (params.A.type() == DataType::TYPE_FP16 &&
-                 params.B.type() == DataType::TYPE_FP16 &&
-                 params.C == std::nullopt && dim > 2    &&
-                 (params.compute_type == DataType::TYPE_FP16 ||
-                 params.compute_type == DataType::TYPE_INVALID)) {
+        else if (params.C == std::nullopt && dim > 2) {
 
             return GemmImplementType::cublas_batch_gemm;
         }
@@ -176,6 +161,21 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     if (CudaGemmDispatch::dispatch(params) == GemmImplementType::invalid) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
+    auto A_data_type = dtypeConvert(arguments.ADtype);
+    auto B_data_type = dtypeConvert(arguments.BDtype);
+    auto D_data_type = dtypeConvert(arguments.DDtype);
+    if (params.compute_type == DataType::TYPE_INVALID) {
+        cublasMMWrapperPtr()->setGemmConfig(A_data_type,
+                                            B_data_type,
+                                            D_data_type,
+                                            CUDA_R_32F);
+    } else {
+        cublasMMWrapperPtr()->setGemmConfig(A_data_type,
+                                            B_data_type,
+                                            D_data_type,
+                                            dtypeConvert(params.compute_type));
+    }
+   
 
     auto output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
 
@@ -185,45 +185,20 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
         auto D = output->data();
         auto a_op = opConvert(params.transA);
         auto b_op = opConvert(params.transB);
-        cublas_mm_wrapper_->Gemm(a_op,
-                                 b_op,
+        cublas_mm_wrapper_->Gemm(b_op,
+                                 a_op,
                                  arguments.n,
                                  arguments.m,
                                  arguments.k,
                                  B,
-                                 arguments.n,
+                                 arguments.ldb,
                                  A,
-                                 arguments.k,
+                                 arguments.lda,
                                  D,
-                                 arguments.n);
+                                 arguments.ldc);
         sync_check_cuda_error();
         return move(output);
-    } else if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_batch_gemm) {
-
-        const auto A = params.A.data();
-        const auto B = params.B.data();
-        auto D = output->data();
-
-        auto a_op = opConvert(params.transA);
-        auto b_op = opConvert(params.transB);
-        cublas_mm_wrapper_->stridedBatchedGemm(b_op,
-                                               a_op,
-                                                arguments.n,
-                                                arguments.m,
-                                                arguments.k,
-                                                B,
-                                                arguments.ldb,
-                                                arguments.stride_b,
-                                                A,
-                                                arguments.lda,
-                                                arguments.stride_a,
-                                                D,
-                                                arguments.ldc,
-                                                arguments.stride_c,
-                                                arguments.batch_size);
-        sync_check_cuda_error();
-        return move(output);
-    } else if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_batch_gemm_float32) {
+    }  else if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_batch_gemm) {
         // convert buffers to ptrs
         const auto A = params.A.data();
         const auto B = params.B.data();

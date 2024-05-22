@@ -48,11 +48,17 @@ public:
                                        DataType type)
     {
         auto dtype = dataTypeToTorchType(type);
-
-        auto A = torch::rand({(int)b, (int)m1, (int)k1}, torch::Device(torch::kCPU)).to(dtype);
-        auto B = torch::rand({(int)b, (int)k2, (int)n2}, torch::Device(torch::kCPU)).to(dtype);
-        return GemmOpTestInput({A, B});
+        if (b == 1) {
+            auto A = torch::rand({(int)m1, (int)k1}, torch::Device(torch::kCPU)).to(dtype);
+            auto B = torch::rand({(int)k2, (int)n2}, torch::Device(torch::kCPU)).to(dtype);
+            return GemmOpTestInput({A, B});
+        } else {
+            auto A = torch::rand({(int)b, (int)m1, (int)k1}, torch::Device(torch::kCPU)).to(dtype);
+            auto B = torch::rand({(int)b, (int)k2, (int)n2}, torch::Device(torch::kCPU)).to(dtype);
+            return GemmOpTestInput({A, B});
+        }
     }
+
 
     GemmOpTestOutput BasicGemmOpRun(GemmOpTestInput& input)
     {
@@ -120,10 +126,10 @@ public:
         auto A = input.A;
         auto B = input.B;
         if (a_op == TransposeOperation::TRANSPOSE) {
-            A = A.transpose(1, 2);
+            A = A.transpose(A.dim()-2, A.dim()-1);
         }
         if (b_op == TransposeOperation::TRANSPOSE) {
-            B = B.transpose(1, 2);
+            B = B.transpose(B.dim()-2, B.dim()-1);
         }
         return GemmOpTestOutput(
             {torch::matmul(A.to(torch::kFloat), B.to(torch::kFloat))}
@@ -139,6 +145,21 @@ public:
         auto input = PrepareGemmOpInput(m, n, k, dtype);
         auto result = BasicGemmOpRun(input);
         auto result_ref = BasicGemmTorchRefRun(input);
+        assertTensorClose(result.C.to(result_ref.C.type()), result.C);
+
+    }
+
+    void TransposeGemmOpTest(TransposeOperation op_a,
+                             TransposeOperation op_b,
+                             size_t m1,
+                             size_t k1,
+                             size_t k2,
+                             size_t n2,
+                             DataType dtype) 
+    {
+        auto input = PrepareGemmOpInput(1, m1, k1, k2, n2, dtype);
+        auto result = BatchTransposeGemmOpRun(input, op_a, op_b);
+        auto result_ref = BatchTransposeGemmTorchRefRun(input, op_a, op_b);
         assertTensorClose(result.C.to(result_ref.C.type()), result.C);
 
     }
@@ -166,7 +187,7 @@ public:
     {
         auto input = PrepareGemmOpInput(b, m1, k1, k2, n2, dtype);
         auto result = BatchTransposeGemmOpRun(input, op_a, op_b);
-        auto result_ref = BatchTransposeGemmOpRun(input, op_a, op_b);
+        auto result_ref = BatchTransposeGemmTorchRefRun(input, op_a, op_b);
         assertTensorClose(result.C.to(result_ref.C.type()), result.C);
 
     }
@@ -183,7 +204,7 @@ public:
     {
         auto input = PrepareGemmOpInput(b, m1, k1, k2, n2, dtype);
         auto result = MixtureBatchTransposeGemmOpRun(input, op_a, op_b, type);
-        auto result_ref = BatchTransposeGemmOpRun(input, op_a, op_b);
+        auto result_ref = BatchTransposeGemmTorchRefRun(input, op_a, op_b);
         assertTensorClose(result.C.to(result_ref.C.type()), result.C);
 
     }
