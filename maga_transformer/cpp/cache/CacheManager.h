@@ -83,11 +83,12 @@ public:
     void insertResidentCache(const std::vector<void *>& pointer, const std::vector<int>& token_ids);
     void insertResidentCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
 
-    void setKVBlockValue(int index, ft::BufferPtr& k_value, ft::BufferPtr& v_value);
+    void setKVBlockValue(int kindex, int vindex, ft::BufferPtr& k_value, ft::BufferPtr& v_value);
     void blockCopy(int src_block_index, int dest_block_index);
 
     KVCacheBlockAddr convertIndexToAddr(const std::vector<int>& block_indices) const;
     std::vector<int> convertAddrToIndex(const std::vector<void*>& pointers) const;
+    std::vector<int> convertValueAddrToIndex(const std::vector<void*>& pointers) const;
 
     void reportMetricsLoop();
 private:

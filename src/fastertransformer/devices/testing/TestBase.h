@@ -236,15 +236,27 @@ protected:
             if (kvCache.dim() == 5) {
                 // [layernum, batch, 2, max_pad_seq, dim]
                 auto max_pad_seq = kvCache.sizes()[3];
-                auto kv_indexs = cache_manager_->convertAddrToIndex(batch_kv_cache.k_ptr[i][0]);
+                auto k_indexs = cache_manager_->convertAddrToIndex(batch_kv_cache.k_ptr[i][0]);
+                auto v_indexs = cache_manager_->convertValueAddrToIndex(batch_kv_cache.v_ptr[i][0]);
                 for (auto k = 0; k < (max_pad_seq / cache_config.seq_size_per_block); k++) {
+                    auto block_start = k * cache_config.seq_size_per_block;
+                    auto block_end   = block_start + cache_config.seq_size_per_block;
                     auto kblock = kvCache.index(
-                        {torch::indexing::Slice(), i, 0, k, torch::indexing::Slice()}).contiguous();
+                        {torch::indexing::Slice(),
+                         i,
+                         0,
+                         torch::indexing::Slice(block_start, block_end),
+                         torch::indexing::Slice()}).contiguous();
                     auto vblock = kvCache.index(
-                        {torch::indexing::Slice(), i, 1, k, torch::indexing::Slice()}).contiguous();
+                        {torch::indexing::Slice(),
+                         i,
+                         1,
+                         torch::indexing::Slice(block_start, block_end),
+                         torch::indexing::Slice()}).contiguous();
                     auto kblock_buffer = torchTensor2Buffer(kblock);
                     auto vblock_buffer = torchTensor2Buffer(vblock);
-                    cache_manager_->setKVBlockValue(kv_indexs[k],
+                    cache_manager_->setKVBlockValue(k_indexs[k],
+                                                    v_indexs[k],
                                                     kblock_buffer,
                                                     vblock_buffer);
                 }

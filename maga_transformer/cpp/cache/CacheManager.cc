@@ -324,7 +324,7 @@ KVCacheBlockAddr CacheManager::convertIndexToAddr(const std::vector<int>& block_
     return result;
 }
 
-// pointer里面的指针必须都在第一个layer内
+// The pointers inside must all be in the first layer and point to the k cache
 std::vector<int> CacheManager::convertAddrToIndex(const std::vector<void*>& pointers) const {
     std::vector<int> block_indices;
     auto             base_addr = kv_cache_.k_blocks->data();
@@ -337,24 +337,37 @@ std::vector<int> CacheManager::convertAddrToIndex(const std::vector<void*>& poin
     return block_indices;
 }
 
-void CacheManager::setKVBlockValue(int index, ft::BufferPtr& k_value, ft::BufferPtr& v_value) {
+
+std::vector<int> CacheManager::convertValueAddrToIndex(const std::vector<void*>& pointers) const {
+    std::vector<int> block_indices;
+    auto             base_addr = kv_cache_.v_blocks->data();
+    for (auto& pointer : pointers) {
+        auto offset       = (uint64_t)pointer - (uint64_t)base_addr;
+        auto block_index  = offset / config_.kv_block_stride;
+        block_indices.push_back(block_index);
+    }
+
+    return block_indices;
+}
+
+void CacheManager::setKVBlockValue(int kindex, int vindex, ft::BufferPtr& k_value, ft::BufferPtr& v_value) {
     auto layer_stride = block_nums_ * config_.kv_block_stride;
     for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
         // k
-        auto kdst = kv_cache_.k_blocks->data() + layer_num * layer_stride + index * config_.kv_block_stride;
+        auto kdst = kv_cache_.k_blocks->data() + layer_num * layer_stride + kindex * config_.kv_block_stride;
         auto ksrc = k_value->data() + layer_num * config_.kv_block_stride;
         auto kdst_buffer = Buffer(
-            kv_cache_.k_blocks->where(), k_value->type(), {config_.kv_block_stride}, kdst);
+            kv_cache_.k_blocks->where(), k_value->type(), {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, kdst);
         auto ksrc_buffer = Buffer(
-            k_value->where(), k_value->type(), {config_.kv_block_stride}, ksrc);
+            k_value->where(), k_value->type(), {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, ksrc);
         device_->copy({kdst_buffer, ksrc_buffer});
         // v
-        auto vdst = kv_cache_.v_blocks->data() + layer_num * layer_stride + index * config_.kv_block_stride;
+        auto vdst = kv_cache_.v_blocks->data() + layer_num * layer_stride + vindex * config_.kv_block_stride;
         auto vsrc = v_value->data() + layer_num * config_.kv_block_stride;
         auto vdst_buffer = Buffer(
-            kv_cache_.v_blocks->where(), v_value->type(), {config_.kv_block_stride}, vdst);
+            kv_cache_.v_blocks->where(), v_value->type(), {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, vdst);
         auto vsrc_buffer = Buffer(
-            v_value->where(), v_value->type(), {config_.kv_block_stride}, vsrc);
+            v_value->where(), v_value->type(), {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, vsrc);
         device_->copy({vdst_buffer, vsrc_buffer});
     }
 }
