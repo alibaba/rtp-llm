@@ -1,4 +1,4 @@
-load("//:def.bzl", "cuda_copts")
+load("//:def.bzl", "cuda_copts", "copts")
 load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
 
 cutlass_kernels_interface()
@@ -115,4 +115,16 @@ cc_test(
     visibility = ["//visibility:public"],
     linkopts = test_linkopts,
     linkstatic = 1,
+)
+
+cc_test(
+    name = "memory_test",
+    srcs = [
+        "MemoryTest.cc",
+    ],
+    deps = [
+        "//src/fastertransformer/core:allocator",
+        "@com_google_googletest//:gtest"
+    ],
+    copts = copts(),
 )

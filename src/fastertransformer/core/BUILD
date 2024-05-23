@@ -24,6 +24,21 @@ cc_library(
 )
 
 cc_library(
+    name = "memory_tracker",
+    srcs = [
+        "MemoryTracker.cc"
+    ],
+    hdrs = [
+        "MemoryTracker.h"
+    ],
+    copts = copts(),
+    deps = [
+        "//src/fastertransformer/utils:logger"
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "allocator",
     srcs = [
         "allocator.cc"
@@ -34,6 +49,7 @@ cc_library(
     copts = copts(),
     deps = [
         ":types",
+        ":memory_tracker",
         "//src/fastertransformer/utils:logger"
     ],
     include_prefix = "src",
