@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "maga_transformer/cpp/utils/StringUtil.h"
+
 namespace rtp_llm {
 
 // TODO: complete params.
@@ -47,6 +49,7 @@ public:
     bool                return_hidden_states;
     bool                is_streaming;
     int                 timeout_ms;
+    std::vector<std::vector<int>> stop_words_list;
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -55,7 +58,10 @@ public:
                      << ", min_new_tokens:" << min_new_tokens << ", num_beams:" << num_beams
                      << ", num_return_sequences:" << num_return_sequences << ", calculate_loss:" << calculate_loss
                      << ", return_logits:" << return_logits << ", return_incremental: " << return_incremental
-                     << ", return_hidden_states:" << return_hidden_states << "}";
+                     << ", return_hidden_states:" << return_hidden_states
+                     << ", is_streaming:" << is_streaming
+                     << ", timeout_ms:" << timeout_ms
+                     << ", stop_words_list:" << vectorsToString(stop_words_list) << "}";
         return debug_string.str();
     }
 };

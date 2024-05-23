@@ -31,7 +31,15 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->mutable_top_p()->set_value(0.6);
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
+    for (int i = 0; i < 2; ++i) {
+        auto* stop_words = generate_config_pb->mutable_stop_words_list()->add_rows();
+        for (int j = 0; j < 3; ++j) {
+            stop_words->add_values(i * 3 + j);
+        }
+    }
+
     auto query     = QueryConverter::transQuery(resource_context, &input);
+
     auto input_ids = query->generateInput()->input_ids.get();
     EXPECT_EQ(input_ids->size(), 2);
     ASSERT_EQ(*(int*)(input_ids->data()), 0);
@@ -46,6 +54,11 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_EQ(generate_config->calculate_loss, 1);
     ASSERT_TRUE(generate_config->return_hidden_states);
     ASSERT_FALSE(generate_config->return_logits);
+    ASSERT_EQ(generate_config->stop_words_list.size(), 2);
+    vector<int> stop_words_1{0, 1, 2};
+    vector<int> stop_words_2{3, 4, 5};
+    ASSERT_EQ(generate_config->stop_words_list[0], stop_words_1);
+    ASSERT_EQ(generate_config->stop_words_list[1], stop_words_2);
 }
 
 TEST_F(QueryConverterTest, testTransOutput) {
@@ -73,6 +86,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
 
     GenerateOutputsPB outputs_pb;
     QueryConverter::transResponse(&outputs_pb, &outputs);
+
     auto& output_pb = outputs_pb.generate_outputs(0);
     auto aux_info_pb = output_pb.aux_info();
     EXPECT_EQ(aux_info_pb.cost_time_us(), 1000);

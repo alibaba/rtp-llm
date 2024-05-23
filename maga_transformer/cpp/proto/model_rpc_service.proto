@@ -18,6 +18,14 @@ message TensorPB {
     bytes bf16_data = 6;
 }
 
+message IntVector {
+  repeated int32 values = 1;
+}
+
+message IntMatrix {
+  repeated IntVector rows = 1;
+}
+
 message GenerateConfigPB {
     int32 max_new_tokens = 1;
     int32 num_beams = 2;
@@ -39,6 +47,7 @@ message GenerateConfigPB {
     bool return_hidden_states = 17;
     bool return_logits = 18;
     bool is_streaming = 19;
+    IntMatrix stop_words_list = 20;
 }
 
 message GenerateInputPB {

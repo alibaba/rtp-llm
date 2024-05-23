@@ -53,6 +53,10 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_incremental = input_py.generate_config.return_incremental
     generate_config_pb.return_hidden_states = input_py.generate_config.return_hidden_states
     generate_config_pb.is_streaming = input_py.generate_config.is_streaming
+    
+    for i in range(len(input_py.generate_config.stop_words_list)):
+        stop_words = generate_config_pb.stop_words_list.rows.add()
+        stop_words.values.extend(input_py.generate_config.stop_words_list[i])
 
     input_pb.prefix_length = input_py.prefix_length
     return input_pb
@@ -71,7 +75,7 @@ def trans_tensor(t: TensorPB):
         raise Exception("unkown error type")
     
 
-def trans_output(outputs_pb: GenerateOutputsPB):
+def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB):
     logging.debug("outputs_pb = ", outputs_pb)
     outputs_py = GenerateOutputs()
     for output_pb in outputs_pb.generate_outputs:
@@ -87,6 +91,7 @@ def trans_output(outputs_pb: GenerateOutputsPB):
         if output_pb.aux_info.HasField('cum_log_probs'):
             output_py.aux_info.cum_log_probs = trans_tensor(output_pb.aux_info.cum_log_probs).tolist()
         output_py.output_ids = trans_tensor(output_pb.output_ids)
+        output_py.input_ids = input_py.token_ids.reshape(1, -1)
         if output_pb.HasField('hidden_states'):
             output_py.hidden_states = trans_tensor(output_pb.hidden_states)
         if output_pb.HasField('loss'):
@@ -117,7 +122,7 @@ class ModelRpcClient(object):
                 count = 0
                 async for response in response_iterator.__aiter__():
                     count += 1
-                    yield trans_output(response)
+                    yield trans_output(input, response)
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()

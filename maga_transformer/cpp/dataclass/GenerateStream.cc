@@ -66,11 +66,14 @@ bool GenerateStream::matchEosToken() const {
 }
 
 bool GenerateStream::matchStopWordsList() const {
+    if (seq_length_ == inputLength()) {
+        return false;
+    }
     int* token_ids_ = (int*)complete_token_ids_->data();
-    auto& stop_words_list = special_tokens_.stop_words_list_;
-    for (auto& stop_words: stop_words_list) {
+    // stop_words_list in generate_config contains stop_words_list in special_tokens
+    for (auto& stop_words: generate_input_->generate_config->stop_words_list) {
         bool match = true;
-        size_t begin_index = seq_length_ - 1 - stop_words.size();
+        size_t begin_index = seq_length_ - stop_words.size();
         for (auto& token: stop_words) {
             if (token != token_ids_[begin_index++]) {
                 match = false;
@@ -195,7 +198,7 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
     }
 
     if (isStreaming() || finished) {
-        updateOutput(finished, hidden_states, logits, std::move(cum_log_probs));
+        updateOutput(finished, hidden_states, logits, cum_log_probs);
     }
 }
 
@@ -213,6 +216,7 @@ void GenerateStream::updateOutput(bool finished,
         generate_output.aux_info.iter_count = iter_count_;
         generate_output.output_ids =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {1lu, output_len}, ft::AllocationType::HOST}, {});
+        // TODO(xinfei.sxf) optimize this copy : only copy last token
         memcpy(generate_output.output_ids->data(), complete_token_ids_->view(i, 1).dataWithOffset<int32_t>(inputLength()), sizeof(int32_t) * output_len);
         if (generate_input_->generate_config->return_logits) {
             if (!generate_input_->generate_config->select_tokens_id.empty()) {
@@ -224,6 +228,7 @@ void GenerateStream::updateOutput(bool finished,
                     logits, select_logits, generate_input_->generate_config->select_tokens_id);
                 generate_output.logits = select_logits;
             } else {
+                // TODO(xinfei.sxf) split logits/hidden states to diffent sub status, and not set logits in middle step for streaming
                 generate_output.logits = device_->clone({*logits, ft::AllocationType::HOST});
             }
         }
@@ -239,6 +244,7 @@ void GenerateStream::updateOutput(bool finished,
             generate_output.loss = std::move(x);
         }
 
+        // TODO(xinfei.sxf) split finished for different sub status
         generate_output.finished              = finished;
         generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
         generate_output.aux_info.input_len    = generate_input_->promptLength();

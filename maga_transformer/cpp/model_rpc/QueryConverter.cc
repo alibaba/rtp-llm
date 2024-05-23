@@ -23,6 +23,14 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->return_hidden_states           = config_proto->return_hidden_states();
     generate_config->calculate_loss                 = config_proto->calculate_loss();
     generate_config->is_streaming                   = config_proto->is_streaming();
+    
+    for (const auto& stop_words_proto : config_proto->stop_words_list().rows()) {
+        std::vector<int> stop_words;
+        for (const int value : stop_words_proto.values()) {
+            stop_words.push_back(value);
+        }
+        generate_config->stop_words_list.push_back(stop_words);
+    }
 
     TRANS_OPTIONAL(top_k);
     TRANS_OPTIONAL(top_p);

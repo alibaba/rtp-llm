@@ -117,6 +117,7 @@ class CustomChatRenderer():
 
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
 
+        generate_config.is_streaming = True
         output_generator: AsyncGenerator[GenerateOutput, None] = model.enqueue(
             GenerateInput(
                 token_ids=input_id_tensor,
@@ -180,7 +181,7 @@ class CustomChatRenderer():
             finish_reason = self._check_finish_reason(output_ids, input_token_length)
             output_ids = self._remove_stop_word_ids(output_ids)
             # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-            decoded_prev_token = self.tokenizer.decode(responded_output_ids[-last_token_length:])
+            decoded_ev_token = self.tokenizer.decode(responded_output_ids[-last_token_length:])
             tokens_to_decode = responded_output_ids[-last_token_length:] + output_ids[len(responded_output_ids):]
             decoded_string = self.tokenizer.decode(tokens_to_decode)
             if (len(decoded_string)) and (u'\uFFFD' == decoded_string[-1]):

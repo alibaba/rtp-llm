@@ -377,6 +377,14 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
                     model_output->logits->data());
 
         parallel_logits_wrapper_->forward(logits, last_hidden_states);
+
+        print_bsd(-1,
+                "last_hidden_states",
+                last_hidden_states.getPtr<T>(),
+                total_batch_size,
+                1,
+                params_.hidden_size_);
+
         print_bsd(-1,
                 "logits",
                 logits.getPtr<float>(),

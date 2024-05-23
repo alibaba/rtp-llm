@@ -7,19 +7,9 @@
 
 #include "maga_transformer/cpp/cache/BlockCache.h"
 #include "maga_transformer/cpp/utils/LRUCache.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
 
 namespace rtp_llm {
-
-std::string vectorToString(const std::vector<int>& vec) {
-    std::string result;
-    for (const auto& value : vec) {
-        result += std::to_string(value) + ",";  // Using comma as a delimiter
-    }
-    if (!result.empty()) {
-        result.pop_back();  // Remove the trailing delimiter
-    }
-    return result;
-}
 
 // Function to calculate a simple hash of a vector of integers
 std::size_t hashVector(const std::vector<int>& vec) {
