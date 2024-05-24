@@ -61,7 +61,7 @@ class ModelDict:
         if config.get('architectures', []):
             # hack for ChatGLMModel: chatglm and chatglm2 use same architecture
             architecture = config.get('architectures')[0]
-            if architecture == 'ChatGLMModel':
+            if architecture in ['ChatGLMModel', 'ChatGLMForConditionalGeneration']:
                 if not config.get('multi_query_attention', False) or 'chatglm-6b' in config.get('_name_or_path', ''):
                     return 'chatglm'
                 elif 'chatglm3' in config.get('_name_or_path', ''):
