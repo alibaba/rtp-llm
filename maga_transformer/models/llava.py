@@ -196,7 +196,7 @@ class Llava(Llama, MultiModalMixin):
         return MultiModalMixin.input_word_embedding(self, inputs, images)
 
     @torch.no_grad()
-    def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+    def expand_token_id(self, token_ids: List[int], images: List[torch.Tensor]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
         assert self.config.vit_related_params.image_expand_token is not None
         image_token_index = self.config.vit_related_params.vit_special_token_ids["image_token_index"]
         if token_ids.count(image_token_index) != len(images):
@@ -204,8 +204,8 @@ class Llava(Llama, MultiModalMixin):
 
         image_expand_token: int = self.config.vit_related_params.image_expand_token
         image_num = len(images)
-        image_features = self.visual.image_embedding(images, self.device)
 
+        image_features = images
         total_image_tokens = 0
         if isinstance(image_features, torch.Tensor):
             total_image_tokens += image_features.shape[0] * image_features.shape[1]

@@ -22,7 +22,7 @@ from maga_transformer.async_decoder_engine.generate_stream import GenerateInput
 from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slice_list, truncate_response_with_stop_words, match_stop_words
 from maga_transformer.utils.tokenizer_utils import DecodingState
 from maga_transformer.utils.util import WEIGHT_TYPE
-from maga_transformer.utils.multimodal_download import DownloadEngine
+from maga_transformer.utils.vit_process_engine import VitEngine
 
 class Pipeline(object):
     def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[PreTrainedTokenizerBase]):
@@ -31,7 +31,7 @@ class Pipeline(object):
         self._special_tokens: int = self.model.config.special_tokens
         self._img_token: str = self.model.config.vit_related_params.vit_special_tokens.get('default_image_token', '')
         self.piple_funcs: PipelineCustomFunc = get_piple_custom_func(self.model)
-        self.download_engine: DownloadEngine = DownloadEngine()
+        self.vit_engine: VitEngine = VitEngine()
 
     def stop(self):
         if isinstance(self.model, AsyncModel):
@@ -131,7 +131,7 @@ class Pipeline(object):
             prompt, images = self.piple_funcs.multimodal_modify_prompt_func(prompt, images=images, img_token=self._img_token,
                                                                             generate_config=generate_config.model_dump(), **kwargs)
             if len(images) > 0:
-                images = self.download_engine.submit(images)
+                images = self.vit_engine.submit(images, self.model.model)
 
         token_ids = self.piple_funcs.process_encode_func(prompt,
                                              generate_config=generate_config.model_dump(),
@@ -198,7 +198,7 @@ class Pipeline(object):
         # TODO(xinfei.sxf) stop words etc 直接带入raw query中去
 
         if self.model.is_multimodal() and len(images) > 0:
-            tasks = [asyncio.create_task(self.download_engine.get(images))]
+            tasks = [asyncio.create_task(self.vit_engine.get(images))]
             await asyncio.wait(tasks)
             images = tasks[0].result()
             tasks = [asyncio.create_task(self.model.expand_token_id(token_ids, images))]

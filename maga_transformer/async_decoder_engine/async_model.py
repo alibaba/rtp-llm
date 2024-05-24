@@ -21,7 +21,6 @@ class AsyncModel:
         self.model = model
         self.sp_model = sp_model
         self.config = model.config
-        self.vit_expand_token_id_lock = asyncio.Lock()
 
         assert self.config.max_seq_len > 0
         self.tokenizer = model.tokenizer        
@@ -37,8 +36,7 @@ class AsyncModel:
 
     async def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
         assert self.is_multimodal()
-        async with self.vit_expand_token_id_lock:
-            return self.model.expand_token_id(token_ids, images)
+        return self.model.expand_token_id(token_ids, images)
 
     @property
     def default_generate_config(self) -> GenerateConfig:

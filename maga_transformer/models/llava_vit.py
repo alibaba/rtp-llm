@@ -24,6 +24,7 @@ class LlavaImageEmbedding(BaseImageEmbedding):
             )
         self.config = config
     
+    @torch.no_grad()
     def image_embedding(self, images: List[Image.Image], device):
         image_aspect_ratio = self.config["image_aspect_ratio"]
         mm_patch_merge_type = self.config.get("mm_patch_merge_type", "flat")

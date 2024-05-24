@@ -22,13 +22,13 @@ from maga_transformer.openai.renderers.custom_renderer import RendererParams, \
 from maga_transformer.openai.renderer_factory import ChatRendererFactory
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.utils.multimodal_download import DownloadEngine
+from maga_transformer.utils.vit_process_engine import VitEngine
 
 class OpenaiEndopoint():
     def __init__(self, model: Union[AsyncModel, BaseModel]):
         self.model = model
         self.max_seq_len = self.model.config.max_seq_len
-        self.download_engine = DownloadEngine()
+        self.vit_engine = VitEngine()
 
         tokenizer = self.model.tokenizer
         if (tokenizer == None):
@@ -195,7 +195,7 @@ class OpenaiEndopoint():
         generate_config = self._extract_generation_config(chat_request)
 
         if self.model.is_multimodal():
-            images = self.download_engine.submit(input_images)
+            images = self.vit_engine.submit(input_images, self.model.model)
         else:
             images = []
 

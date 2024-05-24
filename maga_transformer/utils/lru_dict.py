@@ -3,9 +3,9 @@ from typing import Any, Iterator, Tuple
 
 # lru包是cpython.so，代码提示和跳转会有问题，所以包一层增加可读性
 class LruDict(object):
-    def __init__(self):
+    def __init__(self, size = 100000):
         # lru_cache的大小不重要
-        self._dict = LRU(100000)
+        self._dict = LRU(size)
 
     def __getitem__(self, key: str) -> Any:
         return self._dict[key]
