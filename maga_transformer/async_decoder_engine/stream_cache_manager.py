@@ -61,11 +61,12 @@ class StreamCacheManager:
                         for i in range(len(start_token_list)):
                             if reuse_length > start_token_list[i] and reuse_length <= end_token_list[i]:
                                 reuse_length = start_token_list[i]
+                                break
                     else:
                         raise Exception(f"unclosed image tag pair in {input_token_ids}")
                 else:
                     block_indice, reuse_length = self.cache_manager_.malloc_with_cache(
-                        block_num, stream.complete_token_ids[0].numpy().tolist())
+                        block_num, input_token_ids)
             else:
                 block_indice, reuse_length = self.cache_manager_.malloc_with_cache(
                     block_num, stream.complete_token_ids[0].numpy().tolist())
