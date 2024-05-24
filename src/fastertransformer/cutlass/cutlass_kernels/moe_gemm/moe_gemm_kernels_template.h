@@ -391,22 +391,31 @@ void MoeGemmRunner<T, WeightType>::runGemm<EpilogueTag>(const T* A, const Weight
     auto chosen_conf = this->best_config_;
     if (!chosen_conf)
     {
-        auto candidate_configs = getConfigs();
-        std::vector<int> occupancies(candidate_configs.size());
-
-        for (size_t ii = 0; ii < candidate_configs.size(); ++ii)
-        {
-            dispatchToArch<EpilogueTag>(A, B, weight_scales, biases, C, total_rows_before_expert, total_rows, gemm_n,
-                gemm_k, num_experts, candidate_configs[ii], stream, &occupancies[ii]);
-        }
-
         static constexpr int workspace_bytes = 0; // No workspace for MoE GEMMs.
         static constexpr int split_k_limit = 1;   // MoE GEMM does not support split-k.
-
         static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
-        chosen_conf = kernels::cutlass_kernels::estimate_best_config_from_occupancies(candidate_configs, occupancies,
-            total_rows, gemm_n, gemm_k, num_experts, split_k_limit, workspace_bytes, multi_processor_count_,
-            is_weight_only);
+
+        auto candidate_configs = getConfigs();
+        std::vector<tkc::CutlassGemmConfig> valid_configs;
+        for (int i = 0; i < candidate_configs.size(); i++)
+        {
+            if (tensorrt_llm::kernels::cutlass_kernels::is_valid_split_k_factor(total_rows, gemm_n, gemm_k, candidate_configs[i],
+                    candidate_configs[i].split_k_factor, workspace_bytes, is_weight_only))
+            {
+                valid_configs.push_back(candidate_configs[i]);
+            }
+        }
+        std::vector<int> occupancies(valid_configs.size());
+
+        for (size_t ii = 0; ii < valid_configs.size(); ++ii)
+        {
+            dispatchToArch<EpilogueTag>(A, B, weight_scales, biases, C, total_rows_before_expert, total_rows, gemm_n,
+                gemm_k, num_experts, valid_configs[ii], stream, &occupancies[ii]);
+        }
+
+        chosen_conf
+            = kernels::cutlass_kernels::estimate_best_config_from_occupancies(valid_configs, occupancies, total_rows,
+                gemm_n, gemm_k, num_experts, split_k_limit, workspace_bytes, multi_processor_count_, is_weight_only);
     }
     assert(chosen_conf);
     dispatchToArch<EpilogueTag>(A, B, weight_scales, biases, C, total_rows_before_expert, total_rows, gemm_n, gemm_k,

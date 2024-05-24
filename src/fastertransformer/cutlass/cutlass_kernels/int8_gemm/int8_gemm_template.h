@@ -383,26 +383,27 @@ tkc::CutlassGemmConfig CutlassInt8GemmRunner<T>::getChosenConfig(const void* A, 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::vector<tkc::CutlassGemmConfig> candidate_configs = getConfigs();
-    std::vector<int>               occupancies(candidate_configs.size());
+    std::vector<tkc::CutlassGemmConfig> valid_configs;
+    for (int i = 0; i < candidate_configs.size(); i++)
+    {
+        if (is_valid_split_k_factor(
+                m, n, k, candidate_configs[i], candidate_configs[i].split_k_factor, workspaceBytes, false))
+        {
+            valid_configs.push_back(candidate_configs[i]);
+        }
+    }
+    std::vector<int> occupancies(valid_configs.size());
 
-    for (size_t ii = 0; ii < candidate_configs.size(); ++ii)
+    for (size_t ii = 0; ii < valid_configs.size(); ++ii)
     {
         dispatchToArch(reinterpret_cast<const int8_t*>(A), reinterpret_cast<const int8_t*>(B), quantOption, alphaCol,
-            alphaRow, reinterpret_cast<T*>(C), m, n, k, candidate_configs[ii], workspacePtr, workspaceBytes, stream,
+            alphaRow, reinterpret_cast<T*>(C), m, n, k, valid_configs[ii], workspacePtr, workspaceBytes, stream,
             &(occupancies[ii]));
     }
     static constexpr int num_experts = 1;
     static constexpr int is_weight_only = false;
-    tkc::CutlassGemmConfig chosen_config  = estimate_best_config_from_occupancies(candidate_configs,
-                                                                                 occupancies,
-                                                                                 m,
-                                                                                 n,
-                                                                                 k,
-                                                                                 num_experts,
-                                                                                 SPLIT_K_LIMIT,
-                                                                                 workspaceBytes,
-                                                                                 mMultiProcessorCount,
-                                                                                 is_weight_only);
+    tkc::CutlassGemmConfig chosen_config = estimate_best_config_from_occupancies(valid_configs, occupancies, m, n, k,
+        num_experts, SPLIT_K_LIMIT, workspaceBytes, mMultiProcessorCount, is_weight_only);
     return chosen_config;
 }
 

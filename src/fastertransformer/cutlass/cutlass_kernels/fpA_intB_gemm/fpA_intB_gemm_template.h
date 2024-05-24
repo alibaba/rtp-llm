@@ -451,39 +451,30 @@ CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChosenConfig(const void* A,
 {
     // Standard GEMM, so 1 "expert". We use the same function for MoE and regular FFN.
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    static constexpr bool          is_weight_only    = !std::is_same<T, WeightType>::value;
+    static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
 
-    std::vector<tkc::CutlassGemmConfig> candidate_configs = get_candidate_configs(sm_, is_weight_only, false, false, SPLIT_K_LIMIT);
-    std::vector<int>               occupancies(candidate_configs.size());
-
-    for (size_t ii = 0; ii < candidate_configs.size(); ++ii) {
-        dispatch_to_arch<tkc::EpilogueOpDefault>((const T*)A,
-                                                 (const WeightType*)B,
-                                                 (const T*)weight_scales,
-                                                 (const T*)weight_zero_points,
-                                                 (const T*)biases,
-                                                 (T*)C,
-                                                 m,
-                                                 n,
-                                                 k,
-                                                 group_size,
-                                                 candidate_configs[ii],
-                                                 workspace_ptr,
-                                                 workspace_bytes,
-                                                 stream,
-                                                 &(occupancies[ii]));
+    std::vector<tkc::CutlassGemmConfig> candidate_configs
+        = get_candidate_configs(sm_, is_weight_only, false, false, SPLIT_K_LIMIT);
+    std::vector<tkc::CutlassGemmConfig> valid_configs;
+    for (int i = 0; i < candidate_configs.size(); i++)
+    {
+        if (is_valid_split_k_factor(
+                m, n, k, candidate_configs[i], candidate_configs[i].split_k_factor, workspace_bytes, is_weight_only))
+        {
+            valid_configs.push_back(candidate_configs[i]);
+        }
     }
-    static constexpr int   num_experts = 1;
-    tkc::CutlassGemmConfig chosen_config  = estimate_best_config_from_occupancies(candidate_configs,
-                                                                                 occupancies,
-                                                                                 m,
-                                                                                 n,
-                                                                                 k,
-                                                                                 num_experts,
-                                                                                 SPLIT_K_LIMIT,
-                                                                                 workspace_bytes,
-                                                                                 multi_processor_count_,
-                                                                                 is_weight_only);
+    std::vector<int> occupancies(valid_configs.size());
+
+    for (size_t ii = 0; ii < valid_configs.size(); ++ii)
+    {
+        dispatch_to_arch<tkc::EpilogueOpDefault>((const T*) A, (const WeightType*) B, (const T*) weight_scales,
+            (const T*) weight_zero_points, (const T*) biases, (T*) C, m, n, k, group_size, valid_configs[ii],
+            workspace_ptr, workspace_bytes, stream, &(occupancies[ii]));
+    }
+    static constexpr int num_experts = 1;
+    tkc::CutlassGemmConfig chosen_config = estimate_best_config_from_occupancies(valid_configs, occupancies, m, n, k,
+        num_experts, SPLIT_K_LIMIT, workspace_bytes, multi_processor_count_, is_weight_only);
     return chosen_config;
 }
 
