@@ -47,8 +47,28 @@ class StreamCacheManager:
         if self.ptuning_ and isinstance(self.ptuning_, Ptuning):
             block_indice, reuse_length = self.ptuning_.get_block_indice(block_num, stream.generate_config)
         elif self.reuse_cache_:
-            block_indice, reuse_length = self.cache_manager_.malloc_with_cache(
-                block_num, stream.complete_token_ids[0].numpy().tolist())
+            if len(self.config_.vit_related_params.vit_special_token_ids) > 0:
+                # for qwen_vl; todo llava
+                img_start_id = self.config_.vit_related_params.vit_special_token_ids.get('image_start_id', -1)
+                img_end_id = self.config_.vit_related_params.vit_special_token_ids.get('image_end_id', -1)
+                input_token_ids = stream.complete_token_ids[0].numpy().tolist()
+                if img_start_id > 0 and img_end_id > 0:
+                    start_token_list = [index for index, id in enumerate(input_token_ids) if id == img_start_id]
+                    end_token_list = [index for index, id in enumerate(input_token_ids) if id == img_end_id]
+                    if len(start_token_list) == len(end_token_list) and all([idx < idy for idx, idy in zip(start_token_list, end_token_list)]):
+                        block_indice, reuse_length = self.cache_manager_.malloc_with_cache(
+                            block_num, input_token_ids)
+                        for i in range(len(start_token_list)):
+                            if reuse_length > start_token_list[i] and reuse_length <= end_token_list[i]:
+                                reuse_length = start_token_list[i]
+                    else:
+                        raise Exception(f"unclosed image tag pair in {input_token_ids}")
+                else:
+                    block_indice, reuse_length = self.cache_manager_.malloc_with_cache(
+                        block_num, stream.complete_token_ids[0].numpy().tolist())
+            else:
+                block_indice, reuse_length = self.cache_manager_.malloc_with_cache(
+                    block_num, stream.complete_token_ids[0].numpy().tolist())
         else:
             block_indice = self.cache_manager_.malloc(block_num)
             reuse_length = 0

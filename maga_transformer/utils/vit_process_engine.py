@@ -21,7 +21,6 @@ else:
     }
 
 def process_image(url: str, embedding_func):
-    import time
     if url in image_cache:
         return image_cache[url]
     try:
@@ -40,7 +39,7 @@ def process_image(url: str, embedding_func):
 
 class VitEngine:
     def __init__(self):
-        vit_concurrency = int(os.environ.get('VIT_CONCURRENCY', 0))
+        vit_concurrency = int(os.environ.get('VIT_CONCURRENCY', '0'))
         if vit_concurrency != 0:
             self.executor = ThreadPoolExecutor(max_workers = vit_concurrency)
         else:
