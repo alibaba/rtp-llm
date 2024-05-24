@@ -255,42 +255,30 @@ CutlassGemmConfig estimate_best_config_from_occupancies(const std::vector<Cutlas
         const int ctas_in_m_dim = (m + tile_config.block_m - 1) / tile_config.block_m;
         const int ctas_in_n_dim = (n + tile_config.block_n - 1) / tile_config.block_n;
 
-        for (int split_k_factor = 1; split_k_factor <= max_split_k; ++split_k_factor)
+        const int ctas_per_wave = occupancy * multi_processor_count;
+        const int ctas_for_problem = ctas_in_m_dim * ctas_in_n_dim * candidate_config.split_k_factor;
+
+        const int num_waves_total = (ctas_for_problem + ctas_per_wave - 1) / ctas_per_wave;
+        const float num_waves_fractional = ctas_for_problem / float(ctas_per_wave);
+        const float current_score = float(num_waves_total) - num_waves_fractional;
+
+        const float score_slack = 0.1f;
+        if (current_score < config_score
+            || ((config_waves > num_waves_total) && (current_score < config_score + score_slack)))
         {
-            if (is_valid_split_k_factor(m, n, k, candidate_config, split_k_factor, workspace_bytes, is_weight_only))
-            {
-                const int ctas_per_wave = occupancy * multi_processor_count;
-                const int ctas_for_problem = ctas_in_m_dim * ctas_in_n_dim * split_k_factor;
-
-                const int num_waves_total = (ctas_for_problem + ctas_per_wave - 1) / ctas_per_wave;
-                const float num_waves_fractional = ctas_for_problem / float(ctas_per_wave);
-                const float current_score = float(num_waves_total) - num_waves_fractional;
-
-                const float score_slack = 0.1f;
-                if (current_score < config_score
-                    || ((config_waves > num_waves_total) && (current_score < config_score + score_slack)))
-                {
-                    config_score = current_score;
-                    config_waves = num_waves_total;
-                    SplitKStyle split_style
-                        = split_k_factor > 1 ? SplitKStyle::SPLIT_K_SERIAL : SplitKStyle::NO_SPLIT_K;
-                    best_config = CutlassGemmConfig{
-                        candidate_config.tile_config, split_style, split_k_factor, candidate_config.stages};
-                    current_m_tile = tile_config.block_m;
-                }
-                else if (current_score == config_score
-                    && (best_config.stages < candidate_config.stages || split_k_factor < best_config.split_k_factor
-                        || current_m_tile < tile_config.block_m))
-                {
-                    // Prefer deeper pipeline or smaller split-k
-                    SplitKStyle split_style
-                        = split_k_factor > 1 ? SplitKStyle::SPLIT_K_SERIAL : SplitKStyle::NO_SPLIT_K;
-                    best_config = CutlassGemmConfig{
-                        candidate_config.tile_config, split_style, split_k_factor, candidate_config.stages};
-                    current_m_tile = tile_config.block_m;
-                    config_waves = num_waves_total;
-                }
-            }
+            config_score = current_score;
+            config_waves = num_waves_total;
+            best_config = candidate_config;
+            current_m_tile = tile_config.block_m;
+        }
+        else if (current_score == config_score
+            && (best_config.stages < candidate_config.stages || candidate_config.split_k_factor < best_config.split_k_factor
+                || current_m_tile < tile_config.block_m))
+        {
+            // Prefer deeper pipeline or smaller split-k
+            best_config = candidate_config;
+            current_m_tile = tile_config.block_m;
+            config_waves = num_waves_total;
         }
     }
 
