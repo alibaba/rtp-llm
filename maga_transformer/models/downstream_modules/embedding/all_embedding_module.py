@@ -1,14 +1,16 @@
 import os
 import json
+import torch
+import copy
 import numpy as np
 from collections import OrderedDict
-import torch
-import torch.nn as nn
 from typing import List, Dict, Any, Union
+
+import torch.nn as nn
+from transformers import PreTrainedTokenizerBase
 from sentence_transformers.util import import_from_string
 from sentence_transformers.models import Transformer, Normalize
 
-from transformers import PreTrainedTokenizerBase
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.embedding.embedding_stream import EngineInputs, EngineOutputs
@@ -45,6 +47,12 @@ class ALLEmbeddingRenderer(EmbeddingRendererBase):
                 index=i))
             bias += inputs.input_lengths[i]
         return ALLEmbeddingResponse(data=data, usage=usage).model_dump()
+
+    async def render_log_response(self, response: Dict[str, Any]):
+        log_response = copy.copy(response)
+        if 'data' in log_response:
+            del log_response['data']
+        return log_response
 
 class NormalHandler(CustomHandler):
     def __init__(self, config: GptInitModelParameters):
