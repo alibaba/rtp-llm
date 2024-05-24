@@ -132,11 +132,11 @@ class SpModelExecutor(ExecutorBase):
             else:
                 return rand < model_prob / (sp_prob + 0.00001)
 
-        # shape: [batch, gen_num]        
-        validate_logits = self.validate_executor._post_transformer_nn(validate_hiddens)
+        # shape: [batch, gen_num]
+        validate_hiddens, validate_logits = self.validate_executor._post_transformer_nn(validate_hiddens)
         if g_parallel_info.tp_rank > 0:
             return None, None, None, None, None
-        fake_batch_query = self._creata_fake_sample_query(batch_query, self.gen_num, output_token_list)        
+        fake_batch_query = self._creata_fake_sample_query(batch_query, self.gen_num, output_token_list)
         self.validate_executor._post_process(fake_batch_query, validate_logits, validate_hiddens)
         next_tokens = fake_batch_query.slice_output_token(0, fake_batch_query.total_batch_size + 1, 1)
         index_probs = fake_batch_query.model_output.output_index_prob
