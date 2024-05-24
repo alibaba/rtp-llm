@@ -69,12 +69,12 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
                 ffn_w3_lora.append(CkptWeightInfo(
                     lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w3', lora_name), transpose))
             
-            lora_weights.append(WeightInfo(W.ffn_w1 + "." + lora_name, ffn_w1_lora, stack_))
-            lora_weights.append(WeightInfo(W.ffn_w2 + "." + lora_name, ffn_w2_lora, stack_))
-            lora_weights.append(WeightInfo(W.ffn_w3 + "." + lora_name, ffn_w3_lora, stack_))
+            lora_weights.append(WeightInfo(W.moe_w1 + "." + lora_name, ffn_w1_lora, stack_))
+            lora_weights.append(WeightInfo(W.moe_w2 + "." + lora_name, ffn_w2_lora, stack_))
+            lora_weights.append(WeightInfo(W.moe_w3 + "." + lora_name, ffn_w3_lora, stack_))
 
             lora_weights.append(
-                WeightInfo(W.ffn_gate + "." + lora_name, [CkptWeightInfo(lora_base_name.format('model.layers.{i}.block_sparse_moe.gate', lora_name), concat_1)], transpose))
+                WeightInfo(W.moe_gate + "." + lora_name, [CkptWeightInfo(lora_base_name.format('model.layers.{i}.block_sparse_moe.gate', lora_name), concat_1)], transpose))
 
             lora_weights.append(
                 WeightInfo(W.attn_o_w + "." + lora_name, [CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.o_proj', lora_name), concat_1)], transpose))

@@ -42,7 +42,6 @@ const vector<string> layer_weight_keys = {
     W::ffn_ln_beta,
     W::ffn_w2,
     W::ffn_b2,
-    W::ffn_gate,
     W::post_ffn_ln_gamma,
     W::post_ffn_ln_beta
 };

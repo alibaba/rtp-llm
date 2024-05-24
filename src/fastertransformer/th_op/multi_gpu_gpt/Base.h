@@ -90,7 +90,6 @@ loadWeights(int                                                             pp_s
         gpt_layer_weights[i]->ffn_weights.dense_layernorm.gamma                     = maybe_get<T>(weights[i], W::ffn_ln_gamma);
         gpt_layer_weights[i]->ffn_weights.dense_layernorm.beta                      = maybe_get<T>(weights[i], W::ffn_ln_beta);
         gpt_layer_weights[i]->ffn_weights.output_weight.bias                        = maybe_get<T>(weights[i], W::ffn_b2);
-        gpt_layer_weights[i]->ffn_weights.gating_weight.kernel                      = maybe_get<T>(weights[i], W::ffn_gate);
         gpt_layer_weights[i]->post_ffn_layernorm_weights.gamma                      = maybe_get<T>(weights[i], W::post_ffn_ln_gamma);
         gpt_layer_weights[i]->post_ffn_layernorm_weights.beta                       = maybe_get<T>(weights[i], W::post_ffn_ln_beta);
         gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.bias          = maybe_get<T>(weights[i], W::moe_b1);

@@ -39,7 +39,6 @@ static const std::string ffn_ln_gamma = "ffn_weights.dense_layernorm.gamma";
 static const std::string ffn_ln_beta  = "ffn_weights.dense_layernorm.beta";
 static const std::string ffn_w2       = "ffn_weights.intermediate_weight2.kernel";
 static const std::string ffn_b2       = "ffn_weights.intermediate_weight2.bias";
-static const std::string ffn_gate     = "ffn_weights.gate.kernel"; // for moe
 static const std::string post_ffn_ln_gamma     = "post_ffn_layernorm_weights.gamma";
 static const std::string post_ffn_ln_beta      = "post_ffn_layernorm_weights.beta";
 

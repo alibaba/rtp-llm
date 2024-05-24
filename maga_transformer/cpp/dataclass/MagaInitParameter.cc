@@ -90,7 +90,7 @@ unique_ptr<const Weights> WeightsConverter::convertPythonWeights(const PyModelWe
         ffn_weights.down_weight       = createDenseWeights(py_layer_weights, W::ffn_w2, W::ffn_b2);
         ffn_weights.up_weight         = createDenseWeights(py_layer_weights, W::ffn_w3, W::ffn_b3);
         ffn_weights.dense_layernorm   = mayCreateLayerNormWeights(py_layer_weights, W::ffn_ln_gamma, W::ffn_ln_beta);
-        ffn_weights.moe_gating_weight = createDenseWeights(py_layer_weights, W::ffn_gate);
+        ffn_weights.moe_gating_weight = createDenseWeights(py_layer_weights, W::moe_gate);
 
         weights->layers.push_back(move(layer_weights));
     }

@@ -283,7 +283,6 @@ class W:
     ffn_ln_beta = 'ffn_weights.dense_layernorm.beta'
     ffn_w2 = 'ffn_weights.intermediate_weight2.kernel'
     ffn_b2 = 'ffn_weights.intermediate_weight2.bias'
-    ffn_gate = 'ffn_weights.gate.kernel'
     post_ffn_ln_gamma = "post_ffn_layernorm_weights.gamma"
     post_ffn_ln_beta = "post_ffn_layernorm_weights.beta"
 
@@ -519,7 +518,6 @@ class W:
         ffn_w3_lora_b: sp_neg1,
         ffn_w2_lora_a: sp_0,
         ffn_w2_lora_b: sp_id,
-        ffn_gate: sp_id,
         moe_gate: sp_id,
         shared_expert_gate: sp_id,
         post_ffn_ln_beta: sp_id,
@@ -559,7 +557,6 @@ class W:
         ffn_ln_beta,
         ffn_w2,
         ffn_b2,
-        ffn_gate
     ]
 
     skip_weights_list = [
