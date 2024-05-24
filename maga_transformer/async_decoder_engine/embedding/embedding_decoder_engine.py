@@ -56,7 +56,7 @@ class EmbeddingDecoderEngine(object):
                 if self.batch_input_.batch_size != len(embedding_outputs):
                     raise Exception(f"batch size not equal to output length, {self.batch_input_.batch_size} vs {len(embedding_outputs)}")
                 self.update_output(streams, embedding_outputs)
-                self.report_metric(len(streams), t.cost_ms())
+                self.report_metric(self.scheduler_.wait_queue_size(), len(streams), t.cost_ms())
         except Exception as e:
             for stream in streams:
                 stream.set_error(f'{e}, Traceback: {traceback.format_exc()}')
@@ -73,7 +73,8 @@ class EmbeddingDecoderEngine(object):
             stream.update(embedding_outputs[bias: bias + stream.inputs.batch_size])
             bias += stream.inputs.batch_size
 
-    def report_metric(self, batch_size: int, cost_time: float):
+    def report_metric(self, wait_size: int, batch_size: int, cost_time: float):
+        kmonitor.report(GaugeMetrics.ASYNC_WAIT_QUERY_SIZE_METRIC, wait_size)
         kmonitor.report(GaugeMetrics.ASYNC_BATCH_SIZE_METRIC, batch_size)
         kmonitor.report(GaugeMetrics.ASYNC_ITERATE_LANTENCY, cost_time)
 

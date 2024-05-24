@@ -1,9 +1,11 @@
 import torch
 from typing import Any, List, Dict, Optional, Union
-from maga_transformer.utils.util import to_cuda, to_cpu
 
+from maga_transformer.utils.util import to_cuda, to_cpu
+from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.base_model_config import PyDanticModelBase
+from maga_transformer.metrics import kmonitor, GaugeMetrics
 
 class EngineInputs(PyDanticModelBase):
     token_ids: torch.Tensor
@@ -27,6 +29,7 @@ class EngineOutputs(PyDanticModelBase):
 
 class EmbeddingStream(PyDanticModelBase):
     inputs: EngineInputs
+    begin_time: float
     outputs: Optional[EngineOutputs] = None
     error_info: Optional[str] = None
     finished: bool = False
@@ -39,6 +42,11 @@ class EmbeddingStream(PyDanticModelBase):
         self.outputs = EngineOutputs(outputs=embedding_output, input_length=self.inputs.input_length)
         self.finished = True
 
+    def set_running(self):
+        self._report_wait_time()
+
+    def _report_wait_time(self):
+        kmonitor.report(GaugeMetrics.ASYNC_WAIT_WAIT_TIME_METRIC, current_time_ms() - self.begin_time)
 
 class EmbeddingBatchedInput(object):
     def __init__(self, nccl_op: Any) -> None:

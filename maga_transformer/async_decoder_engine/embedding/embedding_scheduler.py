@@ -3,6 +3,7 @@ import copy
 from typing import List, Deque, Dict, Any
 from collections import deque
 from threading import Lock
+from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.embedding.embedding_stream import EmbeddingStream, EngineInputs
 
@@ -14,10 +15,13 @@ class EmbeddingScheduler(object):
         self.lock_ = Lock()
 
     def enqueue(self, inputs: EngineInputs) -> EmbeddingStream:
-        with self.lock_:
-            stream = EmbeddingStream(inputs=inputs)
+        with self.lock_:                        
+            stream = EmbeddingStream(inputs=inputs, begin_time=current_time_ms())
             self.waiting_streams_.append(stream)
         return stream
+    
+    def wait_queue_size(self):
+        return len(self.waiting_streams_)
 
     def _calc_length(self, stream: EmbeddingStream):
         return stream.inputs.input_length
@@ -40,5 +44,6 @@ class EmbeddingScheduler(object):
                 total_len += new_length
 
             for new_stream in new_streams:
-                self.waiting_streams_.remove(new_stream)
+                new_stream.set_running()
+                self.waiting_streams_.remove(new_stream)        
             return new_streams
