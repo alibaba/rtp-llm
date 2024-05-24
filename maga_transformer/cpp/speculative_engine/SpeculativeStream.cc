@@ -1,5 +1,6 @@
 #include "maga_transformer/cpp/speculative_engine/SpeculativeStream.h"
 #include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
+#include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
 #include <memory>
 #include <optional>
@@ -38,7 +39,7 @@ void SpeculativeStream::updateDraftToken() {
         size_t src_offset = seqLength() - gen_num_per_circle_;
         device_->copy({(*new_tokens)[i], (*complete_token_ids_)[i], 0, src_offset, gen_num_per_circle_});
     }
-    target_stream_->update(new_tokens, gen_num_per_circle_, false, nullptr, nullptr, nullptr, true);
+    target_stream_->update(new_tokens, gen_num_per_circle_, false, nullptr, ft::Buffer::emptyBuffer(), nullptr, true);
     target_stream_->incrKVBlock();
 }
 

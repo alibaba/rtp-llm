@@ -84,7 +84,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     merged_output->model_output   = *model_output;
     merged_output->sampler_output = std::move(sampler_->forward(sampler_input));
     FT_LOG_DEBUG("sampler forward done");
-    return batch_stream_processor_->dispatch(stream_groups, merged_output);
+    return batch_stream_processor_->dispatch(stream_groups, sampler_input, merged_output);
 }
 
 void NormalExecutor::reportMetrics(const StreamGroups& stream_groups) {

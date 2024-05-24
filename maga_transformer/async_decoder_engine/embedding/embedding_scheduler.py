@@ -15,7 +15,7 @@ class EmbeddingScheduler(object):
         self.lock_ = Lock()
 
     def enqueue(self, inputs: EngineInputs) -> EmbeddingStream:
-        with self.lock_:                        
+        with self.lock_:
             stream = EmbeddingStream(inputs=inputs, begin_time=current_time_ms())
             self.waiting_streams_.append(stream)
         return stream
@@ -45,5 +45,5 @@ class EmbeddingScheduler(object):
 
             for new_stream in new_streams:
                 new_stream.set_running()
-                self.waiting_streams_.remove(new_stream)        
+                self.waiting_streams_.remove(new_stream)
             return new_streams

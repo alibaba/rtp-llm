@@ -162,7 +162,7 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
                             int                      num_new_tokens,
                             bool                     finished,
                             const ft::BufferPtr&     hidden_states,
-                            const ft::BufferPtr&     logits,
+                            const ft::Buffer&     logits,
                             const ft::BufferPtr&     cum_log_probs,
                             bool not_update_output) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -204,7 +204,7 @@ void GenerateStream::update(ft::BufferPtr&           new_tokens,
 
 void GenerateStream::updateOutput(bool finished,
                                   const ft::BufferPtr& hidden_states,
-                                  const ft::BufferPtr& logits,
+                                  const ft::Buffer& logits,
                                   const ft::BufferPtr& cum_log_probs) {
     cum_log_probs_ = cum_log_probs;
 
@@ -220,16 +220,16 @@ void GenerateStream::updateOutput(bool finished,
         memcpy(generate_output.output_ids->data(), complete_token_ids_->view(i, 1).dataWithOffset<int32_t>(inputLength()), sizeof(int32_t) * output_len);
         if (generate_input_->generate_config->return_logits) {
             if (!generate_input_->generate_config->select_tokens_id.empty()) {
-                ft::BufferPtr select_logits =
-                    device_->allocateBuffer({logits->type(),
-                                            {generate_input_->generate_config->select_tokens_id.size()},
-                                            ft::AllocationType::HOST});
-                ft::bufferIndexSelect<float>(
-                    logits, select_logits, generate_input_->generate_config->select_tokens_id);
-                generate_output.logits = select_logits;
+                // ft::BufferPtr select_logits =
+                //     device_->allocateBuffer({logits.type(),
+                //                             {generate_input_->generate_config->select_tokens_id.size()},
+                //                             ft::AllocationType::HOST});
+                // ft::bufferIndexSelect<float>(
+                //     logits, select_logits, generate_input_->generate_config->select_tokens_id);
+                // generate_output.logits = select_logits;
             } else {
                 // TODO(xinfei.sxf) split logits/hidden states to diffent sub status, and not set logits in middle step for streaming
-                generate_output.logits = device_->clone({*logits, ft::AllocationType::HOST});
+                generate_output.logits = device_->clone({logits, ft::AllocationType::HOST});
             }
         }
 

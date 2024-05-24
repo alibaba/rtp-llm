@@ -268,13 +268,13 @@ public:
                 int num_new_tokens,
                 bool finished,
                 const ft::BufferPtr& hidden_states,
-                const ft::BufferPtr& logits,
+                const ft::Buffer& logits,
                 const ft::BufferPtr& cum_log_probs,
                 bool not_update_output = false);
 
     void updateOutput(bool finished,
                       const ft::BufferPtr& hidden_states,
-                      const ft::BufferPtr& logits,
+                      const ft::Buffer& logits,
                       const ft::BufferPtr& cum_log_probs);
 
     void setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {

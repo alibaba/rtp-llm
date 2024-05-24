@@ -256,13 +256,17 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     }
 
     auto vocab_size = model_output.logits->shape()[1];
-    sampler_inputs.logits = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size, vocab_size}, ft::AllocationType::DEVICE}, {});
+    model_output.scatter_logits = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size, vocab_size}, ft::AllocationType::DEVICE}, {});
 
     batch_idx = 0;
+    // TODO(xinfei.sxf) optimize this copy -> only one times copy
     for (auto& stream : decode_streams) {
         auto current_batch_size = stream->batchSize();
         for (int i = 0; i < current_batch_size; ++i) {
-            device_->copy({sampler_inputs.logits->view(batch_idx, 1), model_output.logits->view(batch_idx, 1)});
+            device_->copy({model_output.scatter_logits->view(batch_idx, 1), model_output.logits->view(batch_idx, 1)});
+            FT_LOG_DEBUG("stream[%d], batch[%d], sampler inputs logits [%s]",
+                stream->streamId(), i,
+                device_->clone({model_output.scatter_logits->view(batch_idx, 1), ft::AllocationType::HOST})->debugStringWithData<float>().c_str());
             batch_idx += 1;
         }
     }
@@ -270,21 +274,25 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     size_t logits_offset = batch_idx;
     for (auto& stream : context_streams) {
         auto current_batch_size = stream->batchSize();
+        // TODO(xinfei.sxf) optimize this scater copy, optimize logits if no context stream, optimize generate stream cpu copy logits
         for (int i = 0; i < current_batch_size; ++i) {
-            device_->copy({sampler_inputs.logits->view(batch_idx, 1), model_output.logits->view(logits_offset, 1)});
+            device_->copy({model_output.scatter_logits->view(batch_idx, 1), model_output.logits->view(logits_offset, 1)});
             FT_LOG_DEBUG("stream[%d], batch[%d], sampler inputs logits [%s]",
                 stream->streamId(), i,
-                device_->clone({model_output.logits->view(logits_offset, 1), ft::AllocationType::HOST})->debugStringWithData<float>().c_str());
+                device_->clone({model_output.scatter_logits->view(batch_idx, 1), ft::AllocationType::HOST})->debugStringWithData<float>().c_str());
             batch_idx += 1;
         }
         logits_offset += 1;
     }
+
+    sampler_inputs.logits = device_->clone({*model_output.scatter_logits, ft::AllocationType::DEVICE});
 
     FT_LOG_DEBUG("gatherSamplerInput done");
     return move(sampler_inputs);
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&                  stream_groups,
+                                                  const SamplerInputs&                 sampler_inputs,
                                                   const std::unique_ptr<MergedOutput>& merge_outputs) const {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     const auto& model_output      = merge_outputs->model_output;
@@ -300,13 +308,14 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
     int batch_idx = 0;
     for (auto& stream : stream_groups.allStreams()) {
         auto          current_batch_size = stream->batchSize();
+        auto logits = model_output.scatter_logits->view(batch_idx, current_batch_size);
         ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)current_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
         for (int i = 0; i < current_batch_size; ++i) {
             memcpy(new_tokens->dataWithOffset<int32_t>(i), new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1), sizeof(int32_t));
             batch_idx += 1;
         }
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]\n", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
-        stream->update(new_tokens, 1, false, model_output.hidden_states, model_output.logits, sampler_output.cum_log_probs);
+        stream->update(new_tokens, 1, false, model_output.hidden_states, logits, sampler_output.cum_log_probs);
     }
     FT_LOG_DEBUG("dispatch done");
     return absl::OkStatus();
