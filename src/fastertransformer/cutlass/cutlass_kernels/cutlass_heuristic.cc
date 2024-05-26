@@ -200,7 +200,7 @@ std::vector<CutlassGemmConfig> get_candidate_configs(int sm, const bool is_weigh
         {
             CutlassGemmConfig config{tile_config, SplitKStyle::NO_SPLIT_K, 1, stages};
             candidate_configs.push_back(config);
-            if (sm >= 75)
+            if (sm >= 70)
             {
                 for (int split_k_factor = 2; split_k_factor <= max_split_k; ++split_k_factor)
                 {
