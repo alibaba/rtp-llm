@@ -88,7 +88,7 @@ class DecoderEngineTest(TestCase):
                     logging.info(f"{count}: {last_element}")
                 count = count + 1
             self.assertEqual(last_element, ['ProductsProductsProducts'])
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(1)
             
         try:
             loop = asyncio.new_event_loop()
