@@ -372,11 +372,15 @@ class GptInitModelParameters:
                 layer_weight_param_count = layer_weight_param_count + layer_inter_size * hidden_size * ffn_w_count * ffn_export_num
 
         else:
-            layer_weight_param_count = layer_weight_param_count + self.layer_num * self.inter_size * hidden_size * ffn_w_count * ffn_export_num
-
+            if self.moe_style == 1:
+                layer_weight_param_count = layer_weight_param_count + self.layer_num * self.inter_size * hidden_size * ffn_w_count * ffn_export_num
+            else:
+                layer_weight_param_count = layer_weight_param_count + self.layer_num * self.inter_size * hidden_size * ffn_w_count
+                if self.moe_style == 2:
+                    layer_weight_param_count = layer_weight_param_count + len(self.moe_layer_index) * self.moe_inter_padding_size * hidden_size * ffn_w_count * ffn_export_num
+                
         if ffn_export_num > 1:
-            layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * ffn_export_num
-
+            layer_weight_param_count = layer_weight_param_count + len(self.moe_layer_index) * hidden_size * ffn_export_num
         # other small tensor
         layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * 11
 
