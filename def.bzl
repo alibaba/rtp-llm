@@ -138,4 +138,6 @@ def copts():
     ]
 
 def cuda_copts():
-    return copts() + cuda_default_copts()
+    # add --objdir-as-tempdir to rm tmp file after build
+    # add --keep store tmp file at current dir
+    return copts() + cuda_default_copts() + ["-nvcc_options=objdir-as-tempdir", "-nvcc_options=keep"]
