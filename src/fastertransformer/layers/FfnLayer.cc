@@ -187,16 +187,15 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     constexpr bool use_sparse_gemm = false;
     constexpr int  m_padded        = 0;
 #endif
-
     const int cur_inter_size = quant_algo_.weightOnly() ? inter_padding_size : inter_size;
-    // gemm used inter_size, int8 use inter_padding_size
     gemm_runner_->Gemm(m,
                        cur_inter_size,
                        hidden_units_,
                        input_tensor,
-                       &ffn_weights->intermediate_weight,
+                       &ffn_weights->intermediate_weight2,
                        inter_buf_,
                        ffn_dynamic_scale);
+
     // lora
     lora_gemm_->applyLoRA(m,
                           batch_size,
@@ -204,40 +203,40 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                           hidden_units_,
                           cur_inter_size,
                           lora_ids,
-                          ffn_weights->intermediate_weight.lora_weights,
+                          ffn_weights->intermediate_weight2.lora_weights,
                           input_tensor,
                           inter_buf_);
-    print_bsd(layer_id, "ffn1", inter_buf_, 1, m, cur_inter_size);
+
+    print_bsd(layer_id, "ffn_up", inter_buf_, 1, m, cur_inter_size);
 
     if (use_gated_activation_) {
+        // gemm used inter_size, int8 use inter_padding_size
         gemm_runner_->Gemm(m,
                            cur_inter_size,
                            hidden_units_,
                            input_tensor,
-                           &ffn_weights->intermediate_weight2,
+                           &ffn_weights->intermediate_weight,
                            inter_buf_2_,
                            ffn_dynamic_scale);
-
         // lora
         lora_gemm_->applyLoRA(m,
-                            batch_size,
-                            lora_input_lengths,
-                            hidden_units_,
-                            cur_inter_size,
-                            lora_ids,
-                            ffn_weights->intermediate_weight2.lora_weights,
-                            input_tensor,
-                            inter_buf_2_);
-
-        print_bsd(layer_id, "ffn2", inter_buf_2_, 1, m, cur_inter_size);
+                              batch_size,
+                              lora_input_lengths,
+                              hidden_units_,
+                              cur_inter_size,
+                              lora_ids,
+                              ffn_weights->intermediate_weight.lora_weights,
+                              input_tensor,
+                              inter_buf_2_);
+        print_bsd(layer_id, "ffn_gate", inter_buf_2_, 1, m, cur_inter_size);
     }
     POP_RANGE;  // End for NVTX Range: FFN gemm 1
 
     PUSH_RANGE(stream_, "add_bias_act");
     genericActivation(layer_id,
                       m,
-                      ffn_weights->intermediate_weight.bias,
-                      use_gated_activation_ ? ffn_weights->intermediate_weight2.bias : nullptr,
+                      ffn_weights->intermediate_weight2.bias,
+                      use_gated_activation_ ? ffn_weights->intermediate_weight.bias : nullptr,
                       input_tensors->at("ia3_tasks", {MEMORY_GPU, TYPE_INT32, {}, nullptr}).getPtr<const int>(),
                       ffn_weights->ia3_weight.kernel,
                       (float*)nullptr,

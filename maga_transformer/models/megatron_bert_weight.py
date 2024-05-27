@@ -89,8 +89,8 @@ class MegatronBertWeightInfo(ModelDeployWeightInfo):
             WeightInfo(W.post_ln_beta, [CkptWeightInfo(self._names.POST_LN_B)]),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self._names.POST_LN_W)]),
 
-            WeightInfo(W.ffn_w1, [CkptWeightInfo(self._names.FFN_INTER_DENSE_W)], transpose),
-            WeightInfo(W.ffn_b1, [CkptWeightInfo(self._names.FFN_INTER_DENSE_B)]),
+            WeightInfo(W.ffn_w3, [CkptWeightInfo(self._names.FFN_INTER_DENSE_W)], transpose),
+            WeightInfo(W.ffn_b3, [CkptWeightInfo(self._names.FFN_INTER_DENSE_B)]),
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_W)], transpose),
             WeightInfo(W.ffn_b2, [CkptWeightInfo(self._names.FFN_OUTPUT_DENSE_B)]),

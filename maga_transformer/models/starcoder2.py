@@ -72,11 +72,11 @@ class Starcoder2WeightInfo(ModelDeployWeightInfo):
                                identity)
             ], identity),
             WeightInfo(
-                W.ffn_w1,
+                W.ffn_w3,
                 [CkptWeightInfo('model.layers.{i}.mlp.c_fc.weight', identity)],
                 transpose),
             WeightInfo(
-                W.ffn_b1,
+                W.ffn_b3,
                 [CkptWeightInfo('model.layers.{i}.mlp.c_fc.bias', identity)],
                 identity),
             WeightInfo(W.ffn_w2, [

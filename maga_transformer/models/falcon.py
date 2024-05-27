@@ -27,7 +27,7 @@ class FalconWeightInfo(ModelDeployWeightInfo):
 
             WeightInfo(W.attn_o_w, [CkptWeightInfo('transformer.h.{i}.self_attention.dense.weight', identity)], transpose),
 
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.dense_h_to_4h.weight', identity)], transpose),
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.dense_h_to_4h.weight', identity)], transpose),
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.dense_4h_to_h.weight', identity)], transpose),
         ]

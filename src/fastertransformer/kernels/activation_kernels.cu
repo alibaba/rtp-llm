@@ -208,10 +208,10 @@ struct IdentityActivation {
 
 // clang-format off
 template<template<typename T> class Activation, typename T, typename BT>
-__global__ void generic_activation(T*                      out,
+__global__ void generic_activation(T*                      up_out,
                                    const BT*  __restrict   bias,
-                                   const T*   __restrict   gated_weights,
-                                   const BT*  __restrict   gated_bias,
+                                   const T*   __restrict   gate,
+                                   const BT*  __restrict   gate_bias,
                                    const int* __restrict   ia3_tasks,
                                    const T*   __restrict   ia3_weights,
                                    const int               int8_mode,
@@ -227,7 +227,7 @@ __global__ void generic_activation(T*                      out,
     constexpr size_t packed_elems = num_elems<T>::value;
 
     const bool with_bias = bias != nullptr;
-    const bool with_gate = gated_weights != nullptr;
+    const bool with_gate = gate != nullptr;
     const bool with_ia3  = ia3_tasks != nullptr;
     const bool with_act_scale = activation_scale != nullptr;
 
@@ -238,15 +238,15 @@ __global__ void generic_activation(T*                      out,
     for (int id = blockIdx.x * blockDim.x + threadIdx.x; id < total; id += blockDim.x * gridDim.x) {
         T val;
         if (int8_mode == 2) {
-            val = cuda_cast<T>(cuda_cast<Float_T>(reinterpret_cast<Packed_Int8_t*>(out)[id]) * activation_in[0]);
+            val = cuda_cast<T>(cuda_cast<Float_T>(reinterpret_cast<Packed_Int8_t*>(up_out)[id]) * activation_in[0]);
         }
         else {
-            val = out[id];
+            val = up_out[id];
         }
 
-        T gated_val;
+        T gate_val;
         if (with_gate) {
-            gated_val = gated_weights[id];
+            gate_val = gate[id];
         }
 
         if (with_bias) {
@@ -254,13 +254,13 @@ __global__ void generic_activation(T*                      out,
             val              = val + reg_bias;
 
             if (with_gate) {
-                const T reg_gated_bias = static_cast<T>(gated_bias[id % n]);
-                gated_val              = gated_val + reg_gated_bias;
+                const T reg_gated_bias = static_cast<T>(gate_bias[id % n]);
+                gate_val              = gate_val + reg_gated_bias;
             }
         }
 
         if (with_gate) {
-            val = cuda_cast<T>(Activation<T>::apply(val) * cuda_cast<Act_T>(gated_val));
+            val = cuda_cast<T>(Activation<T>::apply(gate_val) * cuda_cast<Act_T>(val));
         }
         else {
             val = cuda_cast<T>(Activation<T>::apply(val));
@@ -280,10 +280,10 @@ __global__ void generic_activation(T*                      out,
         }
 
         if (int8_mode != 2 ) {
-            out[id] = val;
+            up_out[id] = val;
         }
         else {
-            reinterpret_cast<Packed_Int8_t*>(out)[id] =
+            reinterpret_cast<Packed_Int8_t*>(up_out)[id] =
                 cuda_cast<Packed_Int8_t>(cuda_cast<Float_T>(val) * activation_out[0]);
         }
     }
@@ -291,10 +291,10 @@ __global__ void generic_activation(T*                      out,
 // clang-format on
 
 template<template<typename T> class Activation, typename T, typename BT>
-void invokeGenericActivation(T*           out,
+void invokeGenericActivation(T*           up_out,
                              const BT*    bias,
-                             const T*     gated_weights,
-                             const BT*    gated_bias,
+                             const T*     gate,
+                             const BT*    gate_bias,
                              const int*   ia3_tasks,
                              const T*     ia3_weights,
                              const int    m,
@@ -323,10 +323,10 @@ void invokeGenericActivation(T*           out,
         block.x = 1024;
         grid.x  = ceil(m * temp_n / 1024.);
     }
-    generic_activation<Activation><<<grid, block, 0, stream>>>(reinterpret_cast<PT*>(out),
+    generic_activation<Activation><<<grid, block, 0, stream>>>(reinterpret_cast<PT*>(up_out),
                                                                reinterpret_cast<const PBT*>(bias),
-                                                               reinterpret_cast<const PT*>(gated_weights),
-                                                               reinterpret_cast<const PBT*>(gated_bias),
+                                                               reinterpret_cast<const PT*>(gate),
+                                                               reinterpret_cast<const PBT*>(gate_bias),
                                                                ia3_tasks,
                                                                reinterpret_cast<const PT*>(ia3_weights),
                                                                int8_mode,
@@ -341,10 +341,10 @@ void invokeGenericActivation(T*           out,
 }
 
 #define INSTANTIATE_GENERIC_ACTIVATION(Activation, T, BT)                                                              \
-    template void invokeGenericActivation<Activation, T, BT>(T * out,                                                  \
+    template void invokeGenericActivation<Activation, T, BT>(T * up_out,                                               \
                                                              const BT*    bias,                                        \
-                                                             const T*     gated_weights,                               \
-                                                             const BT*    gated_bias,                                  \
+                                                             const T*     gate,                                        \
+                                                             const BT*    gate_bias,                                   \
                                                              const int*   ia3_tasks,                                   \
                                                              const T*     ia3_weights,                                 \
                                                              const int    m,                                           \

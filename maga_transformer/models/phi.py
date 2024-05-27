@@ -21,8 +21,8 @@ class PhiWeightInfo(ModelDeployWeightInfo):
             WeightInfo(W.attn_qkv_b, [CkptWeightInfo('layers.{i_1}.mixer.Wqkv.bias', identity)], identity),
             WeightInfo(W.attn_o_w, [CkptWeightInfo('layers.{i_1}.mixer.out_proj.weight', identity)], transpose),
             WeightInfo(W.attn_o_b, [CkptWeightInfo('layers.{i_1}.mixer.out_proj.bias', identity)], identity),
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('layers.{i_1}.mlp.fc1.weight', identity)], transpose),
-            WeightInfo(W.ffn_b1, [CkptWeightInfo('layers.{i_1}.mlp.fc1.bias', identity)], identity),
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('layers.{i_1}.mlp.fc1.weight', identity)], transpose),
+            WeightInfo(W.ffn_b3, [CkptWeightInfo('layers.{i_1}.mlp.fc1.bias', identity)], identity),
             WeightInfo(W.ffn_w2, [CkptWeightInfo('layers.{i_1}.mlp.fc2.weight', identity)], transpose),
             WeightInfo(W.ffn_b2, [CkptWeightInfo('layers.{i_1}.mlp.fc2.bias', identity)], identity),
         ]

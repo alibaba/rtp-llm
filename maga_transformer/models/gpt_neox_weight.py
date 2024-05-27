@@ -28,10 +28,10 @@ class GPTNeoxWeight(ModelDeployWeightInfo):
             WeightInfo(W.attn_o_b, [CkptWeightInfo('gpt_neox.layers.{i}.attention.dense.bias', identity)],
                        identity),
 
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('gpt_neox.layers.{i}.mlp.dense_h_to_4h.weight', identity)],
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('gpt_neox.layers.{i}.mlp.dense_h_to_4h.weight', identity)],
                        transpose),
 
-            WeightInfo(W.ffn_b1, [CkptWeightInfo('gpt_neox.layers.{i}.mlp.dense_h_to_4h.bias', identity)],
+            WeightInfo(W.ffn_b3, [CkptWeightInfo('gpt_neox.layers.{i}.mlp.dense_h_to_4h.bias', identity)],
                        identity),
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo('gpt_neox.layers.{i}.mlp.dense_4h_to_h.weight', identity)],
@@ -96,10 +96,10 @@ class GPTNeox13BWeight(ModelDeployWeightInfo):
             WeightInfo(W.attn_o_b, [CkptWeightInfo('gpt_neox.layers.{i}.attention.dense.bias', identity)],
                        identity),
 
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('gpt_neox.layers.{i}.mlp.dense_h_to_4h.weight', identity)],
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('gpt_neox.layers.{i}.mlp.dense_h_to_4h.weight', identity)],
                        transpose),
 
-            WeightInfo(W.ffn_b1, [CkptWeightInfo('gpt_neox.layers.{i}.mlp.dense_h_to_4h.bias', identity)],
+            WeightInfo(W.ffn_b3, [CkptWeightInfo('gpt_neox.layers.{i}.mlp.dense_h_to_4h.bias', identity)],
                        identity),
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo('gpt_neox.layers.{i}.mlp.dense_4h_to_h.weight', identity)],

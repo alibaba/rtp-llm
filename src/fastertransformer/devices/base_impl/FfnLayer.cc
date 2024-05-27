@@ -55,12 +55,12 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                        std::nullopt});
 
         activation({params.activation_type,
-                    *(gate_output.output),
-                    std::nullopt,
                     *(up_output.output),
+                    std::nullopt,
+                    *(gate_output.output),
                     std::nullopt});
 
-        auto output = loraLinear({*(gate_output.output),
+        auto output = loraLinear({*(up_output.output),
                                   std::nullopt,
                                   *(params.weights.down_weight),
                                   std::nullopt});

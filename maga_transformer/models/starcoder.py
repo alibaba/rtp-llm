@@ -47,9 +47,9 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
 
             WeightInfo(W.attn_o_b, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.bias', identity)], identity),
 
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.weight', identity)], transpose),
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.weight', identity)], transpose),
 
-            WeightInfo(W.ffn_b1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.bias', identity)], identity),
+            WeightInfo(W.ffn_b3, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.bias', identity)], identity),
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.weight', identity)], transpose),
 
@@ -74,9 +74,9 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
             WeightInfo(W.attn_o_z, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.qzeros', identity)], identity),
             WeightInfo(W.attn_o_s, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.scales')], identity),
 
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.qweight', identity)], identity),
-            WeightInfo(W.ffn_z1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.qzeros', identity)], identity),
-            WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.scales', identity)], identity),
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.qweight', identity)], identity),
+            WeightInfo(W.ffn_z3, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.qzeros', identity)], identity),
+            WeightInfo(W.ffn_s3, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.scales', identity)], identity),
             WeightInfo(W.ffn_act_s, [CkptWeightInfo('transformer.h.{i}.mlp.act.scales', identity)], identity),
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qweight', identity)], identity),
@@ -99,9 +99,9 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
             WeightInfo(W.attn_o_smoother, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.smoother')], identity),
             WeightInfo(W.attn_o_shift, [CkptWeightInfo('transformer.h.{i}.attn.c_proj.shift')], identity),
 
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.qweight', identity)], transpose),
-            WeightInfo(W.ffn_b1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.bias')], identity),
-            WeightInfo(W.ffn_s1, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.scales', identity)], identity),
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.qweight', identity)], transpose),
+            WeightInfo(W.ffn_b3, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.bias')], identity),
+            WeightInfo(W.ffn_s3, [CkptWeightInfo('transformer.h.{i}.mlp.c_fc.scales', identity)], identity),
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.qweight')], transpose),
             WeightInfo(W.ffn_b2, [CkptWeightInfo('transformer.h.{i}.mlp.c_proj.bias')], identity),

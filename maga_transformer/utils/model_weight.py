@@ -419,7 +419,7 @@ class W:
     ]
 
     int8_ffn_weights_2 = [
-        [ffn_w1, ffn_s1],
+        [ffn_w3, ffn_s3],
         [ffn_w2, ffn_s2],
     ]
 
@@ -446,7 +446,7 @@ class W:
     ]
 
     groupwise_ffn_weights_2 = [
-        [ffn_w1, ffn_z1, ffn_s1],
+        [ffn_w3, ffn_z3, ffn_s3],
         [ffn_w2, ffn_z2, ffn_s2],
     ]
 
