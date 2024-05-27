@@ -2,7 +2,7 @@
 import os
 import logging
 import torch
-from typing import Any, List, Optional, Union, Dict
+from typing import Any, List, Optional, Union, Dict, Tuple
 from maga_transformer.async_decoder_engine.cache_manager import CacheManager
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
@@ -47,35 +47,32 @@ class StreamCacheManager:
         if self.ptuning_ and isinstance(self.ptuning_, Ptuning):
             block_indice, reuse_length = self.ptuning_.get_block_indice(block_num, stream.generate_config)
         elif self.reuse_cache_:
-            if len(self.config_.vit_related_params.vit_special_token_ids) > 0:
-                # for qwen_vl; todo llava
-                img_start_id = self.config_.vit_related_params.vit_special_token_ids.get('image_start_id', -1)
-                img_end_id = self.config_.vit_related_params.vit_special_token_ids.get('image_end_id', -1)
-                input_token_ids = stream.complete_token_ids[0].numpy().tolist()
-                if img_start_id > 0 and img_end_id > 0:
-                    start_token_list = [index for index, id in enumerate(input_token_ids) if id == img_start_id]
-                    end_token_list = [index for index, id in enumerate(input_token_ids) if id == img_end_id]
-                    if len(start_token_list) == len(end_token_list) and all([idx < idy for idx, idy in zip(start_token_list, end_token_list)]):
-                        block_indice, reuse_length = self.cache_manager_.malloc_with_cache(
-                            block_num, input_token_ids)
-                        for i in range(len(start_token_list)):
-                            if reuse_length > start_token_list[i] and reuse_length <= end_token_list[i]:
-                                reuse_length = start_token_list[i]
-                                break
-                    else:
-                        raise Exception(f"unclosed image tag pair in {input_token_ids}")
-                else:
-                    block_indice, reuse_length = self.cache_manager_.malloc_with_cache(
-                        block_num, input_token_ids)
-            else:
-                block_indice, reuse_length = self.cache_manager_.malloc_with_cache(
-                    block_num, stream.complete_token_ids[0].numpy().tolist())
+            block_indice, reuse_length = self._cal_kvcache_reuse_length(block_num, stream)
         else:
             block_indice = self.cache_manager_.malloc(block_num)
             reuse_length = 0
 
         stream.set_kvcache([block_indice], reuse_length)
         stream.add_resource_dtor(lambda: self.free_block_cache(stream))
+
+    def _cal_kvcache_reuse_length(self, block_num: int, stream: GenerateStream) -> Tuple[List[int], int]:
+        input_token_ids = stream.complete_token_ids[0].numpy().tolist()
+        if len(self.config_.vit_related_params.vit_special_token_ids) > 0:
+            # for qwen_vl; todo llava
+            img_start_id = self.config_.vit_related_params.vit_special_token_ids.get('image_start_id', -1)
+            img_end_id = self.config_.vit_related_params.vit_special_token_ids.get('image_end_id', -1)
+            if img_start_id > 0 and img_end_id > 0:
+                start_token_list = [index for index, id in enumerate(input_token_ids) if id == img_start_id]
+                end_token_list = [index for index, id in enumerate(input_token_ids) if id == img_end_id]
+                if len(start_token_list) == len(end_token_list) and all([idx < idy for idx, idy in zip(start_token_list, end_token_list)]):
+                    block_indice, reuse_length = self.cache_manager_.malloc_with_cache(block_num, input_token_ids)
+                    for i in range(len(start_token_list)):
+                        if reuse_length > start_token_list[i] and reuse_length <= end_token_list[i]:
+                            reuse_length = start_token_list[i]
+                            return block_indice, reuse_length
+                else:
+                    raise Exception(f"unclosed image tag pair in {input_token_ids}")
+        return self.cache_manager_.malloc_with_cache(block_num, input_token_ids)
 
     def incr_kvcache(self, streams: List[GenerateStream]):
         malloc_sizes = self._collect_malloc_sizes(streams)
