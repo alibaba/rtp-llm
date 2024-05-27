@@ -78,7 +78,7 @@ size_t Buffer::sizeBytes() const {
     return size() * getTypeSize(type_);
 }
 
-void Buffer::reshape(std::vector<size_t>& shape) {
+void Buffer::reshape(const std::vector<size_t>& shape) {
     int new_shape_size = std::accumulate(shape.begin(), shape.end(), 0);
     int old_shape_size = std::accumulate(shape_.begin(), shape_.end(), 0);
     FT_CHECK_WITH_INFO(

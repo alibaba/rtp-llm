@@ -19,6 +19,8 @@ struct RopeConfig {
     int dynamic_embedding_max_pos = 0;
     float position_embeddings_scale = 1.0f;
     float base_scale = 1.0f;
+    bool use_logn_attn = false;
+    int logn_seq_len = 2048;
 };
 
 } // namespace fastertransformer

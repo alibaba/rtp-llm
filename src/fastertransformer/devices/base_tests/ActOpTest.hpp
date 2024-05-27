@@ -73,11 +73,10 @@ public:
     ActOpTestOutput GateActTorchRefRun(ActOpTestInput& params,
                                        ActivationType atype)
     {   
-        auto input = params.input;
         if (atype == ActivationType::Silu) {
-            return ActOpTestOutput({torch::silu(input) * params.gate});
+            return ActOpTestOutput({torch::silu(params.gate) * params.input});
         } else if (atype == ActivationType::Gelu) {
-            return ActOpTestOutput({torch::gelu(input) * params.gate});
+            return ActOpTestOutput({torch::gelu(params.gate) * params.input});
         } else {
             std::runtime_error("invalid activation Type.");
         }
@@ -92,7 +91,7 @@ public:
         auto input = PrepareActOpInput(m, n, dtype);
         auto result = ActOpRun(input, atype);
         auto result_ref = ActTorchRefRun(input, atype);
-        assertTensorClose(result.output.to(result_ref.output.type()), result.output);
+        assertTensorClose(result.output.to(result_ref.output.type()), result_ref.output);
     }
 
     void GateActOpTest(ActivationType atype,
@@ -103,7 +102,7 @@ public:
         auto input = PrepareActOpInput(m, n, dtype);
         auto result = GateActOpRun(input, atype);
         auto result_ref = GateActTorchRefRun(input, atype);
-        assertTensorClose(result.output.to(result_ref.output.type()), result.output);
+        assertTensorClose(result.output.to(result_ref.output.type()), result_ref.output);
 
     }
 

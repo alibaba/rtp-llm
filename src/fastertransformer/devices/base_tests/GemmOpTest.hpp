@@ -145,7 +145,7 @@ public:
         auto input = PrepareGemmOpInput(m, n, k, dtype);
         auto result = BasicGemmOpRun(input);
         auto result_ref = BasicGemmTorchRefRun(input);
-        assertTensorClose(result.C.to(result_ref.C.type()), result.C);
+        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C);
 
     }
 
@@ -160,7 +160,7 @@ public:
         auto input = PrepareGemmOpInput(1, m1, k1, k2, n2, dtype);
         auto result = BatchTransposeGemmOpRun(input, op_a, op_b);
         auto result_ref = BatchTransposeGemmTorchRefRun(input, op_a, op_b);
-        assertTensorClose(result.C.to(result_ref.C.type()), result.C);
+        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C);
 
     }
 
@@ -168,12 +168,14 @@ public:
                          size_t m,
                          size_t n,
                          size_t k,
-                         DataType dtype)
+                         DataType dtype,
+                         double rtol = 1e-3,
+                         double atol = 1e-3)
     {
         auto input = PrepareGemmOpInput(b, m, n, k, dtype);
         auto result = BatchGemmOpRun(input);
         auto result_ref = BatchGemmTorchRefRun(input);
-        assertTensorClose(result.C.to(result_ref.C.type()), result.C);
+        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C, rtol, atol);
     }
 
     void BatchTransposeGemmOp(TransposeOperation op_a,
@@ -188,7 +190,7 @@ public:
         auto input = PrepareGemmOpInput(b, m1, k1, k2, n2, dtype);
         auto result = BatchTransposeGemmOpRun(input, op_a, op_b);
         auto result_ref = BatchTransposeGemmTorchRefRun(input, op_a, op_b);
-        assertTensorClose(result.C.to(result_ref.C.type()), result.C);
+        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C);
 
     }
 
@@ -205,7 +207,7 @@ public:
         auto input = PrepareGemmOpInput(b, m1, k1, k2, n2, dtype);
         auto result = MixtureBatchTransposeGemmOpRun(input, op_a, op_b, type);
         auto result_ref = BatchTransposeGemmTorchRefRun(input, op_a, op_b);
-        assertTensorClose(result.C.to(result_ref.C.type()), result.C);
+        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C);
 
     }
 

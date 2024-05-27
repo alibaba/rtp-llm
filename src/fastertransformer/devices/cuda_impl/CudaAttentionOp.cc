@@ -82,9 +82,8 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     int     int8_mode        = 0;
 
     // logn attention
-    bool        use_logn_attention  = false;
-    const int   logn_seq_len        = 0;
-
+    bool        use_logn_attn = params.configs.rope_config.use_logn_attn;
+    const int   logn_seq_len  = params.configs.rope_config.logn_seq_len;
     // rope
     const auto rope_embedding_dim              = params.configs.rope_config.embedding_dim;
     const auto rope_embedding_style            = (int) params.configs.rope_config.embedding_style;
@@ -118,7 +117,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         rope_position_embeddings_scale,
         rope_base_scale,
         logn_seq_len,
-        use_logn_attention,
+        use_logn_attn,
         scale_out_ptr,
         int8_mode,
         stream_
@@ -206,8 +205,8 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     int base_scale = params.configs.rope_config.base_scale;
 
     // logn attention
-    int logn_seq_len    = 0;
-    bool use_logn_attn  = false;
+    bool        use_logn_attn = params.configs.rope_config.use_logn_attn;
+    const int   logn_seq_len  = params.configs.rope_config.logn_seq_len;
 
     // prefix prompt
 

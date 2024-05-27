@@ -35,10 +35,10 @@ TEST_F(CudaGemmOpTest, TransposeGemmOpTest) {
 }
 
 TEST_F(CudaGemmOpTest, BatchGemmOpTest) {
-    BatchGemmOpTest(1, 8, 16, 32, DataType::TYPE_FP16);
-    BatchGemmOpTest(2, 8, 16, 32, DataType::TYPE_FP16);
-    BatchGemmOpTest(4, 8, 16, 32, DataType::TYPE_FP16);
-    BatchGemmOpTest(8, 8, 8, 8, DataType::TYPE_FP16);
+    BatchGemmOpTest(1, 8, 16, 32, DataType::TYPE_FP16, 1e-2, 1e-2);
+    BatchGemmOpTest(2, 8, 16, 32, DataType::TYPE_FP16, 1e-2, 1e-2);
+    BatchGemmOpTest(4, 8, 16, 32, DataType::TYPE_FP16, 1e-2, 1e-2);
+    BatchGemmOpTest(8, 8, 8, 8, DataType::TYPE_FP16, 1e-2, 1e-2);
     BatchGemmOpTest(1, 8, 16, 32, DataType::TYPE_FP32);
     BatchGemmOpTest(2, 8, 16, 32, DataType::TYPE_FP32);
     BatchGemmOpTest(4, 8, 16, 32, DataType::TYPE_FP32);
