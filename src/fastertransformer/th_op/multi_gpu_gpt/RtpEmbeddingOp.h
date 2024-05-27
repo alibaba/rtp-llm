@@ -19,24 +19,24 @@ public:
 
 class RtpEmbeddingOp: public th::jit::CustomClassHolder {
 public:
-    RtpEmbeddingOp(const c10::intrusive_ptr<ft::GptInitParameter> gpt_init_params, const c10::intrusive_ptr<EmbeddingHandlerOp> handler_op);
+    RtpEmbeddingOp(const ft::GptInitParameter& gpt_init_params, py::object handler_impl);
     ~RtpEmbeddingOp();
-    void init(const c10::intrusive_ptr<ft::GptInitParameter>&                     maga_init_params,
-              const std::vector<std::unordered_map<std::string, th::Tensor>>& layer_weights,
-              const c10::Dict<std::string, th::Tensor>&                       weights);
+    void init(const py::object layer_weights, const py::object weights);
     void stop();
-    
-    th::Tensor decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id);
-    std::vector<std::string> handlerTensorInfo();
+
+    th::Tensor decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id);    
 
 private:
     std::unique_ptr<rtp_llm::EmbeddingEngine> embedding_engine_;
-    rtp_llm::HandlerBase& handler_;
+    py::object handler_;
+    const ft::GptInitParameter& gpt_init_params_;
     std::unordered_map<std::string, ft::ConstBufferPtr>              global_weights_;
     std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layer_weights_;
 
     std::atomic<bool>             is_server_shutdown_{false};
     kmonitor::MetricsReporterPtr  metrics_reporter_ = nullptr;
 };
+
+void registerRtpEmbeddingOp(const py::module_& m);
 
 }  // namespace torch_ext

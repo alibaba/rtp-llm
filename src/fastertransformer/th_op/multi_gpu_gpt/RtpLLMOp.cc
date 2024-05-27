@@ -112,17 +112,17 @@ RtpLLMOp::~RtpLLMOp() {
 
 }  // namespace torch_ext
 
-DECLARE_TORCH_JIT_CLASS_WITH_DEFAULT_CONSTRUCTOR(rtp_llm, MagaInitParams)
-ADD_TORCH_JIT_PROPERTY(rtp_llm, MagaInitParams, gpt_init_parameter);
+// DECLARE_TORCH_JIT_CLASS_WITH_DEFAULT_CONSTRUCTOR(rtp_llm, MagaInitParams)
+// ADD_TORCH_JIT_PROPERTY(rtp_llm, MagaInitParams, gpt_init_parameter);
 
-static auto fasterTransformerGptTHS =
-#ifdef LEGACY_THS
-    torch::jit::class_<torch_ext::RtpLLMOp>("FasterTransformerRtpLLMOp")
-#else
-    torch::jit::class_<torch_ext::RtpLLMOp>("FasterTransformer", "RtpLLMOp")
-#endif
-        .def(torch::jit::init<>())  // quant_pre_scales
-        .def("init", &torch_ext::RtpLLMOp::init)
-        .def("add_lora", &torch_ext::RtpLLMOp::addLoRA)
-        .def("remove_lora", &torch_ext::RtpLLMOp::removeLoRA)
-        .def("stop", &torch_ext::RtpLLMOp::stop);
+// static auto fasterTransformerGptTHS =
+// #ifdef LEGACY_THS
+//     torch::jit::class_<torch_ext::RtpLLMOp>("FasterTransformerRtpLLMOp")
+// #else
+//     torch::jit::class_<torch_ext::RtpLLMOp>("FasterTransformer", "RtpLLMOp")
+// #endif
+//         .def(torch::jit::init<>())  // quant_pre_scales
+//         .def("init", &torch_ext::RtpLLMOp::init)
+//         .def("add_lora", &torch_ext::RtpLLMOp::addLoRA)
+//         .def("remove_lora", &torch_ext::RtpLLMOp::removeLoRA)
+//         .def("stop", &torch_ext::RtpLLMOp::stop);

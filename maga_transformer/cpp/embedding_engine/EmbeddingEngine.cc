@@ -5,10 +5,10 @@
 using namespace std;
 namespace rtp_llm {
 
-EmbeddingEngine::EmbeddingEngine(const MagaInitParams&                                                   params,
+EmbeddingEngine::EmbeddingEngine(const fastertransformer::GptInitParameter&                              params,
                                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
                                  const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
-                                 const HandlerBase&                                                      handler,
+                                 py::object                                                              handler,
                                  const kmonitor::MetricsReporterPtr metrics_reporter):
     params_(params), metrics_reporter_(metrics_reporter) {
     executor_.reset(new EmbeddingExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights, handler, metrics_reporter_));

@@ -5,18 +5,19 @@
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
+#include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
 
 using namespace std;
 using namespace fastertransformer;
 
 namespace rtp_llm {
 
-EmbeddingExecutor::EmbeddingExecutor(const MagaInitParams&                                params,
+EmbeddingExecutor::EmbeddingExecutor(const GptInitParameter&                              gpt_init_parameter,
                                      ft::NcclParam                                        tensor_para,
                                      ft::NcclParam                                        pipeline_para,
                                      const vector<unordered_map<string, ConstBufferPtr>>& layer_weights,
                                      const unordered_map<string, ConstBufferPtr>&         weights,
-                                     const HandlerBase&                                   handler,
+                                     py::object                                           handler,
                                      const kmonitor::MetricsReporterPtr                   metrics_reporter):
     handler_(handler), tensor_para_(tensor_para), pipeline_para_(pipeline_para), metrics_reporter_(metrics_reporter) {
     // need init model and sampler
@@ -24,10 +25,10 @@ EmbeddingExecutor::EmbeddingExecutor(const MagaInitParams&                      
     // model_.reset(new GptModel(*model_params));
     SamplerInitParams sampler_params;
     device_               = ft::DeviceFactory::getDevice(DeviceType::Cuda);
-    data_type_            = ft::getDataType(params.gpt_init_parameter->data_type_);
+    data_type_            = ft::getDataType(gpt_init_parameter.data_type_);
     sampler_params.device = device_;
-    model_wrapper_.reset(new ParallelModelWrapper(*params.gpt_init_parameter, weights, layer_weights));
-    init_position_ids(params.gpt_init_parameter->max_seq_len_);
+    model_wrapper_.reset(new ParallelModelWrapper(gpt_init_parameter, weights, layer_weights));
+    init_position_ids(gpt_init_parameter.max_seq_len_);
 }
 
 void EmbeddingExecutor::init_position_ids(int max_seq_len) {
@@ -109,15 +110,16 @@ void EmbeddingExecutor::calcTokenNum(const list<EmbeddingStreamPtr>& streams, in
     }
 }
 
-unique_ptr<GptModelOutputs> EmbeddingExecutor::copyResultToCPU(const GptModelOutputs& gpu_outputs) const {
+unique_ptr<GptModelOutputs> EmbeddingExecutor::copyResultToCPU(th::Tensor gpu_outputs) const {
     auto output = std::make_unique<GptModelOutputs>();
-    output->hidden_states = device_->allocateBuffer({gpu_outputs.hidden_states->type(), gpu_outputs.hidden_states->shape(), ft::AllocationType::HOST}, {});
-    device_->copy({*(output->hidden_states), *(gpu_outputs.hidden_states)});
+    auto buffer_ptr = torchTensor2Buffer(gpu_outputs);
+    output->hidden_states = device_->allocateBuffer({buffer_ptr->type(), buffer_ptr->shape(), ft::AllocationType::HOST}, {});
+    device_->copy({*(output->hidden_states), *(buffer_ptr)});
     return output;
 }
 
-absl::Status EmbeddingExecutor::updateStreams(std::unique_ptr<GptModelOutputs>& gpu_outputs, const std::list<EmbeddingStreamPtr>& streams) const {
-    auto cpu_output = copyResultToCPU(*gpu_outputs);
+absl::Status EmbeddingExecutor::updateStreams(th::Tensor gpu_outputs, const std::list<EmbeddingStreamPtr>& streams) const {
+    auto cpu_output = copyResultToCPU(gpu_outputs);
     int index = 0;
     for (auto& stream: streams) {
         auto hidden_states_buf = (*cpu_output->hidden_states).slice(index, index + stream->batchSize());
@@ -129,6 +131,19 @@ absl::Status EmbeddingExecutor::updateStreams(std::unique_ptr<GptModelOutputs>& 
     return absl::OkStatus();
 }
 
+absl::StatusOr<th::Tensor> EmbeddingExecutor::postProcess(const ModelRequest& model_request, const GptModelOutputs& gpu_outputs) {
+    py::gil_scoped_acquire acquire;
+    try {
+        torch::Tensor hidden_states = Buffer2torchTensor(gpu_outputs.all_hidden_states, false);
+        torch::Tensor input_lengths = Buffer2torchTensor(model_request.input_lengths, false);
+        torch::Tensor input_ids = Buffer2torchTensor(model_request.combo_tokens, false);
+        torch::Tensor output = handler_.attr("forward")(input_ids, hidden_states, input_lengths).cast<th::Tensor>();
+        return output;
+    } catch (const exception& e) {
+        return absl::InternalError("meet error when run handler " + std::string(e.what()));
+    }    
+}
+
 absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& streams) {
     auto model_input_status = gatherModelInput(streams);
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
@@ -138,9 +153,9 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     ModelRequest model_request        = std::move(generateOldModelRequest(model_input));
 
     auto output = model_wrapper_->forward(model_request);
-    auto handler_output = handler_.forward(model_request, *output);
-    RETURN_IF_STATUS_OR_ERROR(handler_output);
-    return updateStreams(handler_output.value(), streams);
+    auto post_state = postProcess(model_request, *output);
+    RETURN_IF_STATUS_OR_ERROR(post_state);
+    return updateStreams(post_state.value(), streams);
     // return updateStreams(output, streams);
 }
 

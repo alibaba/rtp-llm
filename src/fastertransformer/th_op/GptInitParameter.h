@@ -84,9 +84,9 @@ public:
     int64_t                               bos_token_id_ = -1;
     int64_t                               eos_token_id_ = 0;
     int64_t                               pad_token_id_ = 0;
-    c10::intrusive_ptr<RoleSpecialTokens> user_;
-    c10::intrusive_ptr<RoleSpecialTokens> assistant_;
-    c10::intrusive_ptr<RoleSpecialTokens> system_;
+    RoleSpecialTokens user_;
+    RoleSpecialTokens assistant_;
+    RoleSpecialTokens system_;
     std::vector<std::vector<int64_t>>     stop_words_list_;
     std::vector<std::string>              stop_words_str_;
 };
@@ -165,8 +165,8 @@ public:
     bool        prefix_projection_ = false;
     bool        using_hf_sampling_ = false;
 
-    c10::intrusive_ptr<SpecialTokens> special_tokens_;
-    c10::intrusive_ptr<QuantAlgo> quant_algo_;
+    SpecialTokens special_tokens_;
+    QuantAlgo quant_algo_;
 
     // async mode config
     int64_t max_generate_batch_size_ = 1;
@@ -208,5 +208,7 @@ public:
     void setActivationType();
     bool isGatedActivation();
 };
+
+void registerGptInitParameter(py::module_ m);
 
 }

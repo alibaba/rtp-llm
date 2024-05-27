@@ -93,15 +93,19 @@ inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor) {
     return std::make_unique<Buffer>(memory_type, dtype, shape, data);
 }
 
-inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf) {
+inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf, bool copyData = true) {
     auto option = torch::dtype(dataTypeToTorchType(buf->type())).device(memoryTypeToTorchDevice(buf->where())).requires_grad(false);
-    torch::Tensor out = torch::zeros(bufferShapeToTorchShape(*buf), option);
-    if (buf->where() == MemoryType::MEMORY_CPU || buf->where() == MemoryType::MEMORY_CPU_PINNED) {
-        memcpy(out.data_ptr(), buf->data(), buf->sizeBytes());
+    if (copyData) {
+        torch::Tensor out = torch::zeros(bufferShapeToTorchShape(*buf), option);
+        if (buf->where() == MemoryType::MEMORY_CPU || buf->where() == MemoryType::MEMORY_CPU_PINNED) {
+            memcpy(out.data_ptr(), buf->data(), buf->sizeBytes());
+        } else {
+            throw std::runtime_error("not implemented");
+        }
+        return out;
     } else {
-        throw std::runtime_error("not implemented");
+        return torch::from_blob(buf->data(), bufferShapeToTorchShape(*buf), option);        
     }
-    return out;
 }
 
 } // namespace fastertransformer

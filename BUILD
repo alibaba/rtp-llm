@@ -95,7 +95,8 @@ filegroup(
     srcs = glob(["src/fastertransformer/th_op/th_utils.cc",
                  "src/fastertransformer/th_op/common/*.cc",
                  "src/fastertransformer/th_op/multi_gpu_gpt/*.cc",
-                 "src/fastertransformer/th_op/GptInitParameter.cc"
+                 "src/fastertransformer/th_op/GptInitParameter.cc",
+                 "src/fastertransformer/th_op/init.cc"
                  ]),
 )
 

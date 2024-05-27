@@ -22,14 +22,14 @@ public:
                          th::Tensor&              block_index_map,
                          th::optional<th::Tensor> lora_ids,
                          th::optional<th::Tensor> attention_mask,
-                         th::optional<th::Tensor> position_ids,                
+                         th::optional<th::Tensor> position_ids,
                          th::optional<th::Tensor> linear_bias_slopes,
                          th::optional<th::Tensor> prefix_prompt_lengths,
                          th::optional<th::Tensor> count_prefix_length,
                          th::optional<th::Tensor> max_prefix_length,
                          th::optional<th::Tensor> key_cache_scale,
                          th::optional<th::Tensor> value_cache_scale) = 0;
-    
+
     virtual void addLoRA(const int                                                       lora_id,
                         const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_a_weights,
                         const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights)=0;
@@ -67,7 +67,7 @@ public:
                  th::optional<th::Tensor> max_prefix_length,
                  th::optional<th::Tensor> key_cache_scale,
                  th::optional<th::Tensor> value_cache_scale) override;
-    
+
     virtual void addLoRA(const int                                                       lora_id,
                         const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_a_weights,
                         const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights) override;
@@ -98,7 +98,7 @@ private:
 
 class ParallelGptOp: public th::jit::CustomClassHolder {
 public:
-    ParallelGptOp(c10::intrusive_ptr<ft::GptInitParameter>                            gpt_init_parameter,
+    ParallelGptOp(const ft::GptInitParameter&                                     gpt_init_parameter,
                   const int64_t                                                   tensor_para_size,
                   const int64_t                                                   pipeline_para_size,
                   const std::string                                               master_ip,
@@ -123,10 +123,10 @@ public:
                        th::optional<th::Tensor> key_cache_scale,
                        th::optional<th::Tensor> value_cache_scale);
 
-    
     void addLoRA(const int64_t                                                   lora_id,
                          const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_a_weights,
                          const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights);
+
     void removeLoRA(const int64_t lora_id);
 
     bool UseFMHA();
@@ -143,5 +143,7 @@ private:
     // The chunk size (16 / sizeof(T)) for key cache in fmha.
     size_t chunk_size_;
 };
+
+void registerParallelGptOp(const py::module_& m);
 
 }  // namespace torch_ext

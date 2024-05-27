@@ -1,18 +1,14 @@
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "c10/util/intrusive_ptr.h"
+#include "pybind11/detail/common.h"
 
 namespace th = torch;
 
 namespace fastertransformer {
 
-SpecialTokens::SpecialTokens():
-    user_(c10::make_intrusive<RoleSpecialTokens>()),
-    assistant_(c10::make_intrusive<RoleSpecialTokens>()),
-    system_(c10::make_intrusive<RoleSpecialTokens>()) {}
+SpecialTokens::SpecialTokens() {}
 
-GptInitParameter::GptInitParameter():
-    special_tokens_(c10::make_intrusive<SpecialTokens>()),
-    quant_algo_(c10::make_intrusive<QuantAlgo>()) {}
+GptInitParameter::GptInitParameter() {}
 
 GptInitParameter::GptInitParameter(int64_t head_num,
                                    int64_t size_per_head,
@@ -25,9 +21,7 @@ GptInitParameter::GptInitParameter(int64_t head_num,
     num_layers_(num_layers),
     max_seq_len_(max_seq_len),
     vocab_size_(vocab_size),
-    hidden_size_(hidden_size),
-    special_tokens_(c10::make_intrusive<SpecialTokens>()),
-    quant_algo_(c10::make_intrusive<QuantAlgo>()) {
+    hidden_size_(hidden_size) {
 }
 
 void GptInitParameter::insertMultiTaskPromptTokens(int64_t task_id, std::vector<int64_t> tokens_id) {
@@ -86,55 +80,7 @@ void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int6
     }
 }
 
-static auto quantAlgoTHS =
-#ifdef LEGACY_THS
-    torch::jit::class_<QuantAlgo>("FasterTransformerQuantAlgo")
-#else
-    torch::jit::class_<QuantAlgo>("FasterTransformer", "QuantAlgo")
-#endif
-    .def(torch::jit::init<>())
-    .def("setQuantAlgo", &QuantAlgo::setQuantAlgo)
-    .def("isWeightOnlyPerCol", &QuantAlgo::isWeightOnlyPerCol)
-    .def("isGptq", &QuantAlgo::isGptq)
-    .def("isAwq", &QuantAlgo::isAwq)
-    .def("isSmoothQuant", &QuantAlgo::isSmoothQuant)
-    .def("isOmniQuant", &QuantAlgo::isOmniQuant)
-    .def("isQuant", &QuantAlgo::isQuant)
-    .def("isGroupwise", &QuantAlgo::isGroupwise)
-    .def("getGroupSize", &QuantAlgo::getGroupSize)
-    .def("getWeightBits", &QuantAlgo::getWeightBits)
-    .def_pickle(
-            [](const c10::intrusive_ptr<QuantAlgo> &quant_algo) { // __getstate__
-                return std::vector<int64_t>{int(quant_algo->getQuantMethod()),
-                    quant_algo->getWeightBits(), quant_algo->getGroupSize()};
-            },
-            [](std::vector<int64_t> t) { // __setstate__
-                return c10::make_intrusive<QuantAlgo>(QuantMethod(t[0]), t[1], t[2]);
-            }
-                );
-
-#undef DEF_PROPERTY
-#undef REGISTER_PROPERTYS
-
-// refister propertys for role_special_tokens
-#define DEF_PROPERTY(name) .def_readwrite(#name, &RoleSpecialTokens::name##_)
-
-#define REGISTER_PROPERTYS                      \
-    DEF_PROPERTY(token_ids)                     \
-    DEF_PROPERTY(eos_token_ids)
-
-static auto roleSpecialTokensTHS =
-#ifdef LEGACY_THS
-    torch::jit::class_<RoleSpecialTokens>("FasterTransformerRoleSpecialTokens")
-#else
-    torch::jit::class_<RoleSpecialTokens>("FasterTransformer", "RoleSpecialTokens")
-#endif
-    .def(torch::jit::init<>()) REGISTER_PROPERTYS;
-
-#undef DEF_PROPERTY
-#undef REGISTER_PROPERTYS
-
-// refister propertys for special_tokens
+void registerGptInitParameter(py::module_ m) {
 #define DEF_PROPERTY(name) .def_readwrite(#name, &SpecialTokens::name##_)
 
 #define REGISTER_PROPERTYS                      \
@@ -147,16 +93,46 @@ static auto roleSpecialTokensTHS =
     DEF_PROPERTY(stop_words_str)                \
     DEF_PROPERTY(pad_token_id)
 
-static auto specialTokensTHS =
-#ifdef LEGACY_THS
-    torch::jit::class_<SpecialTokens>("FasterTransformerSpecialTokens")
-#else
-    torch::jit::class_<SpecialTokens>("FasterTransformer", "SpecialTokens")
-#endif
-    .def(torch::jit::init<>()) REGISTER_PROPERTYS;
+    pybind11::class_<SpecialTokens>(m, "SpecialTokens")
+    .def(pybind11::init<>()) REGISTER_PROPERTYS;
 
 #undef DEF_PROPERTY
 #undef REGISTER_PROPERTYS
+  
+#define DEF_PROPERTY(name) .def_readwrite(#name, &RoleSpecialTokens::name##_)
+
+#define REGISTER_PROPERTYS                      \
+    DEF_PROPERTY(token_ids)                     \
+    DEF_PROPERTY(eos_token_ids)
+
+    pybind11::class_<RoleSpecialTokens>(m, "RoleSpecialTokens")
+    .def(pybind11::init<>()) REGISTER_PROPERTYS;
+
+
+#undef DEF_PROPERTY
+#undef REGISTER_PROPERTYS
+
+    pybind11::class_<QuantAlgo>(m, "QuantAlgo")
+    .def(pybind11::init<>())  // quant_pre_scales
+    .def("setQuantAlgo", &QuantAlgo::setQuantAlgo)
+    .def("isWeightOnlyPerCol", &QuantAlgo::isWeightOnlyPerCol)
+    .def("isGptq", &QuantAlgo::isGptq)
+    .def("isAwq", &QuantAlgo::isAwq)
+    .def("isSmoothQuant", &QuantAlgo::isSmoothQuant)
+    .def("isOmniQuant", &QuantAlgo::isOmniQuant)
+    .def("isQuant", &QuantAlgo::isQuant)
+    .def("isGroupwise", &QuantAlgo::isGroupwise)
+    .def("getGroupSize", &QuantAlgo::getGroupSize)
+    .def("getWeightBits", &QuantAlgo::getWeightBits)
+    .def(py::pickle(
+        [](const QuantAlgo& quant_algo) {
+            return py::make_tuple(int(quant_algo.getQuantMethod()),
+                    int(quant_algo.getWeightBits()), int(quant_algo.getGroupSize()));
+        }
+        , [](py::tuple t){
+            return QuantAlgo(QuantMethod(t[0].cast<int>()), t[1].cast<int>(), t[2].cast<int>());
+        }));
+
 
 #define DEF_PROPERTY(name, member) .def_readwrite(#name, &GptInitParameter::member)
 
@@ -244,14 +220,8 @@ static auto specialTokensTHS =
     DEF_PROPERTY(tp_rank, tp_rank_)                                     \
     DEF_PROPERTY(use_rpc, use_rpc_)
 
-
-static auto fasterTransformerGptInitParameterTHS =
-#ifdef LEGACY_THS
-    torch::jit::class_<GptInitParameter>("FasterTransformerGptInitParameter")
-#else
-    torch::jit::class_<GptInitParameter>("FasterTransformer", "GptInitParameter")
-#endif
-    .def(torch::jit::init<int64_t,     // head_num
+    pybind11::class_<GptInitParameter>(m, "GptInitParameter")
+    .def(pybind11::init<int64_t,     // head_num
          int64_t,     // size_per_head
          int64_t,     // num_layers
          int64_t,     // max_seq_len
@@ -263,5 +233,6 @@ static auto fasterTransformerGptInitParameterTHS =
     .def("setNormType", &GptInitParameter::setNormType)
     .def("setActivationType", &GptInitParameter::setActivationType)
     .def("isGatedActivation", &GptInitParameter::isGatedActivation)  REGISTER_PROPERTYS;
+}
 
 }

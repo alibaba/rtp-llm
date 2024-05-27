@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
+from maga_transformer.ops import GptInitParameter
 
 updated_params: Set[str] = set()
 
@@ -107,7 +108,7 @@ class GptInitModelParameters:
                  vocab_size: int,
                  **kwargs: Any):
         hidden_size = head_num * size_per_head
-        self.gpt_init_params = torch.classes.FasterTransformer.GptInitParameter(
+        self.gpt_init_params = GptInitParameter(
             head_num, size_per_head, layer_num, max_seq_len, vocab_size, hidden_size
         )
         self._model_related_types: Dict[str, str] = {
@@ -142,7 +143,7 @@ class GptInitModelParameters:
 
     # read and write directly through GptInitModelParameters.k
     def __getattr__(self, k: str):
-        return self.gpt_init_params.__getattr__(k)
+        return getattr(self.gpt_init_params, k)
 
     def __setattr__(self, k: str, v: Any):
         updated_params.add(k)
@@ -151,7 +152,7 @@ class GptInitModelParameters:
         elif v is not None:
             self.gpt_init_params.__setattr__(k, v)
             if k in self._model_related_types:
-                self.gpt_init_params.__getattr__(self._model_related_types[k])()
+                getattr(self.gpt_init_params, self._model_related_types[k])()
 
     def update(self, update_params: Dict[str, Any]):
         for k, v in update_params.items():

@@ -7,9 +7,9 @@
 using namespace std;
 namespace rtp_llm {
 
-EmbeddingScheduler::EmbeddingScheduler(const MagaInitParams&              config,
-                                       const kmonitor::MetricsReporterPtr metrics_reporter):
-    config_(*config.gpt_init_parameter), metrics_reporter_(metrics_reporter) {}
+EmbeddingScheduler::EmbeddingScheduler(const fastertransformer::GptInitParameter& config,
+                                       const kmonitor::MetricsReporterPtr         metrics_reporter):
+    config_(config), metrics_reporter_(metrics_reporter) {}
 
 EmbeddingScheduler::~EmbeddingScheduler() {
     (void)stop();

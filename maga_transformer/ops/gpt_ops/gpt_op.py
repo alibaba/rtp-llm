@@ -6,6 +6,7 @@ from maga_transformer.utils.model_weight import LoRAMap
 from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
+from maga_transformer.ops import ParallelGptOp
 
 
 class GptOp(FTOPBase):
@@ -22,8 +23,8 @@ class GptOp(FTOPBase):
             return
         if self.ft_op is not None:
             del self.ft_op
-        self.ft_op = torch.classes.FasterTransformer.ParallelGptOp( # type: ignore
-            self.config,
+        self.ft_op = ParallelGptOp( # type: ignore
+            self.config.gpt_init_params,
             g_parallel_info.tp_size,
             g_parallel_info.pp_size,
             g_master_info.ip,

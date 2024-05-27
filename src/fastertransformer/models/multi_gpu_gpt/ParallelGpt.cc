@@ -12,7 +12,7 @@ void ParallelGpt<T>::initialize()
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     // 默认stdout输出到文件的逻辑是全缓冲，导致ft_log和autil_log日志刷不出来，手动设置为行缓冲
     setlinebuf(stdout);
-    quant_algo_                 = params_.quant_algo_->toQuantAlgo();
+    quant_algo_                 = params_.quant_algo_.toQuantAlgo();
     parallel_attention_wrapper_ = new ParallelAttentionWrapper<T>(params_,
                                                                   tensor_para_,
                                                                   stream_,

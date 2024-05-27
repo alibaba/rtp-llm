@@ -77,7 +77,7 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
         torch_ext::loadWeights<T>(pipeline_para_.world_size_,
                                   pipeline_para_.rank_,
                                   gpt_init_parameter.num_layers_,
-                                  gpt_init_parameter.quant_algo_->toQuantAlgo(),
+                                  gpt_init_parameter.quant_algo_.toQuantAlgo(),
                                   layer_weights_,
                                   (const std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*>*)nullptr);
     global_weights_.reset(new GptGlobalWeights<T>(global_weights));

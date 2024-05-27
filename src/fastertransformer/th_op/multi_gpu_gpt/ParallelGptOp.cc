@@ -28,7 +28,7 @@ FtGpt<T>::FtGpt(const ft::GptInitParameter&   gpt_init_parameter,
     gpt_layer_weights_ = loadWeights<T>(pipeline_para_.world_size_,
                                         pipeline_para_.rank_,
                                         gpt_init_parameter_.num_layers_,
-                                        gpt_init_parameter_.quant_algo_->toQuantAlgo(),
+                                        gpt_init_parameter_.quant_algo_.toQuantAlgo(),
                                         weights,
                                         &gpt_lora_layer_weights_);
     
@@ -177,16 +177,16 @@ bool FtGpt<T>::UseFMHA()
     return parallel_gpt_->UseFMHA();
 }
 
-ParallelGptOp::ParallelGptOp(c10::intrusive_ptr<ft::GptInitParameter>                        gpt_init_parameter,
+ParallelGptOp::ParallelGptOp(const ft::GptInitParameter&                                     gpt_init_parameter,
                              const int64_t                                                   tensor_para_size,
                              const int64_t                                                   pipeline_para_size,
                              const std::string                                               master_ip,
                              const int64_t                                                   master_port,
                              const std::vector<std::unordered_map<std::string, th::Tensor>>& weights):
-    gpt_init_parameter_(*gpt_init_parameter),
+    gpt_init_parameter_(gpt_init_parameter),
     tensor_para_size_(tensor_para_size),
     pipeline_para_size_(pipeline_para_size),
-    scalar_type_(getScalarType(gpt_init_parameter->data_type_))
+    scalar_type_(getScalarType(gpt_init_parameter.data_type_))
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
@@ -300,21 +300,18 @@ bool ParallelGptOp::UseFMHA()
     return gpt_->UseFMHA();
 }
 
-}  // namespace torch_ext
-
-static auto fasterTransformerGptTHS =
-#ifdef LEGACY_THS
-    torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformerParallelGptOp")
-#else
-    torch::jit::class_<torch_ext::ParallelGptOp>("FasterTransformer", "ParallelGptOp")
-#endif
-    .def(torch::jit::init<c10::intrusive_ptr<ft::GptInitParameter>,                         // gpt_init_parameter
-                              int64_t,                  // tensor_para_size
-                              int64_t,                  // pipeline_para_size
-                              std::string,              // master_ip
-                              int64_t,                  // master_port
-                              std::vector<std::unordered_map<std::string, th::Tensor>>>()) 
-        .def("forward", &torch_ext::ParallelGptOp::forward)
+void registerParallelGptOp(const py::module_& m) {
+    pybind11::class_<torch_ext::ParallelGptOp>(m, "ParallelGptOp")
+        .def(pybind11::init<const ft::GptInitParameter&,  // gpt_init_parameter
+                            int64_t,                      // tensor_para_size
+                            int64_t,                      // pipeline_para_size
+                            std::string,                  // master_ip
+                            int64_t,                      // master_port
+                            std::vector<std::unordered_map<std::string, th::Tensor>>>())
+        .def("forward", &torch_ext::ParallelGptOp::forward, py::call_guard<py::gil_scoped_release>())
         .def("use_fmha", &torch_ext::ParallelGptOp::UseFMHA)
         .def("add_lora", &torch_ext::ParallelGptOp::addLoRA)
         .def("remove_lora", &torch_ext::ParallelGptOp::removeLoRA);
+}
+
+}  // namespace torch_ext

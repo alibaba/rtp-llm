@@ -11,37 +11,71 @@ namespace th = torch;
 
 namespace torch_ext {
 
-RtpEmbeddingOp::RtpEmbeddingOp(const c10::intrusive_ptr<ft::GptInitParameter> gpt_init_params, const c10::intrusive_ptr<EmbeddingHandlerOp> handler_op): handler_(handler_op->getHandler()) {
+std::unordered_map<std::string, torch::Tensor> convert_pyobject_to_dict(py::handle obj) {
+
+    if (!py::isinstance<py::dict>(obj)) {
+        throw std::runtime_error("Expected a dicts");
+    }
+
+    // 从列表项中提取 dict
+    py::dict py_dict = py::reinterpret_borrow<py::dict>(obj);
+    // 创建一个 unordered_map
+    std::unordered_map<std::string, torch::Tensor> map;
+
+    // 遍历 dict 键值对
+    for (auto kv : py_dict) {
+        std::string   key   = py::cast<std::string>(kv.first);
+        torch::Tensor value = py::cast<torch::Tensor>(kv.second);
+        // 添加到 map 中
+        map[key] = value;
+    }
+    return map;
 }
 
-std::vector<std::string> RtpEmbeddingOp::handlerTensorInfo() {
-    return handler_.tensorInfo();
+std::vector<std::unordered_map<std::string, torch::Tensor>> convert_pyobject_to_vector_dict(py::object obj) {
+    // 确认 obj 是一个 Python 列表
+    if (!py::isinstance<py::list>(obj)) {
+        throw std::runtime_error("Expected a list");
+    }
+
+    // 从 py::object 提取 py::list
+    py::list py_list = py::reinterpret_borrow<py::list>(obj);
+
+    // 创建一个 std::vector<std::unordered_map<std::string, torch::Tensor>>
+    std::vector<std::unordered_map<std::string, torch::Tensor>> vec;
+
+    // 遍历 Python 列表，逐项转换
+    for (auto item : py_list) {
+        vec.push_back(std::move(convert_pyobject_to_dict(item)));
+    }
+    return vec;
 }
 
-void RtpEmbeddingOp::init(const c10::intrusive_ptr<ft::GptInitParameter>&               gpt_init_params,
-                    const std::vector<std::unordered_map<std::string, th::Tensor>>& layer_weights,
-                    const c10::Dict<std::string, th::Tensor>&                       weights) {
+RtpEmbeddingOp::RtpEmbeddingOp(const ft::GptInitParameter& gpt_init_params, py::object handler_impl):
+    gpt_init_params_(gpt_init_params), handler_(handler_impl) {}
+
+void RtpEmbeddingOp::init(py::object layer_weights, py::object weights) {
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
     (void)rtp_llm::initKmonitorFactory();
     auto kmon_tags = rtp_llm::getHippoTags();
-    metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+    metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));    
 
-    rtp_llm::MagaInitParams params;
-    params.gpt_init_parameter = gpt_init_params;
     ft::DeviceFactory::initDevices(ft::DeviceFactory::getDefaultGlobalDeviceParams());
-    for (auto& it : weights) {
-        global_weights_.emplace(it.key(), ft::torchTensor2Buffer(it.value()));
+
+    auto layer_weights_cc = convert_pyobject_to_vector_dict(layer_weights);
+    auto weights_cc = convert_pyobject_to_dict(weights);
+    for (auto& it : weights_cc) {
+        global_weights_.emplace(it.first, ft::torchTensor2Buffer(it.second));
     }
-    for (auto& weights : layer_weights) {
+    for (auto& weights : layer_weights_cc) {
         std::unordered_map<std::string, ft::ConstBufferPtr> __weights;
         for (auto& it : weights) {
             __weights.emplace(it.first, ft::torchTensor2Buffer(it.second));
         }
         layer_weights_.emplace_back(std::move(__weights));
     }
-    THROW_IF_STATUS_ERROR(handler_.loadTensor(global_weights_));
-    embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, layer_weights_, global_weights_, handler_, metrics_reporter_));
+    embedding_engine_.reset(new rtp_llm::EmbeddingEngine(gpt_init_params_, layer_weights_, global_weights_, handler_, metrics_reporter_));
 }
 
 void RtpEmbeddingOp::stop() {
@@ -66,18 +100,12 @@ RtpEmbeddingOp::~RtpEmbeddingOp() {
     stop();
 }
 
-}  // namespace torch_ext
-
-
-static auto rtpEmbeddingOpTHS =
-#ifdef LEGACY_THS
-    torch::jit::class_<torch_ext::RtpEmbeddingOp>("FasterTransformerRtpEmbeddingOp")
-#else
-    torch::jit::class_<torch_ext::RtpEmbeddingOp>("FasterTransformer", "RtpEmbeddingOp")
-#endif
-        .def(torch::jit::init<c10::intrusive_ptr<ft::GptInitParameter>, c10::intrusive_ptr<torch_ext::EmbeddingHandlerOp>>())  // quant_pre_scales
+void registerRtpEmbeddingOp(const py::module_& m) {
+    pybind11::class_<torch_ext::RtpEmbeddingOp>(m, "RtpEmbeddingOp")
+        .def(pybind11::init<const ft::GptInitParameter&, py::object>())  // quant_pre_scales
         .def("init", &torch_ext::RtpEmbeddingOp::init)
         .def("stop", &torch_ext::RtpEmbeddingOp::stop)
-        .def("decode", &torch_ext::RtpEmbeddingOp::decode)
-        .def("handler_tensor_info", &torch_ext::RtpEmbeddingOp::handlerTensorInfo);
+        .def("decode", &torch_ext::RtpEmbeddingOp::decode, py::call_guard<py::gil_scoped_release>());        
+}
 
+}  // namespace torch_ext
