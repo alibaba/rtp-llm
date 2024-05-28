@@ -38,7 +38,7 @@ class CustomHandler(object):
     
     # 输出: 
     # [batch_size], 由endpoint格式化返回
-    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor, config: Dict[str, Any]) -> Union[torch.Tensor, List[Any]]:
+    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> Union[torch.Tensor, List[Any]]:
         raise NotImplementedError
     
 class CustomRenderer(object):

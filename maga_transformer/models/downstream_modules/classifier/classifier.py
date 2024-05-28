@@ -50,7 +50,7 @@ class ClassifierHandler(CustomHandler):
         self.linear.bias.data = tensor_map['classifier.bias']
         self.linear = self.linear.to(data_type).eval().cuda()
         
-    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor, config: Dict[str, Any]) -> List[torch.Tensor]:
+    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> List[torch.Tensor]:
         #TODO test it
         if self.config_.is_causal:
             last_tokens = get_last_token_from_combo_tokens(hidden_states, input_lengths)

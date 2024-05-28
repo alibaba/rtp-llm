@@ -36,6 +36,6 @@ class RobertaClassifierHandler(CustomHandler):
         self.out_proj = self.out_proj.to(data_type).eval().cuda()
         self.dense = self.dense.to(data_type).eval().cuda()
 
-    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor, config: Dict[str, Any]) -> List[torch.Tensor]:
+    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> List[torch.Tensor]:
         first_tokens = get_first_token_from_combo_tokens(hidden_states, input_lengths)
         return self.out_proj(torch.tanh(self.dense(first_tokens)))

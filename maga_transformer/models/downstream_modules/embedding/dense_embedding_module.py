@@ -52,7 +52,7 @@ class NormalHandler(CustomHandler):
         super().__init__(config)
         self.is_causal = config.is_causal
 
-    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor, config: Dict[str, Any]) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> torch.Tensor:
         if self.is_causal:
             ts = get_last_token_from_combo_tokens(hidden_states, input_lengths)
         else:
@@ -85,7 +85,7 @@ class SentenceTransformerHandler(CustomHandler):
                 modules[module_config["name"]] = module
         self.model = nn.Sequential(modules).cuda().to(dtype)
 
-    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor, config: Dict[str, Any]) -> List[Any]:
+    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> List[Any]:
         batch_input_ids, batch_hidden_states, batch_attention_mask = combo_to_batch(hidden_states, input_ids, input_lengths)
         input =  {
             "token_embeddings": batch_hidden_states,

@@ -61,7 +61,7 @@ class SparseEmbeddingHandler(CustomHandler):
         self.sparse_linear.load_state_dict(sparse_linear_dict)
         self.sparse_linear = self.sparse_linear.to(self.dtype_).cuda()
 
-    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor, config: Dict[str, Any]):
+    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor):
         hidden_states = torch.relu(self.sparse_linear(hidden_states)).squeeze_(-1)
         hidden_states_list = combo_to_list(hidden_states, input_lengths)
         input_ids_list = combo_to_list(input_ids, input_lengths)

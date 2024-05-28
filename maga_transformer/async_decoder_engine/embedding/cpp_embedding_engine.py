@@ -1,6 +1,7 @@
 import time
 import torch
 import asyncio
+import logging
 from typing import List
 from concurrent.futures import ThreadPoolExecutor
 from maga_transformer.models.base_model import BaseModel
@@ -10,6 +11,7 @@ from maga_transformer.async_decoder_engine.embedding.embedding_stream import Eng
 
 class EmbeddingCppEngine(object):
     def __init__(self, model: BaseModel):
+        logging.info("creating cpp embedding engine")
         self.model = model
         assert self.model.custom_module is not None, "embedding custom module should not be None"
         # self.cpp_handler = self.model.custom_module.create_cpp_handler()

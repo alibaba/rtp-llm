@@ -37,9 +37,6 @@ class EmbeddingScheduler(object):
                         aborted_stream = self.waiting_streams_.popleft()
                         aborted_stream.set_error(f"stream is not schedule since length exceed max length, max_length: {self.config_.max_context_batch_size} * {self.config_.max_seq_len}, acutal: {aborted_stream.inputs.input_length}")
                     break
-                # make sure embedding config is the same
-                if len(new_streams) > 0 and stream.inputs.config != new_streams[0].inputs.config:
-                    break
                 new_streams.append(stream)
                 total_len += new_length
 
