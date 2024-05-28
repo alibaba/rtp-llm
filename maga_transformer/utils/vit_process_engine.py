@@ -9,7 +9,7 @@ import threading
 from typing import Any, List, Dict, Optional
 from maga_transformer.utils.lru_dict import LruDict
 
-image_cache = LruDict(int(os.environ.get('VIT_CACHE_LEN', '10')))
+image_cache = LruDict(int(os.environ.get('VIT_CACHE_ITEM_NUM', '10')))
 cache_lock = threading.Lock()
 
 if os.environ.get('DOWNLOAD_HEADERS', '') != '':
