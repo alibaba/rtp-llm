@@ -8,20 +8,26 @@ TrakcerAllocator::TrakcerAllocator(const TrackerAllocatorParams& params)
     // try reserve memory for tracker
     auto real_reserve_size = params.target_track_bytes;
     while (true) {
-        auto reserved_ptr = real_allocator_->malloc(real_reserve_size, false);
+        void* reserved_ptr = nullptr;
+        try {
+            reserved_ptr = real_allocator_->malloc(real_reserve_size, false);
+        } catch (std::exception& e) {
+            FT_LOG_WARNING("TrackerAllocator reserve %lu bytes of memory [%d] exception: %s",
+                           real_reserve_size, real_allocator_->memoryType(), e.what());
+        }
         if (reserved_ptr) {
-            FT_LOG_INFO("TrackerAllocator reserved %ld bytes of memory [%d]",
-                        real_reserve_size, real_allocator_->memoryType());
+            FT_LOG_INFO("TrackerAllocator successfully reserved %lu bytes (%lu MiB) of memory [%d]",
+                        real_reserve_size, real_reserve_size / 1024L / 1024L, real_allocator_->memoryType());
             memory_tracker_.reset(new MemoryTracker(reserved_ptr, real_reserve_size, params.align_size));
             break;
         }
         auto next_reserve_size = real_reserve_size - params.bytes_try_step;
         if (next_reserve_size > 0) {
-            FT_LOG_WARNING("TrackerAllocator failed to reserve %ld bytes of memory [%d], "
-                           "next will try %ld bytes",
+            FT_LOG_WARNING("TrackerAllocator failed to reserve %lu bytes of memory [%d], "
+                           "next will try %lu bytes",
                            real_reserve_size, real_allocator_->memoryType(), next_reserve_size);
         } else {
-            FT_LOG_ERROR("TrackerAllocator failed to reserve %ld bytes of memory [%d]. "
+            FT_LOG_ERROR("TrackerAllocator failed to reserve %lu bytes of memory [%d]. "
                          "Give up and use real allocator directly.",
                          real_reserve_size, real_allocator_->memoryType());
             break;
@@ -36,6 +42,10 @@ TrakcerAllocator::~TrakcerAllocator() {
         real_allocator_->free(&ptr);
         memory_tracker_.reset();
     }
+}
+
+AllocatorType TrakcerAllocator::type() const {
+    return real_allocator_->type();
 }
 
 MemoryType TrakcerAllocator::memoryType() const {

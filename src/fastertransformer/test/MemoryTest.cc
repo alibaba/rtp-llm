@@ -1,5 +1,6 @@
 #include "src/fastertransformer/core/MemoryTracker.h"
 #include "src/fastertransformer/core/TrackerAllocator.h"
+#include "src/fastertransformer/cuda/allocator_cuda.h"
 #include <gtest/gtest.h>
 
 using namespace std;
@@ -95,6 +96,58 @@ TEST_F(MemoryTest, testRandomAlloc) {
     EXPECT_EQ(status.free_size, (1 << 20));
     EXPECT_EQ(status.fragmented_size, 0);
     EXPECT_EQ(status.fragment_chunk_count, 0);
+}
+
+TEST_F(MemoryTest, testMemoryTracker) {
+    int device_id = 0;
+    Allocator<AllocatorType::CUDA> basic_cuda_allocator(device_id);
+    Allocator<AllocatorType::CUDA_HOST> basic_cuda_host_allocator(device_id);
+
+    TrackerAllocatorParams params;
+    params.real_allocator = &basic_cuda_allocator;
+    params.target_track_bytes = 1L * 1024L * 1024L * 1024L; // 1GB
+    params.bytes_try_step = 128L * 1024L * 1024L;          // 128MB
+    params.align_size = 64;
+
+    TrakcerAllocator cuda_allocator(params);
+    params.real_allocator = &basic_cuda_host_allocator;
+    TrakcerAllocator cuda_host_allocator(params);
+
+    const auto test_count = 1000;
+    cudaStream_t stream;
+    std::unordered_set<void*> cuda_ptrs;
+    std::unordered_set<void*> cuda_host_ptrs;
+    for (size_t i = 0; i < test_count; i++) {
+        auto alloc_size = i * 1024;
+        auto cuda_ptr = cuda_allocator.malloc(alloc_size);
+        auto cuda_host_ptr = cuda_host_allocator.malloc(alloc_size);
+        cuda_ptrs.insert(cuda_ptr);
+        cuda_host_ptrs.insert(cuda_host_ptr);
+        cudaMemcpyAsync(cuda_ptr, cuda_host_ptr, alloc_size, cudaMemcpyHostToDevice, stream);
+    }
+    cudaDeviceSynchronize();
+    for (auto ptr : cuda_ptrs) {
+        cuda_allocator.free(&ptr);
+    }
+    for (auto ptr : cuda_host_ptrs) {
+        cuda_host_allocator.free(&ptr);
+    }
+}
+
+TEST_F(MemoryTest, testReserveAllMemory) {
+    int device_id = 0;
+    Allocator<AllocatorType::CUDA> basic_cuda_allocator(device_id);
+    Allocator<AllocatorType::CUDA_HOST> basic_cuda_host_allocator(device_id);
+
+    TrackerAllocatorParams params;
+    params.real_allocator = &basic_cuda_allocator;
+    params.target_track_bytes = 80L * 1024L * 1024L * 1024L; // 80GB
+    params.bytes_try_step = 128L * 1024L * 1024L;          // 128MB
+    params.align_size = 64;
+
+    TrakcerAllocator cuda_allocator(params);
+    params.real_allocator = &basic_cuda_host_allocator;
+    TrakcerAllocator cuda_host_allocator(params);
 }
 
 int main(int argc, char** argv) {
