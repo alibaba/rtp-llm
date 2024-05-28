@@ -13,12 +13,11 @@ class RtpLLMOp: public th::jit::CustomClassHolder {
 public:
     RtpLLMOp();
     ~RtpLLMOp();
-    void init(const c10::intrusive_ptr<ft::GptInitParameter>                  maga_init_params,
-              const std::vector<std::unordered_map<std::string, th::Tensor>>& layer_weights,
-              const c10::Dict<std::string, th::Tensor>&                       weights);
+    void init(const ft::GptInitParameter& gpt_init_parameter, py::object layer_weights, py::object weights);
+
     void addLoRA(const int64_t                                                   lora_id,
-                 const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_a_weights,
-                 const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights);
+                 py::object lora_a_weights,
+                 py::object lora_b_weights);
     void removeLoRA(const int64_t lora_id);
     void stop();
     void _init(int64_t                                                                model_rpc_port,
@@ -34,5 +33,7 @@ private:
     std::atomic<bool>             is_server_ready_{false};
     std::atomic<bool>             is_server_shutdown_{false};
 };
+
+void registerRtpLLMOp(const py::module& m);
 
 }  // namespace torch_ext

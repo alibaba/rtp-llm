@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 class PyModelWeights: public th::jit::CustomClassHolder {
 public:
-    std::unordered_map<std::string, th::Tensor>              model_global_weights_;
+    std::unordered_map<std::string, th::Tensor> model_global_weights_;
     std::vector<std::unordered_map<std::string, th::Tensor>> layer_weights_;
     std::vector<std::unordered_map<std::string, th::Tensor>> layer_int8_weights_;
     std::vector<std::unordered_map<std::string, th::Tensor>> layer_int8_scales_;
@@ -21,7 +21,8 @@ public:
 
 class MagaInitParams: public th::jit::CustomClassHolder {
 public:
-    th::intrusive_ptr<ft::GptInitParameter>  gpt_init_parameter;
+    MagaInitParams(const ft::GptInitParameter& gpt_init_parameter);
+    const ft::GptInitParameter&  gpt_init_parameter;
     th::intrusive_ptr<PyModelWeights>    model_weights;
 };
 

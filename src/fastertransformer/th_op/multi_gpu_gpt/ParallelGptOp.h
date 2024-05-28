@@ -144,6 +144,6 @@ private:
     size_t chunk_size_;
 };
 
-void registerParallelGptOp(const py::module_& m);
+void registerParallelGptOp(const py::module& m);
 
 }  // namespace torch_ext

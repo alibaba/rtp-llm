@@ -300,7 +300,7 @@ bool ParallelGptOp::UseFMHA()
     return gpt_->UseFMHA();
 }
 
-void registerParallelGptOp(const py::module_& m) {
+void registerParallelGptOp(const py::module& m) {
     pybind11::class_<torch_ext::ParallelGptOp>(m, "ParallelGptOp")
         .def(pybind11::init<const ft::GptInitParameter&,  // gpt_init_parameter
                             int64_t,                      // tensor_para_size

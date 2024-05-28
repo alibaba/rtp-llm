@@ -21,7 +21,7 @@ SpeculativeExecutor::SpeculativeExecutor(
     // sampler_.reset(new SpeculativeSampler(sampler_params));
     // model_wrapper_.reset(
     //         new ParallelModelWrapper(*params.gpt_init_parameter, weights, layer_weights));
-    batch_stream_processor_.reset(new SpeculativeBatchStreamProcessor(*params.gpt_init_parameter, !model_wrapper_->useFMHA()));
+    batch_stream_processor_.reset(new SpeculativeBatchStreamProcessor(params.gpt_init_parameter, !model_wrapper_->useFMHA()));
 }
 
 ModelRequest SpeculativeExecutor::generateOldModelRequest(GptModelInputs& model_input) {

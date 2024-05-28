@@ -3,18 +3,19 @@ import torch
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
 from maga_transformer.ops.ft_op_base import FTOPBase
+from maga_transformer.ops import RtpLLMOp as CppRtpLLMOp
 
 class RtpLLMOp(FTOPBase):
     def __init__(self, config: GptInitModelParameters, is_sp: bool):
         super().__init__()
         self.config = config
         self.is_sp = is_sp
-        self.ft_op = torch.classes.FasterTransformer.RtpLLMOp()
+        self.ft_op = CppRtpLLMOp()
 
     def _initialize_op(self, force_init: bool=False):
         assert self.weight
         self.ft_op.init( # type: ignore
-            self.config,
+            self.config.gpt_init_params,
             self.weight.weights,
             self.weight.global_weights)
 

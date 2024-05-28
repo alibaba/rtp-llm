@@ -141,7 +141,7 @@ absl::StatusOr<th::Tensor> EmbeddingExecutor::postProcess(const ModelRequest& mo
         return output;
     } catch (const exception& e) {
         return absl::InternalError("meet error when run handler " + std::string(e.what()));
-    }    
+    }
 }
 
 absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& streams) {

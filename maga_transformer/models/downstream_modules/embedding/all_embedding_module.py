@@ -54,12 +54,13 @@ class ALLEmbeddingRenderer(EmbeddingRendererBase):
             del log_response['data']
         return log_response
 
+
 class NormalHandler(CustomHandler):
     def __init__(self, config: GptInitModelParameters):
         super().__init__(config)
         self.is_causal = config.is_causal
 
-    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor, config: Dict[str, Any]) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> torch.Tensor:
         input_lengths = torch.cat((torch.IntTensor([0]), input_lengths), 0)
         cum_lengths = torch.cumsum(input_lengths, dim=0)
         result = []

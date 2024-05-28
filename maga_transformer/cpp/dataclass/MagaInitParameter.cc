@@ -9,6 +9,8 @@ using namespace fastertransformer;
 
 namespace rtp_llm {
 
+MagaInitParams::MagaInitParams(const ft::GptInitParameter& gpt_init_parameter): gpt_init_parameter(gpt_init_parameter) {}
+
 ConstBufferPtr WeightsConverter::mayFindTensor2Buffer(unordered_map<string, th::Tensor> tensor_map, const string& key) {
     if (tensor_map.count(key) > 0) {
         auto buffer = torchTensor2Buffer(tensor_map.at(key));

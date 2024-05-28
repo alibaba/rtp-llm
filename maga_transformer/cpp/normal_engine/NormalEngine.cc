@@ -32,15 +32,15 @@ NormalEngine::~NormalEngine() {
 }
 
 void NormalEngine::initCacheManager() {
-    auto result = CacheConfigCreator::createConfig(*params_.gpt_init_parameter);
+    auto result = CacheConfigCreator::createConfig(params_.gpt_init_parameter);
     // TODO(xinfei.sxf) test create cache config exception
     THROW_IF_STATUS_ERROR(result.status());
     resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device_, metrics_reporter_);
 }
 
 void NormalEngine::initSystemPrompt() {
-    resource_context_.reuse_cache = params_.gpt_init_parameter->reuse_cache_;
-    auto ptuning_param = SystemPromptConstructor::construct(*params_.gpt_init_parameter, this, resource_context_.cache_manager.get());
+    resource_context_.reuse_cache = params_.gpt_init_parameter.reuse_cache_;
+    auto ptuning_param = SystemPromptConstructor::construct(params_.gpt_init_parameter, this, resource_context_.cache_manager.get());
     if (!ptuning_param.empty()) {
         resource_context_.reuse_cache = true;
         resource_context_.system_prompt.reset(new SystemPrompt(ptuning_param));
@@ -98,7 +98,7 @@ absl::Status NormalEngine::trySaveStepError() const {
 
 absl::Status NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setMetricsReporter(metrics_reporter_);
-    stream->setSpecialTokens(params_.gpt_init_parameter->special_tokens_);
+    stream->setSpecialTokens(params_.gpt_init_parameter.special_tokens_);
     FT_LOG_DEBUG("enqueue stream: %s %d", stream->debugString().c_str(), device_->getDeviceProperties().tp_rank);
     return scheduler_->enqueue(stream);
 }

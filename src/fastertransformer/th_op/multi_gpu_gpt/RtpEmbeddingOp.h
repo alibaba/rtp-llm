@@ -37,6 +37,6 @@ private:
     kmonitor::MetricsReporterPtr  metrics_reporter_ = nullptr;
 };
 
-void registerRtpEmbeddingOp(const py::module_& m);
+void registerRtpEmbeddingOp(const py::module& m);
 
 }  // namespace torch_ext

@@ -80,7 +80,7 @@ void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int6
     }
 }
 
-void registerGptInitParameter(py::module_ m) {
+void registerGptInitParameter(py::module m) {
 #define DEF_PROPERTY(name) .def_readwrite(#name, &SpecialTokens::name##_)
 
 #define REGISTER_PROPERTYS                      \

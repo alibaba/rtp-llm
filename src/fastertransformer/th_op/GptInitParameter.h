@@ -209,6 +209,6 @@ public:
     bool isGatedActivation();
 };
 
-void registerGptInitParameter(py::module_ m);
+void registerGptInitParameter(py::module m);
 
 }

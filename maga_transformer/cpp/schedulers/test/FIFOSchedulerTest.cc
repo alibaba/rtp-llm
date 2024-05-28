@@ -25,9 +25,9 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
     
-    MagaInitParams init_config;
-    init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
-    init_config.gpt_init_parameter->max_seq_len_ = 8192;
+    GptInitParameter config;
+    config.max_seq_len_ = 8192;
+    MagaInitParams init_config(config);
     FIFOScheduler scheduler(init_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
@@ -58,9 +58,9 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     ASSERT_EQ(cache_manager->freeBlockNums(), 1);
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
-    MagaInitParams init_config;
-    init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
-    init_config.gpt_init_parameter->max_seq_len_ = 8192;
+    GptInitParameter config;
+    config.max_seq_len_ = 8192;
+    MagaInitParams init_config(config);
     FIFOScheduler scheduler(init_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
@@ -87,9 +87,9 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     ASSERT_EQ(cache_manager->freeBlockNums(), 2);
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
-    MagaInitParams init_config;
-    init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
-    init_config.gpt_init_parameter->max_seq_len_ = 8192;
+    GptInitParameter config;
+    config.max_seq_len_ = 8192;
+    MagaInitParams init_config(config);
     FIFOScheduler scheduler(init_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
@@ -127,9 +127,9 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem2) {
     ASSERT_EQ(cache_manager->freeBlockNums(), 4);
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
-    MagaInitParams init_config;
-    init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
-    init_config.gpt_init_parameter->max_seq_len_ = 8192;
+    GptInitParameter config;
+    config.max_seq_len_ = 8192;
+    MagaInitParams init_config(config);
     FIFOScheduler scheduler(init_config, cache_manager);
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
     query->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
@@ -180,9 +180,9 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     std::shared_ptr<CacheManager> cache_manager = make_shared<CacheManager>(cache_config, device_);
     ASSERT_EQ(cache_manager->freeBlockNums(), 10);
     ResourceContext resource_context = {cache_manager, nullptr, true};
-    MagaInitParams init_config;
-    init_config.gpt_init_parameter               = c10::make_intrusive<GptInitParameter>();
-    init_config.gpt_init_parameter->max_seq_len_ = 8192;
+    GptInitParameter config;
+    config.max_seq_len_ = 8192;
+    MagaInitParams init_config(config);
     FIFOScheduler scheduler(init_config, cache_manager);
 
     std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();

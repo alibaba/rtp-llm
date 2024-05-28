@@ -33,4 +33,4 @@ if not os.path.exists(os.path.join(so_path, SO_NAME)):
     so_path = find_th_transformer(bazel_bin_dir)
 print("so path: ", so_path)
 sys.path.append(so_path)
-from libth_transformer import GptInitParameter, ParallelGptOp, RtpEmbeddingOp
+from libth_transformer import GptInitParameter, ParallelGptOp, RtpEmbeddingOp, RtpLLMOp
