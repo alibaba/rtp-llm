@@ -30,12 +30,65 @@ void* ICudaAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero) {
     }
 }
 
-
 void ICudaAllocator::memSet(void* ptr, const int val, const size_t size) const {
     check_cuda_error(cudaMemsetAsync(ptr, val, size, stream_));
 }
 
-// cuda allocator
+PurePointerCudaAllocator::PurePointerCudaAllocator(int device_id)
+    : ICudaAllocator(device_id)
+    , pointer_mapping_(new std::unordered_map<void*, size_t>)
+    {}
+
+PurePointerCudaAllocator::~PurePointerCudaAllocator() {}
+
+void PurePointerCudaAllocator::destroy() {
+    while (!pointer_mapping_->empty()) {
+        auto it = pointer_mapping_->begin();
+        auto ptr = it->first;
+        free(&ptr);
+    }
+}
+
+bool PurePointerCudaAllocator::isExist(void* address) const {
+    return pointer_mapping_->count(address) > 0;
+}
+
+ReallocType PurePointerCudaAllocator::isReMalloc(void* address, size_t size) const {
+    FT_CHECK(isExist(address));
+    if (pointer_mapping_->at(address) < size) {
+        return ReallocType::INCREASE;
+    } else if (pointer_mapping_->at(address) == size) {
+        return ReallocType::REUSE;
+    } else {
+        return ReallocType::DECREASE;
+    }
+}
+
+void* PurePointerCudaAllocator::malloc(size_t size, const bool is_set_zero) {
+    if (size == 0) {
+        return nullptr;
+    }
+    void* ptr = doMalloc(size, is_set_zero);
+    std::lock_guard<std::mutex> lock(lock_);
+    pointer_mapping_->insert({ptr, size});
+    return ptr;
+}
+
+void PurePointerCudaAllocator::free(void** ptr) {
+    void* address = *ptr;
+    if (address) {
+        std::lock_guard<std::mutex> lock(lock_);
+        if (pointer_mapping_->count(address)) {
+            doFree(address);
+            *ptr = nullptr;
+            pointer_mapping_->erase(address);
+        } else {
+            FT_LOG_WARNING("pointer_mapping_ does not have information of ptr at %p.", address);
+        }
+    }
+    return;
+}
+
 
 Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocator(device_id) {
     int device_count = 1;
@@ -65,89 +118,42 @@ Allocator<AllocatorType::CUDA>::Allocator(int device_id): PurePointerCudaAllocat
 }
 
 Allocator<AllocatorType::CUDA>::~Allocator() {
-    while (!pointer_mapping_->empty()) {
-        free((void**)(&pointer_mapping_->begin()->first));
-    }
+    destroy();
 }
 
-void* Allocator<AllocatorType::CUDA>::malloc(size_t size, const bool is_set_zero) {
-    if (size == 0) {
-        return nullptr;
-    }
+void* Allocator<AllocatorType::CUDA>::doMalloc(size_t size, const bool is_set_zero) {
     void* ptr      = nullptr;
-    int   o_device = 0;
-
-    check_cuda_error(getSetDevice(device_id_, &o_device));
     check_cuda_error(cudaMallocAsync(&ptr, (size_t)(ceil(size / 32.)) * 32, stream_));
-    if (is_set_zero) {
+    if (ptr && is_set_zero) {
         check_cuda_error(cudaMemsetAsync(ptr, 0, (size_t)(ceil(size / 32.)) * 32, stream_));
     }
-    check_cuda_error(getSetDevice(o_device));
-    std::lock_guard<std::mutex> lock(lock_);
-    pointer_mapping_->insert({ptr, size});
-
     return ptr;
 }
 
-void Allocator<AllocatorType::CUDA>::free(void** ptr) {
-    void* address = *ptr;
-    if (*ptr != nullptr) {
-        int o_device = 0;
-        std::lock_guard<std::mutex> lock(lock_);
-        if (pointer_mapping_->count(address)) {
-            check_cuda_error(getSetDevice(device_id_, &o_device));
-            check_cuda_error(cudaFreeAsync(*ptr, stream_));
-            // cudaStreamSynchronize(stream_);
-            check_cuda_error(getSetDevice(o_device));
-            pointer_mapping_->erase(address);
-        } else {
-            FT_LOG_WARNING("pointer_mapping_ does not have information of ptr at %p.", address);
-        }
-    }
-    *ptr = nullptr;
+void Allocator<AllocatorType::CUDA>::doFree(void* address) {
+    check_cuda_error(cudaFreeAsync(address, stream_));
+    // cudaStreamSynchronize(stream_);
     return;
 }
 
-Allocator<AllocatorType::CUDA_HOST>::Allocator(int device_id): PurePointerCudaAllocator(device_id) {
-}
+Allocator<AllocatorType::CUDA_HOST>::Allocator(int device_id): PurePointerCudaAllocator(device_id) {}
 
 Allocator<AllocatorType::CUDA_HOST>::~Allocator() {
-    while (!pointer_mapping_->empty()) {
-        free((void**)(&pointer_mapping_->begin()->first));
-    }
+    destroy();
 }
 
-void* Allocator<AllocatorType::CUDA_HOST>::malloc(size_t size, const bool is_set_zero) {
-    if (size == 0) {
-        return nullptr;
-    }
-    void* ptr      = nullptr;
-    int   o_device = 0;
-
-    ptr = std::malloc(size);
-    if (is_set_zero) {
+void* Allocator<AllocatorType::CUDA_HOST>::doMalloc(size_t size, const bool is_set_zero) {
+    auto ptr = std::malloc(size);
+    if (ptr && is_set_zero) {
         memset(ptr, 0, size);
     }
-    std::lock_guard<std::mutex> lock(lock_);
-    pointer_mapping_->insert({ptr, size});
-
     return ptr;
 }
 
-void Allocator<AllocatorType::CUDA_HOST>::free(void** ptr) {
-    void* address = *ptr;
-    if (*ptr != nullptr) {
-        int o_device = 0;
-        std::lock_guard<std::mutex> lock(lock_);
-        if (pointer_mapping_->count(address)) {
-            FT_LOG_DEBUG("Free buffer %p", address);
-            std::free(*ptr);
-            pointer_mapping_->erase(address);
-        } else {
-            FT_LOG_WARNING("pointer_mapping_ does not have information of ptr at %p.", address);
-        }
+void Allocator<AllocatorType::CUDA_HOST>::doFree(void* address) {
+    if (address) {
+        std::free(address);
     }
-    *ptr = nullptr;
     return;
 }
 
