@@ -25,8 +25,13 @@ public:
     virtual absl::Status stop()                                           = 0;
     virtual const ResourceContext& resourceContext() const                = 0;
 
+    const MagaInitParams& magaInitParams() const {
+        return params_;
+    }
+
 protected:
     ft::DeviceBase*                       device_;
+    MagaInitParams                        params_;
 };
 
 }  // namespace rtp_llm

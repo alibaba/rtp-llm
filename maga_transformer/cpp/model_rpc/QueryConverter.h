@@ -10,7 +10,7 @@
 namespace rtp_llm {
 class QueryConverter {
 public:
-    static std::shared_ptr<GenerateStream> transQuery(const ResourceContext& resource_context, const GenerateInputPB* input);
+    static std::shared_ptr<GenerateStream> transQuery(const ResourceContext& resource_context, const GenerateInputPB* input, int max_seq_len);
 
     static void transResponse(GenerateOutputsPB* outputs, const GenerateOutputs* response);
 

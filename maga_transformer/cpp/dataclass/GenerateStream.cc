@@ -14,19 +14,17 @@ namespace rtp_llm {
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const ResourceContext& resource_context, int max_seq_len):
     generate_input_(input), stream_cache_resource_(this, resource_context) {
-    if (!input.get()) {
-        return;
-    }
+    updatePrefix(resource_context.system_prompt);
     seq_length_ = generate_input_->inputLength();
-
     max_seq_len_        = max_seq_len;
     begin_time_us_      = autil::TimeUtility::currentTimeInMicroSeconds();
+
     device_             = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len}, ft::AllocationType::HOST}, {});
-    // TODO(xinfei.sxf) copy batch, clear complete_token_ids_
-    memcpy(complete_token_ids_->data(), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
-    updatePrefix(resource_context.system_prompt);
+    for (int i = 0; i < tileNum(); ++i) {
+        memcpy(complete_token_ids_->dataWithOffset<int32_t>(i * max_seq_len), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
+    }
 
     cum_log_probs_ = device_->allocateBuffer(
         {ft::DataType::TYPE_FP32, {(size_t)tileNum()}, ft::AllocationType::HOST}, {});
@@ -36,9 +34,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const Res
 
     sub_generate_status_.clear();
     sub_generate_status_.resize(tileNum());
-    // TODO(xinfei.sxf) fix this
     for (int i = 0; i < tileNum(); ++i) {
-        sub_generate_status_[i].status = GenerateState::RUNNING;
+        sub_generate_status_[i].status = GenerateState::WAITING;
     }
 }
 
@@ -66,6 +63,9 @@ bool GenerateStream::matchEosToken() const {
 }
 
 bool GenerateStream::matchStopWordsList() const {
+    if (seq_length_ < generate_input_->generate_config->min_new_tokens + inputLength()) {
+        return false;
+    }
     if (seq_length_ == inputLength()) {
         return false;
     }
@@ -133,8 +133,6 @@ void GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_pr
         prompt_param_ = system_prompt->getPromptParams(*generate_input_->generate_config);
         if (!prompt_param_.prompt_token.empty()) {
             generate_input_->updatePrefix(prompt_param_.prompt_token);
-            seq_length_ = generate_input_->inputLength();
-            memcpy(complete_token_ids_->data(), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
         }
     }
 }
@@ -220,13 +218,15 @@ void GenerateStream::updateOutput(bool finished,
         memcpy(generate_output.output_ids->data(), complete_token_ids_->view(i, 1).dataWithOffset<int32_t>(inputLength()), sizeof(int32_t) * output_len);
         if (generate_input_->generate_config->return_logits) {
             if (!generate_input_->generate_config->select_tokens_id.empty()) {
-                // ft::BufferPtr select_logits =
-                //     device_->allocateBuffer({logits.type(),
-                //                             {generate_input_->generate_config->select_tokens_id.size()},
-                //                             ft::AllocationType::HOST});
-                // ft::bufferIndexSelect<float>(
-                //     logits, select_logits, generate_input_->generate_config->select_tokens_id);
-                // generate_output.logits = select_logits;
+                // TODO(xinfei.sxf) implement bufferIndexSelect at gpu
+                auto host_logits = device_->clone({logits, ft::AllocationType::HOST});
+                ft::BufferPtr select_logits =
+                    device_->allocateBuffer({host_logits->type(),
+                                            {generate_input_->generate_config->select_tokens_id.size()},
+                                            ft::AllocationType::HOST});
+                ft::bufferIndexSelect<float>(
+                    host_logits, select_logits, generate_input_->generate_config->select_tokens_id);
+                generate_output.logits = select_logits;
             } else {
                 // TODO(xinfei.sxf) split logits/hidden states to diffent sub status, and not set logits in middle step for streaming
                 generate_output.logits = device_->clone({logits, ft::AllocationType::HOST});

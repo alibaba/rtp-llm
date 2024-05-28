@@ -128,8 +128,6 @@ private:
     BatchKVCacheBlockAddr           kv_cache_block_addr_;
     GenerateStream*                 stream_;
     ResourceContext                 resource_context_;
-    // TODO(xinfei.sxf) set gen_num_per_circle_
-    int                             gen_num_per_circle_    = 1;
     int                             seq_size_per_block_    = 0;
     bool                            need_release_resource_ = true;
 };

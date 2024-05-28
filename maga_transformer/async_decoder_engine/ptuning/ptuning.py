@@ -16,7 +16,6 @@ class PrefixType(Enum):
     KVCacheReuse = 2
     NoPrefix = 3
 
-# TODO(xinfei.sxf) refactor this class
 class PrefixParams(NamedTuple):
     prefix_type: PrefixType
     prefix_length: int

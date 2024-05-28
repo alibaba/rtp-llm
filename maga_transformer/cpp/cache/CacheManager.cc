@@ -41,7 +41,7 @@ void CacheManager::reportMetricsLoop() {
         if (metrics_reporter_) {
             RtpLLMCacheMetricsCollector collector;
             collector.kv_cache_item_num = block_cache_.size();
-            collector.kv_cache_left_seq = freeBlockNums();
+            collector.kv_cache_left_seq = freeBlockNums() * seq_size_per_block_;
             metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(nullptr, &collector);
             sleep(1); // 1s
         }
@@ -51,6 +51,7 @@ void CacheManager::reportMetricsLoop() {
 void CacheManager::initFreeBlock(const CacheConfig& config) {
     int block_nums = config.block_nums;
 
+    // TODO(xinfei.sxf) sync block nums
     // Assuming g_parallel_info.tp_size and other global variables/functions are defined elsewhere.
     // if (g_parallel_info.tp_size > 1) {
     //     // Use NCCL communication functions to broadcast and synchronize block_nums across devices.
@@ -161,7 +162,12 @@ std::tuple<bool, std::vector<int>, int> CacheManager::mallocWithCacheImpl(int   
     auto [success, new_blocks] = mallocImpl(want_block_nums - reuse_block_num);
     if (success) {
         reuse_blocks.insert(reuse_blocks.end(), new_blocks.begin(), new_blocks.end());
-        // TODO(xinfei.sxf) kmonitor.report(GaugeMetrics::KV_CACHE_REUSE_LENGTH_METRIC, reuse_length);
+        if (metrics_reporter_) {
+            RtpLLMCacheReuseMetricsCollector collector;
+            collector.kv_cache_reuse_length = reuse_length;
+            metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
+        }
+
         return {true, reuse_blocks, reuse_length};
     } else {
         free(reuse_blocks);

@@ -23,7 +23,9 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->return_hidden_states           = config_proto->return_hidden_states();
     generate_config->calculate_loss                 = config_proto->calculate_loss();
     generate_config->is_streaming                   = config_proto->is_streaming();
-    
+    generate_config->timeout_ms                     = config_proto->timeout_ms();
+    generate_config->select_tokens_id.resize(config_proto->select_tokens_id_size());
+    memcpy(generate_config->select_tokens_id.data(), config_proto->select_tokens_id().data(), config_proto->select_tokens_id_size() * sizeof(int));
     for (const auto& stop_words_proto : config_proto->stop_words_list().rows()) {
         std::vector<int> stop_words;
         for (const int value : stop_words_proto.values()) {
@@ -32,33 +34,31 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
         generate_config->stop_words_list.push_back(stop_words);
     }
 
-    TRANS_OPTIONAL(top_k);
-    TRANS_OPTIONAL(top_p);
-    TRANS_OPTIONAL(temperature);
-    TRANS_OPTIONAL(repetition_penalty);
+    generate_config->top_k = config_proto->top_k();
+    generate_config->top_p = config_proto->top_p();
+    generate_config->temperature = config_proto->temperature();
+    generate_config->repetition_penalty = config_proto->repetition_penalty();
     TRANS_OPTIONAL(random_seed);
     TRANS_OPTIONAL(top_p_decay);
     TRANS_OPTIONAL(top_p_min);
     TRANS_OPTIONAL(top_p_reset_ids);
     TRANS_OPTIONAL(task_id);
-    TRANS_OPTIONAL(adapter_name);
     return generate_config;
 }
 
-std::shared_ptr<GenerateStream> QueryConverter::transQuery(const ResourceContext& resource_context, const GenerateInputPB* input) {
+std::shared_ptr<GenerateStream> QueryConverter::transQuery(const ResourceContext& resource_context, const GenerateInputPB* input, int max_seq_len) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
     generate_input->request_id = input->request_id();
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
     }
-    generate_input->prefix_length = input->prefix_length();
+    generate_input->lora_id       = input->lora_id();
     auto device                   = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     generate_input->input_ids     = device->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)input->token_ids_size()}, ft::AllocationType::HOST}, {});
     memcpy(generate_input->input_ids->data(), input->token_ids().data(), generate_input->input_ids->sizeBytes());
     
-    // TODO(xinfei.sxf) set max seq len
-    std::shared_ptr<GenerateStream> stream = std::make_shared<GenerateStream>(generate_input, resource_context);
+    std::shared_ptr<GenerateStream> stream = std::make_shared<GenerateStream>(generate_input, resource_context, max_seq_len);
 
     return stream;
 }

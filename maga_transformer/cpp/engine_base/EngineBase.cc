@@ -6,7 +6,7 @@ using namespace autil;
 
 namespace rtp_llm {
 
-EngineBase::EngineBase(const MagaInitParams& params) {
+EngineBase::EngineBase(const MagaInitParams& params) : params_(params) {
     initDevices(params);
 }
 

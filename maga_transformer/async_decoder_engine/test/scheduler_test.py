@@ -1,4 +1,5 @@
 from unittest import mock
+import os
 import torch
 import logging
 from unittest import TestCase, main
@@ -37,6 +38,7 @@ class SchedulerTest(TestCase):
                                         data_type=data_type,
                                         reserve_runtime_mem_mb=reserve_runtime_mem_mb,
                                         vocab_size=0)
+        config.reuse_cache = os.environ.get('REUSE_CACHE', None) == '1' or os.environ.get('USE_BLOCK_CACHE', None) == '1'
         cache_config = CacheConfigGenerator.create_config(config)
         return config, cache_config
 

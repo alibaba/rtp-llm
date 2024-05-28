@@ -47,9 +47,6 @@ public:
     const ResourceContext& resourceContext() const override {
         return resource_context_;
     }
-    const MagaInitParams magaInitParams() const {
-        return params_;
-    }
 
 private:
     absl::Status    trySaveStepError() const;
@@ -63,7 +60,6 @@ private:
     std::unique_ptr<Executor>             executor_;
     std::unique_ptr<SchedulerBase>        scheduler_;
     std::shared_ptr<CacheManager>         cache_manager_;
-    MagaInitParams                        params_;
     ResourceContext                       resource_context_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
 };

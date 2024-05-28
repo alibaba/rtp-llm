@@ -19,6 +19,7 @@ void StreamCacheResource::releaseResource() {
     if (!kv_cache_block_addr_.k_ptr.empty()) {
         FT_LOG_DEBUG("stream [%ld] release resource", stream_->streamId());
         for (auto& batch : kv_cache_block_addr_.k_ptr) {
+            // TODO(xinfei.sxf) free batch blocks
             const auto& blocks = batch[0];
             if (resource_context_.reuse_cache) {
                 // TODO(xinfei.sxf) batch token
@@ -46,6 +47,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
             auto& blocks = batch[layer_id];
             size_t reserver_blocks = std::max(0, int(blocks.size()) - int(nums));
             release_blocks_num   = blocks.size() - reserver_blocks;
+            // TODO(xinfei.sxf) free batch blocks
             if (layer_id == 0) {
                 release_blocks.insert(release_blocks.end(), blocks.begin() + reserver_blocks, blocks.end());
             }

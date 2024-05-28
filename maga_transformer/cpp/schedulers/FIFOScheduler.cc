@@ -114,8 +114,11 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         if (evaluateNewStream(new_streams, *it)) {
             FT_LOG_DEBUG("stream [%ld %p] add to new queue", (*it)->streamId(), (*it).get());
-            new_streams.emplace_back(*it);
-            it = waiting_streams_.erase(it);
+            // if setRunning fails, it must be in stopped state, evict it in next iteration
+            if ((*it)->setRunning()) {
+                new_streams.emplace_back(*it);
+                it = waiting_streams_.erase(it);
+            }
         } else if (running_streams_.empty() && new_streams.empty()) {
             // It is impossible for this stream to acquire enough resources
             FT_LOG_DEBUG("stream [%ld] can not add to new queue", (*it)->streamId());

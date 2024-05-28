@@ -46,6 +46,7 @@ TEST_F(StreamCacheResourceTest, testSimple) {
     int max_seq_len                 = 2048;
 
     GenerateStream stream(generate_input, resource_context, max_seq_len);
+    stream.setRunning();
 
     auto& resource = stream.streamCacheResource();
     ASSERT_EQ(resource.needKVCacheBlockNums(), 3);

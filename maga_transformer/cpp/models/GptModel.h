@@ -46,6 +46,8 @@ struct GptModelInputs {
     ft::BufferPtr kv_cache_blocks;  // [layer_num, batch_size, 2, block_length], int64 block pointers
     ft::BufferPtr kv_cache_scales;  // [layer_num, batch_size, 2, block_length], int64 block scales
 
+    ft::BufferPtr lora_ids;         // [batch_size]
+
 public:
     std::string debugString() const {
         std::stringstream debug_string;
@@ -61,6 +63,7 @@ public:
     }
 };
 
+// TODO(xinfei.sxf) sync lora id and other member
 inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     if (device->getDeviceProperties().tp_size <= 1) {
         return;

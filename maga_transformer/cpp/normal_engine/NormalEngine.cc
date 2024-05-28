@@ -17,7 +17,6 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
                            const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
                            const kmonitor::MetricsReporterPtr                                      metrics_reporter) :
     EngineBase(params),
-    params_(params),
     metrics_reporter_(metrics_reporter)
 {
     executor_.reset(new NormalExecutor(params_, layer_weights, weights, metrics_reporter_));
@@ -33,17 +32,16 @@ NormalEngine::~NormalEngine() {
 
 void NormalEngine::initCacheManager() {
     auto result = CacheConfigCreator::createConfig(params_.gpt_init_parameter);
-    // TODO(xinfei.sxf) test create cache config exception
     THROW_IF_STATUS_ERROR(result.status());
     resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device_, metrics_reporter_);
 }
 
 void NormalEngine::initSystemPrompt() {
     resource_context_.reuse_cache = params_.gpt_init_parameter.reuse_cache_;
-    auto ptuning_param = SystemPromptConstructor::construct(params_.gpt_init_parameter, this, resource_context_.cache_manager.get());
-    if (!ptuning_param.empty()) {
+    auto system_prompt_param = SystemPromptConstructor::construct(params_.gpt_init_parameter, this, resource_context_.cache_manager.get());
+    if (!system_prompt_param.empty()) {
         resource_context_.reuse_cache = true;
-        resource_context_.system_prompt.reset(new SystemPrompt(ptuning_param));
+        resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
     }
 }
 

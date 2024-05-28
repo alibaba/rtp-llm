@@ -34,7 +34,8 @@ std::unordered_map<int, SystemPromptParams> SystemPromptConstructor::construct(c
         generate_input->generate_config = generate_config;
 
         // TODO(xinfei.sxf) consider tp, consider sp engine
-        GenerateStreamPtr stream = std::make_shared<GenerateStream>(generate_input, engine->resourceContext());
+        GenerateStreamPtr stream = std::make_shared<GenerateStream>(generate_input,
+                engine->resourceContext(), engine->magaInitParams().gpt_init_parameter.max_seq_len_);
         stream->setNeedReleaseResource(false);
         engine->enqueue(stream);
 

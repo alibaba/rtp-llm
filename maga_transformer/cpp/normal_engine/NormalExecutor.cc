@@ -27,12 +27,10 @@ NormalExecutor::NormalExecutor(
     sampler_params.device = device_;
     sampler_params.max_batch_size = params.gpt_init_parameter.max_context_batch_size_
                                   + params.gpt_init_parameter.max_generate_batch_size_;
-    printf("sampler max_batch_size: %d\n", (int)sampler_params.max_batch_size);
     sampler_params.eos_id = params.gpt_init_parameter.special_tokens_.eos_token_id_;
     sampler_.reset(new Sampler(sampler_params));
 
-    model_wrapper_.reset(
-            new ParallelModelWrapper(params.gpt_init_parameter, weights, layer_weights));
+    model_wrapper_.reset(new ParallelModelWrapper(params.gpt_init_parameter, weights, layer_weights));
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter, !model_wrapper_->useFMHA()));
 }
@@ -59,6 +57,7 @@ ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input
     model_request.kv_cache_blocks     = model_input.kv_cache_blocks;
     model_request.kv_cache_scales     = model_input.kv_cache_scales;
     model_request.attention_mask      = model_input.attention_mask;
+    model_request.lora_ids            = model_input.lora_ids;
     return model_request;
 }
 

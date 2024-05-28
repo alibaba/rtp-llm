@@ -20,7 +20,7 @@ class RpcModel:
         self.vit_expand_token_id_lock = asyncio.Lock()
         self.rtp_llm_op_ = RtpLLMOp(model.config, False)
         self.rtp_llm_op_.set_weight(model.weight)
-        self.model_rpc_client = ModelRpcClient()
+        self.model_rpc_client = ModelRpcClient(self.model.weight.lora_resource)
 
     def is_multimodal(self) -> bool:
         return self.model.is_multimodal()

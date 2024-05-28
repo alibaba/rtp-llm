@@ -16,7 +16,7 @@ class StreamCacheManager:
         self.gen_num_per_circle = gen_num_per_circle
         self.seq_size_per_block_ = config.seq_size_per_block        
         self.ptuning_ = None        
-        self.reuse_cache_ = os.environ.get('REUSE_CACHE', None) == '1' or os.environ.get('USE_BLOCK_CACHE', None) == '1'
+        self.reuse_cache_ = config.reuse_cache
 
     def set_ptuning(self, prefix_params: Optional[Union[PrefixParams, Dict[int, PrefixParams]]]):
         if isinstance(prefix_params, dict):

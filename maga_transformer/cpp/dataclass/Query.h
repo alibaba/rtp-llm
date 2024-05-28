@@ -29,7 +29,8 @@ public:
         std::stringstream debug_string;
         debug_string << "GenerateInput {"
                      << "request_id: " << request_id << ", generate_config:" << generate_config->debugString()
-                     << ", input_ids:" << input_ids->debugStringWithData<int32_t>() << ", prefix_length:" << prefix_length << "}";
+                     << ", input_ids:" << input_ids->debugStringWithData<int32_t>() << ", lora_id: " << lora_id
+                     << ", prefix_length:" << prefix_length << "}";
         return debug_string.str();
     }
 
@@ -45,8 +46,8 @@ public:
     int64_t                         request_id;
     std::shared_ptr<GenerateConfig> generate_config;
     ft::BufferPtr                   input_ids;
-    std::optional<ft::BufferPtr>    input_embeddings;  // For multi-modality models
-    std::optional<int>              lora_id       = -1;
+    std::optional<ft::BufferPtr>    image_embeddings;  // For multi-modality models
+    int                             lora_id       = -1;
     int                             prefix_length = 0;
 };
 

@@ -154,6 +154,23 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMCacheReuseMetricsCollector final {
+public:
+    int64_t kv_cache_reuse_length = 0;
+};
+
+class RtpLLMCacheReuseMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* kv_cache_reuse_length = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 bool initKmonitorFactory();
 
 kmonitor::MetricsTags getHippoTags();

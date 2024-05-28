@@ -8,6 +8,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSchedulerMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMEngineMetrics);
 
@@ -117,6 +118,15 @@ bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
 void RtpLLMCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(kv_cache_item_num_metric, collector->kv_cache_item_num);
     REPORT_MUTABLE_METRIC(kv_cache_left_seq_metric, collector->kv_cache_left_seq);
+}
+
+bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_reuse_length, "rtp_llm_kv_cache_reuse_length");
+    return true;
+}
+
+void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(kv_cache_reuse_length, collector->kv_cache_reuse_length);
 }
 
 #undef REPORT_QPS

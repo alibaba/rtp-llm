@@ -67,11 +67,11 @@ public:
         return context_streams_.empty() && decode_streams_.empty();
     }
 
-    std::list<GenerateStreamPtr> contextStreams() const {
+    const std::list<GenerateStreamPtr>& contextStreams() const {
         return context_streams_;
     }
 
-    std::list<GenerateStreamPtr> decodeStreams() const {
+    const std::list<GenerateStreamPtr>& decodeStreams() const {
         return decode_streams_;
     }
 

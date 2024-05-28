@@ -32,30 +32,31 @@ message GenerateConfigPB {
     int32 num_return_sequences = 3;
     int32 min_new_tokens = 4;
 
-    google.protobuf.Int32Value top_k = 5;
-    google.protobuf.FloatValue top_p = 6;
-    google.protobuf.FloatValue temperature = 7;
-    google.protobuf.FloatValue repetition_penalty = 8;
+    int32 top_k = 5;
+    float top_p = 6;
+    float temperature = 7;
+    float repetition_penalty = 8;
     google.protobuf.Int64Value random_seed = 9;
     google.protobuf.FloatValue top_p_decay = 10;
     google.protobuf.FloatValue top_p_min = 11;
     google.protobuf.Int32Value top_p_reset_ids = 12;
     google.protobuf.Int64Value task_id = 13;
-    google.protobuf.Int64Value adapter_name = 14;
-    int32 calculate_loss = 15;
-    bool return_incremental = 16;
-    bool return_hidden_states = 17;
-    bool return_logits = 18;
-    bool is_streaming = 19;
+    int32 calculate_loss = 14;
+    bool return_incremental = 15;
+    bool return_hidden_states = 16;
+    bool return_logits = 17;
+    bool is_streaming = 18;
+    int32 timeout_ms = 19;
     IntMatrix stop_words_list = 20;
+    repeated int32 select_tokens_id = 21;
 }
 
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
-    repeated bytes images = 3;
-    GenerateConfigPB generate_config = 4;
-    int32 prefix_length = 6;
+    repeated bytes image_embeddings = 3;
+    int64 lora_id = 4;
+    GenerateConfigPB generate_config = 5;
 }
 
 message AuxInfoPB {

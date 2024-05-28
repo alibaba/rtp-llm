@@ -21,14 +21,21 @@ TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
     input.add_token_ids(0);
     input.add_token_ids(1);
-    input.set_prefix_length(3);
+    input.set_lora_id(3);
+
     auto generate_config_pb = input.mutable_generate_config();
     generate_config_pb->set_min_new_tokens(4);
     generate_config_pb->set_max_new_tokens(5);
     generate_config_pb->set_num_beams(1);
     generate_config_pb->set_num_return_sequences(1);
-    generate_config_pb->mutable_top_k()->set_value(6);
-    generate_config_pb->mutable_top_p()->set_value(0.6);
+    generate_config_pb->set_top_k(6);
+    generate_config_pb->set_top_p(0.6);
+    generate_config_pb->set_temperature(0.1);
+    generate_config_pb->set_repetition_penalty(0.2);
+    generate_config_pb->mutable_top_p_decay()->set_value(0.7);
+    generate_config_pb->mutable_top_p_min()->set_value(0.3);
+    generate_config_pb->mutable_top_p_reset_ids()->set_value(7);
+    generate_config_pb->mutable_task_id()->set_value(8);
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
     for (int i = 0; i < 2; ++i) {
@@ -37,20 +44,29 @@ TEST_F(QueryConverterTest, testTransInput) {
             stop_words->add_values(i * 3 + j);
         }
     }
+    int max_seq_len = 2048;
 
-    auto query     = QueryConverter::transQuery(resource_context, &input);
+    auto query     = QueryConverter::transQuery(resource_context, &input, max_seq_len);
 
-    auto input_ids = query->generateInput()->input_ids.get();
-    EXPECT_EQ(input_ids->size(), 2);
+    ASSERT_EQ(query->maxSeqLen(), max_seq_len);
+    auto generate_input = query->generateInput();
+    auto input_ids = generate_input->input_ids.get();
+    ASSERT_EQ(input_ids->size(), 2);
     ASSERT_EQ(*(int*)(input_ids->data()), 0);
-    ASSERT_EQ(query->generateInput()->prefix_length, 3);
-    auto generate_config = query->generateInput()->generate_config;
+    ASSERT_EQ(generate_input->lora_id, 3);
+    auto generate_config = generate_input->generate_config;
     ASSERT_EQ(generate_config->min_new_tokens, 4);
     ASSERT_EQ(generate_config->max_new_tokens, 5);
     ASSERT_EQ(generate_config->num_beams, 1);
     ASSERT_EQ(generate_config->num_return_sequences, 1);
-    ASSERT_EQ(generate_config->top_k.value(), 6);
-    ASSERT_FLOAT_EQ(generate_config->top_p.value(), 0.6);
+    ASSERT_EQ(generate_config->top_k, 6);
+    ASSERT_FLOAT_EQ(generate_config->top_p, 0.6);
+    ASSERT_FLOAT_EQ(generate_config->temperature, 0.1);
+    ASSERT_FLOAT_EQ(generate_config->repetition_penalty, 0.2);
+    ASSERT_FLOAT_EQ(generate_config->top_p_decay.value(), 0.7);
+    ASSERT_FLOAT_EQ(generate_config->top_p_min.value(), 0.3);
+    ASSERT_EQ(generate_config->top_p_reset_ids.value(), 7);
+    ASSERT_EQ(generate_config->task_id.value(), 8);
     ASSERT_EQ(generate_config->calculate_loss, 1);
     ASSERT_TRUE(generate_config->return_hidden_states);
     ASSERT_FALSE(generate_config->return_logits);

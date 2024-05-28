@@ -24,9 +24,9 @@ inline std::string vectorsToString(const std::vector<std::vector<int>>& vecs) {
     for (const auto& vec: vecs) {
         result += "[" + vectorToString(vec) + "], ";
     }
-    if (!result.empty()) {
-        result.pop_back(); 
-        result.pop_back(); 
+    if (!vecs.empty()) {
+        result.pop_back();
+        result.pop_back();
     }
     result += "]";
     return result;

@@ -36,7 +36,6 @@ SpeculativeEngine::SpeculativeEngine(
     draft_cache_manager_   = make_shared<CacheManager>(cache_config, device);
     target_cache_manager_  = make_shared<CacheManager>(cache_config, device);
     scheduler_.reset(new FIFOScheduler(params, target_cache_manager_));
-    params_ = params.gpt_init_parameter;
 }
 
 SpeculativeEngine::~SpeculativeEngine() {
@@ -68,7 +67,8 @@ void SpeculativeEngine::loop() {
 
 absl::Status SpeculativeEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     FT_LOG_DEBUG("enqueue stream: %s", stream->debugString().c_str());
-    std::shared_ptr<SpeculativeStream> sp_stream = make_shared<SpeculativeStream>(stream, params_.gen_num_per_circle_, params_.vocab_size_);
+    std::shared_ptr<SpeculativeStream> sp_stream = make_shared<SpeculativeStream>(stream,
+            params_.gpt_init_parameter.gen_num_per_circle_, params_.gpt_init_parameter.vocab_size_);
     return scheduler_->enqueue(stream);
 }
 
@@ -88,7 +88,7 @@ absl::Status SpeculativeEngine::step() {
     const auto streams_status = scheduler_->schedule();
     RETURN_IF_STATUS_OR_ERROR(streams_status);
     const auto& streams = streams_status.value();
-    for (uint i = 0; i < params_.gen_num_per_circle_; ++i) {
+    for (uint i = 0; i < params_.gpt_init_parameter.gen_num_per_circle_; ++i) {
         RETURN_IF_STATUS_ERROR(draft_executor_->process(streams));
         (void)updateDraftProb(streams, i);
     }

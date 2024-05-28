@@ -64,6 +64,7 @@ public:
     ft::BufferPtr kv_cache_blocks;             // [layer_id, batch_size, 2, block_num_per_seq]
     ft::BufferPtr kv_cache_scales;             // [layer_id, batch_size, 2, block_num_per_seq]
     ft::BufferPtr attention_mask;              // [batch_size, max_seq_len, max_seq_len + max_reuse_len]
+    ft::BufferPtr lora_ids;                    // [batch_size]
 };
 
 struct MergedInput {

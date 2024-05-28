@@ -25,7 +25,7 @@ namespace rtp_llm {
 
 class GenerateStream {
 public:
-    GenerateStream(const std::shared_ptr<GenerateInput>& query, const ResourceContext& resource_context, int max_seq_len = 2048);
+    GenerateStream(const std::shared_ptr<GenerateInput>& query, const ResourceContext& resource_context, int max_seq_len);
     virtual ~GenerateStream() {
         reportMetric();
         generate_outputs_queue_.wakeup();
@@ -80,7 +80,6 @@ public:
         stream_cache_resource_.setNeedReleaseResource(need_release_resource);
     }
 
-    // TODO(xinfei.sxf) lora resource?
     virtual void releaseResource() {
         if (need_release_resource_) {
             stream_cache_resource_.releaseResource();
@@ -97,6 +96,10 @@ public:
 
     int inputLength() const {
         return generate_input_->inputLength();
+    }
+
+    int loraId() const {
+        return generate_input_->lora_id;
     }
 
     // TODO(xinfei.sxf) consider reuse when fallback
@@ -143,8 +146,8 @@ public:
         return generate_input_->generate_config->num_return_sequences;
     }
 
-    std::optional<ft::BufferPtr>& inputEmbeddings() {
-        return generate_input_->input_embeddings;
+    std::optional<ft::BufferPtr>& imageEmbeddings() {
+        return generate_input_->image_embeddings;
     }
 
     std::optional<int> lora_id() {
@@ -192,8 +195,11 @@ public:
         if (stoppedWithoutLock()) {
             return false;
         }
-        // reportWaitTime();
+        // TODO(xinfei.sxf) reportWaitTime();
         generate_status_.status = GenerateState::RUNNING;
+        for (int i = 0; i < tileNum(); ++i) {
+            sub_generate_status_[i].status = GenerateState::RUNNING;
+        }
         return true;
     }
 
@@ -221,11 +227,12 @@ public:
     }
 
     void check_timeout() {
-        auto running_time = autil::TimeUtility::currentTimeInMilliSeconds() - begin_time_us_;
+        auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
         auto timeout_ms = generate_input_->generate_config->timeout_ms;
-        if (timeout_ms > 0 && timeout_ms < running_time) {
-            stopAndRelease("query has been running " + std::to_string(running_time) + " ms, it's timeout");
-        }
+        if (timeout_ms > 0 && timeout_ms < running_time_ms) {
+            stopAndRelease("query has been running " + std::to_string(running_time_ms) + " ms, "
+               + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
+         }
     }
 
     // void setLoss(th::Tensor& loss) {

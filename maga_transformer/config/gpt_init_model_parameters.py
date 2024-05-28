@@ -318,8 +318,7 @@ class GptInitModelParameters:
         logging.info(f'block_nums: {self.block_nums}')
         self.scheduler_reserve_resource_ratio = int(os.environ.get('SCHEDUlER_RESERVE_RESOURCE_RATIO', 5))
         logging.info(f'scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}')
-        # TODO(xinfei.sxf) deal with old option : USE_BLOCK_CACHE
-        self.reuse_cache = bool(int(os.environ.get('REUSE_CACHE', 0)))
+        self.reuse_cache = os.environ.get('REUSE_CACHE', None) == '1' or os.environ.get('USE_BLOCK_CACHE', None) == '1'
         logging.info(f'reuse_cache: {self.reuse_cache}')
         self.pre_allocate_op_mem = bool(int(os.environ.get('PRE_ALLOCATE_OP_MEM', 1)))
         logging.info(f'pre_allocate_op_mem: {self.pre_allocate_op_mem}')

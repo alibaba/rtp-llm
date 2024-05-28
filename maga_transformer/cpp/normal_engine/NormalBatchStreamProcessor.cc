@@ -1,19 +1,21 @@
+#include <cstring>
+#include <random>
+#include <limits>
+
+#include "src/fastertransformer/utils/assert_utils.h"
+#include "src/fastertransformer/core/Types.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "maga_transformer/cpp/utils/KvCacheUtils.h"
-#include "src/fastertransformer/core/Types.h"
-#include "autil/TimeUtility.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
-#include <cstring>
 
 using namespace std;
 using namespace fastertransformer;
-
 namespace rtp_llm {
 
 absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(const StreamGroups& stream_groups) const {
-    // assert(!stream_groups.empty());
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     auto           context_streams = stream_groups.contextStreams();
     auto           decode_streams  = stream_groups.decodeStreams();
     GptModelInputs model_input;
@@ -33,12 +35,15 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     }
     model_input.input_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    model_input.lora_ids =
+        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     model_input.sequence_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_decode_batch_size}, ft::AllocationType::HOST}, {});
     model_input.prefix_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     int*      merged_tokens    = (int*)model_input.combo_tokens->data();
     int*      input_lengths    = (int*)model_input.input_lengths->data();
+    int*      lora_ids          = (int*)model_input.lora_ids->data();
     int*      sequence_lengths = (int*)model_input.sequence_lengths->data();
     int*      prefix_lengths   = (int*)model_input.prefix_lengths->data();
     uint64_t* kv_cache_blocks  = (uint64_t*)model_input.kv_cache_blocks->data();
@@ -58,6 +63,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             sequence_lengths[batch_idx] = stream->seqLength() - 1; // need remove
             // TODO(xinfei.sxf) decode stream 还需要设置prefix len吗？
             prefix_lengths[batch_idx]   = stream->reuseLength();
+            lora_ids[batch_idx]         = stream->loraId(); 
             memcpyKvCache(kv_cache_blocks,
                           kv_cache.k_ptr[i],
                           kv_cache.v_ptr[i],
@@ -85,6 +91,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         token_idx += input_tokens.size();
         input_lengths[batch_idx]  = stream->contextLength();
         prefix_lengths[batch_idx] = stream->reuseLength();
+        lora_ids[batch_idx]       = stream->loraId(); 
         auto kv_cache             = stream->kvCache();
         FT_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
         FT_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
@@ -196,37 +203,38 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
                                                const GptModelOutputs& model_output) const {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);    
     assert(!stream_groups.empty());
-    SamplerInputs sampler_inputs;
-    int    max_seq_len      = stream_groups.maxSeqLen();
-    sampler_inputs.step     = max_seq_len;
-    size_t total_batch_size = stream_groups.totalSamplerBatchSize();
+    const auto& context_streams = stream_groups.contextStreams();
+    const auto& decode_streams  = stream_groups.decodeStreams();
+    auto all_streams = stream_groups.allStreams();
 
+    SamplerInputs sampler_inputs;
+    sampler_inputs.step   = stream_groups.maxSeqLen();;
+    auto total_batch_size = stream_groups.totalSamplerBatchSize();
+    sampler_inputs.batch_size = total_batch_size;
     sampler_inputs.sequence_lengths = model_inputs.sequence_lengths;
     sampler_inputs.input_lengths = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    int*      input_lengths = sampler_inputs.input_lengths->data<int32_t>();
-
-    sampler_inputs.logits           = model_output.logits;
-    auto context_streams            = stream_groups.contextStreams();
-    auto decode_streams             = stream_groups.decodeStreams();
-    size_t context_batch_size       = context_streams.size();
-
+    sampler_inputs.num_beams     = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.top_k         = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.top_p         = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.temperature   = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.num_beams     = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.random_seeds  = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.repetition_penalty = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.min_lengths   = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.cum_log_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
-
-    sampler_inputs.batch_size = total_batch_size;
+    // TODO(xinfei.sxf) 增加开关
+    sampler_inputs.index_log_prob = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.token_ids = device_->allocateBuffer(
             {ft::DataType::TYPE_INT32, {total_batch_size, sampler_inputs.step + 1}, ft::AllocationType::HOST}, {});
-    
-    list<GenerateStreamPtr> all_streams = stream_groups.allStreams();
+
+    int* input_lengths        = sampler_inputs.input_lengths->data<int32_t>();
+    uint64_t* num_beams       = sampler_inputs.num_beams->data<uint64_t>();
     int32_t* top_k            = sampler_inputs.top_k->data<int32_t>();
     float* top_p              = sampler_inputs.top_p->data<float>();
     float* temperature        = sampler_inputs.temperature->data<float>();
-    uint64_t* num_beams       = sampler_inputs.num_beams->data<uint64_t>();
     uint64_t* random_seeds    = sampler_inputs.random_seeds->data<uint64_t>();
+    float* repetition_penalty = sampler_inputs.repetition_penalty->data<float>();
+    int32_t* min_lengths      = sampler_inputs.min_lengths->data<int32_t>();
+    float* index_log_prob     = sampler_inputs.index_log_prob->data<float>();
 
     int batch_idx   = 0;
     for (auto& stream : all_streams) {
@@ -239,12 +247,23 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
         memcpy(sampler_inputs.cum_log_probs->dataWithOffset<float>(batch_idx), cum_log_probs->data(), cum_log_probs->sizeBytes());
 
         for (int i = 0; i < current_batch_size; ++i) {
-            num_beams[batch_idx]        = 1;
-            random_seeds[batch_idx]     = autil::TimeUtility::currentTimeInMicroSeconds();
-            top_k[batch_idx]            = stream->generateConfig()->top_k.value_or(0);
-            top_p[batch_idx]            = stream->generateConfig()->top_p.value_or(0.95);
-            temperature[batch_idx]      = stream->generateConfig()->temperature.value_or(1.0);
-            input_lengths[batch_idx]    = stream->inputLength();
+            input_lengths[batch_idx]      = stream->inputLength();
+            // TODO(xinfei.sxf) fix num beams
+            num_beams[batch_idx]          = 1;
+            top_k[batch_idx]              = stream->generateConfig()->top_k;
+            top_p[batch_idx]              = stream->generateConfig()->top_p;
+            temperature[batch_idx]        = stream->generateConfig()->temperature;
+            repetition_penalty[batch_idx] = stream->generateConfig()->repetition_penalty;
+            min_lengths[batch_idx]        = stream->generateConfig()->min_new_tokens;
+            // TODO(xinfei.sxf) consider world size
+            if (stream->generateConfig()->random_seed.has_value()) {
+                random_seeds[batch_idx]   = stream->generateConfig()->random_seed.value();
+            } else {
+                std::random_device rd;
+                std::mt19937_64 gen(rd());
+                std::uniform_int_distribution<std::int64_t> distrib(0, std::numeric_limits<std::int64_t>::max());
+                random_seeds[batch_idx]   = distrib(gen);
+            }
             memcpy(sampler_inputs.token_ids->dataWithOffset<int32_t>((batch_idx) * (sampler_inputs.step + 1)),
                    complete_token_ids->dataWithOffset<int32_t>(i * complete_seq_len),
                    seq_len * sizeof(int));
@@ -266,7 +285,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
             device_->copy({model_output.scatter_logits->view(batch_idx, 1), model_output.logits->view(batch_idx, 1)});
             FT_LOG_DEBUG("stream[%d], batch[%d], sampler inputs logits [%s]",
                 stream->streamId(), i,
-                device_->clone({model_output.scatter_logits->view(batch_idx, 1), ft::AllocationType::HOST})->debugStringWithData<float>().c_str());
+                device_->clone({model_output.scatter_logits->view(batch_idx, 1), ft::AllocationType::HOST})->debugStringWithData<float>(10).c_str());
             batch_idx += 1;
         }
     }
@@ -279,7 +298,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
             device_->copy({model_output.scatter_logits->view(batch_idx, 1), model_output.logits->view(logits_offset, 1)});
             FT_LOG_DEBUG("stream[%d], batch[%d], sampler inputs logits [%s]",
                 stream->streamId(), i,
-                device_->clone({model_output.scatter_logits->view(batch_idx, 1), ft::AllocationType::HOST})->debugStringWithData<float>().c_str());
+                device_->clone({model_output.scatter_logits->view(batch_idx, 1), ft::AllocationType::HOST})->debugStringWithData<float>(10).c_str());
             batch_idx += 1;
         }
         logits_offset += 1;
@@ -298,11 +317,10 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
     const auto& model_output      = merge_outputs->model_output;
     const auto& sampler_output    = merge_outputs->sampler_output;
     const auto& new_all_token_ids = sampler_output.token_ids;
-    FT_LOG_DEBUG("new_all_token_ids = [%s]\n", new_all_token_ids->debugStringWithData<int32_t>().c_str());
+    FT_LOG_DEBUG("new_all_token_ids = [%s]", new_all_token_ids->debugStringWithData<int32_t>().c_str());
     const size_t step = new_all_token_ids->shape()[1];
     size_t      total_batch_size  = stream_groups.totalSamplerBatchSize();
-    // TODO(xinfei.sxf) ft check this
-    assert(total_batch_size == new_all_token_ids->shape()[0]);
+    FT_CHECK(total_batch_size == new_all_token_ids->shape()[0]);
     auto token_ids_cpu =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, new_all_token_ids->shape(), ft::AllocationType::HOST}, {});
     int batch_idx = 0;
@@ -314,7 +332,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
             memcpy(new_tokens->dataWithOffset<int32_t>(i), new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1), sizeof(int32_t));
             batch_idx += 1;
         }
-        FT_LOG_DEBUG("stream [%d], new_tokens = [%s]\n", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
+        FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
         stream->update(new_tokens, 1, false, model_output.hidden_states, logits, sampler_output.cum_log_probs);
     }
     FT_LOG_DEBUG("dispatch done");
