@@ -28,7 +28,8 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     vector<int> prompt_2 = {4, 5, 6, 7};
     params.multi_task_prompt_tokens_ = {{1, prompt_1}, {2, prompt_2}};
     CustomConfig config;
-    auto engine = createMockEngine(device_, config);
+    auto gpt_init_params = GptInitParameter();
+    auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
     auto result = constructor.construct(params, engine.get(), engine->resourceContext().cache_manager.get());
     ASSERT_EQ(result.size(), 2);

@@ -22,10 +22,14 @@ struct CustomConfig {
     std::map<int, std::vector<int>> multi_task_prompt_tokens;
 };
 
-std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomConfig& config) {
-    rtp_llm::MagaInitParams rtp_llm_params;
-    rtp_llm_params.gpt_init_parameter = c10::make_intrusive<GptInitParameter>(2, 64, 2, 20, 20, 128);
-    auto& params        = *rtp_llm_params.gpt_init_parameter;
+std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomConfig& config, GptInitParameter& params) {
+    params.head_num_ = 2;
+    params.size_per_head_ = 64;
+    params.num_layers_ = 2;
+    params.max_seq_len_ = 20;
+    params.vocab_size_ = 20;
+    params.hidden_size_ = 128;
+    // auto params = GptInitParameter(2, 64, 2, 20, 20, 128);
     params.head_num_kv_ = 2;
     params.block_nums_  = 100;
     params.reuse_cache_ = config.reuse_cache;
@@ -39,6 +43,7 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
     params.inter_padding_size_ = inter_size;
     params.seq_size_per_block_ = 2;
     params.reserve_runtime_mem_mb_ = 1024;
+    rtp_llm::MagaInitParams rtp_llm_params(params);    
     typedef half         T;
     const at::ScalarType scalar_type  = at::ScalarType::Half;
     const ft::DataType   data_type    = getTensorType<T>();

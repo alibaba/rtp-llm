@@ -16,7 +16,7 @@ py_test(
         "//maga_transformer/utils/test:testdata",
     ],
     deps = [
-        "//maga_transformer:utils",
+        "//maga_transformer:testlib",
         "//maga_transformer:config",
         "//maga_transformer:_ft_pickler",
     ],

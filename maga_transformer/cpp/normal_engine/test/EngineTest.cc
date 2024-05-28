@@ -29,7 +29,8 @@ TEST_F(NormalEngineTest, testSimple) {
     CustomConfig config;
     // TODO(xinfei.sxf) split case
     config.int8_kv_cache = true;
-    auto engine = createMockEngine(device_, config);
+    auto gpt_init_params = GptInitParameter();
+    auto engine = createMockEngine(device_, config, gpt_init_params);
 
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_FALSE(engine->resourceContext().system_prompt);
@@ -73,7 +74,8 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
     vector<int> prompt_1 = {1, 2, 3};
     vector<int> prompt_2 = {4, 5, 6, 7, 8, 9};
     config.multi_task_prompt_tokens = {{1, prompt_1}, {2, prompt_2}};
-    auto engine = createMockEngine(device_, config);
+    auto gpt_init_params = GptInitParameter();
+    auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_TRUE(engine->resourceContext().system_prompt);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
@@ -142,12 +144,14 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
 TEST_F(NormalEngineTest, testReuseCacheOption) {
     CustomConfig config;
     config.reuse_cache = true;
-    auto engine = createMockEngine(device_, config);
+    auto gpt_init_params = GptInitParameter();
+    auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
 
     config.reuse_cache = false;
-    auto engine2 = createMockEngine(device_, config);
+    auto gpt_init_params2 = GptInitParameter();
+    auto engine2 = createMockEngine(device_, config, gpt_init_params2);
     ASSERT_FALSE(engine2->resourceContext().reuse_cache);
 }
 
@@ -155,7 +159,8 @@ TEST_F(NormalEngineTest, testReuseCache) {
     setenv("REUSE_CACHE", "1", 1);
     CustomConfig config;
     config.reuse_cache = true;
-    auto engine = createMockEngine(device_, config);
+    auto gpt_init_params = GptInitParameter();
+    auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
     {

@@ -53,7 +53,7 @@ class ColBertEmbeddingHandler(CustomHandler):
         # delte the vectors of padding tokens
         return colbert_vecs[:tokens_num - 1]  # we don't use the embedding of cls, so select tokens_num-1
 
-    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor, config: Dict[str, Any]):
+    def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor):
         batch_input_ids, batch_hidden_states, batch_attention_mask = combo_to_batch(hidden_states, input_ids, input_lengths)
         colbert_vecs = self.colbert_linear(batch_hidden_states[:, 1:])
         colbert_vecs = colbert_vecs * batch_attention_mask[:, 1:][:, :, None].float()
