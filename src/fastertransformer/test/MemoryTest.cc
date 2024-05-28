@@ -1,18 +1,19 @@
 #include "src/fastertransformer/core/MemoryTracker.h"
+#include "src/fastertransformer/core/TrackerAllocator.h"
 #include <gtest/gtest.h>
 
 using namespace std;
 using namespace fastertransformer;
 
-class LoraGemmTest: public ::testing::Test {
+class MemoryTest: public ::testing::Test {
 public:
     void SetUp() {};
     void TearDown() {};
 };
 
-TEST_F(LoraGemmTest, testAlloc) {
+TEST_F(MemoryTest, testAlloc) {
     void* base_ptr = (void *)0xF0000000;
-    MemoryTracker tracker(base_ptr, 1 << 20);
+    MemoryTracker tracker(base_ptr, 1 << 20, 1 << 4);
     auto ptr = tracker.allocate(1 << 10);
     EXPECT_EQ(ptr, base_ptr);
     auto ptr1 = tracker.allocate(1 << 10);
@@ -46,17 +47,20 @@ TEST_F(LoraGemmTest, testAlloc) {
     EXPECT_EQ(status.allocated_chunk_count, 0);
 }
 
-TEST_F(LoraGemmTest, testRandomAlloc) {
+TEST_F(MemoryTest, testRandomAlloc) {
     const auto test_count = 10000;
+    const auto align_size = 128;
+    MemoryTracker tracker((void *)0xF0000000, 1 << 20, align_size);
     std::unordered_map<void*, size_t> ptr_map;
-    MemoryTracker tracker((void *)0xF0000000, 1 << 20);
 
     for (size_t i = 0; i < test_count; i++) {
         size_t hash_val = ((i + 123456789) * 1145141919810 + 114514) * 1919810;
         if (((hash_val >> 60) > 6) || (ptr_map.size() == 0)) {
-            auto alloc_size = hash_val & 0xF0;
+            auto alloc_size = hash_val & 0xF2;
             auto ptr = tracker.allocate(alloc_size);
+            alloc_size = (alloc_size + align_size - 1) / align_size * align_size;
             if (nullptr != ptr) {
+                ASSERT_EQ((size_t)ptr % align_size, 0);
                 ptr_map[ptr] = alloc_size;
             }
         } else {
@@ -79,7 +83,9 @@ TEST_F(LoraGemmTest, testRandomAlloc) {
     EXPECT_EQ(status.free_size + status.fragmented_size, status.available_size);
 
     for (auto iter = ptr_map.begin(); iter != ptr_map.end(); iter++) {
+        EXPECT_TRUE(tracker.isTracking(iter->first));
         tracker.deallocate(iter->first);
+        EXPECT_FALSE(tracker.isTracking(iter->first));
     }
     status = tracker.getStatus();
     cout << tracker.getAllocationInfo() << endl;

@@ -124,7 +124,10 @@ cc_test(
     ],
     deps = [
         "//src/fastertransformer/core:allocator",
+        "//src/fastertransformer/core:memory_tracker",
+        "//src/fastertransformer/cuda:allocator_cuda",
         "@com_google_googletest//:gtest"
     ],
     copts = copts(),
+    linkopts = test_linkopts,
 )

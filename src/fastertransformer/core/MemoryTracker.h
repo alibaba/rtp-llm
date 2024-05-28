@@ -27,19 +27,25 @@ struct TrackerStatus {
 // Note: this class is not responsible for memory allocation and free.
 class MemoryTracker {
 public:
-    MemoryTracker(void* ptr, const size_t size);
+    MemoryTracker(void* ptr, const size_t size, const size_t align_size);
     ~MemoryTracker();
 
     void* allocate(const size_t size);
     void deallocate(void* ptr);
 
+    bool isTracking(void* ptr) const;
+    void* getBasePtr() const;
     size_t getTotalSize() const;
     TrackerStatus getStatus() const;
     std::string getAllocationInfo() const;
 
 private:
+    size_t align(const size_t size) const;
+
+private:
     mutable std::shared_mutex mutex_;
     size_t total_size_;
+    size_t align_size_;
     std::map<void*, MemoryChunk*> chunk_map_;
 };
 
