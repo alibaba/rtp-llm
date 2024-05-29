@@ -19,7 +19,7 @@ EmbeddingExecutor::EmbeddingExecutor(const GptInitParameter&                    
                                      const unordered_map<string, ConstBufferPtr>&         weights,
                                      py::object                                           handler,
                                      const kmonitor::MetricsReporterPtr                   metrics_reporter):
-    handler_(handler), tensor_para_(tensor_para), pipeline_para_(pipeline_para), metrics_reporter_(metrics_reporter) {
+    handler_(handler), tensor_para_(tensor_para), pipeline_para_(pipeline_para), metrics_reporter_(metrics_reporter), params_(gpt_init_parameter) {
     // need init model and sampler
     unique_ptr<GptModelInitParams> model_params;
     // model_.reset(new GptModel(*model_params));
@@ -62,6 +62,10 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     int*      merged_token_type_ids = model_input.combo_tokens_type_ids->data<int>();
     int token_idx = 0;
     int batch_idx = 0;
+    int position_bias = 0;
+    if (params_.position_ids_style_ == 1) {
+        position_bias = params_.special_tokens_.pad_token_id_ + 1;
+    }
 
     for (auto& stream: streams) {
         int length = stream->inputLength();
@@ -70,9 +74,10 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         memcpy(merged_token_type_ids + (int)token_idx, stream->embeddingInput()->token_type_ids->data(), length * sizeof(int32_t));
         memcpy(input_lengths + (int)batch_idx, stream->embeddingInput()->input_lengths->data(), stream->batchSize() * sizeof(int32_t));
         int length_idx = 0;
-        for (int i = 0; i < batchSize; i++) {
+        for (int i = 0; i < batchSize; i++) {            
             int seqLen = stream->embeddingInput()->input_lengths->data<int32_t>()[i];
-            memcpy(merged_positon_ids + token_idx + length_idx, max_position_ids_buf_->data(), seqLen * sizeof(int32_t));
+            FT_CHECK_WITH_INFO(seqLen + position_bias <= max_position_ids_buf_->shape()[0], "position index exceed max_position_length");
+            memcpy(merged_positon_ids + token_idx + length_idx, max_position_ids_buf_->data<int32_t>() + position_bias, seqLen * sizeof(int32_t));
             length_idx += seqLen;
         }
         if (length_idx != length) {

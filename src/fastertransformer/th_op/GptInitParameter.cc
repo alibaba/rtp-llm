@@ -170,6 +170,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(activation_type, activation_type_str_)                 \
     DEF_PROPERTY(rotary_embedding_dim, rotary_embedding_dim_)           \
     DEF_PROPERTY(rotary_embedding_style, rotary_embedding_style_)       \
+    DEF_PROPERTY(position_ids_style, position_ids_style_)               \
     DEF_PROPERTY(rotary_embedding_base, rotary_embedding_base_)         \
     DEF_PROPERTY(dynamic_embedding_scalar, dynamic_embedding_scalar_)   \
     DEF_PROPERTY(dynamic_embedding_max_pos, dynamic_embedding_max_pos_) \

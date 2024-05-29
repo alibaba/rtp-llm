@@ -29,6 +29,7 @@ private:
     ft::BufferPtr                         max_position_ids_buf_;
     ft::DataType                          data_type_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
+    const fastertransformer::GptInitParameter& params_;    
 
     ModelRequest                     generateOldModelRequest(GptModelInputs& model_input);
     absl::StatusOr<GptModelInputs>   gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const;

@@ -121,6 +121,7 @@ public:
 
     int64_t rotary_embedding_dim_      = 0;
     int64_t rotary_embedding_style_    = 0;
+    int64_t position_ids_style_        = 0;
     int64_t rotary_embedding_base_     = 10000;
     double  dynamic_embedding_scalar_  = 0.0;
     int64_t dynamic_embedding_max_pos_ = 0;

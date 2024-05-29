@@ -88,6 +88,7 @@ class Roberta(Bert):
     def from_huggingface(cls, config: GptInitModelParameters, config_json: Dict[str, Any]):
         Bert.from_huggingface(config, config_json)
         config.special_tokens.pad_token_id = config_json['pad_token_id']
+        config.position_ids_style = 1
 
     def create_context_position_ids(self, input_lengths: List[int]):
         pad_index = self.config.special_tokens.pad_token_id
