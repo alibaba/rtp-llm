@@ -9,6 +9,7 @@ from enum import Enum
 from maga_transformer.utils.util import WEIGHT_TYPE
 from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
 from maga_transformer.ops import GptInitParameter
+from maga_transformer.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
 
 updated_params: Set[str] = set()
 
@@ -300,6 +301,8 @@ class GptInitModelParameters:
         self.update_task_prompt_config()
         self.update_ptuning_config()
         self.update_medusa_config(ckpt_path)
+
+        load_cutlass_gemm_config(self.quant_algo)
 
         self.seq_size_per_block = seq_size_per_block
         logging.info(f'seq_size_per_block: {self.seq_size_per_block}')
