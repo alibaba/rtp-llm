@@ -24,6 +24,7 @@
 
 #include "cutlass/gemm/gemm.h"
 #include "cutlass/numeric_types.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/gemm_lut_utils.h"
 
 #ifndef _WIN32
 #pragma GCC diagnostic pop
@@ -40,15 +41,6 @@ namespace kernels
 {
 namespace cutlass_kernels
 {
-
-struct TileConfig{
-    int block_m;
-    int block_n;
-    int block_k;
-    int warp_m;
-    int warp_n;
-    int warp_k;
-};
 
 TileConfig
 get_tile_config_from_config(CutlassTileConfig tile_config) {
@@ -233,7 +225,8 @@ CutlassGemmConfig estimate_best_config_from_occupancies(const std::vector<Cutlas
     }
 
     CutlassGemmConfig best_config;
-        // Score will be [0, 1]. The objective is to minimize this score.
+
+    // Score will be [0, 1]. The objective is to minimize this score.
     // It represents the fraction of SM resources unused in the last wave.
     float config_score = 1.0f;
     int config_waves = INT_MAX;

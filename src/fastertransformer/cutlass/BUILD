@@ -49,6 +49,7 @@ cc_library(
     srcs = glob([
         "cutlass_kernels/fpA_intB_gemm/*.cu",
         "cutlass_kernels/fpA_intB_gemm/*.h",
+        "cutlass_kernels/fpA_intB_gemm/*.cc",
     ]),
     hdrs = glob([
         "cutlass_kernels/fpA_intB_gemm/*.h",
@@ -157,7 +158,8 @@ cc_library(
         "cutlass_kernels/gemm_configs.h",
         "cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h",
         "cutlass_kernels/weightOnlyBatchedGemv/common.h",
-        "cutlass_kernels/cutlass_heuristic.h"
+        "cutlass_kernels/cutlass_heuristic.h",
+        "cutlass_kernels/gemm_lut_utils.h"
     ],
     visibility = ["//visibility:public"],
 )

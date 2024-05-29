@@ -35,10 +35,19 @@ tensorrt_llm::cutlass_extensions::CutlassGemmConfig estimate_best_config_from_oc
     const std::vector<int>& occupancies, const int64_t m, const int64_t n, const int64_t k, const int64_t num_experts,
     const int split_k_limit, const size_t workspace_bytes, const int multi_processor_count, const int is_weight_only);
 
+struct TileConfig{
+    int block_m;
+    int block_n;
+    int block_k;
+    int warp_m;
+    int warp_n;
+    int warp_k;
+};
 
 void print_config(tensorrt_llm::cutlass_extensions::CutlassGemmConfig config);
 bool is_valid_split_k_factor(const int64_t m, const int64_t n, const int64_t k, const tensorrt_llm::cutlass_extensions::CutlassGemmConfig gemm_config,
     const int split_k_factor, const size_t workspace_bytes, const bool is_weight_only);
+TileConfig get_tile_config_from_config(tensorrt_llm::cutlass_extensions::CutlassTileConfig tile_config);
 
 } // namespace cutlass_kernels
 } // namespace kernels

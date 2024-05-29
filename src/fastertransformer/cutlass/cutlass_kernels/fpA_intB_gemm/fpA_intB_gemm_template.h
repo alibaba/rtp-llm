@@ -33,10 +33,13 @@
 #pragma GCC diagnostic pop
 #endif // #ifndef _WIN32
 
+#include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm_lut.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_heuristic.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
+
+#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 
 namespace tkc = tensorrt_llm::cutlass_extensions;
 
@@ -366,6 +369,7 @@ CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::CutlassFpAIntBGemmRunner()
     check_cuda_error(cudaGetDevice(&device));
     sm_ = fastertransformer::getSMVersion();
     check_cuda_error(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
+    gemm_lut_ = get_gemm_lut<T, WeightType>();
 }
 
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
@@ -466,6 +470,18 @@ CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChosenConfig(const void* A,
 {
     // Standard GEMM, so 1 "expert". We use the same function for MoE and regular FFN.
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+
+    GemmParamKey cur_key{m, n, k};
+    if (gemm_lut_ != nullptr)
+    {
+        auto iter = gemm_lut_->find({cur_key});
+        if (iter != gemm_lut_->end())
+        {
+            CutlassGemmConfig specified_config = iter->second;
+            return specified_config;
+        }
+    }
+
     static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
 
     std::vector<tkc::CutlassGemmConfig> candidate_configs
