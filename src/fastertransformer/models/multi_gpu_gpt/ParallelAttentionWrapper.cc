@@ -107,6 +107,10 @@ bool ParallelAttentionWrapper<T>::UseOldTRTFMHA() const {
         FT_LOG_INFO("OLD TRT FMHA only support half");
         return false;
     }
+    if (params_.head_num_ != params_.head_num_kv_) {
+        FT_LOG_INFO("OLD TRT not support head_num != head_num_kv");
+        return false;
+    }
     auto testRunner = FusedMHARunnerFP16v2(local_head_num_, size_per_head_, get_sm(), q_scaling_);
     return testRunner.fmha_supported(params_.is_causal_);
 #else
