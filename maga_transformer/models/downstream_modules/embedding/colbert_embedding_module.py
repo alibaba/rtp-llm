@@ -8,8 +8,8 @@ from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.downstream_modules.embedding.misc import combo_to_batch, EmbeddingRendererBase
+from maga_transformer.models.downstream_modules.embedding.api_datatype import EmbeddingResponseType, EmbeddingResponseFormat
 
-from .api_datatype import EmbeddingResponseType
 
 class ColBertEmbeddingModule(CustomModule):
     def __init__(self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase):
@@ -23,15 +23,16 @@ class ColbertEmbeddingRenderer(EmbeddingRendererBase):
         super().__init__(config, tokenizer)
         self.embedding_type = EmbeddingResponseType.COLBERT
         
-    def embedding_func(self, x: torch.Tensor) -> List[float]:
-        assert isinstance(x, torch.Tensor)
-        return x.tolist()
+    def embedding_func(self, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> List[float]:    
+        assert isinstance(res, torch.Tensor)
+        return res[:input_length - 1].tolist()
     
-    def similar_func(self, left: torch.Tensor, right: torch.Tensor):
-        assert isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor), "colbert similaritey datatype error"
-        token_scores = torch.einsum('in,jn->ij', left, right)
+    def similar_func(self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat):
+        left_t = torch.tensor(left.embedding)
+        right_t = torch.tensor(right.embedding)
+        token_scores = torch.einsum('in,jn->ij', left_t, right_t)
         scores, _ = token_scores.max(-1)
-        scores = torch.sum(scores) / left.size(0)
+        scores = torch.sum(scores) / left_t.size(0)
         return float(scores)
 
 
@@ -49,14 +50,9 @@ class ColBertEmbeddingHandler(CustomHandler):
         self.colbert_linear.load_state_dict(sparse_linear_dict)
         self.colbert_linear = self.colbert_linear.to(self.dtype_).cuda()
 
-    def _process_colbert_vecs(self, colbert_vecs: torch.Tensor, tokens_num: int):
-        # delte the vectors of padding tokens
-        return colbert_vecs[:tokens_num - 1]  # we don't use the embedding of cls, so select tokens_num-1
-
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor):
         batch_input_ids, batch_hidden_states, batch_attention_mask = combo_to_batch(hidden_states, input_ids, input_lengths)
         colbert_vecs = self.colbert_linear(batch_hidden_states[:, 1:])
         colbert_vecs = colbert_vecs * batch_attention_mask[:, 1:][:, :, None].float()
         colbert_vecs = torch.nn.functional.normalize(colbert_vecs, dim=-1)
-        all_colbert_vec = (list(map(self._process_colbert_vecs, colbert_vecs.cpu(), input_lengths)))
-        return all_colbert_vec
+        return colbert_vecs

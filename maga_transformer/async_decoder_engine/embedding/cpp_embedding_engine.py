@@ -21,11 +21,8 @@ class EmbeddingCppEngine(object):
         self.cpp_engine.init(self.model.weight.weights, self.model.weight.global_weights)
 
     def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):
-        try:
-            start_time = time.time()
+        try:            
             results = self.cpp_engine.decode(inputs.token_ids, inputs.token_type_ids, inputs.input_lengths, 0)
-            end_time = time.time()
-            # print("engine cost:" , end_time - start_time)        
             outputs.outputs = results
             outputs.input_length = inputs.input_length
         except Exception as e:

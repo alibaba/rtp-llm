@@ -9,9 +9,8 @@ from transformers import PreTrainedTokenizerBase
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-
-from .misc import combo_to_list, EmbeddingRendererBase
-from .api_datatype import EmbeddingResponseType
+from maga_transformer.models.downstream_modules.embedding.api_datatype import EmbeddingResponseFormat, EmbeddingResponseType
+from maga_transformer.models.downstream_modules.embedding.misc import EmbeddingRendererBase, hidden_combo_to_batch
 
 class SparseEmbeddingModule(CustomModule):
     def __init__(self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase):
@@ -28,19 +27,28 @@ class SparseEmbeddingRenderer(EmbeddingRendererBase):
                                   self.tokenizer_.eos_token_id,
                                   self.tokenizer_.pad_token_id,
                                   self.tokenizer_.unk_token_id])
-    def embedding_func(self, d: Any) -> List[float] | Dict[str, float]:
-        assert isinstance(d, dict)
-        return {self.tokenizer_.decode(idx): value for idx, value in d.items() if idx not in self.unused_tokens}
+        
+    def embedding_func(self, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> Dict[str, float]:
+        if len(res.shape) != 1:
+            raise Exception("sparse hidden should be 1-dim")
+        sparse_emb: Dict[int, float] = defaultdict(float)        
+        for score, id in zip(res[:input_length], input_tokens):
+            score = float(score)
+            id = int(id)
+            if id in self.unused_tokens:
+                continue
+            if score > 0 and sparse_emb[id] < score:
+                sparse_emb[id] = score
+        return {self.tokenizer_.decode(key): value for key,value in sparse_emb.items()}
 
-    def similar_func(self, left: Dict[int, float], right: Dict[int, float]) -> float:
-        assert isinstance(left, dict) and isinstance(right, dict), "sparse similaritey datatype error"
+    def similar_func(self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat) -> float:
+        if not isinstance(left.embedding, dict) or not isinstance(right.embedding, dict):
+            raise Exception("sparse similaritey datatype error")
         result: float = 0
-        for key in left.keys():
-            if key not in right:
+        for key in left.embedding.keys():
+            if key not in right.embedding:
                 continue
-            if key in self.unused_tokens:
-                continue
-            result += left[key] * right[key]
+            result += left.embedding[key] * right.embedding[key]
         return result
 
 
@@ -63,17 +71,4 @@ class SparseEmbeddingHandler(CustomHandler):
 
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor):
         hidden_states = torch.relu(self.sparse_linear(hidden_states)).squeeze_(-1)
-        hidden_states_list = combo_to_list(hidden_states, input_lengths)
-        input_ids_list = combo_to_list(input_ids, input_lengths)
-        result: List[Dict[int, float]] = []
-        for hidden_states, input_ids in zip(hidden_states_list, input_ids_list):
-            result.append(self._process_token_weights(hidden_states.cpu().numpy(), input_ids))
-        return result
-
-    def _process_token_weights(self, token_weights: NDArray[np.float32], input_ids: torch.Tensor) -> Dict[int, float]:
-        sparse_emb: Dict[int, float] = defaultdict(float)
-        for w, idx in zip(token_weights, input_ids):
-            idx = int(idx)
-            if w > 0 and w > sparse_emb[idx]:
-                sparse_emb[idx] = w
-        return sparse_emb
+        return hidden_combo_to_batch(hidden_states, input_lengths)

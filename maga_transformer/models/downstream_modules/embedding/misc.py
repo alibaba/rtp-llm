@@ -29,6 +29,13 @@ def combo_to_batch(hidde_states: torch.Tensor, input_ids: torch.Tensor, input_le
         batched_attention_mask[b, input_length:] = 0
     return batched_input_ids, batched_hidden_states, batched_attention_mask
 
+def hidden_combo_to_batch(hidde_states: torch.Tensor, input_lengths: torch.Tensor) -> torch.Tensor:
+    sliced_hidden_states: List[torch.Tensor] = []
+    hidden_bias = 0
+    for input_length in input_lengths:
+        sliced_hidden_states.append(hidde_states[hidden_bias: hidden_bias + input_length])
+        hidden_bias += input_length
+    return pad_sequence(sliced_hidden_states, batch_first=True)
 
 def combo_to_list(tensor: torch.Tensor, input_length: torch.Tensor) -> List[torch.Tensor]:
     result: List[torch.Tensor] = []
@@ -58,36 +65,43 @@ class EmbeddingRendererBase(CustomRenderer):
             engine_inputs = await self.generator.generate(request.left + request.right)
         return engine_inputs
 
-    def embedding_func(self, res: Any) -> Union[List[float], Dict[str, float]]:
+    def embedding_func(self, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> Union[List[float], Dict[str, float]]:
         raise NotImplementedError
 
-    def similar_func(self, left: Any, right: Any) -> float:
+    def similar_func(self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat) -> float:
         raise NotImplementedError
 
-    async def _render_embedding_output(self, request: OpenAIEmbeddingRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
-        usage = Usage(prompt_tokens=outputs.input_length, total_tokens=outputs.input_length)
-        data = [
-            EmbeddingResponseFormat(
+    async def _render_embedding_output(self, inputs: EngineInputs, outputs: EngineOutputs) -> List[EmbeddingResponseFormat]:
+        data: List[EmbeddingResponseFormat] = []
+        bias = 0
+        for i, out in enumerate(outputs.outputs):
+            input_length = int(inputs.input_lengths[i])
+            token_ids = inputs.token_ids[bias: bias + input_length]
+            data.append(EmbeddingResponseFormat(
                 object=self.embedding_type,
-                embedding=self.embedding_func(x),
+                embedding=self.embedding_func(out, input_length, token_ids),
                 index=i)
-            for i, x in enumerate(outputs.outputs)
-        ]
-        return OpenAIEmbeddingResponse(data=data, usage=usage).model_dump()
+            )
+            bias += input_length
+        return data
 
-    async def _render_similarity_output(self, request: SimilarityRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
-        left = outputs.outputs[:len(request.left)]
-        right = outputs.outputs[len(request.left): ]
+    async def _render_similarity_output(self, request: SimilarityRequest, inputs: EngineInputs, outputs: EngineOutputs) -> List[List[float]]:
+        embedding_outputs = await self._render_embedding_output(inputs, outputs)
+        left = embedding_outputs[:len(request.left)]
+        right = embedding_outputs[len(request.left): ]
         batch_results: List[List[float]] = []
         for l_item in left:
             result: List[float] = []
-            for r_item in right:
-                result.append(self.similar_func(l_item, r_item))                
+            for r_item in right:                
+                result.append(self.similar_func(l_item, r_item))
             batch_results.append(result)
-        return SimilarityResponse(similarity=batch_results).model_dump()
+        return batch_results        
 
     async def render_response(self, request: Union[OpenAIEmbeddingRequest, SimilarityRequest], inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
+        usage = Usage(prompt_tokens=outputs.input_length, total_tokens=outputs.input_length)
         if isinstance(request, OpenAIEmbeddingRequest):
-            return await self._render_embedding_output(request, inputs, outputs)
+            data = await self._render_embedding_output(inputs, outputs)
+            return OpenAIEmbeddingResponse(data=data, usage=usage).model_dump()
         else:
-            return await self._render_similarity_output(request, inputs, outputs)
+            batch_results = await self._render_similarity_output(request, inputs, outputs)
+            return SimilarityResponse(similarity=batch_results).model_dump()

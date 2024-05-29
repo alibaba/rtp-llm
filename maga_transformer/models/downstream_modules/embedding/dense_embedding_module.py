@@ -14,8 +14,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler
 from maga_transformer.utils.tensor_utils import get_last_token_from_combo_tokens, get_first_token_from_combo_tokens
 from maga_transformer.models.downstream_modules.embedding.misc import combo_to_batch, EmbeddingRendererBase
-
-from .api_datatype import EmbeddingResponseType
+from maga_transformer.models.downstream_modules.embedding.api_datatype import EmbeddingResponseType, EmbeddingResponseFormat
 
 class DenseEmbeddingModule(CustomModule):
     def __init__(self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase):
@@ -32,14 +31,13 @@ class DenseEmbeddingRenderer(EmbeddingRendererBase):
         super().__init__(*args, ** kwargs)
         self.embedding_type = EmbeddingResponseType.DENSE
 
-    def similar_func(self, left: Any, right: Any) -> float:        
-        assert isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor)
-        return float(left @ right.T) 
-    
-    def embedding_func(self, x: Any) -> List[float]:
-        assert isinstance(x, torch.Tensor)
-        return x.tolist()
-    
+    def similar_func(self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat) -> float:
+        return float(torch.tensor(left.embedding) @ torch.tensor(right.embedding).T)
+
+    def embedding_func(self, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> List[float]:
+        assert isinstance(res, torch.Tensor)
+        return res.tolist()
+
     async def render_log_response(self, response: Dict[str, Any]):
         log_response = copy.copy(response)
         if 'data' in log_response:
