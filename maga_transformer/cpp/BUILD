@@ -369,15 +369,3 @@ py_library(
     ],
     visibility = ["//visibility:public"],
 )
-
-cc_binary(
-    name = "main",
-    srcs = ["main.cc"],
-    deps = [
-        ":model_rpc_server",
-        "//:gpt_init_params",
-        "//3rdparty/flash_attention2:flash_attention2_impl",
-    ] + torch_deps(),
-    linkopts = linkopts,
-    visibility = ["//visibility:public"]
-)
