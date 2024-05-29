@@ -6,10 +6,10 @@
 namespace fastertransformer {
 
 struct TrackerAllocatorParams {
-    IAllocator* real_allocator;
-    size_t target_track_bytes;
-    size_t bytes_try_step;
-    size_t align_size;
+    IAllocator* real_allocator = nullptr;
+    size_t target_track_bytes  = 0;
+    size_t bytes_try_step      = 64UL * 1024 * 1024; // 64 MiB
+    size_t align_size          = 1024;
 };
 
 class TrakcerAllocator : public IAllocator {

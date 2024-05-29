@@ -13,6 +13,8 @@ enum class DeviceType {
 
 struct DeviceInitParams {
     size_t device_id       = 0;
+    size_t max_batch_size = 256;
+
     size_t tp_rank         = 0;
     size_t tp_size         = 1;
     // this ip:port pair should be unused, typically provided by gang,
@@ -20,7 +22,12 @@ struct DeviceInitParams {
     // they are only needed when tp_size > 1.
     std::string master_ip  = "";
     int64_t master_port    = 0;
-    size_t max_batch_size = 256;
+
+    // size (bytes) of device memory preallocated and managed by MemoryTracker.
+    // negative value means reserving all free memory but remains abs(value) bytes.
+    // 0 disables memory reservation
+    int64_t device_reserve_memory_bytes = 0;
+    int64_t host_reserve_memory_bytes   = 0;
 };
 
 // immutable device properties. Can not change since device is initialized.

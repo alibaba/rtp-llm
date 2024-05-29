@@ -34,6 +34,9 @@ public:
         auto device_params = device_name
             ? GlobalDeviceParams{{{getDeviceType(device_name), DeviceInitParams{0}}}}
             : DeviceFactory::getDefaultGlobalDeviceParams();
+        auto& default_device_params = device_params.device_params[0].second;
+        default_device_params.device_reserve_memory_bytes = device_reserve_memory_size_;
+        default_device_params.host_reserve_memory_bytes = host_reserve_memory_size_;
         DeviceFactory::initDevices(device_params);
         device_ = DeviceFactory::getDefaultDevice();
     }
@@ -290,6 +293,8 @@ protected:
     double rtol_ = 1e-03;
     double atol_ = 1e-03;
     rtp_llm::CacheManagerPtr cache_manager_;
+    size_t device_reserve_memory_size_ = 0L;
+    size_t host_reserve_memory_size_ = 2L * 1024 * 1024 * 1024; // 2GB;
 };
 
 int main(int argc, char** argv) {

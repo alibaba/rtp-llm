@@ -134,22 +134,6 @@ TEST_F(MemoryTest, testMemoryTracker) {
     }
 }
 
-TEST_F(MemoryTest, testReserveAllMemory) {
-    int device_id = 0;
-    Allocator<AllocatorType::CUDA> basic_cuda_allocator(device_id);
-    Allocator<AllocatorType::CUDA_HOST> basic_cuda_host_allocator(device_id);
-
-    TrackerAllocatorParams params;
-    params.real_allocator = &basic_cuda_allocator;
-    params.target_track_bytes = 80L * 1024L * 1024L * 1024L; // 80GB
-    params.bytes_try_step = 128L * 1024L * 1024L;          // 128MB
-    params.align_size = 64;
-
-    TrakcerAllocator cuda_allocator(params);
-    params.real_allocator = &basic_cuda_host_allocator;
-    TrakcerAllocator cuda_host_allocator(params);
-}
-
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

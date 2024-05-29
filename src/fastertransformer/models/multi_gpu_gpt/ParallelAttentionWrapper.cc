@@ -485,7 +485,7 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
 
-    if (!use_kvcache && params_.rotary_embedding_style_ == 0 && UseFMHA()) {        
+    if (!use_kvcache && params_.rotary_embedding_style_ == 0 && UseFMHA()) {
         gemm_runner_->GemmWithBias(h_token_num,
                     local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
                     hidden_units_,
@@ -1136,13 +1136,13 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
     // save memory usage when using fmha
     if (allocate_qk_buf) {
         qk_buf_ = (T*)allocator_->reMalloc(
-            qk_buf_, sizeof(T) * context_batch_size * local_head_num_ * seq_len * seq_len_with_prefix, true);
+            qk_buf_, sizeof(T) * context_batch_size * local_head_num_ * seq_len * seq_len_with_prefix, false);
         qkv_buf_3_ =
-            (T*)allocator_->reMalloc(qkv_buf_3_, sizeof(T) * context_batch_size * seq_len * qkv_hidden_size, true);
+            (T*)allocator_->reMalloc(qkv_buf_3_, sizeof(T) * context_batch_size * seq_len * qkv_hidden_size, false);
     }
     else {
         softmax_lse_ = (float*)allocator_->reMalloc(
-            softmax_lse_, sizeof(float) * context_batch_size * local_head_num_ * params_.max_seq_len_, true);
+            softmax_lse_, sizeof(float) * context_batch_size * local_head_num_ * params_.max_seq_len_, false);
     }
 
     if (is_qk_buf_float_ == true) {
@@ -1151,7 +1151,7 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
             qk_buf_float_ = (float*)allocator_->reMalloc(qk_buf_float_,
                                                          sizeof(float) * context_batch_size * local_head_num_ * seq_len
                                                              * seq_len_with_prefix,
-                                                         true);
+                                                         false);
             // qk_buf_ = (T *)qk_buf_float_;
         }
     }

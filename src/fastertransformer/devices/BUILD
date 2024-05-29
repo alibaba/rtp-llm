@@ -10,6 +10,7 @@ cc_library(
     ]),
     deps = [
         "//src/fastertransformer/core:allocator",
+        "//src/fastertransformer/core:memory_tracker",
         "//src/fastertransformer/core:buffer",
         "//src/fastertransformer/utils:utils",
     ],

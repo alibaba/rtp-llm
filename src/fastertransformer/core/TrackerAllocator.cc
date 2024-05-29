@@ -7,6 +7,10 @@ TrakcerAllocator::TrakcerAllocator(const TrackerAllocatorParams& params)
 {
     // try reserve memory for tracker
     auto real_reserve_size = params.target_track_bytes;
+    if (real_reserve_size == 0) {
+        FT_LOG_WARNING("TrackerAllocator target_track_bytes is 0. Use real allocator directly.");
+        return;
+    }
     while (true) {
         void* reserved_ptr = nullptr;
         try {
@@ -42,6 +46,7 @@ TrakcerAllocator::~TrakcerAllocator() {
         real_allocator_->free(&ptr);
         memory_tracker_.reset();
     }
+    delete real_allocator_;
 }
 
 AllocatorType TrakcerAllocator::type() const {
@@ -55,6 +60,9 @@ MemoryType TrakcerAllocator::memoryType() const {
 void* TrakcerAllocator::malloc(size_t size, const bool is_set_zero) {
     if (is_set_zero) {
         throw std::runtime_error("TrakcerAllocator does not support is_set_zero = true");
+    }
+    if (size == 0) {
+        return nullptr;
     }
     void* ptr = nullptr;
     if (memory_tracker_) {
@@ -70,11 +78,15 @@ void* TrakcerAllocator::malloc(size_t size, const bool is_set_zero) {
 }
 
 void TrakcerAllocator::free(void** ptr) {
+    if (!ptr || !*ptr) {
+        return;
+    }
     if (memory_tracker_ && (memory_tracker_->isTracking(*ptr))) {
         memory_tracker_->deallocate(*ptr);
     } else {
         real_allocator_->free(ptr);
     }
+    *ptr = nullptr;
 }
 
 void* TrakcerAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero) {
