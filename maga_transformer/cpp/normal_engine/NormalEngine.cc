@@ -20,9 +20,9 @@ NormalEngine::NormalEngine(const MagaInitParams&                                
     params_(params),
     metrics_reporter_(metrics_reporter)
 {
-    executor_.reset(new NormalExecutor(params, layer_weights, weights, metrics_reporter_));
+    executor_.reset(new NormalExecutor(params_, layer_weights, weights, metrics_reporter_));
     initCacheManager();
-    scheduler_.reset(new FIFOScheduler(params, resource_context_.cache_manager, metrics_reporter));
+    scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter));
     (void)startLoop();
 }
 

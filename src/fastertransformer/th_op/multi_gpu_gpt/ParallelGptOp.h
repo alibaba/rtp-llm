@@ -77,7 +77,7 @@ public:
     virtual bool UseFMHA() override;
 
 private:
-    const ft::GptInitParameter& gpt_init_parameter_;
+    ft::GptInitParameter gpt_init_parameter_;
 
     const std::vector<std::unordered_map<std::string, th::Tensor>> weights_;
 

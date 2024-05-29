@@ -29,7 +29,7 @@ public:
 private:
     std::unique_ptr<rtp_llm::EmbeddingEngine> embedding_engine_;
     py::object handler_;
-    const ft::GptInitParameter& gpt_init_params_;
+    ft::GptInitParameter gpt_init_params_;
     std::unordered_map<std::string, ft::ConstBufferPtr>              global_weights_;
     std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layer_weights_;
 

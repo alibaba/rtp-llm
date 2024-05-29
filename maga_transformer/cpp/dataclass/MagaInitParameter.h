@@ -22,7 +22,7 @@ public:
 class MagaInitParams: public th::jit::CustomClassHolder {
 public:
     MagaInitParams(const ft::GptInitParameter& gpt_init_parameter);
-    const ft::GptInitParameter&  gpt_init_parameter;
+    ft::GptInitParameter  gpt_init_parameter;
     th::intrusive_ptr<PyModelWeights>    model_weights;
 };
 
