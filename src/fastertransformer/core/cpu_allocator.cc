@@ -2,8 +2,7 @@
 
 namespace fastertransformer {
 
-void* Allocator<AllocatorType::CPU>::malloc(size_t size, const bool is_set_zero) {
-    assert(!is_set_zero);
+void* Allocator<AllocatorType::CPU>::malloc(size_t size) {
     return std::malloc(size);
 }
 

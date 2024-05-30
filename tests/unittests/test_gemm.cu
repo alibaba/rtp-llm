@@ -70,7 +70,7 @@ public:
         this->shape = shape;
 
         size_t tensor_memsize = this->memsize();
-        this->data = this->allocator->malloc(tensor_memsize, false);
+        this->data = this->allocator->malloc(tensor_memsize);
         if (zero_init) {
             check_cuda_error(cudaMemset(data, 0x0, tensor_memsize));
         } else {
@@ -484,7 +484,7 @@ void testGemmConsistencyBatchedMatmul(size_t m, size_t n, size_t k) {
                   (const T*)expecteds[1]->data,
                   (const T*)expecteds[2]->data};
 
-    T** batch_tensor_ptrs = reinterpret_cast<T**>(allocator.malloc(sizeof(T*) * 16, false));
+    T** batch_tensor_ptrs = reinterpret_cast<T**>(allocator.malloc(sizeof(T*) * 16));
     check_cuda_error(cudaMemcpyAsync(
         (void*)batch_tensor_ptrs, hA, sizeof(T*) * 16, cudaMemcpyHostToDevice, stream));
     const void* const* batch_a = reinterpret_cast<const void* const*>(batch_tensor_ptrs);

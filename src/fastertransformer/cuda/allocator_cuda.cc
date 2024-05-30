@@ -12,11 +12,11 @@ void* ICudaAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero) {
         if (realloc_type == ReallocType::INCREASE) {
             FT_LOG_DEBUG("ReMalloc the buffer %p since it is too small.", void_ptr);
             free((void**)(&void_ptr));
-            return malloc(size, is_set_zero);
+            return malloc(size);
         } else if (realloc_type == ReallocType::DECREASE) {
             FT_LOG_DEBUG("ReMalloc the buffer %p to release unused memory to memory pools.", void_ptr);
             free((void**)(&void_ptr));
-            return malloc(size, is_set_zero);
+            return malloc(size);
         } else {
             FT_LOG_DEBUG("Reuse original buffer %p with size %d and do nothing for reMalloc.", void_ptr, size);
             if (is_set_zero) {
@@ -26,7 +26,7 @@ void* ICudaAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero) {
         }
     } else {
         FT_LOG_DEBUG("Cannot find buffer %p, mallocing new one.", void_ptr);
-        return malloc(size, is_set_zero);
+        return malloc(size);
     }
 }
 
@@ -64,11 +64,11 @@ ReallocType PurePointerCudaAllocator::isReMalloc(void* address, size_t size) con
     }
 }
 
-void* PurePointerCudaAllocator::malloc(size_t size, const bool is_set_zero) {
+void* PurePointerCudaAllocator::malloc(size_t size) {
     if (size == 0) {
         return nullptr;
     }
-    void* ptr = doMalloc(size, is_set_zero);
+    void* ptr = doMalloc(size);
     std::lock_guard<std::mutex> lock(lock_);
     pointer_mapping_->insert({ptr, size});
     return ptr;

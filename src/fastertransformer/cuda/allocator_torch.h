@@ -32,7 +32,7 @@ class Allocator<AllocatorType::TH>: public ICudaAllocator, public TypedAllocator
 public:
     Allocator();
 
-    void* malloc(size_t size, const bool is_set_zero = true);
+    void* malloc(size_t size);
     void free(void** ptr);
 
     virtual ~Allocator();

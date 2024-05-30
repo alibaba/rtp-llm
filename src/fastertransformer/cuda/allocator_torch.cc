@@ -29,15 +29,12 @@ void Allocator<AllocatorType::TH>::free(void** ptr) {
     return;
 }
 
-void* Allocator<AllocatorType::TH>::malloc(size_t size, const bool is_set_zero){
+void* Allocator<AllocatorType::TH>::malloc(size_t size) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t       buf_size = static_cast<int64_t>(ceil(size / 32.)) * 32;
     torch::Tensor buf;
     buf = torch::empty({buf_size}, torch::dtype(torch::kUInt8).device(torch::kCUDA));
     void* ptr = buf.data_ptr();
-    if (is_set_zero) {
-        cudaMemsetAsync(ptr, 0, buf_size, stream_);
-    }
     FT_LOG_DEBUG("malloc buffer %p with size %ld", ptr, buf_size);
     pointer_mapping_->insert({ptr, buf});
     return ptr;

@@ -43,7 +43,7 @@ public:
     ~PurePointerCudaAllocator();
 
 public:
-    void* malloc(size_t size, const bool is_set_zero = false) override;
+    void* malloc(size_t size) override;
     void free(void** ptr) override;
 
 protected:
