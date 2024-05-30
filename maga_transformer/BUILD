@@ -31,11 +31,18 @@ requirement([
     "orjson"
 ])
 
+filegroup(
+    name = "cutlass_config",
+    srcs = glob(["utils/gemm_utils/luts/*"]),
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
     ]),
+    data = [":cutlass_config"],
     deps = [
         ":torch",
         ":torchvision",
