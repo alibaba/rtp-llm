@@ -13,6 +13,7 @@ public:
     virtual void init();
     virtual DeviceProperties getDeviceProperties() = 0;
     virtual DeviceStatus getDeviceStatus();
+    void traceMemoryUsage();
     BufferPtr allocateBuffer(const BufferParams& params, const BufferHints& hints = {});
     BufferPtr allocateBufferLike(const Buffer& buffer, const BufferHints& hints = {});
     virtual void syncAndCheck();

@@ -26,7 +26,7 @@ TEST_F(MemoryTest, testAlloc) {
     EXPECT_EQ(ptr3, base_ptr);
     auto status = tracker.getStatus();
     auto ptr4 = tracker.allocate((1 << 20) - (1 << 11));
-    cout << tracker.getAllocationInfo() << endl;
+    cout << status.toString() << endl;
     EXPECT_EQ(ptr4, nullptr);
     EXPECT_EQ(status.available_size, (1 << 20) - (1 << 10) - (1 << 12) - (1 << 8));
     EXPECT_EQ(status.free_size, (1 << 20) - (1 << 11) - (1 << 12));
@@ -39,7 +39,7 @@ TEST_F(MemoryTest, testAlloc) {
     tracker.deallocate(ptr1);
     tracker.deallocate(ptr2);
     status = tracker.getStatus();
-    cout << tracker.getAllocationInfo() << endl;
+    cout << status.toString() << endl;
     EXPECT_EQ(status.available_size, (1 << 20));
     EXPECT_EQ(status.free_size, (1 << 20));
     EXPECT_EQ(status.fragmented_size, 0);
@@ -73,7 +73,7 @@ TEST_F(MemoryTest, testRandomAlloc) {
     }
 
     auto status = tracker.getStatus();
-    cout << tracker.getAllocationInfo() << endl;
+    cout << status.toString() << endl;
     EXPECT_EQ(status.allocated_chunk_count, ptr_map.size());
     auto total_size = 0;
     for (auto iter = ptr_map.begin(); iter != ptr_map.end(); iter++) {
@@ -89,7 +89,7 @@ TEST_F(MemoryTest, testRandomAlloc) {
         EXPECT_FALSE(tracker.isTracking(iter->first));
     }
     status = tracker.getStatus();
-    cout << tracker.getAllocationInfo() << endl;
+    cout << status.toString() << endl;
     EXPECT_EQ(status.allocated_chunk_count, 0);
     EXPECT_EQ(status.allocated_size, 0);
     EXPECT_EQ(status.available_size, (1 << 20));

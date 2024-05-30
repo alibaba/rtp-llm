@@ -14,12 +14,17 @@ struct MemoryChunk {
 };
 
 struct TrackerStatus {
+public:
     size_t available_size         = 0; // size of unused chunk, including fragmented size.
     size_t free_size              = 0; // size of last unused chunk, not including fragmented size.
     size_t fragmented_size        = 0;
     size_t allocated_size         = 0;
     size_t fragment_chunk_count   = 0;
     size_t allocated_chunk_count  = 0;
+    std::vector<MemoryChunk> chunks;
+
+public:
+    std::string toString() const;
 };
 
 // This class is designed to completely manage assignable memories.
@@ -37,7 +42,6 @@ public:
     void* getBasePtr() const;
     size_t getTotalSize() const;
     TrackerStatus getStatus() const;
-    std::string getAllocationInfo() const;
 
 private:
     size_t align(const size_t size) const;

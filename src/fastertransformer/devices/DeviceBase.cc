@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
+#include "src/fastertransformer/core/TrackerAllocator.h"
 
 using namespace std;
 
@@ -15,6 +16,16 @@ void DeviceBase::init() {
 
 DeviceStatus DeviceBase::getDeviceStatus() {
     return DeviceStatus();
+}
+
+void DeviceBase::traceMemoryUsage() {
+    if (auto tracker_allocator = dynamic_cast<TrakcerAllocator*>(getAllocator())) {
+        FT_LOG_INFO("Device: %s", tracker_allocator->getTrackerStatus().toString().c_str());
+    }
+    if (auto tracker_allocator = dynamic_cast<TrakcerAllocator*>(getHostAllocator())) {
+        FT_LOG_INFO("Host: %s", tracker_allocator->getTrackerStatus().toString().c_str());
+    }
+    return;
 }
 
 AllocationType DeviceBase::getMemAllocationType(const MemoryType type) {

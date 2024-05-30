@@ -7,6 +7,25 @@ using WriteLock = std::unique_lock<std::shared_mutex>;
 
 namespace fastertransformer {
 
+std::string TrackerStatus::toString() const {
+    std::ostringstream info;
+    info << "Memory Tracker Status:\n";
+    info << "allocated " << allocated_chunk_count << " chunks, size: " << allocated_size << "\n"
+         << "available " << available_size
+         << " bytes, with " << fragment_chunk_count
+         << " fragments of size: " << fragmented_size << "\n";
+    info << "-----------------------------------------------\n";
+    for (const auto chunk: chunks) {
+        info << "| " << chunk.ptr
+             << " | " << setw(12) << chunk.size
+             << " (" << std::setw(8) << std::hex << chunk.size << std::dec << ")"
+             << " | " << (chunk.used ? "USED" : "FREE")
+             << " |\n";
+    }
+    info << "-----------------------------------------------\n";
+    return info.str();
+}
+
 MemoryTracker::MemoryTracker(void* ptr, const size_t size, const size_t align_size) {
     total_size_ = size;
     align_size_ = align_size;
@@ -81,8 +100,7 @@ void MemoryTracker::deallocate(void* ptr) {
     // 1. find the chunk and free
     auto chunk_iter = chunk_map_.find(ptr);
     if (chunk_iter == chunk_map_.end()) {
-        FT_LOG_ERROR("Memory tracker failed to deallocate [%p]! current allocation: %s",
-                    ptr, getAllocationInfo().c_str());
+        FT_LOG_ERROR("Memory tracker failed to deallocate [%p]!", ptr);
         return;
     }
     chunk_iter->second->used = false;
@@ -118,6 +136,7 @@ TrackerStatus MemoryTracker::getStatus() const {
 
     for (auto iter = chunk_map_.begin(); iter != chunk_map_.end(); iter++) {
         auto chunk = iter->second;
+        status.chunks.push_back(*chunk);
         if (chunk->used) {
             status.allocated_size += chunk->size;
             status.allocated_chunk_count++;
@@ -135,23 +154,6 @@ TrackerStatus MemoryTracker::getStatus() const {
     return status;
 }
 
-std::string MemoryTracker::getAllocationInfo() const {
-    ReadLock lock(mutex_);
-    std::ostringstream info;
-    info << "-----------------------------------------------\n";
-    auto iter = chunk_map_.begin();
-    while (iter != chunk_map_.end()) {
-        auto chunk = iter->second;
-        info << "| " << chunk->ptr
-             << " | " << setw(12) << chunk->size
-             << " (" << std::setw(8) << std::hex << chunk->size << std::dec << ")"
-             << " | " << (chunk->used ? "USED" : "FREE")
-             << " |\n";
-        iter++;
-    }
-    info << "-----------------------------------------------\n";
-    return info.str();
-}
 
 size_t MemoryTracker::align(const size_t size) const {
     return ((size + align_size_ - 1) / align_size_) * align_size_;
