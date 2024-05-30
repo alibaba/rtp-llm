@@ -53,7 +53,6 @@ cc_test(
     linkopts = test_linkopts,
     deps = [
         "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
-        "//3rdparty/flash_attention2:flash_attention2_impl",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
         "//maga_transformer/cpp:model_rpc_server",
@@ -62,6 +61,9 @@ cc_test(
         "//maga_transformer/cpp:dataclass",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
+        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
+        "//3rdparty/flash_attention2:flash_attention2_impl",
         "//src/fastertransformer/devices/testing:device_test_utils"
     ] + torch_deps(),
     env = {

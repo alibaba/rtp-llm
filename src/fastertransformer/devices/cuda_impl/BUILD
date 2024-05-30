@@ -20,7 +20,9 @@ cc_library(
         "//src/fastertransformer/layers:layers",
         "//src/fastertransformer/kernels:kernels",
         "cutlass_kernels_interface",
-        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
+        "//3rdparty/flash_attention2:flash_attention2_header",
+        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_header",
+        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_header"
     ],
     visibility = ["//visibility:public"],
     copts = cuda_copts(),

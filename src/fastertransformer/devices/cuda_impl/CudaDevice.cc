@@ -5,6 +5,7 @@
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/core/TrackerAllocator.h"
 #include "src/fastertransformer/utils/logger.h"
+#include "src/fastertransformer/utils/compiler_config.h"
 
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
@@ -94,6 +95,10 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         NCCLCHECK(ncclCommInitRank(&nccl_param_.nccl_comm_, world_size, *nccl_id, rank));
         NCCLCHECK(ncclGroupEnd());
     }
+
+    checkUseTrtV1FMHA();
+    checkUseTrtV2FMHA();
+    checkUseOpenSourceFMHA();
 }
 
 CudaDevice::~CudaDevice() {
@@ -136,6 +141,49 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->tp_size = nccl_param_.world_size_;
     }
     return *prop;
+}
+
+void CudaDevice::checkUseOpenSourceFMHA() {
+    if (!(is_sm8x() || is_sm90())) {
+        FT_LOG_WARNING("opensource FMHA is disabled for sm %d", get_sm());
+        return;
+    }
+
+    if(CompileConfig::cudart_version < 12000) {
+        FT_LOG_WARNING("cudart version %d not support need >= 12000!", CompileConfig::cudart_version);
+        return;
+    }
+
+    char* fmha_env = std::getenv("ENABLE_OPENSOURCE_FMHA");
+    if (fmha_env && std::string(fmha_env) == "OFF") {
+        FT_LOG_WARNING("opensource FMHA is disabled for by env");
+        return;
+    }
+
+    fmha_env = std::getenv("ENABLE_FMHA");
+    if (fmha_env && std::string(fmha_env) == "OFF") {
+        FT_LOG_WARNING("FMHA is not enbaled");
+        return;
+    }
+    use_openSource_fmha = true;
+}
+
+void CudaDevice::checkUseTrtV1FMHA() {
+    // TODO(lidongjin.ldj) support trt v1 fmha.
+    use_trtv1_fmha = false;
+}
+
+void CudaDevice::checkUseTrtV2FMHA() {
+    if (!(is_sm8x() || is_sm90() || is_sm70())) {
+        FT_LOG_WARNING("TRT FMHA is disabled for sm %d", get_sm());
+        return;
+    }
+    char* fmha_env = std::getenv("ENABLE_TRT_FMHA");
+    if (fmha_env && std::string(fmha_env) == "OFF") {
+        FT_LOG_WARNING("TRT FMHA is disabled for by env");
+        return;
+    }
+    use_trtv2_fmha = true;
 }
 
 // TODO(wangyin.yx): fill all memory status.

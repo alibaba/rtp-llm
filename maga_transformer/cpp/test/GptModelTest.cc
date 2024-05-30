@@ -33,6 +33,7 @@ TEST_F(GptModelTest, testSimple) {
     attention_conf.rope_config.embedding_style = RopeType::Base;
     attention_conf.rope_config.embedding_dim = 64;
     attention_conf.rope_config.embedding_base = 1000000;
+    attention_conf.mask_type = AttentionMaskType::causalMask;
     auto model = createGptModel({device_, *weights, description});
 
     const auto cache_block_num = 128;

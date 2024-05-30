@@ -262,6 +262,12 @@ struct AttentionCommonInputs {
                           sequence_lengths(sequence_lengths) {}
 };
 
+enum AttentionMaskType {
+    noMask,
+    causalMask,
+    promptMask,
+};
+
 struct AttentionConfigs {
     size_t      head_num;
     size_t      kv_head_num;
@@ -274,6 +280,8 @@ struct AttentionConfigs {
     size_t tokens_per_block;
 
     size_t hidden_size;
+    AttentionMaskType mask_type = noMask;
+    float q_scaling = 1.0f;
 };
 
 using AttentionModuleOutput = void;

@@ -151,6 +151,7 @@ TEST_F(AttentionLayerTestFp16, testSimpleContextAttention) {
     attention_conf.size_per_head = 64;
     attention_conf.hidden_size = 1024;
     attention_conf.rope_config.embedding_dim = attention_conf.size_per_head;
+    attention_conf.mask_type = AttentionMaskType::causalMask;
     testAttentionLayer(cache_conf, attention_conf, {3}, {});
 }
 

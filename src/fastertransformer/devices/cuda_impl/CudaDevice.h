@@ -21,6 +21,10 @@ public:
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return host_allocator_.get(); }
 
+    void checkUseOpenSourceFMHA();
+    void checkUseTrtV1FMHA();
+    void checkUseTrtV2FMHA();
+
     void syncAndCheck() override;
     void syncCommunication() override;
 
@@ -65,6 +69,11 @@ private:
     NcclParam nccl_param_;
 
     BufferPtr curandstate_buf_; // for sampler use.
+
+
+    bool use_trtv1_fmha         = false;
+    bool use_trtv2_fmha         = false;
+    bool use_openSource_fmha    = false;
 };
 
 } // namespace fastertransformer

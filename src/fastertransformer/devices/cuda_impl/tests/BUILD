@@ -30,6 +30,9 @@ cc_library(
 
 test_deps = [
     "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+    "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
+    "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
+    "//3rdparty/flash_attention2:flash_attention2_impl",
     "//src/fastertransformer/devices/testing:device_test_utils",
     "//src/fastertransformer/devices/base_tests:base_tests",
     ":cuda_test_util",

@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
+#define private public
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 
 #include "maga_transformer/cpp/cache/CacheConfig.h"
@@ -111,12 +112,12 @@ void CudaAttentionOpTest::contextAttentionOpTest(size_t batch_size,
     const auto input_lengths = createBuffer<int32_t>(
         {batch_size}, std::vector<int32_t>(batch_size, seq_len));
     const auto sequence_lengths = createBuffer<int32_t>({0}, {});
-    std::vector<int> cu_seqlens(batch_size);
-    for (int i = 0; i < batch_size; i++) {
-        cu_seqlens[i] = seq_len * (i + 1);
+    std::vector<int> cu_seqlens(batch_size + 1);
+    for (int i = 0; i < batch_size + 1; i++) {
+        cu_seqlens[i] = seq_len * i;
     }
     auto token_num = batch_size * seq_len;
-    auto cu_seqlens_host = torch::from_blob((void*)cu_seqlens.data(), {(int)batch_size}, int_tensor_options);
+    auto cu_seqlens_host = torch::from_blob((void*)cu_seqlens.data(), {(int)batch_size + 1}, int_tensor_options);
     auto padding_offset_host = torch::zeros({(int)token_num}, int_tensor_options);
     auto position_ids_host = torch::arange((int)token_num, int_tensor_options);
     auto bias_host = torch::zeros(
@@ -153,7 +154,7 @@ void CudaAttentionOpTest::contextAttentionOpTest(size_t batch_size,
                                                 rope_config});
 
     auto qkv_output = device_->allocateBuffer(
-        {qkv_input_device->type(), {token_num, num_heads + 2 * num_key_value_heads, head_dim}}
+        {qkv_input_device->type(), {batch_size, seq_len, num_heads, head_dim}}
     );
     device_->contextAttention({*qkv_input_device,
                                *qkv_output,
@@ -167,7 +168,7 @@ void CudaAttentionOpTest::contextAttentionOpTest(size_t batch_size,
                                          attention_mask_host);
 
     auto result  = bufferToTensor(*qkv_output);
-    // assertTensorClose(result_ref[6], result.to(result_ref[6].dtype()));
+    assertTensorClose(result_ref[6], result.to(result_ref[6].dtype()));
 }
 
 void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
@@ -307,15 +308,71 @@ TEST_F(CudaAttentionOpTest, SelfAttentionOpTest) {
     }
 }
 
-
 TEST_F(CudaAttentionOpTest, ContextAttentionOpTest) {
+    setenv("ENABLE_TRT_FMHA", "OFF", 1);
+    setenv("ENABLE_OPENSOURCE_FMHA", "OFF", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_openSource_fmha);
     std::vector<size_t> batch = {1, 2, 4, 8};
-    std::vector<size_t> seq   = {1, 10, 100};
+    std::vector<size_t> seq   = {1, 10, 20, 30};
     for (auto batch_size : batch) {
         for (auto seq_len : seq) {
-            size_t num_heads = 32;
+            size_t num_heads = 64;
             size_t num_key_value_heads = num_heads;
-            size_t head_dim = 32;
+            size_t head_dim = 64;
+            size_t dim = head_dim;
+            contextAttentionOpTest(batch_size,
+                                   seq_len,
+                                   num_heads,
+                                   num_key_value_heads,
+                                   head_dim);
+        }
+    }
+}
+
+TEST_F(CudaAttentionOpTest, OpenSourceFMHAContextAttentionOpTest) {
+    setenv("ENABLE_TRT_FMHA", "OFF", 1);
+    setenv("ENABLE_OPENSOURCE_FMHA", "ON", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
+    ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_openSource_fmha);
+
+    std::vector<size_t> batch = {1, 2, 4, 8};
+    std::vector<size_t> seq   = {1, 10, 20, 30};
+    for (auto batch_size : batch) {
+        for (auto seq_len : seq) {
+            size_t num_heads = 64;
+            size_t num_key_value_heads = num_heads;
+            size_t head_dim = 64;
+            size_t dim = head_dim;
+            contextAttentionOpTest(batch_size,
+                                   seq_len,
+                                   num_heads,
+                                   num_key_value_heads,
+                                   head_dim);
+        }
+    }
+}
+
+
+TEST_F(CudaAttentionOpTest, TrtV2ContextAttentionOpTest) {
+    setenv("ENABLE_TRT_FMHA", "ON", 1);
+    setenv("ENABLE_OPENSOURCE_FMHA", "OFF", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+    ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_openSource_fmha);
+
+    std::vector<size_t> batch = {1, 2, 4, 8};
+    std::vector<size_t> seq   = {1, 10, 20, 30};
+    for (auto batch_size : batch) {
+        for (auto seq_len : seq) {
+            size_t num_heads = 64;
+            size_t num_key_value_heads = num_heads;
+            size_t head_dim = 64;
             size_t dim = head_dim;
             contextAttentionOpTest(batch_size,
                                    seq_len,
