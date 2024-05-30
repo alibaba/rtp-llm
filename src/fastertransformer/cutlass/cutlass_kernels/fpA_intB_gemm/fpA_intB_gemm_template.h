@@ -33,7 +33,7 @@
 #pragma GCC diagnostic pop
 #endif // #ifndef _WIN32
 
-#include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm_lut.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/gemm_lut.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_heuristic.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"

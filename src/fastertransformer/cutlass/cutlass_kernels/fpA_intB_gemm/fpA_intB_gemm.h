@@ -17,7 +17,7 @@
 #pragma once
 #include "src/fastertransformer/cutlass/cutlass_kernels/weight_only_quant_op.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/gemm_configs.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/gemm_lut_utils.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/gemm_lut.h"
 #include <cuda_runtime_api.h>
 
 namespace tkc = tensorrt_llm::cutlass_extensions;

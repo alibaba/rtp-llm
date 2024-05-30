@@ -9,3 +9,4 @@
 #include "src/fastertransformer/cutlass/cutlass_kernels/gemm_configs.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_heuristic.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/gemm_lut.h"

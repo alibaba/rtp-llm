@@ -159,7 +159,11 @@ cc_library(
         "cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h",
         "cutlass_kernels/weightOnlyBatchedGemv/common.h",
         "cutlass_kernels/cutlass_heuristic.h",
-        "cutlass_kernels/gemm_lut_utils.h"
+        "cutlass_kernels/gemm_lut_utils.h",
+        "cutlass_kernels/gemm_lut.h",
+    ],
+    deps = [
+        "@cutlass//:cutlass",
     ],
     visibility = ["//visibility:public"],
 )

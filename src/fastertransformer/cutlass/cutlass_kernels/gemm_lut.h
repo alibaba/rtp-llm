@@ -1,7 +1,6 @@
 #pragma once
 #include "src/fastertransformer/cutlass/cutlass_kernels/gemm_lut_utils.h"
 #include "cutlass/numeric_types.h"
-#include "cutlass/arch/arch.h"
 
 namespace tensorrt_llm {
 namespace kernels {
@@ -27,7 +26,6 @@ GemmLut* get_gemm_lut() {
         return nullptr;
     } 
 }
-
 
 } // namespace cutlass_kernels
 } // namespace kernels

@@ -1,6 +1,5 @@
-#include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm_lut.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/gemm_configs.h" 
 #include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/th_op/th_utils.h"
 
 namespace torch_ext {

@@ -1,4 +1,4 @@
-#include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm_lut.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/gemm_lut.h"
 
 namespace tensorrt_llm {
 namespace kernels {
