@@ -294,7 +294,7 @@ protected:
     double atol_ = 1e-03;
     rtp_llm::CacheManagerPtr cache_manager_;
     size_t device_reserve_memory_size_ = 0L;
-    size_t host_reserve_memory_size_ = 2L * 1024 * 1024 * 1024; // 2GB;
+    size_t host_reserve_memory_size_ = 1L * 1024 * 1024 * 1024; // 1GB;
 };
 
 int main(int argc, char** argv) {

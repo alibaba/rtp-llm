@@ -17,17 +17,18 @@ public:
     TrakcerAllocator(const TrackerAllocatorParams& params);
     ~TrakcerAllocator();
 
-    AllocatorType type() const;
-    MemoryType memoryType() const;
+    AllocatorType type() const override;
+    MemoryType memoryType() const override;
 
-    void* malloc(size_t size, const bool is_set_zero = false);
-    void  free(void** ptr);
-    void* reMalloc(void* ptr, size_t size, const bool is_set_zero = false);
+    void* malloc(size_t size, const bool is_set_zero = false) override;
+    void  free(void** ptr) override;
+    void* reMalloc(void* ptr, size_t size, const bool is_set_zero = false) override;
+
+    TrackerStatus getTrackerStatus() const;
 
 private:
     IAllocator* real_allocator_;
     std::unique_ptr<MemoryTracker> memory_tracker_;
 };
-
 
 } // namespace fastertransformer

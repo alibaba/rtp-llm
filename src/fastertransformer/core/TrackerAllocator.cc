@@ -94,4 +94,11 @@ void* TrakcerAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero)
     return malloc(size, is_set_zero);
 }
 
+TrackerStatus TrakcerAllocator::getTrackerStatus() const {
+    if (memory_tracker_) {
+        return memory_tracker_->getStatus();
+    }
+    return TrackerStatus();
+}
+
 } // namespace fastertransformer
