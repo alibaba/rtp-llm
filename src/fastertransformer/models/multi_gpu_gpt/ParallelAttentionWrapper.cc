@@ -1163,6 +1163,7 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
         partial_sum_ = (float*)allocator_->reMalloc(partial_sum_, sizeof(float) * max_seq_len_tile_ * generate_batch_size * local_head_num_);
         partial_max_ = (float*)allocator_->reMalloc(partial_max_, sizeof(float) * max_seq_len_tile_ * generate_batch_size * local_head_num_);
         block_counter_ = (int*)allocator_->reMalloc(block_counter_, sizeof(int) * generate_batch_size * local_head_num_);
+        cudaMemsetAsync(block_counter_, 0, sizeof(int) * generate_batch_size * local_head_num_, stream_);
     }
     is_allocate_buffer_ = true;
 }

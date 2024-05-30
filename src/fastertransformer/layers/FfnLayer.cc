@@ -465,6 +465,7 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, bool use_moe) {
         }
         inter_buf_normed_ = (T*)(allocator_->reMalloc(
             inter_buf_normed_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4));
+        cudaMemsetAsync(inter_buf_normed_, 0, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, stream_);
     }
 
     if(quant_algo_.smoothQuantInt8()){

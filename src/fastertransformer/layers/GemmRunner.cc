@@ -5,6 +5,7 @@ namespace fastertransformer {
 template<typename T>
 void GemmRunner<T>::allocateWorkspace(size_t s) {
     workspace_ = (char*)allocator_->reMalloc(workspace_, sizeof(char)*s);
+    cudaMemsetAsync(workspace_, 0, sizeof(char)*s, stream_);
 }
 template<typename T>
 void GemmRunner<T>::freeBuffer() {
