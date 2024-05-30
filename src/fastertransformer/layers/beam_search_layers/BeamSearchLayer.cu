@@ -296,8 +296,7 @@ void BeamSearchLayer<T>::allocateBuffer(size_t batch_size, size_t beam_width)
                                 stream_);
     topk_softmax_workspace_ = reinterpret_cast<float*>(allocator_->reMalloc(
         topk_softmax_workspace_,
-        topk_softmax_workspace_size_ + sizeof(float) * batch_size * beam_width * vocab_size_padded_,
-        false));
+        topk_softmax_workspace_size_ + sizeof(float) * batch_size * beam_width * vocab_size_padded_));
     float_log_prob_buf_     = (float*)((char*)topk_softmax_workspace_ + topk_softmax_workspace_size_);
     is_allocate_buffer_     = true;
 }

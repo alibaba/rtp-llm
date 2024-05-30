@@ -25,8 +25,8 @@ FakeSampler::FakeSampler(const ft::GptInitParameter& gpt_init_parameter) {
 }
 
 void FakeSampler::allocateBuffer(size_t total_batch_size) {
-    top_k_  = (int*)allocator_->reMalloc(top_k_, sizeof(int), true);
-    end_id_ = (int*)allocator_->reMalloc(end_id_, sizeof(int) * total_batch_size, true);
+    top_k_  = (int*)allocator_->reMalloc(top_k_, sizeof(int));
+    end_id_ = (int*)allocator_->reMalloc(end_id_, sizeof(int) * total_batch_size);
 }
 
 void FakeSampler::freeBuffer() {

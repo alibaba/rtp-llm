@@ -24,7 +24,7 @@ public:
         return stream_;
     };
 
-    void* reMalloc(void* ptr, size_t size, const bool is_set_zero = false) override;
+    void* reMalloc(void* ptr, size_t size) override;
 
     void memSet(void* ptr, const int val, const size_t size) const;
 
@@ -50,7 +50,7 @@ protected:
     virtual bool isExist(void* address) const;
     virtual ReallocType isReMalloc(void* address, size_t size) const;
 
-    virtual void* doMalloc(size_t size, const bool is_set_zero = false) = 0;
+    virtual void* doMalloc(size_t size) = 0;
     virtual void doFree(void* ptr) = 0;
     void destroy();
 
@@ -65,7 +65,7 @@ public:
     Allocator(int device_id);
     ~Allocator();
 
-    void* doMalloc(size_t size, const bool is_set_zero = false) override;
+    void* doMalloc(size_t size) override;
     void doFree(void* ptr) override;
 };
 
@@ -79,7 +79,7 @@ public:
         return MEMORY_CPU_PINNED;
     }
 
-    void* doMalloc(size_t size, const bool is_set_zero = false) override;
+    void* doMalloc(size_t size) override;
     void doFree(void* ptr) override;
 };
 

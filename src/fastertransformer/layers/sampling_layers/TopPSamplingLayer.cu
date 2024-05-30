@@ -59,24 +59,24 @@ void TopPSamplingLayer<T>::allocateBuffer(size_t batch_size, Tensor top_k, Tenso
                           stream_,
                           cuda_device_prop_,
                           skip_decode_buf_);
-    sampling_workspace_ = allocator_->reMalloc(sampling_workspace_, sampling_workspace_size_, true);
+    sampling_workspace_ = allocator_->reMalloc(sampling_workspace_, sampling_workspace_size_);
     runtime_top_k_buf_ =
-        reinterpret_cast<uint*>(allocator_->reMalloc(runtime_top_k_buf_, sizeof(uint) * batch_size, false));
+        reinterpret_cast<uint*>(allocator_->reMalloc(runtime_top_k_buf_, sizeof(uint) * batch_size));
     runtime_top_p_buf_ =
-        reinterpret_cast<float*>(allocator_->reMalloc(runtime_top_p_buf_, sizeof(float) * batch_size, false));
+        reinterpret_cast<float*>(allocator_->reMalloc(runtime_top_p_buf_, sizeof(float) * batch_size));
     initial_top_p_buf_ =
-        reinterpret_cast<float*>(allocator_->reMalloc(initial_top_p_buf_, sizeof(float) * batch_size, false));
+        reinterpret_cast<float*>(allocator_->reMalloc(initial_top_p_buf_, sizeof(float) * batch_size));
     top_p_decay_buf_ =
-        reinterpret_cast<float*>(allocator_->reMalloc(top_p_decay_buf_, sizeof(float) * batch_size, false));
-    top_p_min_buf_ = reinterpret_cast<float*>(allocator_->reMalloc(top_p_min_buf_, sizeof(float) * batch_size, false));
+        reinterpret_cast<float*>(allocator_->reMalloc(top_p_decay_buf_, sizeof(float) * batch_size));
+    top_p_min_buf_ = reinterpret_cast<float*>(allocator_->reMalloc(top_p_min_buf_, sizeof(float) * batch_size));
     top_p_reset_ids_buf_ =
-        reinterpret_cast<int32_t*>(allocator_->reMalloc(top_p_reset_ids_buf_, sizeof(int32_t) * batch_size, false));
+        reinterpret_cast<int32_t*>(allocator_->reMalloc(top_p_reset_ids_buf_, sizeof(int32_t) * batch_size));
     topp_id_vals_buf_ = reinterpret_cast<int*>(
-        allocator_->reMalloc(topp_id_vals_buf_, sizeof(int) * batch_size * vocab_size_padded_, false));
+        allocator_->reMalloc(topp_id_vals_buf_, sizeof(int) * batch_size * vocab_size_padded_));
     topp_offset_buf_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(topp_offset_buf_, sizeof(int) * (batch_size + 1), false));
+        reinterpret_cast<int*>(allocator_->reMalloc(topp_offset_buf_, sizeof(int) * (batch_size + 1)));
     begin_topp_offset_buf_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(begin_topp_offset_buf_, sizeof(int) * (batch_size + 1), false));
+        reinterpret_cast<int*>(allocator_->reMalloc(begin_topp_offset_buf_, sizeof(int) * (batch_size + 1)));
     is_allocate_buffer_ = true;
 }
 

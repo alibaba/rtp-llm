@@ -36,7 +36,7 @@ cublasMMWrapper::cublasMMWrapper(cublasHandle_t   cublas_handle,
     allocator_(allocator) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (allocator_ != nullptr) {
-        cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE, false);
+        cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE);
     }
 }
 
@@ -57,7 +57,7 @@ cublasMMWrapper::cublasMMWrapper(cublasHandle_t     cublas_handle,
     allocator_(allocator) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (allocator_ != nullptr) {
-        cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE, false);
+        cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE);
     }
 }
 #endif
@@ -83,7 +83,7 @@ cublasMMWrapper::cublasMMWrapper(const cublasMMWrapper& wrapper):
     allocator_(wrapper.allocator_) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (allocator_ != nullptr) {
-        cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE, false);
+        cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE);
     }
 }
 
@@ -418,7 +418,7 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     cublasLtMatmulAlgo_t algo;
 
     void*                workSpace     = cublas_workspace_;
-    int                  workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;    
+    int                  workspaceSize = cublas_workspace_ == NULL ? 0 : CUBLAS_WORKSPACE_SIZE;
 
     if (findAlgo && info.stages != -1 && info.workspaceSize <= workspaceSize) {
         cublasLtMatmulAlgoInit(cublaslt_handle_, computeType, scaleType, Atype_,

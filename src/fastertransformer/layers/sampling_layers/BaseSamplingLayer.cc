@@ -30,21 +30,21 @@ void BaseSamplingLayer<T>::allocateBuffer(size_t batch_size, Tensor top_k, Tenso
 {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     curandstate_buf_ = reinterpret_cast<curandState_t*>(
-        allocator_->reMalloc(curandstate_buf_, sizeof(curandState_t) * batch_size, false));
+        allocator_->reMalloc(curandstate_buf_, sizeof(curandState_t) * batch_size));
     random_seeds_buf_ = reinterpret_cast<unsigned long long*>(
-        allocator_->reMalloc(random_seeds_buf_, sizeof(unsigned long long) * batch_size, false));
+        allocator_->reMalloc(random_seeds_buf_, sizeof(unsigned long long) * batch_size));
     temperature_buf_ =
-        reinterpret_cast<float*>(allocator_->reMalloc(temperature_buf_, sizeof(float) * batch_size, false));
+        reinterpret_cast<float*>(allocator_->reMalloc(temperature_buf_, sizeof(float) * batch_size));
     // penalty_logits tmp support to 64K
     penalty_logits_ =
-        reinterpret_cast<T*>(allocator_->reMalloc(penalty_logits_, sizeof(T) * batch_size * 64 * 1024, false));
+        reinterpret_cast<T*>(allocator_->reMalloc(penalty_logits_, sizeof(T) * batch_size * 64 * 1024));
     repetition_penalty_buf_ =
-        reinterpret_cast<float*>(allocator_->reMalloc(repetition_penalty_buf_, sizeof(float) * batch_size, false));
-    min_lengths_buf_ = reinterpret_cast<int*>(allocator_->reMalloc(min_lengths_buf_, sizeof(int) * batch_size, false));
+        reinterpret_cast<float*>(allocator_->reMalloc(repetition_penalty_buf_, sizeof(float) * batch_size));
+    min_lengths_buf_ = reinterpret_cast<int*>(allocator_->reMalloc(min_lengths_buf_, sizeof(int) * batch_size));
     runtime_logits_buf_ = reinterpret_cast<T*>(
-        allocator_->reMalloc(runtime_logits_buf_, sizeof(T) * batch_size * vocab_size_padded_, false));
+        allocator_->reMalloc(runtime_logits_buf_, sizeof(T) * batch_size * vocab_size_padded_));
     skip_decode_buf_ =
-        reinterpret_cast<bool*>(allocator_->reMalloc(skip_decode_buf_, sizeof(bool) * batch_size, false));
+        reinterpret_cast<bool*>(allocator_->reMalloc(skip_decode_buf_, sizeof(bool) * batch_size));
 
     // host buffers.
     temperature_        = new float[batch_size];

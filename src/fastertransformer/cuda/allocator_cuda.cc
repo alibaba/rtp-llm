@@ -3,7 +3,7 @@
 
 namespace fastertransformer {
 
-void* ICudaAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero) {
+void* ICudaAllocator::reMalloc(void* ptr, size_t size) {
     size              = ((size + 31) / 32) * 32;  // make the buffer align with 32 bytes
     void* void_ptr    = (void*)ptr;
     void* ptr_address = void_ptr;
@@ -19,9 +19,6 @@ void* ICudaAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero) {
             return malloc(size);
         } else {
             FT_LOG_DEBUG("Reuse original buffer %p with size %d and do nothing for reMalloc.", void_ptr, size);
-            if (is_set_zero) {
-                memSet(void_ptr, 0, size);
-            }
             return void_ptr;
         }
     } else {
@@ -121,12 +118,9 @@ Allocator<AllocatorType::CUDA>::~Allocator() {
     destroy();
 }
 
-void* Allocator<AllocatorType::CUDA>::doMalloc(size_t size, const bool is_set_zero) {
+void* Allocator<AllocatorType::CUDA>::doMalloc(size_t size) {
     void* ptr      = nullptr;
     check_cuda_error(cudaMallocAsync(&ptr, (size_t)(ceil(size / 32.)) * 32, stream_));
-    if (ptr && is_set_zero) {
-        check_cuda_error(cudaMemsetAsync(ptr, 0, (size_t)(ceil(size / 32.)) * 32, stream_));
-    }
     return ptr;
 }
 
@@ -142,11 +136,8 @@ Allocator<AllocatorType::CUDA_HOST>::~Allocator() {
     destroy();
 }
 
-void* Allocator<AllocatorType::CUDA_HOST>::doMalloc(size_t size, const bool is_set_zero) {
+void* Allocator<AllocatorType::CUDA_HOST>::doMalloc(size_t size) {
     auto ptr = std::malloc(size);
-    if (ptr && is_set_zero) {
-        memset(ptr, 0, size);
-    }
     return ptr;
 }
 

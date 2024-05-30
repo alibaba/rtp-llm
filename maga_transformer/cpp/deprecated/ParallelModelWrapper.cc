@@ -102,19 +102,19 @@ void ParallelModelWrapperImpl<T>::allocateBuffer(size_t total_batch_size, size_t
         {});
     last_hidden_states_ = (T*)model_output->hidden_states->data();
     all_hidden_states_  = (T*)model_output->all_hidden_states->data();
-    
-    combo_tokens_   = (int*)allocator_->reMalloc(combo_tokens_, sizeof(int) * h_token_num, false);
-        combo_token_types_   = (int*)allocator_->reMalloc(combo_token_types_, sizeof(int) * h_token_num, false);
-    combo_position_ids_   = (int*)allocator_->reMalloc(combo_position_ids_, sizeof(int) * h_token_num, false);
-    padding_offset_ = reinterpret_cast<int*>(allocator_->reMalloc(padding_offset_, sizeof(int) * (h_token_num), false));
+
+    combo_tokens_   = (int*)allocator_->reMalloc(combo_tokens_, sizeof(int) * h_token_num);
+        combo_token_types_   = (int*)allocator_->reMalloc(combo_token_types_, sizeof(int) * h_token_num);
+    combo_position_ids_   = (int*)allocator_->reMalloc(combo_position_ids_, sizeof(int) * h_token_num);
+    padding_offset_ = reinterpret_cast<int*>(allocator_->reMalloc(padding_offset_, sizeof(int) * (h_token_num)));
     cu_seqlens_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(cu_seqlens_, sizeof(int) * (total_batch_size + 1), false));
+        reinterpret_cast<int*>(allocator_->reMalloc(cu_seqlens_, sizeof(int) * (total_batch_size + 1)));
     input_lengths_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(input_lengths_, sizeof(int) * (total_batch_size), false));
+        reinterpret_cast<int*>(allocator_->reMalloc(input_lengths_, sizeof(int) * (total_batch_size)));
     sequence_lengths_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(sequence_lengths_, sizeof(int) * (total_batch_size), false));
+        reinterpret_cast<int*>(allocator_->reMalloc(sequence_lengths_, sizeof(int) * (total_batch_size)));
     prefix_lengths_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(prefix_lengths_, sizeof(int) * (total_batch_size), false));
+        reinterpret_cast<int*>(allocator_->reMalloc(prefix_lengths_, sizeof(int) * (total_batch_size)));
 }
 
 template<typename T>
@@ -172,7 +172,7 @@ bool ParallelModelWrapperImpl<T>::useFMHA() {
 template<typename T>
 void ParallelModelWrapperImpl<T>::createAttentionMask(size_t context_batch_size, size_t max_context_seq_length, int* input_lengths_host) {
     cudaMemcpyAsync(input_lengths_, input_lengths_host, sizeof(int) * context_batch_size, cudaMemcpyHostToDevice, stream_);
-    attention_mask_  = (T*)allocator_->reMalloc(attention_mask_, sizeof(T) * context_batch_size * max_context_seq_length * max_context_seq_length, false);    
+    attention_mask_  = (T*)allocator_->reMalloc(attention_mask_, sizeof(T) * context_batch_size * max_context_seq_length * max_context_seq_length);
     invokeBuildDecoderAttentionMask<T>(attention_mask_, input_lengths_, nullptr, context_batch_size, max_context_seq_length, 0, params_.is_causal_, stream_);
     sync_check_cuda_error();
 }

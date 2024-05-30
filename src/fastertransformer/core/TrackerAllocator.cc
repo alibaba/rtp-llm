@@ -86,7 +86,7 @@ void TrakcerAllocator::free(void** ptr) {
     *ptr = nullptr;
 }
 
-void* TrakcerAllocator::reMalloc(void* ptr, size_t size, const bool is_set_zero) {
+void* TrakcerAllocator::reMalloc(void* ptr, size_t size) {
     free(&ptr);
     return malloc(size);
 }

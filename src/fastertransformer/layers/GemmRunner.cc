@@ -4,7 +4,7 @@ namespace fastertransformer {
 
 template<typename T>
 void GemmRunner<T>::allocateWorkspace(size_t s) {
-    workspace_ = (char*)allocator_->reMalloc(workspace_, sizeof(char)*s, true);
+    workspace_ = (char*)allocator_->reMalloc(workspace_, sizeof(char)*s);
 }
 template<typename T>
 void GemmRunner<T>::freeBuffer() {

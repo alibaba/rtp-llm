@@ -76,59 +76,59 @@ void ParallelGpt<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num,
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     size_t hidden_units   = params_.hidden_size_;
     decoder_normed_input_ = reinterpret_cast<T*>(
-        allocator_->reMalloc(decoder_normed_input_, sizeof(T) * h_token_num * hidden_units, false));
+        allocator_->reMalloc(decoder_normed_input_, sizeof(T) * h_token_num * hidden_units));
     self_attn_output_ =
-        reinterpret_cast<T*>(allocator_->reMalloc(self_attn_output_, sizeof(T) * h_token_num * hidden_units, false));
+        reinterpret_cast<T*>(allocator_->reMalloc(self_attn_output_, sizeof(T) * h_token_num * hidden_units));
     if (!reuse_buf) {
         normed_self_attn_output_ = reinterpret_cast<T*>(
-            allocator_->reMalloc(normed_self_attn_output_, sizeof(T) * h_token_num * hidden_units, false));
+            allocator_->reMalloc(normed_self_attn_output_, sizeof(T) * h_token_num * hidden_units));
     }
     else {
         normed_self_attn_output_ = decoder_normed_input_;
     }
     if (pre_attn_ln) {
         attn_normed_input_ = reinterpret_cast<T*>(
-            allocator_->reMalloc(attn_normed_input_, sizeof(T) * h_token_num * hidden_units, false));
+            allocator_->reMalloc(attn_normed_input_, sizeof(T) * h_token_num * hidden_units));
     }
     // only allocate additionl buffers when has adapters
     decoder_layer_output_ = reinterpret_cast<T*>(
-        allocator_->reMalloc(decoder_layer_output_, sizeof(T) * h_token_num * hidden_units, false));
+        allocator_->reMalloc(decoder_layer_output_, sizeof(T) * h_token_num * hidden_units));
     if (quant_algo_.smoothQuantInt8()) {
         attention_query_dynamic_scale_ = reinterpret_cast<float*>(
-            allocator_->reMalloc(attention_query_dynamic_scale_, sizeof(float) * h_token_num, false));
+            allocator_->reMalloc(attention_query_dynamic_scale_, sizeof(float) * h_token_num));
         ffn_intermediate_dynamic_scale_ = reinterpret_cast<float*>(
-            allocator_->reMalloc(ffn_intermediate_dynamic_scale_, sizeof(float) * h_token_num, false));
+            allocator_->reMalloc(ffn_intermediate_dynamic_scale_, sizeof(float) * h_token_num));
     }
-    padding_offset_ = reinterpret_cast<int*>(allocator_->reMalloc(padding_offset_, sizeof(int) * (h_token_num), false));
+    padding_offset_ = reinterpret_cast<int*>(allocator_->reMalloc(padding_offset_, sizeof(int) * (h_token_num)));
     cu_seqlens_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(cu_seqlens_, sizeof(int) * (total_batch_size + 1), false));
+        reinterpret_cast<int*>(allocator_->reMalloc(cu_seqlens_, sizeof(int) * (total_batch_size + 1)));
     context_lengths_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(context_lengths_, sizeof(int) * (total_batch_size), false));
+        reinterpret_cast<int*>(allocator_->reMalloc(context_lengths_, sizeof(int) * (total_batch_size)));
     sequence_lengths_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(sequence_lengths_, sizeof(int) * (total_batch_size), false));
+        reinterpret_cast<int*>(allocator_->reMalloc(sequence_lengths_, sizeof(int) * (total_batch_size)));
     prefix_lengths_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(prefix_lengths_, sizeof(int) * (total_batch_size), false));
+        reinterpret_cast<int*>(allocator_->reMalloc(prefix_lengths_, sizeof(int) * (total_batch_size)));
     block_pointers_ =
-        reinterpret_cast<int64_t*>(allocator_->reMalloc(block_pointers_, sizeof(int64_t) * (2 * params_.num_layers_ * total_batch_size * params_.max_seq_len_ / params_.seq_size_per_block_ + 32), false));
+        reinterpret_cast<int64_t*>(allocator_->reMalloc(block_pointers_, sizeof(int64_t) * (2 * params_.num_layers_ * total_batch_size * params_.max_seq_len_ / params_.seq_size_per_block_ + 32)));
     if (params_.int8_kv_cache_) {
         block_scale_pointers_ =
-            reinterpret_cast<int64_t*>(allocator_->reMalloc(block_scale_pointers_, sizeof(int64_t) * (2 * params_.num_layers_ * total_batch_size * params_.max_seq_len_ / params_.seq_size_per_block_ + 32), false));
+            reinterpret_cast<int64_t*>(allocator_->reMalloc(block_scale_pointers_, sizeof(int64_t) * (2 * params_.num_layers_ * total_batch_size * params_.max_seq_len_ / params_.seq_size_per_block_ + 32)));
     }
 
     // for moe
     expert_scales_ = reinterpret_cast<float*>(
-        allocator_->reMalloc(expert_scales_, sizeof(float) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num), false));
+        allocator_->reMalloc(expert_scales_, sizeof(float) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num)));
     expanded_source_row_to_expanded_dest_row_ = reinterpret_cast<int*>(allocator_->reMalloc(
-        expanded_source_row_to_expanded_dest_row_, sizeof(int) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num), false));
+        expanded_source_row_to_expanded_dest_row_, sizeof(int) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num)));
     expert_for_source_row_                    = reinterpret_cast<int*>(
-        allocator_->reMalloc(expert_for_source_row_, sizeof(int) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num), false));
+        allocator_->reMalloc(expert_for_source_row_, sizeof(int) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num)));
     fc2_result_ = reinterpret_cast<T*>(
         allocator_->malloc(sizeof(T) * pad_to_multiple_of_16(params_.moe_k_ * h_token_num * hidden_units)));
     if (params_.moe_style_ == 2) {
         partial_moe_output_ = reinterpret_cast<T*>(
-            allocator_->reMalloc(partial_moe_output_, sizeof(T) * h_token_num * hidden_units, false));
+            allocator_->reMalloc(partial_moe_output_, sizeof(T) * h_token_num * hidden_units));
         ffn_output_ = reinterpret_cast<T*>(
-            allocator_->reMalloc(ffn_output_, sizeof(T) * h_token_num * hidden_units, false));
+            allocator_->reMalloc(ffn_output_, sizeof(T) * h_token_num * hidden_units));
     }
 
     is_allocate_buffer_ = true;

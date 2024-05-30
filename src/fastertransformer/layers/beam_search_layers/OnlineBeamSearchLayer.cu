@@ -200,7 +200,7 @@ void OnlineBeamSearchLayer<T>::allocateBuffer(size_t batch_size, size_t beam_wid
                  + ceil(batch_size * (64 * 2) * SMALL_TOP_K_SOFTMAX_MAX_VOC_PARTS * (2 * (MAX_K * 2) + 2) / 4.) * 4);
 
     topk_softmax_workspace_ = reinterpret_cast<float*>(
-        allocator_->reMalloc(topk_softmax_workspace_, sizeof(float) * topk_softmax_workspace_size_, true));
+        allocator_->reMalloc(topk_softmax_workspace_, sizeof(float) * topk_softmax_workspace_size_));
     is_allocate_buffer_ = true;
 }
 

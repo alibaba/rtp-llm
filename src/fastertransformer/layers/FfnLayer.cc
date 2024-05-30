@@ -451,24 +451,24 @@ void FfnLayer<T>::allocateBuffer(size_t token_num, bool use_moe) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     if (use_moe) {
         moe_gates_buf_ =
-            (float*)allocator_->reMalloc(moe_gates_buf_, sizeof(float) * pad_to_multiple_of_16(token_num * expert_num_), false);
+            (float*)allocator_->reMalloc(moe_gates_buf_, sizeof(float) * pad_to_multiple_of_16(token_num * expert_num_));
         size_t moe_workspace_size = moe_plugin_->getWorkspaceSize(token_num);
-        moe_fc_workspace_         = (char*)allocator_->reMalloc(moe_fc_workspace_, moe_workspace_size, false);
+        moe_fc_workspace_         = (char*)allocator_->reMalloc(moe_fc_workspace_, moe_workspace_size);
     } else {
-        shared_gating_scale_buf_ =  (T*)allocator_->reMalloc(shared_gating_scale_buf_, sizeof(T) * token_num, false);
+        shared_gating_scale_buf_ =  (T*)allocator_->reMalloc(shared_gating_scale_buf_, sizeof(T) * token_num);
         const auto type_size = sizeof(T);
         inter_buf_ =
-            (T*)allocator_->reMalloc(inter_buf_, type_size * token_num * inter_padding_size_ + token_num * 4, false);
+            (T*)allocator_->reMalloc(inter_buf_, type_size * token_num * inter_padding_size_ + token_num * 4);
         if (use_gated_activation_) {
             inter_buf_2_ = (T*)allocator_->reMalloc(
-                inter_buf_2_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, false);
+                inter_buf_2_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4);
         }
         inter_buf_normed_ = (T*)(allocator_->reMalloc(
-            inter_buf_normed_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4, inter_size_ != inter_padding_size_));
+            inter_buf_normed_, sizeof(T) * token_num * inter_padding_size_ + token_num * 4));
     }
 
     if(quant_algo_.smoothQuantInt8()){
-        ffn_dynamic_scale_2_ = (float*)(allocator_->reMalloc(ffn_dynamic_scale_2_, sizeof(float)* token_num, false));
+        ffn_dynamic_scale_2_ = (float*)(allocator_->reMalloc(ffn_dynamic_scale_2_, sizeof(float)* token_num));
     }
     is_allocate_buffer_ = true;
 }

@@ -4,7 +4,7 @@ namespace fastertransformer {
 
 template<typename T>
 void LoraGemm<T>::allocateBuffer(size_t s, size_t k, size_t n, size_t r) {
-    lora_buf_ = (T*)allocator_->reMalloc(lora_buf_, sizeof(T) * s * r, true);
+    lora_buf_ = (T*)allocator_->reMalloc(lora_buf_, sizeof(T) * s * r);
 }
 
 template<typename T>

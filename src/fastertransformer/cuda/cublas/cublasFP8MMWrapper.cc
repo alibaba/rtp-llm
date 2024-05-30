@@ -31,7 +31,7 @@ cublasFP8MMWrapper::cublasFP8MMWrapper(cublasLtHandle_t cublaslt_handle,
     cublasVersionCheck();
 
     if (allocator_ != nullptr) {
-        cublas_workspace_qgemm_ = allocator_->reMalloc(cublas_workspace_qgemm_, CUBLAS_WORKSPACE_1MB, true);
+        cublas_workspace_qgemm_ = allocator_->reMalloc(cublas_workspace_qgemm_, CUBLAS_WORKSPACE_1MB);
     }
 }
 
@@ -47,7 +47,7 @@ cublasFP8MMWrapper::cublasFP8MMWrapper(cublasHandle_t   cublas_handle,
     FT_CHECK_WITH_INFO(allocator != nullptr, "must pass allocator to cublasFP8MMWrapper");
     cublasVersionCheck();
     if (allocator_ != nullptr) {
-        cublas_workspace_qgemm_ = allocator_->reMalloc(cublas_workspace_qgemm_, CUBLAS_WORKSPACE_1MB, true);
+        cublas_workspace_qgemm_ = allocator_->reMalloc(cublas_workspace_qgemm_, CUBLAS_WORKSPACE_1MB);
     }
 }
 

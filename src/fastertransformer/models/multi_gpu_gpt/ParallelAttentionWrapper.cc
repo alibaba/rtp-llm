@@ -1115,34 +1115,31 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
     const auto qkv_hidden_size = local_head_num_ * params_.size_per_head_;
     const auto qkv_merged_size = qkv_hidden_size + 2 * local_head_num_kv_ * params_.size_per_head_;
     qkv_buf_   = (T*)allocator_->reMalloc(qkv_buf_,
-                                        sizeof(T) * h_token_num * qkv_merged_size,
-                                        false);
+                                        sizeof(T) * h_token_num * qkv_merged_size);
     if (use_old_trt_fmha_ && !params_.is_causal_) {
         qkv_buf_t_   = (T*)allocator_->reMalloc(qkv_buf_t_,
-                                            sizeof(T) * h_token_num * qkv_merged_size,
-                                            false);
+                                            sizeof(T) * h_token_num * qkv_merged_size);
     }
 
     if (use_kvcache || params_.rotary_embedding_style_ != 0 || !UseFMHA()) {
         q_buf_2_   = (T*)allocator_->reMalloc(q_buf_2_,
-                                        sizeof(T) * context_batch_size * seq_len_with_prefix * qkv_merged_size,
-                                        false);
+                                        sizeof(T) * context_batch_size * seq_len_with_prefix * qkv_merged_size);
         k_buf_2_   = q_buf_2_ + context_batch_size * seq_len_with_prefix * local_head_num_ * params_.size_per_head_;
         v_buf_2_   = k_buf_2_ + context_batch_size * seq_len_with_prefix * local_head_num_kv_ * params_.size_per_head_;
 
     }
-    qkv_buf_2_ = (T*)allocator_->reMalloc(qkv_buf_2_, sizeof(T) * h_token_num * qkv_hidden_size, false);
+    qkv_buf_2_ = (T*)allocator_->reMalloc(qkv_buf_2_, sizeof(T) * h_token_num * qkv_hidden_size);
 
     // save memory usage when using fmha
     if (allocate_qk_buf) {
         qk_buf_ = (T*)allocator_->reMalloc(
-            qk_buf_, sizeof(T) * context_batch_size * local_head_num_ * seq_len * seq_len_with_prefix, false);
+            qk_buf_, sizeof(T) * context_batch_size * local_head_num_ * seq_len * seq_len_with_prefix);
         qkv_buf_3_ =
-            (T*)allocator_->reMalloc(qkv_buf_3_, sizeof(T) * context_batch_size * seq_len * qkv_hidden_size, false);
+            (T*)allocator_->reMalloc(qkv_buf_3_, sizeof(T) * context_batch_size * seq_len * qkv_hidden_size);
     }
     else {
         softmax_lse_ = (float*)allocator_->reMalloc(
-            softmax_lse_, sizeof(float) * context_batch_size * local_head_num_ * params_.max_seq_len_, false);
+            softmax_lse_, sizeof(float) * context_batch_size * local_head_num_ * params_.max_seq_len_);
     }
 
     if (is_qk_buf_float_ == true) {
@@ -1150,23 +1147,22 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
             // allocator_->free((void**)(&qk_buf_));
             qk_buf_float_ = (float*)allocator_->reMalloc(qk_buf_float_,
                                                          sizeof(float) * context_batch_size * local_head_num_ * seq_len
-                                                             * seq_len_with_prefix,
-                                                         false);
+                                                             * seq_len_with_prefix);
             // qk_buf_ = (T *)qk_buf_float_;
         }
     }
 
     if(quant_algo_.smoothQuantInt8()){
-        dense_gemm_dynamic_scale_ = (float*)allocator_->reMalloc(dense_gemm_dynamic_scale_, sizeof(float)*h_token_num, false);
+        dense_gemm_dynamic_scale_ = (float*)allocator_->reMalloc(dense_gemm_dynamic_scale_, sizeof(float)*h_token_num);
     }
 
     if(multi_block_mode_){
         const int threads_per_value = pow2roundup(params_.size_per_head_) * sizeof(T) / 16;
         max_seq_len_tile_ = 256 / threads_per_value; // for allocate partial output results memory. Regardless to THDS_PER_BLOCK
-        partial_out_ = (T*)allocator_->reMalloc(partial_out_, sizeof(T) * max_seq_len_tile_ * generate_batch_size * params_.size_per_head_ * local_head_num_,false);
-        partial_sum_ = (float*)allocator_->reMalloc(partial_sum_, sizeof(float) * max_seq_len_tile_ * generate_batch_size * local_head_num_, false);
-        partial_max_ = (float*)allocator_->reMalloc(partial_max_, sizeof(float) * max_seq_len_tile_ * generate_batch_size * local_head_num_, false);
-        block_counter_ = (int*)allocator_->reMalloc(block_counter_, sizeof(int) * generate_batch_size * local_head_num_, true);
+        partial_out_ = (T*)allocator_->reMalloc(partial_out_, sizeof(T) * max_seq_len_tile_ * generate_batch_size * params_.size_per_head_ * local_head_num_);
+        partial_sum_ = (float*)allocator_->reMalloc(partial_sum_, sizeof(float) * max_seq_len_tile_ * generate_batch_size * local_head_num_);
+        partial_max_ = (float*)allocator_->reMalloc(partial_max_, sizeof(float) * max_seq_len_tile_ * generate_batch_size * local_head_num_);
+        block_counter_ = (int*)allocator_->reMalloc(block_counter_, sizeof(int) * generate_batch_size * local_head_num_);
     }
     is_allocate_buffer_ = true;
 }

@@ -62,11 +62,11 @@ void TopKSamplingLayer<T>::allocateBuffer(size_t batch_size, Tensor top_k, Tenso
                           stream_,
                           batch_size,
                           skip_decode_buf_);
-    sampling_workspace_ = allocator_->reMalloc(sampling_workspace_, sampling_workspace_size_, false);
+    sampling_workspace_ = allocator_->reMalloc(sampling_workspace_, sampling_workspace_size_);
     runtime_top_k_buf_ =
-        reinterpret_cast<uint*>(allocator_->reMalloc(runtime_top_k_buf_, sizeof(uint) * batch_size, false));
+        reinterpret_cast<uint*>(allocator_->reMalloc(runtime_top_k_buf_, sizeof(uint) * batch_size));
     runtime_top_p_buf_ =
-        reinterpret_cast<float*>(allocator_->reMalloc(runtime_top_p_buf_, sizeof(float) * batch_size, false));
+        reinterpret_cast<float*>(allocator_->reMalloc(runtime_top_p_buf_, sizeof(float) * batch_size));
     is_allocate_buffer_ = true;
 }
 

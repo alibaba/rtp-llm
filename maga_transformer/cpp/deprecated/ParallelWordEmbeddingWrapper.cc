@@ -39,7 +39,7 @@ ParallelWordEmbeddingWrapper<T>::~ParallelWordEmbeddingWrapper() {
 template<typename T>
 void ParallelWordEmbeddingWrapper<T>::allocateBuffer(size_t h_token_num) {
     size_t hidden_units = params_.hidden_size_;
-    nccl_embedding_ = (T*)allocator_->reMalloc(nccl_embedding_, sizeof(T) * h_token_num * hidden_units, true);
+    nccl_embedding_ = (T*)allocator_->reMalloc(nccl_embedding_, sizeof(T) * h_token_num * hidden_units);
 }
 
 template<typename T>
@@ -69,7 +69,7 @@ void ParallelWordEmbeddingWrapper<T>::forward(ft::Tensor&      embeddings,
     }
     const int    data_size       = embeddings.size() / tensor_para_.world_size_;
     T*           word_embeddings = reinterpret_cast<T*>(nccl_embeddings.getPtr<T>()) + data_size * tensor_para_.rank_;
-    const size_t local_hidden_units = local_head_num_ * params_.size_per_head_;    
+    const size_t local_hidden_units = local_head_num_ * params_.size_per_head_;
     ft::invokeEmebeddingLookup<T>(word_embeddings,
                                   embedding_table_->kernel,
                                   postition_table_->kernel,

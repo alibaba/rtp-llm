@@ -32,7 +32,7 @@ ParallelLogitsWrapper<T>::~ParallelLogitsWrapper()
 template<typename T>
 void ParallelLogitsWrapper<T>::allocateBuffer(size_t h_token_num) {
     size_t hidden_units = params_.hidden_size_;
-    nccl_logits_ = (T*)allocator_->reMalloc(nccl_logits_, sizeof(T) * h_token_num * params_.vocab_size_, true);
+    nccl_logits_ = (T*)allocator_->reMalloc(nccl_logits_, sizeof(T) * h_token_num * params_.vocab_size_);
 }
 
 template<typename T>
