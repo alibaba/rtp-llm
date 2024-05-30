@@ -26,7 +26,7 @@ class GangTest(unittest.TestCase):
         return socket.gethostbyname(socket.gethostname())
 
     @mock.patch.dict('os.environ', {'GANG_ANNOCATION_PATH': "maga_transformer/distribute/test/testdata/annocation"})
-    def test_annocation(self):        
+    def test_annocation(self):
         # os.environ['GANG_ANNOCATION_PATH'] = "maga_transformer/distribute/test/testdata/annocation"
         gang_members = get_c2_members()
         self.assertEqual(len(gang_members), 2)
@@ -115,9 +115,9 @@ class GangTest(unittest.TestCase):
 
 
     @mock.patch('torch.cuda.device_count')
-    @mock.patch.dict('os.environ', {"TP_SIZE": "4",
+    @mock.patch.dict('os.environ', {"TP_SIZE": "3",
                                     "PP_SIZE": "1",
-                                    "WORLD_SIZE": "4",
+                                    "WORLD_SIZE": "3",
                                     "WORLD_RANK": "0",
                                     "START_PORT": str(random.randint(10000, 40000)),
                                     "GANG_SLEEP_TIME": '1',
@@ -126,9 +126,9 @@ class GangTest(unittest.TestCase):
                                     "TOKENIZER_PATH": os.path.join(os.getcwd(), "maga_transformer/distribute/test/testdata/tokenizer"),
                                     "CHECKPOINT_PATH": os.path.join(os.getcwd(), "maga_transformer/distribute/test/testdata/cpt"),
                                     "DIST_BARRIER_TIMEOUT": "10",
-                                    "CUDA_VISIBLE_DEVICES": "0,1,2,3"})
+                                    "CUDA_VISIBLE_DEVICES": "0,1,2"})
     def test_server_start(self, torch_device_count):
-        torch_device_count.return_value = 4
+        torch_device_count.return_value = 3
         g_parallel_info.reload()
 
         procs: List[Process] = list()
