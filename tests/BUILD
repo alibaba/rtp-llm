@@ -98,17 +98,6 @@ cc_test(
     visibility = ["//visibility:public"],
 )
 
-# TODO(xinfei.sxf) fix those case, assert failed
-# cc_test(
-#     name = "test_sample",
-#     srcs = ["unittests/test_sampling.cu", "unittests/test_sampling_layer.cu",
-#             "unittests/test_sampling_kernels.cu"],
-#     deps = [":test_lib"],
-#     copts = test_copts,
-#     linkopts = test_linkopts,
-#     visibility = ["//visibility:public"],
-# )
-
 ################################ py test ################################
 
 cc_library(

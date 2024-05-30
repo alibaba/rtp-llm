@@ -100,17 +100,17 @@ TEST_F(MemoryTest, testRandomAlloc) {
 
 TEST_F(MemoryTest, testMemoryTracker) {
     int device_id = 0;
-    Allocator<AllocatorType::CUDA> basic_cuda_allocator(device_id);
-    Allocator<AllocatorType::CUDA_HOST> basic_cuda_host_allocator(device_id);
+    auto basic_cuda_allocator = new Allocator<AllocatorType::CUDA>(device_id);
+    auto basic_cuda_host_allocator = new Allocator<AllocatorType::CUDA_HOST>(device_id);
 
     TrackerAllocatorParams params;
-    params.real_allocator = &basic_cuda_allocator;
+    params.real_allocator = basic_cuda_allocator;
     params.target_track_bytes = 1L * 1024L * 1024L * 1024L; // 1GB
     params.bytes_try_step = 128L * 1024L * 1024L;          // 128MB
     params.align_size = 64;
 
     TrakcerAllocator cuda_allocator(params);
-    params.real_allocator = &basic_cuda_host_allocator;
+    params.real_allocator = basic_cuda_host_allocator;
     TrakcerAllocator cuda_host_allocator(params);
 
     const auto test_count = 1000;
