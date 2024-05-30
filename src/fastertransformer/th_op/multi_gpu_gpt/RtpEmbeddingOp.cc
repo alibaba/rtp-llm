@@ -19,7 +19,7 @@ void RtpEmbeddingOp::init(py::object layer_weights, py::object weights) {
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
     (void)rtp_llm::initKmonitorFactory();
     auto kmon_tags = rtp_llm::getHippoTags();
-    metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));    
+    metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
 
     ft::DeviceFactory::initDevices(ft::DeviceFactory::getDefaultGlobalDeviceParams());
 
@@ -64,7 +64,7 @@ void registerRtpEmbeddingOp(const py::module& m) {
         .def(pybind11::init<const ft::GptInitParameter&, py::object>())  // quant_pre_scales
         .def("init", &torch_ext::RtpEmbeddingOp::init)
         .def("stop", &torch_ext::RtpEmbeddingOp::stop)
-        .def("decode", &torch_ext::RtpEmbeddingOp::decode, py::call_guard<py::gil_scoped_release>());        
+        .def("decode", &torch_ext::RtpEmbeddingOp::decode, py::call_guard<py::gil_scoped_release>());
 }
 
 }  // namespace torch_ext
