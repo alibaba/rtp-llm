@@ -49,9 +49,9 @@ TEST_F(GptModelTest, testSimple) {
     const std::vector<int32_t> input_lengths_vec = {3};
     const std::vector<int32_t> sequence_lengths_vec = {};
 
-    auto combo_tokens = createBuffer<int32_t>({3}, {13048, 11, 220});
-    auto input_lengths = createBuffer<int32_t>({1}, input_lengths_vec);
-    auto sequence_lengths = createBuffer<int32_t>({0}, sequence_lengths_vec);
+    auto combo_tokens = createBuffer<int32_t>({3}, {13048, 11, 220}, AllocationType::HOST);
+    auto input_lengths = createBuffer<int32_t>({1}, input_lengths_vec, AllocationType::HOST);
+    auto sequence_lengths = createBuffer<int32_t>({0}, sequence_lengths_vec, AllocationType::HOST);
     auto kv_cache = torch::empty(0);
     auto kv_cache_blocks = allocateKVBlocks(cache_config, input_lengths_vec, kv_cache);
     const auto mask_tensor = create_context_mask(input_lengths_vec).to(torch::kFloat16);
@@ -85,21 +85,19 @@ TEST_F(GptModelTest, testSimple) {
     // expected to output token 151645
     assertTensorClose(
         output_tensor.index({torch::indexing::Slice(), 151645}),
-        bufferToTensor(*createBuffer<float>({3}, {-2.0801, 17.1562, 15.7891}, AllocationType::HOST)),
+        bufferToTensor(*createBuffer<float>({1}, {15.7891}, AllocationType::HOST)),
         1e-1, 5e-2
     );
     assertTensorClose(
         output_tensor.index({torch::indexing::Slice(), torch::indexing::Slice(0, 3)}),
-        bufferToTensor(*createBuffer<float>({3, 3},
-            {-0.4348, -6.0078, -1.4941,
-                6.3320, -5.0469,  0.6240,
-                7.1562, -9.3672, -0.8486}, AllocationType::HOST)),
+        bufferToTensor(*createBuffer<float>({1, 3},
+            {7.1562, -9.3672, -0.8486}, AllocationType::HOST)),
         0.2, 0.1
     );
 
-    inputs.combo_tokens = createBuffer<int32_t>({1}, {151645});
-    inputs.input_lengths = createBuffer<int32_t>({1}, {3});
-    inputs.sequence_lengths = createBuffer<int32_t>({1}, {3});
+    inputs.combo_tokens = createBuffer<int32_t>({1}, {151645}, AllocationType::HOST);
+    inputs.input_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
+    inputs.sequence_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
     device_->syncAndCheck();
     outputs = model->forward(inputs);
     device_->syncAndCheck();
@@ -124,10 +122,14 @@ TEST_F(GptModelTest, testAttentionInputs) {
     inputs.input_lengths = createBuffer<int32_t>({4}, {3, 5, 2, 7}, AllocationType::HOST);
     inputs.sequence_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
     inputs.combo_tokens = createBuffer<int32_t>({17}, std::vector<int32_t>(17, 0), AllocationType::HOST);
+    AttentionCommonInputs attention_inputs({
+            *inputs.input_lengths,
+            *inputs.sequence_lengths
+        });
 
     {
         device_->syncAndCheck();
-        auto attention_inputs = model->prepareAttentionInputs(inputs);
+        model->prepareAttentionInputs(inputs, attention_inputs);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
@@ -144,7 +146,7 @@ TEST_F(GptModelTest, testAttentionInputs) {
     inputs.combo_tokens = createBuffer<int32_t>({10}, std::vector<int32_t>(10, 0), AllocationType::HOST);
     {
         device_->syncAndCheck();
-        auto attention_inputs = model->prepareAttentionInputs(inputs);
+        model->prepareAttentionInputs(inputs, attention_inputs);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
@@ -161,7 +163,7 @@ TEST_F(GptModelTest, testAttentionInputs) {
     inputs.combo_tokens = createBuffer<int32_t>({11}, std::vector<int32_t>(11, 0), AllocationType::HOST);
     {
         device_->syncAndCheck();
-        auto attention_inputs = model->prepareAttentionInputs(inputs);
+        model->prepareAttentionInputs(inputs, attention_inputs);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);

@@ -19,9 +19,9 @@ struct GptModelDescription {
 };
 
 struct GptModelInitParams {
-    ft::DeviceBase*                device;
-    const ft::Weights&             weights;
-    const GptModelDescription& description;
+    ft::DeviceBase*           device;
+    const ft::Weights         weights;
+    const GptModelDescription description;
 };
 
 // A batch includes two parts: context batch and decoder batch.
@@ -117,13 +117,14 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
 
 private:
-    ft::AttentionCommonInputs prepareAttentionInputs(const GptModelInputs& inputs);
+    void prepareAttentionInputs(const GptModelInputs& inputs, ft::AttentionCommonInputs& attention_inputs);
 
 private:
     ft::DeviceBase* device_;
     const ft::DeviceProperties device_props_;
-    const ft::Weights& weights_;
-    const GptModelDescription& description_;
+    const ft::Weights          weights_;
+    const GptModelDescription  description_;
+
 };
 
 }  // namespace rtp_llm

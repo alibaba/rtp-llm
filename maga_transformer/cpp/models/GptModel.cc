@@ -1,7 +1,11 @@
 #include "maga_transformer/cpp/models/GptModel.h"
+#include "src/fastertransformer/core/Buffer.h"
+#include "src/fastertransformer/core/Types.h"
+#include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/utils/BufferUtils.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
-#include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
+#include <memory>
+
 using namespace std;
 using namespace fastertransformer;
 
@@ -46,10 +50,12 @@ void checkKvBlocksShape(const BufferPtr& input_kv_blocks) {
         "kv_cache_blocks shape should be [layer_num, 2, batch_size, block_length].");
 }
 
-AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inputs) {
-    const auto input_lengths = device_->clone({*inputs.input_lengths, AllocationType::HOST});
-    const auto sequence_lengths = device_->clone({*inputs.sequence_lengths, AllocationType::HOST});
-    device_->syncAndCheck();
+void GptModel::prepareAttentionInputs(
+        const GptModelInputs& inputs,
+        AttentionCommonInputs& attention_inputs) {
+
+    const auto& input_lengths = inputs.input_lengths;
+    const auto& sequence_lengths = inputs.sequence_lengths;
     const auto decoder_batch_size = sequence_lengths->shape()[0];
     const auto context_batch_size = input_lengths->shape()[0] - decoder_batch_size;
     const auto max_context_seq_len = context_batch_size ? *std::max_element(
@@ -76,10 +82,6 @@ AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inp
     checkKvBlocksShape(inputs.kv_cache_blocks);
     checkKvBlocksShape(inputs.kv_cache_scales);
 
-    AttentionCommonInputs attention_inputs({
-        *inputs.input_lengths,
-        *inputs.sequence_lengths
-    });
     attention_inputs.cu_seqlens = device_->clone({*vector2Buffer(cu_seqlens_data)});
     attention_inputs.padding_offset = device_->clone({*vector2Buffer(padding_offset_data)});
     attention_inputs.decoder_batch_size = decoder_batch_size;
@@ -89,7 +91,6 @@ AttentionCommonInputs GptModel::prepareAttentionInputs(const GptModelInputs& inp
     attention_inputs.context_token_num = cu_seqlens_data[context_batch_size];
     attention_inputs.position_ids = inputs.position_ids;
     attention_inputs.attention_mask = inputs.attention_mask;
-    return move(attention_inputs);
 }
 
 GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
@@ -98,12 +99,23 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto norm_eps = description_.layernorm_eps;
 
     const auto batch_size = inputs.input_lengths->shape()[0];
-    const auto& combo_tokens = inputs.combo_tokens;
+    const auto combo_tokens = device_->clone({*inputs.combo_tokens});
+    const auto input_lengths = device_->clone({*inputs.input_lengths});
+    const auto sequence_lengths = device_->clone({*inputs.sequence_lengths});
+
     const auto& embedding_table = weights_.embedding->kernel;
     const auto hidden_size = embedding_table->shape()[1];
 
+    const BufferPtr combo_position_ids = inputs.combo_position_ids ? device_->clone({*inputs.combo_position_ids}): nullptr;
+    const BufferPtr combo_tokens_type_ids = inputs.combo_tokens_type_ids ? device_->clone({*inputs.combo_tokens_type_ids}): nullptr;
+
     // word embedding lookup
-    auto hidden = device_->embeddingLookup({*combo_tokens, *embedding_table, nullopt, nullopt});
+    auto hidden = device_->embeddingLookup({
+            *combo_tokens, *embedding_table,
+            combo_position_ids ? (OptionalConstBufferRef)*combo_position_ids: nullopt,
+            combo_position_ids ? (OptionalConstBufferRef)*weights_.position_encoding->kernel: nullopt,
+            combo_tokens_type_ids ? (OptionalConstBufferRef)*combo_tokens_type_ids: nullopt,
+            combo_tokens_type_ids ? (OptionalConstBufferRef)*weights_.token_type_embedding->kernel: nullopt});
 
     // pre layernorm
     if (weights_.pre_decoder_layernorm) {
@@ -112,10 +124,16 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     }
 
     // prepare resources for all layers
-    auto attention_common_inputs = prepareAttentionInputs(inputs);
-    const auto& input_kv_blocks = inputs.kv_cache_blocks;
-    const auto& input_kv_scales = inputs.kv_cache_scales;
-    RUNTIME_ASSERT_OP_ARG(input_kv_blocks, "kv_cache_blocks is required for GPT model.");
+    AttentionCommonInputs attention_common_inputs({
+        *input_lengths,
+        *sequence_lengths
+    });
+
+    prepareAttentionInputs(inputs, attention_common_inputs);
+    BufferPtr input_kv_blocks;
+    if (inputs.kv_cache_blocks) {
+        input_kv_blocks = device_->clone({*inputs.kv_cache_blocks});
+    }
 
     printBufferData(*hidden, "input_hidden");
 
@@ -131,9 +149,12 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                 *hidden, *hidden, nullopt, norm_type,
                 *layer.pre_layernorm, norm_eps));
         }
-
-        auto layer_kv_blocks = (*input_kv_blocks)[i];
-        attention_common_inputs.kv_cache_blocks = layer_kv_blocks;
+        BufferPtr layer_kv_blocks_ptr;
+        if (input_kv_blocks) {
+            auto layer_buffer = (*input_kv_blocks)[i];
+            layer_kv_blocks_ptr = std::make_unique<Buffer>(layer_buffer.where(), layer_buffer.type(), layer_buffer.shape(), layer_buffer.data());
+            attention_common_inputs.kv_cache_blocks = *layer_kv_blocks_ptr;
+        }
         auto attn_output = device_->attentionLayer(AttentionLayerParams({
             *hidden,
             description_.attention_conf,
@@ -149,9 +170,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             // hidden = layernorm(attn_hidden)
             device_->layernorm(LayernormParams(
                 *attn_hidden, *hidden, *attn_hidden,
-                norm_type, mayGetRef(layer.post_layernorm), norm_eps,
-                device_props_.attn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual
-            ));
+                norm_type, ft::mayGetRef(layer.post_layernorm), norm_eps,
+                device_props_.attn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual,
+                nullopt, ft::mayGetRef(layer.self_attention_weights.output_weight->bias)));
             residual.swap(attn_hidden);
         } else {
             hidden.swap(attn_hidden);
@@ -170,9 +191,10 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         // TODO: maybe move this layernorm to ffn layer
         device_->layernorm(LayernormParams(
             *hidden, *hidden, nullopt,
-            norm_type, mayGetRef(layer.post_ffn_layernorm), norm_eps,
-            device_props_.ffn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual
-        ));
+            norm_type, ft::mayGetRef(layer.post_ffn_layernorm), norm_eps,
+            device_props_.ffn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual,
+            nullopt, ft::mayGetRef(layer.ffn_weights.down_weight->bias)));
+
         printBufferData(*hidden, "layer_" + to_string(i) + "_final_hidden");
     }
 
@@ -185,10 +207,28 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     // lm head
     const auto& lm_head = weights_.lm_head;
-    const auto& padded_vocab_size = lm_head->kernel->shape()[0];
-    auto final_hidden = device_->gemm(GemmParams(*hidden, *(lm_head->kernel)));
+    if (lm_head) {
+        // gen last token hidden
+        auto last_hidden = device_->allocateBufferLike(hidden->view(0, batch_size));
+        device_->copy({last_hidden->view(0, attention_common_inputs.decoder_batch_size), hidden->view(0, attention_common_inputs.decoder_batch_size)});
+        if (attention_common_inputs.context_batch_size) {
+            auto context_last_hidden = device_->select({
+                    hidden->view(attention_common_inputs.decoder_batch_size, combo_tokens->size() - attention_common_inputs.decoder_batch_size),
+                    0,
+                    attention_common_inputs.cu_seqlens->view(1, attention_common_inputs.context_batch_size)});
+            device_->copy({last_hidden->view(attention_common_inputs.decoder_batch_size, attention_common_inputs.context_batch_size), *context_last_hidden});
+        }
 
-    return {move(final_hidden)};
+        printBufferData(*last_hidden, "last_hidden");
+
+        auto logits = device_->gemm(GemmParams(*last_hidden, *(lm_head->kernel), nullopt, ft::DataType::TYPE_FP32, TransposeOperation::NONE, TransposeOperation::TRANSPOSE));
+        // logits is too big, tmp not print default
+        // printBufferData(*logits, "logits");
+
+        return {std::move(logits), std::move(last_hidden), std::move(hidden)};
+    } else {
+        return {nullptr, std::move(hidden), nullptr};
+    }
 }
 
 } // namespace rtp_llm
