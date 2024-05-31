@@ -70,6 +70,8 @@ TOKENIZER_PATH=/path/to/tokenizer CHECKPOINT_PATH=/path/to/model MODEL_TYPE=your
 # request to server
 curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "generate_config": {"max_new_tokens": 1000}}'
 ```
+### Docker Relelase Note
+* [Docker Release Note](docs/DockerHistory.md)
 
 ### FAQ
 1. libcufft.so
@@ -107,6 +109,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [SystemPrompt](docs/SystemPrompt-Tutorial.md)
 * [ReuseKVCache](docs/ReuseKVCache-Tutorial.md)
 * [Multimodal](docs/Multimodal-Tutorial.md)
+* [Embedding/Reranker Model Deployment](docs/Embedding.md)
 * [Structured Pruning](docs/Sparse-Tutorial.md)
 * [Quantization](docs/Quantization.md)
 * [Speculative Sampling](docs/SpeculativeDecoding-Tutroial.md)

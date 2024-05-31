@@ -109,6 +109,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 * [LoRA](docs/LoRA-Tutorial.md)
 * [PTuning](docs/PTuning-Tutorial.md)
 * [SystemPrompt](docs/SystemPrompt-Tutorial.md)
+* [Embedding/Reranker模型部署](docs/Embedding.md)
 * [多轮会话](docs/ReuseKVCache-Tutorial.md)
 * [多模态](docs/Multimodal-Tutorial.md)
 * [结构化剪枝](docs/Sparse-Tutorial.md)
