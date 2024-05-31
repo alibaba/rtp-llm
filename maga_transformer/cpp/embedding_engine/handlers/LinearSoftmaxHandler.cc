@@ -23,9 +23,9 @@ template<typename T>
 void LinearSoftmaxHandlerImpl<T>::allocateBuffer(size_t batch_size) {
     const size_t hidden_units = params_.head_num_ * params_.size_per_head_;
     sliced_hidden_buffer_ =
-        reinterpret_cast<T*>(allocator_->reMalloc(sliced_hidden_buffer_, sizeof(T) * batch_size * hidden_units, false));
-    cu_seqlens_     = reinterpret_cast<int*>(allocator_->reMalloc(cu_seqlens_, sizeof(int) * (batch_size + 1), false));
-    input_lengths_gpu_buf = reinterpret_cast<int*>(allocator_->reMalloc(input_lengths_gpu_buf, sizeof(int) * batch_size, false));
+        reinterpret_cast<T*>(allocator_->reMalloc(sliced_hidden_buffer_, sizeof(T) * batch_size * hidden_units));
+    cu_seqlens_     = reinterpret_cast<int*>(allocator_->reMalloc(cu_seqlens_, sizeof(int) * (batch_size + 1)));
+    input_lengths_gpu_buf = reinterpret_cast<int*>(allocator_->reMalloc(input_lengths_gpu_buf, sizeof(int) * batch_size));
 }
 
 template<typename T>
@@ -41,7 +41,7 @@ void LinearSoftmaxHandlerImpl<T>::loadTensor(std::unordered_map<std::string, ft:
     auto weight_it = tensors.find("w_out.weight");
     if (weight_it == tensors.end()) {
         throw std::runtime_error("can't find w_out.weight");
-    } else {                
+    } else {
         transposed_weight_ = device_->transpose({*(weight_it->second)});// weight_it->second->data<T>();a
         linear_weight.kernel = transposed_weight_->data<T>();
     }
@@ -52,8 +52,8 @@ void LinearSoftmaxHandlerImpl<T>::loadTensor(std::unordered_map<std::string, ft:
     }
     else {
         linear_weight.bias = bias_it->second->data<T>();
-    }    
-    is_initalized_ = true;    
+    }
+    is_initalized_ = true;
 }
 
 template<typename T>
@@ -79,9 +79,9 @@ th::Tensor LinearSoftmaxHandlerImpl<T>::forward(th::Tensor hidden_states, th::Te
 
     th::Tensor decoder_output =
         torch::zeros({(int64_t)length, (int64_t)2},
-                     torch::dtype(at::ScalarType::Half).device(torch::kCUDA).requires_grad(false));    
+                     torch::dtype(at::ScalarType::Half).device(torch::kCUDA).requires_grad(false));
     T* decoder_output_buf = (T*)decoder_output.data_ptr();
-                 
+
     float     alpha            = 1.0f;
     float     beta             = 0.0f;
     const cudaDataType_t gemm_data_type = ft::getCudaDataType<T>();
@@ -117,14 +117,14 @@ LinearSoftmaxHandler::LinearSoftmaxHandler(const GptInitParameter& params): Hand
     DataType data_type = DataType::TYPE_FP16;
     switch (data_type) {
         case DataType::TYPE_FP32:
-            throw std::runtime_error("not support fp32");                            
+            throw std::runtime_error("not support fp32");
             break;
         case DataType::TYPE_FP16:
             handler_impl_ = std::make_unique<LinearSoftmaxHandlerImpl<half>>(params);
             break;
-        case DataType::TYPE_BF16:            
+        case DataType::TYPE_BF16:
             // bfloat16 add_bias_softmax not implemented
-            throw std::runtime_error("not support bfloat16");                            
+            throw std::runtime_error("not support bfloat16");
             break;
         default:
             throw std::runtime_error("Wrong tensor type::" + std::to_string(data_type));
