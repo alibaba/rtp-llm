@@ -6,7 +6,7 @@ from maga_transformer.models.downstream_modules.custom_module import CustomModul
 from maga_transformer.models.downstream_modules.common_input_generator import CommonInputGenerator
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 
-from maga_transformer.async_decoder_engine.embedding.embedding_stream import EngineInputs, EngineOutputs
+from maga_transformer.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from maga_transformer.models.downstream_modules.reranker.api_datatype import VoyageRerankerRequest, VoyageRerankerResponse, RankingItem
 from maga_transformer.models.downstream_modules.classifier.classifier import ClassifierHandler
 from maga_transformer.models.downstream_modules.classifier.roberta_classifier import RobertaClassifierHandler

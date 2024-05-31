@@ -6,7 +6,7 @@ import torch.nn as nn
 from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.async_decoder_engine.embedding.embedding_stream import EngineInputs, EngineOutputs
+from maga_transformer.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler
 from maga_transformer.models.downstream_modules.embedding.misc import EmbeddingRendererBase, hidden_combo_to_batch
 from maga_transformer.models.downstream_modules.embedding.api_datatype import OpenAIEmbeddingRequest, \

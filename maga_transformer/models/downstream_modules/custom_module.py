@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.async_decoder_engine.embedding.embedding_stream import EngineInputs, EngineOutputs
+from maga_transformer.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 
 '''
 用于多种多样的下游任务

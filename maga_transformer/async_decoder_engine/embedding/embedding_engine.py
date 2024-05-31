@@ -1,13 +1,10 @@
-import time
 import torch
 import asyncio
 import logging
-from typing import List
-from concurrent.futures import ThreadPoolExecutor
+from typing import List, Any, Dict
 from maga_transformer.models.base_model import BaseModel
-from maga_transformer.metrics import kmonitor, GaugeMetrics
+from maga_transformer.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
 from maga_transformer.ops import RtpEmbeddingOp
-from maga_transformer.async_decoder_engine.embedding.embedding_stream import EngineInputs, EngineOutputs
 
 class EmbeddingCppEngine(object):
     def __init__(self, model: BaseModel):
@@ -29,6 +26,6 @@ class EmbeddingCppEngine(object):
             raise Exception("failed to run query, error: ", e)
 
     async def decode(self, input: EngineInputs):
-        output = EngineOutputs(outputs=[], input_length=0)
+        output = EngineOutputs(outputs=None, input_length=0)
         await asyncio.to_thread(self.decode_sync, input, output)
         return output

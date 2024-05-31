@@ -2,14 +2,13 @@ import json
 import asyncio
 from typing import Any, Dict, Union, Tuple, Optional
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
-from maga_transformer.async_decoder_engine.embedding.embedding_decoder_engine import EmbeddingDecoderEngine
-from maga_transformer.async_decoder_engine.embedding.cpp_embedding_engine import EmbeddingCppEngine
+from maga_transformer.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
 
 class EmbeddingEndpoint(object):
     def __init__(self, model: AsyncModel):
-        assert isinstance(model.decoder_engine_ , EmbeddingDecoderEngine) or isinstance(model.decoder_engine_, EmbeddingCppEngine)
-        self.decoder_engine_: Union[EmbeddingCppEngine, EmbeddingDecoderEngine] = model.decoder_engine_
+        assert isinstance(model.decoder_engine_, EmbeddingCppEngine)
+        self.decoder_engine_: EmbeddingCppEngine = model.decoder_engine_
         assert model.model.custom_module is not None, "custom model should not be None"
         self.custom_model_: CustomModule = model.model.custom_module
 
