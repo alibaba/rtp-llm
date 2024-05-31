@@ -12,10 +12,10 @@ struct TrackerAllocatorParams {
     size_t align_size          = 1024;
 };
 
-class TrakcerAllocator : public IAllocator {
+class TrackerAllocator : public IAllocator {
 public:
-    TrakcerAllocator(const TrackerAllocatorParams& params);
-    ~TrakcerAllocator();
+    TrackerAllocator(const TrackerAllocatorParams& params);
+    ~TrackerAllocator();
 
     AllocatorType type() const override;
     MemoryType memoryType() const override;

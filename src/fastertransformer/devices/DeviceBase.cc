@@ -19,10 +19,10 @@ DeviceStatus DeviceBase::getDeviceStatus() {
 }
 
 void DeviceBase::traceMemoryUsage() {
-    if (auto tracker_allocator = dynamic_cast<TrakcerAllocator*>(getAllocator())) {
+    if (auto tracker_allocator = dynamic_cast<TrackerAllocator*>(getAllocator())) {
         FT_LOG_INFO("Device: %s", tracker_allocator->getTrackerStatus().toString().c_str());
     }
-    if (auto tracker_allocator = dynamic_cast<TrakcerAllocator*>(getHostAllocator())) {
+    if (auto tracker_allocator = dynamic_cast<TrackerAllocator*>(getHostAllocator())) {
         FT_LOG_INFO("Host: %s", tracker_allocator->getTrackerStatus().toString().c_str());
     }
     return;

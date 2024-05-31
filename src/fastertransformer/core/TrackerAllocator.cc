@@ -2,7 +2,7 @@
 
 namespace fastertransformer {
 
-TrakcerAllocator::TrakcerAllocator(const TrackerAllocatorParams& params)
+TrackerAllocator::TrackerAllocator(const TrackerAllocatorParams& params)
     : real_allocator_(params.real_allocator)
 {
     // try reserve memory for tracker
@@ -40,7 +40,7 @@ TrakcerAllocator::TrakcerAllocator(const TrackerAllocatorParams& params)
     }
 }
 
-TrakcerAllocator::~TrakcerAllocator() {
+TrackerAllocator::~TrackerAllocator() {
     if (memory_tracker_) {
         auto ptr = memory_tracker_->getBasePtr();
         real_allocator_->free(&ptr);
@@ -49,15 +49,15 @@ TrakcerAllocator::~TrakcerAllocator() {
     delete real_allocator_;
 }
 
-AllocatorType TrakcerAllocator::type() const {
+AllocatorType TrackerAllocator::type() const {
     return real_allocator_->type();
 }
 
-MemoryType TrakcerAllocator::memoryType() const {
+MemoryType TrackerAllocator::memoryType() const {
     return real_allocator_->memoryType();
 }
 
-void* TrakcerAllocator::malloc(size_t size) {
+void* TrackerAllocator::malloc(size_t size) {
     if (size == 0) {
         return nullptr;
     }
@@ -74,7 +74,7 @@ void* TrakcerAllocator::malloc(size_t size) {
     return ptr;
 }
 
-void TrakcerAllocator::free(void** ptr) {
+void TrackerAllocator::free(void** ptr) {
     if (!ptr || !*ptr) {
         return;
     }
@@ -86,12 +86,12 @@ void TrakcerAllocator::free(void** ptr) {
     *ptr = nullptr;
 }
 
-void* TrakcerAllocator::reMalloc(void* ptr, size_t size) {
+void* TrackerAllocator::reMalloc(void* ptr, size_t size) {
     free(&ptr);
     return malloc(size);
 }
 
-TrackerStatus TrakcerAllocator::getTrackerStatus() const {
+TrackerStatus TrackerAllocator::getTrackerStatus() const {
     if (memory_tracker_) {
         return memory_tracker_->getStatus();
     }

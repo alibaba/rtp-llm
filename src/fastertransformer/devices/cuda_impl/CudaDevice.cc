@@ -36,7 +36,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         tracker_params.align_size = 16;
         FT_LOG_INFO("cuda device %d has %lu bytes free memory, trying to reserve %lu bytes.",
                     device_id_, free_bytes, tracker_params.target_track_bytes);
-        allocator_.reset(new TrakcerAllocator(tracker_params));
+        allocator_.reset(new TrackerAllocator(tracker_params));
     } else {
         allocator_.reset(allocator_ptr);
     }
@@ -49,7 +49,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         tracker_params.real_allocator = host_allocator_ptr;
         tracker_params.target_track_bytes = params.host_reserve_memory_bytes;
         tracker_params.align_size = 32; // required by avx512
-        host_allocator_.reset(new TrakcerAllocator(tracker_params));
+        host_allocator_.reset(new TrackerAllocator(tracker_params));
     } else {
         host_allocator_.reset(host_allocator_ptr);
     }
@@ -203,7 +203,7 @@ DeviceStatus CudaDevice::getDeviceStatus() {
     FT_CHECK(error == cudaSuccess);
     status.device_memory_status.used_bytes = total_bytes - status.device_memory_status.free_bytes;
 
-    if (auto tracker_allocator = dynamic_cast<TrakcerAllocator*>(allocator_.get())) {
+    if (auto tracker_allocator = dynamic_cast<TrackerAllocator*>(allocator_.get())) {
         const auto tracker_status = tracker_allocator->getTrackerStatus();
         status.device_memory_status.allocated_bytes = tracker_status.allocated_size;
         status.device_memory_status.preserved_bytes = tracker_status.available_size;

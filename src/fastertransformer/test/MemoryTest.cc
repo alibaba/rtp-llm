@@ -109,9 +109,9 @@ TEST_F(MemoryTest, testMemoryTracker) {
     params.bytes_try_step = 128L * 1024L * 1024L;          // 128MB
     params.align_size = 64;
 
-    TrakcerAllocator cuda_allocator(params);
+    TrackerAllocator cuda_allocator(params);
     params.real_allocator = basic_cuda_host_allocator;
-    TrakcerAllocator cuda_host_allocator(params);
+    TrackerAllocator cuda_host_allocator(params);
 
     const auto test_count = 1000;
     cudaStream_t stream;
