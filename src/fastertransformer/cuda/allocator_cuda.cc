@@ -27,10 +27,6 @@ void* ICudaAllocator::reMalloc(void* ptr, size_t size) {
     }
 }
 
-void ICudaAllocator::memSet(void* ptr, const int val, const size_t size) const {
-    check_cuda_error(cudaMemsetAsync(ptr, val, size, stream_));
-}
-
 PurePointerCudaAllocator::PurePointerCudaAllocator(int device_id)
     : ICudaAllocator(device_id)
     , pointer_mapping_(new std::unordered_map<void*, size_t>)

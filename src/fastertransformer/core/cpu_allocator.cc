@@ -16,8 +16,5 @@ void* Allocator<AllocatorType::CPU>::reMalloc(void* ptr, size_t size) {
     assert(false);
 }
 
-void  Allocator<AllocatorType::CPU>::memSet(void* ptr, const int val, const size_t size) const {
-    assert(false);
-}
 
 }  // namespace fastertransformer

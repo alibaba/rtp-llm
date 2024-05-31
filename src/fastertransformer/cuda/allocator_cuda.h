@@ -26,8 +26,6 @@ public:
 
     void* reMalloc(void* ptr, size_t size) override;
 
-    void memSet(void* ptr, const int val, const size_t size) const;
-
 protected:
     virtual bool isExist(void* address) const = 0;
     virtual ReallocType isReMalloc(void* address, size_t size) const = 0;
