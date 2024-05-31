@@ -35,6 +35,7 @@ public:
     void copy(const CopyParams& params);
     TransposeOutput transpose(const TransposeParams& params);
     ConvertOutput convert(const ConvertParams& params);
+    SelectOutput select(const SelectParams& params);
     LayernormOutput layernorm(const LayernormParams& params);
     BufferPtr gemm(const GemmParams& params);
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params);

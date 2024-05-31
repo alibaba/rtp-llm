@@ -124,6 +124,17 @@ ConvertOutput CudaDevice::convert(const ConvertParams& params) {
     return {move(output)};
 }
 
+SelectOutput CudaDevice::select(const SelectParams& params) {
+    RUNTIME_ASSERT_OP_ARG(params.dim == 0, "select op tmp only support dim == 0");
+    const auto& input = params.input;
+    auto alloc_type = getMemAllocationType(input.where());
+    auto shape = input.shape();
+    shape[0] = params.index.size();
+    auto output = allocateBuffer({input.type(), shape, alloc_type});
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(input.type(), invokeLookupHiddenStateOfLastToken, output->data(), input.data(), (int*)params.index.data(), (int)params.index.size(), (int)shape[1], stream_);
+    return {std::move(output)};
+}
+
 inline ncclDataType_t getNcclDataType(DataType type) {
     switch (type) {
         case DataType::TYPE_INT8: return ncclInt8;

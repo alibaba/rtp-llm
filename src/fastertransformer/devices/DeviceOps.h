@@ -15,6 +15,7 @@ public:
     virtual CloneOutput clone(const CloneParams& params);
     virtual TransposeOutput transpose(const TransposeParams& params);
     virtual ConvertOutput convert(const ConvertParams& params);
+    virtual SelectOutput select(const SelectParams& params);
 
     // basic compuation ops
     virtual LayernormOutput layernorm(const LayernormParams& params);

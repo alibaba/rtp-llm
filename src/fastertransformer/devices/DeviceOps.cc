@@ -22,6 +22,10 @@ ConvertOutput DeviceOps::convert(const ConvertParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+SelectOutput DeviceOps::select(const SelectParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 LayernormOutput DeviceOps::layernorm(const LayernormParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

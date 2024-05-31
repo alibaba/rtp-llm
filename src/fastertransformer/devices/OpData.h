@@ -70,7 +70,7 @@ using OptionalBufferRef         = std::optional<std::reference_wrapper<Buffer>>;
 using OptionalConstLoraMapRef    = std::optional<std::reference_wrapper<const LoraWeightsMap>>;
 
 template <typename T>
-inline std::optional<std::reference_wrapper<T>> mayGetRef(const std::unique_ptr<T>& ptr) {
+inline std::optional<std::reference_wrapper<T>> mayGetRef(const std::shared_ptr<T>& ptr) {
     return ptr ? std::optional<std::reference_wrapper<T>>(*ptr) : std::nullopt;
 }
 
@@ -103,6 +103,14 @@ struct CopyParams {
     size_t dst_offset = 0;
     size_t src_offset = 0;
     size_t copy_length = 0;
+};
+
+using SelectOutput = BufferPtr;
+
+struct SelectParams {
+    const Buffer& input;
+    size_t dim = 0;
+    const Buffer& index;
 };
 
 using TransposeOutput = BufferPtr;
@@ -227,6 +235,9 @@ struct EmbeddingLookupParams {
 
     OptionalConstBufferRef position_ids;
     OptionalConstBufferRef position_table;
+
+    OptionalConstBufferRef token_types;
+    OptionalConstBufferRef token_type_table;
 };
 
 struct AttentionCommonInputs {

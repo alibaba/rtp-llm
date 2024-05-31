@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
+#include "src/fastertransformer/devices/OpData.h"
 
 using namespace std;
 
@@ -56,7 +57,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
 
         activation({params.activation_type,
                     *(up_output.output),
-                    std::nullopt,
+                    mayGetRef(params.weights.up_weight->bias),
                     *(gate_output.output),
                     std::nullopt});
 
@@ -75,7 +76,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     else if (FFNDispatch::dispatch(params) == FFNDispatch::FFNType::NoGate) {
         activation({params.activation_type,
                     *(up_output.output),
-                    std::nullopt,
+                    mayGetRef(params.weights.up_weight->bias),
                     std::nullopt,
                     std::nullopt});
 
