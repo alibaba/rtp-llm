@@ -41,6 +41,9 @@ py_test (
         "//maga_transformer:testlib",
         "//maga_transformer/test/model_test/test_util:test_util"
     ],
+    env = {
+        "DEVICE_RESERVE_MEMORY_BYTES": "0"
+    }
 )
 
 py_test (
