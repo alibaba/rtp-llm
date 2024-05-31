@@ -1,3 +1,4 @@
+import numpy as np
 from typing import Dict, List, Any, Tuple
 from transformers import PreTrainedTokenizerBase
 
@@ -30,14 +31,25 @@ class RerankerRenderer(CustomRenderer):
 
     async def render_request(self, request: Dict[str, Any]):
         return VoyageRerankerRequest(**request)
+    
+    @staticmethod
+    def sigmoid(x: float):
+        return float(1 / (1 + np.exp(-x)))
 
     async def create_input(self, formated_request: VoyageRerankerRequest):
         input: List[Tuple[str, str]] = [(formated_request.query, doc) for doc in formated_request.documents]
         return await self.generator.generate(input, truncate=formated_request.truncation)
 
     async def render_response(self, formated_request: VoyageRerankerRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
-        rank_items = [RankingItem(index=i, document=formated_request.documents[i], relevance_score=float(outputs.outputs[i])) for i in range(len(formated_request.documents))]
+        if outputs.outputs is None:
+            raise Exception("outputs should not be None")
+        rank_items: List[RankingItem] = []
+        for i in range(len(formated_request.documents)):
+            rank_items.append(RankingItem(
+                index=i, 
+                document=formated_request.documents[i] if formated_request.return_documents else None, 
+                relevance_score=float(outputs.outputs[i]) if not formated_request.normalize else self.sigmoid(float(outputs.outputs[i]))))
         rank_items.sort(key=lambda x: x.relevance_score, reverse=True)
         if formated_request.top_k is not None:
             rank_items = rank_items[: min(len(rank_items), formated_request.top_k)]
-        return VoyageRerankerResponse(results=rank_items, total_tokens=len(inputs.token_ids)).model_dump()
+        return VoyageRerankerResponse(results=rank_items, total_tokens=len(inputs.token_ids)).model_dump(exclude_none=True)

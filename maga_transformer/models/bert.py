@@ -95,4 +95,4 @@ class Roberta(Bert):
         return torch.concat([torch.arange(pad_index + 1, input_length + pad_index + 1, dtype=torch.int32) for input_length in input_lengths], dim=0)
 
 register_model('bert', Bert, ['BertModel', 'BertForMaskedLM', 'BertForSequenceClassification'])
-register_model('roberta', Roberta, ['XLMRobertaModel', 'RobertaModel'])
+register_model('roberta', Roberta, ['XLMRobertaModel', 'RobertaModel', "XLMRobertaForSequenceClassification"])

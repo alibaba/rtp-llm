@@ -7,12 +7,15 @@ class VoyageRerankerRequest(PyDanticModelBase):
     model: Optional[str] = None
     top_k: Optional[int] = None
     truncation: bool = True
+    return_documents: bool = True
+    normalize: bool = False
     
 class RankingItem(PyDanticModelBase):
     index: int
-    document: str
+    document: Optional[str] = None
     relevance_score: float
     
 class VoyageRerankerResponse(PyDanticModelBase):
     results: List[RankingItem]
     total_tokens: int
+    model: Optional[str] = None
