@@ -13,6 +13,7 @@
 #include "3rdparty/contextFusedMultiHeadAttention/fmhaRunner.h"
 #include "3rdparty/contextFusedMultiHeadAttention/fused_multihead_attention_common.h"
 #include "3rdparty/flash_attention2/flash.h"
+#include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
 
 
 using namespace std;
@@ -283,6 +284,15 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             std::cref(*v_output),
             stream_);
     }
+#ifdef USE_OLD_TRT_FMHA
+    auto mFMHARunnerV1 = new FusedMHARunnerFP16v2(head_num, size_per_head, get_sm(), params.configs.q_scaling);
+
+    bool use_trtv1_fmha_ = use_trtv1_fmha && 
+                           mFMHARunnerV1->fmha_supported(
+                            (params.configs.mask_type == AttentionMaskType::causalMask)) &&
+                           head_num == kv_head_num &&
+                           (datatype == DataType::TYPE_FP16);
+#endif
     auto mFMHARunner = new tensorrt_llm::kernels::FusedMHARunnerV2(
             trtDtypeConvert(datatype), head_num, size_per_head, params.configs.q_scaling);
 
@@ -310,6 +320,39 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                        softmax_lse_->data(),
                        stream_);
     }
+#ifdef USE_OLD_TRT_FMHA
+    else if (use_trtv1_fmha_) {
+        if (params.configs.mask_type == AttentionMaskType::causalMask) {
+            mFMHARunnerV1->setup_causal_masked_fmha(seq_len, batch_size);
+            mFMHARunnerV1->run_causal_masked_fmha(params.input.data(), 
+                                                  params.common.cu_seqlens.get()->data(),
+                                                  params.output.data(),
+                                                  true, 
+                                                  stream_);
+        } 
+        else {
+            auto qkv_buf_temp   = allocateBuffer({DataType::TYPE_FP16,
+                                                 {token_num, head_num + 2 * kv_head_num, size_per_head},
+                                                 AllocationType::DEVICE},
+                                                 {"qkv_buf_temp"});
+            invokeTransposeAxis12(qkv_buf_temp->data<half>(),
+                                  params.input.data<half>(),
+                                  token_num,
+                                  3,
+                                  head_num,
+                                  size_per_head,
+                                  stream_);
+            auto max_length  = mFMHARunnerV1->getSFromMaxSeqLen(seq_len);
+            mFMHARunnerV1->setup(max_length, batch_size);
+            mFMHARunnerV1->run(qkv_buf_temp->data<half>(),
+                               nullptr,
+                               params.common.cu_seqlens->data<int>(),
+                               nullptr,
+                               params.output.data<half>(),
+                               stream_);
+        }
+    }
+#endif
     else {
         // TODO(lidongjin): Only support float32 gemm output.
         auto qk_output = gemm({*q_output,

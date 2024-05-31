@@ -23,9 +23,6 @@ cc_library(
 
 test_deps = [
     "//src/fastertransformer/devices/testing:device_test_utils",
-    "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-    "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
-    "//3rdparty/flash_attention2:flash_attention2_impl",
     "//maga_transformer/cpp:models",
     "//:gpt_init_params",
     ":test_headers",

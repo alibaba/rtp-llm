@@ -169,8 +169,16 @@ void CudaDevice::checkUseOpenSourceFMHA() {
 }
 
 void CudaDevice::checkUseTrtV1FMHA() {
-    // TODO(lidongjin.ldj) support trt v1 fmha.
-    use_trtv1_fmha = false;
+    if (!CompileConfig::use_old_trt_fmha) {
+        return;
+    }
+    char* fmha_env = std::getenv("ENABLE_TRTV1_FMHA");
+    if (fmha_env && std::string(fmha_env) == "OFF") {
+        FT_LOG_WARNING("TRTV1 FMHA is not enbaled");
+        return;
+    }
+
+    use_trtv1_fmha = true;
 }
 
 void CudaDevice::checkUseTrtV2FMHA() {

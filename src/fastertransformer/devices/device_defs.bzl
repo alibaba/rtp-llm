@@ -41,7 +41,10 @@ def device_test_envs():
 def device_impl_target():
     return select({
         "//:using_cuda": [
-            "//src/fastertransformer/devices/cuda_impl:cuda_impl"
+            "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+            "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
+            "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
+            "//3rdparty/flash_attention2:flash_attention2_impl",
         ],
         "//conditions:default": [
             "//src/fastertransformer/devices/cpu_impl:cpu_impl"
