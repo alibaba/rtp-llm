@@ -10,6 +10,7 @@
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
 #include "maga_transformer/cpp/utils/KvCacheUtils.h"
+#include "autil/EnvUtil.h"
 
 #include <numeric>
 #include <stdlib.h>
@@ -35,8 +36,10 @@ public:
             ? GlobalDeviceParams{{{getDeviceType(device_name), DeviceInitParams{0}}}}
             : DeviceFactory::getDefaultGlobalDeviceParams();
         auto& default_device_params = device_params.device_params[0].second;
-        default_device_params.device_reserve_memory_bytes = device_reserve_memory_size_;
-        default_device_params.host_reserve_memory_bytes = host_reserve_memory_size_;
+        default_device_params.device_reserve_memory_bytes =
+            autil::EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", device_reserve_memory_size_);
+        default_device_params.host_reserve_memory_bytes =
+            autil::EnvUtil::getEnv("HOST_RESERVE_MEMORY_BYTES", host_reserve_memory_size_);
         DeviceFactory::initDevices(device_params);
         device_ = DeviceFactory::getDefaultDevice();
     }

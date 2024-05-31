@@ -34,7 +34,8 @@ cc_library(
     copts = copts(),
     deps = [
         ":types",
-        "//src/fastertransformer/utils:logger"
+        "//src/fastertransformer/utils:logger",
+        "@havenask//aios/autil:stack_tracer",
     ],
     include_prefix = "src",
     visibility = ["//visibility:public"],

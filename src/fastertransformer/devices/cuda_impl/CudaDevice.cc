@@ -203,16 +203,10 @@ DeviceStatus CudaDevice::getDeviceStatus() {
     FT_CHECK(error == cudaSuccess);
     status.device_memory_status.used_bytes = total_bytes - status.device_memory_status.free_bytes;
 
-    if (auto tracker_allocator = dynamic_cast<TrackerAllocator*>(allocator_.get())) {
-        const auto tracker_status = tracker_allocator->getTrackerStatus();
-        status.device_memory_status.allocated_bytes = tracker_status.allocated_size;
-        status.device_memory_status.preserved_bytes = tracker_status.available_size;
-    } else {
-        const auto buffer_status = queryBufferStatus();
-        status.device_memory_status.allocated_bytes = buffer_status.device_allocated_bytes;
-        status.device_memory_status.preserved_bytes = buffer_status.device_preserved_bytes;
-        status.host_memory_status.allocated_bytes = buffer_status.host_allocated_bytes;
-    }
+    const auto buffer_status = queryBufferStatus();
+    status.device_memory_status.allocated_bytes = buffer_status.device_allocated_bytes;
+    status.device_memory_status.preserved_bytes = buffer_status.device_preserved_bytes;
+    status.host_memory_status.allocated_bytes = buffer_status.host_allocated_bytes;
     status.device_memory_status.available_bytes = status.device_memory_status.free_bytes + status.device_memory_status.preserved_bytes;
 
     nvmlUtilization_t utilization;
