@@ -1,3 +1,5 @@
+#include "ATen/ops/ones.h"
+#include "c10/core/ScalarType.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
@@ -6,29 +8,27 @@
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/engine_base/Executor.h"
+#include <algorithm>
 
 using namespace std;
 using namespace fastertransformer;
 
 namespace rtp_llm {
 
-EmbeddingExecutor::EmbeddingExecutor(const GptInitParameter&                              gpt_init_parameter,
-                                     ft::NcclParam                                        tensor_para,
-                                     ft::NcclParam                                        pipeline_para,
-                                     const vector<unordered_map<string, ConstBufferPtr>>& layer_weights,
-                                     const unordered_map<string, ConstBufferPtr>&         weights,
-                                     py::object                                           handler,
-                                     const kmonitor::MetricsReporterPtr                   metrics_reporter):
-    handler_(handler), tensor_para_(tensor_para), pipeline_para_(pipeline_para), metrics_reporter_(metrics_reporter), params_(gpt_init_parameter) {
+EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, ft::DeviceBase* device, py::object handler):
+    handler_(handler),
+    device_(device),
+    metrics_reporter_(params.metrics_reporter),
+    params_(params.gpt_init_parameter) {
     // need init model and sampler
-    unique_ptr<GptModelInitParams> model_params;
-    // model_.reset(new GptModel(*model_params));
-    SamplerInitParams sampler_params;
-    device_               = ft::DeviceFactory::getDevice(DeviceType::Cuda);
-    data_type_            = ft::getDataType(gpt_init_parameter.data_type_);
-    sampler_params.device = device_;
-    model_wrapper_.reset(new ParallelModelWrapper(gpt_init_parameter, weights, layer_weights));
-    init_position_ids(gpt_init_parameter.max_seq_len_);
+    use_new_device_impl_ = std::getenv("USE_NEW_DEVICE_IMPL");
+    if (use_new_device_impl_) {
+        model_.reset(new GptModel({device_, params.gpt_weights, Executor::genModelDescription(params_)}));
+    }
+    FT_LOG_INFO("model exec use new device impl: %d", (int)use_new_device_impl_);    
+    model_wrapper_.reset(new ParallelModelWrapper(params_, params.global_weights, params.layers_weights));
+    init_position_ids(params_.max_seq_len_);
 }
 
 void EmbeddingExecutor::init_position_ids(int max_seq_len) {
@@ -37,6 +37,24 @@ void EmbeddingExecutor::init_position_ids(int max_seq_len) {
     for (int i = 0; i < max_seq_len; i++) {
         position_ids[i] = i;
     }
+}
+
+absl::Status EmbeddingExecutor::createAttentionMask(GptModelInputs& model_input) const {
+    const auto& input_lengths = model_input.input_lengths;
+    auto max_input_seq_len = *std::max_element(input_lengths->data<int32_t>(), input_lengths->data<int32_t>() + input_lengths->size());
+    auto attention_mask = torch::ones({(int)max_input_seq_len, (int)max_input_seq_len});
+    if (params_.is_causal_) {
+        attention_mask = attention_mask.tril();
+    }
+    attention_mask = attention_mask.unsqueeze_(0).tile({(int)input_lengths->size(), 1, 1}).to(torch_ext::getScalarType(params_.data_type_));
+    for (int i = 0; i < input_lengths->size(); ++i) {
+        attention_mask[i].slice(0, *input_lengths->dataWithOffset<int32_t>(i), max_input_seq_len) = 0;
+        if (!params_.is_causal_) {
+            attention_mask[i].slice(1, *input_lengths->dataWithOffset<int32_t>(i), max_input_seq_len) = 0;
+        }
+    }
+    model_input.attention_mask = device_->clone(*ft::torchTensor2Buffer(attention_mask));
+    return absl::OkStatus();
 }
 
 absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
@@ -87,8 +105,8 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         token_idx += length;
     }
     size_t max_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
+    (void)createAttentionMask(model_input);
     reportMetrics(batch_size, token_num, max_seq_len);
-
     return model_input;
 }
 
@@ -96,13 +114,13 @@ ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_in
     ModelRequest model_request;
     model_request.generate_batch_size  = 0;
     model_request.context_batch_size   = model_input.input_lengths->shape()[0];
-    model_request.combo_tokens         = std::move(model_input.combo_tokens);
-    model_request.combo_position_ids   = std::move(model_input.combo_position_ids);
-    model_request.combo_token_type_ids = std::move(model_input.combo_tokens_type_ids);
-    model_request.input_lengths        = std::move(model_input.input_lengths);
-    model_request.sequence_lengths     = std::move(model_input.sequence_lengths);
-    model_request.prefix_lengths       = std::move(model_input.prefix_lengths);
-    model_request.attention_mask       = std::move(model_input.attention_mask);
+    model_request.combo_tokens         = model_input.combo_tokens;
+    model_request.combo_position_ids   = model_input.combo_position_ids;
+    model_request.combo_token_type_ids = model_input.combo_tokens_type_ids;
+    model_request.input_lengths        = model_input.input_lengths;
+    model_request.sequence_lengths     = model_input.sequence_lengths;
+    model_request.prefix_lengths       = model_input.prefix_lengths;
+    model_request.attention_mask       = model_input.attention_mask;
     return model_request;
 }
 
@@ -155,10 +173,14 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     auto& model_input = model_input_status.value();
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto         merged_output        = std::make_unique<MergedOutput>();
-    ModelRequest model_request        = std::move(generateOldModelRequest(model_input));
-
-    auto output = model_wrapper_->forward(model_request);
-    auto post_state = postProcess(model_request, *output);
+    GptModelOutputs model_output;
+    ModelRequest model_request = generateOldModelRequest(model_input);
+    if (use_new_device_impl_) {
+        model_output = std::move(model_->forward(model_input));
+    } else {
+        model_output = std::move(model_wrapper_->forward(model_request));
+    }
+    auto post_state = postProcess(model_request, model_output);
     RETURN_IF_STATUS_OR_ERROR(post_state);
     return updateStreams(post_state.value(), streams);
     // return updateStreams(output, streams);

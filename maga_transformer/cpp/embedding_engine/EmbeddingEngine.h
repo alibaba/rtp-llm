@@ -1,27 +1,23 @@
 #pragma once
 
-#include "absl/status/status.h"
-#include "maga_transformer/cpp/embedding_engine/handlers/HandlerBase.h"
-#include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
-#include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
-#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
-#include "maga_transformer/cpp/embedding_engine/EmbeddingStream.h"
-#include "maga_transformer/cpp/embedding_engine/EmbeddingScheduler.h"
 #include <atomic>
 #include <chrono>
 #include <iostream>
 #include <memory>
 #include <thread>
+#include "absl/status/status.h"
+#include "maga_transformer/cpp/embedding_engine/handlers/HandlerBase.h"
+#include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
+#include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
+#include "maga_transformer/cpp/embedding_engine/EmbeddingStream.h"
+#include "maga_transformer/cpp/embedding_engine/EmbeddingScheduler.h"
 
 namespace rtp_llm {
 
 class EmbeddingEngine {
 public:
-    EmbeddingEngine(const fastertransformer::GptInitParameter&                              params,
-                    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-                    const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
-                    py::object                                                              handler,
-                    const kmonitor::MetricsReporterPtr                                      metrics_reporter = nullptr);
+    EmbeddingEngine(const EngineInitParams& params, py::object handler);
     ~EmbeddingEngine();
 
     absl::Status enqueue(EmbeddingStreamPtr stream);    
@@ -40,11 +36,11 @@ private:
     absl::Status    trySaveStepError() const;
     void            loop();
 private:
+    const fastertransformer::GptInitParameter params_;
     std::thread                           loop_thread_;
     std::atomic<bool>                     running_{false};
     std::unique_ptr<EmbeddingExecutor>    executor_;
     std::unique_ptr<EmbeddingScheduler>   scheduler_;
-    const fastertransformer::GptInitParameter& params_;
     ResourceContext                       resource_context_;
     ft::NcclParam                         tensor_para_;
     ft::NcclParam                         pipeline_para_;

@@ -7,12 +7,12 @@
 using namespace std;
 namespace rtp_llm {
 
-FIFOScheduler::FIFOScheduler(const MagaInitParams& config,
+FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
                              const std::shared_ptr<CacheManager>& cache_manager,
                              const kmonitor::MetricsReporterPtr   metrics_reporter):
     cache_manager_(cache_manager),
-    max_seq_len_(config.gpt_init_parameter.max_seq_len_),
-    reserve_block_num_(config.gpt_init_parameter.scheduler_reserve_resource_ratio_ * cache_manager->freeBlockNums() / 100),
+    max_seq_len_(params.max_seq_len_),
+    reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->freeBlockNums() / 100),
     metrics_reporter_(metrics_reporter) {}
 
 FIFOScheduler::~FIFOScheduler() {

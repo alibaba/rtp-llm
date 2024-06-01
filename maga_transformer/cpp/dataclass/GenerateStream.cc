@@ -12,18 +12,24 @@ using namespace std;
 
 namespace rtp_llm {
 
-GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const ResourceContext& resource_context, int max_seq_len):
-    generate_input_(input), stream_cache_resource_(this, resource_context) {
+GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const ft::GptInitParameter& params, const ResourceContext& resource_context, kmonitor::MetricsReporterPtr metrics_reporter):
+    generate_input_(input),
+    max_seq_len_(params.max_seq_len_),
+    stream_cache_resource_(this, resource_context, input->need_release_resource),
+    need_release_resource_(input->need_release_resource),
+    metrics_reporter_(metrics_reporter),
+    special_tokens_(params.special_tokens_)
+{
     updatePrefix(resource_context.system_prompt);
     seq_length_ = generate_input_->inputLength();
-    max_seq_len_        = max_seq_len;
+
     begin_time_us_      = autil::TimeUtility::currentTimeInMicroSeconds();
 
     device_             = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
     complete_token_ids_ = device_->allocateBuffer(
-        {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len}, ft::AllocationType::HOST}, {});
+        {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
     for (int i = 0; i < tileNum(); ++i) {
-        memcpy(complete_token_ids_->dataWithOffset<int32_t>(i * max_seq_len), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
+        memcpy(complete_token_ids_->dataWithOffset<int32_t>(i * max_seq_len_), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
     }
 
     cum_log_probs_ = device_->allocateBuffer(

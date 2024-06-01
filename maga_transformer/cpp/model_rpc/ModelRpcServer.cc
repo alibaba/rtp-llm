@@ -3,7 +3,7 @@
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/model_rpc/QueryConverter.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
-#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
+
 #include <chrono>
 #include <cstring>
 #include <memory>
@@ -15,26 +15,18 @@ using namespace std;
 namespace rtp_llm {
 
 ModelRpcServiceImpl::ModelRpcServiceImpl(
-    const MagaInitParams&                                                   maga_init_params,
-    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-    const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights) {
-    (void)initKmonitorFactory();
-    auto kmon_tags = getHippoTags();
-    metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
-    engine_.reset(new NormalEngine(maga_init_params, layer_weights, weights, metrics_reporter_));
+    const EngineInitParams& maga_init_params) {
+    engine_.reset(new NormalEngine(maga_init_params));
 }
 
 grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*                  context,
                                                   const GenerateInputPB*                request,
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     FT_LOG_DEBUG("receive request %ld", request->request_id());
-    auto stream = QueryConverter::transQuery(engine_->resourceContext(), request, engine_->magaInitParams().gpt_init_parameter.max_seq_len_);
+    auto input = QueryConverter::transQuery(request);
     FT_LOG_DEBUG("request:[%ld] trans to stream success", request->request_id());
-    auto status = engine_->enqueue(stream);
+    auto stream = engine_->enqueue(input);
     FT_LOG_DEBUG("request:[%ld] enqueue success", request->request_id());
-    if (!status.ok()) {
-        return grpc::Status(grpc::StatusCode::INTERNAL, status.ToString());
-    }
     while (!stream->finished()) {
         if (context->IsCancelled()) {
             stream->cancel();
@@ -59,11 +51,11 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
 void ModelRpcServiceImpl::addLoRA(const int64_t                                                   lora_id,
                        const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                        const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
-    engine_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+    (void)engine_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
 }
 
 void ModelRpcServiceImpl::removeLoRA(const int64_t lora_id) {
-    engine_->removeLoRA(lora_id);
+    (void)engine_->removeLoRA(lora_id);
 }
 
 

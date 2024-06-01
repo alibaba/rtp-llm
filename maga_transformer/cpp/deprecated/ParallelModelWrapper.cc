@@ -1,4 +1,5 @@
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
@@ -48,7 +49,7 @@ void ParallelModelWrapperImpl<T>::initialize() {
 
 template<typename T>
 ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
-    const ft::GptInitParameter&                                                 gpt_init_parameter,
+    const ft::GptInitParameter&                                             gpt_init_parameter,
     ft::NcclParam                                                           tensor_para,
     ft::NcclParam                                                           pipeline_para,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
@@ -91,18 +92,17 @@ ParallelModelWrapperImpl<T>::~ParallelModelWrapperImpl() {
 }
 
 template<typename T>
-void ParallelModelWrapperImpl<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num, std::unique_ptr<GptModelOutputs>& model_output) {
+void ParallelModelWrapperImpl<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num, GptModelOutputs& model_output) {
     size_t hidden_units = params_.hidden_size_;
     const auto& dtype = getTensorType<T>();
-    model_output->hidden_states = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
+    model_output.hidden_states = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
         {dtype, {(size_t)total_batch_size, (size_t)hidden_units}, ft::AllocationType::DEVICE},
         {});
-    model_output->all_hidden_states = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
+    model_output.all_hidden_states = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
         {dtype, {(size_t)h_token_num, (size_t)hidden_units}, ft::AllocationType::DEVICE},
         {});
-    last_hidden_states_ = (T*)model_output->hidden_states->data();
-    all_hidden_states_  = (T*)model_output->all_hidden_states->data();
-
+    last_hidden_states_ = (T*)model_output.hidden_states->data();
+    all_hidden_states_  = (T*)model_output.all_hidden_states->data();
     combo_tokens_   = (int*)allocator_->reMalloc(combo_tokens_, sizeof(int) * h_token_num);
         combo_token_types_   = (int*)allocator_->reMalloc(combo_token_types_, sizeof(int) * h_token_num);
     combo_position_ids_   = (int*)allocator_->reMalloc(combo_position_ids_, sizeof(int) * h_token_num);
@@ -178,10 +178,10 @@ void ParallelModelWrapperImpl<T>::createAttentionMask(size_t context_batch_size,
 }
 
 template<typename T>
-std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_request) {
+GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_request) {
     const uint   total_batch_size = model_request.generate_batch_size + model_request.context_batch_size;
     const size_t h_token_num      = model_request.combo_tokens->shape()[0];
-    std::unique_ptr<GptModelOutputs> model_output = make_unique<GptModelOutputs>();
+    GptModelOutputs model_output;
     allocateBuffer(total_batch_size, h_token_num, model_output);
     assert(params_.head_num_ % tensor_para_.world_size_ == 0);
     const int    local_head_num      = params_.head_num_ / tensor_para_.world_size_;
@@ -207,13 +207,13 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
         ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {total_batch_size}, model_request.input_lengths->data());
     ft::Tensor lora_ids(ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {0}, nullptr);
 
-    model_output->logits                          = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
+    model_output.logits                          = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
         {ft::DataType::TYPE_FP32, {(size_t)total_batch_size, (size_t)params_.vocab_size_}, ft::AllocationType::DEVICE},
         {});
     ft::Tensor logits(ft::MEMORY_GPU,
                       ft::DataType::TYPE_FP32,
                       {(size_t)total_batch_size, (size_t)params_.vocab_size_},
-                      model_output->logits->data());
+                      model_output.logits->data());
 
     cudaMemcpyAsync(combo_tokens.getPtr<int>(),
                     model_request.combo_tokens->data(),
@@ -374,7 +374,7 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
         ft::Tensor logits(ft::MEMORY_GPU,
                     ft::DataType::TYPE_FP32,
                     {(size_t)total_batch_size, (size_t)params_.vocab_size_},
-                    model_output->logits->data());
+                    model_output.logits->data());
 
         parallel_logits_wrapper_->forward(logits, last_hidden_states);
 
@@ -394,7 +394,7 @@ std::unique_ptr<GptModelOutputs> ParallelModelWrapperImpl<T>::forward(const Mode
     }
     sync_check_cuda_error();
 
-    return std::move(model_output);
+    return model_output;
 }
 
 at::ScalarType getScalarType(const std::string& data_type) {
@@ -450,7 +450,7 @@ bool ParallelModelWrapper::useFMHA() {
     return model_wrapper_->useFMHA();
 }
 
-std::unique_ptr<GptModelOutputs> ParallelModelWrapper::forward(const ModelRequest& model_request) {
+GptModelOutputs ParallelModelWrapper::forward(const ModelRequest& model_request) {
     return model_wrapper_->forward(model_request);
 }
 

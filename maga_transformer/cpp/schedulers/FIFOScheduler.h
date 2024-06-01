@@ -2,16 +2,16 @@
 
 #include <queue>
 #include "maga_transformer/cpp/cache/CacheManager.h"
-#include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include "src/fastertransformer/th_op/GptInitParameter.h"
 
 namespace rtp_llm {
 
 class FIFOScheduler: public SchedulerBase {
 public:
-    explicit FIFOScheduler(const MagaInitParams& config,
+    explicit FIFOScheduler(const ft::GptInitParameter&          params,
                            const std::shared_ptr<CacheManager>& cache_manager,
                            const kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
 

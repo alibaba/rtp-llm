@@ -17,7 +17,6 @@ class QueryConverterTest: public DeviceTestBase {
 };
 
 TEST_F(QueryConverterTest, testTransInput) {
-    ResourceContext resource_context;
     GenerateInputPB input;
     input.add_token_ids(0);
     input.add_token_ids(1);
@@ -44,12 +43,7 @@ TEST_F(QueryConverterTest, testTransInput) {
             stop_words->add_values(i * 3 + j);
         }
     }
-    int max_seq_len = 2048;
-
-    auto query     = QueryConverter::transQuery(resource_context, &input, max_seq_len);
-
-    ASSERT_EQ(query->maxSeqLen(), max_seq_len);
-    auto generate_input = query->generateInput();
+    auto generate_input = QueryConverter::transQuery(&input);
     auto input_ids = generate_input->input_ids.get();
     ASSERT_EQ(input_ids->size(), 2);
     ASSERT_EQ(*(int*)(input_ids->data()), 0);

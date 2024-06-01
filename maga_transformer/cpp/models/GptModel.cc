@@ -173,7 +173,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                 norm_type, ft::mayGetRef(layer.post_layernorm), norm_eps,
                 device_props_.attn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual,
                 nullopt, ft::mayGetRef(layer.self_attention_weights.output_weight->bias)));
-            residual.swap(attn_hidden);
+            if (description_.post_layernorm) {
+                residual = device_->clone(*hidden);
+            } else {
+                residual.swap(attn_hidden);
+            }
         } else {
             hidden.swap(attn_hidden);
         }
@@ -227,7 +231,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         return {std::move(logits), std::move(last_hidden), std::move(hidden)};
     } else {
-        return {nullptr, std::move(hidden), nullptr};
+        return {nullptr, nullptr, std::move(hidden)};
     }
 }
 

@@ -21,25 +21,25 @@ class IModelWrapper {
 public:
     virtual ~IModelWrapper() {}
     virtual bool                             useFMHA() = 0;
-    virtual std::unique_ptr<GptModelOutputs> forward(const ModelRequest& model_request) = 0;
+    virtual GptModelOutputs forward(const ModelRequest& model_request) = 0;
 };
 
 template<typename T>
 class ParallelModelWrapperImpl: public IModelWrapper {
 public:
     ParallelModelWrapperImpl(
-            const ft::GptInitParameter&                                                 gpt_init_parameter,
+            const ft::GptInitParameter&                                             gpt_init_parameter,
             ft::NcclParam                                                           tensor_para,
             ft::NcclParam                                                           pipeline_para,
             const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
             const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights);
     ~ParallelModelWrapperImpl();
-    void                             allocateBuffer(size_t total_batch_size, size_t h_token_num, std::unique_ptr<GptModelOutputs>& model_output);
+    void                             allocateBuffer(size_t total_batch_size, size_t h_token_num, GptModelOutputs& model_output);
     void                             createAttentionMask(size_t context_batch_size, size_t max_context_seq_length, int* input_lengths_host);
     void                             freeBuffer();
     void                             initialize();
     bool                             useFMHA() override;
-    std::unique_ptr<GptModelOutputs> forward(const ModelRequest& model_request) override;
+    GptModelOutputs forward(const ModelRequest& model_request) override;
 private:
     void setPaddingOffsetAndCuSeqLens(ft::Tensor& padding_offset,
                                       ft::Tensor& cu_seqlens,
@@ -49,7 +49,7 @@ private:
                                       const int*  input_lengths);
 
 private:
-    const ft::GptInitParameter&                            params_;
+    const ft::GptInitParameter                         params_;
     const ft::DataType                                 data_type_;
     ft::NcclParam                                      tensor_para_;
     ft::NcclParam                                      pipeline_para_;
@@ -99,7 +99,7 @@ public:
 
     bool useFMHA();
 
-    std::unique_ptr<GptModelOutputs> forward(const ModelRequest& model_request);
+    GptModelOutputs forward(const ModelRequest& model_request);
 
 private:
     IModelWrapper* model_wrapper_;

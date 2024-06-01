@@ -1,9 +1,9 @@
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
-
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingQueryConverter.h"
 #include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
 #include "src/fastertransformer/utils/pybind_utils.h"
+#include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 
 using namespace std;
 
@@ -11,31 +11,20 @@ namespace ft = fastertransformer;
 namespace th = torch;
 
 namespace torch_ext {
-RtpEmbeddingOp::RtpEmbeddingOp(const ft::GptInitParameter& gpt_init_params, py::object handler_impl):
-    gpt_init_params_(gpt_init_params), handler_(handler_impl) {}
+RtpEmbeddingOp::RtpEmbeddingOp() {}
 
-void RtpEmbeddingOp::init(py::object layer_weights, py::object weights) {
+void RtpEmbeddingOp::init(const ft::GptInitParameter& gpt_init_params, py::object handler_impl, py::object py_layers_weights, py::object py_global_weights) {
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
+
+    auto global_weights = rtp_llm::WeightsConverter::convertPyWeightsMap(py_global_weights);
+    auto layers_weights = rtp_llm::WeightsConverter::convertPyWeightsMapVec(py_layers_weights);
+    rtp_llm::EngineInitParams params(gpt_init_params, layers_weights, global_weights);
+    // kmon metric init
     (void)rtp_llm::initKmonitorFactory();
     auto kmon_tags = rtp_llm::getHippoTags();
-    metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
-
-    ft::DeviceFactory::initDevices(ft::DeviceFactory::getDefaultGlobalDeviceParams());
-
-    auto layer_weights_cc = ft::convertPyobjectToVectorDict(layer_weights);
-    auto weights_cc = ft::convertPyObjectToDict(weights);
-    for (auto& it : weights_cc) {
-        global_weights_.emplace(it.first, ft::torchTensor2Buffer(it.second));
-    }
-    for (auto& weights : layer_weights_cc) {
-        std::unordered_map<std::string, ft::ConstBufferPtr> __weights;
-        for (auto& it : weights) {
-            __weights.emplace(it.first, ft::torchTensor2Buffer(it.second));
-        }
-        layer_weights_.emplace_back(std::move(__weights));
-    }
-    embedding_engine_.reset(new rtp_llm::EmbeddingEngine(gpt_init_params_, layer_weights_, global_weights_, handler_, metrics_reporter_));
+    params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+    embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, handler_impl));
 }
 
 void RtpEmbeddingOp::stop() {
@@ -61,7 +50,7 @@ RtpEmbeddingOp::~RtpEmbeddingOp() {
 
 void registerRtpEmbeddingOp(const py::module& m) {
     pybind11::class_<torch_ext::RtpEmbeddingOp>(m, "RtpEmbeddingOp")
-        .def(pybind11::init<const ft::GptInitParameter&, py::object>())  // quant_pre_scales
+        .def(pybind11::init<>())
         .def("init", &torch_ext::RtpEmbeddingOp::init)
         .def("stop", &torch_ext::RtpEmbeddingOp::stop)
         .def("decode", &torch_ext::RtpEmbeddingOp::decode, py::call_guard<py::gil_scoped_release>());

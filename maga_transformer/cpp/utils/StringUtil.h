@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 #include <cstdint>
 #include <cassert>
@@ -7,7 +8,8 @@
 
 namespace rtp_llm {
 
-inline std::string vectorToString(const std::vector<int>& vec) {
+template<typename T>
+std::string vectorToString(const std::vector<T>& vec) {
     std::string result;
     for (const auto& value : vec) {
         result += std::to_string(value) + ",";
@@ -18,7 +20,8 @@ inline std::string vectorToString(const std::vector<int>& vec) {
     return result;
 }
 
-inline std::string vectorsToString(const std::vector<std::vector<int>>& vecs) {
+template<typename T>
+std::string vectorsToString(const std::vector<std::vector<T>>& vecs) {
     std::string result;
     result += "[";
     for (const auto& vec: vecs) {

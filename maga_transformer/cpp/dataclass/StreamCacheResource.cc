@@ -140,8 +140,4 @@ void StreamCacheResource::setKVCache(const BatchKVCacheBlockAddr& kv_cache_block
     kv_cache_block_addr_ = kv_cache_block_addr;
 }
 
-void StreamCacheResource::setNeedReleaseResource(bool need_release_resource) {
-    need_release_resource_ = need_release_resource;
-}
-
 }  // namespace rtp_llm

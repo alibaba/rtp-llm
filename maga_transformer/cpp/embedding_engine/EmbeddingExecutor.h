@@ -1,35 +1,30 @@
 #pragma once
 
+#include <memory>
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
-#include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingStream.h"
 #include "maga_transformer/cpp/embedding_engine/handlers/HandlerBase.h"
+#include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
+#include "maga_transformer/cpp/engine_base/Executor.h"
 
-#include <memory>
 namespace rtp_llm {
 
-class EmbeddingExecutor {
+class EmbeddingExecutor{
 public:
-    explicit EmbeddingExecutor(const fastertransformer::GptInitParameter& gpt_init_parameter,
-                               ft::NcclParam                              tensor_para,
-                               ft::NcclParam                              pipeline_para,
-                               const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-                               const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
-                               py::object                                                              handler,
-                               const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
+    explicit EmbeddingExecutor(const EngineInitParams& params, ft::DeviceBase* device, py::object handler);
 
     absl::Status process(const std::list<EmbeddingStreamPtr>& streams);
 
 private:
+    std::unique_ptr<GptModel>             model_;
     std::unique_ptr<ParallelModelWrapper> model_wrapper_;
     py::object                            handler_;
-    ft::NcclParam                         tensor_para_;
-    ft::NcclParam                         pipeline_para_;
     ft::DeviceBase*                       device_;
     ft::BufferPtr                         max_position_ids_buf_;
-    ft::DataType                          data_type_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
-    const fastertransformer::GptInitParameter& params_;    
+    const fastertransformer::GptInitParameter params_;
+
+    bool                                  use_new_device_impl_ = false;
 
     ModelRequest                     generateOldModelRequest(GptModelInputs& model_input);
     absl::StatusOr<GptModelInputs>   gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const;

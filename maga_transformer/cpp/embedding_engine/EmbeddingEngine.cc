@@ -1,18 +1,16 @@
 #include "maga_transformer/cpp/embedding_engine/EmbeddingEngine.h"
 #include "maga_transformer/cpp/common/status_util.h"
+#include "maga_transformer/cpp/engine_base/EngineBase.h"
 #include "src/fastertransformer/utils/logger.h"
 
 using namespace std;
 namespace rtp_llm {
 
-EmbeddingEngine::EmbeddingEngine(const fastertransformer::GptInitParameter&                              params,
-                                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-                                 const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
-                                 py::object                                                              handler,
-                                 const kmonitor::MetricsReporterPtr metrics_reporter):
-    params_(params), metrics_reporter_(metrics_reporter) {
-    executor_.reset(new EmbeddingExecutor(params, tensor_para_, pipeline_para_, layer_weights, weights, handler, metrics_reporter_));
-    scheduler_.reset(new EmbeddingScheduler(params, metrics_reporter_));
+EmbeddingEngine::EmbeddingEngine(const EngineInitParams& params, py::object handler):
+    params_(params.gpt_init_parameter), metrics_reporter_(params.metrics_reporter) {
+    EngineBase::initDevices(params);
+    executor_.reset(new EmbeddingExecutor(params, ft::DeviceFactory::getDefaultDevice(), handler));
+    scheduler_.reset(new EmbeddingScheduler(params_, metrics_reporter_));
 
     (void)startLoop();
 }

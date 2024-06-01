@@ -12,10 +12,10 @@ class EmbeddingCppEngine(object):
         self.model = model
         assert self.model.custom_module is not None, "embedding custom module should not be None"
         # self.cpp_handler = self.model.custom_module.create_cpp_handler()
-        self.cpp_engine = RtpEmbeddingOp(model.config.gpt_init_params, self.model.custom_module.handler)
+        self.cpp_engine = RtpEmbeddingOp()
 
     def start(self):
-        self.cpp_engine.init(self.model.weight.weights, self.model.weight.global_weights)
+        self.cpp_engine.init(self.model.config.gpt_init_params, self.model.custom_module.handler, self.model.weight.weights, self.model.weight.global_weights)
 
     def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):
         try:            

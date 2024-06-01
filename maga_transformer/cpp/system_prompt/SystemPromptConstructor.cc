@@ -32,12 +32,10 @@ std::unordered_map<int, SystemPromptParams> SystemPromptConstructor::construct(c
         std::vector<size_t> shape = {tokens_id.size()};
         generate_input->input_ids = std::make_unique<ft::Buffer>(ft::MEMORY_CPU, ft::TYPE_INT32, shape, (void *)(tokens_id.data()));
         generate_input->generate_config = generate_config;
+        generate_input->need_release_resource = false;
 
         // TODO(xinfei.sxf) consider tp, consider sp engine
-        GenerateStreamPtr stream = std::make_shared<GenerateStream>(generate_input,
-                engine->resourceContext(), engine->magaInitParams().gpt_init_parameter.max_seq_len_);
-        stream->setNeedReleaseResource(false);
-        engine->enqueue(stream);
+        GenerateStreamPtr stream = engine->enqueue(generate_input);
 
         auto output1 = stream->nextOutput();
         assert(output1.ok());

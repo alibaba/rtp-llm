@@ -1,7 +1,6 @@
 #pragma once
 
 #include <queue>
-#include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/schedulers/SchedulerBase.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingStream.h"
 
@@ -27,7 +26,7 @@ public:
 private:
     void reportMetrics(size_t new_stream_size);
 
-    const ft::GptInitParameter&   config_;
+    const ft::GptInitParameter    config_;
     std::list<EmbeddingStreamPtr> waiting_streams_;
     std::atomic<bool>             stop_ = false;
     std::mutex                    lock_;

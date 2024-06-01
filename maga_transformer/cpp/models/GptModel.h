@@ -16,6 +16,7 @@ struct GptModelDescription {
     ft::ActivationType   activation_type;
     ft::NormType         norm_type;
     double               layernorm_eps = 1e-5;
+    bool                 post_layernorm = false;
 };
 
 struct GptModelInitParams {

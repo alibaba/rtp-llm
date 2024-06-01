@@ -100,7 +100,13 @@ public:
 
 class StreamCacheResource {
 public:
-    StreamCacheResource(GenerateStream* stream, const ResourceContext& resource_context): stream_(stream), resource_context_(resource_context) {}
+    StreamCacheResource(
+            GenerateStream* stream,
+            const ResourceContext& resource_context,
+            bool need_release_resource = true):
+        stream_(stream),
+        resource_context_(resource_context),
+        need_release_resource_(need_release_resource) {}
     ~StreamCacheResource() {
         releaseResource();
     }
@@ -108,7 +114,6 @@ public:
     bool incrKVBlock();
     // TODO(xinfei.sxf) flash attention must suppor prefix prompt
     int     tryReleaseKVBlock(size_t nums);
-    void    setNeedReleaseResource(bool need_release_resource);
     void    releaseResource();
     int     needKVCacheBlockNums() const;
     int     maxBlockSize() const;

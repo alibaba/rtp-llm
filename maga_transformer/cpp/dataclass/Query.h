@@ -49,6 +49,9 @@ public:
     std::optional<ft::BufferPtr>    image_embeddings;  // For multi-modality models
     int                             lora_id       = -1;
     int                             prefix_length = 0;
+
+    // config
+    bool                            need_release_resource = true;
 };
 
 class AuxInfo {

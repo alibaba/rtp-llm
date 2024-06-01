@@ -276,30 +276,30 @@ cc_library(
     visibility = ["//visibility:public"]
 )
 
-cc_library(
-    name = "speculative_engine",
-    hdrs = glob([
-        "speculative_engine/*.h",
-    ]),
-    srcs = glob([
-        "speculative_engine/*.cc",
-    ]),
-    deps = torch_deps() + [
-        ":dataclass",
-        ":models",
-        ":schedulers",
-        ":engine_base",
-        ":normal_engine",
-        ":model_wrapper",
-        ":common",
-        ":system_prompt",
-        ":system_prompt_constructor",
-        "//src/fastertransformer/cuda:allocator_cuda",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-    ],
-    visibility = ["//visibility:public"]
-)
+# cc_library(
+#     name = "speculative_engine",
+#     hdrs = glob([
+#         "speculative_engine/*.h",
+#     ]),
+#     srcs = glob([
+#         "speculative_engine/*.cc",
+#     ]),
+#     deps = torch_deps() + [
+#         ":dataclass",
+#         ":models",
+#         ":schedulers",
+#         ":engine_base",
+#         ":normal_engine",
+#         ":model_wrapper",
+#         ":common",
+#         ":system_prompt",
+#         ":system_prompt_constructor",
+#         "//src/fastertransformer/cuda:allocator_cuda",
+#         "@com_google_absl//absl/status",
+#         "@com_google_absl//absl/status:statusor",
+#     ],
+#     visibility = ["//visibility:public"]
+# )
 
 cc_library(
     name = "metrics",
@@ -353,7 +353,7 @@ cc_library(
         "//maga_transformer/cpp:dataclass",
         "//maga_transformer/cpp:normal_engine",
         "//maga_transformer/cpp:embedding_engine",
-        "//maga_transformer/cpp:speculative_engine",
+        # "//maga_transformer/cpp:speculative_engine",
         "//src/fastertransformer/devices:devices_base",
     ],
     visibility = ["//visibility:public"]

@@ -12,16 +12,14 @@
 using namespace std;
 namespace rtp_llm {
 
-NormalEngine::NormalEngine(const MagaInitParams&                                                   params,
-                           const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-                           const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights,
-                           const kmonitor::MetricsReporterPtr                                      metrics_reporter) :
+NormalEngine::NormalEngine(const EngineInitParams& params) :
     EngineBase(params),
-    metrics_reporter_(metrics_reporter)
+    params_(params.gpt_init_parameter),
+    metrics_reporter_(params.metrics_reporter)
 {
-    executor_.reset(new NormalExecutor(params_, layer_weights, weights, metrics_reporter_));
+    executor_.reset(new NormalExecutor(params, device_));
     initCacheManager();
-    scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter));
+    scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter_));
     (void)startLoop();
 }
 
@@ -31,14 +29,15 @@ NormalEngine::~NormalEngine() {
 }
 
 void NormalEngine::initCacheManager() {
-    auto result = CacheConfigCreator::createConfig(params_.gpt_init_parameter);
+    auto result = CacheConfigCreator::createConfig(params_);
+    // TODO(xinfei.sxf) test create cache config exception
     THROW_IF_STATUS_ERROR(result.status());
     resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device_, metrics_reporter_);
 }
 
 void NormalEngine::initSystemPrompt() {
-    resource_context_.reuse_cache = params_.gpt_init_parameter.reuse_cache_;
-    auto system_prompt_param = SystemPromptConstructor::construct(params_.gpt_init_parameter, this, resource_context_.cache_manager.get());
+    resource_context_.reuse_cache = params_.reuse_cache_;
+    auto system_prompt_param = SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get());
     if (!system_prompt_param.empty()) {
         resource_context_.reuse_cache = true;
         resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
@@ -94,11 +93,10 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
-absl::Status NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
-    stream->setMetricsReporter(metrics_reporter_);
-    stream->setSpecialTokens(params_.gpt_init_parameter.special_tokens_);
-    FT_LOG_DEBUG("enqueue stream: %s %d", stream->debugString().c_str(), device_->getDeviceProperties().tp_rank);
-    return scheduler_->enqueue(stream);
+std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
+    std::shared_ptr<GenerateStream> stream = std::make_shared<GenerateStream>(input, params_, resource_context_, metrics_reporter_);
+    (void)scheduler_->enqueue(stream);
+    return stream;
 }
 
 absl::Status NormalEngine::step() {

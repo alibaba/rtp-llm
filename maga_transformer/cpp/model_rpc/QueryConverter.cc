@@ -46,7 +46,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     return generate_config;
 }
 
-std::shared_ptr<GenerateStream> QueryConverter::transQuery(const ResourceContext& resource_context, const GenerateInputPB* input, int max_seq_len) {
+std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB* input) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
     generate_input->request_id = input->request_id();
     if (input->has_generate_config()) {
@@ -57,10 +57,7 @@ std::shared_ptr<GenerateStream> QueryConverter::transQuery(const ResourceContext
     generate_input->input_ids     = device->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)input->token_ids_size()}, ft::AllocationType::HOST}, {});
     memcpy(generate_input->input_ids->data(), input->token_ids().data(), generate_input->input_ids->sizeBytes());
-    
-    std::shared_ptr<GenerateStream> stream = std::make_shared<GenerateStream>(generate_input, resource_context, max_seq_len);
-
-    return stream;
+    return generate_input;
 }
 
 void QueryConverter::transTensor(TensorPB* t, const ft::Buffer* buffer) {

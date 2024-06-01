@@ -25,7 +25,7 @@ namespace rtp_llm {
 
 class GenerateStream {
 public:
-    GenerateStream(const std::shared_ptr<GenerateInput>& query, const ResourceContext& resource_context, int max_seq_len);
+    GenerateStream(const std::shared_ptr<GenerateInput>& query, const ft::GptInitParameter& params, const ResourceContext& resource_context, kmonitor::MetricsReporterPtr metrics_reporter);
     virtual ~GenerateStream() {
         reportMetric();
         generate_outputs_queue_.wakeup();
@@ -66,19 +66,11 @@ public:
         return special_tokens_;
     }
 
-    void setSpecialTokens(const ft::SpecialTokens& special_tokens) {
-        special_tokens_ = special_tokens;
-    }
-
     const ResourceContext& resourceContext() const {
         return stream_cache_resource_.resourceContext();
     }
-    size_t maxSeqLen() const;
 
-    void setNeedReleaseResource(bool need_release_resource) {
-        need_release_resource_ = need_release_resource;
-        stream_cache_resource_.setNeedReleaseResource(need_release_resource);
-    }
+    size_t maxSeqLen() const;
 
     virtual void releaseResource() {
         if (need_release_resource_) {

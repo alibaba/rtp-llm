@@ -43,7 +43,6 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
     params.inter_padding_size_ = inter_size;
     params.seq_size_per_block_ = 2;
     params.reserve_runtime_mem_mb_ = 1024;
-    rtp_llm::MagaInitParams rtp_llm_params(params);    
     typedef half         T;
     const at::ScalarType scalar_type  = at::ScalarType::Half;
     const ft::DataType   data_type    = getTensorType<T>();
@@ -54,7 +53,7 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
     auto word_embeddings =
         make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{(size_t)20, hidden_units}, data->data());
     auto lm_head =
-        make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units, (size_t)20}, data->data());
+        make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{(size_t)20, hidden_units}, data->data());
     std::unordered_map<std::string, ft::ConstBufferPtr> global_weights;
     global_weights.emplace(W::embedding, std::move(word_embeddings));
     global_weights.emplace(W::lm_head, std::move(lm_head));
@@ -104,16 +103,16 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
         weights.emplace(W::attn_o_b, std::move(attention_output_weight_beta));
         weights.emplace(W::post_ln_gamma, std::move(post_layernorm_weights));
         weights.emplace(W::post_ln_beta, std::move(post_layernorm_beta));
-        weights.emplace(W::ffn_w1, std::move(ffn_weight));
-        weights.emplace(W::ffn_b1, std::move(ffn_weight_beta));
+        weights.emplace(W::ffn_w3, std::move(ffn_weight));
+        weights.emplace(W::ffn_b3, std::move(ffn_weight_beta));
         weights.emplace(W::ffn_w2, std::move(ffn_output_weight));
         weights.emplace(W::ffn_b2, std::move(ffn_output_weight_beta));
         weights.emplace(W::ffn_ln_gamma, std::move(ffn_layer_norm));
         weights.emplace(W::ffn_ln_beta, std::move(ffn_layer_norm_beta));
         layer_weights.push_back(std::move(weights));
     }
-
-    std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, layer_weights, global_weights);
+    rtp_llm::EngineInitParams rtp_llm_params(params, layer_weights, global_weights);
+    std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params);
     return engine;
 }
 
