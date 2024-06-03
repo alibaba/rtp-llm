@@ -13,7 +13,7 @@
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "autil/SynchronizedQueue.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
-#include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 #include "absl/status/statusor.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"

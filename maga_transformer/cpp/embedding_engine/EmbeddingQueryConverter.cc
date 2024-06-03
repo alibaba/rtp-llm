@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/embedding_engine/EmbeddingQueryConverter.h"
-#include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include <numeric>
 
 namespace rtp_llm {

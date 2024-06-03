@@ -2,7 +2,7 @@
 
 #include <vector>
 #include "maga_transformer/cpp/embedding_engine/handlers/HandlerBase.h"
-#include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 namespace torch_ext {
 

@@ -4,7 +4,7 @@
 #include <torch/torch.h>
 
 #include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"

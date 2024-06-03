@@ -78,6 +78,7 @@ cc_library(
     name = "buffer_hdr",
     hdrs = [
         "Buffer.h",
+        "BufferHelper.h"
     ],
     deps = [
         ":types_hdr",
@@ -99,6 +100,20 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "buffer_torch",
+    hdrs = [
+        "torch_utils/BufferTorchUtils.h",
+    ],
+    deps = [
+        ":buffer",
+        "//src/fastertransformer/utils:logger"
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 
 cc_library(
     name = "tensor_hdr",

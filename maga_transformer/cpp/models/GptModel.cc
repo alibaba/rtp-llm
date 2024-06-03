@@ -2,7 +2,7 @@
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/OpData.h"
-#include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include <memory>
 

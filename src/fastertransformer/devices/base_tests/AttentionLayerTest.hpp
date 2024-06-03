@@ -3,9 +3,9 @@
 #include <torch/torch.h>
 
 #include "src/fastertransformer/devices/testing/TestBase.h"
-#include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
-#include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/devices/torch_impl/GptModel.hpp"
 
 #define private public

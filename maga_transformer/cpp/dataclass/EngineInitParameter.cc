@@ -1,7 +1,7 @@
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/devices/utils/BufferUtils.h"
-#include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
+#include "src/fastertransformer/core/BufferHelper.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/models/W.h"
 #include "src/fastertransformer/utils/pybind_utils.h"
 #include <memory>

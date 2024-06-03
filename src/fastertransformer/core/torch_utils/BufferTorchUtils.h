@@ -1,9 +1,11 @@
 #pragma once
 
 #include <torch/extension.h>
+#include <torch/all.h>
+
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/logger.h"
-#include <torch/all.h>
+
 
 namespace fastertransformer {
 
@@ -30,17 +32,17 @@ inline size_t calcTensorBytes(torch::Tensor tensor) {
     return tensor.numel() * torch::elementSize(torch::typeMetaToScalarType(tensor.dtype()));
 }
 
-#define FOREACH_BUFFER_TORCH_TYPE_MAP(F) \
-    F(TYPE_UINT8, torch::kByte) \
-    F(TYPE_INT8, torch::kChar) \
-    F(TYPE_INT16, torch::kShort) \
-    F(TYPE_INT32, torch::kInt) \
-    F(TYPE_INT64, torch::kLong) \
-    F(TYPE_FP16, torch::kHalf) \
-    F(TYPE_FP32, torch::kFloat) \
-    F(TYPE_FP64, torch::kDouble) \
-    F(TYPE_BOOL, torch::kBool) \
-    F(TYPE_BF16, torch::kBFloat16) \
+#define FOREACH_BUFFER_TORCH_TYPE_MAP(F)    \
+    F(TYPE_UINT8, torch::kByte)             \
+    F(TYPE_INT8, torch::kChar)              \
+    F(TYPE_INT16, torch::kShort)            \
+    F(TYPE_INT32, torch::kInt)              \
+    F(TYPE_INT64, torch::kLong)             \
+    F(TYPE_FP16, torch::kHalf)              \
+    F(TYPE_FP32, torch::kFloat)             \
+    F(TYPE_FP64, torch::kDouble)            \
+    F(TYPE_BOOL, torch::kBool)              \
+    F(TYPE_BF16, torch::kBFloat16)          \
     F(TYPE_FP8_E4M3, torch::kFloat8_e4m3fn)
 
 inline DataType torchDTypeToDataType(caffe2::TypeMeta dtype) {
@@ -106,6 +108,12 @@ inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf, bool copyData
     } else {
         return torch::from_blob(buf->data(), bufferShapeToTorchShape(*buf), option);        
     }
+}
+
+inline void bufferCopy(const BufferPtr& src, torch::Tensor& dst, size_t numberOfElements) {
+    assert(dst.device().is_cpu());
+    size_t copySize = src->typeSize() * numberOfElements;
+    memcpy((void*)(dst.data_ptr<int>()), src->data(), copySize);
 }
 
 } // namespace fastertransformer

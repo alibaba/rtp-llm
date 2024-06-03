@@ -6,7 +6,7 @@
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
-#include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 
 using namespace std;
 

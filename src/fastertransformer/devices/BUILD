@@ -28,6 +28,7 @@ cc_library(
     ]),
     deps = [
         "devices_base",
+        "//src/fastertransformer/core:buffer_torch"
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

@@ -12,7 +12,7 @@
 #include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
-#include "src/fastertransformer/devices/utils/BufferUtils.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 #include "absl/status/statusor.h"
 
 namespace ft = fastertransformer;

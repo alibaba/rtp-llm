@@ -2,7 +2,10 @@
 
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/logger.h"
-#include <torch/extension.h>
+
+#include <cassert>
+#include <cstring>
+
 
 namespace fastertransformer {
 
@@ -24,11 +27,6 @@ inline void bufferCopy(const BufferPtr& src, const BufferPtr& dst, size_t number
     memcpy(dst->data(), src->data(), copySize);
 }
 
-inline void bufferCopy(const BufferPtr& src, torch::Tensor& dst, size_t numberOfElements) {
-    assert(dst.device().is_cpu());
-    size_t copySize = src->typeSize() * numberOfElements;
-    memcpy((void*)(dst.data_ptr<int>()), src->data(), copySize);
-}
 
 inline void bufferConcat(const BufferPtr& src1, const BufferPtr& src2, const BufferPtr& dst) {
     assert(src1->type() == src2->type());

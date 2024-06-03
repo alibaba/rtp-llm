@@ -7,7 +7,7 @@
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
-#include "src/fastertransformer/devices/utils/BufferTorchUtils.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
 #include <algorithm>
 
