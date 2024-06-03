@@ -88,6 +88,7 @@ class Llama(GPT):
             else:
                 raise Exception(f"unsupport rope_scaling {config_json['rope_scaling']}")
         # config.activation_type = config_json.get("hidden_act", config.activation_type)
+        config.special_tokens.bos_token_id = config_json['bos_token_id']
         config.special_tokens.eos_token_id = config_json['eos_token_id']
         use_logn_attn = config_json.get("use_logn_attn")
         if (use_logn_attn):
@@ -108,6 +109,7 @@ class Llama(GPT):
             params_json['dim'],
             params_json.get("ffn_dim_multiplier", 1),
             params_json['multiple_of'])
+        config.special_tokens.bos_token_id = 1
         config.special_tokens.eos_token_id = 2
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = params_json.get('tie_word_embeddings', False)
