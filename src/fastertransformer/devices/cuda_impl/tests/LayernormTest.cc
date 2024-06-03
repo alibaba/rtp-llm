@@ -1,5 +1,6 @@
 #include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/Weights.h"
 #include "src/fastertransformer/kernels/rmsnormKernels.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/add_residual_kernels.h"
@@ -35,8 +36,10 @@ protected:
         auto input = tensorToBuffer(input_tensor);
         auto gamma = tensorToBuffer(gamma_tensor);
         auto beta = tensorToBuffer(beta_tensor);
-        auto weights = LayerNormWeights({move(gamma), move(beta)});
-        auto gamma_only_weights = LayerNormWeights({tensorToBuffer(gamma_tensor), nullptr});
+        auto weights = LayerNormWeights(gamma, beta);
+        BufferPtr empty;
+        gamma = tensorToBuffer(gamma_tensor);
+        auto gamma_only_weights = LayerNormWeights(gamma, empty);
         auto residual = tensorToBuffer(residual_tensor);
         auto output = createBuffer({m, n}, data_type);
 

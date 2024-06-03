@@ -13,12 +13,17 @@ namespace fastertransformer {
 struct LayerNormWeights {
     ConstBufferPtr gamma = nullptr;
     ConstBufferPtr beta = nullptr;
-    LayerNormWeights() {};
+    LayerNormWeights() = default;
 
     LayerNormWeights(ConstBufferPtr& gamma,
-                     ConstBufferPtr& beta)
-        :gamma(std::move(gamma)),
-         beta(std::move(beta)) {}
+                     ConstBufferPtr& beta) :
+        gamma(std::move(gamma)),
+        beta(std::move(beta)) {}
+
+    LayerNormWeights(BufferPtr& gamma,
+                     BufferPtr& beta) :
+        gamma(std::move(gamma)),
+        beta(std::move(beta)) {}
 };
 
 typedef std::shared_ptr<const LayerNormWeights> LayerNormWeightsPtr;
