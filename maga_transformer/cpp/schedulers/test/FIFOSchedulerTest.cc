@@ -41,7 +41,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
 
-    stream->setFinished();
+    stream->setFinishedWithoutLock();
 
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
@@ -160,7 +160,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem2) {
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(cache_manager->freeBlockNums(), 1);
 
-    stream1->setFinished();
+    stream1->setFinishedWithoutLock();
     auto streams_status3 = scheduler.schedule();
     ASSERT_TRUE(streams_status3.ok());
     ASSERT_EQ(streams_status3.value().size(), 1);
@@ -190,7 +190,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(cache_manager->freeBlockNums(), 7);
 
-    stream1->setFinished();
+    stream1->setFinishedWithoutLock();
     auto streams_status2 = scheduler.schedule();
 
     ASSERT_TRUE(streams_status2.ok());
@@ -208,7 +208,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
     ASSERT_TRUE(streams_status3.ok());
     ASSERT_EQ(cache_manager->freeBlockNums(), 6);
 
-    stream2->setFinished();
+    stream2->setFinishedWithoutLock();
     auto streams_status4 = scheduler.schedule();
     ASSERT_TRUE(streams_status4.ok());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);

@@ -80,8 +80,6 @@ class CkptDatabase(BaseDatabase):
             self.load_hf_meta(path)
 
         self.load_ptuning_meta(ptuning_path)
-        
-        logging.info(f"CkptDatabase all tensor names = {self.get_pretrain_tensor_names()}")
 
     def load_megatron_meta(self, path: str):
         self.PretrainFileList = self.get_megatron_ckpt_files(Path(path))

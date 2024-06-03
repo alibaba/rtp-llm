@@ -171,6 +171,7 @@ class Pipeline(object):
         if len(token_buffer) == 0:
             token_buffer = [""] * len(texts)
 
+        #TODO(xinfei.sxf) test this
         generate_output.finished = self.piple_funcs.stop_generate_func(texts[0], **kwargs) or generate_output.finished
         if stop_word_str_list and not generate_output.finished and match_stop_words(texts[0], stop_word_str_list):
             generate_output.finished = True

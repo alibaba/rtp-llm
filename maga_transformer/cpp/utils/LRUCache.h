@@ -97,7 +97,6 @@ bool LRUCache<KeyType, ValueType>::contains(const KeyType& key) const {
 
 template<typename KeyType, typename ValueType>
 void LRUCache<KeyType, ValueType>::printCache() {
-    // 遍历列表并打印所有缓存项
     for (auto it = items_list_.begin(); it != items_list_.end(); ++it) {
         std::cout << it->first << " : " << it->second << std::endl;
     }

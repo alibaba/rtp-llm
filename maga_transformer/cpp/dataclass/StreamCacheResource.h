@@ -31,17 +31,25 @@ public:
             v_scale_ptr.push_back(addr.v_scale_ptr);
         }
     }
-    void append(size_t index, const KVCacheBlockAddr& addr) {
-        assert(k_ptr.size() > index);
+    void resize(size_t batch_id, size_t layer_id, int reserver_blocks) {
+        k_ptr[batch_id][layer_id].resize(reserver_blocks);
+        v_ptr[batch_id][layer_id].resize(reserver_blocks);
+        if (!k_scale_ptr.empty()) {
+            k_scale_ptr[batch_id][layer_id].resize(reserver_blocks);
+            v_scale_ptr[batch_id][layer_id].resize(reserver_blocks);
+        }
+    }
+    void append(size_t batch_id, const KVCacheBlockAddr& addr) {
+        assert(k_ptr.size() > batch_id);
         auto append_func = [](auto& dst_vec, auto& src_vec) {
             dst_vec.insert(dst_vec.end(), src_vec.begin(), src_vec.end());
         };
-        for (auto layer_id = 0; layer_id < k_ptr[index].size(); layer_id++) {
-            append_func(k_ptr[index][layer_id], addr.k_ptr[layer_id]);
-            append_func(v_ptr[index][layer_id], addr.v_ptr[layer_id]);
+        for (auto layer_id = 0; layer_id < k_ptr[batch_id].size(); layer_id++) {
+            append_func(k_ptr[batch_id][layer_id], addr.k_ptr[layer_id]);
+            append_func(v_ptr[batch_id][layer_id], addr.v_ptr[layer_id]);
             if (!addr.k_scale_ptr.empty()) {
-                append_func(k_scale_ptr[index][layer_id], addr.k_scale_ptr[layer_id]);
-                append_func(v_scale_ptr[index][layer_id], addr.v_scale_ptr[layer_id]);
+                append_func(k_scale_ptr[batch_id][layer_id], addr.k_scale_ptr[layer_id]);
+                append_func(v_scale_ptr[batch_id][layer_id], addr.v_scale_ptr[layer_id]);
             }
         }
     }
@@ -114,8 +122,10 @@ public:
     bool incrKVBlock();
     // TODO(xinfei.sxf) flash attention must suppor prefix prompt
     int     tryReleaseKVBlock(size_t nums);
+    void    freeBatchBlocks(size_t batch_id, std::vector<void*>& blocks);
     void    releaseResource();
     int     needKVCacheBlockNums() const;
+    int     singleBatchNeedBlocks() const;
     int     maxBlockSize() const;
 
     const BatchKVCacheBlockAddr& kvCache() const;

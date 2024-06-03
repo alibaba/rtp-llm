@@ -41,8 +41,10 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
         FT_LOG_DEBUG("request:[%ld] generate next output success", request->request_id());
         GenerateOutputsPB outputs_pb;
         QueryConverter::transResponse(&outputs_pb, &(output_status.value()));
-        // TODO(xinfei.sxf) 处理write的返回值
-        writer->Write(outputs_pb);
+        if (!writer->Write(outputs_pb)) {
+            FT_LOG_DEBUG("request:[%ld] write outputs pb failed", request->request_id());
+            break;
+        }
     }
     FT_LOG_DEBUG("request:[%ld] generate done", request->request_id());
     return grpc::Status::OK;

@@ -12,7 +12,7 @@ namespace rtp_llm {
 struct CacheItem {
     std::vector<int> token_list;
     std::vector<int> block_indices;
-    size_t           cache_key;  // 用 size_t 作为键的类型
+    size_t           cache_key;
     bool             is_resident = false;
 };
 
@@ -22,7 +22,7 @@ class BlockCache {
 public:
     BlockCache(): lru_cache_(kCacheMaxCapacity) {}
 
-    static size_t prefix_length(const std::vector<int>& left, const std::vector<int>& right);
+    static size_t prefixLength(const std::vector<int>& left, const std::vector<int>& right);
 
     std::pair<std::vector<int>, size_t> match(const std::vector<int>& token_list);
 
@@ -42,7 +42,7 @@ private:
     bool hasHashKey(size_t cache_key) const;
 
 private:
-    mutable LRUCache<size_t, CacheItem> lru_cache_;  // 使用 size_t 作为键的类型
+    mutable LRUCache<size_t, CacheItem> lru_cache_;
 };
 
 }  // namespace rtp_llm

@@ -32,7 +32,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     addr1.v_ptr       = {{{(void*)5, (void*)(6)}, {(void*)7, (void*)(8)}}};
     addr1.k_scale_ptr = {{{(void*)11, (void*)(12)}, {(void*)13, (void*)(14)}}};
     addr1.v_scale_ptr = {{{(void*)15, (void*)(16)}, {(void*)17, (void*)(18)}}};
-    stream1->setKVCache(addr1, 0);
+    stream1->setKVCache(addr1);
     stream1->setIsContextStream(false);
 
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
@@ -45,7 +45,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     addr2.v_ptr       = {{{(void*)50, (void*)(60)}, {(void*)70, (void*)(80)}}};
     addr2.k_scale_ptr = {{{(void*)110, (void*)(120)}, {(void*)130, (void*)(140)}}};
     addr2.v_scale_ptr = {{{(void*)150, (void*)(160)}, {(void*)170, (void*)(180)}}};
-    stream2->setKVCache(addr2, 0);
+    stream2->setKVCache(addr2);
     stream2->setIsContextStream(false);
 
     std::shared_ptr<GenerateInput> query3 = make_shared<GenerateInput>();
@@ -57,7 +57,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     addr3.v_ptr       = {{{(void*)500}, {(void*)700}}};
     addr3.k_scale_ptr = {{{(void*)1100}, {(void*)1300}}};
     addr3.v_scale_ptr = {{{(void*)1500}, {(void*)1700}}};
-    stream3->setKVCache(addr3, 0);
+    stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4 = make_shared<GenerateInput>();
     query4->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
@@ -68,7 +68,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     addr4.v_ptr       = {{{(void*)5000, (void*)(6000)}, {(void*)7000, (void*)(8000)}}};
     addr4.k_scale_ptr = {{{(void*)11000, (void*)(12000)}, {(void*)13000, (void*)(14000)}}};
     addr4.v_scale_ptr = {{{(void*)15000, (void*)(16000)}, {(void*)17000, (void*)(18000)}}};
-    stream4->setKVCache(addr4, 1);
+    stream4->setKVCache(addr4);
+    stream4->setReuseLength(1);
 
     std::list<GenerateStreamPtr> streams;
     streams.emplace_back(stream1);

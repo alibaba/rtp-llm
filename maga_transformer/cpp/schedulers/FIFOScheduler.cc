@@ -32,6 +32,7 @@ absl::Status FIFOScheduler::stop() {
 
 void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) const {
     for (auto it = streams.begin(); it != streams.end();) {
+        (*it)->checkTimeout();
         if ((*it)->stopped() || (*it)->finished()) {
             // Immediately free resources to run more streams
             (*it)->releaseResource();
@@ -73,6 +74,7 @@ void FIFOScheduler::evaluateRunningNext() {
         }
         auto& last_stream = *(running_streams_.rbegin());
         last_stream->tryReleaseKVBlock(last_stream->maxBlockSize());
+        last_stream->setPaused();
         FT_LOG_INFO("lack mem, stream [%ld] fallback to wait and input_length:%d seq_length:%d", last_stream->streamId(), last_stream->inputLength(), last_stream->seqLength());
         waiting_streams_.emplace_front(last_stream);
         running_streams_.pop_back();

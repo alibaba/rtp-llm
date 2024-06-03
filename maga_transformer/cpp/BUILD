@@ -60,6 +60,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@havenask//aios/autil:synchronized_queue",
+        "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:device_utils",
         "//src/fastertransformer/models:weights_define",

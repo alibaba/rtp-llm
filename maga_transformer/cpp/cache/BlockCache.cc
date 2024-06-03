@@ -11,14 +11,13 @@
 
 namespace rtp_llm {
 
-// Function to calculate a simple hash of a vector of integers
 std::size_t hashVector(const std::vector<int>& vec) {
     std::hash<std::string> hasher;
     std::string            vecString = vectorToString(vec);
     return hasher(vecString);
 }
 
-size_t BlockCache::prefix_length(const std::vector<int>& left, const std::vector<int>& right) {
+size_t BlockCache::prefixLength(const std::vector<int>& left, const std::vector<int>& right) {
     size_t max_common_length = std::min(left.size(), right.size());
     for (size_t index = 0; index < max_common_length; ++index) {
         if (left[index] != right[index]) {
@@ -33,7 +32,7 @@ std::pair<std::vector<int>, size_t> BlockCache::match(const std::vector<int>& to
     size_t    matched_len = 0;
 
     for (const auto& item : lru_cache_.items()) {
-        size_t common_length = prefix_length(item.second.token_list, token_list);
+        size_t common_length = prefixLength(item.second.token_list, token_list);
         if (common_length > matched_len) {
             matched_item = item.second;
             matched_len  = common_length;
@@ -53,7 +52,7 @@ BlockCache::put(const std::vector<int>& token_list, const std::vector<int>& bloc
     if (token_list.empty() || block_indices.empty()) {
         return {};
     }
-
+    
     size_t    cache_key = hashVector(token_list);
     CacheItem item{token_list, block_indices, cache_key, is_resident};
 

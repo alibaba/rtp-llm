@@ -93,6 +93,7 @@ public:
 enum class GenerateState {
     WAITING,
     RUNNING,
+    PAUSED,
     STOPPED,
     FINISHED,
 };

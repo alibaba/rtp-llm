@@ -39,7 +39,7 @@ void SpeculativeStream::updateDraftToken() {
         size_t src_offset = seqLength() - gen_num_per_circle_;
         device_->copy({(*new_tokens)[i], (*complete_token_ids_)[i], 0, src_offset, gen_num_per_circle_});
     }
-    target_stream_->update(new_tokens, gen_num_per_circle_, false, nullptr, ft::Buffer::emptyBuffer(), nullptr, true);
+    target_stream_->update(new_tokens, gen_num_per_circle_, ft::Buffer::emptyBuffer(), ft::Buffer::emptyBuffer(), ft::Buffer::emptyBuffer(), true);
     target_stream_->incrKVBlock();
 }
 
