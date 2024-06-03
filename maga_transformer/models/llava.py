@@ -5,8 +5,7 @@ import re
 
 from typing import List, Any, Dict, Tuple, Union
 from PIL import Image
-from transformers.models.llama.tokenization_llama import LlamaTokenizer
-from transformers import AutoConfig, CLIPVisionConfig
+from transformers import AutoConfig, CLIPVisionConfig, AutoTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.llava_weight import LlavaWeightInfo
@@ -26,7 +25,7 @@ class LlavaTokenizer(object):
                  mm_use_im_start_end: bool, 
                  vit_special_token_ids: Dict[str, Any],
                  vit_special_tokens: Dict[str, Any]):
-        self.tokenizer = LlamaTokenizer.from_pretrained(tokenzier_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenzier_path)
         self.mm_use_im_patch_token = mm_use_im_patch_token
         self.mm_use_im_start_end = mm_use_im_start_end
 
