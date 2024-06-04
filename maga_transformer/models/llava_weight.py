@@ -14,5 +14,12 @@ class LlavaWeightInfo(LlamaWeightInfo, BaseMultiModalWeightInfo):
     
     def _get_weight_info(self):
         llava_weight = super()._get_weight_info()
+        
+        # for llava-next
+        for weight in llava_weight.layer_weights:
+            if weight.name == W.attn_o_b:
+                llava_weight.layer_weights.remove(weight)
+                break
+
         self._get_vit_info(llava_weight)
         return llava_weight
