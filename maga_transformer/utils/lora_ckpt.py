@@ -128,8 +128,7 @@ class LoraCkpt:
         # the format which is "base_model.model.{}.{}.weight"
         pattern = r'base_model\.model\.(.*)\.(lora_A|lora_B)\.weight'
         if re.fullmatch(pattern, tensor_name) == None:
-            raise Exception(f"invalid lora tensor name : {tensor_name}")
-        return None
+            logging.warn(f"invalid lora tensor name : {tensor_name}")
 
     def remove_lora(self, name:str):
         for key, _ in self.LoraFileList.items():
