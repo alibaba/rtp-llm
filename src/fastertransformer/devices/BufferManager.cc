@@ -57,28 +57,26 @@ void BufferManager::doRecycle(Buffer* buffer, IAllocator* allocator) {
 }
 
 void BufferManager::recordAllcation(const BufferParams& params, const BufferHints& hints, const BufferPtr& buffer) {
-    if (trace_memory_) {
-        auto stack_trace_id = autil::StackTracer::getInstance()->getTraceId();
-        if (trace_malloc_stack_) {
-            FT_LOG_INFO("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
-                        buffer->data(), buffer->sizeBytes(), hints.tag.c_str(), stack_trace_id);
-        }
-        if (auto tracker_allocator_ = dynamic_cast<TrackerAllocator*>(device_allocator_)) {
-            auto tracker_status = tracker_allocator_->getTrackerStatus();
-            if (tracker_status.allocated_size > device_max_allocated_bytes_) {
-                FT_LOG_INFO("Device allocated size or fragmented size reached new maximum, \n"
-                            "previous is %zu bytes, stack trace id[%lu]\n  %s",
-                            device_max_allocated_bytes_, stack_trace_id,
-                            tracker_status.toString().c_str());
-                device_max_allocated_bytes_ = tracker_status.allocated_size;
-            }
-        }
-    }
+    auto stack_trace_id = trace_malloc_stack_ ? autil::StackTracer::getInstance()->getTraceId() : 0;
     {
         WriteLock lock(mutex_);
-        AllocationRecord record = {params.allocation, true, buffer->sizeBytes(), hints};
+        AllocationRecord record = {params.allocation, buffer->sizeBytes(), hints, stack_trace_id};
         allocation_records_[buffer->data()] = record;
     }
+    if (trace_memory_) {
+        FT_LOG_DEBUG("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
+                     buffer->data(), buffer->sizeBytes(), hints.tag.c_str(), stack_trace_id);
+        auto status = queryStatus();
+        if (status.device_allocated_bytes > device_max_allocated_bytes_) {
+            FT_LOG_INFO("Device allocated size or fragmented size reached new maximum %zu, \n"
+                        "previous is %zu bytes, current stack trace id[%lu]\n  %s",
+                        status.device_allocated_bytes,
+                        device_max_allocated_bytes_, stack_trace_id,
+                        printAllocationRecords(device_allocator_).c_str());
+            device_max_allocated_bytes_ = status.device_allocated_bytes;
+        }
+    }
+
 }
 
 void BufferManager::recordRecycle(Buffer* buffer) {
@@ -108,6 +106,44 @@ BufferStatus BufferManager::queryStatus() {
         status.device_fragmented_bytes = tracker_status.fragmented_size;
     }
     return move(status);
+}
+
+string BufferManager::printAllocationRecords(IAllocator* allocator) {
+    if (auto tracker_allocator = dynamic_cast<TrackerAllocator*>(allocator)) {
+        auto tracker_status = tracker_allocator->getTrackerStatus();
+        std::ostringstream info;
+        info << "Memory Tracker [" << (int32_t)tracker_allocator->type() << "] Status:\n";
+        info << "allocated " << tracker_status.allocated_chunk_count
+             << " chunks, size: " << tracker_status.allocated_size << "\n"
+             << "available " << tracker_status.available_size
+             << " bytes, with " << tracker_status.fragment_chunk_count
+             << " fragments of size: " << tracker_status.fragmented_size << "\n";
+        info << "--------------------------------------------------------------------------\n";
+        info << "|        ADDR |         size (     hex) | AVAIL| TRACE|              TAG |\n";
+        info << "--------------------------------------------------------------------------\n";
+        {
+            ReadLock lock(mutex_);
+            for (const auto chunk: tracker_status.chunks) {
+                info << "| " << chunk.ptr
+                     << " | " << setw(12) << chunk.size
+                     << " (" << std::setw(8) << std::hex << chunk.size << std::dec << ")"
+                     << " | " << (chunk.used ? "USED" : "FREE");
+                const auto alloc_record = allocation_records_.find(chunk.ptr);
+                if (alloc_record != allocation_records_.end()) {
+                    info << " | " << setw(4) << alloc_record->second.trace_id
+                         << " | " << setw(16) << alloc_record->second.hints.tag.c_str()
+                         << " |\n";
+                } else {
+                    info << " |      |                  |\n";
+                }
+            }
+        }
+        info << "--------------------------------------------------------------------------\n";
+        return info.str();
+    } else {
+        FT_LOG_WARNING("BufferManager::printAllocationRecords is only effective when using TrackerAllocator!");
+        return "";
+    }
 }
 
 } // namespace fastertransformer

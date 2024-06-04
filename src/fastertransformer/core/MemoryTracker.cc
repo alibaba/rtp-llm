@@ -7,25 +7,6 @@ using WriteLock = std::unique_lock<std::shared_mutex>;
 
 namespace fastertransformer {
 
-std::string TrackerStatus::toString() const {
-    std::ostringstream info;
-    info << "Memory Tracker Status:\n";
-    info << "allocated " << allocated_chunk_count << " chunks, size: " << allocated_size << "\n"
-         << "available " << available_size
-         << " bytes, with " << fragment_chunk_count
-         << " fragments of size: " << fragmented_size << "\n";
-    info << "-----------------------------------------------\n";
-    for (const auto chunk: chunks) {
-        info << "| " << chunk.ptr
-             << " | " << setw(12) << chunk.size
-             << " (" << std::setw(8) << std::hex << chunk.size << std::dec << ")"
-             << " | " << (chunk.used ? "USED" : "FREE")
-             << " |\n";
-    }
-    info << "-----------------------------------------------\n";
-    return info.str();
-}
-
 MemoryTracker::MemoryTracker(void* ptr, const size_t size, const size_t align_size) {
     total_size_ = size;
     align_size_ = align_size;

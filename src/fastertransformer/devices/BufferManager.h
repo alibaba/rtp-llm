@@ -57,12 +57,11 @@ struct BufferStatus {
 
 struct AllocationRecord {
     AllocationType allocation_type;
-    bool success;
     size_t bytes;
     BufferHints hints;
+    size_t trace_id;
 };
 
-// TODO: maybe need a lock for allocators?
 class BufferManager {
 public:
     BufferManager(IAllocator* device_allocator, IAllocator* host_allocator);
@@ -72,6 +71,7 @@ public:
     BufferPtr allocate(const BufferParams& params, const BufferHints& hints);
     void recycle(Buffer* buffer, IAllocator* allocator);
     virtual BufferStatus queryStatus();
+    std::string printAllocationRecords(IAllocator* allocator);
 
 private:
     virtual BufferPtr doAllocate(const BufferParams& params, const BufferHints& hints);
@@ -87,8 +87,8 @@ private:
     std::shared_mutex mutex_;
 
     size_t device_max_allocated_bytes_;
-    bool trace_memory_;
-    bool trace_malloc_stack_;
+    const bool trace_memory_;
+    const bool trace_malloc_stack_;
 };
 
 } // namespace fastertransformer

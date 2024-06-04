@@ -22,9 +22,6 @@ public:
     size_t fragment_chunk_count   = 0;
     size_t allocated_chunk_count  = 0;
     std::vector<MemoryChunk> chunks;
-
-public:
-    std::string toString() const;
 };
 
 // This class is designed to completely manage assignable memories.
