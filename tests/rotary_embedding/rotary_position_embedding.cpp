@@ -11,7 +11,7 @@ namespace unittest {
 template<RotaryEmbeddingStyle style>
 __global__ void KernelWrapper(
     at::PackedTensorAccessor32<float,4,at::RestrictPtrTraits> input,
-    const int dim, const int base, const float scalar,
+    const int dim, const float base, const float scalar,
     int max_position_embeddings,
     int max_logn_seq_len) {
 
@@ -28,8 +28,6 @@ __global__ void KernelWrapper(
         x = *reinterpret_cast<float2*>(&input[batch_idx][seq_idx][headnum_idx][headsize_idx * 2]);
         if constexpr (style == RotaryEmbeddingStyle::GLM) {
             fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, seq_idx, dim, base);
-        } else if constexpr (style == RotaryEmbeddingStyle::Base) {
-            fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, dim, base);
         } else if constexpr (style == RotaryEmbeddingStyle::LinearScalar) {
             fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, dim, base, scalar);
         } else if constexpr (style == RotaryEmbeddingStyle::NTKScalar) {
@@ -48,7 +46,7 @@ __global__ void KernelWrapper(
 class RotaryPositionEmbeddingOp: public torch::jit::CustomClassHolder {
 public:
     RotaryPositionEmbeddingOp(int64_t dim, int64_t max_position_embeddings,
-                              int64_t base, double scalar, int64_t max_logn_seq_len,
+                              double base, double scalar, int64_t max_logn_seq_len,
                               int64_t style):
         dim(dim),max_position_embeddings(max_position_embeddings),
         base(base),scalar(scalar),style(style),
@@ -58,7 +56,7 @@ public:
 
 private:
     int64_t dim;
-    int64_t base;
+    double base;
     double scalar = 1.0;
     int64_t max_position_embeddings = 2048;
     int64_t style = 0;
@@ -81,9 +79,6 @@ torch::Tensor RotaryPositionEmbeddingOp::forward(torch::Tensor input) {
     switch (style)
     {
     case 0:
-        KernelWrapper<RotaryEmbeddingStyle::Base><<<grid, block, smem_size, stream>>>(
-            input.packed_accessor32<float,4,at::RestrictPtrTraits>(), 
-            dim, base, scalar, max_position_embeddings, max_logn_seq_len);
         break;
     
     case 1:

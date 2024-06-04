@@ -118,6 +118,8 @@ struct Multihead_attention_params_base {
     // 1: neox / llama
     // 2: glm
     // 3: glm2
+    // 4: qwen dynamic ntk
+    // 5: yarn
     int  rotary_embedding_style = 0;
     bool use_logn_attn          = false;
     int  logn_seq_len           = 2048;
@@ -125,7 +127,6 @@ struct Multihead_attention_params_base {
     const int* prefix_prompt_lengths     = nullptr;
     int        max_prefix_prompt_length  = 0;
     bool       count_prefix_length       = false;
-    int        position_embeddings_scale = 1;
     int        base_scale                = 1;
 
     // The current timestep. TODO Check that do we only this param in cross attention?
@@ -268,12 +269,11 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         const int     size_per_head,
                                         const int     rotary_embedding_dim,
                                         const int     rotary_embedding_style,
-                                        const int     rotary_embedding_base,
+                                        const float   rotary_embedding_base,
                                         const int     logn_seq_len,
                                         const bool    use_logn_attn,
-                                        const float   dynamic_embedding_scalar,
+                                        const float   rotary_embedding_scale,
                                         const int     dynamic_embedding_max_pos,
-                                        const int     position_embeddings_scale,
                                         const int     base_scale,
                                         const int     memory_max_len,
                                         const int*    prefix_prompt_lengths,

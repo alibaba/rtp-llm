@@ -75,15 +75,16 @@ class Llama(GPT):
         config.vocab_size = config_json['vocab_size']
         config.layernorm_eps = config_json.get('rms_norm_eps', config_json.get('layer_norm_eps', 1e-05))
         config.inter_size = config_json['intermediate_size']
-        config.rotary_embedding_base = int(config_json.get('rope_theta', 10000))
+        config.rotary_embedding_base = config_json.get('rope_theta', 10000)
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         if config_json.get('rope_scaling', None):
+            config.rotary_embedding_scale = config_json['rope_scaling']['factor']
+            config.dynamic_embedding_max_pos = config_json.get('max_position_embeddings', 2048)
             if config_json['rope_scaling']['type'] == 'dynamic':
-                config.dynamic_embedding_scalar = config_json['rope_scaling']['factor']
-                config.dynamic_embedding_max_pos = config_json.get('max_position_embeddings', 2048)
+                config.rotary_embedding_style = 1
             elif config_json['rope_scaling']['type'] == 'linear':
-                config.position_embeddings_scale = int(config_json['rope_scaling']['factor'])
+                config.rotary_embedding_style = 5
             else:
                 raise Exception(f"unsupport rope_scaling {config_json['rope_scaling']}")
         # config.activation_type = config_json.get("hidden_act", config.activation_type)

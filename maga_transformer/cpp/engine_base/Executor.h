@@ -23,9 +23,8 @@ public:
         ft::RopeConfig       rope_config{(ft::RopeType)params.rotary_embedding_style_,
                                    (size_t)params.rotary_embedding_dim_,
                                    (size_t)params.rotary_embedding_base_,
-                                   (float)params.dynamic_embedding_scalar_,
+                                   (float)params.rotary_embedding_scale_,
                                    (int)params.dynamic_embedding_max_pos_,
-                                   (float)params.position_embeddings_scale_,
                                    (float)params.base_scale_,
                                    (bool)params.use_logn_attn_,
                                    (int)params.logn_seq_len_};

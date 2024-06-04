@@ -15,9 +15,8 @@ struct RopeConfig {
     RopeType embedding_style;
     size_t embedding_dim;
     size_t embedding_base;
-    float dynamic_embedding_scale = 0.0;
+    float rotary_embedding_scale = 1.0;
     int dynamic_embedding_max_pos = 0;
-    float position_embeddings_scale = 1.0f;
     float base_scale = 1.0f;
     bool use_logn_attn = false;
     int logn_seq_len = 2048;

@@ -122,10 +122,9 @@ public:
     int64_t rotary_embedding_dim_      = 0;
     int64_t rotary_embedding_style_    = 0;
     int64_t position_ids_style_        = 0;
-    int64_t rotary_embedding_base_     = 10000;
-    double  dynamic_embedding_scalar_  = 0.0;
+    float rotary_embedding_base_     = 10000.f;
+    double  rotary_embedding_scale_  = 1.0;
     int64_t dynamic_embedding_max_pos_ = 0;
-    int64_t position_embeddings_scale_ = 1;
     int64_t base_scale_                = 1;
     double  input_embedding_scalar_    = 1; // for Gemma, hidden_states = hidden_states * (hidden_size**0.5)
 

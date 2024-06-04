@@ -127,12 +127,11 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         const int     size_per_head,
                                         const int     rotary_embedding_dim,
                                         const int     rotary_embedding_style,
-                                        const int     rotary_embedding_base,
+                                        const float   rotary_embedding_base,
                                         const int     logn_seq_len,
                                         const bool    use_logn_attn,
-                                        const float   dynamic_embedding_scalar,
+                                        const float   rotary_embedding_scale,
                                         const int     dynamic_embedding_max_pos,
-                                        const int     position_embeddings_scale,
                                         const int     base_scale,
                                         const int     memory_max_len,
                                         const int*    prefix_prompt_lengths,
@@ -217,7 +216,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
     params.hidden_size_per_head           = size_per_head;
     params.rotary_embedding_dim           = rotary_embedding_dim;
     params.rotary_embedding_base          = rotary_embedding_base;
-    params.rotary_embedding_scale         = dynamic_embedding_scalar;
+    params.rotary_embedding_scale         = rotary_embedding_scale;
     params.rotary_embedding_max_positions = dynamic_embedding_max_pos;
     params.rotary_embedding_style         = rotary_embedding_style;
     params.use_logn_attn                  = use_logn_attn;
@@ -229,7 +228,6 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
     }
     params.relative_attention_bias_stride = relative_attention_bias_stride;
     params.max_distance                   = 0;
-    params.position_embeddings_scale      = position_embeddings_scale;
     params.base_scale                     = base_scale;
     // The slope of linear position bias per head, e.g., ALiBi.
     if (linear_bias_slopes != nullptr) {
@@ -273,12 +271,11 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                                      const int     size_per_head,                                      \
                                                      const int     rotary_embedding_dim,                               \
                                                      const int     rotary_embedding_style,                             \
-                                                     const int     rotary_embedding_base,                              \
+                                                     const float   rotary_embedding_base,                              \
                                                      const int     logn_seq_len,                                       \
                                                      const bool    use_logn_attn,                                      \
-                                                     const float   dynamic_embedding_scalar,                           \
+                                                     const float   rotary_embedding_scale,                           \
                                                      const int     dynamic_embedding_max_pos,                          \
-                                                     const int     position_embeddings_scale,                          \
                                                      const int     base_scale,                                         \
                                                      const int     memory_max_len,                                     \
                                                      const int*    prefix_prompt_lengths,                              \

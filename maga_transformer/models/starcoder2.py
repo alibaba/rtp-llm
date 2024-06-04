@@ -136,8 +136,7 @@ class StarCoder2(GPT):
         config.special_tokens.bos_token_id = config_json['bos_token_id']
         config.activation_type = config_json['activation_function']
         config.has_post_decoder_layernorm = True
-        config.rotary_embedding_base = int(
-            config_json.get('rope_theta', 1000000))
+        config.rotary_embedding_base = config_json.get('rope_theta', 1000000)
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         return config

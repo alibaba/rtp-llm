@@ -1406,12 +1406,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     float rotary_embedding_base  = params.rotary_embedding_base;
     float rotary_embedding_scale = params.rotary_embedding_scale;
     if (is_valid_qk_vec) {
-        // update_rotary_base_n_scale(rotary_embedding_base,
-        //                                  rotary_embedding_scale,
-        //                                  params.rotary_embedding_scale_type,
-        //                                  params.rotary_embedding_dim,
-        //                                  params.rotary_embedding_max_positions,
-        //                                  tlength);
+
         // Query
         // The stride between tokens. We may be able to always use params.stride.
         uint32_t q_stride = params.stride ? static_cast<uint32_t>(params.stride) : (num_heads * Dh);
@@ -1505,7 +1500,6 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                       params.rotary_embedding_base,
                       params.rotary_embedding_scale,
                       params.rotary_embedding_max_positions,
-                      params.position_embeddings_scale,
                       params.base_scale,
                       input_len,
                       prefix_prompt_length,

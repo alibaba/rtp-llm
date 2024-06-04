@@ -198,7 +198,7 @@ class QWenV2(QWen):
         config.head_num_kv = config_json.get("num_key_value_heads", config.head_num)
         config.size_per_head = config_json["hidden_size"] // config.head_num
         config.layer_num = config_json["num_hidden_layers"]
-        config.rotary_embedding_base = int(config_json.get("rope_theta", config.rotary_embedding_base))
+        config.rotary_embedding_base = config_json.get("rope_theta", config.rotary_embedding_base)
         config.vocab_size = config_json["vocab_size"]
         config.rotary_embedding_dim = config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)

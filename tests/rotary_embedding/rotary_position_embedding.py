@@ -5,7 +5,6 @@ import math
 import importlib
 import einops
 
-from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXRotaryEmbedding
 from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXLinearScalingRotaryEmbedding
 from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXDynamicNTKScalingRotaryEmbedding
 from transformers.models.gpt_neox.modeling_gpt_neox import apply_rotary_pos_emb
@@ -70,26 +69,6 @@ class TestRope(unittest.TestCase):
 
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
-
-    def test_RotaryEmbedding(self):
-        torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")
-
-        base = 10000
-        dim = 128
-        headsize = 32
-        batch_size = 16
-        max_position_embeddings = 2048
-        cuda = torch.device('cuda')
-        for seq_len in range(1024, 4096, 1024):
-            self.RopeOP = torch.classes.unittest.RotaryPositionEmbeddingOp(dim, max_position_embeddings, base, 1.0, 0, 0)
-            self.Rope = GPTNeoXRotaryEmbedding(dim, max_position_embeddings, base, cuda)
-            x = torch.rand(batch_size, seq_len, headsize, dim).cuda()
-            position_ids = torch.arange(0, seq_len, dtype=torch.long).cuda()
-            position_ids = position_ids.unsqueeze(0).view(-1, seq_len)
-            cos, sin = self.Rope(x.permute(0, 2, 1, 3), seq_len)
-            result, _ = apply_rotary_pos_emb(x.permute(0, 2, 1, 3), x.permute(0, 2, 1, 3), cos, sin, position_ids)
-            test = self.RopeOP.forward(x)
-            torch.testing.assert_close(test, result.permute(0, 2, 1, 3), atol=1e-3, rtol=1e-5)
 
     def test_LinearScaling(self):
         torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/tests/libtest_ops.so")

@@ -118,7 +118,7 @@ class Mixtral(GPT):
             has_moe_norm = True,
             rotary_embedding_style=1,
             has_post_decoder_layernorm=True,
-            rotary_embedding_base = int(config_json.get('rope_theta', 10000)),
+            rotary_embedding_base = config_json.get('rope_theta', 10000),
             expert_num = config_json['num_local_experts'],
             moe_k = config_json['num_experts_per_tok'],
             moe_style = 1,

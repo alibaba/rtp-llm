@@ -305,7 +305,7 @@ class QWenBase(GPT):
         config.layernorm_eps = config_json.get("layer_norm_epsilon", config.layernorm_eps)
         config.layer_num = config_json.get("num_hidden_layers", config_json.get("n_layer", config.layer_num))
         config.vocab_size = config_json.get("vocab_size", config_json.get("padded_vocab_size", config.vocab_size))
-        config.rotary_embedding_base = int(config_json.get('rotary_emb_base', 10000))
+        config.rotary_embedding_base = config_json.get('rotary_emb_base', 10000)
         config.rotary_embedding_dim = config.size_per_head
         config.special_tokens.eos_token_id = config_json.get("eos_token_id", config.special_tokens.eos_token_id)
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)

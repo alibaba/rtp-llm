@@ -58,7 +58,7 @@ class ChatGlmV2(GPT):
     
     @staticmethod
     def get_rotary_embedding_scale(config, config_json):   
-        config.position_embeddings_scale = int(config_json.get("rope_ratio", 1))
+        config.rotary_embedding_scale = config_json.get("rope_ratio", 1)
         return config
     
     @staticmethod

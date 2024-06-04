@@ -1473,12 +1473,11 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                                    const int   size_per_head,
                                                    const int   rotary_embedding_dim,
                                                    const int   rotary_embedding_style,
-                                                   const int   rotary_embedding_base,
+                                                   const float rotary_embedding_base,
                                                    const int   logn_seq_len,
                                                    const bool  use_logn_attn,
-                                                   const float dynamic_embedding_scalar  = 0.0f,
+                                                   const float rotary_embedding_scale  = 0.0f,
                                                    const int   dynamic_embedding_max_pos = 0,
-                                                   const int   position_embeddings_scale = 1,
                                                    const int   base_scale                = 1)
 {
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3, head_num, size_per_head], and
@@ -1603,9 +1602,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                 rotary_embedding_dim,
                 seq_len,
                 rotary_embedding_base,
-                dynamic_embedding_scalar,
+                rotary_embedding_scale,
                 dynamic_embedding_max_pos,
-                position_embeddings_scale,
                 base_scale,
                 input_len,
                 PREFIX_PROMPT,
@@ -1662,9 +1660,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                              rotary_embedding_base,                                                    \
                                              logn_seq_len,                                                             \
                                              use_logn_attn,                                                            \
-                                             dynamic_embedding_scalar,                                                 \
+                                             rotary_embedding_scale,                                                 \
                                              dynamic_embedding_max_pos,                                                \
-                                             position_embeddings_scale,                                                \
                                              base_scale);
 
 template<typename T>
@@ -1685,10 +1682,9 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     const int                        size_per_head,
                                     const int                        rotary_embedding_dim,
                                     const int                        rotary_embedding_style,
-                                    const int                        rotary_embedding_base,
-                                    const float                      dynamic_embedding_scalar,
+                                    const float                      rotary_embedding_base,
+                                    const float                      rotary_embedding_scale,
                                     const int                        dynamic_embedding_max_pos,
-                                    const int                        position_embeddings_scale,
                                     const int                        base_scale,
                                     const int                        logn_seq_len,
                                     const bool                       use_logn_attn,
@@ -1856,10 +1852,9 @@ INSTANTIATESPLITQKV(__nv_bfloat16);
                                                  const int                        size_per_head,                       \
                                                  const int                        rotary_embedding_dim,                \
                                                  const int                        rotary_embedding_style,              \
-                                                 const int                        rotary_embedding_base,               \
-                                                 const float                      dynamic_embedding_scalar,            \
+                                                 const float                      rotary_embedding_base,               \
+                                                 const float                      rotary_embedding_scale,            \
                                                  const int                        dynamic_embedding_max_pos,           \
-                                                 const int                        position_embeddings_scale,           \
                                                  const int                        base_scale,                          \
                                                  const int                        logn_seq_len,                        \
                                                  const bool                       use_logn_attn,                       \
