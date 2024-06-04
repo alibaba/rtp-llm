@@ -50,7 +50,7 @@ void DeviceBase::syncCommunication() {
 
 CloneOutput DeviceBase::clone(const CloneParams& params) {
     const auto& src = params.input;
-    auto dst = allocateBuffer({src.type(), src.shape(), params.alloc_type});
+    auto dst = allocateBuffer({src.type(), src.shape(), params.alloc_type}, params.hints);
     copy({*dst, src});
     return move(dst);
 }

@@ -20,7 +20,7 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     const auto hidden_size = embedding_table.shape()[1];
     const auto data_type = embedding_table.type();
 
-    auto embeddings = allocateBuffer({data_type, {token_num, hidden_size}});
+    auto embeddings = allocateBuffer({data_type, {token_num, hidden_size}}, {"embedding"});
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeEmebeddingLookup,
         embeddings->data(),

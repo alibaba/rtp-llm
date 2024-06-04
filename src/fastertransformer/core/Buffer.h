@@ -10,6 +10,29 @@
 
 namespace fastertransformer {
 
+enum class BufferLifecycleType {
+    SHORT,
+    LONG
+};
+
+enum class SpaceComplexityType {
+    UNKNOWN,
+    CONSTANT,
+    LINEAR,
+    QUADRATIC
+};
+
+struct BufferHints {
+    BufferHints(const std::string& tag = "",
+                BufferLifecycleType lifecycle = BufferLifecycleType::SHORT,
+                SpaceComplexityType space_complexity = SpaceComplexityType::UNKNOWN)
+    : tag(tag), lifecycle(lifecycle), space_complexity(space_complexity) {}
+
+    std::string tag;
+    BufferLifecycleType lifecycle;
+    SpaceComplexityType space_complexity;
+};
+
 // Buffer is similar to Tensor, but with more limited functionality.
 // It only includes a pointer with metadata.
 class Buffer {

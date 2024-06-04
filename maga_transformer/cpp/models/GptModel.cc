@@ -82,8 +82,10 @@ void GptModel::prepareAttentionInputs(
     checkKvBlocksShape(inputs.kv_cache_blocks);
     checkKvBlocksShape(inputs.kv_cache_scales);
 
-    attention_inputs.cu_seqlens = device_->clone({*vector2Buffer(cu_seqlens_data)});
-    attention_inputs.padding_offset = device_->clone({*vector2Buffer(padding_offset_data)});
+    attention_inputs.cu_seqlens = device_->clone(
+        {*vector2Buffer(cu_seqlens_data), AllocationType::DEVICE, {"cu_seqlens"}});
+    attention_inputs.padding_offset = device_->clone(
+        {*vector2Buffer(padding_offset_data), AllocationType::DEVICE, {"padding_offset"}});
     attention_inputs.decoder_batch_size = decoder_batch_size;
     attention_inputs.context_batch_size = context_batch_size;
     attention_inputs.context_max_seq_len = max_context_seq_len;
@@ -99,7 +101,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto norm_eps = description_.layernorm_eps;
 
     const auto batch_size = inputs.input_lengths->shape()[0];
-    const auto combo_tokens = device_->clone({*inputs.combo_tokens});
+    const auto combo_tokens = device_->clone(
+        {*inputs.combo_tokens, AllocationType::DEVICE, {"combo_tokens"}});
     const auto input_lengths = device_->clone({*inputs.input_lengths});
     const auto sequence_lengths = device_->clone({*inputs.sequence_lengths});
 
@@ -132,7 +135,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     prepareAttentionInputs(inputs, attention_common_inputs);
     BufferPtr input_kv_blocks;
     if (inputs.kv_cache_blocks) {
-        input_kv_blocks = device_->clone({*inputs.kv_cache_blocks});
+        input_kv_blocks = device_->clone({*inputs.kv_cache_blocks, AllocationType::DEVICE, {"kv_block_ptrs"}});
     }
 
     printBufferData(*hidden, "input_hidden");
@@ -142,21 +145,25 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     for (int i = 0; i < layer_num; ++i) {
         const auto& layer = weights_.layers[i];
 
-        auto residual = device_->allocateBuffer({hidden->type(), hidden->shape()}, {"residual"});
-        device_->copy({*residual, *hidden});
+        auto attn_out_buf = device_->allocateBuffer({hidden->type(), hidden->shape()}, {"attn_out_buf"});
+        auto residual = hidden;
         if (layer.pre_layernorm) {
+            residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
             device_->layernorm(LayernormParams(
                 *hidden, *hidden, nullopt, norm_type,
                 *layer.pre_layernorm, norm_eps));
         }
+
         BufferPtr layer_kv_blocks_ptr;
         if (input_kv_blocks) {
             auto layer_buffer = (*input_kv_blocks)[i];
             layer_kv_blocks_ptr = std::make_unique<Buffer>(layer_buffer.where(), layer_buffer.type(), layer_buffer.shape(), layer_buffer.data());
             attention_common_inputs.kv_cache_blocks = *layer_kv_blocks_ptr;
         }
+
         auto attn_output = device_->attentionLayer(AttentionLayerParams({
             *hidden,
+            move(attn_out_buf),
             description_.attention_conf,
             layer.self_attention_weights,
             attention_common_inputs,
@@ -174,12 +181,12 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                 device_props_.attn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual,
                 nullopt, ft::mayGetRef(layer.self_attention_weights.output_weight->bias)));
             if (description_.post_layernorm) {
-                residual = device_->clone(*hidden);
+                residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
             } else {
-                residual.swap(attn_hidden);
+                residual = attn_hidden;
             }
         } else {
-            hidden.swap(attn_hidden);
+            hidden = move(attn_hidden);
         }
 
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_input");
@@ -189,7 +196,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             description_.activation_type,
             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt
         }));
-        hidden.swap(ffn_output.hidden_states);
+        hidden = ffn_output.hidden_states;
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_output");
 
         // TODO: maybe move this layernorm to ffn layer

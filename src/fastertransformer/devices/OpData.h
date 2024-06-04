@@ -77,11 +77,14 @@ inline std::optional<std::reference_wrapper<T>> mayGetRef(const std::shared_ptr<
 using CloneOutput = BufferPtr;
 
 struct CloneParams {
-    CloneParams(const Buffer& input, const AllocationType alloc_type = AllocationType::DEVICE)
-    : input(input), alloc_type(alloc_type) {}
+    CloneParams(const Buffer& input,
+                const AllocationType alloc_type = AllocationType::DEVICE,
+                const BufferHints& hints = BufferHints())
+    : input(input), alloc_type(alloc_type), hints(hints) {}
 
     const Buffer& input;
     const AllocationType alloc_type;
+    const BufferHints& hints;
 };
 
 struct CopyParams {
@@ -314,6 +317,7 @@ struct AttentionLayerOutput {
 
 struct AttentionLayerParams {
     const Buffer&                   input;
+    BufferPtr                       output;
     const AttentionConfigs&         configs;
     const AttentionLayerWeights&    weights;
     AttentionCommonInputs&          common;

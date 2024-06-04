@@ -38,8 +38,9 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
 
     // attention layer output is preallocated to avoid memory fragmentation
     // note that this output is returned and further used as residual
-    auto output = allocateBuffer({input.type(), {h_token_num, output_weight->kernel->shape()[1]}},
-                                 {"attn_layer_output"});
+    auto output = params.output ? params.output
+                : allocateBuffer({input.type(), {h_token_num, output_weight->kernel->shape()[1]}},
+                                 {"attn_layer_out"});
 
     // NOTE: Cuda implementation fused adding qkv_weight->bias in invokeAddFusedQKVBiasTranspose kernel call.
     // other devices need to be careful about this.

@@ -114,8 +114,9 @@ CudaDevice::~CudaDevice() {
 
 void CudaDevice::init() {
     DeviceBase::init();
-    printf("max batch size: %d\n", init_params_.max_batch_size);
-    curandstate_buf_ = allocateBuffer({init_params_.max_batch_size * sizeof(curandState_t)});
+    FT_LOG_INFO("max batch size: %d\n", init_params_.max_batch_size);
+    curandstate_buf_ = allocateBuffer(
+        {init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
 }
 
 void CudaDevice::syncAndCheck() {

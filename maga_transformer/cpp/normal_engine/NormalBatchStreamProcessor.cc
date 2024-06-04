@@ -63,7 +63,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             sequence_lengths[batch_idx] = stream->seqLength() - 1; // need remove
             // TODO(xinfei.sxf) decode stream 还需要设置prefix len吗？
             prefix_lengths[batch_idx]   = stream->reuseLength();
-            lora_ids[batch_idx]         = stream->loraId(); 
+            lora_ids[batch_idx]         = stream->loraId();
             memcpyKvCache(kv_cache_blocks,
                           kv_cache.k_ptr[i],
                           kv_cache.v_ptr[i],
@@ -91,7 +91,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         token_idx += input_tokens.size();
         input_lengths[batch_idx]  = stream->contextLength();
         prefix_lengths[batch_idx] = stream->reuseLength();
-        lora_ids[batch_idx]       = stream->loraId(); 
+        lora_ids[batch_idx]       = stream->loraId();
         auto kv_cache             = stream->kvCache();
         FT_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
         FT_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
@@ -187,11 +187,11 @@ void NormalBatchStreamProcessor::createAttentionMask(const StreamGroups& stream_
 
     FT_LOG_DEBUG("attention_mask = [%s]", attention_mask->debugStringWithData<float>().c_str());
     auto convert_attention_mask = device_->convert({attention_mask, target_data_type});
-    auto attention_mask_gpu =
-        device_->allocateBuffer({convert_attention_mask->type(), convert_attention_mask->shape()});
+    auto attention_mask_gpu = device_->allocateBuffer(
+        {convert_attention_mask->type(), convert_attention_mask->shape()}, {"attn_mask"});
     device_->copy({*attention_mask_gpu, *convert_attention_mask});
 
-    FT_LOG_DEBUG("create attention_mask done");    
+    FT_LOG_DEBUG("create attention_mask done");
 
     // TODO(xinfei.sxf) add convert to target data type
     model_input.attention_mask = attention_mask_gpu;
@@ -201,7 +201,7 @@ absl::StatusOr<SamplerInputs>
 NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_groups,
                                                const GptModelInputs&  model_inputs,
                                                const GptModelOutputs& model_output) const {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);    
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     assert(!stream_groups.empty());
     const auto& context_streams = stream_groups.contextStreams();
     const auto& decode_streams  = stream_groups.decodeStreams();

@@ -122,6 +122,7 @@ void AttentionLayerTest<T>::testAttentionLayer(
     auto attention_weights = getAttentionWeights(gpt_attention);
     AttentionLayerParams params {
         *input_buffer,
+        nullptr,
         attention_conf,
         attention_weights,
         common_inputs

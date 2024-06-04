@@ -16,7 +16,7 @@ Sampler::Sampler(const SamplerInitParams& params)
             {DataType::TYPE_INT32, {max_batch_size}, AllocationType::HOST});
         std::fill_n(eos_ids_host->data<int32_t>(), max_batch_size, params.eos_id);
         eos_ids_ = device_->allocateBuffer(
-            {DataType::TYPE_INT32, {max_batch_size}, AllocationType::DEVICE});
+            {DataType::TYPE_INT32, {max_batch_size}, AllocationType::DEVICE}, {"eos_id"});
         device_->copy({*eos_ids_, *eos_ids_host});
     };
 
