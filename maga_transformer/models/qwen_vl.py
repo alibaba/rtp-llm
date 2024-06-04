@@ -223,4 +223,4 @@ class QWen_VL(QWen, MultiModalMixin):
 
         return llm_size
     
-register_model('qwen_vl', QWen_VL)
+register_model('qwen_vl', QWen_VL, ["QWenMLMHeadModel"])
