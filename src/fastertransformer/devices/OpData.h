@@ -170,19 +170,19 @@ struct LayernormParams {
 // D = alpha * op(A) * op(B) + beta * C
 // shapes of A, B, C, D have two options: [m, k], [k, n], [m, n], [m, n]
 // or [bs, m, k], [bs, k, n], [bs, m, n], [bs, m, n] where bs is batch_size
-// NOTE: caller needs to preallocate C
-// TODO(dongjin): Make C a BufferPtr so that it can achieve in-place update
+// D is optional, if not passed, it will be allocated by the op
 struct GemmParams {
-
     GemmParams(const Buffer& A,
                const Buffer& B,
                OptionalBufferRef C = std::nullopt,
+               BufferPtr D = nullptr,
                const DataType compute_type = DataType::TYPE_INVALID,
                TransposeOperation transA = TransposeOperation::NONE,
                TransposeOperation transB = TransposeOperation::NONE):
                A(A),
                B(B),
                C(C),
+               D(D),
                compute_type(compute_type),
                transA(transA),
                transB(transB) {}
@@ -191,6 +191,7 @@ struct GemmParams {
     const Buffer& A;
     const Buffer& B;
     OptionalBufferRef C;
+    BufferPtr D;
     const DataType compute_type = DataType::TYPE_INVALID; // If passed invalid type, op should infer type
 
     const TransposeOperation transA = TransposeOperation::NONE;

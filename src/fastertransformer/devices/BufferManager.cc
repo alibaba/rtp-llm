@@ -17,10 +17,13 @@ BufferManager::BufferManager(IAllocator* device_allocator, IAllocator* host_allo
     , host_allocator_(host_allocator)
     , device_max_allocated_bytes_(0)
     , trace_memory_(getenv("RTP_LLM_TRACE_MEMORY"))
+    , trace_malloc_stack_(getenv("RTP_LLM_TRACE_MALLOC_STACK"))
 {
     if (trace_memory_) {
         autil::EnvUtil::setEnv("STACK_TRACER_LOG", "true");
         DECLARE_STACK_TRACER_FILE("rtp_llm_stack.log");
+    } else if (trace_malloc_stack_) {
+        throw std::runtime_error("RTP_LLM_TRACE_MALLOC_STACK must be used with RTP_LLM_TRACE_MALLOC_STACK");
     }
 }
 
@@ -56,8 +59,10 @@ void BufferManager::doRecycle(Buffer* buffer, IAllocator* allocator) {
 void BufferManager::recordAllcation(const BufferParams& params, const BufferHints& hints, const BufferPtr& buffer) {
     if (trace_memory_) {
         auto stack_trace_id = autil::StackTracer::getInstance()->getTraceId();
-        FT_LOG_DEBUG("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
-                    buffer->data(), buffer->sizeBytes(), hints.tag.c_str(), stack_trace_id);
+        if (trace_malloc_stack_) {
+            FT_LOG_INFO("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
+                        buffer->data(), buffer->sizeBytes(), hints.tag.c_str(), stack_trace_id);
+        }
         if (auto tracker_allocator_ = dynamic_cast<TrackerAllocator*>(device_allocator_)) {
             auto tracker_status = tracker_allocator_->getTrackerStatus();
             if (tracker_status.allocated_size > device_max_allocated_bytes_) {

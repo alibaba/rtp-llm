@@ -60,7 +60,6 @@ TEST_F(CudaGemmOpTest, TransposeBatchGemmOpTest) {
     BatchTransposeGemmOp(none, tran, b, m, k, n, k, DataType::TYPE_FP32);
     BatchTransposeGemmOp(tran, tran, b, k, m, n, k, DataType::TYPE_FP32);
     BatchTransposeGemmOp(tran, none, b, k, m, k, n, DataType::TYPE_FP32);
-
 }
 
 TEST_F(CudaGemmOpTest, TransposeBatchMixFloatGemmOP) {
@@ -78,5 +77,4 @@ TEST_F(CudaGemmOpTest, TransposeBatchMixFloatGemmOP) {
     MixtureBatchTransposeGemmOp(none, tran, b, m, k, n, k, DataType::TYPE_FP32, DataType::TYPE_FP32);
     MixtureBatchTransposeGemmOp(tran, tran, b, k, m, n, k, DataType::TYPE_FP32, DataType::TYPE_FP32);
     MixtureBatchTransposeGemmOp(tran, none, b, k, m, k, n, DataType::TYPE_FP32, DataType::TYPE_FP32);
-
 }

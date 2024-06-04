@@ -64,10 +64,10 @@ public:
     {
         auto A = tensorToBuffer(input.A);
         auto B = tensorToBuffer(input.B);
-
-        GemmParams params {*A, *B};
-        auto C = device_->gemm(params);
-        return GemmOpTestOutput({bufferToTensor(*C)});
+        auto D = device_->allocateBuffer({A->type(), {A->shape()[0], B->shape()[1]}});
+        GemmParams params {*A, *B, std::nullopt, D};
+        device_->gemm(params);
+        return GemmOpTestOutput({bufferToTensor(*D)});
     }
 
     GemmOpTestOutput BatchGemmOpRun(GemmOpTestInput& input)
@@ -83,11 +83,11 @@ public:
     GemmOpTestOutput BatchTransposeGemmOpRun(GemmOpTestInput& input,
                                              TransposeOperation a_op,
                                              TransposeOperation b_op)
-    {   
+    {
         auto A = tensorToBuffer(input.A);
         auto B = tensorToBuffer(input.B);
-        
-        GemmParams params {*A, *B, std::nullopt, DataType::TYPE_INVALID, a_op, b_op};
+
+        GemmParams params {*A, *B, std::nullopt, nullptr, DataType::TYPE_INVALID, a_op, b_op};
         auto C = device_->gemm(params);
         return GemmOpTestOutput({bufferToTensor(*C)});
     }
@@ -96,11 +96,11 @@ public:
                                                     TransposeOperation a_op,
                                                     TransposeOperation b_op,
                                                     DataType type)
-    {   
+    {
         auto A = tensorToBuffer(input.A);
         auto B = tensorToBuffer(input.B);
-        
-        GemmParams params {*A, *B, std::nullopt, type, a_op, b_op};
+
+        GemmParams params {*A, *B, std::nullopt, nullptr, type, a_op, b_op};
         auto C = device_->gemm(params);
         return GemmOpTestOutput({bufferToTensor(*C)});
     }
@@ -122,7 +122,7 @@ public:
     GemmOpTestOutput BatchTransposeGemmTorchRefRun(GemmOpTestInput& input,
                                                    TransposeOperation a_op,
                                                    TransposeOperation b_op)
-    {   
+    {
         auto A = input.A;
         auto B = input.B;
         if (a_op == TransposeOperation::TRANSPOSE) {
@@ -140,7 +140,7 @@ public:
     void BasicGemmOpTest(size_t m,
                          size_t n,
                          size_t k,
-                         DataType dtype) 
+                         DataType dtype)
     {
         auto input = PrepareGemmOpInput(m, n, k, dtype);
         auto result = BasicGemmOpRun(input);
@@ -155,7 +155,7 @@ public:
                              size_t k1,
                              size_t k2,
                              size_t n2,
-                             DataType dtype) 
+                             DataType dtype)
     {
         auto input = PrepareGemmOpInput(1, m1, k1, k2, n2, dtype);
         auto result = BatchTransposeGemmOpRun(input, op_a, op_b);

@@ -5,6 +5,7 @@
 #include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/utils/ShapeCheck.h"
+#include "autil/StringUtil.h"
 
 #include <numeric>
 #include <utility>
@@ -152,7 +153,6 @@ struct CudaGemmArguments {
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
 BufferPtr CudaDevice::gemm(const GemmParams& params) {
-
     params.check();
 
     using GemmImplementType = CudaGemmDispatch::GemmImplementType;
@@ -175,9 +175,18 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
                                             D_data_type,
                                             dtypeConvert(params.compute_type));
     }
-   
 
-    auto output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
+    BufferPtr output;
+    if (params.D) {
+        output = params.D;
+        RUNTIME_ASSERT_OP_ARG(
+            (arguments.DDtype == params.D->type()) && (arguments.Dshape == params.D->shape()),
+            "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
+            arguments.DDtype, autil::StringUtil::toString(arguments.Dshape).c_str(),
+            params.D->debugString().c_str());
+    } else {
+        output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
+    }
 
     if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_basic_gemm) {
         const auto A = params.A.data();
@@ -198,7 +207,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
                                  arguments.ldc);
         sync_check_cuda_error();
         return move(output);
-    }  else if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_batch_gemm) {
+    } else if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_batch_gemm) {
         // convert buffers to ptrs
         const auto A = params.A.data();
         const auto B = params.B.data();

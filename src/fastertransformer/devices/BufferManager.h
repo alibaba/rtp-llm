@@ -88,6 +88,7 @@ private:
 
     size_t device_max_allocated_bytes_;
     bool trace_memory_;
+    bool trace_malloc_stack_;
 };
 
 } // namespace fastertransformer

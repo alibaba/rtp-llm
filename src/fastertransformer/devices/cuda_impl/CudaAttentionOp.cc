@@ -46,7 +46,7 @@ void trtFmha(const AttentionModuleParams& params,
     auto size_per_head  = params.configs.size_per_head;
     float q_scaling     = params.configs.q_scaling;
 
-    
+
     FT_LOG_INFO("use TRT fmha");
     bool mFMHAForceFP32Acc  = false;
     bool mRemovePadding     = false;
@@ -73,7 +73,7 @@ void trtFmha(const AttentionModuleParams& params,
 
 
 
-    
+
 }
 
 void OpenSourceFMHA(const AttentionModuleParams& params,
@@ -102,7 +102,7 @@ void OpenSourceFMHA(const AttentionModuleParams& params,
     flash_fwd_params_.q_ptr = params.input.data();
     flash_fwd_params_.k_ptr = params.input.dataWithOffset(hidden_units);
     flash_fwd_params_.v_ptr = params.input.dataWithOffset(hidden_units + hidden_units_kv);
-    
+
 
     flash_fwd_params_.q_row_stride  = hidden_units + 2 * hidden_units_kv;
     flash_fwd_params_.k_row_stride  = hidden_units + 2 * hidden_units_kv;
@@ -287,7 +287,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
 #ifdef USE_OLD_TRT_FMHA
     auto mFMHARunnerV1 = new FusedMHARunnerFP16v2(head_num, size_per_head, get_sm(), params.configs.q_scaling);
 
-    bool use_trtv1_fmha_ = use_trtv1_fmha && 
+    bool use_trtv1_fmha_ = use_trtv1_fmha &&
                            mFMHARunnerV1->fmha_supported(
                             (params.configs.mask_type == AttentionMaskType::causalMask)) &&
                            head_num == kv_head_num &&
@@ -296,20 +296,20 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     auto mFMHARunner = new tensorrt_llm::kernels::FusedMHARunnerV2(
             trtDtypeConvert(datatype), head_num, size_per_head, params.configs.q_scaling);
 
-    bool use_trtv2_fmha_ = use_trtv2_fmha && 
-                           (params.configs.mask_type == AttentionMaskType::causalMask || 
+    bool use_trtv2_fmha_ = use_trtv2_fmha &&
+                           (params.configs.mask_type == AttentionMaskType::causalMask ||
                             params.configs.mask_type == AttentionMaskType::noMask) &&
                             mFMHARunner->fmha_supported();
-    
-    bool use_openSource_fmha_ = use_openSource_fmha && 
-                                (params.configs.mask_type == AttentionMaskType::causalMask || 
-                                params.configs.mask_type == AttentionMaskType::noMask) && 
+
+    bool use_openSource_fmha_ = use_openSource_fmha &&
+                                (params.configs.mask_type == AttentionMaskType::causalMask ||
+                                params.configs.mask_type == AttentionMaskType::noMask) &&
                                 (head_num % kv_head_num == 0) &&
                                 ((size_per_head == 64) || (size_per_head == 96) || (size_per_head == 128));
-    
+
     if (use_trtv2_fmha_) {
         trtFmha(params, mFMHARunner, stream_);
-        
+
     }
     else if (use_openSource_fmha_) {
         auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32,
@@ -324,12 +324,12 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     else if (use_trtv1_fmha_) {
         if (params.configs.mask_type == AttentionMaskType::causalMask) {
             mFMHARunnerV1->setup_causal_masked_fmha(seq_len, batch_size);
-            mFMHARunnerV1->run_causal_masked_fmha(params.input.data(), 
+            mFMHARunnerV1->run_causal_masked_fmha(params.input.data(),
                                                   params.common.cu_seqlens.get()->data(),
                                                   params.output.data(),
-                                                  true, 
+                                                  true,
                                                   stream_);
-        } 
+        }
         else {
             auto qkv_buf_temp   = allocateBuffer({DataType::TYPE_FP16,
                                                  {token_num, head_num + 2 * kv_head_num, size_per_head},
@@ -358,9 +358,10 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         auto qk_output = gemm({*q_output,
                                *k_output,
                                std::nullopt,
+                               nullptr,
                                DataType::TYPE_FP32,
                                TransposeOperation::NONE,
-                                TransposeOperation::TRANSPOSE});
+                               TransposeOperation::TRANSPOSE});
         printBufferData(*qk_output, "qk_output: ");
 
         float scale = (1.0f / sqrtf(size_per_head * 1.0f));
@@ -391,7 +392,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             0,
             stream_);
     }
-    
+
 }
 
 struct SelfAttentionArgs {

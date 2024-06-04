@@ -225,7 +225,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         printBufferData(*last_hidden, "last_hidden");
 
-        auto logits = device_->gemm(GemmParams(*last_hidden, *(lm_head->kernel), nullopt, ft::DataType::TYPE_FP32, TransposeOperation::NONE, TransposeOperation::TRANSPOSE));
+        auto logits = device_->gemm(GemmParams(
+            *last_hidden, *(lm_head->kernel), nullopt, nullptr,
+            ft::DataType::TYPE_FP32, TransposeOperation::NONE, TransposeOperation::TRANSPOSE));
         // logits is too big, tmp not print default
         // printBufferData(*logits, "logits");
 

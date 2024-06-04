@@ -22,7 +22,8 @@ cc_library(
         "cutlass_kernels_interface",
         "//3rdparty/flash_attention2:flash_attention2_header",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_header",
-        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_header"
+        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_header",
+        "@havenask//aios/autil:string_helper",
     ],
     visibility = ["//visibility:public"],
     copts = cuda_copts(),
