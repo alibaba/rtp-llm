@@ -45,6 +45,7 @@ private:
     Flash_fwd_params flash_fwd_params_;
 
     bool                                              use_trt_fmha_         = false;
+    bool                                              use_paged_fmha_       = false;
     bool                                              use_open_source_fmha_ = false;
     bool                                              use_old_trt_fmha_     = false;    
     std::unique_ptr<tensorrt_llm::kernels::MHARunner> mFMHARunner;
@@ -106,6 +107,7 @@ protected:
         // Max cache capacity (used to allocate KV cache)
         // Cyclic kv cache capacity (used to get the cyclic kv cache position for new tokens)
         int*    cu_seqlens;
+        int*    cu_kv_seqlens;
         int32_t cyclic_kv_cache_length;
         T*      context_buf;
         void*   block_pointers;
@@ -164,12 +166,13 @@ public:
 
     void Attention(TensorMap* output_tensors, TensorMap* input_tensors, const AttentionWeight<T>* attention_weights);
     bool CheckUseFMHA() const;
+    bool CheckQKVLengthEqual() const;
     bool UseOpenSourceFMHA() const;
     bool UseOldTRTFMHA() const;
     bool UseTRTFMHA() const;
     bool UseMultiBlockMode() const;
 
-    void TRTFMHA(const ContextAttentionParams& params, cudaStream_t stream);
+    void TRTFMHA(int layer_id, const ContextAttentionParams& params, cudaStream_t stream);
     void OpenSourceFMHA(T*           qkv,
                         int*         cu_seqlens,
                         const int    batch_size,

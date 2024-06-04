@@ -32,6 +32,12 @@ void invokeGetPaddingOffsetAndCuSeqLens(int*         tmp_mask_offset,
                                         const int    max_seq_len,
                                         cudaStream_t stream);
 
+void invokeGetCuSeqLens(int* cu_seqlens, 
+                        const int* sequence_length, 
+                        const int* prefix_length, 
+                        const int batch_size, 
+                        cudaStream_t stream);
+
 template<typename T>
 void invokeBuildEncoderAttentionMask(
     T* attention_mask, const int* sequence_lengths, const int batch_size, const int max_seq_len, cudaStream_t stream);

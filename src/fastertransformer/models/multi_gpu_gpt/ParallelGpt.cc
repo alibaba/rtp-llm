@@ -102,6 +102,8 @@ void ParallelGpt<T>::allocateBuffer(size_t total_batch_size, size_t h_token_num,
     padding_offset_ = reinterpret_cast<int*>(allocator_->reMalloc(padding_offset_, sizeof(int) * (h_token_num)));
     cu_seqlens_ =
         reinterpret_cast<int*>(allocator_->reMalloc(cu_seqlens_, sizeof(int) * (total_batch_size + 1)));
+    cu_kv_seqlens_ =
+        reinterpret_cast<int*>(allocator_->reMalloc(cu_kv_seqlens_, sizeof(int) * (total_batch_size + 1)));
     context_lengths_ =
         reinterpret_cast<int*>(allocator_->reMalloc(context_lengths_, sizeof(int) * (total_batch_size)));
     sequence_lengths_ =
@@ -150,6 +152,7 @@ void ParallelGpt<T>::freeBuffer()
         allocator_->free((void**)(&decoder_layer_output_));
         allocator_->free((void**)(&padding_offset_));
         allocator_->free((void**)(&cu_seqlens_));
+        allocator_->free((void**)(&cu_kv_seqlens_));
         allocator_->free((void**)(&context_lengths_));
         allocator_->free((void**)(&sequence_lengths_));
         allocator_->free((void**)(&prefix_lengths_));
@@ -365,8 +368,12 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         step             = step + 1;
     }
 
+    int max_context_prefix_length = 0;
     if (input_tensors->isExist("d_prefix_prompt_lengths")) {
         int *d_prefix_prompt_lengths = input_tensors->getPtr<int>("d_prefix_prompt_lengths");
+        if (context_batch_size > 0) {
+            max_context_prefix_length = *std::max_element(d_prefix_prompt_lengths + batch_size, d_prefix_prompt_lengths + total_batch_size);
+        }
         cudaMemcpyAsync(prefix_lengths_, d_prefix_prompt_lengths, sizeof(int) * total_batch_size,
                         cudaMemcpyHostToDevice, stream_);
     }
@@ -555,6 +562,9 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             );
             attention_input_tensors.insert("d_prefix_prompt_lengths",
                                            Tensor{MEMORY_GPU, TYPE_INT32, {total_batch_size}, prefix_lengths_});
+            invokeGetCuSeqLens(cu_kv_seqlens_, context_lengths_ + batch_size, prefix_lengths_ + batch_size, context_batch_size, stream_);
+            attention_input_tensors.insert("max_context_prefix_length",  Tensor{MEMORY_CPU, TYPE_INT32, {1}, &max_context_prefix_length});
+            attention_input_tensors.insert("cu_kv_seqlens",  Tensor{MEMORY_GPU, TYPE_INT32, {context_batch_size}, cu_kv_seqlens_});
             attention_input_tensors.insert("count_prefix_length", input_tensors->at("count_prefix_length"));
         }
         TensorMap attention_output_tensors{
