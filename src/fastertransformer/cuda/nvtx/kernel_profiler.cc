@@ -3,50 +3,39 @@
 
 namespace fastertransformer {
 
-bool record_kernel_time() {
-    static bool record = [] {
-        bool         should_record = false;
-        static char* record_kernel = std::getenv("RECORD_KERNEL");
-        if (record_kernel != nullptr) {
-            static std::string level = std::string(record_kernel);
-            should_record            = level == "ON";
-        }
-        return should_record;
-    }();
-    return record;
-}
-
 void KernelProfiler::start() {
-    if (record_kernel_time_) {
-        cudaDeviceSynchronize();
-        cudaEventSynchronize(start_);
-        cudaEventRecord(start_, stream_);
-    }
+    cudaDeviceSynchronize();
+    cudaEventSynchronize(start_);
+    cudaEventRecord(start_, stream_);
 }
 
 void KernelProfiler::stop() {
-    if (record_kernel_time_) {
-        cudaEventRecord(stop_, stream_);
-        cudaEventSynchronize(stop_);
-        float kernel_time = 0;
-        cudaEventElapsedTime(&kernel_time, start_, stop_);
-        FT_LOG_INFO("kernel: " + std::string(kernel_name_.c_str()) + " time: " + std::to_string(kernel_time));
-    }
+    cudaEventRecord(stop_, stream_);
+    cudaEventSynchronize(stop_);
+    float kernel_time = 0;
+    cudaEventElapsedTime(&kernel_time, start_, stop_);
+    reportMetrics(kernel_time);
 }
 
-KernelProfiler::KernelProfiler(cudaStream_t stream, std::string kernel_name):
-    stream_(stream), kernel_name_(kernel_name), record_kernel_time_(record_kernel_time()) {
+void KernelProfiler::reportMetrics(float time) {
+    rtp_llm::RtpLLMKernelMetricsCollector collector;
+    collector.kernel_exec_time = time;
+    kmonitor::MetricsTags tags("kernel_name", kernel_name_);
+    metrics_reporter_->report<rtp_llm::RtpLLMKernelMetrics, rtp_llm::RtpLLMKernelMetricsCollector>(&tags, &collector);
+}
 
-    if (record_kernel_time_) {
-        cudaEventCreate(&start_);
-        cudaEventCreate(&stop_);
-    }
+KernelProfiler::KernelProfiler(cudaStream_t                 stream,
+                               std::string                  kernel_name,
+                               kmonitor::MetricsReporterPtr metrics_reporter):
+    stream_(stream), kernel_name_(kernel_name), metrics_reporter_(metrics_reporter) {
+    FT_CHECK_WITH_INFO(metrics_reporter_ != nullptr, "metric reporter should not be nullptr");
+    cudaEventCreate(&start_);
+    cudaEventCreate(&stop_);
 }
 
 KernelProfiler::~KernelProfiler() {
-    if (record_kernel_time_) {
-        cudaEventDestroy(start_);
-        cudaEventDestroy(stop_);
-    }
+    cudaEventDestroy(start_);
+    cudaEventDestroy(stop_);
 }
+
 }  // namespace fastertransformer

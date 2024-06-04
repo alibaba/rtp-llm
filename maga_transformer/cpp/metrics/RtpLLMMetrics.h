@@ -173,6 +173,23 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMKernelMetricsCollector final {
+public:
+    float kernel_exec_time = 0;
+};
+
+class RtpLLMKernelMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMKernelMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* kernel_exec_time_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 bool initKmonitorFactory();
 
 kmonitor::MetricsTags getHippoTags();

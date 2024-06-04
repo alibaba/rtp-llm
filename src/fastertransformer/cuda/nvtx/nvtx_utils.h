@@ -15,8 +15,61 @@
  */
 
 #pragma once
+#include "src/fastertransformer/cuda/nvtx/kernel_profiler.h"
 
 namespace ft_nvtx {
+
+class ReportCounter{
+
+public:
+    void setReportStep(int step) {
+        step_ = step;
+    }
+    void increment() {
+        if (step_ <= 0) {
+            return;
+        }
+        counter_++;
+        if (counter_ == step_) {
+            counter_ = 0;
+        }
+    }
+    bool shouldReport() {
+        return step_ > 0 && counter_ == 0;
+    }
+
+protected:
+    int step_    = -1;
+    int counter_ = -1;
+};
+
+class NvtxResource {
+private:
+    ReportCounter counter_;
+    kmonitor::MetricsReporterPtr metrics_reporter_;
+    NvtxResource(): counter_(ReportCounter()), metrics_reporter_(nullptr) {} 
+    NvtxResource(const NvtxResource&) = delete;
+    NvtxResource(const NvtxResource&&) = delete;
+    NvtxResource& operator=(const NvtxResource&) = delete;
+public:
+    ReportCounter& getCounter() {
+        return counter_;
+    }
+
+    void setMetricReporter(kmonitor::MetricsReporterPtr& ptr) {
+        metrics_reporter_ = ptr;
+    }
+
+    kmonitor::MetricsReporterPtr& getMetricReporter() {
+        return metrics_reporter_;
+    }
+
+    static NvtxResource& Instance() {
+        static NvtxResource instance;
+        return instance;
+    }
+};
+
 
 std::string getScope();
 void        addScope(std::string name);

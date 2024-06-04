@@ -7,6 +7,8 @@
 #include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
+
 namespace ft = fastertransformer;
 namespace th = torch;
 namespace torch_ext {
@@ -91,6 +93,8 @@ private:
     ft::Allocator<ft::AllocatorType::TH>* allocator_;
     ft::cublasMMWrapper* cublas_wrapper_;
     struct cudaDeviceProp prop_;
+
+    kmonitor::MetricsReporterPtr     metrics_reporter_ = nullptr;
 
     std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*> gpt_lora_layer_weights_;
     std::vector<ft::ParallelGptDecoderLayerWeight<T>*> gpt_layer_weights_;

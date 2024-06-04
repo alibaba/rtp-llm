@@ -21,6 +21,20 @@ FtGpt<T>::FtGpt(const ft::GptInitParameter&   gpt_init_parameter,
     cublas_wrapper_mutex_ = new std::mutex();
 
     ft::ftNcclInitialize(tensor_para_, pipeline_para_, tensor_para_size, pipeline_para_size, master_ip, master_port);
+    
+    AUTIL_ROOT_LOG_CONFIG();
+    AUTIL_ROOT_LOG_SETLEVEL(INFO);
+    (void)rtp_llm::initKmonitorFactory();
+    auto kmon_tags = rtp_llm::getHippoTags();
+    metrics_reporter_.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+    ft_nvtx::NvtxResource::Instance().setMetricReporter(metrics_reporter_);
+
+    int kernel_report_step = -1;
+    char* kernel_report_step_env = std::getenv("KERNEL_REPORT_STEP");
+    if (kernel_report_step_env) {
+        kernel_report_step = std::stoi(kernel_report_step_env);
+    }
+    ft_nvtx::NvtxResource::Instance().getCounter().setReportStep(kernel_report_step);
 
     for (int i = 0; i < static_cast<int>(gpt_init_parameter_.num_layers_); i++) {
         gpt_lora_layer_weights_.push_back(new ft::ParallelGptDecoderLoRALayerWeight<T>());
@@ -153,7 +167,7 @@ void FtGpt<T>::forward(th::Tensor&              decoder_output,
     if (position_ids.has_value()) {
         input_tensors.insert("position_ids", convert_tensor<int>(position_ids.value()));
     }
-    
+    ft_nvtx::NvtxResource::Instance().getCounter().increment();
     parallel_gpt_->forward(&output_tensors, &input_tensors, &gpt_layer_weights_);
 }
 

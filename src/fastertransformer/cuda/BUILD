@@ -58,6 +58,7 @@ cc_library(
     ],
     deps = [
         ":cuda_utils",
+        "//maga_transformer/cpp:metrics",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],

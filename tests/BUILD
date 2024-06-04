@@ -26,6 +26,7 @@ cc_library(
     hdrs = ["unittests/unittest_utils.h", "unittests/gtest_utils.h"],
     deps = torch_deps() + [
         "//src/fastertransformer/cuda:allocator_cuda",
+        "//src/fastertransformer/devices:devices_base_impl",
         "cutlass_kernels_interface",
         "//src/fastertransformer/kernels:kernels",
         "//src/fastertransformer/utils:utils",

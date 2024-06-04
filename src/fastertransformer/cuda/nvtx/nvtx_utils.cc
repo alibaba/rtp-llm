@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-#include "kernel_profiler.h"
 #include <iostream>
 #include <vector>
 
@@ -69,9 +68,12 @@ bool isEnableNvtx() {
 
 void ftNvtxRangePush(std::string name, cudaStream_t stream) {
     std::string                        kernel_name = (getScope() + name).c_str();
-    fastertransformer::KernelProfiler* profiler    = new fastertransformer::KernelProfiler(stream, kernel_name);
-    profiler->start();
-    profilers.push_back(profiler);
+    if (NvtxResource::Instance().getCounter().shouldReport()) {
+        fastertransformer::KernelProfiler* profiler =
+            new fastertransformer::KernelProfiler(stream, kernel_name, NvtxResource::Instance().getMetricReporter());
+        profiler->start();
+        profilers.push_back(profiler);
+    }
 
 #ifdef USE_NVTX
     if (isEnableNvtx()) {
@@ -81,10 +83,12 @@ void ftNvtxRangePush(std::string name, cudaStream_t stream) {
 }
 
 void ftNvtxRangePop() {
-    fastertransformer::KernelProfiler* profiler = profilers.back();
-    profiler->stop();
-    profilers.pop_back();
-    delete profiler;
+    if (NvtxResource::Instance().getCounter().shouldReport()) {
+        fastertransformer::KernelProfiler* profiler = profilers.back();
+        profiler->stop();
+        profilers.pop_back();
+        delete profiler;
+    }
 #ifdef USE_NVTX
     if (isEnableNvtx()) {
         nvtxRangePop();
