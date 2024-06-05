@@ -12,7 +12,7 @@ EmbeddingStream::EmbeddingStream(const shared_ptr<rtp_llm::EmbeddingInput>& quer
         return;
     }
     begin_time_       = autil::TimeUtility::currentTimeInMilliSeconds();
-    device_           = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
+    device_           = ft::DeviceFactory::getDefaultDevice();
     embedding_output_ = make_shared<EmbeddingOutput>();
     generate_state_   = GenerateState::WAITING;
     begin_time_us_    = autil::TimeUtility::currentTimeInMicroSeconds();

@@ -32,7 +32,7 @@ SpeculativeEngine::SpeculativeEngine(
                              params.gpt_init_parameter.size_per_head_,
                              params.gpt_init_parameter.seq_size_per_block_,
                              ft::DataType::TYPE_FP16);
-    ft::DeviceBase* device = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
+    ft::DeviceBase* device = ft::DeviceFactory::getDefaultDevice();
     draft_cache_manager_   = make_shared<CacheManager>(cache_config, device);
     target_cache_manager_  = make_shared<CacheManager>(cache_config, device);
     scheduler_.reset(new FIFOScheduler(params, target_cache_manager_));

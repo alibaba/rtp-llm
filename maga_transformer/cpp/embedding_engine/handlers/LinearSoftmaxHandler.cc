@@ -8,7 +8,7 @@ namespace rtp_llm {
 template<typename T>
 LinearSoftmaxHandlerImpl<T>::LinearSoftmaxHandlerImpl(const GptInitParameter& params): IHandlerImpl(params), is_initalized_(false) {
     ft::DeviceFactory::initDevices(ft::DeviceFactory::getDefaultGlobalDeviceParams());
-    device_ = dynamic_cast<CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda));
+    device_ = dynamic_cast<CudaDevice*>(ft::DeviceFactory::getDefaultDevice());
     allocator_      = device_->getAllocator();
     cublas_wrapper_ = device_->cublasMMWrapperPtr();
     stream_         = device_->stream();

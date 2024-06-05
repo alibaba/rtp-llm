@@ -26,7 +26,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const ft:
 
     begin_time_us_      = autil::TimeUtility::currentTimeInMicroSeconds();
 
-    device_             = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
+    device_             = ft::DeviceFactory::getDefaultDevice();
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
     memset(complete_token_ids_->data(), 0, complete_token_ids_->sizeBytes());
@@ -272,7 +272,7 @@ size_t GenerateStream::maxBlockSize() const {
 
 bool GenerateStream::needFinish() {
     return seq_length_ >= std::min(max_seq_len_,
-            generate_input_->generate_config->max_new_tokens + generate_input_->inputLength()) 
+            generate_input_->generate_config->max_new_tokens + generate_input_->inputLength())
             || needFinishBySPTokens();
 }
 bool GenerateStream::needFinishBySPTokens() {
@@ -435,7 +435,7 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
         generate_output.aux_info.cum_log_probs =
             device_->allocateBuffer({ft::DataType::TYPE_FP32, {1lu}, ft::AllocationType::HOST}, {});
         memcpy(generate_output.aux_info.cum_log_probs.value()->data(), cum_log_probs_->dataWithOffset<float>(i), sizeof(float));
-        
+
         generate_outputs_->generate_outputs.push_back(generate_output);
     }
     generate_outputs_queue_.push(*generate_outputs_);

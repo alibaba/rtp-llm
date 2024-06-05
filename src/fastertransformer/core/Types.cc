@@ -2,6 +2,12 @@
 
 #include <string>
 #include <cstdint>
+#include <immintrin.h>
+
+#if GOOGLE_CUDA
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+#endif
 
 namespace fastertransformer {
 
@@ -25,7 +31,15 @@ namespace fastertransformer {
     F(DataType::TYPE_FP16, half); \
     F(DataType::TYPE_BF16, __nv_bfloat16);
 #else
-#define FT_FOREACH_DEVICE_TYPE(F)
+struct fake_half {
+    uint16_t x;
+};
+struct fake_bfloat16 {
+    uint16_t x;
+};
+#define FT_FOREACH_DEVICE_TYPE(F) \
+    F(DataType::TYPE_FP16, fake_half); \
+    F(DataType::TYPE_BF16, fake_bfloat16);
 #endif
 
 template<typename T>

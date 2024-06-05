@@ -19,4 +19,5 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     copts = copts() + ["-mavx512f", "-mavx512bw", "-mavx512vl"],
+    alwayslink = 1,
 )

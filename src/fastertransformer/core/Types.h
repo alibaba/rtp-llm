@@ -4,10 +4,6 @@
 #include <string>
 #include <unordered_map>
 
-#if GOOGLE_CUDA
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
-#endif
 
 namespace fastertransformer {
 
@@ -49,27 +45,6 @@ typedef enum datatype_enum {
     TYPE_VOID,
     TYPE_QINT8
 } DataType;
-
-template<DataType data_type>
-struct DataTypeTraits {
-};
-
-#if GOOGLE_CUDA
-template<>
-struct DataTypeTraits<TYPE_FP16> {
-    using type = half;
-};
-
-template<>
-struct DataTypeTraits<TYPE_BF16> {
-    using type = __nv_bfloat16;
-};
-#endif
-
-template<>
-struct DataTypeTraits<TYPE_FP32> {
-    using type = float;
-};
 
 inline DataType getDataType(const std::string& type_str) {
     DataType data_type;

@@ -53,7 +53,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
     }
     generate_input->lora_id       = input->lora_id();
-    auto device                   = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
+    auto device                   = ft::DeviceFactory::getDefaultDevice();
     generate_input->input_ids     = device->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)input->token_ids_size()}, ft::AllocationType::HOST}, {});
     memcpy(generate_input->input_ids->data(), input->token_ids().data(), generate_input->input_ids->sizeBytes());
@@ -69,7 +69,7 @@ void QueryConverter::transTensor(TensorPB* t, const ft::Buffer* buffer) {
 
     TensorPB_DataType data_type;
     switch(buffer->type()) {
-        case ft::DataType::TYPE_FP32: 
+        case ft::DataType::TYPE_FP32:
             data_type = TensorPB_DataType::TensorPB_DataType_FP32;
             t->set_fp32_data(reinterpret_cast<const char*>(buffer->data()), buffer->sizeBytes());
             break;
@@ -87,7 +87,7 @@ void QueryConverter::transTensor(TensorPB* t, const ft::Buffer* buffer) {
             break;
         default:
             throw std::invalid_argument("unsupport buffer data type: " + std::to_string(buffer->type()));
-            break; 
+            break;
     }
     t->set_data_type(data_type);
 }

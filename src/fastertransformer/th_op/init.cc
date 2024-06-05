@@ -13,10 +13,10 @@ PYBIND11_MODULE(libth_transformer, m) {
     registerGptInitParameter(m);
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);
-    registerEmbeddingHandler(m);
 
 #if USING_CUDA
     registerParallelGptOp(m);
+    registerEmbeddingHandler(m);
 #endif
 }
 

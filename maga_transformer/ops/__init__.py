@@ -22,7 +22,7 @@ def find_th_transformer(current_dir: str):
             for file in subdir.iterdir():
                 if file.is_file() and file.name == SO_NAME:
                     return os.path.join(current_dir, subdir.name)
-    
+
     raise Exception(f"failed to find {SO_NAME} in {current_dir}")
 
 so_path = os.path.join(libs_path)
@@ -33,4 +33,11 @@ if not os.path.exists(os.path.join(so_path, SO_NAME)):
     so_path = find_th_transformer(bazel_bin_dir)
 print("so path: ", so_path)
 sys.path.append(so_path)
-from libth_transformer import GptInitParameter, ParallelGptOp, RtpEmbeddingOp, RtpLLMOp, SpecialTokens
+
+try:
+    # CUDA GPU build
+    from libth_transformer import GptInitParameter, ParallelGptOp, RtpEmbeddingOp, RtpLLMOp, SpecialTokens
+except:
+    from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens
+    logging.info("ParallelGptOp not registred in libth_transformer.so, this should be a none-cuda build")
+    ParallelGptOp = None

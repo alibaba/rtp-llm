@@ -23,7 +23,7 @@ public:
     NormalBatchStreamProcessor(const ft::GptInitParameter& params):
         num_layers_(params.num_layers_),
         use_int8_kv_cache_(params.int8_kv_cache_),
-        device_(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda)) {}
+        device_(ft::DeviceFactory::getDefaultDevice()) {}
     absl::Status                   dispatch(const StreamGroups&                  stream_groups,
                                             const SamplerInputs&                 sampler_inputs,
                                             const std::unique_ptr<MergedOutput>& merge_outputs) const;

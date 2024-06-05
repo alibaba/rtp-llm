@@ -72,7 +72,7 @@ TEST_F(QueryConverterTest, testTransInput) {
 }
 
 TEST_F(QueryConverterTest, testTransOutput) {
-    auto device           = ft::DeviceFactory::getDevice(ft::DeviceType::Cuda);
+    auto device           = ft::DeviceFactory::getDefaultDevice();
     auto output_token_ids = device->allocateBuffer({ft::DataType::TYPE_INT32, {1, 3}, ft::AllocationType::HOST}, {});
     auto data             = (int*)output_token_ids->data();
     for (int i = 0; i < 3; ++i) {

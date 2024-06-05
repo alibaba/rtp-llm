@@ -30,7 +30,13 @@ GlobalDeviceParams DeviceFactory::getDefaultGlobalDeviceParams() {
         if (getRegistrationMap().find(type) != getRegistrationMap().end()) {
             FT_LOG_INFO("found device type %d, use as default.", static_cast<int>(type));
             params.device_params.push_back({type, DeviceInitParams{0}});
+        } else {
+            FT_LOG_INFO("Device type %d is not registered, skip.", static_cast<int>(type));
         }
+    }
+    if (!params.device_params.size()) {
+        FT_LOG_ERROR("FATAL: No device is registered !");
+        abort();
     }
     return params;
 }
