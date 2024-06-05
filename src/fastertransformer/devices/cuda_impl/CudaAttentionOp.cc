@@ -221,6 +221,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     const auto rope_embedding_base             = params.configs.rope_config.embedding_base;
     const auto rope_rotary_embedding_scale     = params.configs.rope_config.rotary_embedding_scale;
     const auto rope_dynamic_embedding_max_pos  = params.configs.rope_config.dynamic_embedding_max_pos;
+    const auto rope_org_embedding_max_pos      = params.configs.rope_config.org_embedding_max_pos;
     const auto rope_base_scale                 = params.configs.rope_config.base_scale;
 
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, invokeAddFusedQKVBiasTranspose,
@@ -244,6 +245,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         rope_embedding_base,
         rope_rotary_embedding_scale,
         rope_dynamic_embedding_max_pos,
+        rope_org_embedding_max_pos,
         rope_base_scale,
         logn_seq_len,
         use_logn_attn,

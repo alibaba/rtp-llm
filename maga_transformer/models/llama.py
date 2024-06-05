@@ -85,6 +85,9 @@ class Llama(GPT):
                 config.rotary_embedding_style = 1
             elif config_json['rope_scaling']['type'] == 'linear':
                 config.rotary_embedding_style = 5
+            elif config_json['rope_scaling']['type'] == 'yarn':
+                config.rotary_embedding_style = 6
+                config.org_embedding_max_pos = config_json['rope_scaling']['original_max_position_embeddings']
             else:
                 raise Exception(f"unsupport rope_scaling {config_json['rope_scaling']}")
         # config.activation_type = config_json.get("hidden_act", config.activation_type)

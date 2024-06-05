@@ -113,13 +113,15 @@ struct Multihead_attention_params_base {
     float rotary_embedding_base          = 0.0f;
     float rotary_embedding_scale         = 0.0f;
     int   rotary_embedding_max_positions = 0;
+    int   original_max_position_embeddings = 0;
 
     // 0: ??
-    // 1: neox / llama
+    // 1: neox / llama ntk
     // 2: glm
     // 3: glm2
     // 4: qwen dynamic ntk
-    // 5: yarn
+    // 5: linear
+    // 6: yarn
     int  rotary_embedding_style = 0;
     bool use_logn_attn          = false;
     int  logn_seq_len           = 2048;

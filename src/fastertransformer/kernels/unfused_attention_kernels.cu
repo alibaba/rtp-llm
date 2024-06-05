@@ -1478,7 +1478,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                                    const bool  use_logn_attn,
                                                    const float rotary_embedding_scale  = 0.0f,
                                                    const int   dynamic_embedding_max_pos = 0,
-                                                   const int   base_scale                = 1)
+                                                   const int   base_scale                = 1,
+                                                   const int   org_embedding_max_pos     = 0)
 {
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3, head_num, size_per_head], and
     // QKV split to 3 split buffer q, k, v and transpose them to [batch_size, head_num, seq_len, size_per_head].
@@ -1604,6 +1605,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                 rotary_embedding_base,
                 rotary_embedding_scale,
                 dynamic_embedding_max_pos,
+                org_embedding_max_pos,
                 base_scale,
                 input_len,
                 PREFIX_PROMPT,
@@ -1666,7 +1668,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                              use_logn_attn,                                                            \
                                              rotary_embedding_scale,                                                   \
                                              dynamic_embedding_max_pos,                                                \
-                                             base_scale);
+                                             base_scale,                                                               \
+                                             org_embedding_max_pos);
 
 template<typename T>
 void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
@@ -1689,6 +1692,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     const float                      rotary_embedding_base,
                                     const float                      rotary_embedding_scale,
                                     const int                        dynamic_embedding_max_pos,
+                                    const int                        org_embedding_max_pos,
                                     const int                        base_scale,
                                     const int                        logn_seq_len,
                                     const bool                       use_logn_attn,
@@ -1833,6 +1837,7 @@ INSTANTIATESPLITQKV(__nv_bfloat16);
                                                  const float                      rotary_embedding_base,               \
                                                  const float                      rotary_embedding_scale,              \
                                                  const int                        dynamic_embedding_max_pos,           \
+                                                 const int                        org_embedding_max_pos,               \
                                                  const int                        base_scale,                          \
                                                  const int                        logn_seq_len,                        \
                                                  const bool                       use_logn_attn,                       \

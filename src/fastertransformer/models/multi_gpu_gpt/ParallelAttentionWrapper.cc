@@ -579,6 +579,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                        params_.rotary_embedding_base_,
                                        params_.rotary_embedding_scale_,
                                        params_.dynamic_embedding_max_pos_,
+                                       params_.org_embedding_max_pos_,
                                        params_.base_scale_,
                                        params_.logn_seq_len_,
                                        params_.use_logn_attn_,
