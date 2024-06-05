@@ -6,123 +6,12 @@
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_fmha_utils.h"
 
 #include <type_traits>
 #include <cassert>
 
 namespace fastertransformer {
-
-template<typename T>
-bool ParallelAttentionWrapper<T>::CheckQKVLengthEqual() const {
-    char* block_cache_env = std::getenv("REUSE_CACHE");
-    bool  not_prefix =
-        params_.pre_seq_len_ == 0 && (block_cache_env == nullptr || std::string(block_cache_env) != "1");
-    char* multi_task_prompt_env = std::getenv("MULTI_TASK_PROMPT");
-    char* multi_task_prompt_str_env = std::getenv("MULTI_TASK_PROMPT_STR");
-    char* sp_model_env = std::getenv("SP_MODEL_TYPE");
-
-    if (!not_prefix){
-        FT_LOG_WARNING("QKV length not equal: use kv cache reuse");
-        return false;
-    }
-    if (sp_model_env != nullptr){
-        FT_LOG_WARNING("QKV length not equal: use sp_model");
-        return false;
-    }
-    if (multi_task_prompt_env && strcmp(multi_task_prompt_env, "") != 0) {
-        FT_LOG_WARNING("QKV length not equal: use multi_task_prompt");
-        return false;
-    }
-    if (multi_task_prompt_str_env && strcmp(multi_task_prompt_str_env, "") != 0) {
-        FT_LOG_WARNING("QKV length not equal: use multi_task_prompt_str");
-        return false;
-    }
-    return true;
-}
-
-template<typename T>
-bool ParallelAttentionWrapper<T>::CheckUseFMHA() const {
-    char* fmha_env        = std::getenv("ENABLE_FMHA");
-    bool  fmha_enable     = (fmha_env == nullptr || std::string(fmha_env) != "OFF");
-    bool use_medusa = params_.use_medusa_;
-    if (!fmha_enable){
-        FT_LOG_WARNING("FMHA is not enbaled");
-        return false;
-    }
-    if (params_.rotary_embedding_style_ == 2){
-        FT_LOG_WARNING("FMHA is disabled for not support chat-GLM");
-        return false;
-    }
-    if(std::is_same<T, float>::value){
-        FT_LOG_WARNING("FMHA not support float");
-        return false;
-    }
-    if (use_medusa) {
-        FT_LOG_WARNING("FMHA not support medusa model");
-        return false;
-    }
-    return true;
-}
-
-template<typename T>
-bool ParallelAttentionWrapper<T>::UseOpenSourceFMHA() const {
-    bool use_open_source_fmha = CheckUseFMHA() && CheckQKVLengthEqual();
-    if (!(is_sm8x() || is_sm90())) {
-        FT_LOG_WARNING("opensource FMHA is disabled for sm %d", get_sm());
-        use_open_source_fmha = false;
-    }
-    char* fmha_env = std::getenv("ENABLE_OPENSOURCE_FMHA");
-    if (fmha_env && std::string(fmha_env) == "OFF") {
-        FT_LOG_WARNING("opensource FMHA is disabled for by env");
-        use_open_source_fmha = false;
-    }
-    return use_open_source_fmha;
-}
-
-
-template<typename T>
-bool ParallelAttentionWrapper<T>::UseTRTFMHA() const {
-    bool use_trt_fmha = CheckUseFMHA();
-    if (!(is_sm8x() || is_sm90() || is_sm70())) {
-        FT_LOG_WARNING("TRT FMHA is disabled for sm %d", get_sm());
-        use_trt_fmha = false;
-    }
-    if (params_.is_sparse_head_){
-        FT_LOG_WARNING("TRT FMHA is disabled for sparse");
-        use_trt_fmha = false;
-    }
-    char* fmha_env = std::getenv("ENABLE_TRT_FMHA");
-    if (fmha_env && std::string(fmha_env) == "OFF") {
-        FT_LOG_WARNING("TRT FMHA is disabled for by env");
-        use_trt_fmha = false;
-    }
-    return use_trt_fmha;
-}
-
-// for bert and gpu sm=75
-template<typename T>
-bool ParallelAttentionWrapper<T>::UseOldTRTFMHA() const {
-#ifdef USE_OLD_TRT_FMHA
-    bool use_old_trt_fmha = CheckUseFMHA() && CheckQKVLengthEqual();
-    if (!use_old_trt_fmha) {
-        return false;
-    }
-    if(!std::is_same<T, half>::value){
-        FT_LOG_INFO("OLD TRT FMHA only support half");
-        return false;
-    }
-    if (params_.head_num_ != params_.head_num_kv_) {
-        FT_LOG_INFO("OLD TRT not support head_num != head_num_kv");
-        return false;
-    }
-    auto testRunner = FusedMHARunnerFP16v2(local_head_num_, size_per_head_, get_sm(), q_scaling_);
-    return testRunner.fmha_supported(params_.is_causal_);
-#else
-    FT_LOG_INFO("USE_OLD_TRT_FMHA not enabled by define");
-    return false;
-#endif
-}
-
 template<typename T>
 bool ParallelAttentionWrapper<T>::UseMultiBlockMode() const {
     bool use_multi_block_mode = false;
@@ -755,7 +644,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     const int attention_seq_len_2 = max_context_prefix_length + max_context_seq_length;  // kv length
     const float qk_scale = 1.0f / (sqrtf(params_.size_per_head_ * 1.0f) * q_scaling_);
     print_bsd(layer_id, "qkv_buf", qkv_buf,  h_token_num, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt);
-    if (use_trt_fmha_) {
+    if (use_trt_fmha_ || use_paged_fmha_) {
         ContextAttentionParams context_attention_params{qkv_buf,                 // attention_input
                                                         max_context_seq_length,  // max_context_q_len
                                                         max_context_seq_length + max_context_prefix_length,  // max_context_kv_len,
@@ -1051,41 +940,28 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
         data_type = tensorrt_llm::kernels::DATA_TYPE_BF16;
     }
 #endif
-
+    if (false) {}
 #if (CUDART_VERSION >= 12000)
-    use_trt_fmha_ = UseTRTFMHA();
-    if (use_trt_fmha_) {
-        // Load kernels for contiguous cache and paged kv cache at the same time.
+    else if (CudaFmhaUtils::UseTrtFMHA<T>(params_)) {
+        use_trt_fmha_ = true;
+        FT_LOG_INFO("use trt fmha");
         mFMHARunner.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(
             data_type, local_head_num_, params_.size_per_head_, q_scaling_));
-        if (mFMHARunner -> fmha_supported()) {
-            FT_LOG_INFO("use TRT fmha");
-            // Set flags: force_fp32_acc, is_s_padded, causal_mask, num_kv_heads.
-            mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, params_.is_causal_, local_head_num_kv_);
-            char* forced_use_paged_fmha = std::getenv("FORCE_USE_PAGED_FMHA");
-            if (!CheckQKVLengthEqual()) {
-                FT_LOG_INFO("use pagged fmha since qkv length is not equal");
-                use_paged_fmha_ = true;
-            }
-            if (forced_use_paged_fmha != nullptr && std::string(forced_use_paged_fmha) == "1") {
-                FT_LOG_INFO("force use pagged fmha by env");
-                use_paged_fmha_ = true;
-            }
-        }
-        else {
-            FT_LOG_WARNING("FMHA is disabled for size_per_head %d", params_.size_per_head_);
-            use_trt_fmha_ = false;
-        }
+        mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, params_.is_causal_, local_head_num_kv_);
+    } else if (CudaFmhaUtils::UsePagedTrtFMHA<T>(params_)) {
+        FT_LOG_INFO("use paged trt fmha");
+        use_paged_fmha_ = true;
+        mFMHARunner.reset(new tensorrt_llm::kernels::FusedMHARunnerV2(
+            data_type, local_head_num_, params_.size_per_head_, q_scaling_));
+        mFMHARunner->setup_flags(mFMHAForceFP32Acc, !mRemovePadding, params_.is_causal_, local_head_num_kv_);
     }
 #endif
-    use_open_source_fmha_ = !use_trt_fmha_ && UseOpenSourceFMHA();
-    if (use_open_source_fmha_) {
+    else if (CudaFmhaUtils::UseOpenSourceFMHA<T>(params_)) {
         FT_LOG_INFO("use open source fmha");
+        use_open_source_fmha_ = true;
     }
-
 #ifdef USE_OLD_TRT_FMHA
-    use_old_trt_fmha_ = !use_trt_fmha_ && !use_open_source_fmha_ && UseOldTRTFMHA();
-    if (use_old_trt_fmha_) {
+    else if (CudaFmhaUtils::UseOldTrtFMHA<T>(params_)) {
         FT_LOG_INFO("use old trt fmha");
         dispatcher_fp16.reset(new FusedMHARunnerFP16v2(local_head_num_, size_per_head_, get_sm(), q_scaling_));
     }
@@ -1093,21 +969,18 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
 }
 
 template<typename T>
-bool ParallelAttentionWrapper<T>::UseFMHA()
-{
-    return use_open_source_fmha_ || use_trt_fmha_ || use_old_trt_fmha_;
+bool ParallelAttentionWrapper<T>::UseFMHA() {
+    return use_open_source_fmha_ || use_trt_fmha_ || use_old_trt_fmha_ || use_paged_fmha_;
 }
 
 template<typename T>
-ParallelAttentionWrapper<T>::~ParallelAttentionWrapper()
-{
+ParallelAttentionWrapper<T>::~ParallelAttentionWrapper() {
     cublas_wrapper_ = nullptr;
     freeBuffer();
 }
 
 template<typename T>
-void ParallelAttentionWrapper<T>::allocateBuffer()
-{
+void ParallelAttentionWrapper<T>::allocateBuffer() {
     FT_CHECK(false);
 }
 

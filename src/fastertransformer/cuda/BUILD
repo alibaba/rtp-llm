@@ -109,6 +109,21 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "cuda_fmha_utils",
+    hdrs = [
+        "cuda_fmha_utils.h",
+    ],
+    deps = [
+        ":cuda_utils",
+        "//src/fastertransformer/utils:utils",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "cuda_utils",
@@ -140,6 +155,7 @@ cc_library(
         ":nvtx",
         ":cublas",
         ":cuda_utils",
+        ":cuda_fmha_utils",
         ":memory_utils",
         "//src/fastertransformer/kernels:kernels",
         "//src/fastertransformer/utils:utils",

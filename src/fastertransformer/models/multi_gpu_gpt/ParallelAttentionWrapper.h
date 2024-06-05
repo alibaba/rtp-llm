@@ -165,11 +165,6 @@ public:
                    const int*                input_lengths);
 
     void Attention(TensorMap* output_tensors, TensorMap* input_tensors, const AttentionWeight<T>* attention_weights);
-    bool CheckUseFMHA() const;
-    bool CheckQKVLengthEqual() const;
-    bool UseOpenSourceFMHA() const;
-    bool UseOldTRTFMHA() const;
-    bool UseTRTFMHA() const;
     bool UseMultiBlockMode() const;
 
     void TRTFMHA(int layer_id, const ContextAttentionParams& params, cudaStream_t stream);
