@@ -28,11 +28,12 @@ void RtpLLMOp::init(const ft::GptInitParameter& gpt_init_params,
     auto                      global_weights = rtp_llm::WeightsConverter::convertPyWeightsMap(py_global_weights);
     auto                      layers_weights = rtp_llm::WeightsConverter::convertPyWeightsMapVec(py_layers_weights);
     rtp_llm::EngineInitParams params(gpt_init_params, layers_weights, global_weights);
+    if (gpt_init_params.tp_rank_ == 0) {
     // kmon metric init
-    (void)rtp_llm::initKmonitorFactory();
-    auto kmon_tags = rtp_llm::getHippoTags();
-    params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
-
+        (void)rtp_llm::initKmonitorFactory();
+        auto kmon_tags = rtp_llm::getHippoTags();
+        params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+    }
     grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, gpt_init_params.model_rpc_port_, std::move(params));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {

@@ -20,10 +20,12 @@ void RtpEmbeddingOp::init(const ft::GptInitParameter& gpt_init_params, py::objec
     auto global_weights = rtp_llm::WeightsConverter::convertPyWeightsMap(py_global_weights);
     auto layers_weights = rtp_llm::WeightsConverter::convertPyWeightsMapVec(py_layers_weights);
     rtp_llm::EngineInitParams params(gpt_init_params, layers_weights, global_weights);
-    // kmon metric init
-    (void)rtp_llm::initKmonitorFactory();
-    auto kmon_tags = rtp_llm::getHippoTags();
-    params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+    if (gpt_init_params.tp_rank_ == 0) {
+        // kmon metric init
+        (void)rtp_llm::initKmonitorFactory();
+        auto kmon_tags = rtp_llm::getHippoTags();
+        params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+    }
     embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, handler_impl));
 }
 
