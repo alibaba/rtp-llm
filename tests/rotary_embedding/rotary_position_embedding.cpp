@@ -26,9 +26,7 @@ __global__ void KernelWrapper(
     if (work) {
         float2 x;
         x = *reinterpret_cast<float2*>(&input[batch_idx][seq_idx][headnum_idx][headsize_idx * 2]);
-        if constexpr (style == RotaryEmbeddingStyle::GLM) {
-            fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, seq_idx, dim, base);
-        } else if constexpr (style == RotaryEmbeddingStyle::LinearScalar) {
+        if constexpr (style == RotaryEmbeddingStyle::LinearScalar) {
             fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, dim, base, scalar);
         } else if constexpr (style == RotaryEmbeddingStyle::NTKScalar) {
             fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, dim, base, scalar, 
@@ -99,12 +97,6 @@ torch::Tensor RotaryPositionEmbeddingOp::forward(torch::Tensor input) {
             dim, base, scalar, max_position_embeddings, max_logn_seq_len);
         break;
     
-    case 4:
-        KernelWrapper<RotaryEmbeddingStyle::GLM><<<grid, block, smem_size, stream>>>(
-            input.packed_accessor32<float,4,at::RestrictPtrTraits>(), 
-            dim, base, scalar, max_position_embeddings, max_logn_seq_len);
-        break;
-
     default:
         break;
     }

@@ -592,39 +592,8 @@ enum class RotaryEmbeddingStyle : int8_t {
     LinearScalar  = 1,
     NTKScalar     = 2,
     QWenNTKScalar = 3,
-    GLM           = 4,
-    GLM2          = 5,
+    GLM2          = 4,
 };
-
-__inline__ __device__ int
-get_glm_step(const int step, const int mask_id, const int input_len, const int max_input_len) {
-    if (mask_id == -1) {
-        if ((step + 1) < max_input_len)
-            return step;
-        else
-            return (step - max_input_len + input_len);
-    } else {
-        if ((step + 1) < input_len)
-            return step;
-        else
-            return mask_id;
-    }
-}
-
-__inline__ __device__ int
-get_glm_block_step(const int step, const int mask_id, const int input_len, const int max_input_len) {
-    if (mask_id == -1) {
-        if ((step + 1) < max_input_len)
-            return step;
-        else
-            return (step - max_input_len + input_len);
-    } else {
-        if ((step + 1) < input_len)
-            return 0;
-        else
-            return 1;
-    }
-}
 
 template<typename scalar_t, typename vector_t, RotaryEmbeddingStyle style>
 class Rope {};
@@ -779,48 +748,6 @@ public:
 };
 
 template<typename scalar_t, typename vector_t>
-class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM> {
-
-    static constexpr int vec_size = vector_size<scalar_t, vector_t>::size;
-
-public:
-    static __device__ __inline__ void impl(vector_t&   x,
-                                           scalar_t*   smem,
-                                           const int   tidx,
-                                           const int   seqidx,
-                                           const int   blockidx,
-                                           const int   dim,
-                                           const float base        = 10000.f,
-                                           const int   context_len = 0) {
-
-        const int  vec_size = vector_size<scalar_t, vector_t>::size;
-        const bool work     = (tidx * vec_size < dim);
-
-        if (work) {
-            reinterpret_cast<vector_t*>(smem)[tidx] = x;
-        }
-
-        __syncthreads();
-
-        if (tidx * vec_size < dim / 2) {
-            RotaryHalfRead(x, smem, tidx, dim / 4);
-            apply_rotary_embedding(x, tidx, dim / 2, seqidx, base);
-            RotaryHalfWrite(x, smem, tidx, dim / 4);
-        } else if ((tidx * vec_size >= dim / 2 && tidx * vec_size < dim)) {
-            RotaryHalfRead(x, smem + dim / 2, tidx - dim / (2 * vec_size), dim / 4);
-            apply_rotary_embedding(x, tidx - dim / (2 * vec_size), dim / 2, blockidx, base);
-            RotaryHalfWrite(x, smem + dim / 2, tidx - dim / (2 * vec_size), dim / 4);
-        }
-
-        __syncthreads();
-
-        if (work) {
-            x = reinterpret_cast<vector_t*>(smem)[tidx];
-        }
-    }
-};
-
-template<typename scalar_t, typename vector_t>
 class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM2> {
 
 public:
@@ -883,16 +810,6 @@ __device__ inline void context_rope(int       RopeStyle,
             Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar>::impl(
                 k, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, dynamic_embedding_max_pos);
             break;
-
-        case 2: {
-            int block_step = get_glm_block_step(seqidx, input_len - 2, input_len, input_len);
-            int step       = get_glm_step(seqidx, input_len - 2, input_len, input_len);
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM>::impl(
-                q, smem, tidx, step, block_step, dim, base, seq_len);
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM>::impl(
-                k, smem, tidx, step, block_step, dim, base, seq_len);
-            break;
-        }
         case 3:
             // glm2 rotary embedding
             // only do rotary embedding for [..., d / 2]
@@ -962,16 +879,6 @@ __device__ inline void attention_rope(int       RopeStyle,
             if (handle_kv) {
                 Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar>::impl(
                     k, smem, tidx, tlength, dim, base, scaling_factor, seq_len, max_pos);
-            }
-            break;
-
-        case 2:
-
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM>::impl(
-                q, smem, tidx, input_len - 2, gen_len + 2 - prefix_prompt_length, dim, base);
-            if (handle_kv) {
-                Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM>::impl(
-                    k, smem, tidx, input_len - 2, gen_len + 2 - prefix_prompt_length, dim, base);
             }
             break;
 

@@ -32,19 +32,6 @@ py_test(
 )
 
 py_test(
-    name = "chatglm_test",
-    srcs = [
-        "chatglm_test.py",
-    ],
-    data = [
-        "//maga_transformer/models/test:testdata",
-        "//maga_transformer/test/model_test/fake_test/testdata:testdata"
-    ],
-    deps = [
-        "//maga_transformer:testlib",
-    ],
-)
-py_test(
     name = "starcode_test",
     srcs = [
         "starcode_test.py",

@@ -6,7 +6,6 @@ import sys
 from unittest import TestCase, main
 
 from maga_transformer.models.qwen import QWenTokenizer
-from maga_transformer.models.chat_glm import ChatGLMTokenizer
 from maga_transformer.models.chat_glm_v2 import ChatGLMTokenizer as ChatGLMTokenizerV2
 from maga_transformer.models.llama import LlamaTokenizer
 from maga_transformer.models.starcoder import StarcoderTokenizer
@@ -27,7 +26,6 @@ class IncrementalDecodeTest(TestCase):
         ret = []
         tokenizer_pairs = [
             (QWenTokenizer, "maga_transformer/test/model_test/fake_test/testdata/qwen_7b/tokenizer"),
-            (ChatGLMTokenizer, "maga_transformer/test/model_test/fake_test/testdata/chatglm/tokenizer"),
             (ChatGLMTokenizerV2, "maga_transformer/test/model_test/fake_test/testdata/chatglm2/tokenizer"),
             (LlamaTokenizer, "maga_transformer/test/model_test/fake_test/testdata/llama/fake/hf_source"),
             (StarcoderTokenizer, "maga_transformer/test/model_test/fake_test/testdata/starcoder/tokenizer")

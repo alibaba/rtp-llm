@@ -1,15 +1,6 @@
 package(default_visibility = ["//maga_transformer:__subpackages__", "//internal_source:__subpackages__"])
 
 py_binary(
-    name = "fake_glm",
-    srcs = ["fake_glm.py"],
-    deps = [
-        "//maga_transformer:utils",
-        "//maga_transformer:_ft_pickler",
-    ]
-)
-
-py_binary(
     name = "fake_glm_v2",
     srcs = ["fake_glm_v2.py"],
     deps = [

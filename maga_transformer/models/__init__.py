@@ -3,10 +3,8 @@ from .gpt_neox import GPTNeox
 from .llama import Llama, Baichuan
 from .sgpt_bloom import SGPTBloom
 from .sgpt_bloom_vector import SGPTBloomVector
-from .chat_glm import ChatGlm
 from .starcoder import StarCoder
 from .starcoder2 import StarCoder2
-from .glm_130b import Glm130B
 from .bloom import Bloom
 from .chat_glm_v2 import ChatGlmV2
 from .chat_glm_v3 import ChatGlmV3

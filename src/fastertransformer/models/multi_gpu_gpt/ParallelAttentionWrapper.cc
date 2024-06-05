@@ -28,10 +28,6 @@ bool ParallelAttentionWrapper<T>::CheckUseFMHA() const {
         FT_LOG_WARNING("FMHA is not enbaled");
         return false;
     }
-    if (params_.rotary_embedding_style_ == 2){
-        FT_LOG_WARNING("FMHA is disabled for not support chat-GLM");
-        return false;
-    }
     // TODO - TRT FMHA is likely support prefix prompt, need to test
     if (!not_prefix_prompt){
         FT_LOG_WARNING("FMHA is disabled for prefix prompt");
