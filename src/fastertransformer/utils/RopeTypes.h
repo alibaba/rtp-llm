@@ -6,9 +6,9 @@
 namespace fastertransformer {
 
 enum class RopeType {
-    Base = 1,
+    NOROPE = 0,
     NTKScale = 3,
-    NOROPE = 5,
+    Base = 1,
 };
 
 struct RopeConfig {
