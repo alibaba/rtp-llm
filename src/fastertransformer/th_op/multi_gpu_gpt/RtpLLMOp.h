@@ -1,7 +1,6 @@
 #pragma once
 
 #include "grpc++/grpc++.h"
-// #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "maga_transformer/cpp/model_rpc/ModelRpcServer.h"
 

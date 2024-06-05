@@ -5,6 +5,7 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/kernels/bert_preprocess_kernels.h"
 #include "src/fastertransformer/kernels/gen_relative_pos_bias.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
@@ -423,23 +424,6 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
     sync_check_cuda_error();
 
     return model_output;
-}
-
-at::ScalarType getScalarType(const std::string& data_type) {
-    at::ScalarType scalar_type;
-    if (data_type == "fp16") {
-        scalar_type = at::ScalarType::Half;
-
-    } else if (data_type == "bf16") {
-        scalar_type = at::ScalarType::BFloat16;
-
-    } else if (data_type == "fp32") {
-        scalar_type = at::ScalarType::Float;
-
-    } else {
-        FT_LOG_ERROR("datatype not implemented %s", data_type.c_str());
-    }
-    return scalar_type;
 }
 
 ParallelModelWrapper::ParallelModelWrapper(

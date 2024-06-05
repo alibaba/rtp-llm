@@ -1,6 +1,9 @@
 #include "maga_transformer/cpp/embedding_engine/EmbeddingQueryConverter.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include <numeric>
+#include <torch/extension.h>
+
+namespace th = torch;
 
 namespace rtp_llm {
 
@@ -24,7 +27,7 @@ EmbeddingStreamPtr EmbeddingQueryConverter::convertEmbeddingInputs(
             std::vector<size_t>{(size_t)token_type_ids.size(0)},
             token_type_ids.data_ptr());
 
-    int64_t total_length = std::accumulate((int32_t*)input_lengths.data_ptr(), (int32_t*)input_lengths.data_ptr() + input_lengths.size(0), 0);    
+    int64_t total_length = std::accumulate((int32_t*)input_lengths.data_ptr(), (int32_t*)input_lengths.data_ptr() + input_lengths.size(0), 0);
 
     auto input_lengths_buffer_ptr =
         std::make_shared<ft::Buffer>(
@@ -38,7 +41,7 @@ EmbeddingStreamPtr EmbeddingQueryConverter::convertEmbeddingInputs(
 }
 
 th::Tensor EmbeddingQueryConverter::convertEmbeddingOutputs(EmbeddingStreamPtr stream) {
-    return Buffer2torchTensor(stream->embeddingOutput()->output);    
+    return Buffer2torchTensor(stream->embeddingOutput()->output);
 }
 
 } // namespace rtp_llm

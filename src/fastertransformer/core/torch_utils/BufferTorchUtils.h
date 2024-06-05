@@ -12,6 +12,23 @@
 
 namespace fastertransformer {
 
+inline at::ScalarType getScalarType(const std::string& data_type) {
+    at::ScalarType scalar_type;
+    if (data_type == "fp16") {
+        scalar_type = at::ScalarType::Half;
+
+    } else if (data_type == "bf16") {
+        scalar_type = at::ScalarType::BFloat16;
+
+    } else if (data_type == "fp32") {
+        scalar_type = at::ScalarType::Float;
+
+    } else {
+        FT_LOG_ERROR("datatype not implemented %s", data_type.c_str());
+    }
+    return scalar_type;
+}
+
 using BufferShapeType = std::remove_cv<std::remove_reference<
         decltype(std::declval<Buffer>().shape())
     >::type>::type;
@@ -126,7 +143,7 @@ inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf, bool copyData
         }
         return out;
     } else {
-        return torch::from_blob(buf->data(), bufferShapeToTorchShape(*buf), option);        
+        return torch::from_blob(buf->data(), bufferShapeToTorchShape(*buf), option);
     }
 }
 

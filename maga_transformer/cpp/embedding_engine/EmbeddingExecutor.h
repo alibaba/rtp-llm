@@ -1,11 +1,13 @@
 #pragma once
 
 #include <memory>
+#if USING_CUDA
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
+#endif
 #include "maga_transformer/cpp/embedding_engine/EmbeddingStream.h"
-#include "maga_transformer/cpp/embedding_engine/handlers/HandlerBase.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
+#include "maga_transformer/cpp/dataclass/MergedQuery.h"
 
 namespace rtp_llm {
 
@@ -17,7 +19,9 @@ public:
 
 private:
     std::unique_ptr<GptModel>             model_;
+#if USING_CUDA
     std::unique_ptr<ParallelModelWrapper> model_wrapper_;
+#endif
     py::object                            handler_;
     ft::DeviceBase*                       device_;
     ft::BufferPtr                         max_position_ids_buf_;
@@ -33,7 +37,7 @@ private:
     absl::Status                     updateStreams(th::Tensor    gpu_outputs,
                                                    const std::list<EmbeddingStreamPtr>& streams) const;
     absl::StatusOr<th::Tensor>       postProcess(const ModelRequest& model_request, const GptModelOutputs& gpu_outputs);
-    void calcTokenNum(const std::list<EmbeddingStreamPtr>& streams, int64_t& token_num, int64_t& batch_size) const;    
+    void calcTokenNum(const std::list<EmbeddingStreamPtr>& streams, int64_t& token_num, int64_t& batch_size) const;
     void                             init_position_ids(int max_seq_len);
     void reportMetrics(size_t context_batch_size, size_t combo_token_num, size_t max_seq_len) const;
 };

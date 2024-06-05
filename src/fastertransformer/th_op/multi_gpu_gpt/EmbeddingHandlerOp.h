@@ -7,7 +7,7 @@
 namespace torch_ext {
 
 class EmbeddingHandlerOp {
-private: 
+private:
     std::unique_ptr<rtp_llm::HandlerBase> handler_ = nullptr;
 public:
     EmbeddingHandlerOp() {}

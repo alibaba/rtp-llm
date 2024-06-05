@@ -2,7 +2,9 @@
 #include "c10/core/ScalarType.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
+#if USING_CUDA
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
+#endif
 #include "src/fastertransformer/core/Types.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
@@ -41,6 +43,24 @@ void EmbeddingExecutor::init_position_ids(int max_seq_len) {
     for (int i = 0; i < max_seq_len; i++) {
         position_ids[i] = i;
     }
+}
+
+absl::Status EmbeddingExecutor::createAttentionMask(GptModelInputs& model_input) const {
+    const auto& input_lengths = model_input.input_lengths;
+    auto max_input_seq_len = *std::max_element(input_lengths->data<int32_t>(), input_lengths->data<int32_t>() + input_lengths->size());
+    auto attention_mask = torch::ones({(int)max_input_seq_len, (int)max_input_seq_len});
+    if (params_.is_causal_) {
+        attention_mask = attention_mask.tril();
+    }
+    attention_mask = attention_mask.unsqueeze_(0).tile({(int)input_lengths->size(), 1, 1}).to(getScalarType(params_.data_type_));
+    for (int i = 0; i < input_lengths->size(); ++i) {
+        attention_mask[i].slice(0, *input_lengths->dataWithOffset<int32_t>(i), max_input_seq_len) = 0;
+        if (!params_.is_causal_) {
+            attention_mask[i].slice(1, *input_lengths->dataWithOffset<int32_t>(i), max_input_seq_len) = 0;
+        }
+    }
+    model_input.attention_mask = device_->clone(*ft::torchTensor2Buffer(attention_mask));
+    return absl::OkStatus();
 }
 
 absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
@@ -86,7 +106,7 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         memcpy(merged_token_type_ids + (int)token_idx, stream->embeddingInput()->token_type_ids->data(), length * sizeof(int32_t));
         memcpy(input_lengths + (int)batch_idx, stream->embeddingInput()->input_lengths->data(), stream->batchSize() * sizeof(int32_t));
         int length_idx = 0;
-        for (int i = 0; i < batchSize; i++) {            
+        for (int i = 0; i < batchSize; i++) {
             int seqLen = stream->embeddingInput()->input_lengths->data<int32_t>()[i];
             FT_CHECK_WITH_INFO(seqLen + position_bias <= max_position_ids_buf_->shape()[0], "position index exceed max_position_length");
             memcpy(merged_positon_ids + token_idx + length_idx, max_position_ids_buf_->data<int32_t>() + position_bias, seqLen * sizeof(int32_t));
@@ -176,8 +196,10 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     ModelRequest model_request = generateOldModelRequest(model_input);
     if (use_new_device_impl_) {
         model_output = std::move(model_->forward(model_input));
+#if USING_CUDA
     } else {
         model_output = std::move(model_wrapper_->forward(model_request));
+#endif
     }
     auto post_state = postProcess(model_request, model_output);
     RETURN_IF_STATUS_OR_ERROR(post_state);

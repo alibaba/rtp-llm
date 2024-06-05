@@ -218,11 +218,14 @@ cc_library(
         ":common",
         ":system_prompt",
         ":system_prompt_constructor",
-        ":model_wrapper",
-        "//src/fastertransformer/cuda:allocator_cuda",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-    ],
+    ] + select({
+        "//:using_cuda": [
+            ":model_wrapper",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"]
 )
 
@@ -240,15 +243,31 @@ cc_library(
         ":schedulers",
         ":engine_base",
         ":common",
+        ":normal_engine",
         ":system_prompt",
         ":system_prompt_constructor",
-        ":model_wrapper",
-        ":normal_engine",
-        "//src/fastertransformer/cuda:allocator_cuda",
+        ":embedding_handler_base",
+    ] + select({
+        "//:using_cuda": [
+            ":model_wrapper",
+            ":embedding_handler",
+            "//src/fastertransformer/cuda:allocator_cuda",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
+    name = "embedding_handler_base",
+    hdrs = [
+        "embedding_engine/handlers/HandlerBase.h",
+    ],
+    deps = [
         "@com_google_absl//absl/status",
-        ":embedding_handler",
         "@com_google_absl//absl/status:statusor",
     ],
+    copts = copts(),
     visibility = ["//visibility:public"]
 )
 
@@ -256,11 +275,14 @@ cc_library(
     name = "embedding_handler",
     hdrs = glob([
         "embedding_engine/handlers/*.h",
+    ], exclude = [
+        "embedding_engine/handlers/HandlerBase.h"
     ]),
     srcs = glob([
         "embedding_engine/handlers/*.cc",
     ]),
     deps = torch_deps() + [
+        ":embedding_handler_base",
         ":dataclass",
         ":models",
         "//src/fastertransformer/layers:layers",

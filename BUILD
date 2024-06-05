@@ -56,19 +56,21 @@ cc_library(
 
 filegroup(
     name = "not_experimental_th_op_hdrs_files",
-    srcs = glob(["src/fastertransformer/th_op/**/*.h"],
-                exclude=[
-                    "src/fastertransformer/th_op/GptInitParameter.h",
-                    "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.h",
-                ]),
+    srcs = glob([
+        "src/fastertransformer/th_op/**/*.h",
+    ], exclude=[
+        "src/fastertransformer/th_op/GptInitParameter.h",
+        "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.h",
+    ]),
 )
 
 filegroup(
     name = "th_op_hdrs_files",
-    srcs = glob(["src/fastertransformer/th_op/**/*.h"],
-                exclude=[
-                    "src/fastertransformer/th_op/GptInitParameter.h"
-                ]),
+    srcs = glob([
+        "src/fastertransformer/th_op/**/*.h"],
+    exclude=[
+        "src/fastertransformer/th_op/GptInitParameter.h"
+    ]),
 )
 
 cc_library(
@@ -86,23 +88,38 @@ cc_library(
 
 filegroup(
     name = "not_experimental_th_transformer_lib_files",
-    srcs = glob(["src/fastertransformer/th_op/th_utils.cc",
-                 "src/fastertransformer/th_op/common/*.cc",
-                 "src/fastertransformer/th_op/multi_gpu_gpt/*.cc",
-                 "src/fastertransformer/th_op/GptInitParameter.cc"
-                 ], exclude=[
-                     "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.cc"
-                 ]),
+    srcs = glob([
+        "src/fastertransformer/th_op/th_utils.cc",
+        "src/fastertransformer/th_op/common/*.cc",
+        "src/fastertransformer/th_op/multi_gpu_gpt/*.cc",
+        "src/fastertransformer/th_op/GptInitParameter.cc"
+    ], exclude = [
+        "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.cc"
+    ]),
 )
 
 filegroup(
     name = "th_transformer_lib_files",
-    srcs = glob(["src/fastertransformer/th_op/th_utils.cc",
-                 "src/fastertransformer/th_op/common/*.cc",
-                 "src/fastertransformer/th_op/multi_gpu_gpt/*.cc",
-                 "src/fastertransformer/th_op/GptInitParameter.cc",
-                 "src/fastertransformer/th_op/init.cc"
-                 ]),
+    srcs = [
+        "src/fastertransformer/th_op/GptInitParameter.cc",
+        "src/fastertransformer/th_op/init.cc",
+        "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
+        "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.cc",
+    ] + select({
+        "//:using_cuda": [
+            "src/fastertransformer/th_op/th_utils.cc",
+            "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
+            "src/fastertransformer/th_op/common/DynamicDecodeOp.cc",
+            "src/fastertransformer/th_op/common/FusedEmbeddingOp.cc",
+            "src/fastertransformer/th_op/common/GptOps.cc",
+            "src/fastertransformer/th_op/common/NcclOp.cc",
+            "src/fastertransformer/th_op/common/WeightOnlyQuantOps.cc",
+            "src/fastertransformer/th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
+            "src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptOp.cc",
+            "src/fastertransformer/th_op/multi_gpu_gpt/WeightTransposeCalibrateQuantizeOp.cc",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 cc_library(
@@ -114,14 +131,18 @@ cc_library(
     deps = [
         ":gpt_init_params_hdr",
     	":th_op_hdrs",
-        "//src/fastertransformer/cuda:allocator_torch",
-        "//src/fastertransformer/layers:layers",
-        "//src/fastertransformer/models:models",
         "//src/fastertransformer/utils:utils",
     ] + select({
         "//:use_experimental": [
             "//maga_transformer/cpp:model_rpc_server",
             "@grpc//:grpc++",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//:using_cuda": [
+            "//src/fastertransformer/cuda:allocator_torch",
+            "//src/fastertransformer/layers:layers",
+            "//src/fastertransformer/models:models",
         ],
         "//conditions:default": [],
     }),
@@ -133,13 +154,17 @@ cc_library(
 cc_binary(
     name = "th_transformer",
     deps = [
-        "cutlass_kernels_interface",
-        "//3rdparty/flash_attention2:flash_attention2_impl",
-        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
-        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
         ":th_transformer_lib",
         ":gpt_init_params_hdr",
-    ],
+    ] + select({
+        "//:using_cuda": [
+            "cutlass_kernels_interface",
+            "//3rdparty/flash_attention2:flash_attention2_impl",
+            "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
+            "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
+        ],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     linkshared = 1,
     visibility = ["//visibility:public"],

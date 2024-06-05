@@ -1,7 +1,6 @@
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include <cstdlib>
 #include "maga_transformer/cpp/common/status_util.h"
-#include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
@@ -91,9 +90,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     GptModelOutputs model_output;
     if (use_new_device_impl_) {
         model_output = std::move(model_->forward(model_input));
+#if USING_CUDA
     } else {
         ModelRequest model_request = std::move(generateOldModelRequest(model_input));
         model_output               = std::move(model_wrapper_->forward(model_request));
+#endif
     }
     FT_LOG_DEBUG("model forward done");
     if (device_->getDeviceProperties().tp_rank > 0) {
