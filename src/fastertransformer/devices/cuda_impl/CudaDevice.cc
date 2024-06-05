@@ -126,10 +126,10 @@ void CudaDevice::syncAndCheck() {
     sync_check_cuda_error();
 }
 
-void CudaDevice::syncCommunication() {
+void CudaDevice::syncCommunication(bool timeout) {
     if (nccl_param_.world_size_ > 1) {
         FT_LOG_INFO("Synchronize NCCL communicators rank %d of %d.", nccl_param_.rank_, nccl_param_.world_size_);
-        ftNcclStreamSynchronize(nccl_param_, stream_);
+        ftNcclStreamSynchronize(nccl_param_, stream_, timeout);
     }
 }
 

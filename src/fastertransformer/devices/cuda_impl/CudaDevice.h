@@ -27,7 +27,7 @@ public:
     void checkUseMultiBlockMode();
 
     void syncAndCheck() override;
-    void syncCommunication() override;
+    void syncCommunication(bool timeout = true) override;
 
 public:
     cudaStream_t getStream() {return stream_;}

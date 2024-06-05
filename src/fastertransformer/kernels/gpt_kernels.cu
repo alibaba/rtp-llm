@@ -410,20 +410,6 @@ void invokeTransposeAxis012(T* out, T* in, const int dim0, const int dim1, const
     transposeAxis01<<<grid, block, 0, stream>>>(out, in, dim0, dim1, dim2);
 }
 
-template void
-invokeTransposeAxis012(float* out, float* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
-
-template void
-invokeTransposeAxis012(half* out, half* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
-
-#ifdef ENABLE_BF16
-template void
-invokeTransposeAxis012(__nv_bfloat16* out, __nv_bfloat16* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
-#endif
-
-template void
-invokeTransposeAxis012(int* out, int* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream);
-
 template<typename T>
 __global__ void transposeAxis01(T* out, T* in, const int* in_skipping_dim1, const int dim0, const int dim1)
 {
@@ -451,32 +437,21 @@ void invokeTransposeAxis01(
     transposeAxis01<<<grid, block, 0, stream>>>(out, in, nullptr, dim0, dim1);
 }
 
-template void invokeTransposeAxis01(
-    int32_t* out, int32_t* in, const int dim0, const int dim1, cudaStream_t stream);
+#define DEFINE_INVOKETRANSPOSE(T)                                       \
+    template void invokeTransposeAxis01(T* out, T* in, const int dim0, const int dim1, cudaStream_t stream); \
+    template void invokeTransposeAxis012(                               \
+            T* out, T* in, const int dim0, const int dim1, const int dim2, cudaStream_t stream)
 
-template void invokeTransposeAxis01(
-    int8_t* out, int8_t* in, const int dim0, const int dim1, cudaStream_t stream);
 
-template void invokeTransposeAxis01(
-    uint8_t* out, uint8_t* in, const int dim0, const int dim1, cudaStream_t stream);
-
-template void invokeTransposeAxis01(
-    uint32_t* out, uint32_t* in, const int dim0, const int dim1, cudaStream_t stream);
-
-template void invokeTransposeAxis01(
-    int64_t* out, int64_t* in, const int dim0, const int dim1, cudaStream_t stream);
-
-template void invokeTransposeAxis01(
-    uint64_t* out, uint64_t* in, const int dim0, const int dim1, cudaStream_t stream);
-
-template void invokeTransposeAxis01(
-    float* out, float* in, const int dim0, const int dim1, cudaStream_t stream);
-
-template void invokeTransposeAxis01(
-    half* out, half* in, const int dim0, const int dim1, cudaStream_t stream);
-
-template void invokeTransposeAxis01(
-    nv_bfloat16* out, nv_bfloat16* in, const int dim0, const int dim1, cudaStream_t stream);
+DEFINE_INVOKETRANSPOSE(int32_t);
+DEFINE_INVOKETRANSPOSE(int8_t);
+DEFINE_INVOKETRANSPOSE(uint8_t);
+DEFINE_INVOKETRANSPOSE(uint32_t);
+DEFINE_INVOKETRANSPOSE(int64_t);
+DEFINE_INVOKETRANSPOSE(uint64_t);
+DEFINE_INVOKETRANSPOSE(float);
+DEFINE_INVOKETRANSPOSE(half);
+DEFINE_INVOKETRANSPOSE(nv_bfloat16);
 
 template<typename T>
 __global__ void transposeAxis12(T* out, T* in, const int dim0, const int dim1, const int dim2, const int dim3)

@@ -44,7 +44,7 @@ void DeviceBase::syncAndCheck() {
     return;
 }
 
-void DeviceBase::syncCommunication() {
+void DeviceBase::syncCommunication(bool timeout) {
     return;
 }
 
