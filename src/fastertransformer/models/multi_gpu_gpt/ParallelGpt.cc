@@ -339,7 +339,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     }
     const size_t   h_token_num = decoder_input_tensor.shape()[0];
     const DataType data_type   = getTensorType<T>();
-    const bool     use_kvcache = (output_tensors->isExist("key_cache") && output_tensors->isExist("value_cache")) || output_tensors->isExist("block_pointers");
 
     PUSH_RANGE(stream_, "buffer allocation");
     bool reuse_buf   = !params_.use_norm_input_residual_;
@@ -380,7 +379,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
 
     uint   max_blocks_per_batch = 0;
     size_t block_stride = 0;
-    if (use_kvcache) {
+    if (params_.use_kvcache_) {
         if (output_tensors->isExist("block_pointers")) {
             Tensor block_pointers = output_tensors->at("block_pointers");
             assert(block_pointers.shape()[0] == params_.num_layers_);
@@ -511,7 +510,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
 
         TensorMap attention_input_tensors{
             {"input_query", Tensor{MEMORY_GPU, activation_in_type, {h_token_num, hidden_units}, input_query}},
-            {"use_kvcache", Tensor{MEMORY_CPU, TYPE_BOOL, {(size_t)1}, &use_kvcache}},
             {"block_pointers",
              Tensor{MEMORY_GPU, TYPE_INT64, {total_batch_size, 1, 2, max_blocks_per_batch}, block_pointers_ + l * block_stride}},
             {"host_block_pointers", Tensor{MEMORY_CPU, TYPE_INT64, {total_batch_size, 1, 2, max_blocks_per_batch}, block_pointers_vector_.data() + l * block_stride}},

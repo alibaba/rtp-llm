@@ -418,7 +418,7 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
                                                 TensorMap*                input_tensors,
                                                 const AttentionWeight<T>* attention_weights)
 {
-    if (input_tensors->isExist("use_kvcache") && !input_tensors->getVal<bool>("use_kvcache")) {
+    if (!params_.use_kvcache_) {
         throw std::runtime_error("use_kvcahe == false should not do self attention!");
     }
     const int  layer_id                = input_tensors->getVal<int>("layer_id");
@@ -490,7 +490,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                                    TensorMap*                input_tensors,
                                                    const AttentionWeight<T>* attention_weights)
 {
-    const bool use_kvcache = !input_tensors->isExist("use_kvcache") || input_tensors->getVal<bool>("use_kvcache");
+    const bool use_kvcache = params_.use_kvcache_;
     const int  generate_batch_size      = input_tensors->getVal<int>("generate_batch_size");
     const int  h_token_num              = input_tensors->at("input_query").shape()[0];
     const int  context_h_token_num      = h_token_num - generate_batch_size;
@@ -854,7 +854,7 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
 
     const int           generate_batch_size = input_tensors->getVal<int>("generate_batch_size");
     const int           context_batch_size  = input_tensors->getVal<int>("context_batch_size");
-    const bool          use_kvcache = !input_tensors->isExist("use_kvcache") || input_tensors->getVal<bool>("use_kvcache");
+    const bool          use_kvcache = params_.use_kvcache_;
     int                 max_context_seq_len = 0;
     int                 max_context_seq_len_with_prefix = 0;
     const int           layer_id            = input_tensors->getVal<int>("layer_id");

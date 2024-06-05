@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from maga_transformer.utils.util import WEIGHT_TYPE
+from maga_transformer.config.task_type import TaskType, check_task_type
 from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
 from maga_transformer.ops import GptInitParameter
 from maga_transformer.utils.gemm_utils.cutlass_config import load_cutlass_gemm_config
@@ -98,7 +99,8 @@ class GptInitModelParameters:
         "ref_module",
         "ref_dict",
         "tie_word_embeddings",
-        "need_ffn_act_scale"
+        "need_ffn_act_scale",
+        "task_type"
     }
 
     def __init__(self,
@@ -130,6 +132,7 @@ class GptInitModelParameters:
         self.vit_related_params: VitParameters = VitParameters()
         self.ref_module: Optional[torch.nn.Module] = None
         self.ref_dict: Dict[str, torch.Tensor] = {}
+        self.task_type = TaskType.LANGUAGE_MODEL
 
         self.tie_word_embeddings = False
         self.need_ffn_act_scale = False
@@ -266,6 +269,11 @@ class GptInitModelParameters:
             if 'prefix_projection' in content:
                 self.prefix_projection = content['prefix_projection']
         logging.info(f"read ptuning config, pre_seq_len:{self.pre_seq_len}, prefix_projection:{self.prefix_projection}")
+        
+    def update_task_type_use_kvcache(self):
+        self.task_type = check_task_type(self.ckpt_path)
+        self.use_kvcache = (self.task_type == TaskType.LANGUAGE_MODEL)
+        logging.info(f"model task type: {self.task_type}, use_kvcache: {self.use_kvcache}")
 
     def update_common(self,
                       ckpt_path: str,
@@ -284,7 +292,7 @@ class GptInitModelParameters:
         self.lora_infos = lora_infos
         self.tokenizer_path = tokenizer_path
         if not self.quant_algo.isQuant() and int8_mode:
-            self.quant_algo.setQuantAlgo("weight_only_per_col", 8, 0);
+            self.quant_algo.setQuantAlgo("weight_only_per_col", 8, 0)
         self.data_type = data_type.to_str()
         self.gen_num_per_circle = gen_num_per_circle
         self.ptuning_path = ptuning_path
@@ -301,6 +309,7 @@ class GptInitModelParameters:
         self.update_task_prompt_config()
         self.update_ptuning_config()
         self.update_medusa_config(ckpt_path)
+        self.update_task_type_use_kvcache()
 
         load_cutlass_gemm_config(self.quant_algo)
 

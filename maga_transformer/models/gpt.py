@@ -15,7 +15,7 @@ from maga_transformer.utils.time_util import Timer
 from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.task_type import TaskType
-from maga_transformer.models.downstream_modules.utils import load_task_type, create_custom_module
+from maga_transformer.models.downstream_modules.utils import create_custom_module
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
 from maga_transformer.utils.database import CkptDatabase, ModuleDatabase, DictDatabase
 from maga_transformer.models.gpt_util.prefix_encoder import PrefixEncoder
@@ -52,7 +52,7 @@ class GPT(BaseModel):
         self.load()
     
     def init_misc(self):
-        self.task_type = load_task_type(self.config)
+        self.task_type = self.config.task_type
         self.custom_module = self.load_custom_module()
         self.compute_dtype = to_torch_dtype(self.config.data_type)
                     

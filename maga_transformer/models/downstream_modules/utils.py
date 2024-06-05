@@ -8,40 +8,6 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.models.downstream_modules.plugin_loader import UserModuleLoader
 from maga_transformer.models.downstream_modules import SparseEmbeddingModule, DenseEmbeddingModule, ALLEmbeddingModule, ColBertEmbeddingModule, ClassifierModule
 
-def load_task_type(param: GptInitModelParameters) -> TaskType:
-    # from_env
-    if 'TASK_TYPE' in os.environ and os.environ['TASK_TYPE'] != '':
-        return TaskType.from_str(os.environ['TASK_TYPE'])
-    # from config
-    if _is_dense_embedding_task(param.ckpt_path):
-        return TaskType.DENSE_EMBEDDING
-    if _is_classifier_task(param.ckpt_path):
-        return TaskType.SEQ_CLASSIFICATION
-    return TaskType.LANGUAGE_MODEL
-
-def _is_dense_embedding_task(ckpt_path: str) -> bool:
-    def _check_is_sentence_transformer_repo() -> bool:
-        if os.path.exists(os.path.join(ckpt_path, "config_sentence_transformers.json")):
-            return True
-        module_file_path = os.path.join(ckpt_path, "modules.json")
-        if os.path.exists(module_file_path):
-            with open(module_file_path, 'r') as reader:
-                content = reader.read()
-            if 'sentence_transformers' in content:
-                return True
-        return False
-    return os.environ.get('EMBEDDING_MODEL', '0') == '1' or _check_is_sentence_transformer_repo()
-
-def _is_classifier_task(ckpt_path: str) -> bool:
-    config_json = get_config_from_path(ckpt_path)
-    if not config_json:
-        return False
-    if 'architectures' in config_json and len(config_json['architectures']) > 0:
-            model_type = config_json['architectures'][0]
-            if 'SequenceClassification' in model_type:
-                return True
-    return False
-
 def create_custom_module(task_type: TaskType, config: GptInitModelParameters, tokenizer: Optional[PreTrainedTokenizerBase]):
     # try import internal module
     try:

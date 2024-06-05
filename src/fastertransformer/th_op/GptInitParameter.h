@@ -158,6 +158,7 @@ public:
     bool has_moe_norm_               = false;
     double logit_scale_              = 1.0;
     bool is_causal_                  = true;
+    bool use_kvcache_                = true;
 
     std::string tokenizer_path_    = "";
     std::string ckpt_path_         = "";
