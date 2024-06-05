@@ -122,7 +122,6 @@ class GenerateConfig(BaseModel):
                                     f"token_id in select_tokens_id {self.select_tokens_id} should be less than vocab_size {vocab_size}, and shoud not be negative")
         
     def add_special_tokens(self, special_tokens: Any):
-        # 如果同时在外面和里面都有设置采样参数，选择使用外面的
         # 这里假设外部传进来的stop_word_list和stop_word_str都不包含batch维度
         self.stop_words_list += special_tokens.stop_words_list
         self.stop_words_str += special_tokens.stop_words_str

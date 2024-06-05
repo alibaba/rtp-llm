@@ -14,13 +14,6 @@ using namespace fastertransformer;
 
 namespace rtp_llm {
 
-KVCacheBlockAddr KVCacheBlockAddr::clone(std::shared_ptr<CacheManager>& cache_manager) {
-    if (!k_ptr.empty()) {
-        cache_manager->incrBlockRefCounter(k_ptr[0]);
-    }
-    return *this;
-}
-
 CacheManager::CacheManager(const CacheConfig& config, ft::DeviceBase* device,
                            const kmonitor::MetricsReporterPtr metrics_reporter):
     config_(config),
@@ -188,7 +181,7 @@ size_t CacheManager::cacheItemNum() const {
     return block_cache_.size();
 }
 
-const KVCacheBuffer& CacheManager::kvCacheBuffer() const {
+const CacheManager::KVCacheBuffer& CacheManager::kvCacheBuffer() const {
     return kv_cache_;
 }
 
@@ -460,7 +453,7 @@ void CacheManager::copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_l
     }
 }
 
-SeqPosition CacheManager::getSeqPosition(const std::vector<int>& block_indice_list, int idx) {
+CacheManager::SeqPosition CacheManager::getSeqPosition(const std::vector<int>& block_indice_list, int idx) {
     int block_idx = idx / seq_size_per_block_;
     if (block_idx >= static_cast<int>(block_indice_list.size())) {
         RAISE_FATAL_ERROR(std::string("block idx should not >= len(block_indice_list)"));

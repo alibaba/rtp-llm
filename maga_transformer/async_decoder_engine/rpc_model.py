@@ -21,6 +21,7 @@ class RpcModel:
         self.rtp_llm_op_ = RtpLLMOp(model.config, False)
         self.rtp_llm_op_.set_weight(model.weight)
         self.model_rpc_client = ModelRpcClient(self.model.weight.lora_resource)
+        self.model.weight.lora_resource.ft_op = [self.rtp_llm_op_] 
 
     def is_multimodal(self) -> bool:
         return self.model.is_multimodal()
@@ -42,7 +43,7 @@ class RpcModel:
 
     def update(self, lora_infos: Dict[str, str]):
         with Timer() as timer:
-            self.rtp_llm_op_.update_lora(lora_infos)
+            self.model.weight.lora_resource.update(lora_infos)
         logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
     @torch.no_grad()

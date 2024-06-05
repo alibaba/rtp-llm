@@ -18,11 +18,9 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 
-
 namespace ft = fastertransformer;
 
 namespace rtp_llm {
-
 
 // WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
 class GenerateStream {

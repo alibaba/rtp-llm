@@ -37,33 +37,44 @@ struct GptModelInputs {
     ft::BufferPtr combo_tokens;      // [cumulated_seq_len]
     ft::BufferPtr input_lengths;     // [batch_size]
     ft::BufferPtr sequence_lengths;  // [decoder_batch_size]
+    ft::BufferPtr prefix_lengths;    // [batch_size, seq_len]
+    ft::BufferPtr count_lengths;     // [1]
+    ft::BufferPtr max_prefix_length; // [1]
 
     ft::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
-    ft::BufferPtr combo_position_ids;      // [cumulated_seq_len]
+    ft::BufferPtr combo_position_ids;         // [cumulated_seq_len]
+
+    ft::BufferPtr lora_ids;          // [batch_size]
 
     ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
     ft::BufferPtr position_ids;    // [batch_size, seq_len]
 
-    ft::BufferPtr prefix_lengths;   // [batch_size, seq_len]
-    ft::BufferPtr kv_cache_blocks;  // [layer_num, batch_size, 2, block_nums], int64 block pointers
-    ft::BufferPtr kv_cache_scales;  // [layer_num, batch_size, 2, block_nums], int64 block scales
-
-    ft::BufferPtr lora_ids;         // [batch_size]
+    ft::BufferPtr kv_cache_blocks;   // [layer_num, batch_size, 2, block_nums], int64 block pointers
+    ft::BufferPtr kv_cache_scales;   // [layer_num, batch_size, 2, block_nums], int64 block scales
 
 public:
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "GptModelInputs { "
-                     << "combo_tokens: " << combo_tokens->debugString()
-                     << ", input_lengths: " << input_lengths->debugString()
-                     << ", sequence_lengths: " << sequence_lengths->debugString()
-                     << ", prefix_lengths: " << prefix_lengths->debugString();
-        if (kv_cache_blocks != nullptr) {
-            debug_string << ", kv_cache_blocks: " << kv_cache_blocks->debugString() << "}";
+                     << "combo_tokens: " << combo_tokens->debugStringWithData<int32_t>()
+                     << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
+                     << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
+                     << ", prefix_lengths: " << prefix_lengths->debugStringWithData<int32_t>()
+                     << ", count_lengths: " << count_lengths->debugStringWithData<int32_t>()
+                     << ", max_prefix_length: " << max_prefix_length->debugStringWithData<int32_t>();
+        if (lora_ids) {
+            debug_string << ", lora_ids: " << lora_ids->debugStringWithData<int32_t>();
+        }
+        if (kv_cache_blocks) {
+            debug_string << ", kv_cache_blocks: " << kv_cache_blocks->debugString();
+        }
+        if (kv_cache_scales) {
+            debug_string << ", kv_cache_scales: " << kv_cache_scales->debugString();
         }
         if (attention_mask != nullptr) {
-            debug_string << ", attention_mask: " << attention_mask->debugString() << "}";            
+            debug_string << ", attention_mask: " << attention_mask->debugString();          
         }
+        debug_string << "}";
         return debug_string.str();
     }
 };

@@ -63,7 +63,7 @@ class Pipeline(object):
         return config
 
     def _get_stop_word_strs(self, tokenizer: PreTrainedTokenizerBase, generate_config: GenerateConfig) -> List[str]:
-        return generate_config.stop_words_str + [self.piple_funcs.process_decode_func(ids, tokenizer=self.tokenizer) for ids in generate_config.stop_words_list]
+        return generate_config.stop_words_str + [self.piple_funcs.process_decode_func(ids, tokenizer=self.tokenizer)[0] for ids in generate_config.stop_words_list]
 
     def __call__(self, prompt: List[str], images: Optional[List[List[str]]] = None, **kwargs: Any) -> Iterator[GenerateResponse]:
         # if not multimodal model, just pass images = [[]] * len(prompt)
@@ -145,59 +145,83 @@ class Pipeline(object):
 
         return self.generate_stream(token_ids, images, generate_config, **kwargs)
 
+    def process_stop(self,
+                    generate_output: GenerateOutput,
+                    generate_config: GenerateConfig,
+                    text: str, all_text: str,
+                    stop_word_str_list: List[str],
+                    stop_word_str_slice_list: List[str],
+                    token_buffer: str,
+                    **kwargs: Any):
+        generate_output.finished = self.piple_funcs.stop_generate_func(all_text, **kwargs) or generate_output.finished
+        if stop_word_str_list and not generate_output.finished and match_stop_words(all_text, stop_word_str_list):
+            generate_output.finished = True
+
+        if not generate_config.print_stop_words:
+            if not generate_config.return_incremental:                    
+                if not generate_output.finished:
+                    text = truncate_response_with_stop_words(text, stop_word_str_slice_list)
+                else:
+                    text = truncate_response_with_stop_words(text, stop_word_str_list)
+            else:
+                if not generate_output.finished:
+                    text = token_buffer + text
+                    trunc_text = truncate_response_with_stop_words(text, stop_word_str_slice_list)
+                    token_buffer = text[len(trunc_text):]
+                    text = trunc_text
+                else:
+                    text = truncate_response_with_stop_words(token_buffer + text, stop_word_str_list)
+        return text, token_buffer
+
     def decode_tokens(self,
                       generate_outputs: GenerateOutputs,
                       generate_config: GenerateConfig,
                       stop_word_str_list: List[str],
                       stop_word_str_slice_list: List[str],
-                      decoding_state: Optional[DecodingState],
-                      token_buffer: List[str],
+                      decoding_states: List[DecodingState],
+                      token_buffers: List[str],
                       **kwargs: Any) -> Tuple[List[Any], List[List[int]], List[str]]:
-        tokens = []
+        texts = []
+        all_texts = []
+        output_lens = []
+        if len(decoding_states) == 0:
+            if generate_config.num_beams == 1:
+                decoding_states = [DecodingState()] * len(generate_outputs.generate_outputs)
+            else:
+                decoding_states = [None] * len(generate_outputs.generate_outputs)
+
+        if len(token_buffers) == 0:
+            token_buffers = [""] * len(generate_outputs.generate_outputs)
+
+        i = 0
         for generate_output in generate_outputs.generate_outputs:
-            one_tokens = generate_output.output_ids.cpu()
-            tokens.append(one_tokens)
-        
-        tokens = remove_padding_eos(tokens, self._special_tokens.eos_token_id)
-        output_lens = [t.nelement() for t in tokens]
-        texts = [self.piple_funcs.process_decode_func(tokens.tolist(),
+            tokens = generate_output.output_ids.cpu()
+            tokens = remove_padding_eos(tokens, self._special_tokens.eos_token_id)
+            output_lens.append(tokens.nelement())
+            
+            text, all_text = self.piple_funcs.process_decode_func(tokens.tolist(),
                                           generate_config=generate_config.model_dump(),
                                           tokenizer=self.tokenizer,
-                                          decoding_state=decoding_state,
+                                          decoding_state=decoding_states[i],
                                           return_incremental=generate_config.return_incremental,
-                                          **kwargs) \
-                 for tokens in tokens]
-        # custom stop logic, update origin finsihed tensor
-        if len(token_buffer) == 0:
-            token_buffer = [""] * len(texts)
-
-        #TODO(xinfei.sxf) test this
-        generate_output.finished = self.piple_funcs.stop_generate_func(texts[0], **kwargs) or generate_output.finished
-        if stop_word_str_list and not generate_output.finished and match_stop_words(texts[0], stop_word_str_list):
-            generate_output.finished = True
-        if not generate_config.print_stop_words:
-            if not generate_config.return_incremental:
-                if not generate_output.finished:
-                    texts = [truncate_response_with_stop_words(text, stop_word_str_slice_list) for text in texts]
-                else:
-                    texts = [truncate_response_with_stop_words(text, stop_word_str_list) for text in texts]
-            else:
-                if not generate_output.finished:
-                    new_texts = []
-                    for i in range(len(texts)):
-                        text = token_buffer[i] + texts[i]
-                        trunc_text = truncate_response_with_stop_words(text, stop_word_str_slice_list)
-                        token_buffer[i] = text[len(trunc_text):]
-                        new_texts.append(trunc_text)
-                    texts = new_texts
-                else:
-                    texts = [truncate_response_with_stop_words(token_buffer[i] + texts[i], stop_word_str_list) for i in range(len(texts))]
-        return texts, output_lens, token_buffer
+                                          **kwargs)
+            
+            text, token_buffers[i] = self.process_stop(generate_output, generate_config, text, all_text, stop_word_str_list,
+                    stop_word_str_slice_list, token_buffers[i], **kwargs)
+            
+            text = self.piple_funcs.modify_response_func(
+                    text, hidden_states=generate_output.hidden_states,
+                    generate_config=generate_config.model_dump(),
+                    **kwargs)
+    
+            texts.append(text)
+            all_texts.append(all_text)
+            i += 1
+        return texts, output_lens, decoding_states, token_buffers
 
     @torch.inference_mode()
-    async def generate_stream(self, token_ids: List[int], images: List[Future[Image.Image]], generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
-        # TODO(xinfei.sxf) stop words etc 直接带入raw query中去
-
+    async def generate_stream(self, token_ids: List[int], images: List[Future[Image.Image]],
+                            generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         if self.model.is_multimodal() and len(images) > 0:
             tasks = [asyncio.create_task(self.vit_engine.get(images))]
             await asyncio.wait(tasks)
@@ -213,37 +237,30 @@ class Pipeline(object):
                               generate_config=generate_config,
                               tokenizer=self.tokenizer)
 
-        stop_word_strs = self._get_stop_word_strs(self.tokenizer, input.generate_config)
+        # TODO(xinfei.sxf) stop words id 也转化成了 stop words str，导致效率变低？
+        stop_word_strs = self._get_stop_word_strs(self.tokenizer, generate_config)
         stop_word_str_slices = get_stop_word_slice_list(stop_word_strs)
         if stop_word_strs:
             generate_config.is_streaming = True
 
         stream = self.model.enqueue(input)
 
+        decoding_states: List[DecodingState] = []
+        token_buffers: List[str] = []
 
-        num_beams = input.generate_config.num_beams
-        decoding_state = DecodingState() if num_beams == 1 else None
-
-        token_buffer: List[str] = []
-
+        # TODO(xinfei.sxf) add batch and stop test
         async for generate_outputs in stream:
             begin_time = current_time_ms()
-            generate_texts, output_lens, token_buffer = self.decode_tokens(
+            generate_texts, output_lens, decoding_states, token_buffers = self.decode_tokens(
                 generate_outputs,
-                input.generate_config,
-                stop_word_strs, stop_word_str_slices, decoding_state, token_buffer, **kwargs)
-
-            if num_beams == 1:
-                generate_texts[0] = self.piple_funcs.modify_response_func(
-                    generate_texts[0], hidden_states=generate_outputs.generate_outputs[0].hidden_states,
-                    generate_config=input.generate_config.model_dump(),
-                    **kwargs)
+                generate_config,
+                stop_word_strs, stop_word_str_slices, decoding_states, token_buffers, **kwargs)
 
             kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
 
             yield GenerateResponse(generate_outputs=generate_outputs, generate_texts=generate_texts)
 
-            if generate_outputs.generate_outputs[0].finished:
+            if all(output.finished for output in generate_outputs.generate_outputs):
                 kmonitor.report(GaugeMetrics.FT_ITERATE_COUNT_METRIC, generate_outputs.generate_outputs[0].aux_info.iter_count)
                 for l in output_lens:
                     kmonitor.report(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, l)

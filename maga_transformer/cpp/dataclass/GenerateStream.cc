@@ -41,6 +41,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const ft:
     generate_outputs_ = make_shared<GenerateOutputs>();
     generate_outputs_->request_id = generate_input_->request_id;
 
+    generate_status_.status = GenerateState::WAITING;
     sub_generate_status_.clear();
     sub_generate_status_.resize(tileNum());
     for (int i = 0; i < tileNum(); ++i) {
@@ -216,13 +217,6 @@ void GenerateStream::stopAndRelease(const std::string& err_msg) {
     setStop(err_msg);
     releaseResource();
 }
-bool GenerateStream::isDoneWithoutLock(int batch_id) const {
-    assert(batch_id < tileNum());
-    if (sub_generate_status_[batch_id].status == GenerateState::STOPPED || sub_generate_status_[batch_id].status == GenerateState::FINISHED) {
-        return true;
-    }
-    return false;
-}
 void GenerateStream::setPaused() {
     std::lock_guard<std::mutex> lock(output_mutex_);
     if (stoppedWithoutLock()) {
@@ -230,11 +224,6 @@ void GenerateStream::setPaused() {
     }
     is_context_stream_ = true;
     generate_status_.status = GenerateState::PAUSED;
-    for (int i = 0; i < tileNum(); ++i) {
-        if (!isDoneWithoutLock(i)) {
-            sub_generate_status_[i].status = GenerateState::PAUSED;
-        }
-    }
     last_pause_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
 }
 bool GenerateStream::setRunning() {
@@ -243,11 +232,6 @@ bool GenerateStream::setRunning() {
         return false;
     }
     generate_status_.status = GenerateState::RUNNING;
-    for (int i = 0; i < tileNum(); ++i) {
-        if (!isDoneWithoutLock(i)) {
-            sub_generate_status_[i].status = GenerateState::RUNNING;
-        }   
-    }
     return true;
 }
 void GenerateStream::setFinishedWithoutLock() {
@@ -294,6 +278,11 @@ bool GenerateStream::needFinish() {
 bool GenerateStream::needFinishBySPTokens() {
     matchEosToken();
     matchStopWordsList();
+    // num beams, finished by batch 0
+    if (numBeams() != 1) {
+        return sub_generate_status_[0].status == GenerateState::FINISHED;
+    }
+    // num sequence, finished by all batch
     return std::all_of(sub_generate_status_.begin(), sub_generate_status_.end(),
                                     [](GenerateStatus& generate_status) { return generate_status.status == GenerateState::FINISHED; });
 }

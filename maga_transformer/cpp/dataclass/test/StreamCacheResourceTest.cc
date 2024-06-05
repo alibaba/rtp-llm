@@ -172,6 +172,4 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     ASSERT_EQ(cache_manager_->cacheItemNum(), 4);
 }
 
-TEST_F(StreamCacheResourceTest, testError) {}
-
 }  // namespace rtp_llm

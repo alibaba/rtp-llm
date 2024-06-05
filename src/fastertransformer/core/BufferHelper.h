@@ -7,7 +7,6 @@
 #include <cassert>
 #include <cstring>
 
-
 namespace fastertransformer {
 
 inline DataType QBufferDtype2BufferDtype(DataType dtype) {

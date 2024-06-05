@@ -20,6 +20,12 @@ namespace rtp_llm {
 class IModelWrapper {
 public:
     virtual ~IModelWrapper() {}
+    
+    virtual void addLoRA(const int64_t                                                           lora_id,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) = 0;
+    virtual void removeLoRA(const int64_t lora_id) = 0;
+
     virtual bool                             useFMHA() = 0;
     virtual GptModelOutputs forward(const ModelRequest& model_request) = 0;
 };
@@ -39,7 +45,14 @@ public:
     void                             freeBuffer();
     void                             initialize();
     bool                             useFMHA() override;
+
+    void addLoRA(const int64_t                                                           lora_id,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights);
+    void removeLoRA(const int64_t lora_id);
+
     GptModelOutputs forward(const ModelRequest& model_request) override;
+
 private:
     void setPaddingOffsetAndCuSeqLens(ft::Tensor& padding_offset,
                                       ft::Tensor& cu_seqlens,
@@ -69,8 +82,6 @@ private:
     int* padding_offset_     = nullptr;
     int* cu_seqlens_         = nullptr;
     int* input_lengths_      = nullptr;
-    int* sequence_lengths_   = nullptr;
-    int* prefix_lengths_     = nullptr;
 
     // gpu copy is async, so need cpu mem hold
     std::vector<int> padding_offset_cpu_;
@@ -94,8 +105,8 @@ public:
     ~ParallelModelWrapper(){};
     void addLoRA(const int64_t                                                           lora_id,
                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
-                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {}
-    void removeLoRA(const int64_t lora_id) {}
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights);
+    void removeLoRA(const int64_t lora_id);
 
     bool useFMHA();
 

@@ -30,7 +30,6 @@ NormalEngine::~NormalEngine() {
 
 void NormalEngine::initCacheManager() {
     auto result = CacheConfigCreator::createConfig(params_);
-    // TODO(xinfei.sxf) test create cache config exception
     THROW_IF_STATUS_ERROR(result.status());
     resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device_, metrics_reporter_);
 }
@@ -48,13 +47,13 @@ absl::Status NormalEngine::addLoRA(const int64_t                                
                            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
     auto status = executor_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
-    reportMetrics({status.ok(), !status.ok(), 0});
+    reportMetrics({true, !status.ok(), 0});
     return status;
 }
 
 absl::Status NormalEngine::removeLoRA(const int64_t lora_id) {
     auto status = executor_->removeLoRA(lora_id);
-    reportMetrics({status.ok(), !status.ok(), 0});
+    reportMetrics({true, !status.ok(), 0});
     return status;
 }
 

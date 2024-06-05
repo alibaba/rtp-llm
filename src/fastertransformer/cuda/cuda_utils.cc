@@ -491,17 +491,23 @@ void print_bsd(const int   layer_id,
         cpu_ptr = const_cast<T*>(ptr);
     }
     printf("layer_id: %d %s [%d %d %d]\n", layer_id, name, batch_size, seq_len, hidden_size);
-    auto md_array_ptr = (T(*)[seq_len][hidden_size])cpu_ptr;
+    
     for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < seq_len; j++) {
             printf("b_%d s_%d ", i, j);
             double sum1 = 0;
             double sum2 = 0;
-            for (int k = start; k < end; k++) {
-                printf("k = %d, value = %f ", k, float(md_array_ptr[i][j][k]));
-                sum1 += float(md_array_ptr[i][j][k]);
-                sum2 += float(md_array_ptr[i][j][k]) * float(md_array_ptr[i][j][k]);
-            }
+            auto print_func = [&](int k_start, int k_end){
+                auto md_array_ptr = (T(*)[seq_len][hidden_size])cpu_ptr;
+                for (int k = k_start; k < k_end && k < hidden_size; k++) {
+                    printf("k = %d, value = %f ", k, float(md_array_ptr[i][j][k]));
+                    sum1 += float(md_array_ptr[i][j][k]);
+                    sum2 += float(md_array_ptr[i][j][k]) * float(md_array_ptr[i][j][k]);
+                }
+            };
+            print_func(start, end);
+            printf("......");
+            print_func(std::max(0, hidden_size - (end - start)), hidden_size);
             printf("\n");
             printf("sum1 = %f, square sum2 = %lf\n", sum1, sum2);
         }

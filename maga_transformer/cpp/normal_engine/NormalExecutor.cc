@@ -39,15 +39,13 @@ absl::Status
 NormalExecutor::addLoRA(const int64_t                                                           lora_id,
                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
-    // model_wrapper_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
-    // return absl::OkStatus();
-    return absl::UnimplementedError("not support lora yet");
+    model_wrapper_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+    return absl::OkStatus();
 }
 
 absl::Status NormalExecutor::removeLoRA(const int64_t lora_id) {
-    // model_wrapper_->removeLoRA(lora_id);
-    // return absl::OkStatus();
-    return absl::UnimplementedError("not support lora yet");
+    model_wrapper_->removeLoRA(lora_id);
+    return absl::OkStatus();
 }
 
 ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input) {
@@ -57,6 +55,9 @@ ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input
     model_request.combo_tokens        = model_input.combo_tokens;
     model_request.input_lengths       = model_input.input_lengths;
     model_request.sequence_lengths    = model_input.sequence_lengths;
+    model_request.prefix_lengths      = model_input.prefix_lengths;
+    model_request.count_lengths       = model_input.count_lengths;
+    model_request.max_prefix_length   = model_input.max_prefix_length;
     model_request.kv_cache_blocks     = model_input.kv_cache_blocks;
     model_request.kv_cache_scales     = model_input.kv_cache_scales;
     model_request.attention_mask      = model_input.attention_mask;

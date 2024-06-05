@@ -27,6 +27,9 @@ class DecodingState(object):
         self.prefix_offset = prefix_offset
         self.read_offset = read_offset
 
+    def __str__(self):
+        return f"{self.__class__.__name__}(" + ", ".join([f"{k}={v!r}" for k, v in self.__dict__.items()]) + ")"
+
 # Referenced from
 # https://github.com/vllm-project/vllm/blob/main/vllm/transformers_utils/tokenizer.py#L68
 def _convert_tokens_to_string_with_added_encoders(

@@ -73,9 +73,17 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     model_input.sequence_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {0}, ft::AllocationType::HOST}, {});
     model_input.prefix_lengths =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {0}, ft::AllocationType::HOST}, {});
+        device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)batch_size}, ft::AllocationType::HOST}, {});
+    memset(model_input.prefix_lengths->data(), 0, model_input.prefix_lengths->sizeBytes());
+    model_input.count_lengths =
+        device_->allocateBuffer({ft::DataType::TYPE_INT32, {1}, ft::AllocationType::HOST}, {});
+    *model_input.count_lengths->data<int32_t>() = 1;
+    model_input.max_prefix_length =
+        device_->allocateBuffer({ft::DataType::TYPE_INT32, {1}, ft::AllocationType::HOST}, {});
+    *model_input.max_prefix_length->data<int32_t>() = 0;
     int*      merged_tokens    = model_input.combo_tokens->data<int>();
     int*      input_lengths    = model_input.input_lengths->data<int>();
+    int*      prefix_lengths   = model_input.prefix_lengths->data<int>();
     int*      merged_positon_ids = model_input.combo_position_ids->data<int>();
     int*      merged_token_type_ids = model_input.combo_tokens_type_ids->data<int>();
     int token_idx = 0;
@@ -120,6 +128,8 @@ ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_in
     model_request.input_lengths        = model_input.input_lengths;
     model_request.sequence_lengths     = model_input.sequence_lengths;
     model_request.prefix_lengths       = model_input.prefix_lengths;
+    model_request.count_lengths        = model_input.count_lengths;
+    model_request.max_prefix_length    = model_input.max_prefix_length;
     model_request.attention_mask       = model_input.attention_mask;
     return model_request;
 }

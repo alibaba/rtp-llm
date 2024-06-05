@@ -116,10 +116,17 @@ private:
     template<typename T>
     std::string debugDataString(size_t count) const {
         auto base = data<T>();
+        auto total_size = size();
         std::ostringstream oss;
-        auto data_size = std::min(count, size());
+        auto data_size = std::min(count, total_size);
         for (size_t i = 0; i < data_size; i++) {
             oss << base[i] << ", ";
+        }
+        if (data_size != total_size) {
+            oss << "......";
+            for (size_t i = total_size - data_size; i < total_size; i++) {
+                oss << base[i] << ", ";
+            }
         }
         return "BufferData Detail(" + oss.str() + ")";
     }

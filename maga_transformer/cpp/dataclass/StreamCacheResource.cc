@@ -34,7 +34,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
         for (size_t layer_id = 0; layer_id < kv_cache_block_addr_.k_ptr[batch_id].size(); layer_id++) {
             auto& k_blocks = kv_cache_block_addr_.k_ptr[batch_id][layer_id];
             size_t reserver_blocks = std::max(0, int(k_blocks.size()) - int(nums));
-            // TODO(xinfei.sxf) release_blocks_num select min?
+            // NOTE: all batch has same number of blocks
             release_blocks_num = k_blocks.size() - reserver_blocks;
             if (layer_id == 0) {
                 vector<void*> release_blocks(k_blocks.begin() + reserver_blocks, k_blocks.end());

@@ -9,6 +9,7 @@
 #include "src/fastertransformer/kernels/gen_relative_pos_bias.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/utils/compiler_config.h"
+#include "src/fastertransformer/th_op/multi_gpu_gpt/Base.h"
 
 #include <algorithm>
 #include <math.h>
@@ -41,10 +42,6 @@ void ParallelModelWrapperImpl<T>::initialize() {
     }
     norm_wrapper_.reset(
         new NormWrapper<T>(params_.layernorm_type_, params_.norm_type_, T(sqrt(2 * params_.num_layers_))));
-
-    for (int i = 0; i < static_cast<int>(params_.num_layers_); i++) {
-        gpt_lora_layer_weights_.push_back(new ft::ParallelGptDecoderLoRALayerWeight<T>());
-    }
 }
 
 template<typename T>
@@ -64,6 +61,18 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
     cublas_wrapper_ = device_->cublasMMWrapperPtr();
     stream_         = device_->stream();
 
+    if (std::is_same<T, half>::value) {
+        cublas_wrapper_->setFP16GemmConfig();
+    }
+
+    else if constexpr (std::is_same<T, __nv_bfloat16>::value && CompileConfig::enable_bf16) {
+        cublas_wrapper_->setBF16GemmConfig();
+    }
+
+    else if (std::is_same<T, float>::value) {
+        cublas_wrapper_->setFP32GemmConfig();
+    }
+
     std::vector<std::unordered_map<std::string, ft::Tensor>> layer_weights_;
     for (auto& weights : layer_weights) {
         std::unordered_map<std::string, ft::Tensor> weights_;
@@ -74,13 +83,18 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
         }
         layer_weights_.emplace_back(std::move(weights_));
     }
+
+    for (int i = 0; i < static_cast<int>(params_.num_layers_); i++) {
+        gpt_lora_layer_weights_.push_back(new ft::ParallelGptDecoderLoRALayerWeight<T>());
+    }
+
     gpt_layer_weights_ =
         torch_ext::loadWeights<T>(pipeline_para_.world_size_,
                                   pipeline_para_.rank_,
                                   gpt_init_parameter.num_layers_,
                                   gpt_init_parameter.quant_algo_.toQuantAlgo(),
                                   layer_weights_,
-                                  (const std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*>*)nullptr);
+                                  &gpt_lora_layer_weights_);
     global_weights_.reset(new GptGlobalWeights<T>(global_weights));
 
     initialize();
@@ -111,10 +125,6 @@ void ParallelModelWrapperImpl<T>::allocateBuffer(size_t total_batch_size, size_t
         reinterpret_cast<int*>(allocator_->reMalloc(cu_seqlens_, sizeof(int) * (total_batch_size + 1)));
     input_lengths_ =
         reinterpret_cast<int*>(allocator_->reMalloc(input_lengths_, sizeof(int) * (total_batch_size)));
-    sequence_lengths_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(sequence_lengths_, sizeof(int) * (total_batch_size)));
-    prefix_lengths_ =
-        reinterpret_cast<int*>(allocator_->reMalloc(prefix_lengths_, sizeof(int) * (total_batch_size)));
 }
 
 template<typename T>
@@ -125,8 +135,6 @@ void ParallelModelWrapperImpl<T>::freeBuffer() {
     allocator_->free((void**)padding_offset_);
     allocator_->free((void**)cu_seqlens_);
     allocator_->free((void**)input_lengths_);
-    allocator_->free((void**)sequence_lengths_);
-    allocator_->free((void**)prefix_lengths_);
     allocator_->free((void**)attention_mask_);
 }
 
@@ -166,6 +174,19 @@ void ParallelModelWrapperImpl<T>::setPaddingOffsetAndCuSeqLens(ft::Tensor& paddi
 }
 
 template<typename T>
+void ParallelModelWrapperImpl<T>::addLoRA(const int64_t                                  lora_id,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
+   torch_ext::loadLoRAWeights<T>(
+        params_.num_layers_, lora_id, lora_a_weights, lora_b_weights, gpt_lora_layer_weights_);
+}
+
+template<typename T>
+void ParallelModelWrapperImpl<T>::removeLoRA(const int64_t lora_id) {
+    torch_ext::removeLoRAWeights<T>(lora_id, gpt_lora_layer_weights_);
+}
+
+template<typename T>
 bool ParallelModelWrapperImpl<T>::useFMHA() {
     return parallel_gpt_decoder_->UseFMHA();
 }
@@ -199,13 +220,20 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
         ft::MEMORY_GPU, ft::DataType::TYPE_INT32, {(size_t)model_request.context_batch_size + 1}, cu_seqlens_);
     ft::Tensor input_lengths(
         ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {total_batch_size}, model_request.input_lengths->data());
-    ft::Tensor sequence_lengths(ft::MEMORY_CPU,
-                                ft::DataType::TYPE_INT32,
-                                {(size_t)model_request.generate_batch_size},
-                                model_request.sequence_lengths->data());
+    ft::Tensor sequence_lengths(
+        ft::MEMORY_CPU, ft::DataType::TYPE_INT32,
+        {(size_t)model_request.generate_batch_size}, model_request.sequence_lengths->data());
+    ft::Tensor prefix_lengths(
+        ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {total_batch_size}, model_request.prefix_lengths->data());
+    ft::Tensor count_lengths(
+        ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {1}, model_request.count_lengths->data());
+    ft::Tensor max_prefix_length(
+        ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {1}, model_request.max_prefix_length->data());
     ft::Tensor lora_input_lengths(
         ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {total_batch_size}, model_request.input_lengths->data());
-    ft::Tensor lora_ids(ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {0}, nullptr);
+    auto lora_data = model_request.lora_ids ? model_request.lora_ids->data() : nullptr;
+    auto lora_len = model_request.lora_ids ? total_batch_size : 0;
+    ft::Tensor lora_ids(ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {lora_len}, lora_data);
 
     cudaMemcpyAsync(combo_tokens.getPtr<int>(),
                     model_request.combo_tokens->data(),
@@ -294,6 +322,9 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
     // gpt layer
     ft::TensorMap input_tensors({{"decoder_input", all_hidden_states},
                                  {"sequence_lengths", sequence_lengths},
+                                 {"d_prefix_prompt_lengths", prefix_lengths},
+                                 {"count_prefix_length", count_lengths},
+                                 {"max_prefix_prompt_length", max_prefix_length},
                                  {"input_lengths", input_lengths},
                                  {"lora_ids", lora_ids},
                                  {"attention_mask", attention_mask},
@@ -439,6 +470,16 @@ ParallelModelWrapper::ParallelModelWrapper(
         throw std::runtime_error("Wrong tensor type.");
     }
 #undef CREATE_INSTANCE
+}
+
+void ParallelModelWrapper::addLoRA(const int64_t                                         lora_id,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
+    model_wrapper_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+}
+
+void ParallelModelWrapper::removeLoRA(const int64_t lora_id) {
+    model_wrapper_->removeLoRA(lora_id);
 }
 
 bool ParallelModelWrapper::useFMHA() {

@@ -7,6 +7,7 @@
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLoRALayerWeight.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLayerWeight.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "src/fastertransformer/core/Buffer.h"
 
 namespace th = torch;
 namespace ft = fastertransformer;
@@ -29,6 +30,11 @@ inline at::ScalarType getScalarType(const std::string& data_type) {
         FT_LOG_ERROR("datatype not implemented %s", data_type.c_str());
     }
     return scalar_type;
+}
+
+template<typename T>
+inline T* get_ptr(const ft::ConstBufferPtr& t) {
+    return t->data<T>();
 }
 
 template<typename T, typename TensorType=th::Tensor>
@@ -179,6 +185,39 @@ void loadLoRAWeights(int                                                        
             return 0;
         }
         return it->second.size(0);
+    };
+    constexpr int lora_num = 5;
+    std::string lora_name_list[5] = {W::attn_qkv_w, W::attn_o_w, W::ffn_w1, W::ffn_w2, W::ffn_w3};
+    for (size_t i = 0; i < num_layers; i++) {
+        T *lora_a, *lora_b;
+        int lora_rank = 0;
+        for (int j = 0; j < lora_num; j++)
+        {
+            const std::string& name = lora_name_list[j];
+            lora_a = maybe_get<T>(lora_a_weights[i], name);
+            lora_b = maybe_get<T>(lora_b_weights[i], name);
+            lora_rank = get_lora_rank(lora_b_weights[i], name);
+            gpt_lora_layer_weights[i]->setLoRAWeight(name, lora_id, lora_a, lora_b, lora_rank);
+        }
+    }
+}
+
+template<typename T>
+void loadLoRAWeights(int                                                                     num_layers,
+                     int                                                                     lora_id,
+                     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
+                     const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights,
+                     std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*>&                 gpt_lora_layer_weights)
+{
+    // lora_a: [m, r]
+    // lora_b: [r, n]
+    auto get_lora_rank = [](const std::unordered_map<std::string, ft::ConstBufferPtr>& lora_b_weights,
+                            const std::string&                                         name) -> int {
+        auto it = lora_b_weights.find(name);
+        if (it == lora_b_weights.end()) {
+            return 0;
+        }
+        return it->second->shape()[0];
     };
     constexpr int lora_num = 5;
     std::string lora_name_list[5] = {W::attn_qkv_w, W::attn_o_w, W::ffn_w1, W::ffn_w2, W::ffn_w3};

@@ -2,11 +2,15 @@ import numpy as np
 import torch
 from typing import List, Any
 
-def remove_padding_eos(token_ids: torch.Tensor, eos_token_id: int) -> List[torch.Tensor]:
-    # token_ids shape: [beam_width, max_length]
-    out_token_ids = [tokens.cpu().numpy() for tokens in token_ids]
-    out_token_ids = [tokens[tokens != eos_token_id].tolist() for tokens in out_token_ids]
-    return [torch.IntTensor(x) for x in out_token_ids]
+def remove_padding_eos(token_ids: torch.Tensor, eos_token_id: int) -> torch.Tensor:
+    # token_ids shape: [max_length]
+    out_token_ids = token_ids.cpu().numpy()
+    out_token_ids = out_token_ids[out_token_ids != eos_token_id].tolist()
+    return torch.IntTensor(out_token_ids)
+
+def remove_padding_eos_for_list(token_ids_list: List[torch.Tensor], eos_token_id: int) -> List[torch.Tensor]:
+    # token_ids shape: [sub batch of stream, max_length]
+    return [remove_padding_eos(token_ids, eos_token_id) for token_ids in token_ids_list]
 
 def get_list_dim(origin: Any) -> int:
     def _get_dim_internal(x: Any) -> int:
@@ -65,6 +69,7 @@ def truncate_response_with_stop_words(response: str, stop_word_strs: List[str]):
     for stop_word in stop_word_strs:
         if stop_word and response.endswith(stop_word):
             response = response[:(-len(stop_word))]
+            break
     return response
 
 def match_stop_words(response: str, stop_word_strs: List[str]) -> bool:

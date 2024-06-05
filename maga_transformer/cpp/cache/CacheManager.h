@@ -1,20 +1,15 @@
 #pragma once
 
-#include <algorithm>
 #include <cassert>
-#include <iostream>
-#include <list>
 #include <mutex>
 #include <set>
-#include <sstream>
-#include <string>
-#include <unordered_map>
 #include <vector>
 #include <thread>
 
 #include "maga_transformer/cpp/cache/BlockCache.h"
 #include "maga_transformer/cpp/cache/BlockRefCounter.h"
 #include "maga_transformer/cpp/cache/CacheConfig.h"
+#include "maga_transformer/cpp/cache/KVCacheBlockAddr.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
@@ -23,42 +18,20 @@
 
 namespace ft = fastertransformer;
 namespace rtp_llm {
-
-struct SeqPosition {
-    int index;
-    int offset;
-};
-
-class CacheManager;
-
-class KVCacheBlockAddr {
-public:
-    void clear() {
-        k_ptr.clear();
-        v_ptr.clear();
-        k_scale_ptr.clear();
-        v_scale_ptr.clear();
-    }
-
-    KVCacheBlockAddr clone(std::shared_ptr<CacheManager>& cache_manager);
-
-public:
-    // [layer_num, max_block_per_seq]
-    std::vector<std::vector<void*>> k_ptr;
-    std::vector<std::vector<void*>> v_ptr;
-
-    std::vector<std::vector<void*>> k_scale_ptr;
-    std::vector<std::vector<void*>> v_scale_ptr;
-};
-
-struct KVCacheBuffer {
-    ft::BufferPtr k_blocks;
-    ft::BufferPtr v_blocks;
-    ft::BufferPtr k_scale;
-    ft::BufferPtr v_scale;
-};
-
 class CacheManager {
+public:
+    struct SeqPosition {
+        int index;
+        int offset;
+    };
+
+    struct KVCacheBuffer {
+        ft::BufferPtr k_blocks;
+        ft::BufferPtr v_blocks;
+        ft::BufferPtr k_scale;
+        ft::BufferPtr v_scale;
+    };
+
 public:
     CacheManager(const CacheConfig& config, ft::DeviceBase* device,
                  const kmonitor::MetricsReporterPtr metrics_reporter = nullptr);
