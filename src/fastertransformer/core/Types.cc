@@ -70,23 +70,13 @@ size_t getTypeSize(DataType type) {
     switch (type) {
         FT_FOREACH_TYPE(CASE);
         FT_FOREACH_DEVICE_TYPE(CASE);
+        CASE(DataType::TYPE_QINT8, int8_t);
         default:
             return 0;
     }
 
 }
 
-
-bool isFloat(DataType type) {
-    return (type == DataType::TYPE_BF16) ||
-           (type == DataType::TYPE_FP16) ||
-           (type == DataType::TYPE_FP32) ||
-           (type == DataType::TYPE_FP64);
-}
-
-bool isQuantify(DataType type) {
-    return (type == DataType::TYPE_INT8);
-}
 
 } // namespace fastertransformer
 

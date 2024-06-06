@@ -43,12 +43,12 @@ public:
            const std::vector<size_t>& shape,
            const void* data,
            const DeleterFuncType deleter = nullptr);
-    ~Buffer();
+    virtual ~Buffer();
 
     static Buffer emptyBuffer();
 
     Buffer(const Buffer& buffer) = delete;
-    Buffer(Buffer&& buffer)      = delete;
+    Buffer(Buffer&& buffer);
     Buffer& operator=(const Buffer& buffer) = delete;
     Buffer& operator=(Buffer&& buffer) = delete;
 
@@ -74,11 +74,22 @@ public:
     inline T* dataWithOffset(size_t offset) const {
         return data<T>() + offset;
     }
-    size_t                     typeSize() const;
-
+    
+    size_t typeSize() const;
     size_t size() const;
     size_t sizeBytes() const;
     size_t dim() const;
+
+    bool isFloat() const {
+        return  (type_ == DataType::TYPE_BF16) ||
+                (type_ == DataType::TYPE_FP16) ||
+                (type_ == DataType::TYPE_FP32) ||
+                (type_ == DataType::TYPE_FP64);
+    }
+
+    bool isQuantify() const {
+        return (type_ == DataType::TYPE_QINT8);
+    }
 
     void reshape(const std::vector<size_t>& shape);
     Buffer view(size_t offset, size_t size) const; // only from 0-d
@@ -113,7 +124,7 @@ private:
 
     std::string debugStringMeta() const;
 
-private:
+protected:
     MemoryType          where_;
     DataType            type_;
     std::vector<size_t> shape_;

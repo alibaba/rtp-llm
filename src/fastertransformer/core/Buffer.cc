@@ -26,6 +26,13 @@ Buffer::~Buffer() {
     }
 }
 
+Buffer::Buffer(Buffer&& buffer):
+               where_(std::exchange(buffer.where_, MemoryType::MEMORY_CPU)),
+               type_(std::exchange(buffer.type_, DataType::TYPE_INVALID)),
+               data_(std::exchange(buffer.data_, nullptr)),
+               shape_(std::exchange(buffer.shape_, {0})),
+               deleter_(std::exchange(buffer.deleter_, nullptr)) {}
+
 Buffer Buffer::emptyBuffer() {
     return Buffer(MemoryType::MEMORY_CPU, DataType::TYPE_INVALID, {0}, nullptr);
 }

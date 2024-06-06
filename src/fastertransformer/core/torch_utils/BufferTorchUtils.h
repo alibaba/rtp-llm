@@ -4,7 +4,10 @@
 #include <torch/all.h>
 
 #include "src/fastertransformer/core/Buffer.h"
+#include "src/fastertransformer/core/QBuffer.h"
 #include "src/fastertransformer/utils/logger.h"
+
+#include <array>
 
 
 namespace fastertransformer {
@@ -53,6 +56,7 @@ inline DataType torchDTypeToDataType(caffe2::TypeMeta dtype) {
 
     switch (dtype.toScalarType()) {
         FOREACH_BUFFER_TORCH_TYPE_MAP(TYPE_CASE);
+        TYPE_CASE(TYPE_QINT8, c10::kQInt8);
     default:
         FT_LOG_ERROR("Unsupported data type: [%d]%s", dtype.toScalarType(), dtype.name().data());
         throw std::runtime_error("Unsupported data type " + std::to_string((int8_t)(dtype.toScalarType())));
@@ -65,6 +69,9 @@ inline c10::ScalarType dataTypeToTorchType(DataType data_type) {
 #define TYPE_CASE(type, torch_type) \
     case type: { \
         return torch_type;   \
+    }
+    if(data_type == DataType::TYPE_QINT8) {
+        return c10::kQInt8;
     }
 
     switch (data_type) {
@@ -95,7 +102,22 @@ inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor) {
     return std::make_unique<Buffer>(memory_type, dtype, shape, data);
 }
 
+inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor,
+                                    const torch::Tensor& scales,
+                                    const torch::Tensor& zeros) {
+    
+    BufferPtr base_ptr = std::make_unique<QBuffer>(
+        std::move(*torchTensor2Buffer(tensor)),
+        std::move(*torchTensor2Buffer(scales)),
+        std::move(*torchTensor2Buffer(zeros)));
+    return base_ptr;
+}
+
+
 inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf, bool copyData = true) {
+    if (buf->isQuantify()) {
+        throw std::runtime_error("not support qbuffer!");
+    }
     auto option = torch::dtype(dataTypeToTorchType(buf->type())).device(memoryTypeToTorchDevice(buf->where())).requires_grad(false);
     if (copyData) {
         torch::Tensor out = torch::zeros(bufferShapeToTorchShape(*buf), option);
@@ -108,6 +130,15 @@ inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf, bool copyData
     } else {
         return torch::from_blob(buf->data(), bufferShapeToTorchShape(*buf), option);        
     }
+}
+
+inline std::array<torch::Tensor, 3> QBuffer2torchTensor(const ConstQBufferPtr& buf, bool copyData = true) {
+    if (!buf->isQuantify()) {
+        throw std::runtime_error("only support qbuffer!");
+    }
+    return {Buffer2torchTensor(buf->kernel()),
+            Buffer2torchTensor(buf->scales()),
+            Buffer2torchTensor(buf->zeros())};
 }
 
 inline void bufferCopy(const BufferPtr& src, torch::Tensor& dst, size_t numberOfElements) {

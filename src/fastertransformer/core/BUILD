@@ -78,6 +78,7 @@ cc_library(
     name = "buffer_hdr",
     hdrs = [
         "Buffer.h",
+        "QBuffer.h",
         "BufferHelper.h"
     ],
     deps = [
@@ -92,6 +93,7 @@ cc_library(
     name = "buffer",
     srcs = [
         "Buffer.cc",
+        "QBuffer.cc"
     ],
     deps = [
         ":buffer_hdr",
@@ -109,7 +111,7 @@ cc_library(
     deps = [
         ":buffer",
         "//src/fastertransformer/utils:logger"
-    ],
+    ] + torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],
 )

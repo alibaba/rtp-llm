@@ -46,7 +46,8 @@ typedef enum datatype_enum {
     TYPE_BF16,
     TYPE_FP8_E4M3,
     TYPE_STR,
-    TYPE_VOID
+    TYPE_VOID,
+    TYPE_QINT8
 } DataType;
 
 template<DataType data_type>
@@ -88,9 +89,6 @@ template<typename T>
 DataType getTensorType();
 
 size_t getTypeSize(DataType type);
-
-bool isQuantify(DataType type);
-bool isFloat(DataType type);
 
 } // namespace fastertransformer
 

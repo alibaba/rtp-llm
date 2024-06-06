@@ -1,6 +1,7 @@
 #pragma once
 
 #include "src/fastertransformer/core/Buffer.h"
+#include "src/fastertransformer/core/QBuffer.h"
 #include "src/fastertransformer/utils/logger.h"
 
 #include <cassert>
@@ -9,8 +10,24 @@
 
 namespace fastertransformer {
 
+inline DataType QBufferDtype2BufferDtype(DataType dtype) {
+    if (dtype == DataType::TYPE_QINT8) {
+        return DataType::TYPE_INT8;
+    } else {
+        return DataType::TYPE_INVALID;
+    }
+}
+
 inline BufferPtr convertBuffer2Ptr(const Buffer& buffer) {
     return std::make_unique<Buffer>(buffer.where(), buffer.type(), buffer.shape(), buffer.data(), buffer.deleter());
+}
+
+inline QBufferPtr BufferPtr2QBufferPtr(const BufferPtr& ptr) {
+    return std::dynamic_pointer_cast<QBuffer>(ptr);
+}
+
+inline ConstQBufferPtr BufferPtr2QBufferPtr(const ConstBufferPtr& ptr) {
+    return std::dynamic_pointer_cast<const QBuffer>(ptr);
 }
 
 template <typename T>
