@@ -18,13 +18,13 @@ void CudaDevice::copy(const CopyParams& params) {
     if (params.dst.isQuantify() && params.src.isQuantify()) {
         auto dst_ptr = reinterpret_cast<const QBuffer*>(&params.dst);
         auto src_ptr = reinterpret_cast<const QBuffer*>(&params.src);
-        copy({*dst_ptr->kernel(), *src_ptr->kernel()});
-        copy({*dst_ptr->scales(), *src_ptr->scales()});
-        copy({*dst_ptr->zeros(), *src_ptr->zeros()});
+        copy({dst_ptr->kernel(), src_ptr->kernel()});
+        copy({dst_ptr->scales(), src_ptr->scales()});
+        copy({dst_ptr->zeros(), src_ptr->zeros()});
         return;
     }
-    FT_CHECK_WITH_INFO(params.src.type() == params.dst.type(),
-                       "dst and src need has same datatype.");
+    FT_CHECK_WITH_INFO(params.src.typeSize() == params.dst.typeSize(),
+                       "dst and src need has same type size.");
     
     const auto src_offset = params.src_offset;
     const auto dst_offset = params.dst_offset;

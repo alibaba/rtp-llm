@@ -195,7 +195,7 @@ protected:
     {
         auto buffer = torchTensor2Buffer(tensor, scales, zeros);
         if (alloc_type == AllocationType::DEVICE) {
-            auto device_buffer = device_->allocateBufferLike(*buffer, AllocationType::DEVICE);
+            auto device_buffer = device_->allocateBufferLike(*buffer);
             device_->copy(CopyParams(*device_buffer, *buffer));
             device_->syncAndCheck();
             printf("created device buffer from tensor at %p with data=%p\n", device_buffer.get(), device_buffer->data());

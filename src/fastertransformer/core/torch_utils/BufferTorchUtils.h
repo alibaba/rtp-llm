@@ -106,11 +106,9 @@ inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor,
                                     const torch::Tensor& scales,
                                     const torch::Tensor& zeros) {
     
-    BufferPtr base_ptr = std::make_unique<QBuffer>(
-        std::move(*torchTensor2Buffer(tensor)),
-        std::move(*torchTensor2Buffer(scales)),
-        std::move(*torchTensor2Buffer(zeros)));
-    return base_ptr;
+    return BufferPtr(new QBuffer(std::move(torchTensor2Buffer(tensor)),
+                                 std::move(torchTensor2Buffer(scales)),
+                                 std::move(torchTensor2Buffer(zeros))));
 }
 
 
@@ -136,9 +134,22 @@ inline std::array<torch::Tensor, 3> QBuffer2torchTensor(const ConstQBufferPtr& b
     if (!buf->isQuantify()) {
         throw std::runtime_error("only support qbuffer!");
     }
-    return {Buffer2torchTensor(buf->kernel()),
-            Buffer2torchTensor(buf->scales()),
-            Buffer2torchTensor(buf->zeros())};
+    
+    return {Buffer2torchTensor(std::move(BufferPtr(new Buffer(buf->kernel().where(),
+                                                              buf->kernel().type(),
+                                                              buf->kernel().shape(),
+                                                              buf->kernel().data(),
+                                                              nullptr)))),
+            Buffer2torchTensor(std::move(BufferPtr(new Buffer(buf->scales().where(),
+                                                              buf->scales().type(),
+                                                              buf->scales().shape(),
+                                                              buf->scales().data(),
+                                                              nullptr)))),
+            Buffer2torchTensor(std::move(BufferPtr(new Buffer(buf->zeros().where(),
+                                                              buf->zeros().type(),
+                                                              buf->zeros().shape(),
+                                                              buf->zeros().data(),
+                                                              nullptr))))};
 }
 
 inline void bufferCopy(const BufferPtr& src, torch::Tensor& dst, size_t numberOfElements) {

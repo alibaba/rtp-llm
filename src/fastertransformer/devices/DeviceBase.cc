@@ -40,18 +40,18 @@ BufferPtr DeviceBase::allocateBufferLike(const Buffer& buffer,
                                          const AllocationType atype,  
                                          const BufferHints& hints) {
     if (buffer.isQuantify()) {
-        auto kernel = allocateBufferLike(*(reinterpret_cast<const QBuffer*>(&buffer)->kernel()),
+        auto kernel = allocateBufferLike((reinterpret_cast<const QBuffer*>(&buffer)->kernel()),
                                          atype,
                                          hints);
-        auto scales = allocateBufferLike(*(reinterpret_cast<const QBuffer*>(&buffer)->scales()),
+        auto scales = allocateBufferLike((reinterpret_cast<const QBuffer*>(&buffer)->scales()),
                                          atype,
                                          hints);
-        auto zeros = allocateBufferLike(*(reinterpret_cast<const QBuffer*>(&buffer)->zeros()),
+        auto zeros = allocateBufferLike((reinterpret_cast<const QBuffer*>(&buffer)->zeros()),
                                         atype,
                                         hints);
-        return std::make_unique<QBuffer>(std::move(*kernel),
-                                         std::move(*scales),
-                                         std::move(*zeros));
+        return BufferPtr(new QBuffer(std::move(kernel),
+                                     std::move(scales),
+                                     std::move(zeros)));
     }
     return allocateBuffer({buffer.type(), buffer.shape(), atype}, hints);
 }

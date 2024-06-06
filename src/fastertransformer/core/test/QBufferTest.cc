@@ -13,21 +13,22 @@ public:
 };
 
 TEST_F(QBufferTest, ValidConstructTest) {
-    auto kernel = Buffer(MemoryType::MEMORY_CPU,
-                         DataType::TYPE_INT8,
-                         {10, 10, 10},
-                         (void*)12345);
-    auto scales = Buffer(MemoryType::MEMORY_CPU,
-                         DataType::TYPE_FP16,
-                         {10},
-                         (void*)23456);
-    auto zeros = Buffer(MemoryType::MEMORY_CPU,
-                        DataType::TYPE_FP16,
-                        {10},
-                        (void*)34567);
-    Buffer* qbuffer = new QBuffer(std::move(kernel),
-                                  std::move(scales),
-                                  std::move(zeros));
+    auto kernel = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                                  DataType::TYPE_INT8,
+                                                  {10, 10, 10},
+                                                  (void*)12345));
+    auto scales = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                                  DataType::TYPE_FP16,
+                                                  {10},
+                                                  (void*)23456));
+    auto zeros = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                                 DataType::TYPE_FP16,
+                                                 {10},
+                                                 (void*)34567));
+    auto qbuffer = BufferPtr(new QBuffer(std::move(kernel),
+                                         std::move(scales),
+                                         std::move(zeros)));
+
     // buffer method check
     EXPECT_EQ(qbuffer->isQuantify(), true);
     EXPECT_EQ(qbuffer->where(), MemoryType::MEMORY_CPU);
@@ -41,7 +42,7 @@ TEST_F(QBufferTest, ValidConstructTest) {
     EXPECT_EQ(qbuffer->dim(), 3);
 
     // qbuffer method check
-    QBuffer* qbuffer_ptr= dynamic_cast<QBuffer*>(qbuffer);
+    QBufferPtr qbuffer_ptr= std::dynamic_pointer_cast<QBuffer>(qbuffer);
     EXPECT_EQ((int64_t)qbuffer_ptr->data(), 12345);
     EXPECT_EQ((int64_t)qbuffer_ptr->scales_data(), 23456);
     EXPECT_EQ((int64_t)qbuffer_ptr->zeros_data(), 34567);
@@ -52,56 +53,56 @@ TEST_F(QBufferTest, ValidConstructTest) {
 }
 
 TEST_F(QBufferTest, CopyConstructTest) {
-    auto kernel = Buffer(MemoryType::MEMORY_CPU,
-                         DataType::TYPE_INT8,
-                         {10, 10, 10},
-                         (void*)12345);
-    auto scales = Buffer(MemoryType::MEMORY_CPU,
-                         DataType::TYPE_FP16,
-                         {10},
-                         (void*)23456);
-    auto zeros = Buffer(MemoryType::MEMORY_CPU,
-                        DataType::TYPE_FP16,
-                        {10},
-                        (void*)34567);
-    EXPECT_EQ((int64_t)kernel.data(), 12345);
-    EXPECT_EQ((int64_t)scales.data(), 23456);
-    EXPECT_EQ((int64_t)zeros.data(), 34567);
-    Buffer qbuffer = QBuffer(std::move(kernel),
-                             std::move(scales),
-                             std::move(zeros));
-    EXPECT_EQ((int64_t)kernel.data(), 0);
-    EXPECT_EQ((int64_t)scales.data(), 0);
-    EXPECT_EQ((int64_t)zeros.data(), 0);
+    auto kernel = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                       DataType::TYPE_INT8,
+                                       {10, 10, 10},
+                                       (void*)12345));
+    auto scales = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                       DataType::TYPE_FP16,
+                                       {10},
+                                       (void*)23456));
+    auto zeros = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                      DataType::TYPE_FP16,
+                                      {10},
+                                      (void*)34567));
+    EXPECT_EQ((int64_t)kernel->data(), 12345);
+    EXPECT_EQ((int64_t)scales->data(), 23456);
+    EXPECT_EQ((int64_t)zeros->data(), 34567);
+    auto qbuffer = BufferPtr(new QBuffer(std::move(kernel),
+                                         std::move(scales),
+                                         std::move(zeros)));
+    EXPECT_EQ(kernel, nullptr);
+    EXPECT_EQ(scales, nullptr);
+    EXPECT_EQ(zeros, nullptr);
 }
 
 TEST_F(QBufferTest, Destructor_Test) {
     auto deleter_kernel = [] (Buffer* buffer) {
         std::cout << "delete buffer: kernel" << std::endl;};
-    auto kernel = new Buffer(MemoryType::MEMORY_CPU,
-                            DataType::TYPE_INT8,
-                            {10, 10, 10},
-                            nullptr,
-                            deleter_kernel);
+    auto kernel = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                       DataType::TYPE_INT8,
+                                       {10, 10, 10},
+                                       nullptr,
+                                       deleter_kernel));
     auto deleter_scales = [] (Buffer* buffer) {
         std::cout << "delete buffer: scales" << std::endl;};
-    auto scales = new Buffer(MemoryType::MEMORY_CPU,
-                            DataType::TYPE_INT8,
-                            {10},
-                            nullptr,
-                            deleter_scales);
+    auto scales = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                       DataType::TYPE_INT8,
+                                       {10},
+                                       nullptr,
+                                       deleter_scales));
     auto deleter_zeros = [] (Buffer* buffer) {
         std::cout << "delete buffer: zeros" << std::endl;};
-    auto zeros = new Buffer(MemoryType::MEMORY_CPU,
-                            DataType::TYPE_INT8,
-                            {10},
-                            nullptr,
-                            deleter_zeros);
-    Buffer* qbuffer = new QBuffer(std::move(*kernel),
-                                  std::move(*scales),
-                                  std::move(*zeros));
+    auto zeros = BufferPtr(new Buffer(MemoryType::MEMORY_CPU,
+                                       DataType::TYPE_INT8,
+                                       {10},
+                                       nullptr,
+                                       deleter_zeros));
+    auto qbuffer = BufferPtr(new QBuffer(std::move(kernel),
+                                         std::move(scales),
+                                         std::move(zeros)));
     testing::internal::CaptureStdout();
-    delete qbuffer;
+    qbuffer.reset();
     std::string output = testing::internal::GetCapturedStdout();
     EXPECT_EQ(output, "delete buffer: zeros\ndelete buffer: scales\ndelete buffer: kernel\n");
     
@@ -112,8 +113,8 @@ TEST_F(QBufferTest, TorchConstructTest) {
     auto scales = torch::rand({10});
     auto zeros  = torch::randint(0, 10, {10}, at::TensorOptions().dtype(at::ScalarType::Int));
     auto qbuffer = torchTensor2Buffer(tensor, scales, zeros);
-    EXPECT_TRUE(static_pointer_cast<QBuffer>(qbuffer)->isQuantify());
-    auto result = QBuffer2torchTensor(static_pointer_cast<const QBuffer>(qbuffer));
+    EXPECT_TRUE(dynamic_pointer_cast<QBuffer>(qbuffer)->isQuantify());
+    auto result = QBuffer2torchTensor(dynamic_pointer_cast<const QBuffer>(qbuffer));
     EXPECT_TRUE(torch::equal(result[0], tensor));
     EXPECT_TRUE(torch::equal(result[1], scales));
     EXPECT_TRUE(torch::equal(result[2], zeros));

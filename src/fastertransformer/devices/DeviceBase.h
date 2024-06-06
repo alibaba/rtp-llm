@@ -16,7 +16,7 @@ public:
     void traceMemoryUsage();
     BufferPtr allocateBuffer(const BufferParams& params, const BufferHints& hints = {});
     BufferPtr allocateBufferLike(const Buffer& buffer,
-                                 const AllocationType atype = AllocationType::HOST,  
+                                 const AllocationType atype = AllocationType::DEVICE,  
                                  const BufferHints& hints = {});
     virtual void syncAndCheck();
     virtual void syncCommunication(bool timeout = true);

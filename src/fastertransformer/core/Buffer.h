@@ -47,10 +47,10 @@ public:
 
     static Buffer emptyBuffer();
 
-    Buffer(const Buffer& buffer) = delete;
-    Buffer(Buffer&& buffer);
+    Buffer(const Buffer& buffer)            = delete;
+    Buffer(Buffer&& buffer)                 = delete;
     Buffer& operator=(const Buffer& buffer) = delete;
-    Buffer& operator=(Buffer&& buffer) = delete;
+    Buffer& operator=(Buffer&& buffer)      = delete;
 
     bool operator==(const Buffer& other);
 

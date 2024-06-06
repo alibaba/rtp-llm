@@ -47,13 +47,10 @@ struct CudaGemmDispatch {
         if (dim == 2 && params.A.isFloat() && params.B.isFloat()) {
 
             return GemmImplementType::cublas_basic_gemm;
-        }
-
-        else if (dim > 2 && params.A.isFloat() && params.B.isFloat()) {
+        } else if (dim > 2 && params.A.isFloat() && params.B.isFloat()) {
 
             return GemmImplementType::cublas_batch_gemm;
-        }
-        else if (dim == 2 && params.A.type() == DataType::TYPE_FP16 &&
+        } else if (dim == 2 && params.A.type() == DataType::TYPE_FP16 &&
                  params.B.type() == DataType::TYPE_QINT8) {
             return GemmImplementType::WeightOnlyQuantMatmulPlugin;
         }
@@ -192,7 +189,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
 
         weight_only_matmul_plguin_->enqueue(params.A.data(),
                                             reinterpret_cast<const QBuffer&>(params.B).data(),
-                                            reinterpret_cast<const QBuffer&>(params.B).scales()->data(),
+                                            reinterpret_cast<const QBuffer&>(params.B).scales_data(),
                                             output->data(),
                                             workspace->data(),
                                             arguments.m,
