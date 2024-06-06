@@ -95,11 +95,17 @@ static bool UsePagedTrtFMHA(const fastertransformer::GptInitParameter& gpt_init_
         FT_LOG_INFO("Paged TRT FMHA is disabled for int8 kvcache");
         use_paged_trt_fmha = false;        
     }
-    char* fmha_env = std::getenv("ENABLE_PAGED_TRT_FMHA");
-    if (fmha_env && std::string(fmha_env) == "OFF") {
-        FT_LOG_INFO("Paged TRT FMHA is disabled for by env");
+    char* paged_fmha_env = std::getenv("ENABLE_PAGED_TRT_FMHA");
+    if (paged_fmha_env && std::string(paged_fmha_env) == "OFF") {
+        FT_LOG_INFO("Paged TRT FMHA is disabled for by ENABLE_PAGED_TRT_FMHA=OFF env");
         use_paged_trt_fmha = false;
     }
+    char* fmha_env = std::getenv("ENABLE_TRT_FMHA");
+    if (fmha_env && std::string(fmha_env) == "OFF") {
+        FT_LOG_INFO("Paged TRT FMHA is disabled for by ENABLE_TRT_FMHA=OFF env");
+        use_paged_trt_fmha = false;
+    }
+
     return use_paged_trt_fmha;
 }
 
@@ -126,10 +132,6 @@ static bool CheckUseFMHA(const fastertransformer::GptInitParameter& params) {
     bool use_medusa = params.use_medusa_;
     if (!fmha_enable){
         FT_LOG_INFO("FMHA is not enbaled");
-        return false;
-    }
-    if (params.rotary_embedding_style_ == 2){
-        FT_LOG_INFO("FMHA is disabled for not support chat-GLM");
         return false;
     }
     if(std::is_same<T, float>::value){

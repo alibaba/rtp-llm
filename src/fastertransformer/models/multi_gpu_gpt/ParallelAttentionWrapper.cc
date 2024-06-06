@@ -871,7 +871,7 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
         max_context_seq_len_with_prefix = max_context_seq_len + input_tensors->getVal<int>("max_context_prefix_length", 0);
     }
     PUSH_RANGE(stream_, "attention_buffer_alloc");
-    allocateBuffer(h_token_num, context_batch_size, generate_batch_size, max_context_seq_len, max_context_seq_len_with_prefix, !(use_open_source_fmha_||use_trt_fmha_), multi_block_mode_, use_kvcache);
+    allocateBuffer(h_token_num, context_batch_size, generate_batch_size, max_context_seq_len, max_context_seq_len_with_prefix, !UseFMHA(), multi_block_mode_, use_kvcache);
     POP_RANGE;
     sync_check_cuda_error();
 
