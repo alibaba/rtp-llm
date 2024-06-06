@@ -65,6 +65,9 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         &cublas_wrapper_mutex_, allocator_.get()));
     cublas_mm_wrapper_->setGemmConfig(CUDA_R_16F, CUDA_R_16F, CUDA_R_16F, CUDA_R_32F);
 
+    weight_only_matmul_plguin_ = std::make_unique<trt_plugins::WeightOnlyQuantMatmulPlugin>(
+                        nvinfer1::DataType::kHALF, trt_plugins::WeightTypeId::INT8);
+
     auto ret = nvmlInit();
     FT_CHECK(ret == NVML_SUCCESS);
     ret = nvmlDeviceGetHandleByIndex(device_id_, &nvml_device_);

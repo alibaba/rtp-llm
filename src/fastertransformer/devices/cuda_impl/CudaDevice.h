@@ -5,8 +5,10 @@
 #include "src/fastertransformer/cuda/cublas/cublas.h"
 #include "src/fastertransformer/cuda/cufmha/cufmha.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
+#include "src/fastertransformer/trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 
 #include <nvml.h>
+namespace trt_plugins = tensorrt_llm::plugins;
 
 namespace fastertransformer {
 
@@ -67,6 +69,8 @@ private:
     std::mutex cublas_wrapper_mutex_;
     std::unique_ptr<cublasAlgoMap> cublas_algo_map_;
     std::unique_ptr<cublasMMWrapper> cublas_mm_wrapper_;
+    
+    std::unique_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin> weight_only_matmul_plguin_;
 
     nvmlDevice_t nvml_device_;
     NcclParam nccl_param_;

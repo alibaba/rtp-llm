@@ -324,6 +324,24 @@ protected:
         return test_data_path_;
     }
 
+    torch::Tensor randTensor(at::IntArrayRef shape,
+                             torch::Dtype dtype) {
+        torch::TensorOptions float_options = 
+            torch::TensorOptions(torch::kFloat).device(torch::Device(torch::kCPU));
+        torch::TensorOptions half_tensor_options = 
+            torch::TensorOptions(torch::kFloat16).device(torch::Device(torch::kCPU));
+        auto output = torch::rand(shape, float_options);
+        if (c10::isQIntType(dtype)) {
+            int axis = output.dim()-1;
+            auto scales = torch::rand(output.sizes()[axis], half_tensor_options);
+            auto zeros  = torch::zeros(output.sizes()[axis]);
+            output = at::quantize_per_channel(output, scales, zeros, axis, dtype);
+        } else {
+            output = output.to(dtype);
+        }
+        return output;                            
+    }
+
 protected:
     DeviceBase* device_ = nullptr;
     std::string test_data_path_;

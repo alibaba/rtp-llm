@@ -35,19 +35,27 @@ struct CudaGemmDispatch {
     enum GemmImplementType {
         cublas_basic_gemm,
         cublas_batch_gemm,
+        WeightOnlyQuantMatmulPlugin,
         invalid,
     };
 
     static GemmImplementType dispatch(const GemmParams& params) {
         size_t dim = params.A.dim();
-        if (params.C == std::nullopt && dim == 2) {
+        if (params.C != std::nullopt) {
+            return GemmImplementType::invalid;
+        }
+        if (dim == 2 && params.A.isFloat() && params.B.isFloat()) {
 
             return GemmImplementType::cublas_basic_gemm;
         }
 
-        else if (params.C == std::nullopt && dim > 2) {
+        else if (dim > 2 && params.A.isFloat() && params.B.isFloat()) {
 
             return GemmImplementType::cublas_batch_gemm;
+        }
+        else if (dim == 2 && params.A.type() == DataType::TYPE_FP16 &&
+                 params.B.type() == DataType::TYPE_QINT8) {
+            return GemmImplementType::WeightOnlyQuantMatmulPlugin;
         }
         return GemmImplementType::invalid;
     }
@@ -161,6 +169,39 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     if (CudaGemmDispatch::dispatch(params) == GemmImplementType::invalid) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
+    BufferPtr output;
+    if (params.D) {
+        output = params.D;
+        RUNTIME_ASSERT_OP_ARG(
+            (arguments.DDtype == params.D->type()) && (arguments.Dshape == params.D->shape()),
+            "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
+            arguments.DDtype, autil::StringUtil::toString(arguments.Dshape).c_str(),
+            params.D->debugString().c_str());
+    } else {
+        output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
+    }
+    
+    if (CudaGemmDispatch::dispatch(params) == GemmImplementType::WeightOnlyQuantMatmulPlugin) {
+        size_t ws_size = weight_only_matmul_plguin_->getWorkspaceSize(arguments.m,
+                                                                      arguments.n,
+                                                                      arguments.k);
+        auto workspace = allocateBuffer({DataType::TYPE_BYTES,
+                                          {ws_size},
+                                          AllocationType::DEVICE},
+                                          {"workspace"});
+
+        weight_only_matmul_plguin_->enqueue(params.A.data(),
+                                            reinterpret_cast<const QBuffer&>(params.B).data(),
+                                            reinterpret_cast<const QBuffer&>(params.B).scales()->data(),
+                                            output->data(),
+                                            workspace->data(),
+                                            arguments.m,
+                                            arguments.n,
+                                            arguments.k,
+                                            stream_);
+        sync_check_cuda_error();
+        return std::move(output);
+    }
     auto A_data_type = dtypeConvert(arguments.ADtype);
     auto B_data_type = dtypeConvert(arguments.BDtype);
     auto D_data_type = dtypeConvert(arguments.DDtype);
@@ -176,17 +217,6 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
                                             dtypeConvert(params.compute_type));
     }
 
-    BufferPtr output;
-    if (params.D) {
-        output = params.D;
-        RUNTIME_ASSERT_OP_ARG(
-            (arguments.DDtype == params.D->type()) && (arguments.Dshape == params.D->shape()),
-            "Gemm output D shape and dtype mismatch: expected [%d][%s] but got [%s]",
-            arguments.DDtype, autil::StringUtil::toString(arguments.Dshape).c_str(),
-            params.D->debugString().c_str());
-    } else {
-        output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
-    }
 
     if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_basic_gemm) {
         const auto A = params.A.data();
