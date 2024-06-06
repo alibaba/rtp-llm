@@ -28,7 +28,8 @@ requirement([
     "tensorrt",
     "onnx",
     "sentence-transformers",
-    "orjson"
+    "orjson",
+    "xfastertransformer_devel_icx",
 ])
 
 filegroup(
@@ -105,7 +106,8 @@ py_library(
         ":ops",
         ":timm",
         ":tensorrt",
-        ":onnx"
+        ":onnx",
+        ":xfastertransformer_devel_icx",
     ],
 )
 
@@ -299,7 +301,8 @@ py_wheel(
         "pydantic==2.5.3",
         "timm==0.9.12",
         "sentence-transformers==2.7.0",
-        "grpcio==1.62.0"
+        "grpcio==1.62.0",
+        "xfastertransformer_devel_icx==1.6.0.0",
     ] + whl_deps(),
 )
 

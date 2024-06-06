@@ -17,6 +17,7 @@ def device_test_envs():
     return select({
         "//:using_cuda": {
             "TEST_USING_DEVICE": "CUDA",
+            "LD_PRELOAD": "libtorch_cpu.so",
         },
         "//:using_rocm": {
             "TEST_USING_DEVICE": "ROCM",

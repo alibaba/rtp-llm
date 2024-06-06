@@ -30,3 +30,4 @@ aiohttp
 sentence-transformers==2.7.0
 orjson
 grpcio==1.62.0
+xfastertransformer_devel_icx==1.6.0.0

@@ -34,10 +34,31 @@ if not os.path.exists(os.path.join(so_path, SO_NAME)):
 print("so path: ", so_path)
 sys.path.append(so_path)
 
+# load intel xft lib
+xft_loaded = False
+for path in sys.path:
+    try:
+        if "xfastertransformer-devel" in os.listdir(path):
+            xft_lib_path = f"{path}/xfastertransformer-devel/lib"
+            logging.info(f"load libxfastertransformer.so from {xft_lib_path}")
+            from ctypes import cdll
+            cdll.LoadLibrary(f"{xft_lib_path}/libxfastertransformer.so")
+            xft_loaded = True
+            break
+        else:
+            logging.info(f"checked path [{path}] for xft, not found.")
+    except:
+        pass
+if not xft_loaded:
+    logging.info("failed to load xfastertransformer-devel package")
+
+
 try:
     # CUDA GPU build
     from libth_transformer import GptInitParameter, ParallelGptOp, RtpEmbeddingOp, RtpLLMOp, SpecialTokens
-except:
+except BaseException as e:
     from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens
-    logging.info("ParallelGptOp not registred in libth_transformer.so, this should be a none-cuda build")
+    import traceback
+    logging.info(f"ParallelGptOp not registred in libth_transformer.so, this might be a none-cuda build. "
+                 f"Exception: {e}, traceback: {traceback.format_exc()}")
     ParallelGptOp = None
