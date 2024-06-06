@@ -36,8 +36,24 @@ BufferPtr DeviceBase::allocateBuffer(const BufferParams& params, const BufferHin
     return buffer_manager_->allocate(params, hints);
 }
 
-BufferPtr DeviceBase::allocateBufferLike(const Buffer& buffer, const BufferHints& hints) {
-    return allocateBuffer({buffer.type(), buffer.shape(), getMemAllocationType(buffer.where())}, hints);
+BufferPtr DeviceBase::allocateBufferLike(const Buffer& buffer,
+                                         const AllocationType atype,  
+                                         const BufferHints& hints) {
+    if (buffer.isQuantify()) {
+        auto kernel = allocateBufferLike(*(reinterpret_cast<const QBuffer*>(&buffer)->kernel()),
+                                         atype,
+                                         hints);
+        auto scales = allocateBufferLike(*(reinterpret_cast<const QBuffer*>(&buffer)->scales()),
+                                         atype,
+                                         hints);
+        auto zeros = allocateBufferLike(*(reinterpret_cast<const QBuffer*>(&buffer)->zeros()),
+                                        atype,
+                                        hints);
+        return std::make_unique<QBuffer>(std::move(*kernel),
+                                         std::move(*scales),
+                                         std::move(*zeros));
+    }
+    return allocateBuffer({buffer.type(), buffer.shape(), atype}, hints);
 }
 
 void DeviceBase::syncAndCheck() {

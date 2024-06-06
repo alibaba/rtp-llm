@@ -24,6 +24,7 @@ cc_library(
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_header",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_header",
         "@havenask//aios/autil:string_helper",
+        "//src/fastertransformer/trt_plugins:trt_plugins",
     ],
     visibility = ["//visibility:public"],
     copts = cuda_copts(),

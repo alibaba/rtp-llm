@@ -244,7 +244,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto& lm_head = weights_.lm_head;
     if (lm_head) {
         // gen last token hidden
-        auto last_hidden = device_->allocateBufferLike(hidden->view(0, batch_size));
+        auto last_hidden = device_->allocateBufferLike(hidden->view(0, batch_size), AllocationType::DEVICE);
         device_->copy({last_hidden->view(0, attention_common_inputs.decoder_batch_size), hidden->view(0, attention_common_inputs.decoder_batch_size)});
         if (attention_common_inputs.context_batch_size) {
             auto context_last_hidden = device_->select({

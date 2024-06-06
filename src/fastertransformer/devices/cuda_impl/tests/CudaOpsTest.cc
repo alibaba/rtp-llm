@@ -62,3 +62,27 @@ TEST_F(CudaOpsTest, testConvert) {
     }
 }
 
+TEST_F(CudaOpsTest, testQBufferCopy) {
+    auto tensor = torch::ones({5}, torch::kInt8);
+    auto scales = torch::ones({5}, torch::kFloat);
+    auto zeros  = torch::ones({5}, torch::kFloat);
+    auto src = torchTensor2Buffer(tensor, scales, zeros);
+    auto result_src = QBuffer2torchTensor(static_pointer_cast<const QBuffer>(src));
+    EXPECT_TRUE(torch::equal(result_src[0], tensor));
+    EXPECT_TRUE(torch::equal(result_src[1], scales));
+    EXPECT_TRUE(torch::equal(result_src[2], zeros));
+    auto dst_tensor = torch::zeros({5}, torch::kInt8);
+    auto dst_scales = torch::zeros({5}, torch::kFloat);
+    auto dst_zeros  = torch::zeros({5}, torch::kFloat);
+    auto dst = torchTensor2Buffer(dst_tensor, dst_scales, dst_zeros);
+    auto result_dst = QBuffer2torchTensor(static_pointer_cast<const QBuffer>(dst));
+    EXPECT_TRUE(torch::equal(result_dst[0], dst_tensor));
+    EXPECT_TRUE(torch::equal(result_dst[1], dst_scales));
+    EXPECT_TRUE(torch::equal(result_dst[2], dst_zeros));
+    device_->copy({*dst, *src});
+    result_dst = QBuffer2torchTensor(static_pointer_cast<const QBuffer>(dst));
+    EXPECT_TRUE(torch::equal(result_dst[0], tensor));
+    EXPECT_TRUE(torch::equal(result_dst[1], scales));
+    EXPECT_TRUE(torch::equal(result_dst[2], zeros));
+
+} 

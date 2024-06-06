@@ -168,12 +168,34 @@ protected:
     BufferPtr tensorToBuffer(const torch::Tensor& tensor,
                              AllocationType alloc_type = AllocationType::DEVICE)
     {
+        if (tensor.is_quantized()) {
+            return tensorToBuffer(tensor,
+                                  tensor.q_per_channel_scales().to(torch::kHalf),
+                                  tensor.q_per_channel_zero_points().to(torch::kHalf));
+        }
         assert(tensor.is_cpu());
         auto buffer = torchTensor2Buffer(tensor);
         if (alloc_type == AllocationType::DEVICE) {
             auto device_buffer = device_->allocateBuffer(
                 {buffer->type(), buffer->shape(), AllocationType::DEVICE}
             );
+            device_->copy(CopyParams(*device_buffer, *buffer));
+            device_->syncAndCheck();
+            printf("created device buffer from tensor at %p with data=%p\n", device_buffer.get(), device_buffer->data());
+            return std::move(device_buffer);
+        } else {
+            return std::move(buffer);
+        }
+    }
+
+    BufferPtr tensorToBuffer(const torch::Tensor& tensor,
+                             const torch::Tensor& scales,
+                             const torch::Tensor& zeros,
+                             AllocationType alloc_type = AllocationType::DEVICE)
+    {
+        auto buffer = torchTensor2Buffer(tensor, scales, zeros);
+        if (alloc_type == AllocationType::DEVICE) {
+            auto device_buffer = device_->allocateBufferLike(*buffer, AllocationType::DEVICE);
             device_->copy(CopyParams(*device_buffer, *buffer));
             device_->syncAndCheck();
             printf("created device buffer from tensor at %p with data=%p\n", device_buffer.get(), device_buffer->data());
