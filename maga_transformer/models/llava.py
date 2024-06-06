@@ -25,7 +25,7 @@ class LlavaTokenizer(object):
                  mm_use_im_start_end: bool, 
                  vit_special_token_ids: Dict[str, Any],
                  vit_special_tokens: Dict[str, Any],
-                 bos_id: int):
+                 bos_id: int = 1):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenzier_path)
         self.mm_use_im_patch_token = mm_use_im_patch_token
         self.mm_use_im_start_end = mm_use_im_start_end
