@@ -71,6 +71,9 @@ class LlavaTokenizer(object):
     def decode(self, t: List[int]) -> str:
         return self.tokenizer.decode(t)
 
+    def apply_chat_template(self, messages, **kwargs):
+        return self.tokenizer.apply_chat_template(messages, **kwargs)
+
 class Llava(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         with torch.cuda.device(torch.device('cuda:0')):

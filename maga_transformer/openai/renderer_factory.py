@@ -60,9 +60,10 @@ class ChatRendererFactory():
             else:
                 raise AttributeError(f"specified MODEL_TEMPLATE_TYPE {model_template_type} not supported.")
 
-        # qwen needs to deal with function call, so it has higher priority than simple template
+        # renderer in _renderer_factory all have higher priority:
+        # qwen needs to deal with function call, multimodal models need to add image token
         global _renderer_factory
-        if ('qwen' in params.model_type) and ('qwen_vl' not in params.model_type):
+        if params.model_type in _renderer_factory:
             return _renderer_factory[params.model_type](tokenizer, params)
 
         try:
@@ -75,9 +76,6 @@ class ChatRendererFactory():
             logging.info("tokenizer has no chat_template attribute.")
             # tokenizer may has no chat_template property
             pass
-
-        if params.model_type in _renderer_factory:
-            return _renderer_factory[params.model_type](tokenizer, params)
 
         imported_template_renderer = ChatRendererFactory.try_get_imported_renderer(tokenizer, params)
         if imported_template_renderer:
