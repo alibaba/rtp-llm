@@ -133,6 +133,7 @@ cc_library(
     ],
     hdrs = [
         "cuda_utils.h",
+        "Dispatch.h"
     ],
     deps = [
         ":cuda_utils_cu",
@@ -150,7 +151,8 @@ cc_library(
     srcs = ["gemm.cc"],
     hdrs = [
         "custom_ar_comm.h",
-        "gemm.h"],
+        "gemm.h",
+        "Dispatch.h"],
     deps = [
         ":nccl",
         ":nvtx",

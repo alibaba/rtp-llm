@@ -1,5 +1,5 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
-#include "src/fastertransformer/devices/cuda_impl/Dispatch.h"
+#include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 

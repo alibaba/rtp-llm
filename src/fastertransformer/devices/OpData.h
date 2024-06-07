@@ -277,11 +277,6 @@ struct AttentionCommonInputs {
                           sequence_lengths(sequence_lengths) {}
 };
 
-enum AttentionMaskType {
-    noMask,
-    causalMask,
-    promptMask,
-};
 
 struct AttentionConfigs {
     size_t      head_num;

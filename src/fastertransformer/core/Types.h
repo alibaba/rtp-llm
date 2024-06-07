@@ -11,6 +11,12 @@
 
 namespace fastertransformer {
 
+enum AttentionMaskType {
+    noMask,
+    causalMask,
+    promptMask,
+};
+
 typedef enum memorytype_enum {
     MEMORY_CPU,
     MEMORY_CPU_PINNED,
