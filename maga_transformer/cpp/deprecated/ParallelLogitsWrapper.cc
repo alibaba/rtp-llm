@@ -3,6 +3,7 @@
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 template<typename T>
@@ -32,7 +33,7 @@ ParallelLogitsWrapper<T>::~ParallelLogitsWrapper()
 template<typename T>
 void ParallelLogitsWrapper<T>::allocateBuffer(size_t h_token_num) {
     size_t hidden_units = params_.hidden_size_;
-    nccl_logits_ = (T*)allocator_->reMalloc(nccl_logits_, sizeof(T) * h_token_num * params_.vocab_size_);
+    nccl_logits_ = (float*)allocator_->reMalloc(nccl_logits_, sizeof(float) * h_token_num * params_.vocab_size_);
 }
 
 template<typename T>
@@ -87,16 +88,14 @@ void ParallelLogitsWrapper<T>::forward(ft::Tensor& logits, const ft::Tensor hidd
     if (tensor_para_.world_size_ > 1) {
         PUSH_RANGE(stream_, "all gather");
         auto logits_buf = std::make_shared<ft::Buffer>(
-            ft::MemoryType::MEMORY_GPU, ft::getTensorType<T>(),
-            nccl_logits.shape(), nccl_logits.getPtr<T>());
-        device_->allGather({{logits_buf}});
+            ft::MemoryType::MEMORY_GPU, ft::getTensorType<float>(),
+            nccl_logits.shape(), nccl_logits.getPtr<float>());
         ft::invokeTransposeAxis012(logits.getPtr<float>(),
-                                  nccl_logits.getPtr<float>(),
-                                  tensor_para_.world_size_,
-                                  token_num,
-                                  local_vocab_size,
-                                  stream_);
-
+                                   nccl_logits.getPtr<float>(),
+                                   tensor_para_.world_size_,
+                                   token_num,
+                                   local_vocab_size,
+                                   stream_);
         POP_RANGE;
     }
 

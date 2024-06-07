@@ -18,7 +18,7 @@ private:
     ft::NcclParam             tensor_para_;
     const size_t              local_head_num_;
     const ft::DenseWeight<T>* embedding_table_;
-    T*                        nccl_logits_;
+    float*                    nccl_logits_;
     ft::IAllocator*           allocator_;
     ft::CudaDevice*           device_;
 

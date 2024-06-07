@@ -23,6 +23,8 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
+
+// WARNGING: buffer in generate stream should all be host to avoid gpu buffer hold more time (except kv cache)
 class GenerateStream {
 public:
     GenerateStream(const std::shared_ptr<GenerateInput>& query, const ft::GptInitParameter& params,
