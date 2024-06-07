@@ -38,8 +38,8 @@ build --host_action_env TF_NEED_CUDA="1"
 # 6.0 = P100, 7.0 = V100, 7.5 = T4, 8.6 = A10, 8.0 = A100
 build --action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6"
 build --host_action_env TF_CUDA_COMPUTE_CAPABILITIES="7.0,7.5,8.0,8.6"
-build --action_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/cuda/lib64:$LD_LIBRARY_PATH:$HADOOP_HOME/lib/native/:./aios/fslib:/opt/taobao/java/jre/lib/amd64/server/"
-build --host_action_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/cuda/lib64:$LD_LIBRARY_PATH:$HADOOP_HOME/lib/native/:./aios/fslib:/opt/taobao/java/jre/lib/amd64/server/"
+build --action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/lib64:$LD_LIBRARY_PATH:$HADOOP_HOME/lib/native/:./aios/fslib:/opt/taobao/java/jre/lib/amd64/server/"
+build --host_action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:/usr/local/cuda/lib64:$LD_LIBRARY_PATH:$HADOOP_HOME/lib/native/:./aios/fslib:/opt/taobao/java/jre/lib/amd64/server/"
 build --action_env NCCL_INSTALL_PATH="/usr/local/cuda/"
 build --action_env NCCL_HDR_PATH="/usr/local/cuda/include"
 build --action_env TF_NCCL_VERSION="2"
@@ -72,6 +72,14 @@ build:cpu --host_action_env TF_NEED_CUDA="0"
 build:cpu --crosstool_top=@bazel_tools//tools/cpp:toolchain
 build:cpu --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
 build:cpu --linkopt -ldl
+
+build:rocm --define=using_cuda=false --define=using_cuda_nvcc=false
+build:rocm --action_env TF_NEED_CUDA="0"
+build:rocm --host_action_env TF_NEED_CUDA="0"
+build:rocm --crosstool_top=@local_config_rocm//crosstool:toolchain
+build:rocm --host_crosstool_top=@local_config_rocm//crosstool:toolchain
+build:rocm --define=using_rocm=true --define=using_rocm_hipcc=true
+build:rocm --action_env TF_NEED_ROCM=1
 
 build:debug -c dbg
 build:debug --copt -g --copt -O0
