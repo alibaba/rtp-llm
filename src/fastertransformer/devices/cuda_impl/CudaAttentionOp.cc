@@ -10,27 +10,10 @@
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 
-#include "3rdparty/contextFusedMultiHeadAttention/fmhaRunner.h"
-#include "3rdparty/contextFusedMultiHeadAttention/fused_multihead_attention_common.h"
-#include "3rdparty/flash_attention2/flash.h"
-#include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
-
 
 using namespace std;
 
 namespace fastertransformer {
-
-tensorrt_llm::kernels::Data_type trtDtypeConvert(DataType dtype)
-{
-    switch (dtype) {
-        case DataType::TYPE_FP16: return tensorrt_llm::kernels::DATA_TYPE_FP16;
-#ifdef ENABLE_BF16
-        case DataType::TYPE_BF16: return tensorrt_llm::kernels::DATA_TYPE_BF16;
-#endif
-        default: throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-    }
-
-}
 
 void trtFmha(const AttentionModuleParams& params,
              tensorrt_llm::kernels::FusedMHARunnerV2* mFMHARunner,
@@ -46,8 +29,6 @@ void trtFmha(const AttentionModuleParams& params,
     auto size_per_head  = params.configs.size_per_head;
     float q_scaling     = params.configs.q_scaling;
 
-
-    FT_LOG_INFO("use TRT fmha");
     bool mFMHAForceFP32Acc  = false;
     bool mRemovePadding     = false;
     bool is_causal_         = (params.configs.mask_type == AttentionMaskType::causalMask);
@@ -70,10 +51,6 @@ void trtFmha(const AttentionModuleParams& params,
                     params.output.data(), stream);
 
     sync_check_cuda_error();
-
-
-
-
 }
 
 void OpenSourceFMHA(const AttentionModuleParams& params,
@@ -283,76 +260,59 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             std::cref(*v_output),
             stream_);
     }
-#ifdef USE_OLD_TRT_FMHA
-    auto mFMHARunnerV1 = new FusedMHARunnerFP16v2(head_num, size_per_head, get_sm(), params.configs.q_scaling);
 
-    bool use_trtv1_fmha_ = use_trtv1_fmha &&
-                           mFMHARunnerV1->fmha_supported(
-                            (params.configs.mask_type == AttentionMaskType::causalMask)) &&
-                           head_num == kv_head_num &&
-                           (datatype == DataType::TYPE_FP16);
-#endif
-    auto mFMHARunner = new tensorrt_llm::kernels::FusedMHARunnerV2(
-            trtDtypeConvert(datatype), head_num, size_per_head, params.configs.q_scaling);
-
-    bool use_trtv2_fmha_ = use_trtv2_fmha &&
-                           (params.configs.mask_type == AttentionMaskType::causalMask ||
-                            params.configs.mask_type == AttentionMaskType::noMask) &&
-                            mFMHARunner->fmha_supported();
-
-    bool use_openSource_fmha_ = use_openSource_fmha &&
-                                (params.configs.mask_type == AttentionMaskType::causalMask ||
-                                params.configs.mask_type == AttentionMaskType::noMask) &&
-                                (head_num % kv_head_num == 0) &&
-                                ((size_per_head == 64) || (size_per_head == 96) || (size_per_head == 128));
-
-    if (use_trtv2_fmha_) {
-        trtFmha(params, mFMHARunner, stream_);
-
+    cufmha_runner_->setup(datatype,
+                          params.configs.mask_type,
+                          head_num,
+                          kv_head_num,
+                          size_per_head,
+                          params.configs.q_scaling);
+    if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
+        cufmha_runner_->runTrtV2Fmha(params.input.data(),
+                                     params.common.cu_seqlens->data(),
+                                     params.output.data(),
+                                     batch_size,
+                                     seq_len,
+                                     token_num);
+        return;
     }
-    else if (use_openSource_fmha_) {
+    else if (use_openSource_fmha && cufmha_runner_->openSourceFmhaSupport()) {
+        
         auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32,
                                             {batch_size, head_num, seq_len},
                                             AllocationType::DEVICE},
                                             {"softmax_lse"});
-        OpenSourceFMHA(params,
-                       softmax_lse_->data(),
-                       stream_);
+        size_t hidden_units = head_num * size_per_head;
+        size_t hidden_units_kv = kv_head_num * size_per_head;
+        cufmha_runner_->runOpenSourceFmha(params.input.data(),
+                                          params.input.dataWithOffset(hidden_units),
+                                          params.input.dataWithOffset(hidden_units + hidden_units_kv),
+                                          params.output.data(),
+                                          params.common.cu_seqlens->data<int>(),
+                                          softmax_lse_->data(),
+                                          token_num,
+                                          batch_size,
+                                          seq_len);
+        return;
     }
-#ifdef USE_OLD_TRT_FMHA
-    else if (use_trtv1_fmha_) {
-        if (params.configs.mask_type == AttentionMaskType::causalMask) {
-            mFMHARunnerV1->setup_causal_masked_fmha(seq_len, batch_size);
-            mFMHARunnerV1->run_causal_masked_fmha(params.input.data(),
-                                                  params.common.cu_seqlens.get()->data(),
-                                                  params.output.data(),
-                                                  true,
-                                                  stream_);
-        }
-        else {
-            auto qkv_buf_temp   = allocateBuffer({DataType::TYPE_FP16,
-                                                 {token_num, head_num + 2 * kv_head_num, size_per_head},
-                                                 AllocationType::DEVICE},
-                                                 {"qkv_buf_temp"});
-            invokeTransposeAxis12(qkv_buf_temp->data<half>(),
-                                  params.input.data<half>(),
-                                  token_num,
-                                  3,
-                                  head_num,
-                                  size_per_head,
-                                  stream_);
-            auto max_length  = mFMHARunnerV1->getSFromMaxSeqLen(seq_len);
-            mFMHARunnerV1->setup(max_length, batch_size);
-            mFMHARunnerV1->run(qkv_buf_temp->data<half>(),
-                               nullptr,
-                               params.common.cu_seqlens->data<int>(),
-                               nullptr,
-                               params.output.data<half>(),
-                               stream_);
-        }
+    else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport()) {
+
+        auto qkv_buf_temp  = allocateBuffer({DataType::TYPE_FP16,
+                                            {token_num, head_num + 2 * kv_head_num, size_per_head},
+                                             AllocationType::DEVICE},
+                                            {"qkv_buf_temp"});
+
+        cufmha_runner_->runTrtV1Fmha(params.input.data(),
+                                     params.common.cu_seqlens->data(),
+                                     params.output.data(),
+                                     qkv_buf_temp->data(),
+                                     batch_size,
+                                     seq_len,
+                                     token_num);
+        return;
     }
-#endif
     else {
+        FT_LOG_INFO("Do not use fmha!");
         // TODO(lidongjin): Only support float32 gemm output.
         auto qk_output = gemm({*q_output,
                                *k_output,

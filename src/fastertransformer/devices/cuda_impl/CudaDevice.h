@@ -3,6 +3,7 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/cublas/cublas.h"
+#include "src/fastertransformer/cuda/cufmha/cufmha.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 
 #include <nvml.h>
@@ -72,7 +73,7 @@ private:
 
     BufferPtr curandstate_buf_; // for sampler use.
 
-
+    std::unique_ptr<cufmha> cufmha_runner_;
     bool use_trtv1_fmha         = false;
     bool use_trtv2_fmha         = false;
     bool use_openSource_fmha    = false;

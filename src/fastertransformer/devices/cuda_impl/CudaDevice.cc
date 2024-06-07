@@ -95,7 +95,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         NCCLCHECK(ncclCommInitRank(&nccl_param_.nccl_comm_, world_size, *nccl_id, rank));
         NCCLCHECK(ncclGroupEnd());
     }
-
+    cufmha_runner_.reset(new cufmha());
+    cufmha_runner_->init(stream_);
     checkUseTrtV1FMHA();
     checkUseTrtV2FMHA();
     checkUseOpenSourceFMHA();
@@ -167,6 +168,7 @@ void CudaDevice::checkUseOpenSourceFMHA() {
         FT_LOG_WARNING("FMHA is not enbaled");
         return;
     }
+    FT_LOG_INFO("use opensource fmha");
     use_openSource_fmha = true;
 }
 
@@ -179,7 +181,7 @@ void CudaDevice::checkUseTrtV1FMHA() {
         FT_LOG_WARNING("TRTV1 FMHA is not enbaled");
         return;
     }
-
+    FT_LOG_INFO("use TRTV1 fmha");
     use_trtv1_fmha = true;
 }
 
@@ -193,6 +195,7 @@ void CudaDevice::checkUseTrtV2FMHA() {
         FT_LOG_WARNING("TRT FMHA is disabled for by env");
         return;
     }
+    FT_LOG_INFO("use TRTV2 fmha");
     use_trtv2_fmha = true;
 }
 

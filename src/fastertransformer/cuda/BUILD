@@ -27,6 +27,28 @@ cc_library(
 )
 
 cc_library(
+    name = "cufmha",
+    srcs = [
+        "cufmha/cufmha.cc",
+    ],
+    hdrs = [
+        "cufmha/cufmha.h",
+    ],
+    deps = [
+        ":cuda_utils",
+        "//src/fastertransformer/core:types",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+        "//3rdparty/flash_attention2:flash_attention2_header",
+        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
+        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
+    ],
+    copts = copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "nccl",
     srcs = [
         "nccl/nccl_utils_torch.cc",
@@ -157,6 +179,7 @@ cc_library(
         ":nccl",
         ":nvtx",
         ":cublas",
+        ":cufmha",
         ":cuda_utils",
         ":cuda_fmha_utils",
         ":memory_utils",
