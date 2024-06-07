@@ -41,7 +41,6 @@ class Qwen2Moe(QWenV2):
         Qwen2Moe.load_moe_config(ckpt_path, config)
         return config
 
-    # 这里假设shared expert size == intermidate size 可能会有问题
     @classmethod
     def load_moe_config(cls, ckpt_path: str, config: GptInitModelParameters):
         config_path = os.path.join(ckpt_path, "config.json")
@@ -53,11 +52,23 @@ class Qwen2Moe(QWenV2):
         config.moe_k = config_json['num_experts_per_tok']
         config.expert_num = config_json['num_experts']
         config.moe_inter_padding_size=config_json['moe_intermediate_size']
+        shared_expert_intermediate_size = config_json['shared_expert_intermediate_size']
         config.has_moe_norm = False
         # step for moe layer
         config.moe_style = 2
         moe_step = config_json['decoder_sparse_step']
+
+        if moe_step != 1:
+            raise Exception("Paritial moe weights for qwen2 is not implemented yet!")
         config.moe_layer_index = [i for i in range(moe_step - 1,  config.layer_num, moe_step)]
+
+        config.is_sparse_head = True
+        config.layer_inter_size = [shared_expert_intermediate_size if i in config.moe_layer_index \
+                                    else config.inter_size for i in range(config.layer_num)]
+        config.layer_inter_padding_size = config.update_inter_padding_size(config.tp_size)
+        config.layer_head_num = [config.head_num for _ in range(config.layer_num)]
+        config.layer_head_num_kv = [config.head_num_kv for _ in range(config.layer_num)]
+
 
     @staticmethod
     def get_weight_cls():
