@@ -16,6 +16,7 @@ struct GptModelDescription {
     ft::ActivationType   activation_type;
     ft::NormType         norm_type;
     double               layernorm_eps = 1e-5;
+    size_t               vocab_size = 0;
     bool                 post_layernorm = false;
 };
 
@@ -60,6 +61,9 @@ public:
         if (kv_cache_blocks != nullptr) {
             debug_string << ", kv_cache_blocks: " << kv_cache_blocks->debugString() << "}";
         }
+        if (attention_mask != nullptr) {
+            debug_string << ", attention_mask: " << attention_mask->debugString() << "}";            
+        }
         return debug_string.str();
     }
 };
@@ -79,6 +83,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     shape_hints_ptr[4] = inputs.kv_cache_blocks.get() ? inputs.kv_cache_blocks->shape()[3] : 0; // block_size
     shape_hints_ptr[5] = inputs.kv_cache_scales.get() != nullptr; // use_block_scale
     device->broadcast({{shape_hints}, 0});
+    device->syncCommunication(false);
     device->syncAndCheck();
     if (device->getDeviceProperties().tp_rank) {
         inputs.combo_tokens = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[0]}, ft::AllocationType::HOST});
@@ -119,6 +124,7 @@ public:
 
 private:
     void prepareAttentionInputs(const GptModelInputs& inputs, ft::AttentionCommonInputs& attention_inputs);
+    ft::BufferPtr tpSyncEmbeddingOrLogits(const ft::BufferPtr& buffer);
 
 private:
     ft::DeviceBase* device_;

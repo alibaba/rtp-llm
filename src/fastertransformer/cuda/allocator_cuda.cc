@@ -133,13 +133,14 @@ Allocator<AllocatorType::CUDA_HOST>::~Allocator() {
 }
 
 void* Allocator<AllocatorType::CUDA_HOST>::doMalloc(size_t size) {
-    auto ptr = std::malloc(size);
+    void* ptr = nullptr;
+    check_cuda_error(cudaMallocHost(&ptr, (size_t)(ceil(size / 32.)) * 32));
     return ptr;
 }
 
 void Allocator<AllocatorType::CUDA_HOST>::doFree(void* address) {
     if (address) {
-        std::free(address);
+        check_cuda_error(cudaFreeHost(address));
     }
     return;
 }

@@ -28,16 +28,16 @@ public:
                                    (float)params.base_scale_,
                                    (bool)params.use_logn_attn_,
                                    (int)params.logn_seq_len_};
-        ft::AttentionConfigs attention_config{(size_t)params.head_num_,
-                                              (size_t)params.head_num_kv_,
+        ft::AttentionConfigs attention_config{(size_t)params.head_num_ / params.tp_size_,
+                                              (size_t)params.head_num_kv_ / params.tp_size_,
                                               (size_t)params.size_per_head_,
                                               rope_config,
-                                              (size_t)params.seq_size_per_block_,
-                                              (size_t)params.hidden_size_};
+                                              (size_t)params.seq_size_per_block_};
         return {attention_config,
                 ft::getActivationType(params.activation_type_str_),
                 ft::getNormType(params.norm_type_str_),
                 params.layernorm_eps_,
+                (size_t)params.vocab_size_,
                 params.layernorm_type_ == ft::LayerNormType::post_layernorm};
     }
 

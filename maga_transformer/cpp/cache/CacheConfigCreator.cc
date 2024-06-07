@@ -38,12 +38,13 @@ absl::StatusOr<CacheConfig> CacheConfigCreator::createConfig(const ft::GptInitPa
     } else {
         auto result = CacheConfigCreator::getKVCacheMemorySize(param);
         RETURN_IF_STATUS_OR_ERROR(result);
-        block_nums = result.value() / config.block_size / 2;
+        block_nums = result.value() / config.block_size;
     }
     if (block_nums == 0) {
         return absl::InternalError("kv cache block nums is 0");
     }
     config.block_nums = block_nums;
+    config.reserve_runtime_mem_mb = param.reserve_runtime_mem_mb_;
     FT_LOG_INFO("kv cache block nums is %u", block_nums);
     return config;
 }

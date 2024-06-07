@@ -19,6 +19,7 @@ struct CacheConfig {
     size_t       kv_scale_block_size;
     size_t       kv_block_stride;
     size_t       kv_scale_block_stride;
+    size_t       reserve_runtime_mem_mb;
     
     CacheConfig() {}
 
@@ -41,7 +42,7 @@ struct CacheConfig {
             scale_size = 4;
         }
 
-        block_size = layer_num * local_head_num_kv * (size_per_head + scale_size) * seq_size_per_block * dtype_size;
+        block_size = layer_num * local_head_num_kv * (size_per_head + scale_size) * seq_size_per_block * dtype_size * 2;
         kv_block_size = layer_num * local_head_num_kv * size_per_head * seq_size_per_block * dtype_size;
         kv_scale_block_size = layer_num * local_head_num_kv * scale_size * seq_size_per_block * dtype_size;
 
@@ -54,7 +55,8 @@ struct CacheConfig {
         debug_string << "CacheConfig { "
                      << "layer_num: " << layer_num << ", block_nums: " << block_nums << ", block_size: " << block_size
                      << ", local_head_num_kv: " << local_head_num_kv << ", size_per_head: " << size_per_head
-                     << ", seq_size_per_block: " << seq_size_per_block << ", dtype: " << dtype << "}";
+                     << ", seq_size_per_block: " << seq_size_per_block << ", dtype: " << dtype
+                     << ", reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "}";
         return debug_string.str();
     }
 };

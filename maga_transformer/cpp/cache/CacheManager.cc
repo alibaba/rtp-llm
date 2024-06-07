@@ -1,6 +1,13 @@
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <stdexcept>
+#include <unistd.h>
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
-#include <unistd.h>
+#include "maga_transformer/cpp/common/fatal_util.h"
+#include "src/fastertransformer/core/Buffer.h"
+#include "src/fastertransformer/core/Types.h"
 
 using namespace std;
 using namespace fastertransformer;
@@ -22,8 +29,10 @@ CacheManager::CacheManager(const CacheConfig& config, ft::DeviceBase* device,
     metrics_reporter_(metrics_reporter)
 {
     FT_LOG_INFO("cache config: %s", config.debugString().c_str());
-    initFreeBlock(config_);
-    initKvCache(config_);
+    allocateAndTpSync();
+    FT_LOG_INFO("block nums is %d after tp sync", config_.block_nums);
+    initFreeBlock();
+    initKvCache();
     if (metrics_reporter_) {
         metrics_reporter_thread_ = std::thread(&CacheManager::reportMetricsLoop, this);
     }
@@ -34,6 +43,7 @@ CacheManager::~CacheManager() {
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
     }
+    cache_aligned_buffer.reset();
 }
 
 void CacheManager::reportMetricsLoop() {
@@ -48,61 +58,114 @@ void CacheManager::reportMetricsLoop() {
     }
 }
 
-void CacheManager::initFreeBlock(const CacheConfig& config) {
-    int block_nums = config.block_nums;
-
-    // TODO(xinfei.sxf) sync block nums
-    // Assuming g_parallel_info.tp_size and other global variables/functions are defined elsewhere.
-    // if (g_parallel_info.tp_size > 1) {
-    //     // Use NCCL communication functions to broadcast and synchronize block_nums across devices.
-    //     // ...
-    // }
-    block_nums_ = block_nums;
-    FT_LOG_INFO("block nums is %d after tp sync", block_nums_);
+void CacheManager::initFreeBlock() {
     free_blocks_index_ = std::set<int>();
     // block 0 is reserved for tmp or padding use
-    for (int i = 1; i < block_nums; ++i) {
+    for (int i = 1; i < config_.block_nums; ++i) {
         free_blocks_index_.insert(i);
     }
 
-    block_ref_counter_ = BlockRefCounter(block_nums);
+    block_ref_counter_ = BlockRefCounter(config_.block_nums);
     block_cache_       = BlockCache();
 }
 
-void CacheManager::initKvCache(const CacheConfig& config) {
-    // block num can't not use config.block_nums when tp, use sync block_nums_
-    kv_cache_.k_blocks = device_->allocateBuffer({config.dtype,
-                                                  std::vector<size_t>{(size_t)config.layer_num,
-                                                                      (size_t)block_nums_,
-                                                                      (size_t)config.local_head_num_kv,
-                                                                      (size_t)config.seq_size_per_block,
-                                                                      (size_t)config.size_per_head},
-                                                  ft::AllocationType::DEVICE},
-                                                 {"k_cache_blocks"});
-    kv_cache_.v_blocks = device_->allocateBuffer({config.dtype,
-                                                  std::vector<size_t>{(size_t)config.layer_num,
-                                                                      (size_t)block_nums_,
-                                                                      (size_t)config.local_head_num_kv,
-                                                                      (size_t)config.seq_size_per_block,
-                                                                      (size_t)config.size_per_head},
-                                                  ft::AllocationType::DEVICE},
-                                                 {"v_cache_blocks"});
+ft::BufferPtr CacheManager::tryAllocateMaxBuffer() {
+    auto reserve_runtime_buffer = device_->allocateBuffer({ft::DataType::TYPE_INT8, {config_.reserve_runtime_mem_mb * 1024 * 1024}});
+    if (!reserve_runtime_buffer) {
+        RAISE_FATAL_ERROR(std::string("cache manager can not allocate reserve runtime mem"));
+    }
+    auto allocate_bytes = device_->getDeviceStatus().device_memory_status.preserved_bytes;
 
-    if (config.dtype == ft::DataType::TYPE_INT8) {
-        kv_cache_.k_scale = device_->allocateBuffer({ft::DataType::TYPE_FP32,
-                                                     std::vector<size_t>{(size_t)config.layer_num,
-                                                                         (size_t)block_nums_,
-                                                                         (size_t)config.local_head_num_kv,
-                                                                         (size_t)config.seq_size_per_block},
-                                                     ft::AllocationType::DEVICE},
-                                                    {"k_cache_scales"});
-        kv_cache_.v_scale = device_->allocateBuffer({ft::DataType::TYPE_FP32,
-                                                     std::vector<size_t>{(size_t)config.layer_num,
-                                                                         (size_t)block_nums_,
-                                                                         (size_t)config.local_head_num_kv,
-                                                                         (size_t)config.seq_size_per_block},
-                                                     ft::AllocationType::DEVICE},
-                                                    {"v_cache_scales"});
+    BufferPtr buffer;
+    const size_t bytes_try_step = 64UL * 1024 * 1024;
+    while(!buffer) {
+        if (allocate_bytes < bytes_try_step) {
+            break;
+        }
+        try {
+            buffer = device_->allocateBuffer({ft::DataType::TYPE_INT8, {allocate_bytes}}, {"kv_cache"});
+        } catch (std::exception& e) {
+            FT_LOG_WARNING("cache manager reserve %lu bytes of memory exception: %s",
+                           allocate_bytes, e.what());
+        }
+        allocate_bytes -= bytes_try_step;
+    }
+    if (!buffer) {
+        RAISE_FATAL_ERROR((std::string("tp cache manager can not allocate mem ") + std::to_string(allocate_bytes + bytes_try_step)));
+    }
+    return buffer;
+}
+
+void CacheManager::allocateAndTpSync() {
+    const auto properties = device_->getDeviceProperties();
+    if (properties.tp_size <= 1) {
+        cache_aligned_buffer = device_->allocateBuffer({ft::DataType::TYPE_INT8, {config_.block_size * config_.block_nums}});
+        cache_base_ptr = cache_aligned_buffer->data();
+        return;
+    }
+
+    cache_aligned_buffer = tryAllocateMaxBuffer();
+    BufferPtr buffer_infos = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {properties.tp_size * 2}, ft::AllocationType::HOST});
+    auto current_buffer_infos = buffer_infos->dataWithOffset<uint64_t>(properties.tp_rank * 2);
+
+    current_buffer_infos[0] = (uint64_t)cache_aligned_buffer->data();
+    current_buffer_infos[1] = current_buffer_infos[0] + (uint64_t)cache_aligned_buffer->sizeBytes();
+
+    device_->allGather({{buffer_infos}});
+    device_->syncCommunication(false);
+    device_->syncAndCheck();
+
+    auto max_address_begin = current_buffer_infos[0];
+    auto min_address_end = current_buffer_infos[1];
+    for (int i = 0; i < properties.tp_rank; ++i) {
+        max_address_begin = std::max(max_address_begin, *(buffer_infos->dataWithOffset<uint64_t>(i * 2)));
+        min_address_end = std::min(min_address_end, *(buffer_infos->dataWithOffset<uint64_t>(i * 2 + 1)));
+    }
+    if (max_address_begin >= min_address_end) {
+        RAISE_FATAL_ERROR((std::string("tp cache can not find common interval mem")));
+    }
+
+    cache_base_ptr = (void *)max_address_begin;
+    config_.block_nums = (min_address_end - max_address_begin) / config_.block_size;
+}
+
+void CacheManager::initKvCache() {
+    kv_cache_.k_blocks = std::make_unique<ft::Buffer>(
+            ft::MemoryType::MEMORY_GPU,
+            config_.dtype,
+            std::vector<size_t>{(size_t)config_.layer_num,
+                (size_t)config_.block_nums,
+                (size_t)config_.local_head_num_kv,
+                (size_t)config_.seq_size_per_block,
+                (size_t)config_.size_per_head},
+            cache_base_ptr);
+    kv_cache_.v_blocks = std::make_unique<ft::Buffer>(
+        ft::MemoryType::MEMORY_GPU,
+        config_.dtype,
+        std::vector<size_t>{(size_t)config_.layer_num,
+            (size_t)config_.block_nums,
+            (size_t)config_.local_head_num_kv,
+            (size_t)config_.seq_size_per_block,
+            (size_t)config_.size_per_head},
+        (int8_t*)cache_base_ptr + kv_cache_.k_blocks->sizeBytes());
+
+    if (config_.dtype == ft::DataType::TYPE_INT8) {
+        kv_cache_.k_scale = std::make_unique<ft::Buffer>(
+                ft::MemoryType::MEMORY_GPU,
+                ft::DataType::TYPE_FP32,
+                std::vector<size_t>{(size_t)config_.layer_num,
+                    (size_t)config_.block_nums,
+                    (size_t)config_.local_head_num_kv,
+                    (size_t)config_.seq_size_per_block},
+                (int8_t*)cache_base_ptr + kv_cache_.k_blocks->sizeBytes() * 2);
+        kv_cache_.v_scale = std::make_unique<ft::Buffer>(
+                ft::MemoryType::MEMORY_GPU,
+                ft::DataType::TYPE_FP32,
+                std::vector<size_t>{(size_t)config_.layer_num,
+                    (size_t)config_.block_nums,
+                    (size_t)config_.local_head_num_kv,
+                    (size_t)config_.seq_size_per_block},
+                (int8_t*)cache_base_ptr + kv_cache_.k_blocks->sizeBytes() * 2 + kv_cache_.k_scale->sizeBytes());
     }
 }
 
@@ -303,7 +366,7 @@ KVCacheBlockAddr CacheManager::convertIndexToAddr(const std::vector<int>& block_
     for (auto block_index : block_indices) {
         vector<void*> blocks;
         for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
-            auto offset = (layer_num) * (size_t)block_nums_ * (size_t)config_.local_head_num_kv
+            auto offset = (layer_num) * (size_t)config_.block_nums * (size_t)config_.local_head_num_kv
                           * (size_t)config_.seq_size_per_block * (size_t)config_.size_per_head;
             offset += block_index * (size_t)config_.local_head_num_kv * (size_t)config_.seq_size_per_block
                       * (size_t)config_.size_per_head;
@@ -312,7 +375,7 @@ KVCacheBlockAddr CacheManager::convertIndexToAddr(const std::vector<int>& block_
             result.v_ptr[layer_num].push_back(kv_cache_.v_blocks->dataWithOffset(offset));
 
             if (config_.dtype == ft::DataType::TYPE_INT8) {
-                auto scale_offset = (layer_num) * (size_t)block_nums_ * (size_t)config_.local_head_num_kv
+                auto scale_offset = (layer_num) * (size_t)config_.block_nums * (size_t)config_.local_head_num_kv
                                     * (size_t)config_.seq_size_per_block;
                 scale_offset += block_index * (size_t)config_.local_head_num_kv * (size_t)config_.seq_size_per_block;
 
@@ -351,7 +414,7 @@ std::vector<int> CacheManager::convertValueAddrToIndex(const std::vector<void*>&
 }
 
 void CacheManager::setKVBlockValue(int kindex, int vindex, ft::BufferPtr& k_value, ft::BufferPtr& v_value) {
-    auto layer_stride = block_nums_ * config_.kv_block_stride;
+    auto layer_stride = config_.block_nums * config_.kv_block_stride;
     for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
         // k
         auto kdst = kv_cache_.k_blocks->data() + layer_num * layer_stride + kindex * config_.kv_block_stride;
@@ -383,7 +446,7 @@ void CacheManager::copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_l
                                           const std::vector<int>& src_index,
                                           const std::vector<int>& tgt_index) {
     if (src_index.size() != tgt_index.size()) {
-        throw std::runtime_error("src and tgt length should equal");
+        RAISE_FATAL_ERROR(std::string("src and tgt length should equal"));
     }
     std::vector<SeqPosition> src_seq_positions;
     std::vector<SeqPosition> tgt_seq_positions;
@@ -401,7 +464,7 @@ void CacheManager::copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_l
 SeqPosition CacheManager::getSeqPosition(const std::vector<int>& block_indice_list, int idx) {
     int block_idx = idx / seq_size_per_block_;
     if (block_idx >= static_cast<int>(block_indice_list.size())) {
-        throw std::runtime_error("block idx should not >= len(block_indice_list)");
+        RAISE_FATAL_ERROR(std::string("block idx should not >= len(block_indice_list)"));
     }
     return SeqPosition{block_indice_list[block_idx], idx % seq_size_per_block_};
 }

@@ -50,6 +50,23 @@ void checkKvBlocksShape(const BufferPtr& input_kv_blocks) {
         "kv_cache_blocks shape should be [layer_num, 2, batch_size, block_length].");
 }
 
+BufferPtr GptModel::tpSyncEmbeddingOrLogits(const BufferPtr& buffer) {
+    const auto tp_size = device_props_.tp_size;
+    const auto tp_rank = device_props_.tp_rank;
+    const auto buffer_shape = buffer->shape();
+    auto all_data = device_->allocateBuffer({buffer->type(), {buffer_shape[0], buffer_shape[1] * tp_size}});
+    all_data->reshape({all_data->size()});
+    auto buffer_view = buffer->view(0, buffer_shape[0]);
+    buffer_view.reshape({buffer_view.size()});
+    const auto local_size = all_data->size() / tp_size;
+    device_->copy({all_data->view(local_size * tp_rank, local_size), buffer_view});
+    device_->allGather({{all_data}});
+    all_data->reshape({tp_size, buffer_shape[0], buffer_shape[1]});
+    all_data = device_->transpose({*all_data});
+    all_data->reshape({buffer_shape[0], buffer_shape[1] * tp_size});
+    return all_data;
+}
+
 void GptModel::prepareAttentionInputs(
         const GptModelInputs& inputs,
         AttentionCommonInputs& attention_inputs) {
@@ -107,7 +124,6 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto sequence_lengths = device_->clone({*inputs.sequence_lengths});
 
     const auto& embedding_table = weights_.embedding->kernel;
-    const auto hidden_size = embedding_table->shape()[1];
 
     const BufferPtr combo_position_ids = inputs.combo_position_ids ? device_->clone({*inputs.combo_position_ids}): nullptr;
     const BufferPtr combo_tokens_type_ids = inputs.combo_tokens_type_ids ? device_->clone({*inputs.combo_tokens_type_ids}): nullptr;
@@ -119,7 +135,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             combo_position_ids ? (OptionalConstBufferRef)*weights_.position_encoding->kernel: nullopt,
             combo_tokens_type_ids ? (OptionalConstBufferRef)*combo_tokens_type_ids: nullopt,
             combo_tokens_type_ids ? (OptionalConstBufferRef)*weights_.token_type_embedding->kernel: nullopt});
-
+    if (device_props_.tp_size > 1) {
+        hidden = tpSyncEmbeddingOrLogits(hidden);
+    }
     // pre layernorm
     if (weights_.pre_decoder_layernorm) {
         device_->layernorm(LayernormParams(
@@ -235,9 +253,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         auto logits = device_->gemm(GemmParams(
             *last_hidden, *(lm_head->kernel), nullopt, nullptr,
             ft::DataType::TYPE_FP32, TransposeOperation::NONE, TransposeOperation::TRANSPOSE));
+        if (device_props_.tp_size > 1) {
+            logits = tpSyncEmbeddingOrLogits(logits);
+        }
         // logits is too big, tmp not print default
         // printBufferData(*logits, "logits");
-
         return {std::move(logits), std::move(last_hidden), std::move(hidden)};
     } else {
         return {nullptr, nullptr, std::move(hidden)};
@@ -245,4 +265,3 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 }
 
 } // namespace rtp_llm
-

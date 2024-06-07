@@ -92,8 +92,10 @@ public:
 
     void reportMetricsLoop();
 private:
-    void                                    initFreeBlock(const CacheConfig& config);
-    void                                    initKvCache(const CacheConfig& config);
+    void                                    initFreeBlock();
+    ft::BufferPtr                           tryAllocateMaxBuffer();
+    void                                    allocateAndTpSync();
+    void                                    initKvCache();
     std::tuple<bool, std::vector<int>>      mallocImpl(int nums);
     std::tuple<bool, std::vector<int>, int> mallocWithCacheImpl(int want_block_nums, const std::vector<int>& token_ids);
     
@@ -115,12 +117,15 @@ private:
     std::set<int>   free_blocks_index_;
     BlockRefCounter block_ref_counter_;
     BlockCache      block_cache_;
-    int             block_nums_;
     KVCacheBuffer   kv_cache_;
     ft::DeviceBase* device_;
     bool            stop_ = false;
     std::thread     metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+
+    // tmp
+    ft::BufferPtr cache_aligned_buffer;
+    void*         cache_base_ptr;
 };
 
 typedef std::shared_ptr<CacheManager> CacheManagerPtr;

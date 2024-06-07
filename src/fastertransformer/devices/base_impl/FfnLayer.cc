@@ -66,7 +66,9 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                   std::nullopt,
                                   *(params.weights.down_weight),
                                   std::nullopt});
-
+        if (getDeviceProperties().tp_size > 1) {
+            allReduce({{output.output}, ReduceOp::Sum});
+        }
         return FfnLayerOutput({move(output.output)});
     } else if (FFNDispatch::dispatch(params) == FFNDispatch::FFNType::NoGate) {
         activation({params.activation_type,
@@ -79,7 +81,9 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                   std::nullopt,
                                   *(params.weights.down_weight),
                                   std::nullopt});
-
+        if (getDeviceProperties().tp_size > 1) {
+            allReduce({{output.output}, ReduceOp::Sum});
+        }
         return FfnLayerOutput({move(output.output)});
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
