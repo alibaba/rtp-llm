@@ -99,6 +99,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     checkUseTrtV1FMHA();
     checkUseTrtV2FMHA();
     checkUseOpenSourceFMHA();
+    checkUseMultiBlockMode();
 }
 
 CudaDevice::~CudaDevice() {
@@ -194,6 +195,28 @@ void CudaDevice::checkUseTrtV2FMHA() {
     }
     use_trtv2_fmha = true;
 }
+
+void CudaDevice::checkUseMultiBlockMode() {
+    if constexpr (CompileConfig::cudart_version < 11070) {
+        FT_LOG_WARNING("MMHA multi_block_mode for cudart_version %d is disabled",
+                        CompileConfig::cudart_version);
+        use_multi_block_mode = false;
+        return;
+    }
+    char* multi_block_mode_env = std::getenv("ENABLE_MULTI_BLOCK_MODE");
+    if (multi_block_mode_env != nullptr && std::string(multi_block_mode_env) == "OFF") {
+        FT_LOG_WARNING("MMHA multi_block_mode is disabled");
+        use_multi_block_mode = false;
+        return;
+    }
+    if (get_sm() == 80 || get_sm() >= 89) {
+        FT_LOG_INFO("MMHA multi_block_mode is enabled");
+        use_multi_block_mode = false;
+        return;
+    }
+    use_multi_block_mode = true;
+}
+
 
 // TODO(wangyin.yx): fill all memory status.
 DeviceStatus CudaDevice::getDeviceStatus() {

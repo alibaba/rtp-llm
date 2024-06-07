@@ -24,6 +24,7 @@ public:
     void checkUseOpenSourceFMHA();
     void checkUseTrtV1FMHA();
     void checkUseTrtV2FMHA();
+    void checkUseMultiBlockMode();
 
     void syncAndCheck() override;
     void syncCommunication() override;
@@ -75,6 +76,7 @@ private:
     bool use_trtv1_fmha         = false;
     bool use_trtv2_fmha         = false;
     bool use_openSource_fmha    = false;
+    bool use_multi_block_mode   = false;
 };
 
 } // namespace fastertransformer

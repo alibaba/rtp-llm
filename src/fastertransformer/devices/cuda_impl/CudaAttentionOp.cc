@@ -399,6 +399,12 @@ struct SelfAttentionArgs {
 
 template<typename T>
 void selfAttentionwrapper(const AttentionModuleParams params,
+                          bool use_multi_block_mode,
+                          size_t max_seq_len_tile,
+                          void* partial_out,
+                          float* partial_sum,
+                          float* partial_max,
+                          int* block_counter,
                           cudaStream_t stream)
 {
     size_t token_num            = params.input.shape()[0];
@@ -453,13 +459,6 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     const float* query_weight_scale_out = nullptr;
     const float* attention_output_weight_scale_out = nullptr;
     int int8_mode = 0;
-    // TODO(lidongjin) support multi block
-    bool multi_block_mode = false;
-    int max_seq_len_tile = 0;
-    T* partial_out = nullptr;
-    float* partial_sum = nullptr;
-    float* partial_max = nullptr;
-    int* block_counter = nullptr;
 
     if (!params.common.kv_cache_blocks.has_value()) {
         throw std::runtime_error("kv cache block pointers can not be null");
@@ -503,9 +502,9 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         query_weight_scale_out,
         attention_output_weight_scale_out,
         int8_mode,
-        multi_block_mode,
-        max_seq_len_tile,
-        partial_out,
+        use_multi_block_mode,
+        (int)max_seq_len_tile,
+        reinterpret_cast<T*>(partial_out),
         partial_sum,
         partial_max,
         block_counter,
@@ -517,7 +516,55 @@ void selfAttentionwrapper(const AttentionModuleParams params,
 
 AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModuleParams& params) {
     auto datatype = params.input.type();
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, selfAttentionwrapper, params, stream_);
+    size_t max_seq_len_tile = 0;
+    BufferPtr partial_out = nullptr;
+    BufferPtr partial_sum = nullptr;
+    BufferPtr partial_max = nullptr;
+    BufferPtr block_counter = nullptr;
+
+    size_t batch_size           = params.common.decoder_batch_size;
+    size_t local_head_num       = params.configs.head_num;
+    size_t size_per_head        = params.configs.size_per_head;
+
+    if (use_multi_block_mode) {
+        FT_LOG_INFO("USE_MULTI_BLOCK_MODE");
+        const int threads_per_value = pow2roundup(size_per_head) * getTypeSize(datatype) / 16;
+        // for allocate partial output results memory. Regardless to THDS_PER_BLOCK
+        max_seq_len_tile = 256 / threads_per_value;
+        partial_out = allocateBuffer({datatype,
+                                     {batch_size, max_seq_len_tile, local_head_num, size_per_head},
+                                     AllocationType::DEVICE},
+                                     {"partial_out"});
+        partial_sum = allocateBuffer({DataType::TYPE_FP32,
+                                     {batch_size, max_seq_len_tile, local_head_num},
+                                     AllocationType::DEVICE},
+                                     {"partial_sum"});
+        partial_max = allocateBuffer({DataType::TYPE_FP32,
+                                     {batch_size, max_seq_len_tile, local_head_num},
+                                     AllocationType::DEVICE},
+                                     {"partial_max"});
+        block_counter = allocateBuffer({DataType::TYPE_INT32,
+                                      {batch_size, local_head_num},
+                                      AllocationType::DEVICE},
+                                      {"block_counter"});
+        // TODO(lidongjin) use fill op to set zeros.
+        cudaMemsetAsync(block_counter->data(), 0, sizeof(int) * batch_size * local_head_num, stream_);
+    }
+    void* partial_out_data = (partial_out == nullptr) ? nullptr : partial_out->data();
+    float* partial_sum_data = (partial_sum == nullptr) ? nullptr : partial_sum->data<float>();
+    float* partial_max_data = (partial_max == nullptr) ? nullptr : partial_max->data<float>();
+    int* block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
+    
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
+                                     selfAttentionwrapper,
+                                     params,
+                                     use_multi_block_mode,
+                                     max_seq_len_tile,
+                                     partial_out_data,
+                                     partial_sum_data,
+                                     partial_max_data,
+                                     block_counter_data,
+                                     stream_);
 }
 
 } // namespace fastertransformer

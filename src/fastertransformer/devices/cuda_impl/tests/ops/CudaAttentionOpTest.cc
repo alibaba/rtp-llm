@@ -288,6 +288,36 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
 
 TEST_F(CudaAttentionOpTest, SelfAttentionOpTest) {
     // batch size > 8 may exceed cache manager buffer size.
+    setenv("ENABLE_MULTI_BLOCK_MODE", "OFF", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+    ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
+    std::vector<size_t> batch = {2, 4, 8};
+    std::vector<size_t> seq   = {1};
+    std::vector<size_t> kv_seq = {0, 1, 2, 4, 8};
+    for (auto batch_size : batch) {
+        for (auto seq_len : seq) {
+            for (auto kv_seq_len: kv_seq) {
+                size_t num_heads = 64;
+                size_t num_key_value_heads = num_heads;
+                size_t head_dim = 64;
+                selfAttentionOpTest(batch_size,
+                                    seq_len,
+                                    kv_seq_len,
+                                    num_heads,
+                                    num_key_value_heads,
+                                    head_dim);
+            }
+        }
+    }
+}
+
+TEST_F(CudaAttentionOpTest, MultiBlockSelfAttentionOpTest) {
+    // batch size > 8 may exceed cache manager buffer size.
+    setenv("ENABLE_MULTI_BLOCK_MODE", "ON", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+    ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
     std::vector<size_t> batch = {2, 4, 8};
     std::vector<size_t> seq   = {1};
     std::vector<size_t> kv_seq = {0, 1, 2, 4, 8};
