@@ -63,11 +63,7 @@ size_t Buffer::size() const {
     if (shape_.empty()) {
         return 0;
     }
-    size_t totalSize = 1;
-    for (size_t dim : shape_) {
-        totalSize *= dim;
-    }
-    return totalSize;
+    return std::accumulate(shape_.begin(), shape_.end(), 1, std::multiplies<size_t>());
 }
 
 size_t Buffer::dim() const {
@@ -79,11 +75,10 @@ size_t Buffer::sizeBytes() const {
 }
 
 void Buffer::reshape(const std::vector<size_t>& shape) {
-    int new_shape_size = std::accumulate(shape.begin(), shape.end(), 0);
-    int old_shape_size = std::accumulate(shape_.begin(), shape_.end(), 0);
+    size_t new_shape_size = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
     FT_CHECK_WITH_INFO(
-        new_shape_size == old_shape_size,
-        "reshape shape size not match: %d vs %d", new_shape_size, old_shape_size);
+            new_shape_size == size(),
+            "reshape shape size not match: %d vs %d", new_shape_size, size());
     shape_ = shape;
 }
 

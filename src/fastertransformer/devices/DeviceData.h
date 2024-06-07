@@ -47,7 +47,7 @@ struct DeviceProperties {
     bool ffn_fuse_add_residual  = false;
 };
 
-struct MemroyStatus {
+struct MemoryStatus {
     size_t used_bytes       = 0;
     size_t free_bytes       = 0;
     size_t available_bytes  = 0; // free + preserved
@@ -57,8 +57,8 @@ struct MemroyStatus {
 
 // runtime device status, such as available memory.
 struct DeviceStatus {
-    MemroyStatus device_memory_status;
-    MemroyStatus host_memory_status;
+    MemoryStatus device_memory_status;
+    MemoryStatus host_memory_status;
     float device_utilization = 0.0f; // percentage of device utilization, 0.0f ~ 100.0f
 };
 

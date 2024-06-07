@@ -294,7 +294,6 @@ struct AttentionConfigs {
     //kv cache block
     size_t tokens_per_block;
 
-    size_t hidden_size;
     AttentionMaskType mask_type = noMask;
     float q_scaling = 1.0f;
 };
