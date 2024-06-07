@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "copts", "rocm_copts")
 
 cc_library(
     name = "rocm_impl",
@@ -14,5 +14,5 @@ cc_library(
         "//src/fastertransformer/core:allocator",
     ],
     visibility = ["//visibility:public"],
-    copts = copts(),
+    copts = rocm_copts(),
 )

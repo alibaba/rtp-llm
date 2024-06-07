@@ -183,13 +183,8 @@ def _rocm_include_path(repository_ctx, rocm_config):
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/hip/include")
 
     # Add HIP-Clang headers
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/8.0/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/9.0.0/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/10.0.0/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/11.0.0/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/12.0.0/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/13.0.0/include")
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/14.0.0/include")
+    print("rocm_config.rocm_toolkit_path: ", rocm_config.rocm_toolkit_path)
+    inc_dirs.append(rocm_config.rocm_toolkit_path + "/lib/llvm/lib/clang/17/include")
 
     # Add rocrand and hiprand headers
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/rocrand/include")
@@ -583,11 +578,11 @@ def _create_dummy_repository(repository_ctx):
         "rocm:BUILD",
         {
             "%{hip_lib}": _lib_name("hip", cpu_value),
-            # "%{rocblas_lib}": _lib_name("rocblas", cpu_value),
-            # "%{miopen_lib}": _lib_name("miopen", cpu_value),
-            # "%{rccl_lib}": _lib_name("rccl", cpu_value),
-            # "%{hipfft_lib}": _lib_name("hipfft", cpu_value),
-            # "%{hiprand_lib}": _lib_name("hiprand", cpu_value),
+            "%{rocblas_lib}": _lib_name("rocblas", cpu_value),
+            "%{miopen_lib}": _lib_name("miopen", cpu_value),
+            "%{rccl_lib}": _lib_name("rccl", cpu_value),
+            "%{hipfft_lib}": _lib_name("hipfft", cpu_value),
+            "%{hiprand_lib}": _lib_name("hiprand", cpu_value),
             "%{copy_rules}": "",
             "%{rocm_headers}": "",
         },
@@ -712,30 +707,30 @@ def _create_local_rocm_repository(repository_ctx):
             exceptions = [rocm_toolkit_path + "/include/gtest",
               rocm_toolkit_path + "/include/gmock"],
         ),
-        make_copy_dir_rule(
-            repository_ctx,
-            name = "hipfft-include",
-            src_dir = rocm_toolkit_path + "/include/hipfft",
-            out_dir = "rocm/include/hipfft",
-        ),
-        make_copy_dir_rule(
-            repository_ctx,
-            name = "rocblas-include",
-            src_dir = rocm_toolkit_path + "/include/rocblas",
-            out_dir = "rocm/include/rocblas",
-        ),
-        make_copy_dir_rule(
-            repository_ctx,
-            name = "miopen-include",
-            src_dir = rocm_toolkit_path + "/include/miopen",
-            out_dir = "rocm/include/miopen",
-        ),
-        make_copy_dir_rule(
-            repository_ctx,
-            name = "rccl-include",
-            src_dir = rocm_toolkit_path + "/include/rccl",
-            out_dir = "rocm/include/rccl",
-        ),
+        # make_copy_dir_rule(
+        #     repository_ctx,
+        #     name = "hipfft-include",
+        #     src_dir = rocm_toolkit_path + "/include/hipfft",
+        #     out_dir = "rocm/include/hipfft",
+        # ),
+        # make_copy_dir_rule(
+        #     repository_ctx,
+        #     name = "rocblas-include",
+        #     src_dir = rocm_toolkit_path + "/include/rocblas",
+        #     out_dir = "rocm/include/rocblas",
+        # ),
+        # make_copy_dir_rule(
+        #     repository_ctx,
+        #     name = "miopen-include",
+        #     src_dir = rocm_toolkit_path + "/include/miopen",
+        #     out_dir = "rocm/include/miopen",
+        # ),
+        # make_copy_dir_rule(
+        #     repository_ctx,
+        #     name = "rccl-include",
+        #     src_dir = rocm_toolkit_path + "/include/rccl",
+        #     out_dir = "rocm/include/rccl",
+        # ),
     ]
 
     # explicitly copy (into the local_config_rocm repo) the $ROCM_PATH/hiprand/include and

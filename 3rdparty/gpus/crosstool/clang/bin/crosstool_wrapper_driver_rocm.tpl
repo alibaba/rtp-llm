@@ -143,7 +143,7 @@ def InvokeHipcc(argv, log=False):
   undefines = GetOptionValue(argv, 'U')
   undefines = ''.join([' -U' + define for define in undefines])
   std_options = GetOptionValue(argv, 'std')
-  hipcc_allowed_std_options = ["c++11", "c++14"]
+  hipcc_allowed_std_options = ["c++11", "c++14", "c++17"]
   std_options = ''.join([' -std=' + define
       for define in std_options if define in hipcc_allowed_std_options])
 

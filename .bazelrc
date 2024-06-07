@@ -73,11 +73,11 @@ build:cpu --crosstool_top=@bazel_tools//tools/cpp:toolchain
 build:cpu --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
 build:cpu --linkopt -ldl
 
-build:rocm --define=using_cuda=false --define=using_cuda_nvcc=false
 build:rocm --action_env TF_NEED_CUDA="0"
 build:rocm --host_action_env TF_NEED_CUDA="0"
 build:rocm --crosstool_top=@local_config_rocm//crosstool:toolchain
 build:rocm --host_crosstool_top=@local_config_rocm//crosstool:toolchain
+build:rocm --define=using_cuda=false --define=using_cuda_nvcc=false
 build:rocm --define=using_rocm=true --define=using_rocm_hipcc=true
 build:rocm --action_env TF_NEED_ROCM=1
 
