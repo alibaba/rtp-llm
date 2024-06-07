@@ -2,33 +2,30 @@
 
 #include "src/fastertransformer/utils/layernorm_types.h"
 #include "src/fastertransformer/utils/activation_types.h"
-#include "torch/extension.h"
-#include <torch/custom_class.h>
-#include <torch/script.h>
 #include "src/fastertransformer/utils/quantization.h"
+#include "src/fastertransformer/utils/pybind_utils.h"
+
 #include <vector>
 #include <map>
-
-namespace th = torch;
 
 namespace fastertransformer {
 
 enum QuantMethod {
-    None = 0,
-    WeightOnlyPerCol = 1,
-    GptQ = 2,
-    Awq = 3,
-    SmoothQuant = 4,
-    OmniQuant = 5
+    None                = 0,
+    WeightOnlyPerCol    = 1,
+    GptQ                = 2,
+    Awq                 = 3,
+    SmoothQuant         = 4,
+    OmniQuant           = 5
 };
 
-struct RoleSpecialTokens: public th::jit::CustomClassHolder {
+struct RoleSpecialTokens {
 public:
     std::vector<int64_t> token_ids_;
     std::vector<int64_t> eos_token_ids_;
 };
 
-struct QuantAlgo: public th::jit::CustomClassHolder {
+struct QuantAlgo {
 public:
     QuantAlgo() = default;
     QuantAlgo(QuantMethod method, int bits, int group_size)
@@ -78,7 +75,7 @@ private:
     int64_t group_size_ = 0;
 };
 
-struct SpecialTokens: public th::jit::CustomClassHolder {
+struct SpecialTokens {
 public:
     SpecialTokens();
     int64_t                               bos_token_id_ = -1;
@@ -91,7 +88,7 @@ public:
     std::vector<std::string>              stop_words_str_;
 };
 
-class GptInitParameter: public th::jit::CustomClassHolder {
+class GptInitParameter {
 public:
     // model variant params used in ft
     int64_t head_num_               = 0;
@@ -126,7 +123,8 @@ public:
     double  rotary_embedding_scale_  = 1.0;
     int64_t dynamic_embedding_max_pos_ = 0;
     int64_t base_scale_                = 1;
-    double  input_embedding_scalar_    = 1; // for Gemma, hidden_states = hidden_states * (hidden_size**0.5)
+    // for Gemma, hidden_states = hidden_states * (hidden_size**0.5)
+    double  input_embedding_scalar_    = 1;
 
     bool    use_logn_attn_ = false;
     int64_t logn_seq_len_  = 2048;
@@ -145,7 +143,8 @@ public:
     int64_t              expert_num_                 = 0;
     int64_t              moe_k_                      = 0;
     bool                 moe_normalize_expert_scale_ = false;
-    int64_t              moe_style_                  = 0; // 0 for no moe; 1 for all layer moe; 2 for partial layer moe
+    // 0 for no moe; 1 for all layer moe; 2 for partial layer moe
+    int64_t              moe_style_                  = 0;
     std::vector<int64_t> moe_layer_index_            = {};
 
     bool has_positional_encoding_    = false;

@@ -8,6 +8,7 @@
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include <memory>
 
+namespace th = torch;
 namespace rtp_llm {
 
 class IHandlerImpl {

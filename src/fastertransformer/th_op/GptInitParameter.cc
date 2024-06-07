@@ -1,8 +1,4 @@
 #include "src/fastertransformer/th_op/GptInitParameter.h"
-#include "c10/util/intrusive_ptr.h"
-#include "pybind11/detail/common.h"
-
-namespace th = torch;
 
 namespace fastertransformer {
 
