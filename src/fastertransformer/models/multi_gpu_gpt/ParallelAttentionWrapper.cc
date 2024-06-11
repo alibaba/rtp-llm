@@ -677,7 +677,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         FT_CHECK_WITH_INFO(local_head_num == local_head_num_kv, "old flash attention don't support head_num != head_num_kv");
         if (params_.is_causal_) {
             dispatcher_fp16->setup_causal_masked_fmha(max_context_seq_length, context_batch_size);
-            dispatcher_fp16->run_causal_masked_fmha(qkv_buf_, cu_seqlens, qkv_buf_2, true, stream_);
+            dispatcher_fp16->run_causal_masked_fmha(qkv_buf, cu_seqlens, qkv_buf_2, true, stream_);
         } else {
             invokeTransposeAxis12(qkv_buf_t_, qkv_buf, h_token_num, 3, local_head_num, size_per_head_, stream_);
             auto max_length  = dispatcher_fp16->getSFromMaxSeqLen(max_context_seq_length);
@@ -964,6 +964,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     else if (CudaFmhaUtils::UseOldTrtFMHA<T>(params_)) {
         FT_LOG_INFO("use old trt fmha");
         dispatcher_fp16.reset(new FusedMHARunnerFP16v2(local_head_num_, size_per_head_, get_sm(), q_scaling_));
+	use_old_trt_fmha_ = true;
     }
 #endif
 }
