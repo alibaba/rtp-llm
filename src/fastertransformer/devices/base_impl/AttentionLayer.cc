@@ -78,9 +78,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     printBufferData(*qkv_output, "qkv_output");
 
     gemm({*qkv_output, *(output_weight->kernel), nullopt, output});
-    if (getDeviceProperties().tp_size > 1) {
-        allReduce({{output}, ReduceOp::Sum});
-    }
+
     return {move(output)};
 }
 

@@ -117,14 +117,13 @@ void CacheManager::allocateAndTpSync() {
 
     auto max_address_begin = current_buffer_infos[0];
     auto min_address_end = current_buffer_infos[1];
-    for (int i = 0; i < properties.tp_rank; ++i) {
+    for (int i = 0; i < properties.tp_size; ++i) {
         max_address_begin = std::max(max_address_begin, *(buffer_infos->dataWithOffset<uint64_t>(i * 2)));
         min_address_end = std::min(min_address_end, *(buffer_infos->dataWithOffset<uint64_t>(i * 2 + 1)));
     }
     if (max_address_begin >= min_address_end) {
         RAISE_FATAL_ERROR((std::string("tp cache can not find common interval mem")));
     }
-
     cache_base_ptr = (void *)max_address_begin;
     config_.block_nums = (min_address_end - max_address_begin) / config_.block_size;
 }

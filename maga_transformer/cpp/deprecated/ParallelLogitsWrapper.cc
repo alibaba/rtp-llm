@@ -90,6 +90,7 @@ void ParallelLogitsWrapper<T>::forward(ft::Tensor& logits, const ft::Tensor hidd
         auto logits_buf = std::make_shared<ft::Buffer>(
             ft::MemoryType::MEMORY_GPU, ft::getTensorType<float>(),
             nccl_logits.shape(), nccl_logits.getPtr<float>());
+        device_->allGather({{logits_buf}});
         ft::invokeTransposeAxis012(logits.getPtr<float>(),
                                    nccl_logits.getPtr<float>(),
                                    tensor_para_.world_size_,

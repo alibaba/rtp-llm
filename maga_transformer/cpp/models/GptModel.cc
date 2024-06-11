@@ -188,6 +188,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt
         }));
         auto attn_hidden = move(attn_output.hidden_states);
+        if (device_props_.tp_size > 1) {
+            device_->allReduce({{attn_hidden}, ReduceOp::Sum});
+        }
         printBufferData(*attn_hidden, "layer_" + to_string(i) + "_attn_output");
 
         if (layer.post_layernorm) {
@@ -215,6 +218,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt
         }));
         hidden = ffn_output.hidden_states;
+        if (device_props_.tp_size > 1) {
+            device_->allReduce({{hidden}, ReduceOp::Sum});
+        }
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_output");
 
         // TODO: maybe move this layernorm to ffn layer

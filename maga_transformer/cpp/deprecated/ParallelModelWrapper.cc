@@ -207,14 +207,6 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
         ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {total_batch_size}, model_request.input_lengths->data());
     ft::Tensor lora_ids(ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {0}, nullptr);
 
-    model_output.logits                          = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
-        {ft::DataType::TYPE_FP32, {(size_t)total_batch_size, (size_t)params_.vocab_size_}, ft::AllocationType::DEVICE},
-        {});
-    ft::Tensor logits(ft::MEMORY_GPU,
-                      ft::DataType::TYPE_FP32,
-                      {(size_t)total_batch_size, (size_t)params_.vocab_size_},
-                      model_output.logits->data());
-
     cudaMemcpyAsync(combo_tokens.getPtr<int>(),
                     model_request.combo_tokens->data(),
                     combo_tokens.sizeBytes(),
@@ -371,6 +363,9 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
 
     // logits
     if (parallel_logits_wrapper_ != nullptr) {
+        model_output.logits = const_cast<ft::CudaDevice*>(device_)->allocateBuffer(
+                {ft::DataType::TYPE_FP32, {(size_t)total_batch_size, (size_t)params_.vocab_size_}, ft::AllocationType::DEVICE},
+                {});
         ft::Tensor logits(ft::MEMORY_GPU,
                     ft::DataType::TYPE_FP32,
                     {(size_t)total_batch_size, (size_t)params_.vocab_size_},
