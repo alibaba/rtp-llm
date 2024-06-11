@@ -89,8 +89,7 @@ void ParallelAttentionWrapper<T>::TRTFMHA(int layer_id, const ContextAttentionPa
                                     params.is_alibi_with_sacle,
                                     1,
                                     0);
-        invokeTransposeAxis12(qkv_buf_t_, q_buf_2_, params.batch_size, local_head_num_, params.input_seq_length, params_.size_per_head_, stream);
-        mFMHARunner->run_paged_kv(qkv_buf_t_,
+        mFMHARunner->run_paged_kv(q_buf_2_,
                                   paged_kv_tma_desc,
                                   host_kv_cache_block_ptrs,
                                   reinterpret_cast<KVBlockArray&>(kv_cache_buffer),
@@ -585,6 +584,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                        params_.use_logn_attn_,
                                        attention_weights->query_weight.scale_out,
                                        0,
+                                       use_paged_fmha_,
                                        stream_);
         sync_check_cuda_error();
 
@@ -995,7 +995,7 @@ void ParallelAttentionWrapper<T>::allocateBuffer(
     const auto qkv_merged_size = qkv_hidden_size + 2 * local_head_num_kv_ * params_.size_per_head_;
     qkv_buf_   = (T*)allocator_->reMalloc(qkv_buf_,
                                         sizeof(T) * h_token_num * qkv_merged_size);
-    if ((use_old_trt_fmha_ && !params_.is_causal_) || use_paged_fmha_) {
+    if (use_old_trt_fmha_ && !params_.is_causal_) {
         qkv_buf_t_   = (T*)allocator_->reMalloc(qkv_buf_t_,
                                             sizeof(T) * h_token_num * qkv_merged_size);
     }

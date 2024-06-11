@@ -158,6 +158,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     const bool                       use_logn_attention,
                                     const float*                     scale,
                                     const int                        int8_mode,
+                                    const bool                       use_paged_fmha,
                                     cudaStream_t                     stream);
 template<typename T>
 void invokeTranspose4d(T*           dst,

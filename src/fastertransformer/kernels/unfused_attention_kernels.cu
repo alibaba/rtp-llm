@@ -1456,7 +1456,7 @@ struct Vec_t<__nv_bfloat16> {
 };
 #endif
 
-template<typename T, typename Tcache, bool PREFIX_PROMPT>
+template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA>
 __global__ void add_fusedQKV_bias_transpose_kernel(T*                               q_buf,
                                                    T*                               k_buf,
                                                    T*                               v_buf,
@@ -1623,8 +1623,12 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
         }
     }
 
-    const int dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
+    size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
                            + seq_idx * size_per_head + tidx * vec_size;
+    if constexpr (USE_PAGED_FMHA) {
+        dest_q_idx = batch_idx * size_per_head * seq_len * head_num + seq_idx * size_per_head * head_num
+                     + head_idx * size_per_head + tidx * vec_size;
+    }
 
     const int dest_kv_idx = batch_idx * size_per_head * total_seq_len * head_num_kv
                             + head_idx * size_per_head * total_seq_len + dst_kv_seq_idx * size_per_head
@@ -1639,8 +1643,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     }
 }
 
-#define FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, Tcache, PREFIX_PROMPT)                                                      \
-    add_fusedQKV_bias_transpose_kernel<T, Tcache, PREFIX_PROMPT>                                                       \
+#define FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(Tcache, PREFIX_PROMPT, USE_PAGED_FMHA)                                         \
+    add_fusedQKV_bias_transpose_kernel<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA>                                       \
         <<<grid, block, smem_size, stream>>>(q_buf,                                                                    \
                                              k_buf,                                                                    \
                                              v_buf,                                                                    \
@@ -1660,7 +1664,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                              rotary_embedding_base,                                                    \
                                              logn_seq_len,                                                             \
                                              use_logn_attn,                                                            \
-                                             rotary_embedding_scale,                                                 \
+                                             rotary_embedding_scale,                                                   \
                                              dynamic_embedding_max_pos,                                                \
                                              base_scale);
 
@@ -1690,77 +1694,51 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     const bool                       use_logn_attn,
                                     const float*                     scale,
                                     const int                        int8_mode,
+                                    const bool                       use_paged_fmha,
                                     cudaStream_t                     stream)
 {
     auto &param = *param_ptr;
+    dim3 block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
+    // dim3   grid(token_num + batch_size * param.max_prefix_prompt_length, head_num);
+    dim3   grid(token_num + batch_size * param.max_prefix_prompt_length, head_num);
+    size_t smem_size = rotary_embedding_style == 0 ? 0 : 2 * rotary_embedding_dim * sizeof(T);
+
     // [bs, seq_len, 3, head, Dh]
-    if (rotary_embedding_dim == 0 && param.max_prefix_prompt_length == 0) {
-        if (head_num_kv != head_num) {
-            dim3 block(size_per_head);
-            dim3 grid(token_num, head_num + 2 * head_num_kv);
-            add_fusedQKV_bias_transpose_kernel<<<grid, block, 0, stream>>>(q_buf,
-                                                                           k_buf,
-                                                                           v_buf,
-                                                                           QKV,
-                                                                           qkv_bias,
-                                                                           padding_offset,
-                                                                           batch_size,
-                                                                           seq_len,
-                                                                           token_num,
-                                                                           head_num,
-                                                                           head_num_kv,
-                                                                           size_per_head,
-                                                                           scale,
-                                                                           int8_mode);
-        }
-        else {
-            const int m = token_num;
-            const int n = head_num * size_per_head;
-            dim3      block(384);
-            dim3      grid((int)(ceil(1.0 * m * n / 384)));
-            add_fusedQKV_bias_transpose_kernel<<<grid, block, 0, stream>>>(q_buf,
-                                                                           k_buf,
-                                                                           v_buf,
-                                                                           QKV,
-                                                                           qkv_bias,
-                                                                           padding_offset,
-                                                                           batch_size,
-                                                                           seq_len,
-                                                                           token_num,
-                                                                           head_num,
-                                                                           size_per_head,
-                                                                           scale,
-                                                                           int8_mode);
-        }
-    }
-    else {
-        FT_CHECK_WITH_INFO(int8_mode != 2, "w8a8 not yet implemented with prefix prompt");  // TODO(mseznec)
-        // To implement rotary embeddings, each thread processes two QKV elems:
-        dim3 block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
-        // dim3   grid(token_num + batch_size * param.max_prefix_prompt_length, head_num);
-        dim3   grid(token_num + batch_size * param.max_prefix_prompt_length, head_num);
-        size_t smem_size = rotary_embedding_style == 0 ? 0 : 2 * rotary_embedding_dim * sizeof(T);
-        // smem_size        = rotary_embedding_style == 1 ? smem_size : 2 * smem_size;
-        // NOTE: add offset for rotary embedding
-        //  add_fusedQKV_bias_transpose_kernel<<<grid, block, 0, stream>>>(
-        //      q_buf, k_buf, v_buf, param, QKV, qkv_bias, batch_size, seq_len, head_num, size_per_head,
-        //      rotary_embedding_dim);
-        if (param.max_prefix_prompt_length == 0) {
-            if (param.kv_block_array.int8_mode) {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, int8_t, false);
+    FT_CHECK_WITH_INFO(int8_mode != 2, "w8a8 not yet implemented");  // TODO(mseznec)
+    // smem_size        = rotary_embedding_style == 1 ? smem_size : 2 * smem_size;
+    // NOTE: add offset for rotary embedding
+    if (param.max_prefix_prompt_length == 0) {
+        if (param.kv_block_array.int8_mode) {
+            if (use_paged_fmha) {
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(int8_t, false, true);
             } else {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, T, false);
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(int8_t, false, false);
             }
-        }
-        else {
-            if (param.kv_block_array.int8_mode) {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, int8_t, true);
+        } else {
+            if (use_paged_fmha) {
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, false, true);
             } else {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, T, true);
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, false, false);
+            }            
+        }
+    } else {
+        if (param.kv_block_array.int8_mode) {
+            if (use_paged_fmha) {
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(int8_t, true, true);
+            } else {
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(int8_t, true, false);
             }
+        } else {
+            if (use_paged_fmha) {
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, true, true);
+            } else {
+                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, true, false);
+            }            
         }
     }
 }
+
+#undef FUSED_QKV_BIAS_TRANSPOSE_LAUNCH
 
 template<typename T>
 __global__ void SplitQKV_kernel(T*        q_buf,
@@ -1853,13 +1831,14 @@ INSTANTIATESPLITQKV(__nv_bfloat16);
                                                  const int                        rotary_embedding_dim,                \
                                                  const int                        rotary_embedding_style,              \
                                                  const float                      rotary_embedding_base,               \
-                                                 const float                      rotary_embedding_scale,            \
+                                                 const float                      rotary_embedding_scale,              \
                                                  const int                        dynamic_embedding_max_pos,           \
                                                  const int                        base_scale,                          \
                                                  const int                        logn_seq_len,                        \
                                                  const bool                       use_logn_attn,                       \
                                                  const float*                     scale,                               \
                                                  const int                        int8_mode,                           \
+                                                 const bool                       use_paged_fmha,                      \
                                                  cudaStream_t                     stream)
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSE(float);
 INSTANTIATEADDFUSEDQKVBIASTRANSPOSE(half);

@@ -272,6 +272,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         use_logn_attn,
         scale_out_ptr,
         int8_mode,
+        false,
         stream_
     );
 
