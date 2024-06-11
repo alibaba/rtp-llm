@@ -945,17 +945,14 @@ def _impl(ctx):
                         ),
                     ],
                 ),
-                #
-                # commented out in CROSSTOOL_hipcc.tpl
-                #
-                # flag_set(
-                #     actions = [
-                #         ACTION_NAMES.cpp_link_dynamic_library,
-                #         ACTION_NAMES.cpp_link_nodeps_dynamic_library,
-                #         ACTION_NAMES.cpp_link_executable,
-                #     ],
-                #     flag_groups = [flag_group(flags = ["-Wl,--gc-sections"])],
-                # ),
+                flag_set(
+                    actions = [
+                        ACTION_NAMES.cpp_link_dynamic_library,
+                        ACTION_NAMES.cpp_link_nodeps_dynamic_library,
+                        ACTION_NAMES.cpp_link_executable,
+                    ],
+                    flag_groups = [flag_group(flags = ["-Wl,--gc-sections"])],
+                ),
             ],
             implies = ["common", "disable-assertions"],
         )
