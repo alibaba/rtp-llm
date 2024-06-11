@@ -44,9 +44,9 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     assert(top_p.size() == batch_size);
     assert(temperature.size() == batch_size);
 
-    auto default_top_k = top_k.data<int32_t>()[0];
+    auto default_top_k = top_k.data<uint32_t>()[0];
     auto default_top_p = top_p.data<float>()[0];
-    auto max_top_k = *max_element(top_k.data<int32_t>(), top_k.dataWithOffset<int32_t>(top_k.size()));
+    auto max_top_k = *max_element(top_k.data<uint32_t>(), top_k.dataWithOffset<uint32_t>(top_k.size()));
     if (max_top_k == 0) {
         // for safety. TopKSamplingLayer handles a case of top_k=0 and top_p=0 as
         // a greedy decode, i.e. top_k=1, although such case has max_top_k=0.

@@ -212,7 +212,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     sampler_inputs.sequence_lengths = model_inputs.sequence_lengths;
     sampler_inputs.input_lengths = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.num_beams     = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
-    sampler_inputs.top_k         = device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    sampler_inputs.top_k         = device_->allocateBuffer({ft::DataType::TYPE_UINT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.top_p         = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.temperature   = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size}, ft::AllocationType::HOST}, {});
     sampler_inputs.random_seeds  = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {total_batch_size}, ft::AllocationType::HOST}, {});
@@ -224,7 +224,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
 
     int* input_lengths        = sampler_inputs.input_lengths->data<int32_t>();
     uint64_t* num_beams       = sampler_inputs.num_beams->data<uint64_t>();
-    int32_t* top_k            = sampler_inputs.top_k->data<int32_t>();
+    uint32_t* top_k            = sampler_inputs.top_k->data<uint32_t>();
     float* top_p              = sampler_inputs.top_p->data<float>();
     float* temperature        = sampler_inputs.temperature->data<float>();
     uint64_t* random_seeds    = sampler_inputs.random_seeds->data<uint64_t>();

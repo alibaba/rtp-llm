@@ -34,7 +34,7 @@ TEST_F(CudaSamplerTest, testTopK) {
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
     BufferPtr rand_seed = createBuffer<uint64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
 
-    auto top_k = createBuffer<int32_t>({4}, {1, 1, 2, 2}, AllocationType::HOST);
+    auto top_k = createBuffer<uint32_t>({4}, {1, 1, 2, 2}, AllocationType::HOST);
     auto top_p = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
     auto temperture = createBuffer<float>({4}, {1.0, 1.0, 10.0, 10.0}, AllocationType::HOST);
 
@@ -82,7 +82,7 @@ TEST_F(CudaSamplerTest, testTopP) {
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
     BufferPtr rand_seed = createBuffer<uint64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
 
-    auto top_k = createBuffer<int32_t>({4}, {0, 0, 0, 0}, AllocationType::HOST);
+    auto top_k = createBuffer<uint32_t>({4}, {0, 0, 0, 0}, AllocationType::HOST);
     auto top_p = createBuffer<float>({4}, {0.01, 0.7, 0.001, 0.9}, AllocationType::HOST);
     auto temperture = createBuffer<float>({4}, {0.01, 0.5, 0.9, 0.9}, AllocationType::HOST);
 
@@ -134,7 +134,7 @@ TEST_F(CudaSamplerTest, testRandom) {
     BufferPtr cum_log_probs = createBuffer<float>({1}, {-1.0});
     BufferPtr rand_seed = createBuffer<uint64_t>({1}, {1}, AllocationType::HOST);
 
-    auto top_k = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
+    auto top_k = createBuffer<uint32_t>({1}, {0}, AllocationType::HOST);
     auto top_p = createBuffer<float>({1}, {0.5f}, AllocationType::HOST);
     auto temperture = createBuffer<float>({1}, {0.2}, AllocationType::HOST);
 
@@ -167,7 +167,7 @@ TEST_F(CudaSamplerTest, testRandom) {
     EXPECT_GE(counts[8], 1000);
     EXPECT_GE(counts[9], 1000);
 
-    top_k->data<int32_t>()[0] = 4;
+    top_k->data<uint32_t>()[0] = 4;
     top_p->data<float>()[0] = 0.0f;
     counts = std::vector<size_t>(vocab_size, 0);
     for (int i = 0; i < 10000; i++) {
