@@ -72,7 +72,7 @@ void AttentionLayerTest<T>::testAttentionLayer(
     const auto total_token_num = context_token_num + sequence_lengths.size();
 
     // NOTE: this relationship does not hold for all models, e.g. gemma
-    const auto hidden_size = attention_conf.hidden_size;
+    const auto hidden_size = attention_conf.head_num * attention_conf.size_per_head;
     const auto input_tensor = fakeAttentionInputs(hidden_size, total_token_num);
     const auto context_lengths = std::vector<int32_t>(
         input_lengths.begin() + sequence_lengths.size(), input_lengths.end());
@@ -140,7 +140,6 @@ TEST_F(AttentionLayerTestFp16, testSimpleContextAttention) {
     attention_conf.kv_head_num = 4;
     attention_conf.size_per_head = 8;
     attention_conf.tokens_per_block = 4;
-    attention_conf.hidden_size = 32;
 
     attention_conf.rope_config.embedding_style = RopeType::Base;
     attention_conf.rope_config.embedding_dim = attention_conf.size_per_head;
@@ -156,7 +155,6 @@ TEST_F(AttentionLayerTestFp16, testSimpleContextAttention) {
     attention_conf.head_num = 16;
     attention_conf.kv_head_num = 16;
     attention_conf.size_per_head = 64;
-    attention_conf.hidden_size = 1024;
     attention_conf.rope_config.embedding_dim = attention_conf.size_per_head;
     attention_conf.mask_type = AttentionMaskType::causalMask;
     testAttentionLayer(cache_conf, attention_conf, {3}, {});
