@@ -34,6 +34,9 @@ __global__ void KernelWrapper(
         } else if constexpr (style == RotaryEmbeddingStyle::QWenNTKScalar) {
             fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, dim, base, scalar, 
                                                         input.size(1), max_logn_seq_len);
+        } else if constexpr (style == RotaryEmbeddingStyle::Yarn) {
+            fastertransformer::Rope<float, float2, style>::impl(x, (float*)smem, headsize_idx, seq_idx, dim, base, scalar, 
+                                                        max_position_embeddings);
         }
         
         *reinterpret_cast<float2*>(&input[batch_idx][seq_idx][headnum_idx][headsize_idx * 2]) = x;
@@ -93,6 +96,12 @@ torch::Tensor RotaryPositionEmbeddingOp::forward(torch::Tensor input) {
     
     case 3:
         KernelWrapper<RotaryEmbeddingStyle::QWenNTKScalar><<<grid, block, smem_size, stream>>>(
+            input.packed_accessor32<float,4,at::RestrictPtrTraits>(), 
+            dim, base, scalar, max_position_embeddings, max_logn_seq_len);
+        break;
+    
+    case 4:
+        KernelWrapper<RotaryEmbeddingStyle::Yarn><<<grid, block, smem_size, stream>>>(
             input.packed_accessor32<float,4,at::RestrictPtrTraits>(), 
             dim, base, scalar, max_position_embeddings, max_logn_seq_len);
         break;
