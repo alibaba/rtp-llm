@@ -13,20 +13,13 @@ def device_linkopts():
         ],
     })
 
-def device_copts():
-    return select({
-        "//:using_cuda": {
-            "TEST_USING_DEVICE": "CUDA",
-        },
-        "//conditions:default": {
-            "TEST_USING_DEVICE": "CPU",
-        },
-    })
-
 def device_test_envs():
     return select({
         "//:using_cuda": {
             "TEST_USING_DEVICE": "CUDA",
+        },
+        "//:using_rocm": {
+            "TEST_USING_DEVICE": "ROCM",
         },
         "//conditions:default": {
             "TEST_USING_DEVICE": "CPU",
@@ -45,6 +38,9 @@ def device_impl_target():
             "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
             "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
             "//3rdparty/flash_attention2:flash_attention2_impl",
+        ],
+        "//:using_rocm": [
+            "//src/fastertransformer/devices/rocm_impl:rocm_impl",
         ],
         "//conditions:default": [
             "//src/fastertransformer/devices/cpu_impl:cpu_impl"

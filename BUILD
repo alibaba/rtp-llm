@@ -15,6 +15,11 @@ config_setting(
 )
 
 config_setting(
+    name = "using_rocm",
+    values = {"define": "using_rocm=true"},
+)
+
+config_setting(
     name = "use_experimental",
     values = {"define": "use_experimental=true"},
 )

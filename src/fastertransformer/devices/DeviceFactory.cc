@@ -10,6 +10,8 @@ DeviceType getDeviceType(const std::string& device_name) {
         return DeviceType::Cpu;
     } else if (device_name == "CUDA") {
         return DeviceType::Cuda;
+    } else if (device_name == "ROCM") {
+        return DeviceType::ROCm;
     } else if (device_name == "YITIAN") {
         return DeviceType::Yitian;
     } else if (device_name == "ARM") {
