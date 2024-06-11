@@ -36,7 +36,7 @@ CacheManager::~CacheManager() {
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
     }
-    cache_aligned_buffer.reset();
+    cache_aligned_buffer_.reset();
 }
 
 void CacheManager::reportMetricsLoop() {
@@ -92,17 +92,17 @@ ft::BufferPtr CacheManager::tryAllocateMaxBuffer() {
 void CacheManager::allocateAndTpSync() {
     const auto properties = device_->getDeviceProperties();
     if (properties.tp_size <= 1) {
-        cache_aligned_buffer = device_->allocateBuffer({ft::DataType::TYPE_INT8, {config_.block_size * config_.block_nums}});
-        cache_base_ptr = cache_aligned_buffer->data();
+        cache_aligned_buffer_ = device_->allocateBuffer({ft::DataType::TYPE_INT8, {config_.block_size * config_.block_nums}});
+        cache_base_ptr_ = cache_aligned_buffer_->data();
         return;
     }
 
-    cache_aligned_buffer = tryAllocateMaxBuffer();
+    cache_aligned_buffer_ = tryAllocateMaxBuffer();
     BufferPtr buffer_infos = device_->allocateBuffer({ft::DataType::TYPE_UINT64, {properties.tp_size * 2}, ft::AllocationType::HOST});
     auto current_buffer_infos = buffer_infos->dataWithOffset<uint64_t>(properties.tp_rank * 2);
 
-    current_buffer_infos[0] = (uint64_t)cache_aligned_buffer->data();
-    current_buffer_infos[1] = current_buffer_infos[0] + (uint64_t)cache_aligned_buffer->sizeBytes();
+    current_buffer_infos[0] = (uint64_t)cache_aligned_buffer_->data();
+    current_buffer_infos[1] = current_buffer_infos[0] + (uint64_t)cache_aligned_buffer_->sizeBytes();
 
     device_->allGather({{buffer_infos}});
     device_->syncCommunication(false);
@@ -117,7 +117,7 @@ void CacheManager::allocateAndTpSync() {
     if (max_address_begin >= min_address_end) {
         RAISE_FATAL_ERROR((std::string("tp cache can not find common interval mem")));
     }
-    cache_base_ptr = (void *)max_address_begin;
+    cache_base_ptr_ = (void *)max_address_begin;
     config_.block_nums = (min_address_end - max_address_begin) / config_.block_size;
 }
 
@@ -130,7 +130,7 @@ void CacheManager::initKvCache() {
                 (size_t)config_.local_head_num_kv,
                 (size_t)config_.seq_size_per_block,
                 (size_t)config_.size_per_head},
-            cache_base_ptr);
+            cache_base_ptr_);
     kv_cache_.v_blocks = std::make_unique<ft::Buffer>(
         ft::MemoryType::MEMORY_GPU,
         config_.dtype,
@@ -139,7 +139,7 @@ void CacheManager::initKvCache() {
             (size_t)config_.local_head_num_kv,
             (size_t)config_.seq_size_per_block,
             (size_t)config_.size_per_head},
-        (int8_t*)cache_base_ptr + kv_cache_.k_blocks->sizeBytes());
+        (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes());
 
     if (config_.dtype == ft::DataType::TYPE_INT8) {
         kv_cache_.k_scale = std::make_unique<ft::Buffer>(
@@ -149,7 +149,7 @@ void CacheManager::initKvCache() {
                     (size_t)config_.block_nums,
                     (size_t)config_.local_head_num_kv,
                     (size_t)config_.seq_size_per_block},
-                (int8_t*)cache_base_ptr + kv_cache_.k_blocks->sizeBytes() * 2);
+                (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2);
         kv_cache_.v_scale = std::make_unique<ft::Buffer>(
                 ft::MemoryType::MEMORY_GPU,
                 ft::DataType::TYPE_FP32,
@@ -157,7 +157,7 @@ void CacheManager::initKvCache() {
                     (size_t)config_.block_nums,
                     (size_t)config_.local_head_num_kv,
                     (size_t)config_.seq_size_per_block},
-                (int8_t*)cache_base_ptr + kv_cache_.k_blocks->sizeBytes() * 2 + kv_cache_.k_scale->sizeBytes());
+                (int8_t*)cache_base_ptr_ + kv_cache_.k_blocks->sizeBytes() * 2 + kv_cache_.k_scale->sizeBytes());
     }
 }
 

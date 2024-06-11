@@ -97,8 +97,8 @@ private:
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 
     // tmp
-    ft::BufferPtr cache_aligned_buffer;
-    void*         cache_base_ptr;
+    ft::BufferPtr cache_aligned_buffer_;
+    void*         cache_base_ptr_;
 };
 
 typedef std::shared_ptr<CacheManager> CacheManagerPtr;
