@@ -28,7 +28,6 @@ TEST_F(GptModelTest, testSimple) {
     attention_conf.head_num = 16;
     attention_conf.kv_head_num = 16;
     attention_conf.size_per_head = 64;
-    attention_conf.hidden_size = 1024;
     attention_conf.tokens_per_block = 8;
     attention_conf.rope_config.embedding_style = RopeType::Base;
     attention_conf.rope_config.embedding_dim = 64;

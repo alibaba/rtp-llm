@@ -153,7 +153,7 @@ torch::Tensor merge_mask(const torch::Tensor& mask) {
 class GptAttentionImpl : public torch::nn::Module {
 public:
     GptAttentionImpl(const AttentionConfigs& config)
-    : hidden_size(config.hidden_size),
+    : hidden_size(config.head_num * config.size_per_head),
         num_heads(config.head_num),
         head_dim(config.size_per_head),
         num_key_value_heads(config.kv_head_num),
