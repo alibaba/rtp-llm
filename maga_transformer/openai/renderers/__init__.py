@@ -1,6 +1,7 @@
 from .llava_renderer import LlavaRenderer
 from .qwen_renderer import QwenRenderer
 from .qwen_vl_renderer import QwenVLRenderer
+from .chatglm4_renderer import ChatGlm4Renderer
 
 import logging
 try:
