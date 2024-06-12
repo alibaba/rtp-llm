@@ -6,7 +6,7 @@ import logging
 # make sure so init
 from dataclasses import dataclass, field, fields
 from enum import Enum
-from maga_transformer.utils.util import WEIGHT_TYPE
+from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.config.task_type import TaskType, check_task_type
 from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
 from maga_transformer.ops import GptInitParameter

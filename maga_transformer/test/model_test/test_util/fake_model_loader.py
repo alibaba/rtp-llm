@@ -2,7 +2,7 @@ import os
 import logging
 import json
 import torch
-from maga_transformer.utils.util import WEIGHT_TYPE
+from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.async_decoder_engine.rpc_model import RpcModel
 from maga_transformer.model_factory import ModelConfig, ModelFactory

@@ -1,7 +1,7 @@
 import os
 import torch
 from unittest import TestCase, main, mock
-from maga_transformer.utils.util import WEIGHT_TYPE
+from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.models.base_model import GenerateOutput, GenerateOutputs
 from maga_transformer.test.model_test.test_util.fake_model_loader import  FakeModelLoader

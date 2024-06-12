@@ -7,7 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest import TestCase, main
 from unittest import mock
-from maga_transformer.utils.util import WEIGHT_TYPE
+from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.config.log_config import LOGGING_CONFIG
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.server.inference_worker import InferenceWorker, BatchPipelineResponse

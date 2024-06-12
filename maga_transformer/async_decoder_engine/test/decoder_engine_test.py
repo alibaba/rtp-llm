@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from unittest import TestCase, main
-from maga_transformer.utils.util import WEIGHT_TYPE
+from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.pipeline.pipeline import Pipeline

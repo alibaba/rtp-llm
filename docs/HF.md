@@ -20,7 +20,7 @@ model = ModelFactory.from_huggingface("/path/to/dir")
 ```
 构建模型时默认使用基础配置参数，也可以通过构建`ModelConfig`自行修改配置，`ModelConfig`参数的介绍在下一节
 ``` python
-from maga_transformer.utils.util import WEIGHT_TYPE
+from maga_transformer.utils.weight_type import WEIGHT_TYPE
 
 model_config = ModelConfig(
     weight_type=WEIGHT_TYPE.INT8,

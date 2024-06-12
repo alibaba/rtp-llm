@@ -21,7 +21,7 @@ from maga_transformer.pipeline.pipeline_custom_func import PipelineCustomFunc, g
 from maga_transformer.async_decoder_engine.generate_stream import GenerateInput
 from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slice_list, truncate_response_with_stop_words, match_stop_words
 from maga_transformer.utils.tokenizer_utils import DecodingState
-from maga_transformer.utils.util import WEIGHT_TYPE
+from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.utils.vit_process_engine import VitEngine
 
 class Pipeline(object):
