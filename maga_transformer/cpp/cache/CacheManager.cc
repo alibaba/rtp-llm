@@ -244,7 +244,7 @@ std::tuple<bool, std::vector<int>> CacheManager::mallocImpl(int nums) {
     if (free_blocks_index_.size() < static_cast<size_t>(nums)) {
         std::string error_msg = "Failed to malloc " + std::to_string(nums) + " blocks, only "
                                 + std::to_string(free_blocks_index_.size()) + " blocks left";
-        FT_LOG_ERROR("%s", error_msg);
+        FT_LOG_ERROR("%s", error_msg.c_str());
         return {false, {}};
     } else {
         std::vector<int> result;

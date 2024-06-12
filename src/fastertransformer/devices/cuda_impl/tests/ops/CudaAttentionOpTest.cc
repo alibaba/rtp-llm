@@ -214,7 +214,8 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
 
     size_t tokensPerBlock = 8;
     
-    size_t padding_kv_seq_len = ((kv_seq_len + tokensPerBlock) / tokensPerBlock) * tokensPerBlock;
+    size_t padding_kv_seq_len = ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) * tokensPerBlock;
+    padding_kv_seq_len = (kv_seq_len == 0) ? 2 * tokensPerBlock : padding_kv_seq_len;
     auto kvcache_pad = torch::zeros(
         {1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim},
         tensor_options);
@@ -242,7 +243,9 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
 
     auto rope_config = RopeConfig({RopeType::NOROPE, head_dim, 10000, 1, 2048, 1, 1});
     
-    rtp_llm::CacheConfig cache_conf(1, 4096, num_heads, head_dim, tokensPerBlock, DataType::TYPE_FP16);
+    // cache manager need one block for preserve and every seq need one block for preserve.
+    auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
+    rtp_llm::CacheConfig cache_conf(1, block_num, num_heads, head_dim, tokensPerBlock, DataType::TYPE_FP16);
     auto kv_cache = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
 
     auto common_inputs = AttentionCommonInputs(*input_lengths_device, *sequence_lengths_device);
@@ -442,6 +445,56 @@ TEST_F(CudaAttentionOpTest, TrtV1ContextAttentionOpTest) {
                                    num_heads,
                                    num_key_value_heads,
                                    head_dim);
+        }
+    }
+}
+
+TEST_F(CudaAttentionOpTest, LongSeqMultiBlockSelfAttentionOpTest) {
+    setenv("ENABLE_MULTI_BLOCK_MODE", "ON", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+    ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
+    std::vector<size_t> batch = {4};
+    std::vector<size_t> seq   = {1};
+    std::vector<size_t> kv_seq = {16000};
+    for (auto batch_size : batch) {
+        for (auto seq_len : seq) {
+            for (auto kv_seq_len: kv_seq) {
+                size_t num_heads = 64;
+                size_t num_key_value_heads = num_heads;
+                size_t head_dim = 64;
+                selfAttentionOpTest(batch_size,
+                                    seq_len,
+                                    kv_seq_len,
+                                    num_heads,
+                                    num_key_value_heads,
+                                    head_dim);
+            }
+        }
+    }
+}
+
+TEST_F(CudaAttentionOpTest, LongSeqSelfAttentionOpTest) {
+    setenv("ENABLE_MULTI_BLOCK_MODE", "OFF", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+    ASSERT_FALSE(static_cast<CudaDevice*>(device_)->use_multi_block_mode);
+    std::vector<size_t> batch = {4};
+    std::vector<size_t> seq   = {1};
+    std::vector<size_t> kv_seq = {16000};
+    for (auto batch_size : batch) {
+        for (auto seq_len : seq) {
+            for (auto kv_seq_len: kv_seq) {
+                size_t num_heads = 64;
+                size_t num_key_value_heads = num_heads;
+                size_t head_dim = 64;
+                selfAttentionOpTest(batch_size,
+                                    seq_len,
+                                    kv_seq_len,
+                                    num_heads,
+                                    num_key_value_heads,
+                                    head_dim);
+            }
         }
     }
 }

@@ -229,9 +229,10 @@ protected:
                                torch::Tensor& kvCache)
     {
         cache_manager_ = std::make_shared<rtp_llm::CacheManager>(cache_config, device_);
-        const auto max_seq_len = *std::max_element(input_lengths.begin(), input_lengths.end());
-
-        const auto batch_layer_kv_block_num = (max_seq_len / cache_config.seq_size_per_block) + 2;
+        auto max_seq_len = *std::max_element(input_lengths.begin(), input_lengths.end());
+        max_seq_len = (max_seq_len == 0) ? 1 : max_seq_len;
+        const auto tokensPerBlock = cache_config.seq_size_per_block;
+        const auto batch_layer_kv_block_num = ((max_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1);
         const auto batch_size = input_lengths.size();
 
         auto kv_blocks_buf = device_->allocateBuffer({
