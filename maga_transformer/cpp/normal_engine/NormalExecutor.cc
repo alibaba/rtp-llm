@@ -15,7 +15,11 @@ using namespace std;
 namespace rtp_llm {
 
 NormalExecutor::NormalExecutor(const EngineInitParams& params, ft::DeviceBase* device):
-    Executor(device), metrics_reporter_(params.metrics_reporter) {
+    Executor(device),
+    metrics_reporter_(params.metrics_reporter),
+    dtype_(ft::getDataType(params.gpt_init_parameter.data_type_)),
+    is_causal_(params.gpt_init_parameter.is_causal_)
+{
     size_t max_batch_size =
         params.gpt_init_parameter.max_context_batch_size_ + params.gpt_init_parameter.max_generate_batch_size_;
     int eos_id = params.gpt_init_parameter.special_tokens_.eos_token_id_;
@@ -26,12 +30,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params, ft::DeviceBase* d
     FT_LOG_INFO("model exec use new device impl: %d", (int)use_new_device_impl_);
     if (use_new_device_impl_) {
         model_.reset(new GptModel({device_, params.gpt_weights, genModelDescription(params.gpt_init_parameter)}));
-        batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter, true));
+        batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter));
+        need_attention_mask_ = device_->getDeviceProperties().attention_need_mask;
     } else {
         model_wrapper_.reset(
             new ParallelModelWrapper(params.gpt_init_parameter, params.global_weights, params.layers_weights));
         batch_stream_processor_.reset(
-            new NormalBatchStreamProcessor(params.gpt_init_parameter, !model_wrapper_->useFMHA()));
+            new NormalBatchStreamProcessor(params.gpt_init_parameter));
+        need_attention_mask_ = !model_wrapper_->useFMHA();
     }
 }
 
@@ -72,6 +78,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     auto& model_input = model_input_status.value();
     tpSyncModelInputs(model_input, device_);
+    if (need_attention_mask_) {
+        const auto context_batch_size = model_input.sequence_lengths->size();
+        const auto generate_batch_size = model_input.input_lengths->size() - context_batch_size;
+        model_input.attention_mask = NormalBatchStreamProcessor::createAttentionMask({
+                model_input.input_lengths->view(generate_batch_size, context_batch_size),
+                model_input.prefix_lengths->view(generate_batch_size, context_batch_size),
+                dtype_, is_causal_, device_});
+    }
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto            merged_output = std::make_unique<MergedOutput>();
     GptModelOutputs model_output;

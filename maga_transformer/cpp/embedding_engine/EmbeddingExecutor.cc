@@ -9,6 +9,7 @@
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
+#include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include <algorithm>
 
 using namespace std;
@@ -23,11 +24,14 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, ft::DeviceB
     params_(params.gpt_init_parameter) {
     // need init model and sampler
     use_new_device_impl_ = std::getenv("USE_NEW_DEVICE_IMPL");
+    FT_LOG_INFO("model exec use new device impl: %d", (int)use_new_device_impl_);
     if (use_new_device_impl_) {
         model_.reset(new GptModel({device_, params.gpt_weights, Executor::genModelDescription(params_)}));
+        need_attention_mask_ = device_->getDeviceProperties().attention_need_mask;
+    } else {
+        model_wrapper_.reset(new ParallelModelWrapper(params_, params.global_weights, params.layers_weights));
+        need_attention_mask_ = !model_wrapper_->useFMHA();
     }
-    FT_LOG_INFO("model exec use new device impl: %d", (int)use_new_device_impl_);    
-    model_wrapper_.reset(new ParallelModelWrapper(params_, params.global_weights, params.layers_weights));
     init_position_ids(params_.max_seq_len_);
 }
 
@@ -37,24 +41,6 @@ void EmbeddingExecutor::init_position_ids(int max_seq_len) {
     for (int i = 0; i < max_seq_len; i++) {
         position_ids[i] = i;
     }
-}
-
-absl::Status EmbeddingExecutor::createAttentionMask(GptModelInputs& model_input) const {
-    const auto& input_lengths = model_input.input_lengths;
-    auto max_input_seq_len = *std::max_element(input_lengths->data<int32_t>(), input_lengths->data<int32_t>() + input_lengths->size());
-    auto attention_mask = torch::ones({(int)max_input_seq_len, (int)max_input_seq_len});
-    if (params_.is_causal_) {
-        attention_mask = attention_mask.tril();
-    }
-    attention_mask = attention_mask.unsqueeze_(0).tile({(int)input_lengths->size(), 1, 1}).to(torch_ext::getScalarType(params_.data_type_));
-    for (int i = 0; i < input_lengths->size(); ++i) {
-        attention_mask[i].slice(0, *input_lengths->dataWithOffset<int32_t>(i), max_input_seq_len) = 0;
-        if (!params_.is_causal_) {
-            attention_mask[i].slice(1, *input_lengths->dataWithOffset<int32_t>(i), max_input_seq_len) = 0;
-        }
-    }
-    model_input.attention_mask = device_->clone(*ft::torchTensor2Buffer(attention_mask));
-    return absl::OkStatus();
 }
 
 absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
@@ -113,7 +99,10 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         token_idx += length;
     }
     size_t max_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
-    (void)createAttentionMask(model_input);
+    if (need_attention_mask_) {
+        // 只有context请求，没有decode请求，所以直接使用input和prefix length，不需要像normal一样view
+        model_input.attention_mask = NormalBatchStreamProcessor::createAttentionMask({*model_input.input_lengths, *model_input.prefix_lengths, ft::getDataType(params_.data_type_), params_.is_causal_, device_});
+    }
     reportMetrics(batch_size, token_num, max_seq_len);
     return model_input;
 }

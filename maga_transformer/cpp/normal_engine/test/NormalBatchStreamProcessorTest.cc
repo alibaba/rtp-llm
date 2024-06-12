@@ -1,3 +1,4 @@
+#include "src/fastertransformer/core/Types.h"
 #include "torch/all.h"
 #include "gtest/gtest.h"
 #include <memory>
@@ -21,7 +22,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     param.max_seq_len_   = 2048;
     param.num_layers_    = 2;
     param.int8_kv_cache_ = true;
-    NormalBatchStreamProcessor     processor(param, true);
+    NormalBatchStreamProcessor     processor(param);
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
     query1->generate_config               = make_shared<GenerateConfig>();
@@ -88,6 +89,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
 
         EXPECT_TRUE(merge_input_status.ok());
         auto&            model_input      = merge_input_status.value();
+        model_input.attention_mask = NormalBatchStreamProcessor::createAttentionMask({model_input.input_lengths->view(2, 2), model_input.prefix_lengths->view(2, 2), ft::DataType::TYPE_FP16, true, device_});
         vector<int>      combo_tokens     = {2, 3, 1, 2, 3, 2, 3, 4};
         vector<int>      input_lengths    = {1, 2, 3, 3};
         vector<int>      sequence_lengths = {1, 2};
@@ -107,7 +109,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     }
 
     {
-        NormalBatchStreamProcessor     processor(param, false);
+        NormalBatchStreamProcessor     processor(param);
         StreamGroups stream_groups(streams);
         auto merge_input_status = processor.gatherModelInput(stream_groups);
         EXPECT_TRUE(merge_input_status.ok());

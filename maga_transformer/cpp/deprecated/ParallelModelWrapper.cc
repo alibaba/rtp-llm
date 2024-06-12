@@ -327,8 +327,10 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
                                  {"max_prefix_prompt_length", max_prefix_length},
                                  {"input_lengths", input_lengths},
                                  {"lora_ids", lora_ids},
-                                 {"attention_mask", attention_mask},
                                  {"lora_input_lengths", lora_input_lengths}});
+    if (attention_mask.size()) {
+        input_tensors.insert("attention_mask", attention_mask);
+    }
     ft::TensorMap output_tensors({{"decoder_output", all_hidden_states}});
 
     if (model_request.kv_cache_blocks != nullptr) {

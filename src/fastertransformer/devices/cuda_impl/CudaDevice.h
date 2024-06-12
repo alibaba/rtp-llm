@@ -24,13 +24,15 @@ public:
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return host_allocator_.get(); }
 
+    void syncAndCheck() override;
+    void syncCommunication(bool timeout = true) override;
+
+private:
     void checkUseOpenSourceFMHA();
     void checkUseTrtV1FMHA();
     void checkUseTrtV2FMHA();
     void checkUseMultiBlockMode();
 
-    void syncAndCheck() override;
-    void syncCommunication(bool timeout = true) override;
 
 public:
     cudaStream_t getStream() {return stream_;}

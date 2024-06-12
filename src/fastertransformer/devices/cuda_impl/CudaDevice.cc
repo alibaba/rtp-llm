@@ -145,6 +145,7 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->id = device_id_;
         prop->tp_rank = nccl_param_.rank_;
         prop->tp_size = nccl_param_.world_size_;
+        prop->attention_need_mask = !(use_openSource_fmha || use_trtv1_fmha || use_trtv2_fmha);
     }
     return *prop;
 }

@@ -6,6 +6,7 @@
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "src/fastertransformer/core/Types.h"
 
 namespace rtp_llm {
 
@@ -30,6 +31,9 @@ private:
     std::unique_ptr<ParallelModelWrapper>       model_wrapper_;
     kmonitor::MetricsReporterPtr                metrics_reporter_ = nullptr;
 
+    ft::DataType                                dtype_               = ft::DataType::TYPE_FP16 ;
+    bool                                        is_causal_           = true;
+    bool                                        need_attention_mask_ = false;
     bool                                        use_new_device_impl_ = false;
 };
 

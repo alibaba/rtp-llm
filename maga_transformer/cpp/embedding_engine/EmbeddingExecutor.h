@@ -24,6 +24,7 @@ private:
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
     const fastertransformer::GptInitParameter params_;
 
+    bool                                  need_attention_mask_ = false;
     bool                                  use_new_device_impl_ = false;
 
     ModelRequest                     generateOldModelRequest(GptModelInputs& model_input);
@@ -31,7 +32,6 @@ private:
     std::unique_ptr<GptModelOutputs> copyResultToCPU(th::Tensor gpu_outputs) const;
     absl::Status                     updateStreams(th::Tensor    gpu_outputs,
                                                    const std::list<EmbeddingStreamPtr>& streams) const;
-    absl::Status                     createAttentionMask(GptModelInputs& model_input) const;
     absl::StatusOr<th::Tensor>       postProcess(const ModelRequest& model_request, const GptModelOutputs& gpu_outputs);
     void calcTokenNum(const std::list<EmbeddingStreamPtr>& streams, int64_t& token_num, int64_t& batch_size) const;    
     void                             init_position_ids(int max_seq_len);

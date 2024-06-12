@@ -9,13 +9,20 @@
 
 namespace rtp_llm {
 
+struct MaskParams {
+public:
+    const ft::Buffer& input_lengths;
+    const ft::Buffer& prefix_lengths;
+    ft::DataType      dtype;
+    bool              is_causal;
+    ft::DeviceBase*   device;
+};
+
 class NormalBatchStreamProcessor {
 public:
-    NormalBatchStreamProcessor(const ft::GptInitParameter& params, bool need_attention_mask):
+    NormalBatchStreamProcessor(const ft::GptInitParameter& params):
         num_layers_(params.num_layers_),
         use_int8_kv_cache_(params.int8_kv_cache_),
-        data_type_(params.data_type_),
-        need_attention_mask_(need_attention_mask),
         device_(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda)) {}
     absl::Status                   dispatch(const StreamGroups&                  stream_groups,
                                             const SamplerInputs&                 sampler_inputs,
@@ -24,13 +31,12 @@ public:
     absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
                                                       const GptModelInputs&  model_inputs,
                                                       const GptModelOutputs& model_output) const;
-    void createAttentionMask(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+
+    static ft::BufferPtr createAttentionMask(const MaskParams& params);
 
 private:
     size_t          num_layers_;
     bool            use_int8_kv_cache_;
-    bool            need_attention_mask_;
-    std::string     data_type_;
     ft::DeviceBase* device_;
 };
 

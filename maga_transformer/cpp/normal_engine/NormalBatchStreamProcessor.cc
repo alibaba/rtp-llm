@@ -1,7 +1,10 @@
+#include <algorithm>
 #include <cstring>
 #include <random>
 #include <limits>
-
+#include "ATen/ops/ones.h"
+#include "c10/core/ScalarType.h"
+#include "src/fastertransformer/th_op/multi_gpu_gpt/Base.h"
 #include "src/fastertransformer/utils/assert_utils.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
@@ -9,6 +12,7 @@
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "maga_transformer/cpp/utils/KvCacheUtils.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 using namespace std;
 using namespace fastertransformer;
@@ -120,84 +124,39 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     FT_LOG_DEBUG("input_lengths: %s", model_input.input_lengths->debugStringWithData<int32_t>().c_str());
     FT_LOG_DEBUG("sequence_lengths: %s", model_input.sequence_lengths->debugStringWithData<int32_t>().c_str());
 
-    createAttentionMask(stream_groups, model_input);
     return model_input;
 }
 
-// TODO(xinfei.sxf) fmha enable的判断支持动态化，现在是靠静态的判断，不太好。
-void NormalBatchStreamProcessor::createAttentionMask(const StreamGroups& stream_groups, GptModelInputs& model_input) const {
-    if (!need_attention_mask_) {
-        return;
-    }
+ft::BufferPtr NormalBatchStreamProcessor::createAttentionMask(const MaskParams& params) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-
-    auto           context_streams     = stream_groups.contextStreams();
-    size_t         context_batch_size  = context_streams.size();
-    size_t         max_context_seq_len = stream_groups.maxContextSeqLen();
-    size_t         max_reuse_len       = stream_groups.maxReuseLength();
-
-    DataType target_data_type = getDataType(data_type_);
-    DataType data_type = TYPE_FP32;
-
-    // TODO(xinfei.sxf)考虑在fallback的情况下，sequence len的使用
-    auto attention_mask =
-        device_->allocateBuffer({data_type,
-            {context_batch_size, max_context_seq_len, max_context_seq_len + max_reuse_len}, ft::AllocationType::HOST}, {});
-
-    // TODO(xinfei.sxf) memset 0 in device base when api is ready
-    for (size_t i = 0; i < context_batch_size; i++) {
-        for (size_t j = 0; j < max_context_seq_len; j++) {
-            for (size_t k = 0; k <= max_context_seq_len + max_reuse_len; k++) {
-                switch (data_type) {
-                    #define ATTENTION_MASK_VALUE(ft_type) \
-                    case ft_type: { \
-                        typedef DataTypeTraits<ft_type>::type cppType; \
-                        auto data = reinterpret_cast<cppType (*) \
-                            [context_batch_size][max_context_seq_len][max_context_seq_len + max_reuse_len]>((void*)attention_mask->data()); \
-                        (*data)[i][j][k] = 0.0; \
-                        break; \
-                    }
-
-                    ATTENTION_MASK_VALUE(TYPE_FP32)
-                    default:
-                        throw std::runtime_error("wrong data type.");
-                }
+    const int *input_lengths = params.input_lengths.data<int32_t>();
+    const auto batch_size = params.input_lengths.size();
+    auto max_input_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
+    auto attention_mask = torch::ones({(int)max_input_seq_len, (int)max_input_seq_len});
+    if (params.is_causal) {
+        attention_mask = attention_mask.tril();
+    }
+    const auto torch_type = ft::dataTypeToTorchType(params.dtype);
+    attention_mask = attention_mask.unsqueeze_(0).tile({(int)batch_size, 1, 1}).to(torch_type);
+    for (int i = 0; i < batch_size; ++i) {
+        attention_mask[i].slice(0, input_lengths[i], max_input_seq_len) = 0;
+        if (!params.is_causal) {
+            attention_mask[i].slice(1, input_lengths[i], max_input_seq_len) = 0;
+        }
+    }
+    if (params.prefix_lengths.size()) {
+        assert(params.prefix_lengths.size() == batch_size);
+        const int *prefix_lengths = params.prefix_lengths.data<int32_t>();
+        auto max_reuse_length = *std::max_element(prefix_lengths, prefix_lengths + batch_size);
+        attention_mask = torch::cat({attention_mask, torch::zeros({(int)batch_size, max_input_seq_len, max_reuse_length}).to(torch_type)}, -1);
+        if (max_reuse_length) {
+            for (int i = 0; i < batch_size; ++i) {
+                attention_mask[i] = attention_mask[i].roll({prefix_lengths[i]}, {-1});
+                attention_mask[i].slice(0, 0, input_lengths[i]).slice(1, 0, prefix_lengths[i]) = 0;
             }
         }
     }
-
-    for (size_t i = 0; i < context_batch_size; i++) {
-        auto context_len = (*std::next(context_streams.begin(), i))->contextLength();
-        auto reuse_len = (*std::next(context_streams.begin(), i))->reuseLength();
-        for (size_t j = 0; j < context_len; j++) {
-            for (size_t k = 0; k <= reuse_len + j; k++) {
-                switch (data_type) {
-                    #define ATTENTION_MASK_VALUE(ft_type) \
-                    case ft_type: { \
-                        typedef DataTypeTraits<ft_type>::type cppType; \
-                        auto data = reinterpret_cast<cppType (*) \
-                            [context_batch_size][max_context_seq_len][max_context_seq_len + max_reuse_len]>((void*)attention_mask->data()); \
-                        (*data)[i][j][k] = 1.0; \
-                        break; \
-                    }
-
-                    ATTENTION_MASK_VALUE(TYPE_FP32)
-                    default:
-                        throw std::runtime_error("wrong data type.");
-                }
-            }
-        }
-    }
-
-    FT_LOG_DEBUG("attention_mask = [%s]", attention_mask->debugStringWithData<float>().c_str());
-    auto convert_attention_mask = device_->convert({attention_mask, target_data_type});
-    auto attention_mask_gpu = device_->allocateBuffer(
-        {convert_attention_mask->type(), convert_attention_mask->shape()}, {"attn_mask"});
-    device_->copy({*attention_mask_gpu, *convert_attention_mask});
-
-    FT_LOG_DEBUG("create attention_mask done");
-
-    model_input.attention_mask = attention_mask_gpu;
+    return params.device->clone(*ft::torchTensor2Buffer(attention_mask));
 }
 
 absl::StatusOr<SamplerInputs>
