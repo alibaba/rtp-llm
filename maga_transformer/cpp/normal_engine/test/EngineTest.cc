@@ -239,7 +239,6 @@ TEST_F(NormalEngineTest, testReuseCacheOption) {
 }
 
 TEST_F(NormalEngineTest, testReuseCache) {
-    setenv("REUSE_CACHE", "1", 1);
     CustomConfig config;
     config.reuse_cache = true;
     auto gpt_init_params = GptInitParameter();

@@ -12,7 +12,6 @@ test_linkopts = [
     "-ltorch_python",
     "-L/usr/local/cuda/lib64",
     "-lcudart",
-    "-lcuda",
     "-lnccl",
     "-lnvToolsExt",
 ]
@@ -67,7 +66,7 @@ cc_test(
 cc_test(
     name = "engine_test",
     srcs = glob([
-        "*EngineTest.cc",
+        "EngineTest.cc",
     ]),
     data = [],
     copts = test_copts,
