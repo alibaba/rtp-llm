@@ -4,7 +4,7 @@ import requests
 from PIL import Image
 import asyncio
 import json
-import torch
+from io import BytesIO
 import threading
 from typing import Any, List, Dict, Optional
 from maga_transformer.utils.lru_dict import LruDict
@@ -27,7 +27,7 @@ def process_image(url: str, embedding_func):
         if url.startswith("http://") or url.startswith("https://"):
             if os.environ.get("IMAGE_RESIZE_SUFFIX", "") != "" and "picasso" in url:
                 url += os.environ.get("IMAGE_RESIZE_SUFFIX", "")
-            image = Image.open(requests.get(url, stream=True, headers=headers).raw)
+            image = Image.open(BytesIO(requests.get(url, stream=True, headers=headers).content))
         else:
             image = Image.open(url)
     except Exception as e:
