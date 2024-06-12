@@ -73,10 +73,9 @@ private:
     std::tuple<bool, std::vector<int>, int> mallocWithCacheImpl(int want_block_nums, const std::vector<int>& token_ids);
     
     void                                    maybeFreeBlockFromCache(int nums);
-    void                                    free(const std::vector<std::vector<int>>& indices);
     void                                    free(const std::vector<int>& indice);
-    void freeWithCache(const std::vector<std::vector<int>>& block_indices, const std::vector<int>& token_ids);
-    void insertIntoCache(const std::vector<std::vector<int>>& block_indices,
+    void freeWithCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
+    void insertIntoCache(const std::vector<int>& block_indices,
                          const std::vector<int>&              token_ids,
                          bool                                 is_resident);
 

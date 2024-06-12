@@ -122,8 +122,6 @@ TEST_F(NormalEngineTest, testSimple) {
 TEST_F(NormalEngineTest, testNewDevice) {
     setenv("USE_NEW_DEVICE_IMPL", "1", 1);
     CustomConfig config;
-    // TODO(xinfei.sxf) split case
-    config.int8_kv_cache = true;
     auto gpt_init_params = GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
 

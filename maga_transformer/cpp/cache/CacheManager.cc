@@ -263,13 +263,6 @@ void CacheManager::reserveBlocks(int nums) {
     maybeFreeBlockFromCache(nums);
 }
 
-
-void CacheManager::free(const std::vector<std::vector<int>>& block_indices) {
-    for (const auto& indice : block_indices) {
-        free(indice);
-    }
-}
-
 void CacheManager::free(const std::vector<int>& block_indices) {
     block_ref_counter_.decrementRefCounter(block_indices);
     for (auto block : block_indices) {
@@ -304,39 +297,34 @@ void CacheManager::free(const std::vector<void*>& pointers) {
 }
 
 void CacheManager::freeWithCache(const std::vector<void*>& pointer, const std::vector<int>& token_ids) {
-    freeWithCache({convertAddrToIndex(pointer)}, token_ids);
+    freeWithCache(convertAddrToIndex(pointer), token_ids);
 }
 
-void CacheManager::freeWithCache(const std::vector<std::vector<int>>& block_indices,
-                                 const std::vector<int>&              token_ids) {
+void CacheManager::freeWithCache(const std::vector<int>& block_indices,
+                                 const std::vector<int>& token_ids) {
     insertIntoCache(block_indices, token_ids, false);
 }
 
 void CacheManager::insertResidentCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids) {
-    std::vector<std::vector<int>> wrapper(1, block_indices);
-    insertIntoCache(wrapper, token_ids, true);
+    insertIntoCache(block_indices, token_ids, true);
 }
 
 void CacheManager::insertResidentCache(const std::vector<void *>& pointer, const std::vector<int>& token_ids) {
     insertResidentCache(convertAddrToIndex(pointer), token_ids);
 }
 
-void CacheManager::insertIntoCache(const std::vector<std::vector<int>>& block_indices,
-                                   const std::vector<int>&              token_ids,
-                                   bool                                 is_resident) {
+void CacheManager::insertIntoCache(const std::vector<int>& block_indices,
+                                   const std::vector<int>& token_ids,
+                                   bool                    is_resident) {
     if (token_ids.size() > 1) {
-        const std::vector<int>& cache_block = block_indices.front();
-        int                     cache_len   = token_ids.size() - 1;
-        int                     block_len   = cache_len / seq_size_per_block_;
+        size_t                  cache_len   = token_ids.size() - 1;
+        size_t                  block_len   = std::min(block_indices.size(), cache_len / seq_size_per_block_);
         std::vector<int>        indices =
             block_cache_.put(std::vector<int>(token_ids.begin(), token_ids.begin() + cache_len),
-                             std::vector<int>(cache_block.begin(), cache_block.begin() + block_len),
+                             std::vector<int>(block_indices.begin(), block_indices.begin() + block_len),
                              is_resident);
         free(indices);
-        free(std::vector<int>(cache_block.begin() + block_len, cache_block.end()));
-        for (size_t i = 1; i < block_indices.size(); ++i) {
-            free(block_indices[i]);
-        }
+        free(std::vector<int>(block_indices.begin() + block_len, block_indices.end()));
     } else {
         free(block_indices);
     }

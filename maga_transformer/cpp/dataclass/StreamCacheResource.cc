@@ -26,7 +26,6 @@ void StreamCacheResource::releaseResource() {
     kv_cache_block_addr_.clear();
 }
 
-// TODO(xinfei.sxf) add ut
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     FT_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
     size_t release_blocks_num = 0;

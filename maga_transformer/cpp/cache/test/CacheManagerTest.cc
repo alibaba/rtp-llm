@@ -50,10 +50,10 @@ TEST_F(CacheManagerTest, testSimple) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
 
-    cache_manager.free({index1});
+    cache_manager.free(index1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 0);
 
-    cache_manager.free({index2});
+    cache_manager.free(index2);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
 
@@ -71,7 +71,7 @@ TEST_F(CacheManagerTest, testAllocateWithFreeCache) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
 
-    cache_manager.freeWithCache({index1}, {1000, 2000, 3000});
+    cache_manager.freeWithCache(index1, {1000, 2000, 3000});
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
@@ -98,7 +98,7 @@ TEST_F(CacheManagerTest, testAllocateWithReuse) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
     ASSERT_EQ(cache_manager.cacheItemNum(), 0);
 
-    cache_manager.freeWithCache({index1}, {1000, 1002});
+    cache_manager.freeWithCache(index1, {1000, 1002});
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
@@ -112,7 +112,7 @@ TEST_F(CacheManagerTest, testAllocateWithReuse) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
 
-    cache_manager.freeWithCache({index2}, {1000, 1002});
+    cache_manager.freeWithCache(index2, {1000, 1002});
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
@@ -125,7 +125,7 @@ TEST_F(CacheManagerTest, testAllocateWithReuse) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
     ASSERT_EQ(cache_manager.cacheItemNum(), 1);
 
-    cache_manager.freeWithCache({index3}, {1000, 1002, 1003});
+    cache_manager.freeWithCache(index3, {1000, 1002, 1003});
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
@@ -146,7 +146,7 @@ TEST_F(CacheManagerTest, testMatchMaxLen) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
 
     // insert cache item 1
-    cache_manager.freeWithCache({index1}, {1000, 1002});
+    cache_manager.freeWithCache(index1, {1000, 1002});
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
 
@@ -160,7 +160,7 @@ TEST_F(CacheManagerTest, testMatchMaxLen) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(4), 0);
 
     // insert cache item 2
-    cache_manager.freeWithCache({index2}, {1000, 1002, 1003});
+    cache_manager.freeWithCache(index2, {1000, 1002, 1003});
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 2);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
@@ -178,7 +178,7 @@ TEST_F(CacheManagerTest, testMatchMaxLen) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(6), 0);
 
     // insert cache item 3
-    cache_manager.freeWithCache({index3}, {1000, 1002, 1003, 1004});
+    cache_manager.freeWithCache(index3, {1000, 1002, 1003, 1004});
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 3);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 2);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 1);
@@ -211,7 +211,7 @@ TEST_F(CacheManagerTest, testPopNoResidentCacheItem) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
 
     // insert cache item 1
-    cache_manager.freeWithCache({index1}, {1000, 1002});
+    cache_manager.freeWithCache(index1, {1000, 1002});
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(1), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 0);
 
@@ -231,7 +231,7 @@ TEST_F(CacheManagerTest, testPopNoResidentCacheItem) {
     auto [success4, index4, reuseNum4] = cache_manager.mallocWithCacheImpl(2, {100, 1002});
     ASSERT_EQ(index4, std::vector<int>({1, 2}));
     ASSERT_EQ(reuseNum4, 0);
-    cache_manager.freeWithCache({index4}, {1000, 1002});
+    cache_manager.freeWithCache(index4, {1000, 1002});
     ASSERT_EQ(cache_manager.freeBlockNums(), 2);
 
     // trigger pop cache item 2 from cache, malloc success
@@ -251,7 +251,7 @@ TEST_F(CacheManagerTest, testPopTwoCache) {
     auto [success1, index1, reuseNum1] = cache_manager.mallocWithCacheImpl(2, {1000, 1002});
     ASSERT_EQ(index1, std::vector<int>({1, 2}));
     ASSERT_EQ(reuseNum1, 0);
-    cache_manager.freeWithCache({index1}, {1000, 1002});
+    cache_manager.freeWithCache(index1, {1000, 1002});
     ASSERT_EQ(cache_manager.freeBlockNums(), 5);
     ASSERT_TRUE(cache_manager.blockCache().hasKey({1000}));
 
@@ -259,7 +259,7 @@ TEST_F(CacheManagerTest, testPopTwoCache) {
     auto [success2, index2, reuseNum2] = cache_manager.mallocWithCacheImpl(3, {2000, 2002, 2003});
     ASSERT_EQ(index2, std::vector<int>({2, 3, 4}));
     ASSERT_EQ(reuseNum2, 0);
-    cache_manager.freeWithCache({index2}, {2000, 2002, 2003});
+    cache_manager.freeWithCache(index2, {2000, 2002, 2003});
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
     ASSERT_TRUE(cache_manager.blockCache().hasKey({2000, 2002}));
 
@@ -295,7 +295,7 @@ TEST_F(CacheManagerTest, testPopWithResident) {
     auto [success2, index2, reuseNum] = cache_manager.mallocWithCacheImpl(3, {2000, 2002, 2003});
     ASSERT_EQ(index2, std::vector<int>({2, 3, 4}));
     ASSERT_EQ(reuseNum, 0);
-    cache_manager.freeWithCache({index2}, {2000, 2002, 2003});
+    cache_manager.freeWithCache(index2, {2000, 2002, 2003});
     ASSERT_EQ(cache_manager.freeBlockNums(), 2);
     ASSERT_TRUE(cache_manager.blockCache().hasKey({2000, 2002}));
     ASSERT_TRUE(cache_manager.blockCache().isResident({1000}));
@@ -332,7 +332,7 @@ TEST_F(CacheManagerTest, testResident) {
     auto [success2, index2, reuseNum2] = cache_manager.mallocWithCacheImpl(2, {1000, 1002});
     ASSERT_EQ(index2, std::vector<int>({1, 2}));
     ASSERT_EQ(reuseNum2, 1);
-    cache_manager.freeWithCache({index2}, {1000, 1002});
+    cache_manager.freeWithCache(index2, {1000, 1002});
     ASSERT_TRUE(cache_manager.blockCache().isResident({1000}));
 
     // Match resident cache item
@@ -343,7 +343,7 @@ TEST_F(CacheManagerTest, testResident) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
 
     // Put not pop resident cache item
-    cache_manager.freeWithCache({index3}, {1000, 1002, 1003});
+    cache_manager.freeWithCache(index3, {1000, 1002, 1003});
     ASSERT_TRUE(cache_manager.blockCache().isResident({1000}));
 
     // Not match
@@ -364,7 +364,7 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     ASSERT_EQ(index1, std::vector<int>({1}));
     ASSERT_EQ(reuseNum, 0);
     // Insert cache item 1
-    cache_manager.freeWithCache({index1}, {1000, 1002});
+    cache_manager.freeWithCache(index1, {1000, 1002});
     ASSERT_FALSE(cache_manager.blockCache().hasKey({1000, 1002}));
 
     // Malloc cache item 2
@@ -374,7 +374,7 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
     // Free cache item 2
-    cache_manager.freeWithCache({index2}, {1000, 1002, 1003});
+    cache_manager.freeWithCache(index2, {1000, 1002, 1003});
     ASSERT_TRUE(cache_manager.blockCache().hasKey({1000, 1002}));
 
     // Malloc cache item 3
@@ -385,7 +385,7 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(2), 1);
     ASSERT_EQ(cache_manager.blockRefCounter().getRefCounter(3), 0);
     // Free cache item 3
-    cache_manager.freeWithCache({index3}, {1000, 1002, 1003, 1004, 1005});
+    cache_manager.freeWithCache(index3, {1000, 1002, 1003, 1004, 1005});
 
     auto [success4, index4, reuseNum4] = cache_manager.mallocWithCacheImpl(3, {1000, 1002, 1003, 1004, 1005});
     ASSERT_EQ(index4, std::vector<int>({1, 2, 3}));

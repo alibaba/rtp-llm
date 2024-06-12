@@ -71,9 +71,6 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
     CHECK_FUNC(blocks.k_scale_ptr, 2, 3);
     CHECK_FUNC(blocks.v_scale_ptr, 2, 3);
 
-    printf("here1\n");
-    fflush(stdout);
-
     ASSERT_EQ(resource.needKVCacheBlockNums(), 0);
 
     stream_->setSeqLength(7);
@@ -170,6 +167,68 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     stream_->releaseResource();
     ASSERT_EQ(cache_manager_->freeBlockNums(), 2);
     ASSERT_EQ(cache_manager_->cacheItemNum(), 4);
+}
+
+
+TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.reuse_cache = false;
+    ASSERT_EQ(resource.needKVCacheBlockNums(), 3);
+
+    ASSERT_TRUE(resource.initKVBlock());
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
+    ASSERT_EQ(resource.maxBlockSize(), 3);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(2), 2);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(3), 2);
+
+    resource.tryReleaseKVBlock(1);
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
+    ASSERT_EQ(resource.maxBlockSize(), 2);
+
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(1), 2);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(2), 2);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(3), 0);
+
+    resource.tryReleaseKVBlock(2);
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
+    ASSERT_EQ(resource.maxBlockSize(), 0);
+
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(1), 0);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(2), 0);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(3), 0);
+
+    ASSERT_TRUE(resource.incrKVBlock());
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 2);
+    ASSERT_EQ(resource.maxBlockSize(), 3);
+
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(1), 1);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(2), 1);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(3), 1);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(4), 1);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(5), 1);
+    ASSERT_EQ(cache_manager_->blockRefCounter().getRefCounter(6), 1);
+
+    resource.tryReleaseKVBlock(2);
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
+    ASSERT_EQ(resource.maxBlockSize(), 1);
+
+    resource.resource_context_.reuse_cache = true;
+    auto tokens_1 = stream_->complete_token_ids_->view(0, 1).data<int32_t>();
+    tokens_1[0] = 1;
+    auto tokens_2 = stream_->complete_token_ids_->view(1, 1).data<int32_t>();
+    tokens_2[0] = 2;
+
+    resource.tryReleaseKVBlock(1);
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
+    ASSERT_EQ(resource.maxBlockSize(), 0);
+    ASSERT_EQ(cache_manager_->cacheItemNum(), 2);
+
+    resource.tryReleaseKVBlock(1);
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 6);
+    ASSERT_EQ(resource.maxBlockSize(), 0);
+    ASSERT_EQ(cache_manager_->cacheItemNum(), 2);
 }
 
 }  // namespace rtp_llm
