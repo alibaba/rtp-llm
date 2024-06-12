@@ -17,7 +17,7 @@ class ChatGlmV2(GPT):
     def get_weight_cls():
         return GlmV2WeightInfo
 
-    @staticmethod
+    @classmethod
     def from_huggingface(cls, config_json: Dict[str, Any]):
         '''
         "apply_query_key_layer_scaling": true,
@@ -48,13 +48,17 @@ class ChatGlmV2(GPT):
         if 'pre_seq_len' in config_json:
             config.pre_seq_len = config_json['pre_seq_len']
         if 'prefix_projection' in config_json:
-            config.prefix_projection = config_json['prefix_projection']
-        config.special_tokens.eos_token_id = config_json['eos_token_id']
+            config.prefix_projection = config_json['prefix_projection']        
         config.src_quantization_bit = config_json.get('quantization_bit', 0)
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
-        config = cls.get_rotary_embedding_scale(config, config_json)
+        config = cls.get_rotary_embedding_scale(config, config_json)        
+        cls.update_stop_words(config, config_json)
         return config
+    
+    @classmethod
+    def update_stop_words(cls, config: GptInitModelParameters, config_json: Dict[str, Any]):
+        config.special_tokens.eos_token_id = config_json['eos_token_id']        
     
     @staticmethod
     def get_rotary_embedding_scale(config, config_json):   
@@ -90,7 +94,7 @@ class ChatGlmV2(GPT):
     def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict is not None:
-            config = ChatGlmV2.from_huggingface(ChatGlmV2, config_dict)
+            config = ChatGlmV2.from_huggingface(config_dict)
         else:
             config = ChatGlmV2.default_config()
         config = ChatGlmV2.modify_config(config)

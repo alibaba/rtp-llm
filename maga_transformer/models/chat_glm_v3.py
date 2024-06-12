@@ -16,7 +16,7 @@ class ChatGlmV3(ChatGlmV2):
     def _create_config(cls, ckpt_path: str):
         config_dict = get_config_from_path(ckpt_path)
         if config_dict is not None:
-            config = ChatGlmV3.from_huggingface(ChatGlmV3, config_dict)
+            config = cls.from_huggingface(config_dict)
         else:
             config = ChatGlmV2.default_config()
         config = ChatGlmV2.modify_config(config)
