@@ -50,8 +50,9 @@ struct CudaGemmDispatch {
         } else if (dim > 2 && params.A.isFloat() && params.B.isFloat()) {
 
             return GemmImplementType::cublas_batch_gemm;
-        } else if (dim == 2 && params.A.type() == DataType::TYPE_FP16 &&
-                 params.B.type() == DataType::TYPE_QINT8) {
+        } else if (dim == 2 && 
+                   (params.A.type() == DataType::TYPE_FP16 || params.A.type() == DataType::TYPE_BF16) &&
+                    params.B.type() == DataType::TYPE_QINT8) {
             return GemmImplementType::WeightOnlyQuantMatmulPlugin;
         }
         return GemmImplementType::invalid;
@@ -179,6 +180,9 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     }
     
     if (CudaGemmDispatch::dispatch(params) == GemmImplementType::WeightOnlyQuantMatmulPlugin) {
+        if (params.A.type() == DataType::TYPE_BF16) {
+            weight_only_matmul_plguin_->init(nvinfer1::DataType::kBF16, trt_plugins::WeightTypeId::INT8);
+        }
         size_t ws_size = weight_only_matmul_plguin_->getWorkspaceSize(arguments.m,
                                                                       arguments.n,
                                                                       arguments.k);

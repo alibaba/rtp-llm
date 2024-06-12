@@ -10,6 +10,8 @@
 
 namespace fastertransformer {
 
+class QBuffer;
+
 enum class BufferLifecycleType {
     SHORT,
     LONG
@@ -130,6 +132,9 @@ protected:
     std::vector<size_t> shape_;
     void*               data_;
     DeleterFuncType     deleter_ = nullptr;
+
+friend class QBuffer;
+
 };
 
 using ConstBufferPtr = std::shared_ptr<const Buffer>;

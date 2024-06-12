@@ -10,7 +10,7 @@ QBuffer::QBuffer(BufferPtr kernel,
                         kernel->type(),
                         kernel->shape(),
                         kernel->data(),
-                        std::move(std::static_pointer_cast<QBuffer>(kernel)->deleter_))
+                        std::move(kernel->deleter_))
 {
     FT_CHECK_WITH_INFO(
        (kernel.use_count() == 1 &&
@@ -102,11 +102,11 @@ DataType QBuffer::zeros_type() const {
     return zeros_->type();
 }
 
-size_t QBuffer::scales_sizeBytes() const {
+size_t QBuffer::scales_size_bytes() const {
     return scales_->sizeBytes();
 }
 
-size_t QBuffer::zeros_sizeBytes() const {
+size_t QBuffer::zeros_size_bytes() const {
     return zeros_->sizeBytes();
 }
 

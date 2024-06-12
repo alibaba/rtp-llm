@@ -54,7 +54,7 @@ class WeightOnlyQuantMatmulPlugin
 {
 public:
     // using PluginProfilerPtr = std::shared_ptr<WeightOnlyQuantGemmPluginProfiler>;
-    WeightOnlyQuantMatmulPlugin() = delete;
+    WeightOnlyQuantMatmulPlugin() = default;
 
     WeightOnlyQuantMatmulPlugin(nvinfer1::DataType type, WeightTypeId weightTypeId);
 
@@ -73,9 +73,9 @@ public:
 
     int  initialize() noexcept;
 
-private:
     void init(nvinfer1::DataType type, WeightTypeId weightTypeId);
 
+private:
     void configGemm();
 
 private:

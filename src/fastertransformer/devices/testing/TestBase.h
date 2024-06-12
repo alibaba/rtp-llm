@@ -325,12 +325,17 @@ protected:
     }
 
     torch::Tensor randTensor(at::IntArrayRef shape,
-                             torch::Dtype dtype) {
+                             torch::Dtype dtype,
+                             int64_t seed = 0) {
         torch::TensorOptions float_options = 
             torch::TensorOptions(torch::kFloat).device(torch::Device(torch::kCPU));
         torch::TensorOptions half_tensor_options = 
             torch::TensorOptions(torch::kFloat16).device(torch::Device(torch::kCPU));
-        auto output = torch::rand(shape, float_options);
+        auto generator = at::detail::createCPUGenerator();
+        if (seed != 0) {
+            generator = at::detail::createCPUGenerator(seed);
+        }
+        auto output = torch::rand(shape, generator, float_options);
         if (c10::isQIntType(dtype)) {
             int axis = output.dim()-1;
             auto scales = torch::rand(output.sizes()[axis], half_tensor_options);

@@ -26,8 +26,8 @@ public:
     void*           zeros_data()            const;
     DataType        scales_type()           const;
     DataType        zeros_type()            const;
-    size_t          scales_sizeBytes()      const;
-    size_t          zeros_sizeBytes()       const;
+    size_t          scales_size_bytes()      const;
+    size_t          zeros_size_bytes()       const;
 
 private:
     BufferPtr                      scales_;

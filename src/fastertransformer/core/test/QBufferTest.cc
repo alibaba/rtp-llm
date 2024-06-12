@@ -48,8 +48,8 @@ TEST_F(QBufferTest, ValidConstructTest) {
     EXPECT_EQ((int64_t)qbuffer_ptr->zeros_data(), 34567);
     EXPECT_EQ((int64_t)qbuffer_ptr->scales_type(), DataType::TYPE_FP16);
     EXPECT_EQ((int64_t)qbuffer_ptr->zeros_type(), DataType::TYPE_FP16);
-    EXPECT_EQ((int64_t)qbuffer_ptr->scales_sizeBytes(), 10 * 2);
-    EXPECT_EQ((int64_t)qbuffer_ptr->zeros_sizeBytes(), 10 * 2);
+    EXPECT_EQ((int64_t)qbuffer_ptr->scales_size_bytes(), 10 * 2);
+    EXPECT_EQ((int64_t)qbuffer_ptr->zeros_size_bytes(), 10 * 2);
 }
 
 TEST_F(QBufferTest, CopyConstructTest) {
