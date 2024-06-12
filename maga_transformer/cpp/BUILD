@@ -243,6 +243,7 @@ cc_library(
         ":system_prompt",
         ":system_prompt_constructor",
         ":model_wrapper",
+        ":normal_engine",
         "//src/fastertransformer/cuda:allocator_cuda",
         "@com_google_absl//absl/status",
         ":embedding_handler",
