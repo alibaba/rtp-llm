@@ -71,7 +71,7 @@ def git_deps():
 
     git_repository(
         name = "com_google_protobuf",
-        remote = "git@github.com:protocolbuffers/protobuf.git",
+        remote = "https://github.com/protocolbuffers/protobuf.git",
         # tag = 3.7
         commit = "a2a0afb5468dc423782344a2047abc041e75323e",
         shallow_since = "1518192000 +0800",
@@ -80,7 +80,7 @@ def git_deps():
 
     new_git_repository(
         name = "rapidjson",
-        remote = "git@github.com:Tencent/rapidjson.git",
+        remote = "https://github.com/Tencent/rapidjson.git",
         # tag = "v1.1.0",
         commit = "f54b0e47a08782a6131cc3d60f94d038fa6e0a51",
         build_file = clean_dep("//3rdparty/rapidjson:rapidjson.BUILD"),
@@ -88,7 +88,7 @@ def git_deps():
 
     new_git_repository(
         name = "havenask",
-        remote = "git@github.com:alibaba/havenask.git",
+        remote = "https://github.com/alibaba/havenask.git",
         commit = "3c973500afbd40933eb0a80cfdfb6592274377fb",
         shallow_since = "1704038400 +0800",
         build_file = clean_dep("//3rdparty/kmonitor:kmonitor.BUILD"),
