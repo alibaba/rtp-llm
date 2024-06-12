@@ -185,6 +185,7 @@ class Pipeline(object):
         all_texts = []
         output_lens = []
         if len(decoding_states) == 0:
+            # TODO(xinfei.sxf) not special for num beams
             if generate_config.num_beams == 1:
                 decoding_states = [DecodingState()] * len(generate_outputs.generate_outputs)
             else:
