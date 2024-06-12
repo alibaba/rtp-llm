@@ -36,4 +36,4 @@ RUN wget $AMD_BKC_URL -O /tmp/bkc.tar && \
 ARG PYPI_URL
 ADD deps /tmp/deps
 RUN /opt/conda310/bin/pip install -r /tmp/deps/requirements_rocm.txt -i $PYPI_URL && \
-    rm /tmp/deps
+    rm -rf /tmp/deps
