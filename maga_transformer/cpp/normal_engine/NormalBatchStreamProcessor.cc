@@ -152,7 +152,7 @@ ft::BufferPtr NormalBatchStreamProcessor::createAttentionMask(const MaskParams& 
         if (max_reuse_length) {
             for (int i = 0; i < batch_size; ++i) {
                 attention_mask[i] = attention_mask[i].roll({prefix_lengths[i]}, {-1});
-                attention_mask[i].slice(0, 0, input_lengths[i]).slice(1, 0, prefix_lengths[i]) = 0;
+                attention_mask[i].slice(0, 0, input_lengths[i]).slice(1, 0, prefix_lengths[i]) = 1;
             }
         }
     }

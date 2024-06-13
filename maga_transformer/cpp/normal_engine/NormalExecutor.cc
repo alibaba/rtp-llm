@@ -78,9 +78,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     auto& model_input = model_input_status.value();
     tpSyncModelInputs(model_input, device_);
-    if (need_attention_mask_) {
-        const auto context_batch_size = model_input.sequence_lengths->size();
-        const auto generate_batch_size = model_input.input_lengths->size() - context_batch_size;
+    if (need_attention_mask_ && model_input.input_lengths->size() > model_input.sequence_lengths->size()) {
+        const auto generate_batch_size = model_input.sequence_lengths->size();
+        const auto context_batch_size = model_input.input_lengths->size() - generate_batch_size;
         model_input.attention_mask = NormalBatchStreamProcessor::createAttentionMask({
                 model_input.input_lengths->view(generate_batch_size, context_batch_size),
                 model_input.prefix_lengths->view(generate_batch_size, context_batch_size),
