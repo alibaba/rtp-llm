@@ -285,7 +285,7 @@ py_wheel(
         "thrift",
         "numpy==1.24.1",
         "psutil",
-        "tiktoken==0.4.0",
+        "tiktoken==0.7.0",
         "lru-dict",
         "py-spy",
         "safetensors",

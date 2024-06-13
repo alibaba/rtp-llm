@@ -14,21 +14,20 @@ class ChatGlm4Renderer(CustomChatRenderer):
     def get_renderer_info(self) -> RendererInfo:
         renderer_info = super().get_renderer_info()
         return renderer_info
-    
+
     def get_prefix_tokens(self) -> List[int]:
         assert isinstance(self.tokenizer, PreTrainedTokenizer)
         prefix_tokens = [self.tokenizer.convert_tokens_to_ids("[gMASK]"), self.tokenizer.convert_tokens_to_ids("<sop>")]
         return prefix_tokens
-    
+
     def build_single_message(self, role: str, metadata: str, message: str) -> Tuple[List[int], str]:
         assert isinstance(self.tokenizer, PreTrainedTokenizer)
-        assert role in ["system", "user", "assistant", "observation"], role        
-        role_tokens = [self.tokenizer.convert_tokens_to_ids(f"<|{role}|>")] + self.tokenizer.encode(f"{metadata}\n",
-                                                                                            disallowed_special=())
-        message_tokens = self.tokenizer.encode(message, disallowed_special=())
+        assert role in ["system", "user", "assistant", "observation"], role
+        role_tokens = [self.tokenizer.convert_tokens_to_ids(f"<|{role}|>")] + self.tokenizer.tokenizer.encode(f"{metadata}\n", disallowed_special=())
+        message_tokens = self.tokenizer.tokenizer.encode(message, disallowed_special=())
         tokens: List[int] = role_tokens + message_tokens
         return tokens, str(f"<|{role}|>{metadata}\n{message}")
-    
+
     def handle_single_conversation(self, conversation: List[ChatMessage]):
         input_ids = self.get_prefix_tokens()
         input_message = "[gMASK]<sop>"
@@ -51,7 +50,7 @@ class ChatGlm4Renderer(CustomChatRenderer):
                         content += "\n\n## cogview\n\n如果用户的请求中包含了对图像的描述，你可以使用 `cogview` 来生成图像并展示给用户。你需要向 `cogview` 发送图像描述，规则：\n- 发送给 `cogview` 的消息必须使用英语。用户的中文描述必须完全翻译为英语。\n- 应当尽可能详细地描述图像生成的需求，需求描述约 100 英文单词。\n- 保持用户原始描述的意图。不要虚构内容或者没见过的人物。\n- 如无特殊说明，所在地为中国，持有中国立场并遵循中国社会主义价值观。"
                     else:
                         raise NotImplementedError(f"Unknown tool type {tool.type}")
-                id, message = self.build_single_message("system", "", content)                
+                id, message = self.build_single_message("system", "", content)
                 input_ids.extend(id)
                 input_message += message
             # no metadata yet
@@ -72,9 +71,9 @@ class ChatGlm4Renderer(CustomChatRenderer):
 
         return input_ids, input_message
 
-    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:        
+    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         assert isinstance(self.tokenizer, PreTrainedTokenizerBase)
-        input_ids, input_message = self.handle_single_conversation(request.messages)        
+        input_ids, input_message = self.handle_single_conversation(request.messages)
         return RenderedInputs(input_ids=input_ids, rendered_prompt=input_message)
 
 register_renderer('chatglm4', ChatGlm4Renderer)
