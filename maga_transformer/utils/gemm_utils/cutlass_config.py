@@ -1,5 +1,6 @@
 import torch
 import os
+import glob
 import re
 import logging
 from enum import Enum
@@ -34,27 +35,30 @@ class DeviceMap(Enum):
 
 def get_quant_info(quant_algo):
     if quant_algo.isWeightOnlyPerCol() and quant_algo.getWeightBits() == 8:
-        return "fp16_int8"
+        return "int8"
     elif quant_algo.isGroupwise() and quant_algo.getWeightBits() == 4:
-        return "fp16_int4"
+        return "int4"
     raise Exception("quant info not supported")
 
 def concat_config_file_name(quant_algo):
     device_name = torch.cuda.get_device_name(0)
     device = DeviceMap.from_str(device_name).to_str()
     quant_info = get_quant_info(quant_algo=quant_algo)
-    return "_".join([device, quant_info, "config.ini"])
+    pattern = "_".join([device, quant_info, "*", "config.ini"])
+    return pattern
      
 def load_cutlass_gemm_config(quant_algo):
     try:
-        config_file = concat_config_file_name(quant_algo=quant_algo)
-        file_path = os.path.join(CUR_PATH, "luts", config_file)
-        with open(file_path) as reader:
-            logging.info("load cutlass gemm config: " + str(file_path))
-            contents = reader.read().rstrip("\n").split("\n")
-            for s in contents:
-                configs = split_config(s)
-                torch.ops.fastertransformer.insert_fp16_int8_gemm_config(int(configs[0]), int(configs[1]), int(configs[2]), configs[3], int(configs[4]), int(configs[5]))
+        config_pattern = concat_config_file_name(quant_algo=quant_algo)
+        config_pattern = os.path.join(CUR_PATH, "luts", config_pattern)
+        config_files = glob.glob(config_pattern)
+        for config_file in config_files:
+            with open(config_file) as reader:
+                logging.info("load cutlass gemm config: " + str(config_file))
+                contents = reader.read().rstrip("\n").split("\n")
+                for s in contents:
+                    configs = split_config(s)
+                    torch.ops.fastertransformer.insert_fp16_int8_gemm_config(int(configs[0]), int(configs[1]), int(configs[2]), configs[3], int(configs[4]), int(configs[5]))
     except Exception as e: 
         logging.warn("load cutlass gemm config failed: " + str(e))
  
