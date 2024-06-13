@@ -9,7 +9,6 @@ public:
         torch::Tensor input;
         torch::Tensor mask;
         float scale;
-
     };
 
     struct SoftmaxOpTestOutput {
@@ -36,32 +35,31 @@ public:
         return SoftmaxOpTestInput({input, mask});
     }
 
-    SoftmaxOpTestOutput SoftmaxOpRun(SoftmaxOpTestInput& params)
-    {
+    SoftmaxOpTestOutput SoftmaxOpRun(SoftmaxOpTestInput& params) {
         bool is_cpu     = (this->device_->getDeviceProperties().type == DeviceType::Cpu);
         auto alloc_type = is_cpu ? AllocationType::HOST : AllocationType::DEVICE;
         auto input      = tensorToBuffer(params.input, alloc_type);
         auto mask       = tensorToBuffer(params.mask, alloc_type);
 
-
         auto output = device_->softmax({std::move(input),
                                         *mask,
+                                        std::nullopt,
                                         params.scale,
                                         mask->type()});
 
         return SoftmaxOpTestOutput({bufferToTensor(*output)});
-
     }
 
-    SoftmaxOpTestOutput SoftmaxTorchRefRun(SoftmaxOpTestInput& params)
-    {
+    SoftmaxOpTestOutput SoftmaxTorchRefRun(SoftmaxOpTestInput& params) {
         auto mask = params.mask.reshape({params.mask.sizes()[0],
                                          1,
                                          params.mask.sizes()[1],
                                          params.mask.sizes()[2]});
-        return SoftmaxOpTestOutput(
-            {torch::softmax((params.input + mask) * params.scale, -1)}
-        );
+        return SoftmaxOpTestOutput({
+            torch::softmax(
+                ((params.input + mask) * params.scale).to(torch::kFloat32), -1
+            ).to(params.input.type())
+        });
 
     }
 
@@ -71,13 +69,12 @@ public:
                            size_t k_len,
                            float scale,
                            DataType in_type,
-                           DataType out_type) 
+                           DataType out_type)
     {
         auto input = PrepareSoftmaxOpInput(b, head_num, q_len, k_len, scale, in_type, out_type);
         auto result = SoftmaxOpRun(input);
         auto result_ref = SoftmaxTorchRefRun(input);
         assertTensorClose(result.out.to(result_ref.out.type()), result_ref.out);
-
     }
 
 };

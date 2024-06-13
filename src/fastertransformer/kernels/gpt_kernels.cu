@@ -639,13 +639,14 @@ __launch_bounds__(1024, 1) __global__ void lookupHiddenStateOfLastToken(T*      
                                                                         const T*   hidden_state,
                                                                         const int* input_lengths,
                                                                         const int  batch_size,
-                                                                        const int  hidden_units)
+                                                                        const int  hidden_units,
+                                                                        const int  idx_offset)
 {
     for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < batch_size * hidden_units;
          index += blockDim.x * gridDim.x) {
         const int col_index = index % hidden_units;
         const int batch_id  = index / hidden_units;
-        from_tensor[index]  = hidden_state[(input_lengths[batch_id] - 1) * hidden_units + col_index];
+        from_tensor[index]  = hidden_state[(input_lengths[batch_id] + idx_offset) * hidden_units + col_index];
     }
 }
 
@@ -671,13 +672,14 @@ void invokeLookupHiddenStateOfLastToken(T*           from_tensor,
                                         const int*   input_lengths,
                                         const int    batch_size,
                                         const int    hidden_units,
+                                        const int    idx_offset,
                                         cudaStream_t stream)
 {
     const int grid_size = (int)(ceil(batch_size * hidden_units / 1024.));
     dim3      grid(min(grid_size, 65536));
     dim3      block(min(hidden_units, 1024));
     lookupHiddenStateOfLastToken<T><<<grid, block, 0, stream>>>(
-        from_tensor, hidden_state, input_lengths, batch_size, hidden_units);
+        from_tensor, hidden_state, input_lengths, batch_size, hidden_units, idx_offset);
 }
 
 template<typename T>
@@ -701,6 +703,7 @@ template void invokeLookupHiddenStateOfLastToken(T*       from_tensor, \
                                                  const int*   input_lengths, \
                                                  const int    batch_size, \
                                                  const int    hidden_units, \
+                                                 const int    idx_offset, \
                                                  cudaStream_t stream)
 
 INSTANTIATE_INVOKE_LOOKUP_HIDDEN_OF_LAST(float);

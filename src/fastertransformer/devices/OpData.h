@@ -111,10 +111,15 @@ struct CopyParams {
 
 using SelectOutput = BufferPtr;
 
+enum SelectType {
+    LAST = 0,
+    FIRST = 1,
+};
+
 struct SelectParams {
     const Buffer& input;
-    size_t dim = 0;
     const Buffer& index;
+    size_t dim = 0;
 };
 
 using TransposeOutput = BufferPtr;
@@ -426,22 +431,13 @@ struct ActivationParams {
                      gate_bias(gate_bias) {}
 };
 
+// softmax op is inplace-update, thus output buffer is same as input
 struct SoftmaxParams{
-
-    SoftmaxParams(BufferPtr input,
-                  const Buffer& mask,
-                  float scale = 1.0f,
-                  const DataType output_t = DataType::TYPE_INVALID) :
-                  input(std::move(input)),
-                  mask(mask),
-                  scale(scale),
-                  output_t(output_t) {}
-
-    // inplace
-    BufferPtr input = nullptr;
-    const Buffer& mask;
-    float scale;
-    const DataType output_t;
+    const BufferPtr input;
+    const OptionalConstBufferRef mask = std::nullopt;
+    const OptionalConstBufferRef bias = std::nullopt;
+    float scale = 1.0f;
+    const DataType output_t = DataType::TYPE_INVALID;
 };
 
 struct LoraLinearOutput {

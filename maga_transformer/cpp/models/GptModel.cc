@@ -70,7 +70,6 @@ BufferPtr GptModel::tpSyncEmbeddingOrLogits(const BufferPtr& buffer) {
 void GptModel::prepareAttentionInputs(
         const GptModelInputs& inputs,
         AttentionCommonInputs& attention_inputs) {
-
     const auto& input_lengths = inputs.input_lengths;
     const auto& sequence_lengths = inputs.sequence_lengths;
     const auto decoder_batch_size = sequence_lengths->shape()[0];
@@ -113,7 +112,6 @@ void GptModel::prepareAttentionInputs(
 }
 
 GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
-    const auto hidden_type = datatype_enum::TYPE_BF16;
     const auto norm_type = description_.norm_type;
     const auto norm_eps = description_.layernorm_eps;
 
@@ -246,11 +244,12 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         // gen last token hidden
         auto last_hidden = device_->allocateBufferLike(hidden->view(0, batch_size));
         device_->copy({last_hidden->view(0, attention_common_inputs.decoder_batch_size), hidden->view(0, attention_common_inputs.decoder_batch_size)});
+        const auto context_output_indexes = device_->clone({*inputs.context_output_indexes});
         if (attention_common_inputs.context_batch_size) {
             auto context_last_hidden = device_->select({
                     hidden->view(attention_common_inputs.decoder_batch_size, combo_tokens->size() - attention_common_inputs.decoder_batch_size),
-                    0,
-                    attention_common_inputs.cu_seqlens->view(1, attention_common_inputs.context_batch_size)});
+                    *context_output_indexes
+                    });
             device_->copy({last_hidden->view(attention_common_inputs.decoder_batch_size, attention_common_inputs.context_batch_size), *context_last_hidden});
         }
 

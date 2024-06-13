@@ -1723,7 +1723,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                 FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, false, true);
             } else {
                 FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, false, false);
-            }            
+            }
         }
     } else {
         if (param.kv_block_array.int8_mode) {
@@ -1737,7 +1737,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                 FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, true, true);
             } else {
                 FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, true, false);
-            }            
+            }
         }
     }
 }

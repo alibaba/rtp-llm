@@ -1,136 +1,77 @@
-#include "src/fastertransformer/kernels/sampling_topp_kernels.h"
-#include "src/fastertransformer/kernels/gpt_kernels.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "maga_transformer/cpp/embedding_engine/handlers/LinearSoftmaxHandler.h"
+#include <cstdlib>
+#include <stdlib.h>
 
 using namespace fastertransformer;
+
 namespace rtp_llm {
 
-template<typename T>
-LinearSoftmaxHandlerImpl<T>::LinearSoftmaxHandlerImpl(const GptInitParameter& params): IHandlerImpl(params), is_initalized_(false) {
-    ft::DeviceFactory::initDevices(ft::DeviceFactory::getDefaultGlobalDeviceParams());
-    device_ = dynamic_cast<CudaDevice*>(ft::DeviceFactory::getDefaultDevice());
-    allocator_      = device_->getAllocator();
-    cublas_wrapper_ = device_->cublasMMWrapperPtr();
-    stream_         = device_->stream();
+LinearSoftmaxHandlerImpl::LinearSoftmaxHandlerImpl(const GptInitParameter& params): IHandlerImpl(params), is_initalized_(false) {
+    DeviceFactory::initDevices(DeviceFactory::getDefaultGlobalDeviceParams());
+    device_ = DeviceFactory::getDefaultDevice();
 }
 
-template<typename T>
-LinearSoftmaxHandlerImpl<T>::~LinearSoftmaxHandlerImpl(){
-    freeBuffer();
-}
+LinearSoftmaxHandlerImpl::~LinearSoftmaxHandlerImpl(){}
 
-template<typename T>
-void LinearSoftmaxHandlerImpl<T>::allocateBuffer(size_t batch_size) {
-    const size_t hidden_units = params_.head_num_ * params_.size_per_head_;
-    sliced_hidden_buffer_ =
-        reinterpret_cast<T*>(allocator_->reMalloc(sliced_hidden_buffer_, sizeof(T) * batch_size * hidden_units));
-    cu_seqlens_     = reinterpret_cast<int*>(allocator_->reMalloc(cu_seqlens_, sizeof(int) * (batch_size + 1)));
-    input_lengths_gpu_buf = reinterpret_cast<int*>(allocator_->reMalloc(input_lengths_gpu_buf, sizeof(int) * batch_size));
-}
-
-template<typename T>
-void LinearSoftmaxHandlerImpl<T>::freeBuffer() {
-    allocator_->free((void**)sliced_hidden_buffer_);
-    allocator_->free((void**)cu_seqlens_);
-    allocator_->free((void**)input_lengths_gpu_buf);
-}
-
-template<typename T>
-void LinearSoftmaxHandlerImpl<T>::loadTensor(std::unordered_map<std::string, ft::ConstBufferPtr>& tensors) {
+void LinearSoftmaxHandlerImpl::loadTensor(std::unordered_map<std::string, ConstBufferPtr>& tensors) {
     // weight
     auto weight_it = tensors.find("w_out.weight");
     if (weight_it == tensors.end()) {
         throw std::runtime_error("can't find w_out.weight");
     } else {
-        transposed_weight_ = device_->transpose({*(weight_it->second)});// weight_it->second->data<T>();a
-        linear_weight.kernel = transposed_weight_->data<T>();
+        weight_ = device_->transpose({*(weight_it->second)});
     }
     // bias
     auto bias_it = tensors.find("w_out.bias");
     if (bias_it == tensors.end()) {
         throw std::runtime_error("can't find w_out.bias");
-    }
-    else {
-        linear_weight.bias = bias_it->second->data<T>();
+    } else {
+        bias_ = bias_it->second;
     }
     is_initalized_ = true;
 }
 
-template<typename T>
-th::Tensor LinearSoftmaxHandlerImpl<T>::forward(th::Tensor hidden_states, th::Tensor input_lengths) {
-    const int* input_lengths_cpu_buf = input_lengths.data_ptr<int>();
-    const size_t hidden_units = params_.head_num_ * params_.size_per_head_;
-    const size_t length = input_lengths.size(0);
-    const size_t max_context_seq_length = *std::max_element(input_lengths_cpu_buf, input_lengths_cpu_buf + (int)length);
+void getStateIndexes(int32_t*       select_indexes,
+                     const int32_t* sequence_length,
+                     const int32_t  batch_size)
+{
+    int32_t        total_seq_len        = 0;
+    for (int32_t i = 0; i < batch_size; i++) {
+        select_indexes[i] = total_seq_len;
+        total_seq_len += sequence_length[i];
+    }
+}
+
+th::Tensor LinearSoftmaxHandlerImpl::forward(th::Tensor hidden_states, th::Tensor input_lengths) {
     if (!is_initalized_) {
         throw std::runtime_error("mainse handler not initalized!");
     }
 
-    allocateBuffer(length);
-    cudaMemcpyAsync(input_lengths_gpu_buf, input_lengths_cpu_buf, sizeof(int) * length, cudaMemcpyHostToDevice, stream_);
+    const size_t hidden_units = params_.head_num_ * params_.size_per_head_;
+    const size_t batch_size = input_lengths.size(0);
 
-    invokeLookupHiddenStateOfFirstToken(
-        sliced_hidden_buffer_,
-        (T*)hidden_states.data_ptr(),
-        input_lengths_gpu_buf,
-        length,
-        hidden_units,
-        stream_);
+    auto indexes_cpu = device_->allocateBuffer(
+        {DataType::TYPE_INT32, {batch_size}, AllocationType::HOST});
+    getStateIndexes(indexes_cpu->data<int32_t>(), input_lengths.data_ptr<int32_t>(), batch_size);
+    auto input_buf = torchTensor2Buffer(hidden_states);
+    auto indexes_buf = device_->clone({*indexes_cpu});
+    auto sliced_hidden_buffer = device_->select({*input_buf, *indexes_buf});
 
-    th::Tensor decoder_output =
-        torch::zeros({(int64_t)length, (int64_t)2},
-                     torch::dtype(at::ScalarType::Half).device(torch::kCUDA).requires_grad(false));
-    T* decoder_output_buf = (T*)decoder_output.data_ptr();
+    printBufferData(*input_buf, "input_buf");
+    printBufferData(*sliced_hidden_buffer, "sliced_hidden_buffer");
 
-    float     alpha            = 1.0f;
-    float     beta             = 0.0f;
-    const cudaDataType_t gemm_data_type = ft::getCudaDataType<T>();
-    // gemm
-    print_bsd(-1, "origin", sliced_hidden_buffer_, 1, length, hidden_units);
-
-    cublas_wrapper_->Gemm(CUBLAS_OP_N,
-                          CUBLAS_OP_N,
-                          2,  // n
-                          length, // m
-                          hidden_units,  // k
-                          &alpha,
-                          linear_weight.kernel,
-                          gemm_data_type,
-                          2,               // k
-                          sliced_hidden_buffer_,
-                          gemm_data_type,
-                          hidden_units,  // k
-                          &beta,
-                          decoder_output_buf,
-                          gemm_data_type,
-                          2, /* n */
-                          CUDA_R_32F,
-                          cublasGemmAlgo_t(-1));
-    // bias softmax
-    invokeAddBiasSoftMax(decoder_output_buf, linear_weight.bias, nullptr, nullptr, length, 2, 2, stream_);
-    print_bsd(-1, "mainse_output", decoder_output_buf, 1, 1, 2, 0, 2);
-    return decoder_output.cpu();
+    const auto output_hidden_size = 2;
+    auto gemm_output = device_->gemm({*sliced_hidden_buffer, *weight_, std::nullopt, nullptr, DataType::TYPE_FP32});
+    auto gemm_output_typed = device_->convert({gemm_output, torchDTypeToDataType(hidden_states.dtype())});
+    auto decoder_output = device_->softmax({gemm_output_typed, std::nullopt, *bias_});
+    auto output_cpu = device_->clone({*decoder_output, AllocationType::HOST});
+    return Buffer2torchTensor(output_cpu);
 }
 
 LinearSoftmaxHandler::LinearSoftmaxHandler(const GptInitParameter& params): HandlerBase(params) {
-    //@miji FIXME
-    DataType data_type = DataType::TYPE_FP16;
-    switch (data_type) {
-        case DataType::TYPE_FP32:
-            throw std::runtime_error("not support fp32");
-            break;
-        case DataType::TYPE_FP16:
-            handler_impl_ = std::make_unique<LinearSoftmaxHandlerImpl<half>>(params);
-            break;
-        case DataType::TYPE_BF16:
-            // bfloat16 add_bias_softmax not implemented
-            throw std::runtime_error("not support bfloat16");
-            break;
-        default:
-            throw std::runtime_error("Wrong tensor type::" + std::to_string(data_type));
-    }
+    handler_impl_ = std::make_unique<LinearSoftmaxHandlerImpl>(params);
 }
 
-template class LinearSoftmaxHandlerImpl<half>;
-
-} // namespace rtp_llmπ
+} // namespace rtp_llm

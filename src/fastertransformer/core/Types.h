@@ -24,27 +24,27 @@ enum class AllocationType {
     DEVICE = 1,
 };
 
-typedef enum datatype_enum {
-    TYPE_INVALID,
-    TYPE_BOOL,
-    TYPE_UINT8,
-    TYPE_UINT16,
-    TYPE_UINT32,
-    TYPE_UINT64,
-    TYPE_INT8,
-    TYPE_INT16,
-    TYPE_INT32,
-    TYPE_INT64,
-    TYPE_FP16,
-    TYPE_FP32,
-    TYPE_FP64,
-    TYPE_BYTES,
-    TYPE_BF16,
-    TYPE_FP8_E4M3,
-    TYPE_STR,
-    TYPE_VOID,
-    TYPE_QINT8
-} DataType;
+enum DataType : std::uint8_t {
+    TYPE_INVALID   =  0,
+    TYPE_BOOL      =  1,
+    TYPE_UINT8     =  2,
+    TYPE_UINT16    =  3,
+    TYPE_UINT32    =  4,
+    TYPE_UINT64    =  5,
+    TYPE_INT8      =  6,
+    TYPE_INT16     =  7,
+    TYPE_INT32     =  8,
+    TYPE_INT64     =  9,
+    TYPE_FP16      = 10,
+    TYPE_FP32      = 11,
+    TYPE_FP64      = 12,
+    TYPE_BYTES     = 13,
+    TYPE_BF16      = 14,
+    TYPE_FP8_E4M3  = 15,
+    TYPE_STR       = 16,
+    TYPE_VOID      = 17,
+    TYPE_QINT8     = 18,
+};
 
 inline DataType getDataType(const std::string& type_str) {
     DataType data_type;

@@ -48,10 +48,6 @@ inline std::vector<int64_t> bufferShapeToTorchShape(const Buffer& buffer) {
     return tensor_shape;
 }
 
-inline size_t calcTensorBytes(torch::Tensor tensor) {
-    return tensor.numel() * torch::elementSize(torch::typeMetaToScalarType(tensor.dtype()));
-}
-
 #define FOREACH_BUFFER_TORCH_TYPE_MAP(F)    \
     F(TYPE_UINT8, torch::kByte)             \
     F(TYPE_INT8, torch::kChar)              \
@@ -116,13 +112,12 @@ inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor) {
     const auto& shape = torchShapeToBufferShape(tensor.sizes());
     const auto& dtype = torchDTypeToDataType(tensor.dtype());
     const auto& memory_type = torchDeviceToMemoryType(tensor.device());
-    return std::make_unique<Buffer>(memory_type, dtype, shape, data);
+    return std::make_shared<Buffer>(memory_type, dtype, shape, data);
 }
 
 inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor,
                                     const torch::Tensor& scales,
                                     const torch::Tensor& zeros) {
-    
     return BufferPtr(new QBuffer(std::move(torchTensor2Buffer(tensor)),
                                  std::move(torchTensor2Buffer(scales)),
                                  std::move(torchTensor2Buffer(zeros))));
@@ -151,7 +146,7 @@ inline std::array<torch::Tensor, 3> QBuffer2torchTensor(const ConstQBufferPtr& b
     if (!buf->isQuantify()) {
         throw std::runtime_error("only support qbuffer!");
     }
-    
+
     return {Buffer2torchTensor(std::move(BufferPtr(new Buffer(buf->kernel().where(),
                                                               buf->kernel().type(),
                                                               buf->kernel().shape(),

@@ -76,7 +76,7 @@ public:
     inline T* dataWithOffset(size_t offset) const {
         return data<T>() + offset;
     }
-    
+
     size_t typeSize() const;
     size_t size() const;
     size_t sizeBytes() const;

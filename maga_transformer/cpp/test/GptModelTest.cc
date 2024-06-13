@@ -59,6 +59,7 @@ TEST_F(GptModelTest, testSimple) {
     GptModelInputs inputs = {
         std::move(combo_tokens), std::move(input_lengths), std::move(sequence_lengths)
     };
+    inputs.context_output_indexes = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
     inputs.attention_mask = mask_buf;
     inputs.kv_cache_blocks = std::move(kv_cache_blocks);
     device_->syncAndCheck();
@@ -97,6 +98,7 @@ TEST_F(GptModelTest, testSimple) {
     inputs.combo_tokens = createBuffer<int32_t>({1}, {151645}, AllocationType::HOST);
     inputs.input_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
     inputs.sequence_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
+    inputs.context_output_indexes = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
     device_->syncAndCheck();
     outputs = model->forward(inputs);
     device_->syncAndCheck();

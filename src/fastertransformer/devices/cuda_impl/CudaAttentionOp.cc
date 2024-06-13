@@ -279,7 +279,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         return;
     }
     else if (use_openSource_fmha && cufmha_runner_->openSourceFmhaSupport()) {
-        
+
         auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32,
                                             {batch_size, head_num, seq_len},
                                             AllocationType::DEVICE},
@@ -334,6 +334,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
             "attention_mask must be provided for default context attention implementation");
         auto softmax_qk_output = softmax({std::move(qk_output),
                                         *params.common.attention_mask,
+                                        nullopt,
                                         scale,
                                         DataType::TYPE_FP16});
         printBufferData(*softmax_qk_output, "softmax_qk_output: ");
@@ -517,7 +518,7 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     float* partial_sum_data = (partial_sum == nullptr) ? nullptr : partial_sum->data<float>();
     float* partial_max_data = (partial_max == nullptr) ? nullptr : partial_max->data<float>();
     int* block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
-    
+
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                      selfAttentionwrapper,
                                      params,

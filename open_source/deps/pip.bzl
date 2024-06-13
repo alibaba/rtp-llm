@@ -8,6 +8,7 @@ def pip_deps():
         extra_pip_args = [
             "--index-url=https://mirrors.aliyun.com/pypi/simple/",
         ],
+        timeout=12000,
     )
 
     pip_install(
@@ -17,4 +18,5 @@ def pip_deps():
         extra_pip_args = [
             "--index-url=https://mirrors.aliyun.com/pypi/simple/",
         ],
+        timeout=12000,
     )

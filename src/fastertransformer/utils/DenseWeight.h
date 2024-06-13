@@ -16,7 +16,6 @@
 
 #pragma once
 #include "src/fastertransformer/utils/LoRAWeight.h"
-#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #include "stdlib.h"
 
 namespace fastertransformer {

@@ -2,9 +2,6 @@
 #include "c10/core/ScalarType.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingExecutor.h"
-#if USING_CUDA
-#include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
-#endif
 #include "src/fastertransformer/core/Types.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
@@ -23,17 +20,10 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, ft::DeviceB
     handler_(handler),
     device_(device),
     metrics_reporter_(params.metrics_reporter),
-    params_(params.gpt_init_parameter) {
-    // need init model and sampler
-    use_new_device_impl_ = std::getenv("USE_NEW_DEVICE_IMPL");
-    FT_LOG_INFO("model exec use new device impl: %d", (int)use_new_device_impl_);
-    if (use_new_device_impl_) {
-        model_.reset(new GptModel({device_, params.gpt_weights, Executor::genModelDescription(params_)}));
-        need_attention_mask_ = device_->getDeviceProperties().attention_need_mask;
-    } else {
-        model_wrapper_.reset(new ParallelModelWrapper(params_, params.global_weights, params.layers_weights));
-        need_attention_mask_ = !model_wrapper_->useFMHA();
-    }
+    params_(params.gpt_init_parameter)
+{
+    model_.reset(new GptModel({device_, params.gpt_weights, Executor::genModelDescription(params_)}));
+    need_attention_mask_ = device_->getDeviceProperties().attention_need_mask;
     init_position_ids(params_.max_seq_len_);
 }
 
@@ -194,13 +184,7 @@ absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& str
     auto         merged_output        = std::make_unique<MergedOutput>();
     GptModelOutputs model_output;
     ModelRequest model_request = generateOldModelRequest(model_input);
-    if (use_new_device_impl_) {
-        model_output = std::move(model_->forward(model_input));
-#if USING_CUDA
-    } else {
-        model_output = std::move(model_wrapper_->forward(model_request));
-#endif
-    }
+    model_output = std::move(model_->forward(model_input));
     auto post_state = postProcess(model_request, model_output);
     RETURN_IF_STATUS_OR_ERROR(post_state);
     return updateStreams(post_state.value(), streams);

@@ -119,6 +119,7 @@ void invokeLookupHiddenStateOfLastToken(T*           from_tensor,
                                         const int*   input_lengths,
                                         const int    batch_size,
                                         const int    hidden_units,
+                                        const int    idx_offset,
                                         cudaStream_t stream);
 
 template<typename T>

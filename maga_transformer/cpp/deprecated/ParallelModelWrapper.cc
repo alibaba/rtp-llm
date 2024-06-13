@@ -369,6 +369,7 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
                 cu_seqlens.template getPtrWithOffset<int>(1),
                 model_request.context_batch_size,
                 hidden_units,
+                -1,
                 stream_);
         } else {
             invokeLookupHiddenStateOfFirstToken(

@@ -1,9 +1,6 @@
 #pragma once
 
 #include <memory>
-#if USING_CUDA
-#include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
-#endif
 #include "maga_transformer/cpp/embedding_engine/EmbeddingStream.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "maga_transformer/cpp/engine_base/Executor.h"
@@ -19,17 +16,12 @@ public:
 
 private:
     std::unique_ptr<GptModel>             model_;
-#if USING_CUDA
-    std::unique_ptr<ParallelModelWrapper> model_wrapper_;
-#endif
     py::object                            handler_;
     ft::DeviceBase*                       device_;
     ft::BufferPtr                         max_position_ids_buf_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
     const fastertransformer::GptInitParameter params_;
-
     bool                                  need_attention_mask_ = false;
-    bool                                  use_new_device_impl_ = false;
 
     ModelRequest                     generateOldModelRequest(GptModelInputs& model_input);
     absl::StatusOr<GptModelInputs>   gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const;

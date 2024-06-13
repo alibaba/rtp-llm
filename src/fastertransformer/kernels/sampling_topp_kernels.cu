@@ -1379,6 +1379,15 @@ template void invokeAddBiasSoftMax(half*        logits,
                                    const int    n,
                                    cudaStream_t stream);
 
+template void invokeAddBiasSoftMax(__nv_bfloat16*        logits,
+                                   const __nv_bfloat16*  bias,
+                                   const int*            end_ids,
+                                   const bool*           finished,
+                                   const int             m,
+                                   const int             n_padded,
+                                   const int             n,
+                                   cudaStream_t          stream);
+
 __global__ void computeToppDecay(float*         runtime_top_p,
                                  const float*   runtime_initial_top_p,
                                  const int*     output_ids,

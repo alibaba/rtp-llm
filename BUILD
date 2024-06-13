@@ -104,6 +104,7 @@ filegroup(
         "src/fastertransformer/th_op/GptInitParameter.cc",
         "src/fastertransformer/th_op/init.cc",
         "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.cc",
+        "src/fastertransformer/th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
         "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.cc",
     ] + select({
         "//:using_cuda": [
@@ -114,7 +115,6 @@ filegroup(
             "src/fastertransformer/th_op/common/GptOps.cc",
             "src/fastertransformer/th_op/common/NcclOp.cc",
             "src/fastertransformer/th_op/common/WeightOnlyQuantOps.cc",
-            "src/fastertransformer/th_op/multi_gpu_gpt/EmbeddingHandlerOp.cc",
             "src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptOp.cc",
             "src/fastertransformer/th_op/multi_gpu_gpt/WeightTransposeCalibrateQuantizeOp.cc",
         ],

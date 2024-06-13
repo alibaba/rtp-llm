@@ -143,7 +143,7 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
         break;                                         \
     }
 
-#define OUTER_TYPE_CASE(dtype1, T1, dtype2, function, ...)                                   \
+#define GENERAL_OUTER_TYPE_CASE(dtype1, T1, dtype2, function, ...)                                   \
     case dtype1: {                                                                           \
         switch (dtype2) {                                                                    \
             DISPATCH_FOR_EACH_NUMERIC_TYPE(INNER_TYPE_CASE, function, T1, __VA_ARGS__);      \
@@ -153,13 +153,28 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
 
 #define DISPATCH_CUDA_FUNCTION_TWO_TYPES(dtype1, dtype2, function, ...)                      \
     switch (dtype1) {                                                                        \
-        OUTER_TYPE_CASE(DataType::TYPE_FP16, half, dtype2, function, __VA_ARGS__)            \
-        OUTER_TYPE_CASE(DataType::TYPE_BF16, __nv_bfloat16, dtype2, function, __VA_ARGS__)   \
-        OUTER_TYPE_CASE(DataType::TYPE_FP32, float, dtype2, function, __VA_ARGS__)           \
-        OUTER_TYPE_CASE(DataType::TYPE_INT32, int32_t, dtype2, function, __VA_ARGS__)        \
-        OUTER_TYPE_CASE(DataType::TYPE_UINT32, uint32_t, dtype2, function, __VA_ARGS__)      \
-        OUTER_TYPE_CASE(DataType::TYPE_INT64, int64_t, dtype2, function, __VA_ARGS__)        \
-        OUTER_TYPE_CASE(DataType::TYPE_UINT64, uint64_t, dtype2, function, __VA_ARGS__)      \
+        GENERAL_OUTER_TYPE_CASE(DataType::TYPE_FP16, half, dtype2, function, __VA_ARGS__)            \
+        GENERAL_OUTER_TYPE_CASE(DataType::TYPE_BF16, __nv_bfloat16, dtype2, function, __VA_ARGS__)   \
+        GENERAL_OUTER_TYPE_CASE(DataType::TYPE_FP32, float, dtype2, function, __VA_ARGS__)           \
+        GENERAL_OUTER_TYPE_CASE(DataType::TYPE_INT32, int32_t, dtype2, function, __VA_ARGS__)        \
+        GENERAL_OUTER_TYPE_CASE(DataType::TYPE_UINT32, uint32_t, dtype2, function, __VA_ARGS__)      \
+        GENERAL_OUTER_TYPE_CASE(DataType::TYPE_INT64, int64_t, dtype2, function, __VA_ARGS__)        \
+        GENERAL_OUTER_TYPE_CASE(DataType::TYPE_UINT64, uint64_t, dtype2, function, __VA_ARGS__)      \
+    }
+
+#define COMPUTE_OUTER_TYPE_CASE(dtype1, T1, dtype2, function, ...)                           \
+    case dtype1: {                                                                           \
+        switch (dtype2) {                                                                    \
+            DISPATCH_FOR_EACH_COMPUTE_TYPE(INNER_TYPE_CASE, function, T1, __VA_ARGS__);      \
+        }                                                                                    \
+        break;                                                                               \
+    }
+
+#define DISPATCH_CUDA_FUNCTION_TWO_COMPUTE_TYPES(dtype1, dtype2, function, ...)                      \
+    switch (dtype1) {                                                                                \
+        COMPUTE_OUTER_TYPE_CASE(DataType::TYPE_FP16, half, dtype2, function, __VA_ARGS__)            \
+        COMPUTE_OUTER_TYPE_CASE(DataType::TYPE_BF16, __nv_bfloat16, dtype2, function, __VA_ARGS__)   \
+        COMPUTE_OUTER_TYPE_CASE(DataType::TYPE_FP32, float, dtype2, function, __VA_ARGS__)           \
     }
 
 }  // namespace fastertransformer

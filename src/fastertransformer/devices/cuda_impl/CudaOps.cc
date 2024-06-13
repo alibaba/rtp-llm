@@ -27,7 +27,7 @@ void CudaDevice::copy(const CopyParams& params) {
         copy({dst_ptr->zeros(), src_ptr->zeros()});
         return;
     }
-    
+
     const auto src_offset = params.src_offset;
     const auto dst_offset = params.dst_offset;
     auto copy_length = params.copy_length;
@@ -151,11 +151,20 @@ ConvertOutput CudaDevice::convert(const ConvertParams& params) {
 SelectOutput CudaDevice::select(const SelectParams& params) {
     RUNTIME_ASSERT_OP_ARG(params.dim == 0, "select op tmp only support dim == 0");
     const auto& input = params.input;
-    auto alloc_type = getMemAllocationType(input.where());
-    auto shape = input.shape();
-    shape[0] = params.index.size();
-    auto output = allocateBuffer({input.type(), shape, alloc_type});
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(input.type(), invokeLookupHiddenStateOfLastToken, output->data(), input.data(), (int*)params.index.data(), (int)params.index.size(), (int)shape[1], stream_);
+    auto output_shape = input.shape();
+    output_shape[0] = params.index.size();
+    auto num_selected_element = input.size() / input.shape()[0];
+    auto output = allocateBuffer({input.type(), output_shape});
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+        input.type(),
+        invokeLookupHiddenStateOfLastToken,
+        output->data(),
+        input.data(),
+        (int*)params.index.data(),
+        (int)params.index.size(),
+        num_selected_element,
+        0,
+        stream_);
     return {std::move(output)};
 }
 
