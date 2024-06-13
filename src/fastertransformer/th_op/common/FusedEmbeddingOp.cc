@@ -7,10 +7,13 @@ namespace ft = fastertransformer;
 namespace torch_ext {
 
 template<typename T>
-FusedEmbedding<T>::FusedEmbedding(th::Tensor embedding_weight, th::optional<th::Tensor> positional_embedding_weight, th::optional<th::Tensor> token_type_embedding_weight) {
+FusedEmbedding<T>::FusedEmbedding(th::Tensor embedding_weight, double input_embedding_scalar,
+                                  th::optional<th::Tensor> positional_embedding_weight,
+                                  th::optional<th::Tensor> token_type_embedding_weight) {
     hidden_size_ = embedding_weight.size(1);
     stream_ = at::cuda::getCurrentCUDAStream().stream();
     embedding_weight_ptr_ = get_ptr<T>(embedding_weight);
+    input_embedding_scalar_ = input_embedding_scalar;
     if (positional_embedding_weight.has_value()) {
         positional_weight_ptr_ = get_ptr<T>(positional_embedding_weight.value());    
     }
@@ -34,6 +37,7 @@ void FusedEmbedding<T>::forward(th::Tensor& embedding_output, const th::Tensor& 
     }
     ft::invokeEmebeddingLookup(embedding_output_ptr, 
                                embedding_weight_ptr_, 
+                               input_embedding_scalar_,
                                positional_weight_ptr_, 
                                type_weight_ptr_,
                                token_ids_ptr,
@@ -44,10 +48,13 @@ void FusedEmbedding<T>::forward(th::Tensor& embedding_output, const th::Tensor& 
                                stream_);
 }
 
-FusedEmbeddingOp::FusedEmbeddingOp(th::Tensor embedding_weight, th::optional<th::Tensor> positional_embedding_weight, th::optional<th::Tensor> token_type_embedding_weight) {
+FusedEmbeddingOp::FusedEmbeddingOp(th::Tensor embedding_weight, double input_embedding_scalar,
+                                   th::optional<th::Tensor> positional_embedding_weight,
+                                   th::optional<th::Tensor> token_type_embedding_weight) {
     scalar_type_ = embedding_weight.scalar_type();
     hidden_size_ = embedding_weight.size(1);
-#define CREATE_INSTANCE(T_)  embedding_ptr_ = new FusedEmbedding<T_>(embedding_weight, positional_embedding_weight, token_type_embedding_weight);
+#define CREATE_INSTANCE(T_)  \
+    embedding_ptr_ = new FusedEmbedding<T_>(embedding_weight, input_embedding_scalar, positional_embedding_weight, token_type_embedding_weight);
     
     switch (scalar_type_) {
         case at::ScalarType::Float:
@@ -92,6 +99,7 @@ th::Tensor FusedEmbeddingOp::forward(th::Tensor& token_ids, th::optional<th::Ten
 static auto fasterTransformerEmbeddingTHS =
     torch::jit::class_<torch_ext::FusedEmbeddingOp>("FasterTransformer", "FusedEmbeddingOp")
         .def(torch::jit::init<th::Tensor,
+             double,
              th::optional<th::Tensor>,
              th::optional<th::Tensor>>())
         .def("forward", &torch_ext::FusedEmbeddingOp::forward);

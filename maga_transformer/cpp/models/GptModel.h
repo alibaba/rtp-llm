@@ -18,6 +18,7 @@ struct GptModelDescription {
     double               layernorm_eps = 1e-5;
     size_t               vocab_size = 0;
     bool                 post_layernorm = false;
+    double               input_embedding_scalar = 1;
 };
 
 struct GptModelInitParams {
@@ -152,7 +153,6 @@ private:
     const ft::DeviceProperties device_props_;
     const ft::Weights          weights_;
     const GptModelDescription  description_;
-
 };
 
 }  // namespace rtp_llm

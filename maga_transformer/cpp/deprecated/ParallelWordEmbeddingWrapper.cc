@@ -72,6 +72,7 @@ void ParallelWordEmbeddingWrapper<T>::forward(ft::Tensor&      embeddings,
     const size_t local_hidden_units = local_head_num_ * params_.size_per_head_;
     ft::invokeEmebeddingLookup<T>(word_embeddings,
                                   embedding_table_->kernel,
+                                  params_.input_embedding_scalar_,
                                   postition_table_->kernel,
                                   token_type_table_->kernel,
                                   input_ids,

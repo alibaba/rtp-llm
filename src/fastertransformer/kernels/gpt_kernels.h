@@ -76,6 +76,7 @@ void invokeInputIdsEmbeddingLookupPosEncoding(T*                    from_tensor,
 template<typename T>
 void invokeEmebeddingLookup(T*           from_tensor,
                             const T*     embedding_table,
+                            double       input_embedding_scalar,
                             const T*     pos_table,
                             const T*     type_table,
                             const int*   input_ids,

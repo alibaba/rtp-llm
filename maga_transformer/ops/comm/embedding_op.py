@@ -13,6 +13,7 @@ class EmbeddingOp(object):
         self.all_gather_ = all_gather
         self.embedding_op_ = \
             torch.classes.FasterTransformer.FusedEmbeddingOp(self.embedding_weight_,
+                                                             1,
                                                              self.position_weight_,
                                                              self.token_type_weight_)
 

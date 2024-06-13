@@ -16,7 +16,7 @@ GptModel::GptModel(const GptModelInitParams& params)
     , device_props_(params.device->getDeviceProperties())
     , weights_(params.weights)
     , description_(params.description)
-    {};
+    {}
 
 void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
                                   int32_t*       cu_seqlens,
@@ -128,7 +128,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     // word embedding lookup
     auto hidden = device_->embeddingLookup({
-            *combo_tokens, *embedding_table,
+            *combo_tokens, *embedding_table, description_.input_embedding_scalar,
             combo_position_ids ? (OptionalConstBufferRef)*combo_position_ids: nullopt,
             combo_position_ids ? (OptionalConstBufferRef)*weights_.position_encoding->kernel: nullopt,
             combo_tokens_type_ids ? (OptionalConstBufferRef)*combo_tokens_type_ids: nullopt,

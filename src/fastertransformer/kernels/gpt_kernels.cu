@@ -31,6 +31,7 @@ namespace fastertransformer {
 template<typename T, bool USE_POS_EMB, bool USE_TYPE_ID_EMB>
 __global__ void embedding_lookup_kernel(T*                    from_tensor,
                                         const T*              embedding_table,
+                                        double                input_embedding_scalar,
                                         const T*              pos_table,
                                         const T*              type_table,
                                         const int*            input_ids,
@@ -48,6 +49,7 @@ __global__ void embedding_lookup_kernel(T*                    from_tensor,
         T         pos_embed       = (T)0.0f;
         T         type_embed      = (T)0.0f;
         embedding = embedding_table[input_id * hidden_units + col_index];
+        embedding *= input_embedding_scalar;
 
         if constexpr(USE_POS_EMB) {
             assert(pos_table != nullptr);
@@ -64,6 +66,7 @@ __global__ void embedding_lookup_kernel(T*                    from_tensor,
 #define INVOKE_WORD_EMBED_LOOKUP(USE_POS, USE_YPE) \
         embedding_lookup_kernel<T, USE_POS, USE_YPE><<<grid, block, 0, stream>>>(from_tensor, \
                                                         embedding_table, \
+                                                        input_embedding_scalar, \
                                                         pos_table, \
                                                         type_table, \
                                                         input_ids,  \
@@ -75,6 +78,7 @@ __global__ void embedding_lookup_kernel(T*                    from_tensor,
 template<typename T>
 void invokeEmebeddingLookup(T*                    from_tensor,
                             const T*              embedding_table,
+                            double                input_embedding_scalar,
                             const T*              pos_table,
                             const T*              type_table,
                             const int*            input_ids,
@@ -276,8 +280,10 @@ template void invokeInputIdsEmbeddingLookupPosEncoding(__nv_bfloat16*           
 #endif
 
 #define INSTANTIATE_INVOKE_EMBEDDING_LOOKUP(T)                          \
-    template void invokeEmebeddingLookup(T*                    from_tensor, \
+    template void invokeEmebeddingLookup(                               \
+        T*                    from_tensor,                              \
         const T*              embedding_table,                          \
+        double                input_embedding_scalar,                   \
         const T*              pos_table,                                \
         const T*              type_table,                               \
         const int*            input_ids,                                \

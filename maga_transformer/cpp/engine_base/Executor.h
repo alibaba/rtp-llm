@@ -39,7 +39,8 @@ public:
                 ft::getNormType(params.norm_type_str_),
                 params.layernorm_eps_,
                 (size_t)params.vocab_size_,
-                params.layernorm_type_ == ft::LayerNormType::post_layernorm};
+                params.layernorm_type_ == ft::LayerNormType::post_layernorm,
+                params.input_embedding_scalar_};
     }
 
     virtual ~Executor(){};

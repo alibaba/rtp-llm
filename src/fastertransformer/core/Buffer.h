@@ -123,7 +123,7 @@ private:
             oss << base[i] << ", ";
         }
         if (data_size != total_size) {
-            oss << "......";
+            oss << "...... ";
             for (size_t i = total_size - data_size; i < total_size; i++) {
                 oss << base[i] << ", ";
             }

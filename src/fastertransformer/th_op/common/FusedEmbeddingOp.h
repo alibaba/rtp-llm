@@ -15,7 +15,8 @@ public:
 template<typename T>
 class FusedEmbedding: public IFusedEmbedding {
 public:
-    FusedEmbedding(th::Tensor embedding_weight, th::optional<th::Tensor> positional_embedding_weight, th::optional<th::Tensor> token_type_embedding_weight);
+    FusedEmbedding(th::Tensor embedding_weight, double input_embedding_scalar,
+                   th::optional<th::Tensor> positional_embedding_weight, th::optional<th::Tensor> token_type_embedding_weight);
     virtual void forward(th::Tensor& embedding_output, const th::Tensor& token_ids, th::optional<th::Tensor> position_ids,
                          th::optional<th::Tensor> token_type_ids, int token_num);
 
@@ -23,6 +24,7 @@ private:
     // 这里没有持有三个tesnor，依赖外部去避免tensor析构
     cudaStream_t stream_;
     T* embedding_weight_ptr_ = nullptr;
+    double input_embedding_scalar_ = 1;
     T* positional_weight_ptr_ = nullptr;
     T* type_weight_ptr_ = nullptr;
     int hidden_size_;
@@ -30,7 +32,9 @@ private:
 
 class FusedEmbeddingOp: public th::jit::CustomClassHolder {
 public:
-    FusedEmbeddingOp(th::Tensor embedding_weight, th::optional<th::Tensor> positional_embedding_weight, th::optional<th::Tensor> token_type_embedding_weight);
+    FusedEmbeddingOp(th::Tensor embedding_weight, double input_embedding_scalar,
+                     th::optional<th::Tensor> positional_embedding_weight,
+                     th::optional<th::Tensor> token_type_embedding_weight);
     th::Tensor forward(th::Tensor& token_ids, th::optional<th::Tensor> postion_ids, th::optional<th::Tensor> token_type_ids);
 
 private:

@@ -25,6 +25,7 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeEmebeddingLookup,
         embeddings->data(),
         embedding_table.data(),
+        params.input_embedding_scalar,
         postition_table.has_value() ? postition_table.value().get().data() : nullptr,
         token_type_table.has_value() ? token_type_table.value().get().data() : nullptr,
         tokens.data<int>(),
