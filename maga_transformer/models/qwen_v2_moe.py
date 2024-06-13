@@ -52,23 +52,18 @@ class Qwen2Moe(QWenV2):
         config.moe_k = config_json['num_experts_per_tok']
         config.expert_num = config_json['num_experts']
         config.moe_inter_padding_size=config_json['moe_intermediate_size']
-        shared_expert_intermediate_size = config_json['shared_expert_intermediate_size']
+        config.inter_size = config_json['shared_expert_intermediate_size']
         config.has_moe_norm = False
         # step for moe layer
         config.moe_style = 2
         moe_step = config_json['decoder_sparse_step']
 
+        # todo
+        # qwen2 moe is supposed to have different inter size for moe and normal layers
+        # so there should be two config for ffnlayer 
         if moe_step != 1:
             raise Exception("Paritial moe weights for qwen2 is not implemented yet!")
         config.moe_layer_index = [i for i in range(moe_step - 1,  config.layer_num, moe_step)]
-
-        config.is_sparse_head = True
-        config.layer_inter_size = [shared_expert_intermediate_size if i in config.moe_layer_index \
-                                    else config.inter_size for i in range(config.layer_num)]
-        config.layer_inter_padding_size = config.update_inter_padding_size(config.tp_size)
-        config.layer_head_num = [config.head_num for _ in range(config.layer_num)]
-        config.layer_head_num_kv = [config.head_num_kv for _ in range(config.layer_num)]
-
 
     @staticmethod
     def get_weight_cls():
