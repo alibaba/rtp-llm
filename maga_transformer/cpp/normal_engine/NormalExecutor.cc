@@ -31,12 +31,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params, ft::DeviceBase* d
         model_.reset(new GptModel({device_, params.gpt_weights, genModelDescription(params.gpt_init_parameter)}));
         batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter));
         need_attention_mask_ = device_->getDeviceProperties().attention_need_mask;
+#if USING_CUDA
     } else {
         model_wrapper_.reset(
             new ParallelModelWrapper(params.gpt_init_parameter, params.global_weights, params.layers_weights));
         batch_stream_processor_.reset(
             new NormalBatchStreamProcessor(params.gpt_init_parameter));
         need_attention_mask_ = !model_wrapper_->useFMHA();
+#endif
     }
 }
 

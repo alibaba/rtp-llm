@@ -286,11 +286,10 @@ cc_library(
         ":embedding_handler_base",
         ":dataclass",
         ":models",
-        "//:th_utils",
         "//:th_op_hdrs",
         "//src/fastertransformer/utils:utils",
     ],
-    copts = cuda_copts(),
+    copts = copts(),
     visibility = ["//visibility:public"]
 )
 

@@ -4,7 +4,7 @@
 #include <limits>
 #include "ATen/ops/ones.h"
 #include "c10/core/ScalarType.h"
-#include "src/fastertransformer/th_op/multi_gpu_gpt/Base.h"
+// #include "src/fastertransformer/th_op/multi_gpu_gpt/Base.h"
 #include "src/fastertransformer/utils/assert_utils.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
