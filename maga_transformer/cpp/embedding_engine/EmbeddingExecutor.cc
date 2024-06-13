@@ -35,24 +35,6 @@ void EmbeddingExecutor::init_position_ids(int max_seq_len) {
     }
 }
 
-absl::Status EmbeddingExecutor::createAttentionMask(GptModelInputs& model_input) const {
-    const auto& input_lengths = model_input.input_lengths;
-    auto max_input_seq_len = *std::max_element(input_lengths->data<int32_t>(), input_lengths->data<int32_t>() + input_lengths->size());
-    auto attention_mask = torch::ones({(int)max_input_seq_len, (int)max_input_seq_len});
-    if (params_.is_causal_) {
-        attention_mask = attention_mask.tril();
-    }
-    attention_mask = attention_mask.unsqueeze_(0).tile({(int)input_lengths->size(), 1, 1}).to(getScalarType(params_.data_type_));
-    for (int i = 0; i < input_lengths->size(); ++i) {
-        attention_mask[i].slice(0, *input_lengths->dataWithOffset<int32_t>(i), max_input_seq_len) = 0;
-        if (!params_.is_causal_) {
-            attention_mask[i].slice(1, *input_lengths->dataWithOffset<int32_t>(i), max_input_seq_len) = 0;
-        }
-    }
-    model_input.attention_mask = device_->clone(*ft::torchTensor2Buffer(attention_mask));
-    return absl::OkStatus();
-}
-
 absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::list<EmbeddingStreamPtr>& streams) const {
     int64_t token_num = 0;
     int64_t batch_size = 0;
