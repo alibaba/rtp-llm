@@ -57,7 +57,7 @@ void generic_mixed_gemm_kernelLauncher(const T* A, const WeightType* B, const T*
     tkc::CutlassGemmConfig gemm_config, char* workspace, size_t workspace_bytes, cudaStream_t stream,
     int* occupancy = nullptr)
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
 
 #ifdef ENABLE_BF16
     static_assert(cutlass::platform::is_same<T, __nv_bfloat16>::value || cutlass::platform::is_same<T, half>::value
@@ -236,7 +236,7 @@ void filter_and_run_mixed_gemm(const T* A, const WeightType* B, const T* weight_
     char* workspace, size_t workspace_bytes, cudaStream_t stream, int* occupancy = nullptr)
 {
 
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
     if constexpr (arch::kMinComputeCapability < 70)
     {
         // Finegrained only supported on Ampere
@@ -271,7 +271,7 @@ void dispatch_gemm_config(const T* A, const WeightType* B, const T* weight_scale
     char* workspace, size_t workspace_bytes, cudaStream_t stream, int* occupancy = nullptr)
 {
 
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
     switch (gemm_config.stages)
     {
     case 2:
@@ -302,7 +302,7 @@ void dispatch_gemm_to_cutlass(const T* A, const WeightType* B, const T* weight_s
     tkc::CutlassGemmConfig gemm_config, cudaStream_t stream, int* occupancy = nullptr)
 {
 
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
 
     // Note that SIMT configs are omitted here since they are not supported for fpA_intB.
     // We also only instantiate configs here where threadblockShapeM == warpShapeM since those usually perform the best
@@ -364,7 +364,7 @@ void dispatch_gemm_to_cutlass(const T* A, const WeightType* B, const T* weight_s
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
 CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::CutlassFpAIntBGemmRunner()
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));
     sm_ = fastertransformer::getSMVersion();
@@ -375,7 +375,7 @@ CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::CutlassFpAIntBGemmRunner()
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
 CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::~CutlassFpAIntBGemmRunner()
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
 }
 
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
@@ -385,7 +385,7 @@ void CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::dispatch_to_arch<Epilogue
     const int group_size, tkc::CutlassGemmConfig gemm_config, char* workspace_ptr, const size_t workspace_bytes,
     cudaStream_t stream, int* occupancy)
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
     if (sm_ >= 70 && sm_ < 75)
     {
         dispatch_gemm_to_cutlass<T, WeightType, cutlass::arch::Sm70, QuantOp, EpilogueTag>(A, B, weight_scales,
@@ -418,7 +418,7 @@ void CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::gemm(const void* A, const
     const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
     tkc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
     if constexpr ((QuantOp == cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS)
         || (QuantOp == cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY))
     {
@@ -438,7 +438,7 @@ void CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::gemm(const void* A, const
     void* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes,
     cudaStream_t stream)
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
 
     if constexpr (QuantOp == cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY)
     {
@@ -502,7 +502,7 @@ tkc::CutlassGemmConfig CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChos
     const int group_size, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
 {
     // Standard GEMM, so 1 "expert". We use the same function for MoE and regular FFN.
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
 
     GemmParamKey cur_key{m, n, k};
     if (gemm_lut_ != nullptr)
@@ -544,7 +544,7 @@ tkc::CutlassGemmConfig CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChos
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
 size_t CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getWorkspaceSize(const int m, const int n, const int k)
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
     // These are the min tile sizes for each config, which would launch the maximum number of blocks
     const int max_grid_m = cutlass::ceil_div(m, MIN_M_TILE);
     const int max_grid_n = cutlass::ceil_div(n, MIN_N_TILE);
@@ -557,7 +557,7 @@ void CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::gemm(const void* A, c
     const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
     tkc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
 }
 
 template <typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
@@ -565,20 +565,20 @@ void CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::gemm(const void* A, c
     void* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes,
     cudaStream_t stream)
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
 }
 
 template <typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
 size_t CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::getWorkspaceSize(const int m, const int n, const int k)
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
     return 0;
 }
 
 template <typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
 std::vector<tkc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::getConfigs() const
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
     std::vector<tkc::CutlassGemmConfig> configs={};
     return configs;
 }
@@ -589,7 +589,7 @@ CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::getChosenConfig(const void
         const void* biases, void* C, int m, int n, int k, const int group_size,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
 {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
     tkc::CutlassGemmConfig config;
     return config;
   

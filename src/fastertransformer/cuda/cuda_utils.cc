@@ -164,6 +164,7 @@ void printMatrix(T* ptr, int m, int k, int stride, bool is_device_ptr) {
     if (is_device_ptr) {
         free(tmp);
     }
+    fflush(stdout);
 }
 
 template void printMatrix(float* ptr, int m, int k, int stride, bool is_device_ptr);
@@ -203,6 +204,7 @@ void printMatrix(unsigned long long* ptr, int m, int k, int stride, bool is_devi
     if (is_device_ptr) {
         free(tmp);
     }
+    fflush(stdout);
 }
 
 void printMatrix(int* ptr, int m, int k, int stride, bool is_device_ptr) {
@@ -236,6 +238,7 @@ void printMatrix(int* ptr, int m, int k, int stride, bool is_device_ptr) {
     if (is_device_ptr) {
         free(tmp);
     }
+    fflush(stdout);
 }
 
 void printMatrix(size_t* ptr, int m, int k, int stride, bool is_device_ptr) {
@@ -269,6 +272,7 @@ void printMatrix(size_t* ptr, int m, int k, int stride, bool is_device_ptr) {
     if (is_device_ptr) {
         free(tmp);
     }
+    fflush(stdout);
 }
 
 template<typename T>
@@ -376,19 +380,31 @@ void print_bshd(const int   layer_id,
         cpu_ptr = const_cast<T*>(ptr);
     }
     printf("layer_id: %d %s [%d %d %d %d]\n", layer_id, name, batch_size, seq_len, num_heads, hidden_size_per_head);
-    auto md_array_ptr = (T(*)[seq_len][total_num_heads][hidden_size_per_head])cpu_ptr;
+    fflush(stdout);
     for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < seq_len; j++) {
-            for (int k = 0; k < std::min(num_heads, 4); k++) {
-	        int kk = k + head_offset;
-                printf("b_%d s_%d h_%d %f %f %f %f\n", i, j, k,
-                       float(md_array_ptr[i][j][kk][0]),
-                       float(md_array_ptr[i][j][kk][1]),
-                       float(md_array_ptr[i][j][kk][2]),
-                       float(md_array_ptr[i][j][kk][3]));
-            }
+            auto print_func = [&](int head_start, int head_end){
+                auto md_array_ptr = (T(*)[seq_len][total_num_heads][hidden_size_per_head])cpu_ptr;
+                for (int k = head_start; k < head_end; k++) {
+                    printf("b_%d s_%d h_%d ", i, j, k);
+                    fflush(stdout);
+                    int kk = k + head_offset;
+                    for (int d = 0; d < 4; d++) {
+                        printf("%f ", float(md_array_ptr[i][j][kk][d]));
+                    }
+                    printf(" ...... ");
+                    for (int d = std::max(0, hidden_size_per_head - 4); d < hidden_size_per_head; d++) {
+                        printf("%f ", float(md_array_ptr[i][j][kk][d]));
+                    }
+                    printf("\n");
+                    fflush(stdout);
+                }
+            };
+            print_func(0, std::min(num_heads, 4));
+            print_func(std::max(0, num_heads - 4), num_heads);
         }
     }
+    fflush(stdout);
 }
 
 template<typename T>
@@ -414,6 +430,7 @@ void print_bhsd(const int   layer_id,
         cpu_ptr = const_cast<T*>(ptr);
     }
     printf("layer_id: %d %s [%d %d %d %d]\n", layer_id, name, batch_size, num_heads, seq_len, hidden_size_per_head);
+    fflush(stdout);
     auto md_array_ptr = (T(*)[num_heads][seq_len][hidden_size_per_head])cpu_ptr;
     for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < seq_len; j++) {
@@ -426,6 +443,7 @@ void print_bhsd(const int   layer_id,
                        float(md_array_ptr[i][k][j][1]),
                        float(md_array_ptr[i][k][j][2]),
                        float(md_array_ptr[i][k][j][3]));
+                fflush(stdout);
             }
         }
     }
@@ -454,13 +472,14 @@ void print_bhss(const int   layer_id,
         cpu_ptr = const_cast<T*>(ptr);
     }
     printf("layer_id: %d %s [%d %d %d %d]\n", layer_id, name, batch_size, num_heads, seq_len, seq_len2);
-
+    fflush(stdout);
     auto md_array_ptr = (T(*)[num_heads][seq_len][seq_len2])cpu_ptr;
     for (int i = 0; i < batch_size; i++) {
         for (int head = 0; head < std::min(num_heads, 4); head++) {
             for (int j1 = 0; j1 < seq_len; j1++) {
                 for (int j2 = 0; j2 < seq_len2; j2++) {
                     printf("b_%d h_%d s_%d_%d %f \n", i, head, j1, j2, float(md_array_ptr[i][head][j1][j2]));
+                    fflush(stdout);
                 }
             }
         }
@@ -491,16 +510,18 @@ void print_bsd(const int   layer_id,
         cpu_ptr = const_cast<T*>(ptr);
     }
     printf("layer_id: %d %s [%d %d %d]\n", layer_id, name, batch_size, seq_len, hidden_size);
-    
+    fflush(stdout);
     for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < seq_len; j++) {
             printf("b_%d s_%d ", i, j);
+            fflush(stdout);
             double sum1 = 0;
             double sum2 = 0;
             auto print_func = [&](int k_start, int k_end){
                 auto md_array_ptr = (T(*)[seq_len][hidden_size])cpu_ptr;
                 for (int k = k_start; k < k_end && k < hidden_size; k++) {
                     printf("k = %d, value = %f ", k, float(md_array_ptr[i][j][k]));
+                    fflush(stdout);
                     sum1 += float(md_array_ptr[i][j][k]);
                     sum2 += float(md_array_ptr[i][j][k]) * float(md_array_ptr[i][j][k]);
                 }
@@ -510,8 +531,10 @@ void print_bsd(const int   layer_id,
             print_func(std::max(0, hidden_size - (end - start)), hidden_size);
             printf("\n");
             printf("sum1 = %f, square sum2 = %lf\n", sum1, sum2);
+            fflush(stdout);
         }
     }
+    fflush(stdout);
 }
 
 template<typename T>
@@ -549,6 +572,7 @@ void print_kv_cache(const int   layer_id,
                 for (uint64_t x = 0; x < dim4; x++) {
                     for (uint64_t y = 0; y < dim5; y++) {
                         printf("i = %d, j = %d, k = %d, x = %d, y = %d\n", i, j, k, x, y);
+                        fflush(stdout);
                         if (print_all) {
                             for (uint64_t z = 0; z < dim6; z++) {
                                 std::cout << float(*(cpu_ptr + i * dim2 * dim3 * dim4 * dim5 * dim6
@@ -568,6 +592,7 @@ void print_kv_cache(const int   layer_id,
         printf("\n\n");
     }
     printf("\n\n");
+    fflush(stdout);
 }
 
 template<typename T>
@@ -630,6 +655,7 @@ void print_bsd_sum_and_square(const int   layer_id,
                    sum2);
         }
     }
+    fflush(stdout);
 }
 
 #define DECLARE_PRINT_TYPE(CPP_TYPE)                                    \

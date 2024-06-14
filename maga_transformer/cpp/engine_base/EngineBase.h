@@ -15,6 +15,10 @@ public:
     virtual ~EngineBase() {}
 
     static void initDevices(const EngineInitParams& params);
+    ft::DeviceBase* getDevice() {
+        return device_;
+    }
+
     virtual absl::Status addLoRA(const int64_t                                                           lora_id,
                                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) = 0;
@@ -25,7 +29,7 @@ public:
     virtual absl::Status stop()                                           = 0;
 
 protected:
-    ft::DeviceBase*                       device_;
+    ft::DeviceBase* device_;
 };
 
 }  // namespace rtp_llm

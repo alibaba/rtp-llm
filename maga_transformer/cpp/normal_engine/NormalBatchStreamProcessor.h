@@ -23,6 +23,7 @@ public:
     NormalBatchStreamProcessor(const ft::GptInitParameter& params):
         num_layers_(params.num_layers_),
         use_int8_kv_cache_(params.int8_kv_cache_),
+        has_positional_encoding_(params.has_positional_encoding_),
         device_(ft::DeviceFactory::getDefaultDevice()) {}
     absl::Status                   dispatch(const StreamGroups&                  stream_groups,
                                             const SamplerInputs&                 sampler_inputs,
@@ -37,6 +38,7 @@ public:
 private:
     size_t          num_layers_;
     bool            use_int8_kv_cache_;
+    bool            has_positional_encoding_;
     ft::DeviceBase* device_;
 };
 

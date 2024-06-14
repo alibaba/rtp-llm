@@ -34,7 +34,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params, ft::DeviceBase* d
 #if USING_CUDA
     } else {
         model_wrapper_.reset(
-            new ParallelModelWrapper(params.gpt_init_parameter, params.global_weights, params.layers_weights));
+            new ParallelModelWrapper(params.gpt_init_parameter, params.global_weights, params.layers_weights, params.linear_bias_slopes));
         batch_stream_processor_.reset(
             new NormalBatchStreamProcessor(params.gpt_init_parameter));
         need_attention_mask_ = !model_wrapper_->useFMHA();
@@ -69,10 +69,12 @@ ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input
     model_request.prefix_lengths      = model_input.prefix_lengths;
     model_request.count_lengths       = model_input.count_lengths;
     model_request.max_prefix_length   = model_input.max_prefix_length;
+    model_request.combo_position_ids  = model_input.combo_position_ids;
     model_request.kv_cache_blocks     = model_input.kv_cache_blocks;
     model_request.kv_cache_scales     = model_input.kv_cache_scales;
     model_request.attention_mask      = model_input.attention_mask;
     model_request.lora_ids            = model_input.lora_ids;
+    model_request.lora_input_lengths  = model_input.lora_input_lengths;
     return model_request;
 }
 

@@ -67,11 +67,14 @@ class ModelFactory:
 
     @staticmethod
     def from_model_config(model_config: ModelConfig, sp_model_config: Optional[ModelConfig] = None) -> Union[AsyncModel, BaseModel]:
-        model = ModelFactory._create_model(model_config)        
+        model = ModelFactory._create_model(model_config)
+        logging.info("create base model done")
         if model_config.use_rpc:
             sp_model = None if sp_model_config is None else ModelFactory._create_model(sp_model_config)
+            logging.info("create sp model done")
             from maga_transformer.async_decoder_engine.rpc_model import RpcModel
             model = RpcModel(model, sp_model)
+            logging.info("create rpc model done")
         elif model_config.model_type != 'fake_model': # for test
             sp_model = None if sp_model_config is None else ModelFactory._create_model(sp_model_config)
             model = AsyncModel(model, sp_model)

@@ -17,7 +17,7 @@ from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer
     StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderer_factory_register import register_renderer
-from maga_transformer.utils.word_util import get_stop_word_slice_list, truncate_response_with_stop_words
+from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
 
@@ -316,7 +316,7 @@ class QwenRenderer(CustomChatRenderer):
         output_token_length = 0
         finish_reason: Optional[FinisheReason] = None
         generating_function_call = False
-        stop_word_slice_list = get_stop_word_slice_list(generate_config.stop_words_str)
+        stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
 
         async for output in output_generator:
             if output_token_length == 0:

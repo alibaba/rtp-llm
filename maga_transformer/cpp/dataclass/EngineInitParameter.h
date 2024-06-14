@@ -31,20 +31,25 @@ public:
     EngineInitParams(const ft::GptInitParameter&    gpt_init_parameter,
                      ConstBufferPtrMaps             layers_weights,
                      ConstBufferPtrMap              global_weights,
-                     ft::Weights&&                  gpt_weights) :
+                     ft::Weights&&                  gpt_weights,
+                     const ft::ConstBufferPtr&      linear_bias_slopes) :
                      gpt_init_parameter(gpt_init_parameter),
                      layers_weights(layers_weights),
                      global_weights(global_weights),
-                     gpt_weights(std::move(gpt_weights)) {}
+                     gpt_weights(std::move(gpt_weights)),
+                     linear_bias_slopes(linear_bias_slopes) {}
+
 
 public:
     ft::GptInitParameter         gpt_init_parameter;
     ft::Weights                  gpt_weights;
+    
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
 
     // TODO(): rm old impl init
     ConstBufferPtrMaps layers_weights;
     ConstBufferPtrMap global_weights;
+    ft::ConstBufferPtr linear_bias_slopes;
 };
 
 class WeightsConverter {

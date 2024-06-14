@@ -16,7 +16,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
     RoleEnum, RendererInfo
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
-from maga_transformer.utils.word_util import get_stop_word_slice_list, truncate_response_with_stop_words
+from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words
 
 @dataclass
 class StreamResponseObject:
@@ -156,7 +156,7 @@ class CustomChatRenderer():
         finish_reason = None
         last_token_length = 0
         delta_output_string = ""
-        stop_word_slice_list = get_stop_word_slice_list(generate_config.stop_words_str)
+        stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
 
         def generate_stream_response(index: int, output_str: str, input_token_length: int, output_token_length: int):
             return StreamResponseObject(

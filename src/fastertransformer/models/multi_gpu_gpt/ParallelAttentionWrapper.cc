@@ -441,7 +441,7 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
                         output_buf,
                         dynamic_scale);
     }
-    
+
     // lora
     lora_gemm_->applyLoRA(h_token_num,
                           batch_size,
@@ -744,7 +744,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     const int attention_seq_len_1 = max_context_seq_length;                      // q length
     const int attention_seq_len_2 = max_context_prefix_length + max_context_seq_length;  // kv length
     const float qk_scale = 1.0f / (sqrtf(params_.size_per_head_ * 1.0f) * q_scaling_);
-    print_bsd(layer_id, "qkv_buf", qkv_buf,  h_token_num, 1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt);
+    print_bsd(layer_id, "qkv_buf", qkv_buf, 1, h_token_num, local_hidden_units_rt + 2 * local_hidden_units_kv_rt);
     if (use_trt_fmha_ || use_paged_fmha_) {
         ContextAttentionParams context_attention_params{qkv_buf,                 // attention_input
                                                         max_context_seq_length,  // max_context_q_len

@@ -25,6 +25,7 @@ public:
                 max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
                 max_context_seq_len_ = std::max(max_context_seq_len_, (size_t)stream->contextLength());
                 max_reuse_length_ = std::max(max_reuse_length_, (size_t)stream->reuseLength());
+                cum_context_seq_len_ += (size_t)stream->contextLength();
             } else {
                 decode_streams_.push_back(stream);
                 model_execute_token_size_ += stream->currentExecuteTokenSize();
@@ -60,6 +61,9 @@ public:
     }
     size_t maxReuseLength() const {
         return max_reuse_length_;
+    }
+    size_t cumContextSeqLen() const {
+        return cum_context_seq_len_;
     }
 
     bool empty() const {
@@ -114,6 +118,7 @@ private:
     size_t                       max_seq_len_              = 0;
     size_t                       max_context_seq_len_      = 0;
     size_t                       max_reuse_length_         = 0;
+    size_t                       cum_context_seq_len_      = 0;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

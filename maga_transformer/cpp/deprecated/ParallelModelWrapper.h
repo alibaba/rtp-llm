@@ -38,7 +38,8 @@ public:
             ft::NcclParam                                                           tensor_para,
             ft::NcclParam                                                           pipeline_para,
             const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
-            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights);
+            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
+            const ft::ConstBufferPtr&                                               linear_bias_slopes);
     ~ParallelModelWrapperImpl();
     void                             allocateBuffer(size_t total_batch_size, size_t h_token_num, GptModelOutputs& model_output);
     void                             createAttentionMask(size_t context_batch_size, size_t max_context_seq_length, int* input_lengths_host);
@@ -72,6 +73,7 @@ private:
     std::shared_ptr<GptGlobalWeights<T>>               global_weights_;
     std::vector<ft::ParallelGptDecoderLayerWeight<T>*> gpt_layer_weights_;
     std::vector<ft::ParallelGptDecoderLoRALayerWeight<T>*> gpt_lora_layer_weights_;
+    ft::ConstBufferPtr                                 linear_bias_slopes_;
 
     T*   all_hidden_states_  = nullptr;
     T*   last_hidden_states_  = nullptr;
@@ -100,7 +102,8 @@ public:
     ParallelModelWrapper(
             const ft::GptInitParameter&                                             gpt_init_parameter,
             const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
-            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights);
+            const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
+            const ft::ConstBufferPtr&                                               inear_bias_slopes);
 
     ~ParallelModelWrapper(){};
     void addLoRA(const int64_t                                                           lora_id,

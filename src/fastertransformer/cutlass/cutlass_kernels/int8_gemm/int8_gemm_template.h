@@ -66,7 +66,7 @@ void genericInt8GemmKernelLauncher(const int8_t* A, const int8_t* B, tk::QuantMo
     const float* alphaRow, T* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
     size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr)
 {
-    TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
 
     using ElementInput = int8_t;
 
@@ -180,7 +180,7 @@ struct dispatchStages
         const float* alphaRow, T* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
         size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr)
     {
-        TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+        TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
         std::string errMsg = "Cutlass int8 gemm. Not instantiates for arch "
             + std::to_string(arch::kMinComputeCapability) + " with stages set to " + std::to_string(Stages);
         throw std::runtime_error("[TensorRT-LLM Error][dispatchStages::dispatch] " + errMsg);
@@ -194,7 +194,7 @@ struct dispatchStages<T, arch, ThreadblockShape, WarpShape, 2>
         const float* alphaRow, T* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
         size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr)
     {
-        TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+        TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
         genericInt8GemmKernelLauncher<T, arch, ThreadblockShape, WarpShape, 2>(A, B, quantOption, alphaCol, alphaRow, C,
             m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
     }
@@ -209,7 +209,7 @@ struct dispatchStages<T, cutlass::arch::Sm80, ThreadblockShape, WarpShape, Stage
         size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr)
     {
 
-        TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+        TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
         genericInt8GemmKernelLauncher<T, cutlass::arch::Sm80, ThreadblockShape, WarpShape, Stages>(A, B, quantOption,
             alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
     }
@@ -221,7 +221,7 @@ void dispatchGemmConfig(const int8_t* A, const int8_t* B, tk::QuantMode quantOpt
     size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr)
 {
 
-    TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
     switch (gemmConfig.stages)
     {
     case 2:
@@ -262,7 +262,7 @@ void dispatchGemmToCutlass(const int8_t* A, const int8_t* B, tk::QuantMode quant
     tkc::CutlassGemmConfig gemmConfig, cudaStream_t stream, int* occupancy = nullptr)
 {
 
-    TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
 
     switch (gemmConfig.tile_config)
     {
@@ -308,7 +308,7 @@ void dispatchGemmToCutlass(const int8_t* A, const int8_t* B, tk::QuantMode quant
 template <typename T>
 CutlassInt8GemmRunner<T>::CutlassInt8GemmRunner()
 {
-    TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));
     mSm = ft::getSMVersion();
@@ -318,7 +318,7 @@ CutlassInt8GemmRunner<T>::CutlassInt8GemmRunner()
 template <typename T>
 CutlassInt8GemmRunner<T>::~CutlassInt8GemmRunner()
 {
-    TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
 }
 
 template <typename T>
@@ -326,7 +326,7 @@ void CutlassInt8GemmRunner<T>::dispatchToArch(const int8_t* A, const int8_t* B, 
     const float* alphaCol, const float* alphaRow, T* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig,
     char* workspacePtr, const size_t workspaceBytes, cudaStream_t stream, int* occupancy)
 {
-    TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
     if (mSm >= 70 && mSm < 72)
     {
         dispatchGemmToCutlass<T, cutlass::arch::Sm70>(A, B, quantOption, alphaCol, alphaRow, C, m, n, k, workspacePtr,
@@ -359,7 +359,7 @@ void CutlassInt8GemmRunner<T>::gemm(const void* A, const void* B, tk::QuantMode 
     const float* alphaRow, void* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
     const size_t workspaceBytes, cudaStream_t stream)
 {
-    TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
     dispatchToArch(reinterpret_cast<const int8_t*>(A), reinterpret_cast<const int8_t*>(B), quantOption, alphaCol,
         alphaRow, reinterpret_cast<T*>(C), m, n, k, gemmConfig, workspacePtr, workspaceBytes, stream);
 }
@@ -411,7 +411,7 @@ tkc::CutlassGemmConfig CutlassInt8GemmRunner<T>::getChosenConfig(const void* A, 
         const size_t workspaceBytes, cudaStream_t stream)
 {
     // Standard GEMM, so 1 "expert". We use the same function for MoE and regular FFN.
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+    FT_LOG_TRACE(__PRETTY_FUNCTION__);
 
     std::vector<tkc::CutlassGemmConfig> candidate_configs = getConfigs();
     std::vector<tkc::CutlassGemmConfig> valid_configs;
@@ -440,7 +440,7 @@ tkc::CutlassGemmConfig CutlassInt8GemmRunner<T>::getChosenConfig(const void* A, 
 template <typename T>
 size_t CutlassInt8GemmRunner<T>::getWorkspaceSize(const int m, const int n, const int k)
 {
-    TLLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
     // These are the min tile sizes for each config, which would launch the maximum number of blocks
     const int maxGridM = cutlass::ceil_div(m, MIN_M_TILE);
     const int maxGridN = cutlass::ceil_div(m, MIN_N_TILE);

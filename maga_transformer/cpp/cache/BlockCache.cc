@@ -56,11 +56,12 @@ BlockCache::put(const std::vector<int>& token_list, const std::vector<int>& bloc
     size_t    cache_key = hashVector(token_list);
     CacheItem item{token_list, block_indices, cache_key, is_resident};
 
+    // TODO(xinfei.sxf) 增加一下这个重复item的热度
     if (lru_cache_.contains(cache_key)) {
         return block_indices;
     }
 
-    lru_cache_.put(cache_key, item);  // Assuming LRUCache has a put() method
+    lru_cache_.put(cache_key, item);
     return {};
 }
 

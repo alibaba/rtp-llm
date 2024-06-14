@@ -46,7 +46,8 @@ struct GptModelInputs {
     ft::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
     ft::BufferPtr combo_position_ids;         // [cumulated_seq_len]
 
-    ft::BufferPtr lora_ids;          // [batch_size]
+    ft::BufferPtr lora_ids;           // [batch_size]
+    ft::BufferPtr lora_input_lengths; // [batch_size]
 
     ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
     ft::BufferPtr position_ids;    // [batch_size, seq_len]
@@ -64,8 +65,14 @@ public:
                      << ", prefix_lengths: " << prefix_lengths->debugStringWithData<int32_t>()
                      << ", count_lengths: " << count_lengths->debugStringWithData<int32_t>()
                      << ", max_prefix_length: " << max_prefix_length->debugStringWithData<int32_t>();
+        if (combo_position_ids) {
+            debug_string << ", combo_position_ids: " << combo_position_ids->debugStringWithData<int32_t>();
+        }
         if (lora_ids) {
             debug_string << ", lora_ids: " << lora_ids->debugStringWithData<int32_t>();
+        }
+        if (lora_input_lengths) {
+            debug_string << ", lora_input_lengths: " << lora_input_lengths->debugStringWithData<int32_t>();
         }
         if (kv_cache_blocks) {
             debug_string << ", kv_cache_blocks: " << kv_cache_blocks->debugString();
@@ -73,7 +80,7 @@ public:
         if (kv_cache_scales) {
             debug_string << ", kv_cache_scales: " << kv_cache_scales->debugString();
         }
-        if (attention_mask != nullptr) {
+        if (attention_mask) {
             debug_string << ", attention_mask: " << attention_mask->debugString();
         }
         debug_string << "}";
@@ -81,12 +88,11 @@ public:
     }
 };
 
-// TODO(xinfei.sxf) sync lora id and other member
 inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     if (device->getDeviceProperties().tp_size <= 1) {
         return;
     }
-    const size_t shape_hints_size = 10;
+    const size_t shape_hints_size = 13;
     auto shape_hints = device->allocateBuffer({ft::DataType::TYPE_INT32, {shape_hints_size}, ft::AllocationType::HOST});
     auto shape_hints_ptr = shape_hints->data<int32_t>();
     shape_hints_ptr[0] = inputs.combo_tokens.get() ? inputs.combo_tokens->size() : 0;
@@ -99,6 +105,9 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     shape_hints_ptr[7] = inputs.kv_cache_blocks.get() ? inputs.kv_cache_blocks->shape()[3] : 0;
     shape_hints_ptr[8] = inputs.kv_cache_scales.get() != nullptr;
     shape_hints_ptr[9] = inputs.lm_output_indexes.get() ? inputs.lm_output_indexes->size() : 0;
+    shape_hints_ptr[10] = inputs.combo_position_ids.get() ? inputs.combo_position_ids->size() : 0;
+    shape_hints_ptr[11] = inputs.lora_ids.get() ? inputs.lora_ids->size() : 0;
+    shape_hints_ptr[12] = inputs.lora_input_lengths.get() ? inputs.lora_input_lengths->size() : 0;
     device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
     device->syncAndCheck();
@@ -114,6 +123,11 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
             inputs.kv_cache_scales = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[6], (size_t)shape_hints_ptr[1], 2, (size_t)shape_hints_ptr[7]}, ft::AllocationType::HOST});
         }
         inputs.lm_output_indexes = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[9]}, ft::AllocationType::HOST});
+        if (shape_hints_ptr[10]) {
+            inputs.combo_position_ids = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[10]}, ft::AllocationType::HOST});
+        }
+        inputs.lora_ids = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[11]}, ft::AllocationType::HOST});
+        inputs.lora_input_lengths = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[12]}, ft::AllocationType::HOST});
     }
     std::vector<ft::BufferPtr> buffers;
     buffers.emplace_back(inputs.combo_tokens);
@@ -127,6 +141,11 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         buffers.emplace_back(inputs.kv_cache_scales);
     }
     buffers.emplace_back(inputs.lm_output_indexes);
+    if (shape_hints_ptr[10]) {
+        buffers.emplace_back(inputs.combo_position_ids);
+    }
+    buffers.emplace_back(inputs.lora_ids);
+    buffers.emplace_back(inputs.lora_input_lengths);
     device->broadcast({buffers, 0});
     device->syncAndCheck();
 }

@@ -36,7 +36,6 @@ struct FFNDispatch {
 ///          output(array)
 FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     const auto& input = params.input;
-    const auto& gate_weight = *(params.weights.gate_weight->kernel);
     const auto& up_weight = *(params.weights.up_weight->kernel);
     const auto& down_weight = *(params.weights.down_weight->kernel);
 

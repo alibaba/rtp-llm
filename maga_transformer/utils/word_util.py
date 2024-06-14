@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from typing import List, Any
+from typing import List, Union, Any
 
 def remove_padding_eos(token_ids: torch.Tensor, eos_token_id: int) -> torch.Tensor:
     # token_ids shape: [max_length]
@@ -57,12 +57,12 @@ def to_word_list_format(words_list: List[List[List[int]]]):
     #   result = result.squeeze(0)
     return np.ascontiguousarray(result)
 
-def get_stop_word_slice_list(stop_word_strs: List[str]) -> List[str]:
-    result: List[str] = []
-    for stop_word_str in stop_word_strs:
-        result.append(stop_word_str)
-        for i in range(1, len(stop_word_str)):
-            result.append(stop_word_str[:-i])
+def get_stop_word_slices(stop_word_list: List[Union[str, List[int]]]) -> List[Union[str, List[int]]]:
+    result: List[Union[str, List[int]]] = []
+    for stop_word in stop_word_list:
+        result.append(stop_word)
+        for i in range(1, len(stop_word)):
+            result.append(stop_word[:-i])
     return result
 
 def truncate_response_with_stop_words(response: str, stop_word_strs: List[str]):
@@ -71,6 +71,13 @@ def truncate_response_with_stop_words(response: str, stop_word_strs: List[str]):
             response = response[:(-len(stop_word))]
             break
     return response
+
+def truncate_token_with_stop_word_id(tokens: List[int], stop_word_ids: List[int]):
+    for stop_word_id in stop_word_ids:
+        if stop_word_id and tokens[-len(stop_word_id):] == stop_word_id:
+            tokens = tokens[:(-len(stop_word_id))]
+            break
+    return tokens
 
 def match_stop_words(response: str, stop_word_strs: List[str]) -> bool:
     for stop_word in stop_word_strs:
@@ -85,4 +92,4 @@ if __name__ == "__main__":
     # print(stop_list, stop_list.shape)
     
     stop_words = ['abc', '11123']
-    print(get_stop_word_slice_list(stop_words))
+    print(get_stop_word_slices(stop_words))

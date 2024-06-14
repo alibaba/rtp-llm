@@ -51,12 +51,14 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
     ft::NcclParam                                                           tensor_para,
     ft::NcclParam                                                           pipeline_para,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
-    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights):
+    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
+    const ft::ConstBufferPtr&                                               linear_bias_slopes):
     params_(gpt_init_parameter),
     data_type_(ft::getTensorType<T>()),
     device_(dynamic_cast<ft::CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda))),
     tensor_para_(tensor_para),
-    pipeline_para_(pipeline_para)
+    pipeline_para_(pipeline_para),
+    linear_bias_slopes_(linear_bias_slopes)
 {
     allocator_      = device_->getAllocator();
     cublas_wrapper_ = device_->cublasMMWrapperPtr();
@@ -119,7 +121,7 @@ void ParallelModelWrapperImpl<T>::allocateBuffer(size_t total_batch_size, size_t
     last_hidden_states_ = (T*)model_output.hidden_states->data();
     all_hidden_states_  = (T*)model_output.all_hidden_states->data();
     combo_tokens_   = (int*)allocator_->reMalloc(combo_tokens_, sizeof(int) * h_token_num);
-        combo_token_types_   = (int*)allocator_->reMalloc(combo_token_types_, sizeof(int) * h_token_num);
+    combo_token_types_   = (int*)allocator_->reMalloc(combo_token_types_, sizeof(int) * h_token_num);
     combo_position_ids_   = (int*)allocator_->reMalloc(combo_position_ids_, sizeof(int) * h_token_num);
     padding_offset_ = reinterpret_cast<int*>(allocator_->reMalloc(padding_offset_, sizeof(int) * (h_token_num)));
     cu_seqlens_ =
@@ -230,11 +232,10 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
         ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {1}, model_request.count_lengths->data());
     ft::Tensor max_prefix_length(
         ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {1}, model_request.max_prefix_length->data());
+    ft::Tensor lora_ids(
+        ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {total_batch_size}, model_request.lora_ids->data());
     ft::Tensor lora_input_lengths(
-        ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {total_batch_size}, model_request.input_lengths->data());
-    auto lora_data = model_request.lora_ids ? model_request.lora_ids->data() : nullptr;
-    auto lora_len = model_request.lora_ids ? total_batch_size : 0;
-    ft::Tensor lora_ids(ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {lora_len}, lora_data);
+        ft::MEMORY_CPU, ft::DataType::TYPE_INT32, {total_batch_size}, model_request.lora_input_lengths->data());
 
     cudaMemcpyAsync(combo_tokens.getPtr<int>(),
                     model_request.combo_tokens->data(),
@@ -269,6 +270,7 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
                                      max_context_seq_length,
                                      (int*)model_request.input_lengths->data() + model_request.generate_batch_size);
     }
+
     ft::Tensor attention_mask;
     if (!parallel_gpt_decoder_->UseFMHA() && model_request.attention_mask.get() == nullptr && model_request.context_batch_size > 0) {
         createAttentionMask(model_request.context_batch_size, max_context_seq_length_, model_request.input_lengths->data<int>() + model_request.generate_batch_size);
@@ -302,7 +304,6 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
     print_bsd(-1, "position", combo_position_ids.getPtr<int>(), 1, 1, h_token_num);
     print_bsd(-1, "type", combo_token_type_ids.getPtr<int>(), 1, 1, h_token_num);
     parallel_word_embedding_wrapper_->forward(all_hidden_states, combo_tokens, combo_token_type_ids, combo_position_ids);
-
     print_bsd(-1, "embedding", all_hidden_states.getPtr<T>(), 1, h_token_num, hidden_units);
 
     if (params_.has_pre_decoder_layernorm_) {
@@ -320,13 +321,20 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
     }
     sync_check_cuda_error();
 
+    ft::Tensor linear_bias_slopes;
+    if (linear_bias_slopes_) {
+        linear_bias_slopes = ft::Tensor(ft::MEMORY_GPU, data_type_, linear_bias_slopes_->shape(), linear_bias_slopes_->data());
+    }
+
     // gpt layer
+    // TODO(xinfei.sxf) 传入position_ids
     ft::TensorMap input_tensors({{"decoder_input", all_hidden_states},
                                  {"sequence_lengths", sequence_lengths},
                                  {"d_prefix_prompt_lengths", prefix_lengths},
                                  {"count_prefix_length", count_lengths},
                                  {"max_prefix_prompt_length", max_prefix_length},
                                  {"input_lengths", input_lengths},
+                                 {"linear_bias_slopes", linear_bias_slopes},
                                  {"lora_ids", lora_ids},
                                  {"lora_input_lengths", lora_input_lengths}});
     if (attention_mask.size()) {
@@ -353,6 +361,7 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
 
     parallel_gpt_decoder_->forward(&output_tensors, &input_tensors, &gpt_layer_weights_);
     sync_check_cuda_error();
+    
     // last hidden states
     cudaMemcpyAsync(reinterpret_cast<T*>(last_hidden_states.getPtr<T>()),
                     reinterpret_cast<T*>(all_hidden_states.getPtr<T>()),
@@ -430,7 +439,8 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
 ParallelModelWrapper::ParallelModelWrapper(
     const GptInitParameter&                                                 gpt_init_parameter,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
-    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights) {
+    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
+    const ft::ConstBufferPtr&                                               linear_bias_slopes) {
     auto device = dynamic_cast<ft::CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda));
     ft::NcclParam pipeline_para;
     auto tensor_para = device->getNcclParam();
@@ -438,7 +448,8 @@ ParallelModelWrapper::ParallelModelWrapper(
 #define CREATE_INSTANCE(T_)                                                                     \
     {                                                                                           \
         model_wrapper_ = new ParallelModelWrapperImpl<T_>(                                      \
-                gpt_init_parameter, tensor_para, pipeline_para, global_weights, layer_weights); \
+                gpt_init_parameter, tensor_para, pipeline_para,                                 \
+                global_weights, layer_weights, linear_bias_slopes);                             \
     }
 
     switch (getScalarType(gpt_init_parameter.data_type_)) {

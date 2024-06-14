@@ -17,9 +17,13 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
     params_(params.gpt_init_parameter),
     metrics_reporter_(params.metrics_reporter)
 {
+    FT_LOG_INFO(__PRETTY_FUNCTION__);
     executor_.reset(new NormalExecutor(params, device_));
+    FT_LOG_INFO("create normal executor done");
     initCacheManager();
+    FT_LOG_INFO("create cache manager done");
     scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter_));
+    FT_LOG_INFO("create fifo scheduler done");
     (void)startLoop();
 }
 
@@ -35,6 +39,9 @@ void NormalEngine::initCacheManager() {
 }
 
 void NormalEngine::initSystemPrompt() {
+    if (device_->getDeviceProperties().tp_rank != 0) {
+        return;
+    }
     resource_context_.reuse_cache = params_.reuse_cache_;
     auto system_prompt_param = SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get());
     if (!system_prompt_param.empty()) {
@@ -58,10 +65,12 @@ absl::Status NormalEngine::removeLoRA(const int64_t lora_id) {
 }
 
 absl::Status NormalEngine::startLoop() {
-    FT_LOG_INFO("start normal engine");
+    FT_LOG_INFO("start normal engine loop");
     running_ = true;
     loop_thread_ = std::thread(&NormalEngine::loop, this);
+    FT_LOG_INFO("start init system prompt");
     initSystemPrompt(); // system prompt constructor depends on engine startup
+    FT_LOG_INFO("init system prompt done");
     return absl::OkStatus();
 }
 

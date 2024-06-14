@@ -21,7 +21,8 @@ class RtpEmbeddingOp: public th::jit::CustomClassHolder {
 public:
     RtpEmbeddingOp();
     ~RtpEmbeddingOp();
-    void init(const ft::GptInitParameter& gpt_init_params, py::object handler_impl, const py::object layer_weights, const py::object weights);
+    void init(const ft::GptInitParameter& gpt_init_params, py::object handler_impl,
+              const py::object py_layer_weights, const py::object py_weights, py::object py_linear_bias_slopes);
     void stop();
 
     th::Tensor decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id);

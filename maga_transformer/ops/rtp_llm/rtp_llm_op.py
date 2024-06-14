@@ -11,13 +11,18 @@ class RtpLLMOp(FTOPBase):
         self.config = config
         self.is_sp = is_sp
         self.ft_op = CppRtpLLMOp()
+        self.linear_bias_slopes: torch.Tensor = None
+
+    def set_linear_bias_slopes(self, linear_bias_slopes):
+        self.linear_bias_slopes = linear_bias_slopes
 
     def _initialize_op(self, force_init: bool=False):
         assert self.weight
         self.ft_op.init( # type: ignore
             self.config.gpt_init_params,
             self.weight.weights,
-            self.weight.global_weights)
+            self.weight.global_weights,
+            self.linear_bias_slopes)
 
         for id, lora_weight in self.weight.lora_resource.lora_map.weights_map.items():
             self.ft_op.add_lora( # type: ignore

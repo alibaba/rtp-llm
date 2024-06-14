@@ -1,11 +1,8 @@
 #pragma once
 #include <cstdint>
-#include <mutex>
 #include <string>
-#include <optional>
 #include <vector>
 #include <map>
-#include <torch/torch.h>
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/GenerateConfig.h"
@@ -13,7 +10,7 @@
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
 #include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "maga_transformer/cpp/common/fatal_util.h"
 
 namespace ft = fastertransformer;
 
@@ -33,14 +30,10 @@ std::unordered_map<std::string, SystemPromptParams> SystemPromptConstructor::con
         generate_input->generate_config = generate_config;
         generate_input->need_release_resource = false;
 
-        // TODO(xinfei.sxf) consider tp, consider sp engine
         GenerateStreamPtr stream = engine->enqueue(generate_input);
-
-        auto output1 = stream->nextOutput();
-        FT_CHECK(output1.ok());
-        FT_CHECK(output1.value().generate_outputs[0].aux_info.output_len == 1);
-        FT_CHECK(stream->finished());
-
+        if (!stream->nextOutput().ok()) {
+            RAISE_FATAL_ERROR(std::string("stream run failed: ") + stream->stopReason());
+        }
         const auto& kv_cache = stream->kvCache();
         FT_CHECK(kv_cache.k_ptr.size() == 1);
         FT_CHECK(kv_cache.k_ptr[0].size() > 0);

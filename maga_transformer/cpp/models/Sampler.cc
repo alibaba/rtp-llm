@@ -89,6 +89,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         sample_to_batch_idx = from_batch_idx;
         from_seq_idx = sample_to_seq_idx;
     } while (from_batch_idx < inputs.batch_size);
+    // TODO(xinfei.sxf) 优化copy token_ids
     return SamplerOutput({move(inputs.token_ids), move(inputs.cum_log_probs), move(inputs.index_log_prob)});
 }
 

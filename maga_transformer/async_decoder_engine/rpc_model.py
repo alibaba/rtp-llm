@@ -19,6 +19,7 @@ class RpcModel:
         self.config = model.config
         self.vit_expand_token_id_lock = asyncio.Lock()
         self.rtp_llm_op_ = RtpLLMOp(model.config, False)
+        self.rtp_llm_op_.set_linear_bias_slopes(model.linear_bias_slopes)
         self.rtp_llm_op_.set_weight(model.weight)
         self.model_rpc_client = ModelRpcClient(self.model.weight.lora_resource)
         self.model.weight.lora_resource.ft_op = [self.rtp_llm_op_] 

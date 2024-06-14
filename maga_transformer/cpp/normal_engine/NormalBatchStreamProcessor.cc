@@ -41,6 +41,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     model_input.lora_ids =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
+    model_input.lora_input_lengths =
+        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     model_input.sequence_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_decode_batch_size}, ft::AllocationType::HOST}, {});
     model_input.lm_output_indexes =
@@ -53,12 +55,20 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     model_input.max_prefix_length =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {1}, ft::AllocationType::HOST}, {});
     *model_input.max_prefix_length->data<int32_t>() = 0;
+    if (has_positional_encoding_) {
+        auto total_len = decode_streams.size() + stream_groups.cumContextSeqLen();
+        model_input.combo_position_ids =
+            device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_len}, ft::AllocationType::HOST}, {});
+    }
+
     int*      merged_tokens    = (int*)model_input.combo_tokens->data();
     int*      input_lengths    = (int*)model_input.input_lengths->data();
     int*      lora_ids         = (int*)model_input.lora_ids->data();
+    int*      lora_input_lengths = (int*)model_input.lora_input_lengths->data();
     int*      sequence_lengths = (int*)model_input.sequence_lengths->data();
     int*      lm_output_indexes = (int*)model_input.lm_output_indexes->data();
     int*      prefix_lengths   = (int*)model_input.prefix_lengths->data();
+    int*      combo_position_ids = has_positional_encoding_ ? (int*)model_input.combo_position_ids->data() : nullptr;
     uint64_t* kv_cache_blocks  = (uint64_t*)model_input.kv_cache_blocks->data();
     uint64_t* kv_cache_scales  = use_int8_kv_cache_ ? (uint64_t*)model_input.kv_cache_scales->data() : nullptr;
     int       batch_idx        = 0;
@@ -74,7 +84,11 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             input_lengths[batch_idx]    = stream->inputLength();
             sequence_lengths[batch_idx] = stream->seqLength() - 1; // need remove
             prefix_lengths[batch_idx]   = 0;
+            if (has_positional_encoding_) {
+                combo_position_ids[batch_idx] = stream->seqLength() - 1;
+            }
             lora_ids[batch_idx]         = stream->loraId();
+            lora_input_lengths[batch_idx] = 1;
             lm_output_indexes[batch_idx] = batch_idx;
             memcpyKvCache(kv_cache_blocks,
                           kv_cache.k_ptr[i],
@@ -98,6 +112,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     int token_idx = batch_idx;
     int cum_output_seq_len = batch_idx;
+    int position_idx = batch_idx;
     for (const auto& stream : context_streams) {
         auto input_tokens    = stream->currentExecuteTokens();
         memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
@@ -106,8 +121,16 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         input_lengths[batch_idx]  = stream->contextLength();
         prefix_lengths[batch_idx] = stream->reuseLength();
         lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
-        lora_ids[batch_idx]       = stream->loraId();
-        auto kv_cache             = stream->kvCache();
+        if (has_positional_encoding_) {
+            // TODO(xinfei.sxf) optimize this, reduce cost
+            for (uint32_t i = stream->reuseLength(); i < stream->reuseLength() + stream->contextLength(); i++) {
+                combo_position_ids[position_idx + i] = i;
+            }
+            position_idx += stream->contextLength();
+        }
+        lora_ids[batch_idx]           = stream->loraId();
+        lora_input_lengths[batch_idx] = input_lengths[batch_idx];
+        auto kv_cache                 = stream->kvCache();
         FT_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
         FT_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
         memcpyKvCache(kv_cache_blocks,
@@ -128,8 +151,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         }
         batch_idx += 1;
     }
-    FT_LOG_DEBUG("input_lengths: %s", model_input.input_lengths->debugStringWithData<int32_t>().c_str());
-    FT_LOG_DEBUG("sequence_lengths: %s", model_input.sequence_lengths->debugStringWithData<int32_t>().c_str());
     return model_input;
 }
 

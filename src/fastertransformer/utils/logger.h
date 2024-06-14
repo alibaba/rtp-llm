@@ -117,10 +117,11 @@ private:
 
 #define FT_LOG(level, ...)                                                                                             \
     do {                                                                                                               \
-        if (fastertransformer::Logger::getLogger().getLevel() <= level) {                                              \
+        auto logger_level = fastertransformer::Logger::getLogger().getLevel();                                         \
+        if (logger_level <= level) {                                                                                   \
             fastertransformer::Logger::getLogger().log(level, __VA_ARGS__);                                            \
         }                                                                                                              \
-        if (level == fastertransformer::Logger::DEBUG) {                                                               \
+        if (logger_level == fastertransformer::Logger::DEBUG) {                                                        \
             fflush(stdout);                                                                                            \
             fflush(stderr);                                                                                            \
         }                                                                                                              \

@@ -184,8 +184,11 @@ inline void syncAndCheck(const char* const file, int const line) {
             cudaDeviceSynchronize();
             cudaError_t result = cudaGetLastError();
             if (result) {
-                throw std::runtime_error(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result))
-                                         + " " + file + ":" + std::to_string(line) + " \n");
+                std::string msg = std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
+                                 + file + ":" + std::to_string(line) + " \n";
+                FT_LOG_INFO(msg);
+                fflush(stdout);
+                throw std::runtime_error(msg);
             }
             FT_LOG_DEBUG(fmtstr("run syncAndCheck at %s:%d", file, line));
         }
@@ -195,8 +198,11 @@ inline void syncAndCheck(const char* const file, int const line) {
     cudaDeviceSynchronize();
     cudaError_t result = cudaGetLastError();
     if (result) {
-        throw std::runtime_error(std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
-                                 + file + ":" + std::to_string(line) + " \n");
+        std::string msg = std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
+                                 + file + ":" + std::to_string(line) + " \n";
+        FT_LOG_INFO(msg);
+        fflush(stdout);
+        throw std::runtime_error(msg);
     }
 #endif
 }

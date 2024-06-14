@@ -3,6 +3,7 @@ import torch
 import logging
 import random
 from enum import Enum
+from functools import partial
 from typing import List, Optional, Tuple, Any
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery, ModelOutput
@@ -16,6 +17,8 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.util import to_cuda, to_cpu
 
 DEFAULT_NEW_SAMPLER_BATCH_SIZE=128
+
+flushed_print = partial(print, flush=True)
 
 class ModelType(Enum):
     Normal = "normal"
@@ -183,21 +186,23 @@ class NormalModelExecutor(ExecutorBase):
         model = self.model_ops.model
         combo_tokens, images, combo_token_types = self._packed_tokens(batch_query)
         position_ids = self._create_position_ids_for_rotary(batch_query)
+        if debug_print():
+            flushed_print("combo_tokens = ", combo_tokens)
 
         assert model.word_embedding is not None
         input_embeds = model.async_input_word_embedding(combo_tokens, images, combo_token_types)
         if debug_print():
-            print("input_embeds = ", input_embeds)
+            flushed_print("input_embeds = ", input_embeds)
 
         if model.position_encoding is not None:
             input_embeds += model.position_encoding(position_ids)
             if debug_print():
-                print("after add position_encoding, input_embeds = ", input_embeds)
+                flushed_print("after add position_encoding, input_embeds = ", input_embeds)
 
         if model.pre_decoder_layernorm is not None:
             input_embeds = model.pre_decoder_layernorm(input_embeds)
             if debug_print():
-                print("after pre_decoder_layernorm, input_embeds = ", input_embeds)
+                flushed_print("after pre_decoder_layernorm, input_embeds = ", input_embeds)
 
         if self.model_ops.gpt_op.use_fmha:
             attention_mask = None
@@ -273,11 +278,11 @@ class NormalModelExecutor(ExecutorBase):
         if self.model_ops.model.post_decoder_layernorm is not None:
             hidden_states = self.model_ops.model.post_decoder_layernorm(hidden_states)
             if debug_print():
-                print('hidden_states after layernorm', hidden_states, flush=True)
+                flushed_print('hidden_states after layernorm = ', hidden_states, flush=True)
         assert self.model_ops.model.lm_head is not None
         logits = self.model_ops.model.lm_head(hidden_states).float()
         if debug_print():
-            print('logits', logits, flush=True)
+            flushed_print('logits = ', logits, flush=True)
         if 'CHECK_LOGITS_NAN' in os.environ:
             logits_cpu = to_cpu(logits.view(-1))
             if any(torch.isnan(logits_cpu).numpy().tolist()):
@@ -327,6 +332,7 @@ class NormalModelExecutor(ExecutorBase):
             batch_query: BatchQuery,
             logits: torch.Tensor,
             hidden_states: torch.Tensor) -> None:
+
         key_cache, value_cache = self.cache_manager_.get_kv_cache_base()
         if batch_query.num_beams > 1:
             logits = self._prepare_beam_search(batch_query, logits, key_cache, value_cache)
@@ -374,6 +380,8 @@ class NormalModelExecutor(ExecutorBase):
         ))
 
         output_token_ids = token_ids.permute(1, 0)
+        if debug_print():
+            flushed_print("output_token_ids = ", output_token_ids)
         batch_query.update_output(ModelOutput(
             finished=finished.cpu(),
             update_length=[1] * batch_query.total_batch_size,
