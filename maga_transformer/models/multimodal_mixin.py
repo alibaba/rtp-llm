@@ -70,7 +70,11 @@ class MultiModalMixin:
             raise FtRuntimeException(ExceptionType.EMPTY_PROMPT_ERROR, "prompt should have at least one token!")
         if type(prompt) is not str:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "expect string prompt, actual: " + str(prompt))
-        return tokenizer.encode(prompt, add_special_tokens=add_special_tokens)
+        if add_special_tokens:
+            return tokenizer.encode(prompt)
+        else:
+            # for CogVLM2, we need to pass add_special_tokens=False to tokenizer
+            return tokenizer.encode(prompt, add_special_tokens=False)
 
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str], 
