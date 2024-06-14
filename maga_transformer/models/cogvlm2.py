@@ -64,7 +64,7 @@ class CogVLM2(Llama, MultiModalMixin):
             activation_type="SiGLU",
             norm_type="rmsnorm",
             rotary_embedding_dim=128,
-            rotary_embedding_style=6,
+            rotary_embedding_style=7,
             has_post_decoder_layernorm=True,
             is_multimodal=True,
         )
