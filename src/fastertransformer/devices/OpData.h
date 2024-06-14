@@ -242,7 +242,7 @@ struct GroupedGemmParams {
 struct EmbeddingLookupParams {
     const Buffer& combo_tokens;
     const Buffer& embedding_table;
-    double input_embedding_scalar;
+    double input_embedding_scalar = 1;
 
     OptionalConstBufferRef position_ids;
     OptionalConstBufferRef position_table;
