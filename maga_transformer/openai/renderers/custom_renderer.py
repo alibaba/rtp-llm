@@ -113,7 +113,8 @@ class CustomChatRenderer():
 
         token_type_ids = []
         # CogVLM2 will expand token_ids whether there exist an image or not
-        if (model.is_multimodal() and len(images) > 0) or model.is_cogvlm2():
+        if (model.is_multimodal() and len(images) > 0) or (isinstance(self.model, CogVLM2)) \
+                or (hasattr(self.model, 'model') and isinstance(self.model.model, CogVLM2)):
             images = await VitEngine.get(images)
             input_ids, images, token_type_ids = await model.expand_token_id(input_ids, images)
         

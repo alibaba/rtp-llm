@@ -227,7 +227,8 @@ class Pipeline(object):
                             generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
         # CogVLM2 will expand token_ids whether there exist an image or not
-        if (self.model.is_multimodal() and len(images) > 0) or self.model.is_cogvlm2():
+        if (self.model.is_multimodal() and len(images) > 0) or isinstance(self.model.model, CogVLM2) \
+                or (hasattr(self.model, 'model') and isinstance(self.model.model, CogVLM2)):
             tasks = [asyncio.create_task(self.vit_engine.get(images))]
             await asyncio.wait(tasks)
             images = tasks[0].result()

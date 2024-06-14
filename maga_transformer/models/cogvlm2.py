@@ -33,10 +33,6 @@ class CogVLM2(Llama, MultiModalMixin):
     def is_multimodal(cls) -> bool:
         return True
 
-    @classmethod
-    def is_cogvlm2(cls) -> bool:
-        return True
-
     @staticmethod
     def multimodal_modify_prompt_plugin(
         prompt: Union[List[Dict[str, Any]], str],

@@ -182,10 +182,6 @@ class BaseModel(object):
     def is_multimodal(cls) -> bool:
         return False
     
-    @classmethod
-    def is_cogvlm2(cls) -> bool:
-        return False
-
     def __init__(self) -> None:
         self.weight = None
         self.word_embedding: Optional[ParallelEmbedding] = None
