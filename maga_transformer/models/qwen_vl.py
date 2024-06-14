@@ -183,7 +183,7 @@ class QWen_VL(QWen, MultiModalMixin):
 
     @torch.no_grad()
     def expand_token_id(self, token_ids: List[int], images: List[torch.tensor]) -> Tuple[List[int], List[torch.Tensor], List[int]]:
-        return token_ids, images
+        return token_ids, images, []
     
     def multimodal_embedding(self, input_ids: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
         img_start_id: int = self.config.vit_related_params.vit_special_token_ids['image_start_id']

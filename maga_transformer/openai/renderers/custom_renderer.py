@@ -28,6 +28,7 @@ class RendererParams:
     max_seq_len: int
     eos_token_id: int
     stop_word_ids_list: List[List[int]]
+    template_version: str = "chat"
 
 @dataclass
 class RenderedInputs:

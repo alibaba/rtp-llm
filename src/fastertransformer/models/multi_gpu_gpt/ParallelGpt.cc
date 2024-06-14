@@ -22,34 +22,34 @@ void ParallelGpt<T>::initialize()
                                                                   is_free_buffer_after_forward_,
                                                                   is_qk_buf_float_,
                                                                   sparse_);
-                            
+
     // max_seq_len + max_generate_batch_size because max_seq_len >> max_generate_batch_size
     ffn_layer_ = new TensorParallelFfnLayer<T>(params_.max_context_batch_size_,
-                    params_.max_seq_len_ + params_.max_generate_batch_size_,
-                    params_.hidden_size_,
-                    params_.expert_num_,  // expert_num
-                    params_.moe_k_,
-                    params_.moe_normalize_expert_scale_,
-                    params_.moe_style_,
-                    params_.inter_size_,
-                    params_.inter_padding_size_,
-                    params_.moe_inter_padding_size_,
-                    params_.layer_inter_size_,
-                    params_.layer_inter_padding_size_,
-                    tensor_para_,
-                    stream_,
-                    cublas_wrapper_,
-                    quant_algo_,
-                    allocator_,
-                    true,
-                    is_free_buffer_after_forward_,
-                    sparse_,
-                    params_.is_sparse_head_,
-                    params_.activation_type_,
-                    params_.has_moe_norm_,
-                    params_.layernorm_eps_,
-                    custom_all_reduce_comm_,
-                    enable_custom_all_reduce_);
+                                               params_.max_seq_len_ + params_.max_generate_batch_size_,
+                                               params_.hidden_size_,
+                                               params_.expert_num_,  // expert_num
+                                               params_.moe_k_,
+                                               params_.moe_normalize_expert_scale_,
+                                               params_.moe_style_,
+                                               params_.inter_size_,
+                                               params_.inter_padding_size_,
+                                               params_.moe_inter_padding_size_,
+                                               params_.layer_inter_size_,
+                                               params_.layer_inter_padding_size_,
+                                               tensor_para_,
+                                               stream_,
+                                               cublas_wrapper_,
+                                               quant_algo_,
+                                               allocator_,
+                                               true,
+                                               is_free_buffer_after_forward_,
+                                               sparse_,
+                                               params_.is_sparse_head_,
+                                               params_.activation_type_,
+                                               params_.has_moe_norm_,
+                                               params_.layernorm_eps_,
+                                               custom_all_reduce_comm_,
+                                               enable_custom_all_reduce_);
 
     norm_wrapper_.reset(
         new NormWrapper<T>(params_.layernorm_type_, params_.norm_type_, T(sqrt(2 * params_.num_layers_))));

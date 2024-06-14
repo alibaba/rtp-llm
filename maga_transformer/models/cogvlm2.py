@@ -108,8 +108,12 @@ class CogVLM2(Llama, MultiModalMixin):
         config.vit_related_params.config.update(vit_config)
         config.special_tokens.bos_token_id = config_json["bos_token_id"]
         config.special_tokens.pad_token_id = config_json["pad_token_id"]
-        # TODO(xyz): cogvlm2 has two eos token ids in config file
-        config.special_tokens.eos_token_id = 128001
+
+        if isinstance(config_json['eos_token_id'], list):            
+            config.special_tokens.eos_token_id = config_json['eos_token_id'][0]
+            config.special_tokens.stop_words_list = [[x] for x in config_json['eos_token_id']]
+        else:
+            config.special_tokens.eos_token_id = config_json['eos_token_id']      
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
