@@ -4,13 +4,13 @@
 #include "3rdparty/contextFusedMultiHeadAttention/fused_multihead_attention_common.h"
 #include "3rdparty/flash_attention2/flash.h"
 #include "src/fastertransformer/cutlass/interface.h"
+#include "src/fastertransformer/cuda/ExpertAttentionUtil.h"
 #include "src/fastertransformer/layers/GemmRunner.h"
 #include "src/fastertransformer/layers/LoraGemm.h"
 #include "src/fastertransformer/layers/attention_layers/BaseAttentionLayer.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/kernels/quantization_tensor.h"
-#include "src/fastertransformer/utils/ExpertAttentionUtil.h"
 #include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
 
 namespace fastertransformer {

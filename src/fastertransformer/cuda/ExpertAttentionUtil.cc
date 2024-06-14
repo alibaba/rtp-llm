@@ -1,4 +1,4 @@
-#include "src/fastertransformer/utils/ExpertAttentionUtil.h"
+#include "src/fastertransformer/cuda/ExpertAttentionUtil.h"
 
 namespace fastertransformer {
 

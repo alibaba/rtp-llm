@@ -11,6 +11,7 @@
 #include <cuda_fp16.h>
 
 #include "src/fastertransformer/core/allocator.h"
+#include "src/fastertransformer/cuda/cuda_utils.h"
 
 namespace fastertransformer {
 
@@ -218,6 +219,27 @@ public:
     T* text_intermediate_buf() {
         return intermediate_buf_ + vision_token_length() * n_;
     }
+
+    void print_vision_split_buf(size_t layer_id) {
+        print_bsd(layer_id, "vision split buf", vision_split_buf(), 1, vision_token_length(), k_);
+    }
+
+    void print_text_split_buf(size_t layer_id) {
+        print_bsd(layer_id, "text split buf", text_split_buf(), 1, text_token_length(), k_);
+    }
+
+    void print_intermediate_buf(size_t layer_id) {
+        print_bsd(layer_id, "intermediate buf", intermediate_buf(), 1, token_length(), n_);
+    }
+
+    void print_vision_intermediate_buf(size_t layer_id) {
+        print_bsd(layer_id, "vision intermediate buf", vision_intermediate_buf(), 1, vision_token_length(), n_);
+    }
+
+    void print_text_intermediate_buf(size_t layer_id) {
+        print_bsd(layer_id, "text intermediate buf", text_intermediate_buf(), 1, text_token_length(), n_);
+    }
+
 
 private:
     IAllocator*         allocator_;
