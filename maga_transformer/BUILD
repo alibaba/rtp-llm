@@ -30,6 +30,7 @@ requirement([
     "sentence-transformers",
     "orjson",
     "xfastertransformer_devel_icx",
+    "xformers"
 ])
 
 filegroup(
@@ -108,6 +109,7 @@ py_library(
         ":tensorrt",
         ":onnx",
         ":xfastertransformer_devel_icx",
+        ":xformers"
     ],
 )
 
