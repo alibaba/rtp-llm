@@ -65,12 +65,12 @@ class MultiModalMixin:
     nccl_op_: NcclOp
 
     @staticmethod
-    def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], tokenizer: Any, **kwargs: Any) -> List[int]:
+    def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], tokenizer: Any, add_special_tokens: bool, **kwargs: Any) -> List[int]:
         if len(prompt) == 0:
             raise FtRuntimeException(ExceptionType.EMPTY_PROMPT_ERROR, "prompt should have at least one token!")
         if type(prompt) is not str:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "expect string prompt, actual: " + str(prompt))
-        return tokenizer.encode(prompt)
+        return tokenizer.encode(prompt, add_special_tokens=add_special_tokens)
 
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str], 
@@ -108,7 +108,7 @@ class MultiModalMixin:
         return prompt, images
     
     @torch.no_grad()
-    def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+    def expand_token_id(self, token_ids: List[int], images: List[torch.Tensor]) -> Tuple[List[int], List[torch.Tensor], List[int]]:
         raise NotImplementedError()
 
     def load_vit_weight(self, ctype: str):
@@ -126,27 +126,15 @@ class MultiModalMixin:
             param = eval(w_name)
             _safe_load_from_module(param, ckpt_prefix + w, ctype)
 
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor]):
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
         inputs = inputs.reshape(1, -1)
         if g_parallel_info.tp_size <= 1:
-            return self.multimodal_embedding(inputs, images).squeeze(0)
+            return self.multimodal_embedding(inputs, images, token_type_ids).squeeze(0)
 
         if g_parallel_info.tp_rank == 0:
-            embedding_tensor = self.multimodal_embedding(inputs, images).squeeze(0)
+            embedding_tensor = self.multimodal_embedding(inputs, images, token_type_ids).squeeze(0)
         else:
-            embedding_tensor = torch.zeros((inputs.shape[1], self.config.head_num * self.config.size_per_head), dtype=torch.float16, device=self.device)
-        self.nccl_op_.broadcast_tp([embedding_tensor])
-        torch.cuda.current_stream().synchronize()
-        return embedding_tensor
-        
-    def input_word_embedding(self, inputs: torch.Tensor, images: List[Union[torch.Tensor, List[torch.Tensor]]]):
-        if g_parallel_info.tp_size <= 1:
-            return self.multimodal_embedding(inputs, images)
-
-        if g_parallel_info.tp_rank == 0:
-            embedding_tensor = self.multimodal_embedding(inputs, images)
-        else:
-            embedding_tensor = torch.zeros((inputs.shape[1], self.config.head_num * self.config.size_per_head), dtype=torch.float16, device=self.device)
+            embedding_tensor = torch.zeros((inputs.shape[1], self.config.head_num * self.config.size_per_head), dtype=self.dtype, device=self.device)
         self.nccl_op_.broadcast_tp([embedding_tensor])
         torch.cuda.current_stream().synchronize()
         return embedding_tensor

@@ -36,6 +36,9 @@ struct AttentionWeight {
     DenseWeight<T1, T2>          attention_output_weight;
     DenseWeight<T1, T2>          ia3_key_weight;
     DenseWeight<T1, T2>          ia3_value_weight;
+    DenseWeight<T1, T2>          vision_query_weight;            // for CogVLM2
+    DenseWeight<T1, T2>          vision_attention_output_weight; // for CogVLM2
+    T1*                          rotary_embedding_inv_freq;      // for CogVLM2
 };
 
 }  // namespace fastertransformer

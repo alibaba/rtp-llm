@@ -20,6 +20,7 @@ from .mixtral import Mixtral
 from .bert import Bert
 from .megatron_bert import MegatronBert
 from .qwen_v2_moe import Qwen2Moe
+from .cogvlm2 import CogVLM2
 
 import logging
 try:

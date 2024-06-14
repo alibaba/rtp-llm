@@ -30,6 +30,11 @@ static const std::string attn_o_w          = "self_attention_weights.attention_o
 static const std::string attn_o_b          = "self_attention_weights.attention_output_weight.bias";
 static const std::string post_ln_gamma     = "post_layernorm_weights.gamma";
 static const std::string post_ln_beta      = "post_layernorm_weights.beta";
+static const std::string vision_attn_qkv_w = "self_attention_weights.vision_query_weight.kernel";
+static const std::string vision_attn_qkv_b = "self_attention_weights.vision_query_weight.bias";
+static const std::string vision_attn_o_w   = "self_attention_weights.vision_attention_output_weight.kernel";
+static const std::string attn_rotary_emb   = "self_attention_weights.rotary_emb_inv_freq";
+
 
 static const std::string ffn_w1       = "ffn_weights.intermediate_weight.kernel";
 static const std::string ffn_b1       = "ffn_weights.intermediate_weight.bias";
@@ -41,6 +46,9 @@ static const std::string ffn_w2       = "ffn_weights.intermediate_weight2.kernel
 static const std::string ffn_b2       = "ffn_weights.intermediate_weight2.bias";
 static const std::string post_ffn_ln_gamma     = "post_ffn_layernorm_weights.gamma";
 static const std::string post_ffn_ln_beta      = "post_ffn_layernorm_weights.beta";
+static const std::string vision_ffn_w1 = "vision_ffn_weights.intermediate_weight.kernel";
+static const std::string vision_ffn_w3 = "vision_ffn_weights.intermediate_weight3.kernel";
+static const std::string vision_ffn_w2 = "vision_ffn_weights.intermediate_weight2.kernel";
 
 static const std::string shared_expert_gate_w = "ffn_weights.shared_expert_gate.kernel";
 static const std::string moe_w1   = "partial_moe_weights.intermediate_weight.kernel";

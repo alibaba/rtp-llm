@@ -109,9 +109,12 @@ class CustomChatRenderer():
             model: Union[AsyncModel, BaseModel],
             request: ChatCompletionRequest
     ) -> AsyncGenerator[StreamResponseObject, None]:
-        if model.is_multimodal() and len(images) > 0:
+
+        token_type_ids = []
+        # CogVLM2 will expand token_ids whether there exist an image or not
+        if (model.is_multimodal() and len(images) > 0) or model.is_cogvlm2():
             images = await VitEngine.get(images)
-            input_ids, images = await model.expand_token_id(input_ids, images)
+            input_ids, images, token_type_ids = await model.expand_token_id(input_ids, images)
         
         input_token_length = len(input_ids)
 
@@ -123,7 +126,8 @@ class CustomChatRenderer():
                 token_ids=input_id_tensor,
                 images=images,
                 generate_config=generate_config,
-                tokenizer=self.tokenizer
+                tokenizer=self.tokenizer,
+                token_type_ids=token_type_ids
             )
         )
 

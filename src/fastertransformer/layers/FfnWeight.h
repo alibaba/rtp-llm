@@ -30,11 +30,15 @@ template<typename T1, typename T2 = T1>
 struct FfnWeight {
     DenseWeight<T1, T2> gating_weight;
     DenseWeight<T1, T2> shared_expert_gating_weight;
-    DenseWeight<T1, T2> intermediate_weight;
-    DenseWeight<T1, T2> intermediate_weight2;  // for gated activation
+    DenseWeight<T1, T2> intermediate_weight;  // for gated activation
+    DenseWeight<T1, T2> intermediate_weight2;  
     FfnNormWeight<T1>   dense_layernorm;
     DenseWeight<T1, T2> output_weight;
     DenseWeight<T1, T2> ia3_weight;
+
+    DenseWeight<T1, T2> vision_intermediate_weight;   // for CogVLM2, gated activation
+    DenseWeight<T1, T2> vision_intermediate_weight2;  // for CogVLM2
+    DenseWeight<T1, T2> vision_output_weight;         // for CogVLM2
 };
 
 }  // namespace fastertransformer

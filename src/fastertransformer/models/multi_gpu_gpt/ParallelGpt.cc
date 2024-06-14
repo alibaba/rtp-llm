@@ -22,34 +22,34 @@ void ParallelGpt<T>::initialize()
                                                                   is_free_buffer_after_forward_,
                                                                   is_qk_buf_float_,
                                                                   sparse_);
-
+                            
     // max_seq_len + max_generate_batch_size because max_seq_len >> max_generate_batch_size
     ffn_layer_ = new TensorParallelFfnLayer<T>(params_.max_context_batch_size_,
-                                               params_.max_seq_len_ + params_.max_generate_batch_size_,
-                                               params_.hidden_size_,
-                                               params_.expert_num_,  // expert_num
-                                               params_.moe_k_,
-                                               params_.moe_normalize_expert_scale_,
-                                               params_.moe_style_,
-                                               params_.inter_size_,
-                                               params_.inter_padding_size_,
-                                               params_.moe_inter_padding_size_,
-                                               params_.layer_inter_size_,
-                                               params_.layer_inter_padding_size_,
-                                               tensor_para_,
-                                               stream_,
-                                               cublas_wrapper_,
-                                               quant_algo_,
-                                               allocator_,
-                                               true,
-                                               is_free_buffer_after_forward_,
-                                               sparse_,
-                                               params_.is_sparse_head_,
-                                               params_.activation_type_,
-                                               params_.has_moe_norm_,
-                                               params_.layernorm_eps_,
-                                               custom_all_reduce_comm_,
-                                               enable_custom_all_reduce_);
+                    params_.max_seq_len_ + params_.max_generate_batch_size_,
+                    params_.hidden_size_,
+                    params_.expert_num_,  // expert_num
+                    params_.moe_k_,
+                    params_.moe_normalize_expert_scale_,
+                    params_.moe_style_,
+                    params_.inter_size_,
+                    params_.inter_padding_size_,
+                    params_.moe_inter_padding_size_,
+                    params_.layer_inter_size_,
+                    params_.layer_inter_padding_size_,
+                    tensor_para_,
+                    stream_,
+                    cublas_wrapper_,
+                    quant_algo_,
+                    allocator_,
+                    true,
+                    is_free_buffer_after_forward_,
+                    sparse_,
+                    params_.is_sparse_head_,
+                    params_.activation_type_,
+                    params_.has_moe_norm_,
+                    params_.layernorm_eps_,
+                    custom_all_reduce_comm_,
+                    enable_custom_all_reduce_);
 
     norm_wrapper_.reset(
         new NormWrapper<T>(params_.layernorm_type_, params_.norm_type_, T(sqrt(2 * params_.num_layers_))));
@@ -339,6 +339,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     }
     const size_t   h_token_num = decoder_input_tensor.shape()[0];
     const DataType data_type   = getTensorType<T>();
+    const bool     use_expert_attention = input_tensors->isExist("token_type_ids");
 
     PUSH_RANGE(stream_, "buffer allocation");
     bool reuse_buf   = !params_.use_norm_input_residual_;
@@ -524,7 +525,12 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             {"sequence_lengths", Tensor{MEMORY_GPU, TYPE_INT32, {batch_size}, sequence_lengths_}},
             {"input_lengths", Tensor{MEMORY_GPU, TYPE_INT32, {total_batch_size}, context_lengths_}},
             {"lora_ids", input_tensors->at("lora_ids")},
-            {"lora_input_lengths", input_tensors->at("lora_input_lengths")}};
+            {"lora_input_lengths", input_tensors->at("lora_input_lengths")},
+            {"use_expert_attention", Tensor{MEMORY_CPU, TYPE_BOOL, {(size_t)1}, &use_expert_attention}}};
+
+        if (use_expert_attention) {
+            attention_input_tensors.insert("token_type_ids", input_tensors->at("token_type_ids"));
+        }
 
         if (quant_algo_.smoothQuantInt8()) {
             FT_CHECK_WITH_INFO(attention_query_dynamic_scale_!=nullptr, "attention_query_dynamic_scale_ should not be nullptr");
@@ -644,38 +650,18 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                       hidden_units);
         }
 
-        TensorMap ffn_input_tensors(
-            {{"ffn_input",
-              Tensor{MEMORY_GPU,
-                     activation_in_type,
-                     {h_token_num, hidden_units},
-                     params_.layernorm_type_ == LayerNormType::pre_layernorm ? normed_self_attn_output_ :
-                                                                               self_attn_output_}},
-             {"layer_id", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &l}},
-             {"lora_ids", input_tensors->at("lora_ids")},
-             {"lora_input_lengths", Tensor{MEMORY_GPU, TYPE_INT32, {total_batch_size}, lora_input_lengths}},
-             {"batch_size", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &ffn_batch_size_lora}}});
-        if(quant_algo_.smoothQuantInt8()){
-            FT_CHECK_WITH_INFO(ffn_intermediate_dynamic_scale_ != nullptr, "ffn_dynamic_scale should not be nullptr");
-            ffn_input_tensors.insert("ffn_dynamic_scale", Tensor{MEMORY_GPU, TYPE_FP32, {h_token_num, 1}, ffn_intermediate_dynamic_scale_});
+        T* ffn_input_ptr = params_.layernorm_type_ == LayerNormType::pre_layernorm ? normed_self_attn_output_ : self_attn_output_;
+
+        std::unique_ptr<ExpertAttentionUtil<T>> expert_attention_util = nullptr;
+        if (use_expert_attention) {
+            expert_attention_util = std::make_unique<ExpertAttentionUtil<T>>(&stream_, allocator_, input_tensors->at("token_type_ids").getPtr<int32_t>(), h_token_num, ffn_input_ptr, ffn_output_ptr);
         }
-        TensorMap ffn_output_tensors;
-        size_t    moe_k = params_.moe_k_;
-        ffn_output_tensors.insert("ffn_output",
-                                  Tensor{MEMORY_GPU, activation_out_type, {h_token_num, hidden_units}, ffn_output_ptr});
+        bool vision = false;
+
         bool use_moe_instead_ffn = params_.moe_style_ == 1;
-        if (use_moe_instead_ffn) {
-            ffn_output_tensors.insert(
-                "fc2_result",
-                Tensor{MEMORY_GPU, activation_out_type, {moe_k * h_token_num, hidden_units}, fc2_result_});
-            ffn_output_tensors.insert("expert_scales",
-                                      Tensor{MEMORY_GPU, activation_out_type, {h_token_num, moe_k}, expert_scales_});
-            ffn_output_tensors.insert(
-                "expanded_source_row_to_expanded_dest_row",
-                Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expanded_source_row_to_expanded_dest_row_});
-            ffn_output_tensors.insert("expert_for_source_row",
-                                      Tensor{MEMORY_GPU, TYPE_INT32, {h_token_num, moe_k}, expert_for_source_row_});
-        }
+        size_t    moe_k = params_.moe_k_;
+        auto [ffn_input_tensors, ffn_output_tensors] = prepareFfnInputOutput(expert_attention_util, ffn_input_ptr, ffn_output_ptr, h_token_num, activation_in_type,  
+            hidden_units, input_tensors, l, total_batch_size, lora_input_lengths, activation_out_type, ffn_batch_size_lora, vision);
 
         ffn_layer_->forward(&ffn_output_tensors,
                             &ffn_input_tensors,
@@ -683,6 +669,22 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                 ? &layer_weight->partial_moe_weights
                                 : &layer_weight->ffn_weights,
                             use_moe_instead_ffn);
+
+
+
+        if (use_expert_attention && expert_attention_util->vision_token_length() > 0) {
+            vision = true;
+            auto [ffn_input_tensors, ffn_output_tensors] = prepareFfnInputOutput(expert_attention_util, ffn_input_ptr, ffn_output_ptr, 
+                h_token_num, activation_in_type, hidden_units, input_tensors, l, total_batch_size, lora_input_lengths, activation_out_type, ffn_batch_size_lora, vision);
+            ffn_layer_->forward(&ffn_output_tensors, 
+                        &ffn_input_tensors,
+                        use_moe_instead_ffn
+                            ? &layer_weight->partial_moe_weights
+                            : &layer_weight->ffn_weights,
+                        use_moe_instead_ffn);
+            expert_attention_util->reorganize();
+            expert_attention_util->freeBuffer();
+        }
 
         print_bsd(l, "post ffn", ffn_output_ptr, 1, h_token_num, hidden_units);
 
@@ -756,6 +758,60 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     }
     FT_LOG_DEBUG("%s stop", __PRETTY_FUNCTION__);
     final_check_error();
+}
+
+template<typename T>
+std::pair<TensorMap, TensorMap> ParallelGpt<T>::prepareFfnInputOutput(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util, 
+        T* ffn_input_ptr, T* ffn_output_ptr, const size_t& h_token_num, const DataType& activation_in_type, const size_t& hidden_units, 
+        const TensorMap* input_tensors, uint& l, const size_t& total_batch_size, const int* lora_input_lengths, const DataType& activation_out_type, 
+        int& ffn_batch_size_lora, bool& vision) {
+    size_t token_length = h_token_num;
+    bool use_moe_instead_ffn = params_.moe_style_ == 1;
+    // for cogvlm2, we perform expertFfn when there exists vision tokens in the input(in context stage), otherwise we perform expertFfn directly
+    if (expert_attention_util && expert_attention_util->vision_token_length() > 0) {
+        assert(!use_moe_instead_ffn);
+        if (vision) {
+            ffn_input_ptr = expert_attention_util->vision_split_buf();
+            ffn_output_ptr = expert_attention_util->vision_intermediate_buf();
+            token_length = expert_attention_util->vision_token_length();
+        } else {
+            expert_attention_util->updateBufferShape(h_token_num, hidden_units, hidden_units);
+            expert_attention_util->allocateBuffer();
+            expert_attention_util->split();
+            ffn_input_ptr = expert_attention_util->text_split_buf();
+            ffn_output_ptr = expert_attention_util->text_intermediate_buf();
+            token_length = expert_attention_util->text_token_length();
+        }
+    }
+    TensorMap ffn_input_tensors(
+        {{"ffn_input",
+            Tensor{MEMORY_GPU, activation_in_type, {token_length, hidden_units}, ffn_input_ptr}},
+            {"layer_id", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &l}},
+            {"lora_ids", input_tensors->at("lora_ids")},
+            {"lora_input_lengths", Tensor{MEMORY_GPU, TYPE_INT32, {total_batch_size}, lora_input_lengths}},
+            {"batch_size", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &ffn_batch_size_lora}},
+            {"use_vision_ffn_weight", Tensor{MEMORY_CPU, TYPE_BOOL, {(size_t)1}, &vision}}});
+    if(quant_algo_.smoothQuantInt8()){
+        FT_CHECK_WITH_INFO(ffn_intermediate_dynamic_scale_ != nullptr, "ffn_dynamic_scale should not be nullptr");
+        ffn_input_tensors.insert("ffn_dynamic_scale", Tensor{MEMORY_GPU, TYPE_FP32, {token_length, 1}, ffn_intermediate_dynamic_scale_});
+    }
+    TensorMap ffn_output_tensors;
+    size_t    moe_k = params_.moe_k_;
+    ffn_output_tensors.insert("ffn_output",
+                                Tensor{MEMORY_GPU, activation_out_type, {token_length, hidden_units}, ffn_output_ptr});
+    if (use_moe_instead_ffn) {
+        ffn_output_tensors.insert(
+            "fc2_result",
+            Tensor{MEMORY_GPU, activation_out_type, {moe_k * token_length, hidden_units}, fc2_result_});
+        ffn_output_tensors.insert("expert_scales",
+                                    Tensor{MEMORY_GPU, activation_out_type, {token_length, moe_k}, expert_scales_});
+        ffn_output_tensors.insert(
+            "expanded_source_row_to_expanded_dest_row",
+            Tensor{MEMORY_GPU, TYPE_INT32, {token_length, moe_k}, expanded_source_row_to_expanded_dest_row_});
+        ffn_output_tensors.insert("expert_for_source_row",
+                                    Tensor{MEMORY_GPU, TYPE_INT32, {token_length, moe_k}, expert_for_source_row_});
+    }
+    return {ffn_input_tensors, ffn_output_tensors};
 }
 
 template class ParallelGpt<float>;

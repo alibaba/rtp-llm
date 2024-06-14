@@ -26,7 +26,7 @@ class RpcModel:
     def is_multimodal(self) -> bool:
         return self.model.is_multimodal()
 
-    async def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+    async def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]], List[int]]:
         assert self.is_multimodal()
         raise Exception("not support yet")
 

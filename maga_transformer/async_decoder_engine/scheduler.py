@@ -23,7 +23,7 @@ class Scheduler:
         self._stream_cache_manager = stream_cache_manager
         logging.info(f"model generate length per circle: {self.gen_num_per_circle}")
 
-        self.batch_query = BatchQuery(gen_num_per_circle, nccl_op)
+        self.batch_query = BatchQuery(gen_num_per_circle, nccl_op, config.use_expert_attention)
         self._waiting_streams: ThreadSafeDeque = ThreadSafeDeque()
         self._schedule_strategy = create_schedule_strategy(config, stream_cache_manager)
 

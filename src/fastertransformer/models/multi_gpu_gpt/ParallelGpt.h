@@ -50,6 +50,11 @@ private:
     bool isLastLayerParallelId(uint l);
     int  getFirstLayerParallelId();
 
+    std::pair<TensorMap, TensorMap> prepareFfnInputOutput(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util, 
+        T* ffn_input_ptr, T* ffn_output_ptr, const size_t& h_token_num, const DataType& activation_in_type, const size_t& hidden_units, 
+        const TensorMap* input_tensors, uint& l, const size_t& total_batch_size, const int* lora_input_lengths, const DataType& activation_out_type, 
+        int& ffn_batch_size_lora, bool& vision);
+
     T*      decoder_normed_input_    = nullptr;
     T*      attn_normed_input_       = nullptr;
     T*      self_attn_output_        = nullptr;

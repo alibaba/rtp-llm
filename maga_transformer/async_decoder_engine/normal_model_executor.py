@@ -85,7 +85,7 @@ class NormalModelExecutor(ExecutorBase):
 
     def _process(self, batch_query: BatchQuery) -> torch.Tensor:
         with torch.cuda.nvtx.range('pre_process'):
-            input_embeds, attention_mask, position_ids = self._pre_process(batch_query)
+            input_embeds, attention_mask, position_ids, token_type_ids = self._pre_process(batch_query)
             k_cache, v_cache = self.cache_manager_.get_kv_cache_base()
             k_cache_scale, v_cache_scale = self.cache_manager_.get_kv_cache_scale_base()
             prefix_lengths, count_length, max_prefix_length = batch_query.get_prefix_args()
@@ -109,34 +109,10 @@ class NormalModelExecutor(ExecutorBase):
                 prefix_lengths=prefix_lengths,
                 count_length=count_length,
                 max_prefix_length=max_prefix_length,
-                lora_ids=torch.IntTensor(batch_query.lora_ids))
+                lora_ids=torch.IntTensor(batch_query.lora_ids),
+                token_type_ids=token_type_ids if token_type_ids.shape[0] > 0 else None)
 
         return hidden_states
-
-    def _create_position_ids_for_rotary(self, batch_query: BatchQuery) -> Optional[torch.Tensor]:
-        if self.model_ops.model.position_encoding is None:
-            return None
-        # generate query
-        position_ids = [i - 1 for i in batch_query.seq_lengths_list]
-        # context query
-        for i in range(batch_query.generate_batch_size, batch_query.total_batch_size):
-            position_ids.extend(range(batch_query.reuse_lengths_list[i], batch_query.reuse_lengths_list[i] + batch_query.context_lengths_list[i]))
-        return to_cuda(torch.IntTensor(position_ids))
-
-    def _packed_tokens(self, batch_query: BatchQuery) -> Tuple[torch.Tensor, List[Any]]:
-        combo_tokens: List[int] = []
-        for i in range(batch_query.generate_batch_size):
-            combo_tokens.extend(batch_query.generate_query_last_token(i).numpy().tolist())
-        for i in range(batch_query.context_batch_size):
-            combo_tokens.extend(batch_query.context_query_output_tokens(i).numpy().tolist())
-        if (not self.model_ops.config.is_multimodal):
-            if any([t < 0 or t >= self.model_ops.config.vocab_size for t in combo_tokens]):
-                raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')
-        else:
-            special_set = set([v for v in self.model_ops.config.vit_related_params.vit_special_token_ids.values()])
-            if any([((t < 0 or t >= self.model_ops.config.vocab_size) and (t not in special_set)) for t in combo_tokens]):
-                raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')
-        return to_cuda(torch.IntTensor(combo_tokens)), batch_query.images
 
     # static for ut
     @staticmethod
@@ -158,11 +134,15 @@ class NormalModelExecutor(ExecutorBase):
         self, batch_query: BatchQuery,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         model = self.model_ops.model
-        combo_tokens, images = self._packed_tokens(batch_query)
-        position_ids = self._create_position_ids_for_rotary(batch_query)
+        combo_tokens, images, combo_token_types = model.packed_tokens(batch_query)
+        # for medusa executor, use class method to construct position ids
+        if hasattr(self, "_create_position_ids_for_rotary"):
+            position_ids = self._create_position_ids_for_rotary(batch_query)
+        else:
+            position_ids = model.create_position_ids_for_rotary(batch_query)
 
         assert model.word_embedding is not None
-        input_embeds = model.async_input_word_embedding(combo_tokens, images)
+        input_embeds = model.async_input_word_embedding(combo_tokens, images, combo_token_types)
         if debug_print():
             print("input_embeds = ", input_embeds)
 
@@ -181,7 +161,7 @@ class NormalModelExecutor(ExecutorBase):
         else:
             attention_mask = self._create_context_attention_mask(batch_query)
 
-        return input_embeds, attention_mask, position_ids
+        return input_embeds, attention_mask, position_ids, combo_token_types
 
     def _create_context_attention_mask(self, batch_query: BatchQuery):
         if batch_query.has_context_query():
@@ -253,8 +233,9 @@ class NormalModelExecutor(ExecutorBase):
                 print('hidden_states after layernorm', hidden_states, flush=True)
         assert self.model_ops.model.lm_head is not None
         logits = self.model_ops.model.lm_head(hidden_states).float()
-        if debug_print():
-            print('logits', logits, flush=True)
+        # if debug_print():
+        print('logits', logits, flush=True)
+        print('logits top10', logits.topk(10), flush=True)
         if 'CHECK_LOGITS_NAN' in os.environ:
             logits_cpu = to_cpu(logits.view(-1))
             if any(torch.isnan(logits_cpu).numpy().tolist()):

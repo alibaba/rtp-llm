@@ -296,6 +296,17 @@ class W:
     post_ffn_ln_gamma = "post_ffn_layernorm_weights.gamma"
     post_ffn_ln_beta = "post_ffn_layernorm_weights.beta"
 
+    # cogvlm2-expert-attn
+    vision_attn_qkv_w = 'self_attention_weights.vision_query_weight.kernel'
+    vision_attn_qkv_b = 'self_attention_weights.vision_query_weight.bias'
+    vision_attn_o_w = 'self_attention_weights.vision_attention_output_weight.kernel'
+    attn_rotary_emb = 'self_attention_weights.rotary_emb_inv_freq'
+
+    # cogvlm2-expert-ffn
+    vision_ffn_w1 = 'vision_ffn_weights.intermediate_weight.kernel'
+    vision_ffn_w3 = 'vision_ffn_weights.intermediate_weight3.kernel'
+    vision_ffn_w2 = 'vision_ffn_weights.intermediate_weight2.kernel'
+
     # partial moe
     shared_expert_gate = 'ffn_weights.shared_expert_gate.kernel'    
     moe_w1   = 'partial_moe_weights.intermediate_weight.kernel'
@@ -480,24 +491,30 @@ class W:
         pre_attn_ln_beta: sp_id,
         qk_ln_gamma: sp_head_qk_norm,
         attn_qkv_w: sp_head,
+        vision_attn_qkv_w: sp_head,
         attn_qkv_z: sp_head_z,
         attn_qkv_s: sp_head_s,
         attn_qkv_b: sp_head_b,
+        vision_attn_qkv_b: sp_head_b,
         attn_o_w: sp_0,
+        vision_attn_o_w: sp_0,
         attn_o_z: sp_0,
         attn_o_s: sp_0,
         attn_o_b: sp_id,
         attn_o_smoother: sp_0,
         attn_o_shift: sp_0,
         ffn_w1: sp_neg1,
+        vision_ffn_w1: sp_neg1,
         ffn_z1: sp_neg1,
         ffn_s1: sp_neg1,
         ffn_b1: sp_neg1,
         ffn_w3: sp_neg1,
+        vision_ffn_w3: sp_neg1,
         ffn_z3: sp_neg1,
         ffn_s3: sp_neg1,
         ffn_b3: sp_neg1,
         ffn_w2: sp_0,
+        vision_ffn_w2: sp_0,
         ffn_z2: sp_0,
         ffn_s2: sp_0,
         ffn_b2: sp_id,
@@ -528,6 +545,7 @@ class W:
         ffn_w3_lora_b: sp_neg1,
         ffn_w2_lora_a: sp_0,
         ffn_w2_lora_b: sp_id,
+        attn_rotary_emb: sp_id,
         moe_gate: sp_id,
         shared_expert_gate: sp_id,
         post_ffn_ln_beta: sp_id,

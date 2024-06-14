@@ -216,7 +216,8 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(tp_size, tp_size_)                                     \
     DEF_PROPERTY(tp_rank, tp_rank_)                                     \
     DEF_PROPERTY(use_rpc, use_rpc_)                                     \
-    DEF_PROPERTY(use_kvcache, use_kvcache_)
+    DEF_PROPERTY(use_kvcache, use_kvcache_)                             \
+    DEF_PROPERTY(use_expert_attention, use_expert_attention_)
 
     pybind11::class_<GptInitParameter>(m, "GptInitParameter")
     .def(pybind11::init<int64_t,     // head_num

@@ -49,7 +49,8 @@ class GptOp(FTOPBase):
                 attention_mask: Optional[torch.Tensor] = None,
                 linear_bias_slopes: Optional[torch.Tensor] = None,
                 prefix_lengths: Optional[torch.Tensor] = None,
-                position_ids: Optional[torch.Tensor] = None):
+                position_ids: Optional[torch.Tensor] = None,
+                token_type_ids: Optional[torch.Tensor] = None):
                 
         """
 
@@ -88,5 +89,6 @@ class GptOp(FTOPBase):
                                         count_length,
                                         max_prefix_length,
                                         key_cache_scale,
-                                        value_cache_scale)
+                                        value_cache_scale,
+                                        token_type_ids)
             return outputs

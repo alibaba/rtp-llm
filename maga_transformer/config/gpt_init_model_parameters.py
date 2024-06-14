@@ -100,7 +100,9 @@ class GptInitModelParameters:
         "ref_dict",
         "tie_word_embeddings",
         "need_ffn_act_scale",
-        "task_type"
+        "task_type",
+        "add_special_tokens",
+        "template_version",
     }
 
     def __init__(self,
@@ -141,6 +143,8 @@ class GptInitModelParameters:
         self.model_rpc_port = g_master_info.model_rpc_port if g_parallel_info.tp_rank == 0 else -1
         self.tp_size = g_parallel_info.tp_size
         self.tp_rank = g_parallel_info.tp_rank
+        self.add_special_tokens = True
+        self.template_version = "chat"
 
         for k, v in kwargs.items():
             setattr(self, k, v)

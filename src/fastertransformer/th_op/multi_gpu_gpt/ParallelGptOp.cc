@@ -112,7 +112,8 @@ void FtGpt<T>::forward(th::Tensor&              decoder_output,
                        th::optional<th::Tensor> count_prefix_length,
                        th::optional<th::Tensor> max_prefix_length,
                        th::optional<th::Tensor> key_cache_scale,
-                       th::optional<th::Tensor> value_cache_scale)
+                       th::optional<th::Tensor> value_cache_scale,
+                       th::optional<th::Tensor> token_type_ids)
 {
     auto stream        = at::cuda::getCurrentCUDAStream().stream();
 
@@ -166,6 +167,10 @@ void FtGpt<T>::forward(th::Tensor&              decoder_output,
     // position_ids for rotary embedding
     if (position_ids.has_value()) {
         input_tensors.insert("position_ids", convert_tensor<int>(position_ids.value()));
+    }
+
+    if (token_type_ids.has_value()) {
+        input_tensors.insert("token_type_ids", convert_tensor<int>(token_type_ids.value()));
     }
     ft_nvtx::NvtxResource::Instance().getCounter().increment();
     parallel_gpt_->forward(&output_tensors, &input_tensors, &gpt_layer_weights_);
@@ -245,7 +250,8 @@ th::Tensor ParallelGptOp::forward(th::Tensor               decoder_input,
                                   th::optional<th::Tensor> count_prefix_length,
                                   th::optional<th::Tensor> max_prefix_length,
                                   th::optional<th::Tensor> key_cache_scale,
-                                  th::optional<th::Tensor> value_cache_scale)
+                                  th::optional<th::Tensor> value_cache_scale,
+                                  th::optional<th::Tensor> token_type_ids)
 {
     // Input Arguments:
     //     decoder_input [batch_size + context_batch_size, hidden_units], T
@@ -295,7 +301,8 @@ th::Tensor ParallelGptOp::forward(th::Tensor               decoder_input,
                   count_prefix_length,
                   max_prefix_length,
                   key_cache_scale,
-                  value_cache_scale);
+                  value_cache_scale,
+                  token_type_ids);
     return decoder_output;
 }
 

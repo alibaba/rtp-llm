@@ -85,10 +85,12 @@ loadWeights(int                                                             pp_s
         gpt_layer_weights[i]->pre_attn_layernorm_weights.gamma                      = maybe_get<T>(weights[i], W::pre_attn_ln_gamma);
         gpt_layer_weights[i]->pre_attn_layernorm_weights.beta                       = maybe_get<T>(weights[i], W::pre_attn_ln_beta);
         gpt_layer_weights[i]->self_attention_weights.query_weight.bias              = maybe_get<T>(weights[i], W::attn_qkv_b);
+        gpt_layer_weights[i]->self_attention_weights.vision_query_weight.bias       = maybe_get<T>(weights[i], W::vision_attn_qkv_b);
         gpt_layer_weights[i]->self_attention_weights.attention_layernorm.gamma      = maybe_get<T>(weights[i], W::attn_ln_gamma);
         gpt_layer_weights[i]->self_attention_weights.attention_layernorm.beta       = maybe_get<T>(weights[i], W::attn_ln_beta);
         gpt_layer_weights[i]->self_attention_weights.qk_layernorm.gamma             = maybe_get<T>(weights[i], W::qk_ln_gamma);
         gpt_layer_weights[i]->self_attention_weights.attention_output_weight.bias   = maybe_get<T>(weights[i], W::attn_o_b);
+        gpt_layer_weights[i]->self_attention_weights.rotary_embedding_inv_freq      = maybe_get<T>(weights[i], W::attn_rotary_emb);
         gpt_layer_weights[i]->self_attn_layernorm_weights.gamma                     = maybe_get<T>(weights[i], W::post_ln_gamma);
         gpt_layer_weights[i]->self_attn_layernorm_weights.beta                      = maybe_get<T>(weights[i], W::post_ln_beta);
         gpt_layer_weights[i]->ffn_weights.intermediate_weight.bias                  = maybe_get<T>(weights[i], W::ffn_b1);
@@ -156,14 +158,19 @@ loadWeights(int                                                             pp_s
             }
         }
         else {
-            gpt_layer_weights[i]->self_attention_weights.query_weight.kernel            = maybe_get<T>(weights[i], W::attn_qkv_w);
-            gpt_layer_weights[i]->self_attention_weights.attention_output_weight.kernel = maybe_get<T>(weights[i], W::attn_o_w);
-            gpt_layer_weights[i]->ffn_weights.intermediate_weight.kernel                = maybe_get<T>(weights[i], W::ffn_w1);
-            gpt_layer_weights[i]->ffn_weights.intermediate_weight2.kernel               = maybe_get<T>(weights[i], W::ffn_w3);
-            gpt_layer_weights[i]->ffn_weights.output_weight.kernel                      = maybe_get<T>(weights[i], W::ffn_w2);
-            gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.kernel        = maybe_get<T>(weights[i], W::moe_w1);
-            gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.kernel       = maybe_get<T>(weights[i], W::moe_w3);
-            gpt_layer_weights[i]->partial_moe_weights.output_weight.kernel              = maybe_get<T>(weights[i], W::moe_w2);
+            gpt_layer_weights[i]->self_attention_weights.query_weight.kernel                    = maybe_get<T>(weights[i], W::attn_qkv_w);
+            gpt_layer_weights[i]->self_attention_weights.vision_query_weight.kernel             = maybe_get<T>(weights[i], W::vision_attn_qkv_w);
+            gpt_layer_weights[i]->self_attention_weights.attention_output_weight.kernel         = maybe_get<T>(weights[i], W::attn_o_w);
+            gpt_layer_weights[i]->self_attention_weights.vision_attention_output_weight.kernel  = maybe_get<T>(weights[i], W::vision_attn_o_w);
+            gpt_layer_weights[i]->ffn_weights.intermediate_weight.kernel                        = maybe_get<T>(weights[i], W::ffn_w1);
+            gpt_layer_weights[i]->ffn_weights.vision_intermediate_weight.kernel                 = maybe_get<T>(weights[i], W::vision_ffn_w1);
+            gpt_layer_weights[i]->ffn_weights.intermediate_weight2.kernel                       = maybe_get<T>(weights[i], W::ffn_w3);
+            gpt_layer_weights[i]->ffn_weights.vision_intermediate_weight2.kernel                = maybe_get<T>(weights[i], W::vision_ffn_w3);
+            gpt_layer_weights[i]->ffn_weights.output_weight.kernel                              = maybe_get<T>(weights[i], W::ffn_w2);
+            gpt_layer_weights[i]->ffn_weights.vision_output_weight.kernel                       = maybe_get<T>(weights[i], W::vision_ffn_w2);
+            gpt_layer_weights[i]->partial_moe_weights.intermediate_weight.kernel                = maybe_get<T>(weights[i], W::moe_w1);
+            gpt_layer_weights[i]->partial_moe_weights.intermediate_weight2.kernel               = maybe_get<T>(weights[i], W::moe_w3);
+            gpt_layer_weights[i]->partial_moe_weights.output_weight.kernel                      = maybe_get<T>(weights[i], W::moe_w2);
         }
     }
     return gpt_layer_weights;

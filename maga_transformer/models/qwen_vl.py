@@ -178,17 +178,14 @@ class QWen_VL(QWen, MultiModalMixin):
     def get_weight_cls():
         return QWenVLWeightInfo
 
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor]):
-        return MultiModalMixin.async_input_word_embedding(self, inputs, images)
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
+        return MultiModalMixin.async_input_word_embedding(self, inputs, images, token_type_ids)
 
-    def input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor]):
-        return MultiModalMixin.input_word_embedding(self, inputs, images)
-    
     @torch.no_grad()
-    def expand_token_id(self, token_ids: List[int], images: List[torch.tensor]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+    def expand_token_id(self, token_ids: List[int], images: List[torch.tensor]) -> Tuple[List[int], List[torch.Tensor], List[int]]:
         return token_ids, images
     
-    def multimodal_embedding(self, input_ids: torch.Tensor, images: List[torch.Tensor]):
+    def multimodal_embedding(self, input_ids: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
         img_start_id: int = self.config.vit_related_params.vit_special_token_ids['image_start_id']
         img_end_id: int = self.config.vit_related_params.vit_special_token_ids['image_end_id']
         bos_pos = torch.where(input_ids == img_start_id)

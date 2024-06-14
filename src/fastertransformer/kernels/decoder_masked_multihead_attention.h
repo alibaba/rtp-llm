@@ -115,6 +115,11 @@ struct Multihead_attention_params_base {
     int   rotary_embedding_max_positions = 0;
     int   original_max_position_embeddings = 0;
 
+    // Rotary embedding inv freq for CogVLM2. The rotary embedding inv freq on CogVLM2 is stored in safetensor, 
+    // rather than being constructed within a cuda kernel. Therefore, We pass the rotary embedding into cuda kernel for CogVLM2.
+    void* rotary_embedding_inv_freq = nullptr;
+    // Position id of rotary embedding for CogVlm2
+    const int* position_ids = nullptr;
     // 0: ??
     // 1: neox / llama ntk
     // 2: glm
@@ -182,7 +187,7 @@ struct Multihead_attention_params_base {
 
     const int* memory_length_per_sample = nullptr;
 
-    bool enable_multi_block_mode(){
+    bool enable_multi_block_mode() {
         return seq_len_tile > 1;
     }
 };
@@ -272,6 +277,8 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         const int     rotary_embedding_dim,
                                         const int     rotary_embedding_style,
                                         const float   rotary_embedding_base,
+                                        const T*      rotary_embedding_inv_freq,
+                                        const int*    position_ids,
                                         const int     logn_seq_len,
                                         const bool    use_logn_attn,
                                         const float   rotary_embedding_scale,

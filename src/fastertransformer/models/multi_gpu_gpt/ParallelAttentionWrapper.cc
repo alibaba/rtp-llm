@@ -269,13 +269,9 @@ void ParallelAttentionWrapper<T>::forward(TensorMap*                output_tenso
 }
 
 template<typename T>
-void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_num,
-                                            const int                 layer_id,
-                                            T*                        attention_out,
-                                            const AttentionWeight<T>* attention_weights,
-                                            int *                     lora_ids,
-                                            int                       batch_size,
-                                            const int*                lora_input_lengths)
+T* ParallelAttentionWrapper<T>::prepareDenseGemmInput(const int         h_token_num,
+                                                const int                 layer_id,
+                                                const AttentionWeight<T>* attention_weights)
 {
     const int local_hidden_units_rt =
         (params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_) * params_.size_per_head_;
@@ -312,7 +308,23 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
         sync_check_cuda_error();
         print_bsd(layer_id, "quant per tensor", reinterpret_cast<int8_t*>(qkv_buf_3_input), h_token_num, 1, local_hidden_units_rt);
     }
+    return qkv_buf_3_input;
+}
 
+
+template<typename T>
+void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_num,
+                                            const int                 layer_id,
+                                            const T*                  input,
+                                            T*                        output,
+                                            const AttentionWeight<T>* attention_weights,
+                                            int *                     lora_ids,
+                                            int                       batch_size,
+                                            const int*                lora_input_lengths,
+                                            bool                      vision_dense_weight)
+{
+    const int local_hidden_units_rt =
+        (params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_) * params_.size_per_head_;
 
     PUSH_RANGE(stream_, "proj_gemm");
 #ifdef SPARSITY_ENABLED
@@ -327,11 +339,12 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
     gemm_runner_->Gemm(h_token_num,
                        hidden_units_,
                        local_hidden_units_rt,
-                       qkv_buf_3_input,
-                       &attention_weights->attention_output_weight,
-                       attention_out,
+                       input,
+                       vision_dense_weight ? &attention_weights->vision_attention_output_weight : &attention_weights->attention_output_weight,
+                       output,
                        dense_gemm_dynamic_scale_);
 
+    // Todo(xyz): handle the lora case for CogVLM2
     // lora
     lora_gemm_->applyLoRA(h_token_num,
                           batch_size,
@@ -340,10 +353,44 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
                           hidden_units_,
                           lora_ids,
                           attention_weights->attention_output_weight.lora_weights,
-                          qkv_buf_3_input,
-                          attention_out);
+                          input,
+                          output);
 
     POP_RANGE;
+}
+
+template<typename T>
+void ParallelAttentionWrapper<T>::expertDenseGemm(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util,
+                                            const int                 h_token_num,
+                                            const int                 layer_id,
+                                            const T*                  input,
+                                            T*                        output,
+                                            const AttentionWeight<T>* attention_weights,
+                                            int *                     lora_ids,
+                                            int                       batch_size,
+                                            const int*                lora_input_lengths)
+{
+
+    const int local_hidden_units_rt =
+        (params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_) * params_.size_per_head_;
+
+    expert_attention_util->updateBufferShape(h_token_num, local_hidden_units_rt, hidden_units_);
+    expert_attention_util->allocateBuffer();
+    expert_attention_util->split(input);
+
+    size_t vision_token_length = expert_attention_util->vision_token_length();
+    // skip the vision QKVGemm if there is no vision token in batch
+    if (vision_token_length > 0) {
+        DenseGemm(vision_token_length, layer_id, expert_attention_util->vision_split_buf(), 
+                expert_attention_util->vision_intermediate_buf(), attention_weights, lora_ids, batch_size, lora_input_lengths, true);
+    }
+
+    DenseGemm(expert_attention_util->text_token_length(), layer_id, expert_attention_util->text_split_buf(), 
+            expert_attention_util->text_intermediate_buf(), attention_weights, lora_ids, batch_size, lora_input_lengths);
+
+    expert_attention_util->reorganize(output);
+
+    expert_attention_util->freeBuffer();
 }
 
 template<typename T>
@@ -351,11 +398,14 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
                                           const int                 layer_id,
                                           const T*                  attention_input,
                                           const AttentionWeight<T>* attention_weights,
+                                          T*                        output_buf,
                                           int *                     lora_ids,
                                           int                       batch_size,
                                           const int*                lora_input_lengths,
                                           bool                      use_kvcache,
-                                          const float*              dynamic_scale)
+                                          const float*              dynamic_scale,
+                                          bool                      vision_qkv_weight,
+                                          bool                      add_bias)
 {
     const int local_head_num        = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
     const int local_head_num_kv     = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
@@ -375,24 +425,24 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
 
-    if (!use_kvcache && params_.rotary_embedding_style_ == 0 && UseFMHA()) {
+    if (add_bias || (!use_kvcache && params_.rotary_embedding_style_ == 0 && UseFMHA())) {  
         gemm_runner_->GemmWithBias(h_token_num,
                     local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
                     hidden_units_,
                     attention_input,
-                    &attention_weights->query_weight,
-                    qkv_buf_);
+                    vision_qkv_weight ? &attention_weights->vision_query_weight : &attention_weights->query_weight,
+                    output_buf);
     } else {
         gemm_runner_->Gemm(h_token_num,
                         local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
                         hidden_units_,
                         attention_input,
-                        &attention_weights->query_weight,
-                        qkv_buf_,
+                        vision_qkv_weight ? &attention_weights->vision_query_weight : &attention_weights->query_weight,
+                        output_buf,
                         dynamic_scale);
     }
+    
     // lora
-
     lora_gemm_->applyLoRA(h_token_num,
                           batch_size,
                           lora_input_lengths,
@@ -401,7 +451,53 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
                           lora_ids,
                           attention_weights->query_weight.lora_weights,
                           attention_input,
-                          qkv_buf_);
+                          output_buf);
+
+    print_bshd(layer_id, "q", output_buf, 1, h_token_num, local_head_num, params_.size_per_head_,
+	       local_head_num + 2 * local_head_num_kv, 0);
+    print_bshd(layer_id, "k", output_buf, 1, h_token_num, local_head_num_kv, params_.size_per_head_,
+	       local_head_num + 2 * local_head_num_kv, local_head_num);
+    print_bshd(layer_id, "v", output_buf, 1, h_token_num, local_head_num_kv, params_.size_per_head_,
+	       local_head_num + 2 * local_head_num_kv, local_head_num + local_head_num_kv);
+    POP_RANGE;
+}
+
+template<typename T>
+void ParallelAttentionWrapper<T>::expertQKVGemm(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util,
+                                                const int                                h_token_num,
+                                                const int                                layer_id,
+                                                const T*                                 attention_input,
+                                                const AttentionWeight<T>*                attention_weights,
+                                                int *                                    lora_ids,
+                                                int                                      batch_size,
+                                                const int*                               lora_input_lengths,
+                                                bool                                     use_kvcache,
+                                                const float*                             dynamic_scale)
+{
+    const int32_t local_head_num        = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
+    const int32_t local_head_num_kv     = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
+    const int32_t local_hidden_units_rt = local_head_num * params_.size_per_head_;
+    const int32_t local_hidden_units_kv_rt = local_head_num_kv * params_.size_per_head_;
+    const int32_t qkv_hidden_size = local_head_num_ * params_.size_per_head_;
+    const int32_t qkv_merged_size = qkv_hidden_size + 2 * local_head_num_kv_ * params_.size_per_head_;
+
+    expert_attention_util->updateBufferShape(h_token_num, hidden_units_, qkv_merged_size);
+    expert_attention_util->allocateBuffer();
+    expert_attention_util->split(attention_input);
+
+    size_t vision_token_length = expert_attention_util->vision_token_length();
+    // skip the vision QKVGemm if there is no vision token in batch
+    if (vision_token_length > 0) {
+        // TODO(xyz): handle the case for INT8 Gemm with bias
+        QKVGemm(vision_token_length, layer_id, expert_attention_util->vision_split_buf(), attention_weights, expert_attention_util->vision_intermediate_buf(), 
+                lora_ids, batch_size, lora_input_lengths, use_kvcache, dynamic_scale, true, true);
+    }
+    
+    QKVGemm(expert_attention_util->text_token_length(), layer_id, expert_attention_util->text_split_buf(), attention_weights, 
+        expert_attention_util->text_intermediate_buf(), lora_ids, batch_size, lora_input_lengths, use_kvcache, dynamic_scale, false, false);
+
+    expert_attention_util->reorganize(qkv_buf_);
+    
 
     print_bshd(layer_id, "q", qkv_buf_, 1, h_token_num, local_head_num, params_.size_per_head_,
 	       local_head_num + 2 * local_head_num_kv, 0);
@@ -409,7 +505,8 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
 	       local_head_num + 2 * local_head_num_kv, local_head_num);
     print_bshd(layer_id, "v", qkv_buf_, 1, h_token_num, local_head_num_kv, params_.size_per_head_,
 	       local_head_num + 2 * local_head_num_kv, local_head_num + local_head_num_kv);
-    POP_RANGE;
+
+    expert_attention_util->freeBuffer();
 }
 
 template<typename T>
@@ -423,6 +520,7 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
     const int  layer_id                = input_tensors->getVal<int>("layer_id");
     const int  generate_batch_size     = input_tensors->getVal<int>("generate_batch_size");
     const int* cache_indir             = input_tensors->getPtr<int>("cache_indirection", nullptr);
+    const int* position_ids            = input_tensors->getPtr<int>("position_ids", nullptr);
     const int  beam_width              = cache_indir ? input_tensors->at("cache_indirection").shape()[1] : 1;
     const T*   relative_attention_bias = input_tensors->getPtr<T>("relative_attention_bias", nullptr);
     const int  relative_attention_bias_stride =
@@ -455,6 +553,8 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
         params_.rotary_embedding_dim_,
         params_.rotary_embedding_style_,
         params_.rotary_embedding_base_,
+        attention_weights->rotary_embedding_inv_freq,
+        position_ids,
         params_.logn_seq_len_,
         params_.use_logn_attn_,
         params_.rotary_embedding_scale_,
@@ -577,6 +677,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                        params_.rotary_embedding_dim_,
                                        params_.rotary_embedding_style_,
                                        params_.rotary_embedding_base_,
+                                       attention_weights->rotary_embedding_inv_freq,
                                        params_.rotary_embedding_scale_,
                                        params_.dynamic_embedding_max_pos_,
                                        params_.org_embedding_max_pos_,
@@ -856,6 +957,7 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
     const int           generate_batch_size = input_tensors->getVal<int>("generate_batch_size");
     const int           context_batch_size  = input_tensors->getVal<int>("context_batch_size");
     const bool          use_kvcache = params_.use_kvcache_;
+    const bool          use_expert_attention = input_tensors->getVal<bool>("use_expert_attention");
     int                 max_context_seq_len = 0;
     int                 max_context_seq_len_with_prefix = 0;
     const int           layer_id            = input_tensors->getVal<int>("layer_id");
@@ -876,8 +978,20 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
     POP_RANGE;
     sync_check_cuda_error();
 
-    QKVGemm(h_token_num, layer_id, input_tensors->at("input_query").getPtr<T>(), attention_weights,
-            lora_ids, batch_size, lora_input_lengths, use_kvcache, attn_dynamic_scale);
+    std::unique_ptr<ExpertAttentionUtil<T>> expert_attention_util = nullptr;
+    if (use_expert_attention) {
+        expert_attention_util = std::make_unique<ExpertAttentionUtil<T>>(&stream_, allocator_, input_tensors->at("token_type_ids").getPtr<int32_t>(), h_token_num);
+    }
+
+    // for cogvlm2, we perform expertQKVGemm when there exists vision tokens in the input(in context stage), otherwise we perform QKVGemm directly
+    if (use_expert_attention && expert_attention_util->vision_token_length() > 0) {
+        expertQKVGemm(expert_attention_util, h_token_num, layer_id, input_tensors->at("input_query").getPtr<T>(), attention_weights, lora_ids, batch_size, 
+                lora_input_lengths, use_kvcache, attn_dynamic_scale);
+    } else {
+        QKVGemm(h_token_num, layer_id, input_tensors->at("input_query").getPtr<T>(), attention_weights,
+                qkv_buf_, lora_ids, batch_size, lora_input_lengths, use_kvcache, attn_dynamic_scale);
+    }
+
     if (params_.qk_norm_) {
         invokeQkLayerNorm(qkv_buf_, attention_weights->qk_layernorm.gamma,
 			  params_.layernorm_eps_, h_token_num, local_head_num_, local_head_num_kv_,
@@ -893,8 +1007,16 @@ void ParallelAttentionWrapper<T>::Attention(TensorMap*                output_ten
     if (generate_batch_size) {
         SelfAttention(output_tensors, input_tensors, attention_weights);
     }
-    DenseGemm(h_token_num, layer_id, output_tensors->at("hidden_features").getPtr<T>(), attention_weights,
-              lora_ids, batch_size, lora_input_lengths);
+
+    T* dense_gemm_input = prepareDenseGemmInput(h_token_num, layer_id, attention_weights);
+    
+    if (use_expert_attention && expert_attention_util->vision_token_length() > 0) {
+        expertDenseGemm(expert_attention_util, h_token_num, layer_id, dense_gemm_input, 
+                output_tensors->at("hidden_features").getPtr<T>(), attention_weights, lora_ids, batch_size, lora_input_lengths);
+    } else {
+        DenseGemm(h_token_num, layer_id, dense_gemm_input, output_tensors->at("hidden_features").getPtr<T>(), attention_weights,
+                lora_ids, batch_size, lora_input_lengths);
+    }
     if (is_free_buffer_after_forward_ == true) {
         freeBuffer();
     }

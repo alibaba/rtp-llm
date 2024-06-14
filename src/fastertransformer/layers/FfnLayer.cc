@@ -60,6 +60,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     allocateBuffer(input_tensors->at("ffn_input").shape()[0], use_moe);
 
     const int m             = input_tensors->at("ffn_input").shape()[0];
+    const bool use_vision_ffn_weight = input_tensors->getVal<bool>("use_vision_ffn_weight");
     T*        output_tensor = output_tensors->at("ffn_output").getPtr<T>();
     const T*  input_tensor  = input_tensors->at("ffn_input").getPtr<const T>();
     const int layer_id      = input_tensors->getVal<int>("layer_id");
@@ -192,7 +193,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                        cur_inter_size,
                        hidden_units_,
                        input_tensor,
-                       &ffn_weights->intermediate_weight2,
+                       use_vision_ffn_weight ? &ffn_weights->vision_intermediate_weight2 : &ffn_weights->intermediate_weight2,
                        inter_buf_,
                        ffn_dynamic_scale);
 
@@ -215,7 +216,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                            cur_inter_size,
                            hidden_units_,
                            input_tensor,
-                           &ffn_weights->intermediate_weight,
+                           use_vision_ffn_weight ? &ffn_weights->vision_intermediate_weight : &ffn_weights->intermediate_weight,
                            inter_buf_2_,
                            ffn_dynamic_scale);
         // lora
@@ -286,13 +287,13 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
         print_bsd(layer_id, "ffn quant tensor", reinterpret_cast<int8_t*>(inter_buf_normed_output), 1, m, cur_inter_size);
 
     }
-
+    
     PUSH_RANGE(stream_, "ffn_gemm_2");
     gemm_runner_->Gemm(m,
                        hidden_units_,
                        cur_inter_size,
                        inter_buf_normed_output,
-                       &ffn_weights->output_weight,
+                       use_vision_ffn_weight ? &ffn_weights->vision_output_weight : &ffn_weights->output_weight,
                        output_tensor,
                        ffn_dynamic_scale_2_);
 

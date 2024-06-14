@@ -625,6 +625,116 @@ inline __device__ void apply_rotary_embedding(bf16_8_t&   q,
 }
 #endif  // ENABLE_BF16
 
+
+inline __device__ void apply_rotary_embedding(
+    float2& q, const float* inv_freqs, const int tid, const int rot_embed_dim, const float t_step) {
+    if (2 * tid >= rot_embed_dim) {
+        return;
+    }
+    float inv_freq_f32 = t_step * inv_freqs[tid];
+    const float2 coef = {cos(inv_freq_f32), sin(inv_freq_f32)};
+    q               = rotary_embedding_transform(q, coef);
+}
+
+inline __device__ void apply_rotary_embedding(
+    float4& q, const float* inv_freqs, const int tid, const int rot_embed_dim, const float t_step) {
+
+    if (4 * tid >= rot_embed_dim) {
+        return;
+    }
+    float inv_freq0_f32 = t_step * inv_freqs[2 * tid];
+    const float2 coef0 = {cos(inv_freq0_f32), sin(inv_freq0_f32)};
+    q.x              = rotary_embedding_transform(q.x, coef0);
+    
+    float inv_freq1_f32 = t_step * inv_freqs[2 * tid + 1];
+    const float2 coef1 = {cos(inv_freq1_f32), sin(inv_freq1_f32)};
+    q.y = rotary_embedding_transform(q.y, coef1);
+}
+
+
+inline __device__ void apply_rotary_embedding(
+    uint32_t& q, const half* inv_freqs, const int tid, const int rot_embed_dim, const float t_step) {
+    if (2 * tid >= rot_embed_dim) {
+        return;
+    }
+    float inv_freq_f32 = __half2float(__float2half(t_step) * inv_freqs[tid]);
+    const float2 coef = {cos(inv_freq_f32), sin(inv_freq_f32)};
+    q               = rotary_embedding_transform(q, coef);
+}
+
+
+inline __device__ void apply_rotary_embedding(
+    uint32_t& q, const uint16_t* inv_freqs, const int tid, const int rot_embed_dim, const float t_step) {
+    if (2 * tid >= rot_embed_dim) {
+        return;
+    }
+    float inv_freq_f32 = half_to_float(mul<uint16_t, uint16_t, uint16_t>(float_to_half(t_step), inv_freqs[tid]));
+    const float2 coef = {cos(inv_freq_f32), sin(inv_freq_f32)};
+    q               = rotary_embedding_transform(q, coef);
+}
+
+inline __device__ void apply_rotary_embedding(
+    uint2& q, const uint16_t* inv_freqs, const int tid, const int rot_embed_dim, const float t_step) {
+    if (4 * tid >= rot_embed_dim) {
+        return;
+    }
+    float inv_freq0_f32 = half_to_float(mul<uint16_t, uint16_t, uint16_t>(float_to_half(t_step), inv_freqs[2 * tid]));
+    const float2 coef0 = {cos(inv_freq0_f32), sin(inv_freq0_f32)};
+    q.x              = rotary_embedding_transform(q.x, coef0);
+    
+    float inv_freq1_f32 = half_to_float(mul<uint16_t, uint16_t, uint16_t>(float_to_half(t_step), inv_freqs[2 * tid + 1]));
+    const float2 coef1 = {cos(inv_freq1_f32), sin(inv_freq1_f32)};
+    q.y = rotary_embedding_transform(q.y, coef1);
+}
+
+#ifdef ENABLE_BF16
+inline __device__ void apply_rotary_embedding(
+    __nv_bfloat162& q, const __nv_bfloat16* inv_freqs, const int tid, const int rot_embed_dim, const float t_step) {
+    if (2 * tid >= rot_embed_dim) {
+        return;
+    }
+    float inv_freq_f32 = __bfloat162float(__float2bfloat16(t_step) * inv_freqs[tid]);
+    const float2 coef = {cos(inv_freq_f32), sin(inv_freq_f32)};
+    q               = rotary_embedding_transform(q, coef);
+}
+
+inline __device__ void apply_rotary_embedding(
+    bf16_4_t& q, const __nv_bfloat16* inv_freqs, const int tid, const int rot_embed_dim, const float t_step) {
+    if (4 * tid >= rot_embed_dim) {
+        return;
+    }
+    float inv_freq0_f32 = __bfloat162float(__float2bfloat16(t_step) * inv_freqs[2 * tid]);
+    const float2 coef0 = {cos(inv_freq0_f32), sin(inv_freq0_f32)};
+    q.x              = rotary_embedding_transform(q.x, coef0);
+    
+    float inv_freq1_f32 = __bfloat162float(__float2bfloat16(t_step) * inv_freqs[2 * tid + 1]);
+    const float2 coef1 = {cos(inv_freq1_f32), sin(inv_freq1_f32)};
+    q.y = rotary_embedding_transform(q.y, coef1);
+}
+
+inline __device__ void apply_rotary_embedding(
+    bf16_8_t& q, const __nv_bfloat16* inv_freqs, int tid, int rot_embed_dim, int t_step) {
+    if (8 * tid >= rot_embed_dim) {
+        return;
+    }
+    float inv_freq0_f32 = __bfloat162float(__float2bfloat16(t_step) * inv_freqs[4 * tid]);
+    const float2 coef0 = {cos(inv_freq0_f32), sin(inv_freq0_f32)};
+    q.x              = rotary_embedding_transform(q.x, coef0);
+    
+    float inv_freq1_f32 = __bfloat162float(__float2bfloat16(t_step) * inv_freqs[4 * tid + 1]);
+    const float2 coef1 = {cos(inv_freq1_f32), sin(inv_freq1_f32)};
+    q.y = rotary_embedding_transform(q.y, coef1);
+
+    float inv_freq2_f32 = __bfloat162float(__float2bfloat16(t_step) * inv_freqs[4 * tid + 2]);
+    const float2 coef2 = {cos(inv_freq2_f32), sin(inv_freq2_f32)};
+    q.z              = rotary_embedding_transform(q.z, coef2);
+    
+    float inv_freq3_f32 = __bfloat162float(__float2bfloat16(t_step) * inv_freqs[4 * tid + 3]);
+    const float2 coef3 = {cos(inv_freq3_f32), sin(inv_freq3_f32)};
+    q.w = rotary_embedding_transform(q.w, coef3);
+}
+#endif 
+
 enum class RotaryEmbeddingStyle : int8_t {
     NoRope        = 0,
     LinearScalar  = 1,
@@ -632,6 +742,7 @@ enum class RotaryEmbeddingStyle : int8_t {
     QWenNTKScalar = 3,
     GLM2          = 4,
     Yarn          = 5,
+    CogVLM2       = 6,
 };
 
 template<typename scalar_t, typename vector_t, RotaryEmbeddingStyle style>
@@ -809,6 +920,44 @@ public:
     }
 };
 
+
+template<typename scalar_t, typename vector_t>
+class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::CogVLM2> {
+
+    static constexpr int vec_size = vector_size<scalar_t, vector_t>::size;
+
+public:
+    static __device__ __inline__ void impl(vector_t& x,
+                                           scalar_t* smem,
+                                           const scalar_t* inv_freqs,
+                                           const int tidx,
+                                           const int dim,
+                                           const float t_step) {
+
+        const int  vec_size = vector_size<scalar_t, vector_t>::size;
+        const bool work     = (tidx * vec_size < dim);
+
+        if (work) {
+            reinterpret_cast<vector_t*>(smem)[tidx] = x;
+        }
+
+        __syncthreads();
+
+        if (work) {
+            RotaryHalfRead(x, smem, tidx, dim / 2);
+            // TODO(xyz) : optimize the memory access of inv_freqs
+            apply_rotary_embedding(x, inv_freqs, tidx, dim, t_step);
+            RotaryHalfWrite(x, smem, tidx, dim / 2);
+        }
+
+        __syncthreads();
+
+        if (work) {
+            x = reinterpret_cast<vector_t*>(smem)[tidx];
+        }
+    }
+};
+
 template<typename scalar_t, typename vector_t>
 class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>{
 private:
@@ -888,6 +1037,7 @@ __device__ inline void context_rope(int       RopeStyle,
                                     float     scaling_factor,
                                     int       dynamic_embedding_max_pos,
                                     int       org_embedding_pos,
+                                    const     scalar_t*    rotary_embedding_inv_freq,
                                     int       base_scale,
                                     int       input_len,
                                     bool      PREFIX_PROMPT,
@@ -945,6 +1095,13 @@ __device__ inline void context_rope(int       RopeStyle,
                 q, smem, tidx, seqidx, dim, base, scaling_factor, org_embedding_pos);
             Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>::impl(
                 k, smem, tidx, seqidx, dim, base, scaling_factor, org_embedding_pos);
+
+        case 7:
+            // cogvlm2 rotary embedding
+            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::CogVLM2>::impl(
+                q, smem, rotary_embedding_inv_freq, tidx, dim, seqidx);
+            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::CogVLM2>::impl(
+                k, smem, rotary_embedding_inv_freq, tidx, dim, seqidx);
             break;
 
         default:
@@ -967,6 +1124,8 @@ __device__ inline void attention_rope(int       RopeStyle,
                                       int       max_pos,
                                       int       org_embedding_pos,
                                       int       base_scale,
+                                      scalar_t* rotary_embedding_inv_freq,
+                                      int       position_id,
                                       int       input_len,
                                       int       prefix_prompt_length,
                                       int       count_prefix_length,
@@ -1029,6 +1188,13 @@ __device__ inline void attention_rope(int       RopeStyle,
                 Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>::impl(
                     k, smem, tidx, tlength, dim, base, scaling_factor, org_embedding_pos);
             }
+
+        case 7:
+            // cogvlm2 rotary embedding
+            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::CogVLM2>::impl(
+                q, smem, rotary_embedding_inv_freq, tidx, dim, position_id);
+            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::CogVLM2>::impl(
+                k, smem, rotary_embedding_inv_freq, tidx, dim, position_id);
             break;
 
         default:

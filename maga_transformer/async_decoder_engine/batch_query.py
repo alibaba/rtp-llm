@@ -13,7 +13,7 @@ from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.stop_utils import create_stop_criteria_list
 from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
-from maga_transformer.utils.util import to_cuda, to_cpu
+from maga_transformer.utils.util import to_cuda, to_cpu, LANGUAGE_TOKEN_TYPE
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 
 class ModelOutput(BaseModel):
@@ -31,7 +31,7 @@ class ModelOutput(BaseModel):
         arbitrary_types_allowed = True
 
 class BatchQuery:
-    def __init__(self, gen_num_per_circle: int, nccl_op: Any) -> None:
+    def __init__(self, gen_num_per_circle: int, nccl_op: Any, use_expect_attention: bool = False) -> None:
         self.gen_num_per_circle = gen_num_per_circle
         self.nccl_op_ = nccl_op
         if g_parallel_info.tp_size > 1:
@@ -56,6 +56,9 @@ class BatchQuery:
         self._ptuning_info = PrefixInfo()
 
         self.model_output = ModelOutput()
+        self.use_expect_attention: bool = use_expect_attention
+        self.token_type_ids: np.ndarray = np.zeros((0, 0), dtype=np.int32)
+        self.vision_token_length: List[int] = []
 
     def __str__(self):
         return f'generate_batch_size: {self.generate_batch_size}, \
@@ -97,6 +100,9 @@ class BatchQuery:
             self._ptuning_info.ptuning,
             self._ptuning_info.count_length,
             self._ptuning_info.count_prefix_length,
+            self.token_type_ids.shape[0],
+            self.token_type_ids.shape[1],
+            len(self.vision_token_length),
             check_num2
         ])
         shape_hints = to_cuda(shape_hints)
@@ -113,6 +119,8 @@ class BatchQuery:
             cache_block_indice = to_cuda(self.cache_block_indice)
             lora_ids_tensor = to_cuda(torch.IntTensor(self.lora_ids))
             calculate_loss_tensor = to_cuda(torch.IntTensor(self.calculate_loss))
+            token_type_ids_tensor = to_cuda(torch.IntTensor(self.token_type_ids))
+            vision_token_length_tensor = to_cuda(torch.IntTensor(self.vision_token_length))
         else:
             self.generate_batch_size = int(shape_hints[1])
             self.context_batch_size = int(shape_hints[2])
@@ -128,10 +136,12 @@ class BatchQuery:
             context_lengths_tensor = torch.zeros((self.decoder_batch_size), dtype=torch.int32, device="cuda:0")
             lora_ids_tensor = torch.zeros((max(1, self.total_batch_size)), dtype=torch.int32, device="cuda:0")
             calculate_loss_tensor = torch.zeros((self.context_batch_size), dtype=torch.int32, device="cuda:0")
+            token_type_ids_tensor = torch.zeros((int(shape_hints[9]), int(shape_hints[10])), dtype=torch.int32, device="cuda:0")
+            vision_token_length_tensor = torch.zeros((int(shape_hints[11])), dtype=torch.int32, device="cuda:0")
         self.nccl_op_.broadcast_tp([
             cache_block_indice, output_token_ids, seq_lengths_tensor,
             reuse_lengths_tensor, context_lengths_tensor, lora_ids_tensor,
-            calculate_loss_tensor
+            calculate_loss_tensor, token_type_ids_tensor, vision_token_length_tensor
         ])
         torch.cuda.current_stream().synchronize()
         if g_parallel_info.tp_rank > 0:
@@ -142,6 +152,8 @@ class BatchQuery:
             self.context_lengths_list = to_cpu(context_lengths_tensor).numpy().tolist()
             self.lora_ids = to_cpu(lora_ids_tensor).numpy().tolist()
             self.calculate_loss = to_cpu(calculate_loss_tensor).numpy().tolist()
+            self.token_type_ids = to_cpu(token_type_ids_tensor).numpy()
+            self.vision_token_length = to_cpu(vision_token_length_tensor).numpy().tolist()
 
     @property
     def max_context_length(self):
@@ -181,12 +193,31 @@ class BatchQuery:
             end_index += self.reuse_lengths_list[index]
 
         return self.output_token_ids[index, start_index: end_index]
+    
+    def context_query_token_type_ids(self, index: int) -> np.ndarray:
+        index = index + self.generate_batch_size * self.num_beams
+        start_index = 0
+        end_index = self.context_lengths_list[index]
+        # 除去ptuningv2以外，前缀token不参与计算
+        if self._ptuning_info.count_prefix_length:
+            start_index += self.reuse_lengths_list[index]
+            end_index += self.reuse_lengths_list[index]
+
+        return self.token_type_ids[index, start_index: end_index]
 
     def generate_query_last_token(self, index: int) -> torch.Tensor:
         assert index < self.generate_batch_size
         start_idx = index * self.num_beams
         end_idx = (index + 1) * self.num_beams
         return self.output_token_ids[start_idx: end_idx, self.seq_lengths_list[start_idx] - 1]
+
+    def generate_query_last_position_id_for_cogvlm2(self, index: int) -> torch.Tensor:
+        assert index < self.generate_batch_size
+        start_idx = index * self.num_beams
+        if self.vision_token_length[start_idx] == 0:
+            return self.seq_lengths_list[start_idx] - 1
+        else:
+            return self.seq_lengths_list[start_idx] - self.vision_token_length[start_idx] + 2
 
     def check(self):
         assert len(self.context_lengths_list) == self.decoder_batch_size
@@ -256,6 +287,9 @@ class BatchQuery:
             self.seq_lengths_list.extend([stream.seq_length] * self.num_beams)
             self.reuse_lengths_list.extend([stream.reuse_length * (1 - int(self._ptuning_info.count_prefix_length))] * self.num_beams)
             self.context_lengths_list.extend([stream.input_length] * self.num_beams)
+            
+            if self.use_expect_attention:
+                self.vision_token_length = [stream.vision_token_length] * self.num_beams
 
         images = []
         for idx, stream in enumerate(self.context_streams):
@@ -266,7 +300,15 @@ class BatchQuery:
             self.seq_lengths_list.extend([stream.seq_length])
             self.reuse_lengths_list.append(stream.reuse_length)
             self.context_lengths_list.append(stream.seq_length - stream.reuse_length * int(self._ptuning_info.count_prefix_length))
-   
+            if self.use_expect_attention:
+                self.token_type_ids = np.zeros_like(output_token_ids)
+                if stream.seq_length > 0 and len(stream.token_type_ids) == 0:
+                    # when there is no image input, we use language token type for all tokens
+                    self.token_type_ids[batch_idx, :stream.seq_length] = [LANGUAGE_TOKEN_TYPE] * stream.seq_length
+                else:
+                    self.token_type_ids[batch_idx, :stream.seq_length] = stream.token_type_ids
+                    
+
         lora_ids = []
         for stream in self.streams:
             lora_ids.append(stream.lora_id)

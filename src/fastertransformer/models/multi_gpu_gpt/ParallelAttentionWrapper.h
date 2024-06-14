@@ -10,6 +10,7 @@
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/kernels/quantization_tensor.h"
+#include "src/fastertransformer/utils/ExpertAttentionUtil.h"
 #include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
 
 namespace fastertransformer {
@@ -47,7 +48,7 @@ private:
     bool                                              use_trt_fmha_         = false;
     bool                                              use_paged_fmha_       = false;
     bool                                              use_open_source_fmha_ = false;
-    bool                                              use_old_trt_fmha_     = false;    
+    bool                                              use_old_trt_fmha_     = false;
     std::unique_ptr<tensorrt_llm::kernels::MHARunner> mFMHARunner;
     bool                                              mFMHAForceFP32Acc = false;
     bool                                              mRemovePadding    = true;
@@ -147,22 +148,51 @@ public:
                  const int                 layer_id,
                  const T*                  attention_input,
                  const AttentionWeight<T>* attention_weights,
+                 T*                        output_buf,
                  int*                      lora_ids,
                  int                       batch_size,
                  const int*                input_lengths,
                  bool                      use_kvcache,
-                 const float*              dynamic_scale = nullptr);
+                 const float*              dynamic_scale = nullptr,
+                 bool                      vision_qkv_weight = false,
+                 bool                      add_bias    = false);
+
+    void expertQKVGemm(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util,
+                       const int                                h_token_num,
+                       const int                                layer_id,
+                       const T*                                 attention_input,
+                       const AttentionWeight<T>*                attention_weights,
+                       int*                                     lora_ids,
+                       int                                      batch_size,
+                       const int*                               input_lengths,
+                       bool                                     use_kvcache,
+                       const float*                             dynamic_scale = nullptr);
     void
     ContextAttention(TensorMap* output_tensors, TensorMap* input_tensors, const AttentionWeight<T>* attention_weights);
     void
     SelfAttention(TensorMap* output_tensors, TensorMap* input_tensors, const AttentionWeight<T>* attention_weights);
+
+    T* prepareDenseGemmInput(const int h_token_num, const int layer_id, const AttentionWeight<T>* attention_weights);
+
     void DenseGemm(const int                 h_token_num,
                    const int                 layer_id,
-                   T*                        attention_out,
+                   const T*                  input,
+                   T*                        output,
                    const AttentionWeight<T>* attention_weights,
                    int*                      lora_ids,
                    int                       batch_size,
-                   const int*                input_lengths);
+                   const int*                input_lengths,
+                   bool                      vision_dense_weight = false);
+
+    void expertDenseGemm(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util,
+                         const int                                h_token_num,
+                         const int                                layer_id,
+                         const T*                                 input,
+                         T*                                       output,
+                         const AttentionWeight<T>*                attention_weights,
+                         int*                                     lora_ids,
+                         int                                      batch_size,
+                         const int*                               input_lengths);
 
     void Attention(TensorMap* output_tensors, TensorMap* input_tensors, const AttentionWeight<T>* attention_weights);
     bool UseMultiBlockMode() const;
@@ -179,7 +209,7 @@ public:
                         T*           linear_bias_slopes,
                         T*           out,
                         cudaStream_t stream);
-    
+
     bool UseFMHA() override;
 };
 

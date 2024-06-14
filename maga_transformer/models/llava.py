@@ -194,14 +194,11 @@ class Llava(Llama, MultiModalMixin):
                               config.vit_related_params.vit_special_tokens,
                               config.special_tokens.bos_token_id)
     
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor]):
-        return MultiModalMixin.async_input_word_embedding(self, inputs, images)
+    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
+        return MultiModalMixin.async_input_word_embedding(self, inputs, images, token_type_ids)
         
-    def input_word_embedding(self, inputs: torch.Tensor, images: List[Union[torch.Tensor, List[torch.Tensor]]]):
-        return MultiModalMixin.input_word_embedding(self, inputs, images)
-
     @torch.no_grad()
-    def expand_token_id(self, token_ids: List[int], images: List[torch.Tensor]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]]]:
+    def expand_token_id(self, token_ids: List[int], images: List[torch.Tensor]) -> Tuple[List[int], List[torch.Tensor], List[int]]:
         assert self.config.vit_related_params.image_expand_token is not None
         image_token_index = self.config.vit_related_params.vit_special_token_ids["image_token_index"]
         if token_ids.count(image_token_index) != len(images):
@@ -220,10 +217,10 @@ class Llava(Llama, MultiModalMixin):
             raise Exception("Unknown image features data type")
 
         token_ids.extend([image_expand_token] * (total_image_tokens - image_num))
-        return token_ids, image_features
+        return token_ids, image_features, []
     
     def multimodal_embedding(
-        self, input_ids: torch.Tensor, image_features: List[List[Any]]
+        self, input_ids: torch.Tensor, image_features: List[List[Any]], token_type_ids: torch.Tensor
     ):
         image_token_index = self.config.vit_related_params.vit_special_token_ids["image_token_index"]
         ignore_token_index = self.config.vit_related_params.vit_special_token_ids["ignore_token_index"]

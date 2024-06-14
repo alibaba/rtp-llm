@@ -23,6 +23,7 @@ from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_s
 from maga_transformer.utils.tokenizer_utils import DecodingState
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.utils.vit_process_engine import VitEngine
+from maga_transformer.models.cogvlm2 import CogVLM2
 
 class Pipeline(object):
     def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[PreTrainedTokenizerBase]):
@@ -136,6 +137,7 @@ class Pipeline(object):
         token_ids = self.piple_funcs.process_encode_func(prompt,
                                              generate_config=generate_config.model_dump(),
                                              tokenizer=self.tokenizer,
+                                             add_special_tokens=self.model.config.add_special_tokens,
                                              special_tokens=self._special_tokens,
                                              **kwargs)
         
@@ -223,20 +225,23 @@ class Pipeline(object):
     @torch.inference_mode()
     async def generate_stream(self, token_ids: List[int], images: List[Future[Image.Image]],
                             generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
-        if self.model.is_multimodal() and len(images) > 0:
+        token_type_ids = []
+        # CogVLM2 will expand token_ids whether there exist an image or not
+        if (self.model.is_multimodal() and len(images) > 0) or self.model.is_cogvlm2():
             tasks = [asyncio.create_task(self.vit_engine.get(images))]
             await asyncio.wait(tasks)
             images = tasks[0].result()
             tasks = [asyncio.create_task(self.model.expand_token_id(token_ids, images))]
             await asyncio.wait(tasks)
-            token_ids, images = tasks[0].result()
+            token_ids, images, token_type_ids = tasks[0].result()
 
         token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
 
         input = GenerateInput(token_ids=token_ids,
                               images=images,
                               generate_config=generate_config,
-                              tokenizer=self.tokenizer)
+                              tokenizer=self.tokenizer,
+                              token_type_ids=token_type_ids)
 
         # TODO(xinfei.sxf) stop words id 也转化成了 stop words str，导致效率变低？
         stop_word_strs = self._get_stop_word_strs(self.tokenizer, generate_config)

@@ -125,7 +125,7 @@ class ModelWeightsLoader:
         else:
             all_results = [self._load_layer_weight(id, device)
                            for id in range(self._num_layers)]
-            
+
         for results, logs, lora_logs in all_results:
             self._weight_log.update(logs)
             if self._merge_lora:
@@ -133,7 +133,7 @@ class ModelWeightsLoader:
             for (layer_id, name, tensor) in results:
                 weights.append_layer_weight(layer_id, name, tensor)
         for weight in self._model_weights_info.weights:
-            tensor = self._load_and_convert_tensor(weight)
+            tensor = self._load_and_convert_tensor(weight, datatype=self._data_type)
             tensor = self._split_and_sanitize_tensor(tensor, weight)
             tensor = tensor.to('cuda')
             weights.append_pytorch_weight(weight.name, tensor)
@@ -353,7 +353,7 @@ class ModelWeightsLoader:
             try:
                 if self._is_quant_weight(weight):
                     continue
-                tensor = self._load_and_convert_tensor(weight, layer_id=layer_id)
+                tensor = self._load_and_convert_tensor(weight, layer_id=layer_id, datatype=self._data_type)
 
                 if self._merge_lora:
                     tensor = self.apply_lora(tensor, weight, layer_id)

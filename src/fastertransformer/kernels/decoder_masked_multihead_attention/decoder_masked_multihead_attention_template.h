@@ -1488,6 +1488,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     const int input_len            = (params.input_lengths == nullptr) ? 0 : params.input_lengths[batch_beam_idx];
     int       prefix_prompt_length = (params.prefix_prompt_lengths == nullptr) ? 0 : params.prefix_prompt_lengths[batch_beam_idx];
     if (params.rotary_embedding_dim > 0) {
+        const int position_id = params.position_ids == nullptr ? -1 : params.position_ids[batch_beam_idx];
         attention_rope(params.rotary_embedding_style,
                       q,
                       k,
@@ -1502,6 +1503,8 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
                       params.rotary_embedding_max_positions,
                       params.original_max_position_embeddings,
                       params.base_scale,
+                      reinterpret_cast<T*>(params.rotary_embedding_inv_freq),
+                      position_id,
                       input_len,
                       prefix_prompt_length,
                       count_prefix_length,

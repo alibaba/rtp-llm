@@ -30,8 +30,9 @@ public:
                          th::optional<th::Tensor> count_prefix_length,
                          th::optional<th::Tensor> max_prefix_length,
                          th::optional<th::Tensor> key_cache_scale,
-                         th::optional<th::Tensor> value_cache_scale) = 0;
-
+                         th::optional<th::Tensor> value_cache_scale,
+                         th::optional<th::Tensor> token_type_ids) = 0;
+    
     virtual void addLoRA(const int                                                       lora_id,
                         const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_a_weights,
                         const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights)=0;
@@ -68,8 +69,9 @@ public:
                  th::optional<th::Tensor> count_prefix_length,
                  th::optional<th::Tensor> max_prefix_length,
                  th::optional<th::Tensor> key_cache_scale,
-                 th::optional<th::Tensor> value_cache_scale) override;
-
+                 th::optional<th::Tensor> value_cache_scale,
+                 th::optional<th::Tensor> token_type_ids) override;
+    
     virtual void addLoRA(const int                                                       lora_id,
                         const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_a_weights,
                         const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_b_weights) override;
@@ -125,7 +127,8 @@ public:
                        th::optional<th::Tensor> count_prefix_length,
                        th::optional<th::Tensor> max_prefix_length,
                        th::optional<th::Tensor> key_cache_scale,
-                       th::optional<th::Tensor> value_cache_scale);
+                       th::optional<th::Tensor> value_cache_scale,
+                       th::optional<th::Tensor> token_type_ids);
 
     void addLoRA(const int64_t                                                   lora_id,
                          const std::vector<std::unordered_map<std::string, th::Tensor>>& lora_a_weights,
