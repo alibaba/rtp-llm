@@ -9,7 +9,6 @@ from einops import rearrange
 from PIL import Image
 from transformers import AutoTokenizer
 
-from maga_transformer.async_decoder_engine.batch_query import BatchQuery
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.cogvlm2_vit import CogVLM2ImageEmbedding
@@ -120,7 +119,7 @@ class CogVLM2(Llama, MultiModalMixin):
         return tokenizer
 
     def packed_tokens(
-        self, batch_query: BatchQuery
+        self, batch_query
     ) -> Tuple[torch.Tensor, List[Any], torch.Tensor]:
         combo_tokens: List[int] = []
         combo_token_types: List[int] = []
@@ -164,7 +163,7 @@ class CogVLM2(Llama, MultiModalMixin):
         )
 
     def create_position_ids_for_rotary(
-        self, batch_query: BatchQuery
+        self, batch_query
     ) -> Optional[torch.Tensor]:
         # construct position ids for rotary embedding, assuming the token_type_ids is [T, V, V, V, V, V, T, T, T]
         # the expected position ids is [0, 1, 2, 2, 2, 3, 4, 5, 6]
