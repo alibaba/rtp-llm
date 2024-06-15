@@ -8,24 +8,15 @@ import os
 import json
 from typing import List, Any
 
-from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo,\
-    ModelDeployWeightInfo, CkptWeightInfo, \
-    concat_0, concat_1, identity, zeros, transpose, trans_qkv, trans_qkv_b, trans_lora_qkv, transpose_pad, pad
+from maga_transformer.utils.model_weight import (W, WeightInfo, ModelWeightInfo, ModelDeployWeightInfo,
+                                                 CkptWeightInfo, identity, zeros, transpose, transpose_pad,
+                                                 merge_qkv_b, merge_qkv_hf)
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.qwen import QWen
 from maga_transformer.models.gpt import GPT
 from transformers import AutoTokenizer
 from maga_transformer.model_factory_register import register_model
-
-def merge_qkv_b(ts: List[torch.Tensor]):
-    q, k, v = ts
-    qkv_b = torch.concat([q, k, v], dim=0).contiguous()
-    return qkv_b
-
-def merge_qkv_hf(ts: List[torch.Tensor]):
-    q, k, v = ts
-    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
-    return qkv_weight
+from maga_transformer.utils.group_quant_weight_util import get_layer_group_quant_weight_info
 
 class QWenV2Weight(ModelDeployWeightInfo):
     def _get_weight_info(self):
@@ -64,74 +55,6 @@ class QWenV2Weight(ModelDeployWeightInfo):
         layer_weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
         return layer_weights
 
-    def _get_hf_quant_weight_info(self, layer_id: int):
-        inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
-        group_size = self._quant_algo.getGroupSize()
-        pad_div = 32 // self._quant_algo.getWeightBits()
-        is_awq = self._quant_algo.isAwq()
-        is_gptq = self._quant_algo.isGptq()
-
-        layer_quant_weights =[
-            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)],
-                       identity),
-            # quant_weight
-            WeightInfo(W.attn_qkv_w, [
-                    CkptWeightInfo('model.layers.{i}.self_attn.q_proj.qweight', transpose),
-                    CkptWeightInfo('model.layers.{i}.self_attn.k_proj.qweight', transpose),
-                    CkptWeightInfo('model.layers.{i}.self_attn.v_proj.qweight', transpose)
-                ],
-                functools.partial(merge_qkv_hf)),
-            WeightInfo(W.attn_qkv_z, [
-                    CkptWeightInfo('model.layers.{i}.self_attn.q_proj.qzeros', transpose),
-                    CkptWeightInfo('model.layers.{i}.self_attn.k_proj.qzeros', transpose),
-                    CkptWeightInfo('model.layers.{i}.self_attn.v_proj.qzeros', transpose)
-                ],
-                functools.partial(merge_qkv_hf)),
-            WeightInfo(W.attn_qkv_s, [
-                    CkptWeightInfo('model.layers.{i}.self_attn.q_proj.scales', transpose),
-                    CkptWeightInfo('model.layers.{i}.self_attn.k_proj.scales', transpose),
-                    CkptWeightInfo('model.layers.{i}.self_attn.v_proj.scales', transpose)
-                ],
-                functools.partial(merge_qkv_hf)),
-            WeightInfo(W.attn_qkv_b, [
-                    CkptWeightInfo('model.layers.{i}.self_attn.q_proj.bias', identity),
-                    CkptWeightInfo('model.layers.{i}.self_attn.k_proj.bias', identity),
-                    CkptWeightInfo('model.layers.{i}.self_attn.v_proj.bias', identity)
-                ],
-                functools.partial(merge_qkv_b)),
-
-            WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.qweight', identity)],
-                       identity),
-            WeightInfo(W.attn_o_z, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.qzeros', identity)],
-                       identity),
-            WeightInfo(W.attn_o_s, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.scales', identity)],
-                       identity),
-
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.qweight', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//pad_div if is_awq else inter_padding_size, dim=1)),
-            WeightInfo(W.ffn_z1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.qzeros', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//pad_div, dim=1)),
-            WeightInfo(W.ffn_s1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.scales', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size, dim=1)),
-
-            WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.qweight', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//pad_div if is_awq else inter_padding_size, dim=1)),
-            WeightInfo(W.ffn_z3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.qzeros', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//pad_div, dim=1)),
-            WeightInfo(W.ffn_s3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.scales', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size, dim=1)),
-
-            WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.qweight', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//pad_div if is_gptq else inter_padding_size, dim=0)),
-            WeightInfo(W.ffn_z2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.qzeros', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//group_size, dim=0)),
-            WeightInfo(W.ffn_s2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.scales', identity)],
-                       functools.partial(pad, inter_padding_size=inter_padding_size//group_size, dim=0)),
-                WeightInfo(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)],
-                           identity),
-        ]
-        return layer_quant_weights
-
     def _get_hf_weight_info(self):
         weights = [
             WeightInfo(W.embedding, [CkptWeightInfo('model.embed_tokens.weight', identity)], identity),
@@ -143,7 +66,9 @@ class QWenV2Weight(ModelDeployWeightInfo):
         layer_weights: List[List[WeightInfo]] = []
         for layer in range(self._num_layers):
             if self._quant_algo.isGroupwise():
-                w = self._get_hf_quant_weight_info(layer)
+                inter_padding_size = self._layer_inter_padding_size[layer] if self._layer_inter_padding_size else self._inter_padding_size                
+                w = self._get_hf_layer_weight_info(layer)
+                w = get_layer_group_quant_weight_info(w, self._quant_algo, inter_padding_size)
                 layer_weights.append(w)
             else:
                 w = self._get_hf_layer_weight_info(layer)

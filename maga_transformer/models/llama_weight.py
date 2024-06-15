@@ -6,9 +6,11 @@ import torch
 from typing import List, Any
 from einops import rearrange
 
-from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, LoRAModelWeightInfo, \
-    ModelDeployWeightInfo, CkptWeightInfo, \
-    concat_1, concat_0, identity, zeros, transpose, merge_qkv_lora_A, merge_qkv_lora_B, shift_one
+from maga_transformer.utils.model_weight import (W, WeightInfo, ModelWeightInfo, LoRAModelWeightInfo,
+                                                 ModelDeployWeightInfo, CkptWeightInfo, concat_1,
+                                                 concat_0, identity, zeros, transpose, merge_qkv_lora_A,
+                                                 merge_qkv_lora_B, shift_one, pad, merge_qkv_b)
+from maga_transformer.utils.group_quant_weight_util import get_layer_group_quant_weight_info
 
 # permute for sliced rotary
 def permute(w, head_num, dim1, dim2):
@@ -21,16 +23,10 @@ def merge_qkv(ts, hidden_size, head_num_kv, head_num):
     qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
     return qkv_weight
 
-def merge_qkv_hf(ts, hidden_size, head_num_kv, head_num):
+def merge_qkv_hf(ts: List[torch.Tensor], hidden_size, head_num_kv, head_num):
     q, k, v = ts
     qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
     return qkv_weight
-
-def merge_qkv_b(ts):
-    q, k, v = ts
-    qkv_b = torch.concat([q, k, v], dim=0).contiguous()
-    return qkv_b
-
 
 def qkv_rerange(ts, hidden_size, head_num_kv, head_num):
     num_key_value_groups = int(head_num // head_num_kv)
@@ -258,6 +254,9 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
             else:
                 layer_weights.append(
                     WeightInfo(W.attn_qkv_w, [CkptWeightInfo(self._names.W_QKV, identity)], transpose))
+
+        if self._quant_algo.isGptq() or self._quant_algo.isAwq():
+            layer_weights = get_layer_group_quant_weight_info(layer_weights, self._quant_algo, self._inter_padding_size)
 
         lora_base_name = "base_model.model.{}.{}.weight"
         lora_weights = []

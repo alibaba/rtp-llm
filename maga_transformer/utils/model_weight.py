@@ -221,6 +221,16 @@ def sp_0_pad8(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Te
         else:
             return t[tp_rank * per_slice_size:(tp_rank + 1) * per_slice_size]
 
+def merge_qkv_hf(ts: List[torch.Tensor]):
+    q, k, v = ts
+    qkv_weight = torch.concat([q.T, k.T, v.T], dim=1).contiguous()
+    return qkv_weight
+
+def merge_qkv_b(ts: List[torch.Tensor]):
+    q, k, v = ts
+    qkv_b = torch.concat([q, k, v], dim=0).contiguous()
+    return qkv_b
+
 def trans_lora_qkv(ts: List[torch.Tensor], head_num: int, head_size: int):
     split = 3
     r = ts[0].shape[1]
