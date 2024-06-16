@@ -33,6 +33,7 @@ cc_library(
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_header",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_header",
         "//src/fastertransformer/layers:layers",
+        "//src/fastertransformer/cuda:expert_attention_util",
         "//src/fastertransformer/cuda:cuda",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",

@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union, NamedTuple
 from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.ops.ft_op_base import FTOPBase
-from maga_transformer.utils.weight_type import WEIGHT_TYPE, to_cuda
+from maga_transformer.utils.weight_type import WEIGHT_TYPE
+from maga_transformer.utils.util import to_cuda
 from maga_transformer.utils.sample_utils import HuggingfaceSampler, FtSampler, BaseSampler, DynamicDecodeOp, BeamSearchSampler
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
