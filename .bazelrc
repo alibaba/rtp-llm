@@ -113,3 +113,5 @@ test --test_env OMP_NUM_THREADS=8
 test --test_env FT_SERVER_TEST="1"
 test --test_env PY_LOG_LEVEL="INFO"
 
+test:l20 --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"
+try-import %workspace%/internal_source/.internal_bazelrc
