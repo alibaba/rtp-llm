@@ -233,9 +233,8 @@ class NormalModelExecutor(ExecutorBase):
                 print('hidden_states after layernorm', hidden_states, flush=True)
         assert self.model_ops.model.lm_head is not None
         logits = self.model_ops.model.lm_head(hidden_states).float()
-        # if debug_print():
-        print('logits', logits, flush=True)
-        print('logits top10', logits.topk(10), flush=True)
+        if debug_print():
+            print('logits', logits, flush=True)
         if 'CHECK_LOGITS_NAN' in os.environ:
             logits_cpu = to_cpu(logits.view(-1))
             if any(torch.isnan(logits_cpu).numpy().tolist()):

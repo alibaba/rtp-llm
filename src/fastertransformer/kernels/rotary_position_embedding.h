@@ -1095,6 +1095,7 @@ __device__ inline void context_rope(int       RopeStyle,
                 q, smem, tidx, seqidx, dim, base, scaling_factor, org_embedding_pos);
             Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>::impl(
                 k, smem, tidx, seqidx, dim, base, scaling_factor, org_embedding_pos);
+            break;
 
         case 7:
             // cogvlm2 rotary embedding
@@ -1188,6 +1189,7 @@ __device__ inline void attention_rope(int       RopeStyle,
                 Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>::impl(
                     k, smem, tidx, tlength, dim, base, scaling_factor, org_embedding_pos);
             }
+            break;
 
         case 7:
             // cogvlm2 rotary embedding

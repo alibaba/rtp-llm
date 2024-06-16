@@ -22,7 +22,7 @@ class CogVLM2Renderer(CustomChatRenderer):
         self.first_query: bool = True
         self.template_version: str = renderer_params.template_version
 
-    def query_answer_template(template_version: str) -> str:
+    def query_answer_template(self, template_version: str) -> str:
         if template_version == 'base':
             return "{}", "{}"
         elif template_version == 'vqa':
@@ -53,28 +53,30 @@ class CogVLM2Renderer(CustomChatRenderer):
             query_format, answer_format = self.query_answer_template(template_version)
         
         last_message = ""
+        last_format_message = ""
         # handle history message and save the latest query in last_message
         # For messages with multiple content parts(containing history message), we assume last message is the lastest query. 
         # cogvlm2 chat template distinguishes between query and answer, and we assume the query's role is user and answer's role is assistant
         # see https://huggingface.co/THUDM/cogvlm2-llama3-chat-19B/blob/main/modeling_cogvlm.py#580
         for message in messages:
-            prompt += last_message
+            prompt += last_format_message
             if isinstance(message.content, str):
                 last_message = message.content
                 if message.role == RoleEnum.user:
-                    last_message = query_format.format(message.text)
+                    last_format_message = query_format.format(last_message)
                 elif message.role == RoleEnum.assistant:
-                    last_message = answer_format.format(message.text)
+                    last_format_message = answer_format.format(last_message)
                 else:
                     raise Exception(f"Unknown role: {message.role}")
             elif isinstance(message.content, list):
                 for content_part in message.content:
                     if content_part.type == ContentPartTypeEnum.text:
                         assert (isinstance(content_part.text, str))
+                        last_message = content_part.text
                         if message.role == RoleEnum.user:
-                            last_message = query_format.format(message.text)
+                            last_format_message = query_format.format(last_message)
                         elif message.role == RoleEnum.assistant:
-                            last_message = answer_format.format(message.text)
+                            last_format_message = answer_format.format(last_message)
                         else:
                             raise Exception(f"Unknown role: {message.role}")
                     elif content_part.type == ContentPartTypeEnum.image_url:
@@ -90,8 +92,8 @@ class CogVLM2Renderer(CustomChatRenderer):
             if template_version == 'base':
                 prompt += last_message
             else:
-                # remove tail \n for template_version 'vqa' and 'chat'
-                prompt += 'Question: {} {}'.format(last_message, answer_format[:-1])
+                # remove tail answer_format for template_version 'vqa' and 'chat'
+                prompt += 'Question: {}{}'.format(last_message, answer_format[:-4])
 
         self.first_query = False
 

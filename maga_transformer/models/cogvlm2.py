@@ -98,6 +98,7 @@ class CogVLM2(Llama, MultiModalMixin):
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         config.template_version = config_json.get("template_version", "chat")
+        config.reserve_runtime_mem_mb = 2048
 
         vit_config = config_json["vision_config"]
         config.vit_related_params.config.update(vit_config)

@@ -127,6 +127,7 @@ struct Multihead_attention_params_base {
     // 4: qwen dynamic ntk
     // 5: linear
     // 6: yarn
+    // 7: cogvlm2
     int  rotary_embedding_style = 0;
     bool use_logn_attn          = false;
     int  logn_seq_len           = 2048;
