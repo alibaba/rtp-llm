@@ -60,7 +60,6 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
     allocateBuffer(input_tensors->at("ffn_input").shape()[0], use_moe);
 
     const int m             = input_tensors->at("ffn_input").shape()[0];
-    const bool use_vision_ffn_weight = input_tensors->getVal<bool>("use_vision_ffn_weight");
     T*        output_tensor = output_tensors->at("ffn_output").getPtr<T>();
     const T*  input_tensor  = input_tensors->at("ffn_input").getPtr<const T>();
     const int layer_id      = input_tensors->getVal<int>("layer_id");
@@ -193,7 +192,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                        cur_inter_size,
                        hidden_units_,
                        input_tensor,
-                       use_vision_ffn_weight ? &ffn_weights->vision_intermediate_weight2 : &ffn_weights->intermediate_weight2,
+                       &ffn_weights->intermediate_weight2,
                        inter_buf_,
                        ffn_dynamic_scale);
 
@@ -216,7 +215,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                            cur_inter_size,
                            hidden_units_,
                            input_tensor,
-                           use_vision_ffn_weight ? &ffn_weights->vision_intermediate_weight : &ffn_weights->intermediate_weight,
+                           &ffn_weights->intermediate_weight,
                            inter_buf_2_,
                            ffn_dynamic_scale);
         // lora
@@ -293,7 +292,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                        hidden_units_,
                        cur_inter_size,
                        inter_buf_normed_output,
-                       use_vision_ffn_weight ? &ffn_weights->vision_output_weight : &ffn_weights->output_weight,
+                       &ffn_weights->output_weight,
                        output_tensor,
                        ffn_dynamic_scale_2_);
 

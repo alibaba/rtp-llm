@@ -663,7 +663,6 @@ void ParallelGpt<T>::forward(TensorMap*                                         
             Ffnforward(expert_attention_util, ffn_input_ptr, ffn_output_ptr, h_token_num, activation_in_type, hidden_units, input_tensors, 
             l, total_batch_size, lora_input_lengths, activation_out_type, ffn_batch_size_lora, layer_weight, use_moe, true);
             expert_attention_util->reorganize();
-            expert_attention_util->freeBuffer();
         }
 
         // the adapter after ffn (only pre layernorm currently)
@@ -725,8 +724,7 @@ void ParallelGpt<T>::Ffnforward(std::unique_ptr<ExpertAttentionUtil<T>>& expert_
     bool use_moe_instead_ffn = params_.moe_style_ == 1;
     // for cogvlm2, we perform expertFfn when there exists vision tokens in the input(in context stage), otherwise we perform expertFfn directly
     if (expert_attention_util && expert_attention_util->vision_token_length() > 0) {
-        assert(params_.moe_style_ == 0);
-        assert(!use_moe);
+        assert(params_.moe_style_ == 0 && !use_moe && !use_moe_instead_ffn);
         if (vision) {
             ffn_input_ptr = expert_attention_util->vision_split_buf();
             ffn_output_ptr = expert_attention_util->vision_intermediate_buf();
@@ -742,11 +740,10 @@ void ParallelGpt<T>::Ffnforward(std::unique_ptr<ExpertAttentionUtil<T>>& expert_
     }
     TensorMap ffn_input_tensors(
         {{"ffn_input", Tensor{MEMORY_GPU, activation_in_type, {token_length, hidden_units}, ffn_input_ptr}},
-         {"layer_id", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &l}},
-         {"lora_ids", input_tensors->at("lora_ids")},
-         {"lora_input_lengths", Tensor{MEMORY_GPU, TYPE_INT32, {total_batch_size}, lora_input_lengths}},
-         {"batch_size", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &ffn_batch_size_lora}},
-         {"use_vision_ffn_weight", Tensor{MEMORY_CPU, TYPE_BOOL, {(size_t)1}, &vision}}});
+        {"layer_id", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &l}},
+        {"lora_ids", input_tensors->at("lora_ids")},
+        {"lora_input_lengths", Tensor{MEMORY_GPU, TYPE_INT32, {total_batch_size}, lora_input_lengths}},
+        {"batch_size", Tensor{MEMORY_CPU, TYPE_INT32, {(size_t)1}, &ffn_batch_size_lora}}});
     if(quant_algo_.smoothQuantInt8()){
         FT_CHECK_WITH_INFO(ffn_intermediate_dynamic_scale_ != nullptr, "ffn_dynamic_scale should not be nullptr");
         ffn_input_tensors.insert("ffn_dynamic_scale", Tensor{MEMORY_GPU, TYPE_FP32, {token_length, 1}, ffn_intermediate_dynamic_scale_});
@@ -770,9 +767,8 @@ void ParallelGpt<T>::Ffnforward(std::unique_ptr<ExpertAttentionUtil<T>>& expert_
 
     ffn_layer_->forward(&ffn_output_tensors,
         &ffn_input_tensors,
-        use_moe_instead_ffn
-            ? &layer_weight->partial_moe_weights
-            : &layer_weight->ffn_weights,
+        use_moe_instead_ffn ? &layer_weight->partial_moe_weights: 
+            vision ? &layer_weight->vision_ffn_weights: &layer_weight->ffn_weights,
         use_moe_instead_ffn);
 
     print_bsd(l, "post ffn", ffn_output_ptr, 1, token_length, hidden_units);
