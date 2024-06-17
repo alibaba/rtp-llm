@@ -75,12 +75,6 @@ class GPTFunctionDefinition(BaseModel):
     name_for_human: Optional[str] = None
     description_for_model: Optional[str] = None
 
-class ExtraConfigs(BaseModel):
-    top_k: Optional[int] = None
-    repitition_penalty: Optional[float] = None
-    max_new_tokens: Optional[int] = None
-    timeout_ms: Optional[int] = None
-
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
@@ -100,7 +94,7 @@ class ChatCompletionRequest(BaseModel):
     # logit_bias: Optional[Dict[str, float]] = None
 
     # ---- These params are hacked for our framework, not standard.
-    extra_configs: Optional[ExtraConfigs] = None
+    extra_configs: Optional[GenerateConfig] = None
     private_request: bool = False
     trace_id: Optional[str] = None
     chat_id: Optional[str] = None

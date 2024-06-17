@@ -71,7 +71,7 @@ class OpenaiEndopoint():
 
     def _extract_generation_config(self, request: ChatCompletionRequest) -> GenerateConfig:
         # TODO(wangyin): implement this
-        config = GenerateConfig()
+        config = request.extra_configs or GenerateConfig()
         if request.stream != None:
             config.is_streaming = request.stream
         if request.temperature != None:
@@ -89,14 +89,6 @@ class OpenaiEndopoint():
             config.chat_id = request.chat_id
         if request.seed != None:
             config.random_seed = request.seed
-        extra_configs = request.extra_configs
-        if extra_configs:
-            if extra_configs.top_k:
-                config.top_k = extra_configs.top_k
-                config.top_p = 0.0
-            config.repetition_penalty = extra_configs.repitition_penalty or config.repetition_penalty
-            config.max_new_tokens = extra_configs.max_new_tokens or config.max_new_tokens
-            config.timeout_ms = extra_configs.timeout_ms or config.timeout_ms
         return config
 
     async def _collect_complete_response(
