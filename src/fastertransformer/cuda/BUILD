@@ -160,6 +160,7 @@ cc_library(
     deps = [
         ":cuda_utils_cu",
         "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/core:types",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],

@@ -2,7 +2,7 @@
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingQueryConverter.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "src/fastertransformer/utils/pybind_utils.h"
+#include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 
 using namespace std;

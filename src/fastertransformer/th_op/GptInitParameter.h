@@ -3,7 +3,7 @@
 #include "src/fastertransformer/utils/layernorm_types.h"
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/utils/quantization.h"
-#include "src/fastertransformer/utils/pybind_utils.h"
+#include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 
 #include <vector>
 #include <map>

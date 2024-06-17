@@ -1,6 +1,5 @@
 #pragma once
-#include "src/fastertransformer/core/Buffer.h"
-
+#include <string>
 #include <vector>
 #include <algorithm>
 

@@ -48,6 +48,7 @@ cc_library(
     ],
     deps = [
         ":gpt_init_params_hdr",
+        "//src/fastertransformer/utils:py_utils",
     ],
     copts = copts(),
     alwayslink = True,

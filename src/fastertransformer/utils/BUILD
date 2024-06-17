@@ -40,9 +40,21 @@ cc_library(
     ]),
     deps = torch_deps() + [
         ":logger",
-        ":assert_utils",
-        "//src/fastertransformer/core:buffer"
+        ":assert_utils"
     ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "py_utils",
+    srcs = glob([
+        "py_utils/*.cc",
+    ]),
+    hdrs = glob([
+        "py_utils/*.h",
+    ]),
+    deps = torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],
 )

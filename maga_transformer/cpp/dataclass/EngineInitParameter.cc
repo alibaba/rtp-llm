@@ -3,7 +3,7 @@
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/models/W.h"
-#include "src/fastertransformer/utils/pybind_utils.h"
+#include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include <memory>
 
 using namespace std;
@@ -115,9 +115,11 @@ unique_ptr<const Weights> WeightsConverter::convertPythonWeights(const PyModelWe
 std::unordered_map<std::string, ft::ConstBufferPtr>
 WeightsConverter::convertPyWeightsMap(py::object py_global_weights) {
     std::unordered_map<std::string, ft::ConstBufferPtr> global_weights;
-    auto global_weights_cc = fastertransformer::convertPyObjectToDict(py_global_weights);
+    auto global_weights_cc = ft::convertPyObjectToDict(py_global_weights);
     for (auto& it : global_weights_cc) {
-        global_weights.emplace(it.first, ft::torchTensor2Buffer(it.second));
+        global_weights.emplace(it.first,
+                               ft::torchTensor2Buffer(
+                                   ft::convertPyObjectToTensor(it.second)));
     }
     return global_weights;
 }
@@ -125,11 +127,13 @@ WeightsConverter::convertPyWeightsMap(py::object py_global_weights) {
 std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>
 WeightsConverter::convertPyWeightsMapVec(py::object py_layers_weights) {
     std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layers_weights;
-    auto layers_weights_cc = fastertransformer::convertPyobjectToVectorDict(py_layers_weights);
+    auto layers_weights_cc = ft::convertPyObjectToVec(py_layers_weights);
     for (auto& layer_weights : layers_weights_cc) {
         std::unordered_map<std::string, ft::ConstBufferPtr> weights;
-        for (auto& it : layer_weights) {
-            weights.emplace(it.first, ft::torchTensor2Buffer(it.second));
+        for (auto& it : convertPyObjectToDict(layer_weights)) {
+            weights.emplace(it.first,
+                            ft::torchTensor2Buffer(
+                                ft::convertPyObjectToTensor(it.second)));
         }
         layers_weights.emplace_back(std::move(weights));
     }
