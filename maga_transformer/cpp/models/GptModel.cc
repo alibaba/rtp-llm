@@ -69,7 +69,11 @@ BufferPtr GptModel::tpSyncEmbeddingOrLogits(const BufferPtr& buffer) {
 
 void GptModel::prepareAttentionInputs(
         const GptModelInputs& inputs,
-        AttentionCommonInputs& attention_inputs) {
+        AttentionCommonInputs& attention_inputs)
+{
+    checkKvBlocksShape(inputs.kv_cache_blocks);
+    checkKvBlocksShape(inputs.kv_cache_scales);
+
     const auto& input_lengths = inputs.input_lengths;
     const auto& sequence_lengths = inputs.sequence_lengths;
     const auto decoder_batch_size = sequence_lengths->shape()[0];
@@ -95,8 +99,6 @@ void GptModel::prepareAttentionInputs(
         "combo_tokens is not consistent with input lengths, "
         "there are %d tokens in context plus %d tokens in decoder batch, but got %d input tokens.",
         cu_seqlens_data[context_batch_size], decoder_batch_size, inputs.combo_tokens->shape()[0]);
-    checkKvBlocksShape(inputs.kv_cache_blocks);
-    checkKvBlocksShape(inputs.kv_cache_scales);
 
     attention_inputs.cu_seqlens = device_->clone(
         {*vector2Buffer(cu_seqlens_data), AllocationType::DEVICE, {"cu_seqlens"}});

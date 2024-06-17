@@ -120,7 +120,7 @@ protected:
         auto host_buffer = createHostBuffer<T>(shape, data);
         auto buffer = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::DEVICE}, {});
         if (data && (buffer->size() > 0)) {
-            device_->copy(CopyParams(*buffer, *host_buffer));
+            device_->copy({*buffer, *host_buffer});
         }
         device_->syncAndCheck();
         return move(buffer);
@@ -141,7 +141,7 @@ protected:
         auto comp_buffer = device_->allocateBuffer(
             {buffer.type(), buffer.shape(), AllocationType::HOST}
         );
-        device_->copy(CopyParams(*comp_buffer, buffer));
+        device_->copy({*comp_buffer, buffer});
         device_->syncAndCheck();
         for (size_t i = 0; i < buffer.size(); i++) {
             printf("i=%ld, buffer[i] = %f, expected[i] = %f\n", i,
@@ -156,7 +156,7 @@ protected:
         device_->syncAndCheck();
         if (buffer.where() == MemoryType::MEMORY_GPU) {
             auto host_buffer = createHostBuffer<T>(buffer.shape(), nullptr);
-            device_->copy(CopyParams(*host_buffer, buffer));
+            device_->copy({*host_buffer, buffer});
             device_->syncAndCheck();
             memcpy(values.data(), host_buffer->data(), sizeof(T) * buffer.size());
         } else {
@@ -179,7 +179,7 @@ protected:
             auto device_buffer = device_->allocateBuffer(
                 {buffer->type(), buffer->shape(), AllocationType::DEVICE}
             );
-            device_->copy(CopyParams(*device_buffer, *buffer));
+            device_->copy({*device_buffer, *buffer});
             device_->syncAndCheck();
             printf("created device buffer from tensor at %p with data=%p\n", device_buffer.get(), device_buffer->data());
             return std::move(device_buffer);
@@ -196,7 +196,7 @@ protected:
         auto buffer = torchTensor2Buffer(tensor, scales, zeros);
         if (alloc_type == AllocationType::DEVICE) {
             auto device_buffer = device_->allocateBufferLike(*buffer);
-            device_->copy(CopyParams(*device_buffer, *buffer));
+            device_->copy({*device_buffer, *buffer});
             device_->syncAndCheck();
             printf("created device buffer from tensor at %p with data=%p\n", device_buffer.get(), device_buffer->data());
             return std::move(device_buffer);
@@ -212,7 +212,7 @@ protected:
         auto host_buffer = device->allocateBuffer(
             {buffer.type(), buffer.shape(), AllocationType::HOST}
         );
-        device->copy(CopyParams(*host_buffer, buffer));
+        device->copy({*host_buffer, buffer});
         device->syncAndCheck();
 
         return torch::from_blob(
@@ -328,9 +328,9 @@ protected:
     torch::Tensor randTensor(at::IntArrayRef shape,
                              torch::Dtype dtype,
                              int64_t seed = 0) {
-        torch::TensorOptions float_options = 
+        torch::TensorOptions float_options =
             torch::TensorOptions(torch::kFloat).device(torch::Device(torch::kCPU));
-        torch::TensorOptions half_tensor_options = 
+        torch::TensorOptions half_tensor_options =
             torch::TensorOptions(torch::kFloat16).device(torch::Device(torch::kCPU));
         auto generator = at::detail::createCPUGenerator();
         if (seed != 0) {
@@ -345,7 +345,7 @@ protected:
         } else {
             output = output.to(dtype);
         }
-        return output;                            
+        return output;
     }
 
 protected:

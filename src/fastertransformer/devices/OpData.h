@@ -89,24 +89,12 @@ struct CloneParams {
 };
 
 struct CopyParams {
-    CopyParams(const Buffer& dst, const Buffer& src)
-    : dst(dst), src(src)
-    {}
-
-    // copy from part of src to full dst, offsets / size are at dim 0.
-    CopyParams(const Buffer& dst, const Buffer& src,
-               const size_t dst_offset, const size_t src_offset,
-               const size_t copy_length)
-    : dst(dst), src(src)
-    , dst_offset(dst_offset), src_offset(src_offset), copy_length(copy_length)
-    {}
-
     const Buffer& dst;
     const Buffer& src;
 
-    size_t dst_offset = 0;
-    size_t src_offset = 0;
-    size_t copy_length = 0;
+    size_t dst_offset  = 0;
+    size_t src_offset  = 0;
+    int64_t copy_length = -1;
 };
 
 using SelectOutput = BufferPtr;
@@ -133,6 +121,13 @@ using ConvertOutput = BufferPtr;
 struct ConvertParams {
     const BufferPtr input;
     const DataType type;
+};
+
+using ConcatOutput = BufferPtr;
+
+struct ConcatParams {
+    const std::vector<BufferPtr>& inputs;
+    const size_t dim = 0;
 };
 
 using LayernormOutput = void;

@@ -164,10 +164,4 @@ inline std::array<torch::Tensor, 3> QBuffer2torchTensor(const ConstQBufferPtr& b
                                                               nullptr))))};
 }
 
-inline void bufferCopy(const BufferPtr& src, torch::Tensor& dst, size_t numberOfElements) {
-    assert(dst.device().is_cpu());
-    size_t copySize = src->typeSize() * numberOfElements;
-    memcpy((void*)(dst.data_ptr<int>()), src->data(), copySize);
-}
-
 } // namespace fastertransformer

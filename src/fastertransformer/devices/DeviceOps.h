@@ -16,6 +16,7 @@ public:
     virtual TransposeOutput transpose(const TransposeParams& params);
     virtual ConvertOutput convert(const ConvertParams& params);
     virtual SelectOutput select(const SelectParams& params);
+    virtual ConcatOutput concat(const ConcatParams& params);
 
     // basic compuation ops
     virtual LayernormOutput layernorm(const LayernormParams& params);

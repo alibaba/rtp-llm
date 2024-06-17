@@ -26,6 +26,10 @@ SelectOutput DeviceOps::select(const SelectParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+ConcatOutput DeviceOps::concat(const ConcatParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 LayernormOutput DeviceOps::layernorm(const LayernormParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

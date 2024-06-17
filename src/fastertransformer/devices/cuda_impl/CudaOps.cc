@@ -32,9 +32,9 @@ void CudaDevice::copy(const CopyParams& params) {
     const auto dst_offset = params.dst_offset;
     auto copy_length = params.copy_length;
 
-    if (copy_length == 0) {
+    if (copy_length < 0) {
         RUNTIME_ASSERT_OP_ARG(params.src.shape()[0] == params.dst.shape()[0],
-            "src and dst 0d size mismatch: [%s] vs [%s]",
+            "src and dst 0-dim size mismatch: [%s] vs [%s]",
             params.src.debugString().c_str(), params.dst.debugString().c_str());
         copy_length = params.src.shape()[0];
     }
@@ -64,14 +64,17 @@ void CudaDevice::copy(const CopyParams& params) {
     } else {
         copyType = cudaMemcpyHostToHost;
     }
+
     if (copyType == cudaMemcpyHostToHost) {
         std::memcpy(dst.data(), src.data(), src.sizeBytes());
     } else {
         cudaMemcpyAsync(dst.data(), src.data(), src.sizeBytes(), copyType, stream_);
     }
+
     if (copyType == cudaMemcpyDeviceToHost) {
         cudaStreamSynchronize(stream_);
     }
+
     sync_check_cuda_error();
 }
 

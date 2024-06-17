@@ -19,7 +19,7 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
     auto host_buffer = device->allocateBuffer(
         {buffer.type(), buffer.shape(), AllocationType::HOST}
     );
-    device->copy(CopyParams(*host_buffer, buffer));
+    device->copy({*host_buffer, buffer});
     device->syncAndCheck();
 
     auto tensor = torch::from_blob(

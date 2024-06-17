@@ -37,9 +37,7 @@ public:
     void updatePrefix(const std::vector<int>& prefix_prompt) {
         prefix_length   = prefix_prompt.size();
         auto device     = ft::DeviceFactory::getDefaultDevice();
-        auto new_input  = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)prefix_length + (size_t)inputLength()}, ft::AllocationType::HOST}, {});
-        ft::bufferConcat(ft::vector2Buffer(prefix_prompt), input_ids, new_input);
-        input_ids = std::move(new_input);
+        input_ids = device->concat({{ft::vector2Buffer(prefix_prompt), input_ids}});
     }
 
 public:

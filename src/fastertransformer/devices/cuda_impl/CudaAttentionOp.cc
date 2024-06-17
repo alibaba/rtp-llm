@@ -277,8 +277,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                      seq_len,
                                      token_num);
         return;
-    }
-    else if (use_openSource_fmha && cufmha_runner_->openSourceFmhaSupport()) {
+    } else if (use_openSource_fmha && cufmha_runner_->openSourceFmhaSupport()) {
 
         auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32,
                                             {batch_size, head_num, seq_len},
@@ -296,8 +295,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                           batch_size,
                                           seq_len);
         return;
-    }
-    else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport()) {
+    } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport()) {
 
         auto qkv_buf_temp  = allocateBuffer({DataType::TYPE_FP16,
                                             {token_num, head_num + 2 * kv_head_num, size_per_head},
@@ -312,8 +310,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                      seq_len,
                                      token_num);
         return;
-    }
-    else {
+    } else {
         FT_LOG_INFO("Do not use fmha!");
         // TODO(lidongjin): Only support float32 gemm output.
         auto qk_output = gemm({*q_output,
@@ -356,10 +353,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     }
 
 }
-
-struct SelfAttentionArgs {
-
-};
 
 template<typename T>
 void selfAttentionwrapper(const AttentionModuleParams params,

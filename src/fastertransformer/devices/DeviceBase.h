@@ -16,7 +16,7 @@ public:
     void traceMemoryUsage();
     BufferPtr allocateBuffer(const BufferParams& params, const BufferHints& hints = {});
     BufferPtr allocateBufferLike(const Buffer& buffer,
-                                 const AllocationType atype = AllocationType::DEVICE,  
+                                 const AllocationType atype = AllocationType::DEVICE,
                                  const BufferHints& hints = {});
     virtual void syncAndCheck();
     virtual void syncCommunication(bool timeout = true);
@@ -24,6 +24,7 @@ public:
 public:
     // device-independence op implementations
     CloneOutput clone(const CloneParams& params) override;
+    ConcatOutput concat(const ConcatParams& params) override;
     AttentionLayerOutput attentionLayer(const AttentionLayerParams& params) override;
     FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
     LoraLinearOutput loraLinear(const LoraLinearParams& params) override;
