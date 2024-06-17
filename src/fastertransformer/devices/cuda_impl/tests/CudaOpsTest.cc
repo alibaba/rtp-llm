@@ -10,6 +10,8 @@ class CudaOpsTest: public DeviceTestBase {
 public:
 };
 
+// TODO(wangyin.yx): transfer these tests to BasicDeviceTest when cpu ready.
+
 TEST_F(CudaOpsTest, testCopyWithSlicing) {
     using TestT = int32_t;
 
@@ -84,5 +86,57 @@ TEST_F(CudaOpsTest, testQBufferCopy) {
     EXPECT_TRUE(torch::equal(result_dst[0], tensor));
     EXPECT_TRUE(torch::equal(result_dst[1], scales));
     EXPECT_TRUE(torch::equal(result_dst[2], zeros));
+}
 
-} 
+TEST_F(CudaOpsTest, testConcat) {
+    auto src1 = createBuffer<float>({4, 3}, {
+        0, 1, 2,
+        3, 4, 5,
+        6, 7, 8,
+        9, 10, 11
+    });
+    auto src2 = createBuffer<float>({1, 3}, {
+        111, 222, 333
+    });
+    auto src3 = createBuffer<float>({2, 3}, {
+        1000, 1001, 1002,
+        1003, 1004, 1005,
+    });
+    auto result = device_->concat({{src1, src2, src3}});
+    device_->syncAndCheck();
+    auto expected = torch::tensor({
+        {0, 1, 2},
+        {3, 4, 5},
+        {6, 7, 8},
+        {9, 10, 11},
+        {111, 222, 333},
+        {1000, 1001, 1002},
+        {1003, 1004, 1005}
+    }, torch::kFloat32);
+    assertTensorClose(bufferToTensor(*result), expected, 1e-6, 1e-6);
+}
+
+TEST_F(CudaOpsTest, testSelect) {
+    auto src = createBuffer<float>({6, 5}, {
+        0, 1, 2, 3, 4,
+        5, 6, 7, 8, 9,
+        10, 11, 12, 13, 14,
+        15, 16, 17, 18, 19,
+        20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29
+    });
+    auto index = createBuffer<int32_t>({3}, {0, 2, 3});
+
+    auto result = device_->select({*src, *index});
+    auto expected = torch::tensor({
+        {0, 1, 2, 3, 4},
+        {10, 11, 12, 13, 14},
+        {15, 16, 17, 18, 19}
+    }, torch::kFloat32);
+    assertTensorClose(bufferToTensor(*result), expected, 1e-6, 1e-6);
+
+    auto src2 = device_->clone({*src, AllocationType::HOST});
+    auto index2 = device_->clone({*index, AllocationType::HOST});
+    auto result2 = device_->select({*src2, *index2});
+    assertTensorClose(bufferToTensor(*result2), expected, 1e-6, 1e-6);
+}

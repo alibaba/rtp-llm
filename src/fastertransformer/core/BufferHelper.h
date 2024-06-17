@@ -26,17 +26,6 @@ BufferPtr vector2Buffer(const std::vector<T>& vec) {
 };
 
 template<typename T>
-inline void bufferIndexSelect(const BufferPtr& dst, const BufferPtr& src, std::vector<int>& select_index) {
-    assert(src->size() == select_index.size());
-    assert(src->type() == dst->type());
-    T* src_data = (T*)src->data();
-    T* dst_data = (T*)dst->data();
-    for (size_t i = 0; i < select_index.size(); i++) {
-        src_data[i] = dst_data[select_index[i]];
-    }
-}
-
-template<typename T>
 std::vector<T> buffer2vector(const Buffer& src, size_t num) {
     assert(num <= src.size());
     assert(sizeof(T) == src.typeSize());

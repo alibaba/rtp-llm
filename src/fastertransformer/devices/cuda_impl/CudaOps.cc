@@ -152,6 +152,10 @@ ConvertOutput CudaDevice::convert(const ConvertParams& params) {
 }
 
 SelectOutput CudaDevice::select(const SelectParams& params) {
+    if (params.input.where() != MemoryType::MEMORY_GPU) {
+        return DeviceBase::select(params);
+    }
+
     RUNTIME_ASSERT_OP_ARG(params.dim == 0, "select op tmp only support dim == 0");
     const auto& input = params.input;
     auto output_shape = input.shape();

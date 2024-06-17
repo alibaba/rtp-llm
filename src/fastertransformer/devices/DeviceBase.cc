@@ -73,6 +73,25 @@ CloneOutput DeviceBase::clone(const CloneParams& params) {
     return move(dst);
 }
 
+SelectOutput DeviceBase::select(const SelectParams& params) {
+    RUNTIME_ASSERT_OP_ARG(params.dim == 0, "Select only support dim 0, but got %d.", params.dim);
+    RUNTIME_ASSERT_OP_ARG(params.index.where() != MemoryType::MEMORY_GPU,
+                          "Select index must be on host memory.")
+    const auto& src = params.input;
+    const auto& idx = params.index;
+    auto selected_shape = src.shape();
+    selected_shape[0] = idx.shape()[0];
+    auto selected = allocateBuffer({src.type(), selected_shape, getMemAllocationType(src.where())});
+
+    for (size_t i = 0; i < idx.shape()[0]; i++) {
+        const size_t offset = idx.data<int32_t>()[i];
+        RUNTIME_ASSERT_OP_ARG(offset >= 0 && offset < src.shape()[0],
+            "Select index %d out of range [0, %d).", offset, src.shape()[0]);
+        copy({*selected, src, i, offset, 1});
+    }
+    return move(selected);
+}
+
 ConcatOutput DeviceBase::concat(const ConcatParams& params) {
     RUNTIME_ASSERT_OP_ARG(params.dim == 0, "Concat only support dim 0, but got %d.", params.dim);
     RUNTIME_ASSERT_OP_ARG(params.inputs.size() > 0, "Concat requires at least 1 input.");
@@ -110,7 +129,7 @@ ConcatOutput DeviceBase::concat(const ConcatParams& params) {
             "Concat input [%d] type %d does not match concated type %d.",
             i, input->type(), type);
 
-        copy({*concated, *input, offset, 0, shape[0]});
+        copy({*concated, *input, offset, 0, (int64_t)shape[0]});
         offset += shape[0];
     }
     return move(concated);

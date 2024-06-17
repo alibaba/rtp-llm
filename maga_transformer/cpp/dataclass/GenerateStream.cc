@@ -396,14 +396,8 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
                 host_logits = device_->clone({logits.view(i, 1), ft::AllocationType::HOST});
             }
             if (!generate_input_->generate_config->select_tokens_id.empty()) {
-                // TODO(xinfei.sxf) implement bufferIndexSelect at gpu
-                ft::BufferPtr select_logits =
-                    device_->allocateBuffer({host_logits->type(),
-                                            {generate_input_->generate_config->select_tokens_id.size()},
-                                            ft::AllocationType::HOST});
-                ft::bufferIndexSelect<float>(
-                    host_logits, select_logits, generate_input_->generate_config->select_tokens_id);
-                generate_output.logits = select_logits;
+                auto select_buf = ft::vector2Buffer(generate_input_->generate_config->select_tokens_id);
+                generate_output.logits = device_->select({*host_logits, *select_buf});
             } else {
                 // TODO(xinfei.sxf) not set logits in middle step for streaming
                 generate_output.logits = host_logits;

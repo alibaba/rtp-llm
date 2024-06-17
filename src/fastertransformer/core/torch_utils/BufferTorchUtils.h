@@ -117,7 +117,8 @@ inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor) {
 
 inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor,
                                     const torch::Tensor& scales,
-                                    const torch::Tensor& zeros) {
+                                    const torch::Tensor& zeros)
+{
     return BufferPtr(new QBuffer(std::move(torchTensor2Buffer(tensor)),
                                  std::move(torchTensor2Buffer(scales)),
                                  std::move(torchTensor2Buffer(zeros))));
