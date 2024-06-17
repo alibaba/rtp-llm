@@ -6,6 +6,7 @@
 #include "src/fastertransformer/cuda/cufmha/cufmha.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
+#include "src/fastertransformer/cutlass/interface.h"
 
 #include <nvml.h>
 namespace trt_plugins = tensorrt_llm::plugins;
@@ -53,6 +54,8 @@ public:
     void broadcast(const BroadcastParams& params);
     void allReduce(const AllReduceParams& params);
     void allGather(const AllGatherParams& params);
+
+    BufferPtr quantize(const QuantizeParams& params);
 
 // TODO: @xinglai delelte this
 public:

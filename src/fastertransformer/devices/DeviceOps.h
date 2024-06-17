@@ -42,6 +42,8 @@ public:
     virtual void broadcast(const BroadcastParams& params);
     virtual void allReduce(const AllReduceParams& params);
     virtual void allGather(const AllGatherParams& params);
+
+    virtual BufferPtr quantize(const QuantizeParams& params);
 };
 
 }  // namespace fastertransformer

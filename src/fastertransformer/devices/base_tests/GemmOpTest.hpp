@@ -61,26 +61,6 @@ public:
         }
     }
 
-    // common
-    GemmOpTestInput PrepareGemmOpInput(DataType Atype,
-                                       DataType Btype,
-                                       size_t b,
-                                       size_t m,
-                                       size_t n,
-                                       size_t k)
-    {
-        auto Adtype = dataTypeToTorchType(Atype);
-        auto Bdtype = dataTypeToTorchType(Btype);
-
-        auto A = randTensor({int(m), int(k)}, Adtype);
-        auto B = randTensor({int(k), int(n)}, Bdtype);
-        if (b > 1) {
-            A = randTensor({int(b), int(m), int(k)}, Adtype);
-            B = randTensor({int(b), int(k), int(n)}, Bdtype);
-        }
-
-        return GemmOpTestInput({A, B});
-    }
 
 
     GemmOpTestOutput BasicGemmOpRun(GemmOpTestInput& input)
@@ -130,8 +110,8 @@ public:
 
     GemmOpTestOutput BasicGemmTorchRefRun(GemmOpTestInput& input)
     {   
-        auto A = input.A.is_quantized() ? input.A.dequantize() : input.A;
-        auto B = input.B.is_quantized() ? input.B.dequantize() : input.B;
+        auto A = input.A;
+        auto B = input.B;
         return GemmOpTestOutput(
             {torch::matmul(A.to(torch::kFloat), B.to(torch::kFloat))}
         );
@@ -203,23 +183,6 @@ public:
         assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C, rtol, atol);
     }
 
-    void BasicQGemmOpTest(DataType Adtype,
-                          DataType Bdtype,
-                          size_t m,
-                          size_t n,
-                          size_t k)
-    {
-        auto input = PrepareGemmOpInput(Adtype,
-                                        Bdtype,
-                                        1,
-                                        m,
-                                        n,
-                                        k);
-        auto result = BasicGemmOpRun(input);
-        auto result_ref = BasicGemmTorchRefRun(input);
-        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C);
-
-    }
 
     void BatchTransposeGemmOp(TransposeOperation op_a,
                               TransposeOperation op_b,

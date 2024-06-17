@@ -4,7 +4,37 @@
 using namespace std;
 using namespace fastertransformer;
 
-class CudaGemmOpTest: public GemmOpTest {};
+class CudaGemmOpTest: public GemmOpTest {
+
+public:
+
+GemmOpTestOutput BasicCUDAQGemmOpRun(GemmOpTestInput& input) {
+    auto A = tensorToBuffer(input.A);
+    auto host_B = tensorToBuffer(input.B, AllocationType::HOST);
+    auto QB = device_->quantize({*host_B,
+                                 std::nullopt,
+                                 std::nullopt,
+                                 DataType::TYPE_QINT8,
+                                 1});
+    auto device_B  = device_->clone({*QB});
+    auto D = device_->allocateBuffer({A->type(), {A->shape()[0], device_B->shape()[1]}});
+    GemmParams params {*A, *device_B, std::nullopt, D};
+    device_->gemm(params);
+    return GemmOpTestOutput({bufferToTensor(*D)});
+}
+
+void BasicQGemmOpTest(size_t m,
+                      size_t n,
+                      size_t k,
+                      DataType dtype)
+{
+    auto input = PrepareGemmOpInput(m, n, k, dtype);
+    auto result = BasicCUDAQGemmOpRun(input);
+    auto result_ref = BasicGemmTorchRefRun(input);
+    assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C, 1e-2, 1e-2);
+
+}
+};
 
 
 TEST_F(CudaGemmOpTest, BasicGemmOpTest) {
@@ -16,6 +46,9 @@ TEST_F(CudaGemmOpTest, BasicGemmOpTest) {
     BasicGemmOpTest(8, 1024, 2048, DataType::TYPE_FP32);
     BasicGemmOpTest(1024, 1024, 2048, DataType::TYPE_FP32);
     BasicGemmOpTest(4096, 1024, 2048, DataType::TYPE_FP32);
+    BasicQGemmOpTest(64, 64, 64, DataType::TYPE_FP16);
+    BasicQGemmOpTest(2, 1024, 2048, DataType::TYPE_FP16);
+    BasicQGemmOpTest(2, 2048, 4096, DataType::TYPE_FP16);
 }
 
 TEST_F(CudaGemmOpTest, TransposeGemmOpTest) {

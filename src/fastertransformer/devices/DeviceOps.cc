@@ -90,5 +90,9 @@ void DeviceOps::allGather(const AllGatherParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+BufferPtr DeviceOps::quantize(const QuantizeParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 } // namespace fastertransformer
 

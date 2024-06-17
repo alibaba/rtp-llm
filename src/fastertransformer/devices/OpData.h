@@ -462,4 +462,12 @@ struct LoraLinearParams {
     OptionalConstLoraMapRef                 lora_map;
 };
 
+struct QuantizeParams {
+    const Buffer&           input;
+    OptionalConstBufferRef  scales;
+    OptionalConstBufferRef  zeros;
+    DataType                qtype;
+    size_t                  axis;
+};
+
 }  // namespace fastertransformer

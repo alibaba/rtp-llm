@@ -21,7 +21,7 @@ QBuffer::QBuffer(BufferPtr kernel,
         scales.use_count(),
         zeros.use_count()
     );
-    // std::static_pointer_cast<QBuffer>(kernel)->deleter_ = nullptr;
+
     scales_.swap(scales);
     zeros_.swap(zeros);
     kernel.reset();
@@ -38,16 +38,12 @@ QBuffer::QBuffer(BufferPtr kernel,
     }
 
     FT_CHECK_WITH_INFO(
-        (scales_->dim() == 1 && zeros_->dim() == 1),
-        "dim of scales[%d] and zero_points[%d] must be 1.",
+        ((scales_->dim() == 1 || scales_->dim() == 2) &&
+         (zeros_->dim() == 1 || zeros_->dim() == 2)),
+        "dim of scales[%d] and zero_points[%d] must be 1 or 2.",
         scales_->dim(), zeros_->dim()
     );
 
-    FT_CHECK_WITH_INFO(
-        (scales_->size() == zeros_->size()),
-        "number of elements in scales[] and zero_points[] must match.",
-        scales_->size(), zeros_->size()
-    );
 
     FT_CHECK_WITH_INFO(
         (scales_->where() == zeros_->where() &&
