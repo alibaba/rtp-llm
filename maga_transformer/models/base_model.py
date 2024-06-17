@@ -44,6 +44,10 @@ class GenerateInput(PyBaseModel):
         self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
         self.prefix_length = prefix_tokens.nelement()
 
+    @property
+    def vision_token_length(self):
+        return self.images[0].shape[0]
+
 class AuxInfo(PyBaseModel):
     cost_time: float = 0
     iter_count: int = 0
@@ -249,6 +253,24 @@ class BaseModel(object):
         for i in range(batch_query.generate_batch_size, batch_query.total_batch_size):
             position_ids.extend(range(batch_query.reuse_lengths_list[i], batch_query.reuse_lengths_list[i] + batch_query.context_lengths_list[i]))
         return to_cuda(torch.IntTensor(position_ids))
+    
+    def extend_context_combo_token_types(self, combo_token_types: List[int], token_types: List[int]):
+        pass
+
+    def extend_generate_combo_token_types(self, combo_token_types: List[int], combo_tokens: List[int]):
+        pass
+
+    def extend_generate_position_ids(
+        self, position_ids: List[int], generate_batch_size: int, num_beams: int,
+        vision_token_length: List[int], seq_lengths_list: List[int]
+    ):
+        position_ids.extend([i - 1 for i in seq_lengths_list])
+
+    def extend_context_position_ids(
+        self, position_ids: List[int], context_begin_position: int,
+        context_end_position: int, token_type_ids: torch.Tensor
+    ):
+        position_ids.extend(range(context_begin_position, context_end_position))
 
     def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
         return self.word_embedding(inputs)

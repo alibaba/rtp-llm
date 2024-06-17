@@ -11,6 +11,7 @@ from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.sample_utils import BaseSampler, SamplerSetupParams, SamplingParams
 from maga_transformer.utils.dump_config_utils import dump_engine_to_table
 from maga_transformer.models.base_model import BaseModel
+from maga_transformer.models.cogvlm2 import CogVLM2
 from maga_transformer.ops.gpt_ops.gpt_op import GptOp
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.util import to_cuda, to_cpu
@@ -129,17 +130,63 @@ class NormalModelExecutor(ExecutorBase):
             final_attention_mask[i] = final_attention_mask[i].roll(reuse_length_list[i], dims=-1)
             final_attention_mask[i, :context_length_list[i], :reuse_length_list[i]] = 1
         return final_attention_mask
+    
+    def _create_position_ids_for_rotary(self, batch_query: BatchQuery) -> Optional[torch.Tensor]:
+        model = self.model_ops.model
+        if model.position_encoding is None and not isinstance(model, CogVLM2):
+            return None
+        position_ids = []
+
+        # generate query
+        model.extend_generate_position_ids(
+            position_ids, batch_query.generate_batch_size, batch_query.num_beams,
+            batch_query.vision_token_length, batch_query.seq_lengths_list
+        )
+
+        # context query
+        for i in range(batch_query.context_batch_size):
+            context_begin_position = batch_query.reuse_lengths_list[i + batch_query.generate_batch_size]
+            context_end_position = batch_query.reuse_lengths_list[i + batch_query.generate_batch_size] + \
+                batch_query.context_lengths_list[i + batch_query.generate_batch_size]
+            model.extend_context_position_ids(
+                position_ids, context_begin_position,
+                context_end_position, batch_query.context_query_token_type_ids(i)
+            )
+        
+        return to_cuda(torch.IntTensor(position_ids))
+
+    def _packed_tokens(self, batch_query: BatchQuery) -> Tuple[torch.Tensor, List[Any], torch.Tensor]:
+        combo_tokens: List[int] = []
+        combo_token_types: List[int] = []
+        model = self.model_ops.model
+        for i in range(batch_query.generate_batch_size):
+            combo_tokens.extend(batch_query.generate_query_last_token(i).numpy().tolist())
+        model.extend_generate_combo_token_types(combo_token_types, combo_tokens)
+        for i in range(batch_query.context_batch_size):
+            combo_tokens.extend(batch_query.context_query_output_tokens(i).numpy().tolist())
+            model.extend_context_combo_token_types(combo_token_types, batch_query.context_query_token_type_ids(i).tolist())
+
+        if (not self.model_ops.config.is_multimodal):
+            if any([t < 0 or t >= self.model_ops.config.vocab_size for t in combo_tokens]):
+                raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')
+        else:
+            special_set = set([v for v in self.model_ops.config.vit_related_params.vit_special_token_ids.values()])
+            if any([((t < 0 or t >= self.model_ops.config.vocab_size) and (t not in special_set)) for t in combo_tokens]):
+                raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')
+        return to_cuda(torch.IntTensor(combo_tokens)), batch_query.images, torch.IntTensor(combo_token_types)
 
     def _pre_process(
         self, batch_query: BatchQuery,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         model = self.model_ops.model
-        combo_tokens, images, combo_token_types = model.packed_tokens(batch_query)
-        # for medusa executor, use class method to construct position ids
-        if hasattr(self, "_create_position_ids_for_rotary"):
-            position_ids = self._create_position_ids_for_rotary(batch_query)
-        else:
-            position_ids = model.create_position_ids_for_rotary(batch_query)
+        combo_tokens, images, combo_token_types = self._packed_tokens(batch_query)
+        position_ids = self._create_position_ids_for_rotary(batch_query)
+
+        # # for medusa executor, use class method to construct position ids
+        # if hasattr(self, "_create_position_ids_for_rotary"):
+        #     position_ids = self._create_position_ids_for_rotary(batch_query)
+        # else:
+        #     position_ids = model.create_position_ids_for_rotary(batch_query)
 
         assert model.word_embedding is not None
         input_embeds = model.async_input_word_embedding(combo_tokens, images, combo_token_types)

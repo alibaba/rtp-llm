@@ -11,9 +11,6 @@ from typing import Optional, Union, Dict, Any, List, Set
 from maga_transformer import _ft_pickler
 from pathlib import Path
 
-LANGUAGE_TOKEN_TYPE = 0
-VISION_TOKEN_TYPE = 1
-
 class AtomicCounter:
     def __init__(self, initial: int=0):
         self.value = initial

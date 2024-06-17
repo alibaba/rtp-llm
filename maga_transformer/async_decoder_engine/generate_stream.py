@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field, PrivateAttr
 
 from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.utils.stop_utils import create_stop_criteria_list
-from maga_transformer.utils.util import VISION_TOKEN_TYPE
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.models.base_model import GenerateInput, GenerateOutput, GenerateOutputs
 from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
@@ -134,12 +133,8 @@ class GenerateStream(BaseModel):
         return self._input.lora_id
     
     @property
-    def token_type_ids(self):
-        return self._input.token_type_ids
-
-    @property
-    def vision_token_length(self):
-        return self._input.token_type_ids.count(VISION_TOKEN_TYPE)
+    def input(self):
+        return self._input
 
     @property
     def output(self) -> GenerateOutputs:
