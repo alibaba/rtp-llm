@@ -1138,6 +1138,10 @@ __device__ inline void attention_rope(int       RopeStyle,
     }
     int gen_len = tlength - input_len;
 
+    if (position_id > 0) {
+        tlength = position_id;
+    }
+
     switch (RopeStyle) {
         case 0:
 
@@ -1195,8 +1199,10 @@ __device__ inline void attention_rope(int       RopeStyle,
             // cogvlm2 rotary embedding
             Rope<scalar_t, vector_t, RotaryEmbeddingStyle::CogVLM2>::impl(
                 q, smem, rotary_embedding_inv_freq, tidx, dim, position_id);
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::CogVLM2>::impl(
-                k, smem, rotary_embedding_inv_freq, tidx, dim, position_id);
+            if (handle_kv) {
+                Rope<scalar_t, vector_t, RotaryEmbeddingStyle::CogVLM2>::impl(
+                    k, smem, rotary_embedding_inv_freq, tidx, dim, position_id);
+            }
             break;
 
         default:

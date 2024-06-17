@@ -59,7 +59,8 @@ class CogVLM2(Llama, MultiModalMixin):
             activation_type="SiGLU",
             norm_type="rmsnorm",
             rotary_embedding_dim=128,
-            rotary_embedding_style=7,
+            rotary_embedding_style=5,
+            rotary_embedding_base=500000,
             has_post_decoder_layernorm=True,
             is_multimodal=True,
         )
@@ -94,7 +95,6 @@ class CogVLM2(Llama, MultiModalMixin):
         config.vocab_size = config_json["vocab_size"]
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-05)
         config.inter_size = config_json["intermediate_size"]
-        config.rotary_embedding_base = int(config_json.get("rope_theta", 10000))
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
         config.template_version = config_json.get("template_version", "chat")

@@ -43,7 +43,6 @@ public:
     }
 
     void init_spans(const int32_t* token_type_ids, const size_t length) {
-        assert(length >= 0);
         size_t span_item_left = 0;
         bool   text_span_flag = token_type_ids[0] == LANGUAGE_TOKEN_TYPE;
 

@@ -215,6 +215,7 @@ class BatchQuery:
         assert index < self.generate_batch_size
         start_idx = index * self.num_beams
         if self.vision_token_length[start_idx] == 0:
+            # no image
             return self.seq_lengths_list[start_idx] - 1
         else:
             return self.seq_lengths_list[start_idx] - self.vision_token_length[start_idx] + 2
