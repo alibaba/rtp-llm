@@ -117,22 +117,6 @@ Buffer Buffer::operator[](size_t offset) const {
     return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), nullptr);
 }
 
-Buffer Buffer::slice(size_t begin, size_t end) const {
-    if (end <= begin) {
-        throw std::runtime_error("Buffer::slice: end must be larger than begin");
-    }
-    if (end > shape()[0]) {
-        char msg[4096];
-        sprintf(msg, "Buffer::slice: end [%d] out of range with buffer[%s]",
-                (int)end, debugString().c_str());
-        throw std::runtime_error(msg);
-    }
-    auto new_shape = shape_;
-    new_shape[0] = end - begin;
-    const auto offset_size = this->size() / shape_[0] * begin;
-    return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), nullptr);
-}
-
 std::string Buffer::debugStringMeta() const {
     std::string debugStr = "Buffer( ";
     debugStr += "where=" + std::to_string(where_) + ", ";

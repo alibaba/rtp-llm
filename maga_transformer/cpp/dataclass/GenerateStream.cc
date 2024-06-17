@@ -397,7 +397,7 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
             }
             if (!generate_input_->generate_config->select_tokens_id.empty()) {
                 auto select_buf = ft::vector2Buffer(generate_input_->generate_config->select_tokens_id);
-                generate_output.logits = device_->select({*host_logits, *select_buf});
+                generate_output.logits = device_->select({*host_logits, *select_buf, 1});
             } else {
                 // TODO(xinfei.sxf) not set logits in middle step for streaming
                 generate_output.logits = host_logits;

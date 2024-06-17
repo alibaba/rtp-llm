@@ -152,11 +152,13 @@ ConvertOutput CudaDevice::convert(const ConvertParams& params) {
 }
 
 SelectOutput CudaDevice::select(const SelectParams& params) {
-    if (params.input.where() != MemoryType::MEMORY_GPU) {
+    if ((params.input.where() != MemoryType::MEMORY_GPU) || (params.dim > 0)) {
         return DeviceBase::select(params);
     }
 
+    RUNTIME_ASSERT_OP_ARG(params.index.type() == DataType::TYPE_INT32, "Select index must be int32.");
     RUNTIME_ASSERT_OP_ARG(params.dim == 0, "select op tmp only support dim == 0");
+
     const auto& input = params.input;
     auto output_shape = input.shape();
     output_shape[0] = params.index.size();
@@ -172,7 +174,7 @@ SelectOutput CudaDevice::select(const SelectParams& params) {
         num_selected_element,
         0,
         stream_);
-    return {std::move(output)};
+    return std::move(output);
 }
 
 inline ncclDataType_t getNcclDataType(DataType type) {

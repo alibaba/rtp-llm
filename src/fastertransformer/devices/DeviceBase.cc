@@ -74,21 +74,40 @@ CloneOutput DeviceBase::clone(const CloneParams& params) {
 }
 
 SelectOutput DeviceBase::select(const SelectParams& params) {
-    RUNTIME_ASSERT_OP_ARG(params.dim == 0, "Select only support dim 0, but got %d.", params.dim);
-    RUNTIME_ASSERT_OP_ARG(params.index.where() != MemoryType::MEMORY_GPU,
-                          "Select index must be on host memory.")
+    RUNTIME_ASSERT_OP_ARG(params.dim < params.input.shape().size(),
+                          "Select dim %d out of range with input shape %s.",
+                          params.dim, params.input.debugString().c_str());
+    RUNTIME_ASSERT_OP_ARG(params.index.shape().size() == 1, "Select index must be 1D.");
+    RUNTIME_ASSERT_OP_ARG(params.index.type() == DataType::TYPE_INT32, "Select index must be int32.");
+    RUNTIME_ASSERT_OP_ARG(params.index.where() != MemoryType::MEMORY_GPU, "Select index must on CPU.");
+
     const auto& src = params.input;
-    const auto& idx = params.index;
+    const auto& idx_buf = params.index;
+    const auto dim = params.dim;
     auto selected_shape = src.shape();
-    selected_shape[0] = idx.shape()[0];
+    selected_shape[dim] = idx_buf.shape()[0];
     auto selected = allocateBuffer({src.type(), selected_shape, getMemAllocationType(src.where())});
 
-    for (size_t i = 0; i < idx.shape()[0]; i++) {
-        const size_t offset = idx.data<int32_t>()[i];
-        RUNTIME_ASSERT_OP_ARG(offset >= 0 && offset < src.shape()[0],
-            "Select index %d out of range [0, %d).", offset, src.shape()[0]);
-        copy({*selected, src, i, offset, 1});
+    const auto pre_select_size = std::accumulate(
+        selected_shape.begin(), selected_shape.begin() + dim, 1UL, std::multiplies<size_t>());
+    const auto post_select_stride = std::accumulate(
+        selected_shape.begin() + dim + 1, selected_shape.end(), 1UL, std::multiplies<size_t>());
+
+    // both src and dst needs to be viewed into 1-d buffer.
+    auto src_view = src.view(0, src.shape()[0]);
+    src_view.reshape({src.size()});
+    auto dst_view = selected->view(0, selected_shape[0]);
+    dst_view.reshape({selected->size()});
+
+    for (auto i = 0; i < idx_buf.shape()[0]; i++) {
+        const auto idx = idx_buf.data<int32_t>()[i];
+        for (auto j = 0; j < pre_select_size; j++) {
+            const auto src_offset = j * src.shape()[dim] * post_select_stride + idx * post_select_stride;
+            const auto dst_offset = j * idx_buf.size() * post_select_stride + i * post_select_stride;
+            copy({dst_view, src_view, dst_offset, src_offset, (int32_t)post_select_stride});
+        }
     }
+
     return move(selected);
 }
 

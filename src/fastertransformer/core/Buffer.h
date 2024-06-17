@@ -95,7 +95,6 @@ public:
 
     void reshape(const std::vector<size_t>& shape);
     Buffer view(size_t offset, size_t size) const; // only from 0-d
-    Buffer slice(size_t begin, size_t end) const; // slice from 0-d, must contigious eg: [5,3] -> [3,3]
     Buffer operator[](size_t offset) const;
 
     std::string debugString() const {

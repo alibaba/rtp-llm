@@ -136,7 +136,7 @@ absl::Status EmbeddingExecutor::updateStreams(th::Tensor gpu_outputs, const std:
     auto cpu_output = copyResultToCPU(gpu_outputs);
     int index = 0;
     for (auto& stream: streams) {
-        auto hidden_states_buf = (*cpu_output->hidden_states).slice(index, index + stream->batchSize());
+        auto hidden_states_buf = (*cpu_output->hidden_states).view(index, stream->batchSize());
         auto new_buffer_ptr = device_->allocateBuffer({hidden_states_buf.type(), hidden_states_buf.shape(), AllocationType::HOST});
         device_->copy({*new_buffer_ptr, hidden_states_buf});
         stream->updateOutput(new_buffer_ptr);
