@@ -128,7 +128,6 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         const int     rotary_embedding_dim,
                                         const int     rotary_embedding_style,
                                         const float   rotary_embedding_base,
-                                        const T*      rotary_embedding_inv_freq,
                                         const int*    position_ids,
                                         const int     logn_seq_len,
                                         const bool    use_logn_attn,
@@ -221,7 +220,6 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
     params.rotary_embedding_scale         = rotary_embedding_scale;
     params.rotary_embedding_max_positions = dynamic_embedding_max_pos;
     params.rotary_embedding_style         = rotary_embedding_style;
-    params.rotary_embedding_inv_freq      = static_cast<void*>(const_cast<T*>(rotary_embedding_inv_freq));
     params.position_ids                   = position_ids;
     params.use_logn_attn                  = use_logn_attn;
     params.logn_seq_len                   = logn_seq_len;
@@ -276,7 +274,6 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                                      const int     rotary_embedding_dim,                               \
                                                      const int     rotary_embedding_style,                             \
                                                      const float   rotary_embedding_base,                              \
-                                                     const T*      rotary_embedding_inv_freq,                          \
                                                      const int*    position_ids,                                       \
                                                      const int     logn_seq_len,                                       \
                                                      const bool    use_logn_attn,                                      \

@@ -8,7 +8,6 @@ from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
-from maga_transformer.utils.util import to_cuda
 from maga_transformer.utils.sample_utils import HuggingfaceSampler, FtSampler, BaseSampler, DynamicDecodeOp, BeamSearchSampler
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
@@ -186,7 +185,7 @@ class BaseModel(object):
     @classmethod
     def is_multimodal(cls) -> bool:
         return False
-    
+
     def __init__(self) -> None:
         self.weight = None
         self.word_embedding: Optional[ParallelEmbedding] = None
@@ -229,31 +228,6 @@ class BaseModel(object):
         shape = list(t.shape)
         return t.unsqueeze(1).repeat([1, beam_width] + [1] * len(shape[1:])).reshape([-1] + shape[1:]).contiguous()
 
-    def packed_tokens(self, batch_query) -> Tuple[torch.Tensor, List[Any], torch.Tensor]:
-        combo_tokens: List[int] = []
-        for i in range(batch_query.generate_batch_size):
-            combo_tokens.extend(batch_query.generate_query_last_token(i).numpy().tolist())
-        for i in range(batch_query.context_batch_size):
-            combo_tokens.extend(batch_query.context_query_output_tokens(i).numpy().tolist())
-        if (not self.config.is_multimodal):
-            if any([t < 0 or t >= self.config.vocab_size for t in combo_tokens]):
-                raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.config.vocab_size}')
-        else:
-            special_set = set([v for v in self.config.vit_related_params.vit_special_token_ids.values()])
-            if any([((t < 0 or t >= self.config.vocab_size) and (t not in special_set)) for t in combo_tokens]):
-                raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.config.vocab_size}')
-        return to_cuda(torch.IntTensor(combo_tokens)), batch_query.images, torch.IntTensor([])
-
-    def create_position_ids_for_rotary(self, batch_query) -> Optional[torch.Tensor]:
-        if self.position_encoding is None:
-            return None
-        # generate query
-        position_ids = [i - 1 for i in batch_query.seq_lengths_list]
-        # context query
-        for i in range(batch_query.generate_batch_size, batch_query.total_batch_size):
-            position_ids.extend(range(batch_query.reuse_lengths_list[i], batch_query.reuse_lengths_list[i] + batch_query.context_lengths_list[i]))
-        return to_cuda(torch.IntTensor(position_ids))
-    
     def extend_context_combo_token_types(self, combo_token_types: List[int], token_types: List[int]):
         pass
 

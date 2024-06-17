@@ -90,7 +90,6 @@ loadWeights(int                                                             pp_s
         gpt_layer_weights[i]->self_attention_weights.attention_layernorm.beta       = maybe_get<T>(weights[i], W::attn_ln_beta);
         gpt_layer_weights[i]->self_attention_weights.qk_layernorm.gamma             = maybe_get<T>(weights[i], W::qk_ln_gamma);
         gpt_layer_weights[i]->self_attention_weights.attention_output_weight.bias   = maybe_get<T>(weights[i], W::attn_o_b);
-        gpt_layer_weights[i]->self_attention_weights.rotary_embedding_inv_freq      = maybe_get<T>(weights[i], W::attn_rotary_emb);
         gpt_layer_weights[i]->self_attn_layernorm_weights.gamma                     = maybe_get<T>(weights[i], W::post_ln_gamma);
         gpt_layer_weights[i]->self_attn_layernorm_weights.beta                      = maybe_get<T>(weights[i], W::post_ln_beta);
         gpt_layer_weights[i]->ffn_weights.intermediate_weight.bias                  = maybe_get<T>(weights[i], W::ffn_b1);

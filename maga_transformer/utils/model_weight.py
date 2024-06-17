@@ -300,7 +300,6 @@ class W:
     vision_attn_qkv_w = 'self_attention_weights.vision_query_weight.kernel'
     vision_attn_qkv_b = 'self_attention_weights.vision_query_weight.bias'
     vision_attn_o_w = 'self_attention_weights.vision_attention_output_weight.kernel'
-    attn_rotary_emb = 'self_attention_weights.rotary_emb_inv_freq'
 
     # cogvlm2-expert-ffn
     vision_ffn_w1 = 'vision_ffn_weights.intermediate_weight.kernel'
@@ -545,7 +544,6 @@ class W:
         ffn_w3_lora_b: sp_neg1,
         ffn_w2_lora_a: sp_0,
         ffn_w2_lora_b: sp_id,
-        attn_rotary_emb: sp_id,
         moe_gate: sp_id,
         shared_expert_gate: sp_id,
         post_ffn_ln_beta: sp_id,

@@ -286,7 +286,7 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
         print_bsd(layer_id, "ffn quant tensor", reinterpret_cast<int8_t*>(inter_buf_normed_output), 1, m, cur_inter_size);
 
     }
-    
+
     PUSH_RANGE(stream_, "ffn_gemm_2");
     gemm_runner_->Gemm(m,
                        hidden_units_,

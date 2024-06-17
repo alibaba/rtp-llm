@@ -553,7 +553,6 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
         params_.rotary_embedding_dim_,
         params_.rotary_embedding_style_,
         params_.rotary_embedding_base_,
-        attention_weights->rotary_embedding_inv_freq,
         position_ids,
         params_.logn_seq_len_,
         params_.use_logn_attn_,
@@ -602,8 +601,8 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         d_prefix_prompt_lengths_ ? d_prefix_prompt_lengths_ + generate_batch_size : d_prefix_prompt_lengths_;
     const int* padding_offset     = input_tensors->getPtr<int>("padding_offset", nullptr);
     // position_id shape: [h_token_num]
-    int* position_ids             = input_tensors->getPtr<int>("position_ids", nullptr);
-    position_ids                  = position_ids ? position_ids + generate_batch_size : nullptr;
+    int* position_ids             = input_tensors->isExist("position_ids") ? 
+        input_tensors->getPtr<int>("position_ids", nullptr) + generate_batch_size : nullptr;
     int*       cu_seqlens         = input_tensors->getPtr<int>("cu_seqlens", nullptr);
     int*       cu_kv_seqlens         = input_tensors->getPtr<int>("cu_kv_seqlens", nullptr);
     T*         linear_bias_slopes = input_tensors->getPtr<T>("linear_bias_slopes", nullptr);
@@ -678,7 +677,6 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                        params_.rotary_embedding_dim_,
                                        params_.rotary_embedding_style_,
                                        params_.rotary_embedding_base_,
-                                       attention_weights->rotary_embedding_inv_freq,
                                        params_.rotary_embedding_scale_,
                                        params_.dynamic_embedding_max_pos_,
                                        params_.org_embedding_max_pos_,

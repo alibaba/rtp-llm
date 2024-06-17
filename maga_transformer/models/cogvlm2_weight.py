@@ -82,15 +82,6 @@ class CogVLM2Weight(ModelDeployWeightInfo):
                 transpose,
             ),
             WeightInfo(
-                W.attn_rotary_emb,
-                [
-                    CkptWeightInfo(
-                        "model.layers.{i}.self_attn.rotary_emb.inv_freq", identity
-                    )
-                ],
-                identity,
-            ),
-            WeightInfo(
                 W.post_ln_gamma,
                 [
                     CkptWeightInfo(

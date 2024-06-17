@@ -115,22 +115,6 @@ class NormalModelExecutor(ExecutorBase):
 
         return hidden_states
 
-    # static for ut
-    @staticmethod
-    def append_reuse_mask(attention_mask: torch.Tensor, context_length_list: List[int],
-                           reuse_length_list: List[int]) -> torch.Tensor:
-
-        max_reuse_length = max(reuse_length_list)
-        if max_reuse_length == 0:
-            return attention_mask
-        max_context_length = max(context_length_list)
-        batch_size = attention_mask.size(0)
-        final_attention_mask = torch.cat((attention_mask, torch.zeros(batch_size, max_context_length, max_reuse_length).to(attention_mask)), dim=-1)
-        for i in range(0, batch_size):
-            final_attention_mask[i] = final_attention_mask[i].roll(reuse_length_list[i], dims=-1)
-            final_attention_mask[i, :context_length_list[i], :reuse_length_list[i]] = 1
-        return final_attention_mask
-    
     def _create_position_ids_for_rotary(self, batch_query: BatchQuery) -> Optional[torch.Tensor]:
         model = self.model_ops.model
         if model.position_encoding is None and not isinstance(model, CogVLM2):
@@ -175,18 +159,28 @@ class NormalModelExecutor(ExecutorBase):
                 raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')
         return to_cuda(torch.IntTensor(combo_tokens)), batch_query.images, torch.IntTensor(combo_token_types)
 
+    # static for ut
+    @staticmethod
+    def append_reuse_mask(attention_mask: torch.Tensor, context_length_list: List[int],
+                           reuse_length_list: List[int]) -> torch.Tensor:
+
+        max_reuse_length = max(reuse_length_list)
+        if max_reuse_length == 0:
+            return attention_mask
+        max_context_length = max(context_length_list)
+        batch_size = attention_mask.size(0)
+        final_attention_mask = torch.cat((attention_mask, torch.zeros(batch_size, max_context_length, max_reuse_length).to(attention_mask)), dim=-1)
+        for i in range(0, batch_size):
+            final_attention_mask[i] = final_attention_mask[i].roll(reuse_length_list[i], dims=-1)
+            final_attention_mask[i, :context_length_list[i], :reuse_length_list[i]] = 1
+        return final_attention_mask
+
     def _pre_process(
         self, batch_query: BatchQuery,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         model = self.model_ops.model
         combo_tokens, images, combo_token_types = self._packed_tokens(batch_query)
         position_ids = self._create_position_ids_for_rotary(batch_query)
-
-        # # for medusa executor, use class method to construct position ids
-        # if hasattr(self, "_create_position_ids_for_rotary"):
-        #     position_ids = self._create_position_ids_for_rotary(batch_query)
-        # else:
-        #     position_ids = model.create_position_ids_for_rotary(batch_query)
 
         assert model.word_embedding is not None
         input_embeds = model.async_input_word_embedding(combo_tokens, images, combo_token_types)

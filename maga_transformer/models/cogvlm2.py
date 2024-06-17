@@ -16,11 +16,9 @@ from maga_transformer.models.cogvlm2_weight import CogVLM2VitWeights, CogVLM2Wei
 from maga_transformer.models.llama import Llama
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
-# from maga_transformer.utils.util import LANGUAGE_TOKEN_TYPE, VISION_TOKEN_TYPE, to_cuda
 
 LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1
-
 
 
 class CogVLM2(Llama, MultiModalMixin):
@@ -168,84 +166,6 @@ class CogVLM2(Llama, MultiModalMixin):
         )
         y = y.cumsum()
         position_ids.extend(y.tolist())
-
-    # def packed_tokens(
-    #     self, batch_query
-    # ) -> Tuple[torch.Tensor, List[Any], torch.Tensor]:
-    #     combo_tokens: List[int] = []
-    #     combo_token_types: List[int] = []
-    #     for i in range(batch_query.generate_batch_size):
-    #         combo_tokens.extend(
-    #             batch_query.generate_query_last_token(i).numpy().tolist()
-    #         )
-    #     combo_token_types.extend([LANGUAGE_TOKEN_TYPE] * len(combo_tokens))
-    #     for i in range(batch_query.context_batch_size):
-    #         combo_tokens.extend(
-    #             batch_query.context_query_output_tokens(i).numpy().tolist()
-    #         )
-    #         combo_token_types.extend(
-    #             batch_query.context_query_token_type_ids(i).tolist()
-    #         )
-    #     if not self.config.is_multimodal:
-    #         if any([t < 0 or t >= self.config.vocab_size for t in combo_tokens]):
-    #             raise Exception(
-    #                 f"tokens: {combo_tokens} not in vocab_size: {self.config.vocab_size}"
-    #             )
-    #     else:
-    #         special_set = set(
-    #             [
-    #                 v
-    #                 for v in self.config.vit_related_params.vit_special_token_ids.values()
-    #             ]
-    #         )
-    #         if any(
-    #             [
-    #                 ((t < 0 or t >= self.config.vocab_size) and (t not in special_set))
-    #                 for t in combo_tokens
-    #             ]
-    #         ):
-    #             raise Exception(
-    #                 f"tokens: {combo_tokens} not in vocab_size: {self.config.vocab_size}"
-    #             )
-    #     return (
-    #         to_cuda(torch.IntTensor(combo_tokens)),
-    #         batch_query.images,
-    #         torch.IntTensor(combo_token_types),
-    #     )
-
-    # def create_position_ids_for_rotary(
-    #     self, batch_query
-    # ) -> Optional[torch.Tensor]:
-    #     # construct position ids for rotary embedding, assuming the token_type_ids is [T, V, V, V, V, V, T, T, T]
-    #     # the expected position ids is [0, 1, 2, 2, 2, 3, 4, 5, 6]
-    #     # see https://huggingface.co/THUDM/cogvlm2-llama3-chat-19B/blob/main/modeling_cogvlm.py#318
-    #     position_ids = []
-    #     # generate query
-    #     for i in range(batch_query.generate_batch_size):
-    #         position_ids.append(
-    #             batch_query.generate_query_last_position_id_for_cogvlm2(i)
-    #         )
-    #     # context query
-    #     for i in range(batch_query.context_batch_size):
-    #         token_type_ids = batch_query.context_query_token_type_ids(i)
-    #         tmp = token_type_ids.copy()
-    #         is_boi_eoi = np.zeros_like(token_type_ids, dtype=bool)
-    #         is_boi_eoi[1:] |= (token_type_ids[1:] == VISION_TOKEN_TYPE) & (
-    #             token_type_ids[:-1] == LANGUAGE_TOKEN_TYPE
-    #         )
-    #         is_boi_eoi[0] |= token_type_ids[0] == VISION_TOKEN_TYPE
-    #         is_boi_eoi[:-1] |= (token_type_ids[:-1] == VISION_TOKEN_TYPE) & (
-    #             token_type_ids[1:] == LANGUAGE_TOKEN_TYPE
-    #         )
-    #         is_boi_eoi[-1] |= token_type_ids[-1] == VISION_TOKEN_TYPE
-    #         tmp[is_boi_eoi] = LANGUAGE_TOKEN_TYPE
-    #         y = np.zeros_like(tmp, dtype=np.int32)
-    #         y[1:] = (tmp[1:] == LANGUAGE_TOKEN_TYPE) | (
-    #             (tmp[1:] == VISION_TOKEN_TYPE) & (tmp[:-1] == LANGUAGE_TOKEN_TYPE)
-    #         )
-    #         y = y.cumsum()
-    #         position_ids.extend(y.tolist())
-    #     return to_cuda(torch.IntTensor(position_ids))
 
     def async_input_word_embedding(
         self,

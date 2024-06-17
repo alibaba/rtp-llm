@@ -33,7 +33,6 @@ static const std::string post_ln_beta      = "post_layernorm_weights.beta";
 static const std::string vision_attn_qkv_w = "self_attention_weights.vision_query_weight.kernel";
 static const std::string vision_attn_qkv_b = "self_attention_weights.vision_query_weight.bias";
 static const std::string vision_attn_o_w   = "self_attention_weights.vision_attention_output_weight.kernel";
-static const std::string attn_rotary_emb   = "self_attention_weights.rotary_emb_inv_freq";
 
 
 static const std::string ffn_w1       = "ffn_weights.intermediate_weight.kernel";

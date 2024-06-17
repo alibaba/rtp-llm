@@ -214,15 +214,6 @@ class BatchQuery:
         end_idx = (index + 1) * self.num_beams
         return self.output_token_ids[start_idx: end_idx, self.seq_lengths_list[start_idx] - 1]
 
-    def generate_query_last_position_id_for_cogvlm2(self, index: int) -> torch.Tensor:
-        assert index < self.generate_batch_size
-        start_idx = index * self.num_beams
-        if self.vision_token_length[start_idx] == 0:
-            # no image
-            return self.seq_lengths_list[start_idx] - 1
-        else:
-            return self.seq_lengths_list[start_idx] - self.vision_token_length[start_idx] + 2
-
     def check(self):
         assert len(self.context_lengths_list) == self.decoder_batch_size
         assert len(self.reuse_lengths_list) == self.decoder_batch_size
