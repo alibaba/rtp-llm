@@ -6,6 +6,7 @@ from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGener
 
 from transformers import PreTrainedTokenizerBase
 
+from maga_transformer.config.gpt_init_model_parameters import TemplateVersion
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, PromptWithImages
@@ -20,14 +21,14 @@ class CogVLM2Renderer(CustomChatRenderer):
     def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.first_query: bool = True
-        self.template_version: str = renderer_params.template_version
+        self.template_version = renderer_params.template_version
 
-    def query_answer_template(self, template_version: str) -> str:
-        if template_version == 'base':
+    def query_answer_template(self, template_version: TemplateVersion) -> str:
+        if template_version == template_version.base:
             return "{}", "{}"
-        elif template_version == 'vqa':
+        elif template_version == template_version.vqa:
             return "Question: {}", " Short answer: {}\n"
-        elif template_version == 'chat':
+        elif template_version == template_version.chat:
             return "Question: {}", " Answer: {}\n"
         else:
             raise Exception(f"Unknown template version: {template_version}")

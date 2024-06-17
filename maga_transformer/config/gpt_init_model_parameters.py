@@ -83,6 +83,13 @@ class VitParameters:
     image_expand_token: Optional[int] = None
     vit_weights = None
 
+
+class TemplateVersion(Enum):
+    chat = "chat"
+    vqa = "vqa"
+    base = "image"
+
+
 class GptInitModelParameters:
     __slots__ = {
         "gpt_init_params",
@@ -144,7 +151,7 @@ class GptInitModelParameters:
         self.tp_size = g_parallel_info.tp_size
         self.tp_rank = g_parallel_info.tp_rank
         self.add_special_tokens = True
-        self.template_version = "chat"
+        self.template_version = TemplateVersion.chat
 
         for k, v in kwargs.items():
             setattr(self, k, v)

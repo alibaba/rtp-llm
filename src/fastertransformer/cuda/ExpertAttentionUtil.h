@@ -33,7 +33,8 @@ public:
 /*
  *  Utility class for transforming the input token_type_ids to a vector of SpanItem.
  *  Assuming the input token_type_ids is a vector of [T, V, V, V, T, T], it will be transforming into
- *  two expert attention span, [1, 2] for vision tokens, [0, 1] and [3, 3] for text tokens,
+ *  two expert attention span, {origin_index: 1, offset: 2} for vision tokens, {origin_index: 0, offset: 1}
+ *  and {origin_index: 3, offset: 3} for text tokens.
  *  see https://huggingface.co/THUDM/cogvlm2-llama3-chat-19B/blob/main/modeling_cogvlm.py#L92
  */
 class ExpertAttentionSpan {
