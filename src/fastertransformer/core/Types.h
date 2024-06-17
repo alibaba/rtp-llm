@@ -8,6 +8,7 @@
 namespace fastertransformer {
 
 enum AttentionMaskType {
+    // ones matrix, for bert model.
     noMask,
     causalMask,
     promptMask,

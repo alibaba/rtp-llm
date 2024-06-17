@@ -33,7 +33,9 @@ public:
             params.head_num_kv_ > 1 ? (size_t)params.head_num_kv_ / params.tp_size_ : 1,
             (size_t)params.size_per_head_,
             rope_config,
-            (size_t)params.seq_size_per_block_};
+            (size_t)params.seq_size_per_block_,
+            params.is_causal_ ? fastertransformer::AttentionMaskType::causalMask :
+                                fastertransformer::AttentionMaskType::noMask};
         return {attention_config,
                 ft::getActivationType(params.activation_type_str_),
                 ft::getNormType(params.norm_type_str_),
