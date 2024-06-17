@@ -602,7 +602,8 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         d_prefix_prompt_lengths_ ? d_prefix_prompt_lengths_ + generate_batch_size : d_prefix_prompt_lengths_;
     const int* padding_offset     = input_tensors->getPtr<int>("padding_offset", nullptr);
     // position_id shape: [h_token_num]
-    const int* position_ids       = input_tensors->getPtr<int>("position_ids", nullptr);
+    int* position_ids             = input_tensors->getPtr<int>("position_ids", nullptr);
+    position_ids                  = position_ids ? position_ids + generate_batch_size : nullptr;
     int*       cu_seqlens         = input_tensors->getPtr<int>("cu_seqlens", nullptr);
     int*       cu_kv_seqlens         = input_tensors->getPtr<int>("cu_kv_seqlens", nullptr);
     T*         linear_bias_slopes = input_tensors->getPtr<T>("linear_bias_slopes", nullptr);

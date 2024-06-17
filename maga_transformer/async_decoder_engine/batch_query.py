@@ -56,7 +56,7 @@ class BatchQuery:
         self._ptuning_info = PrefixInfo()
 
         self.model_output = ModelOutput()
-        self.use_expect_attention: bool = use_expect_attention
+        self.use_expect_attention: bool = use_expect_attention  # true for cogvlm2, false for other model
         self.token_type_ids: np.ndarray = np.zeros((0, 0), dtype=np.int32)
         self.vision_token_length: List[int] = []
 
@@ -337,10 +337,12 @@ class BatchQuery:
         self.generate_configs = []
         self.seq_lengths_list = []
         self.reuse_lengths_list = []
+        self.vision_token_length = []
         self.context_lengths_list = []
         self.cache_block_indice = None
         self.output_token_ids = None
         self.record_index_prob = None
+        self.token_type_ids = np.zeros((0, 0), dtype=np.int32)
 
     def update_output(self, model_output):
         self.model_output = model_output
