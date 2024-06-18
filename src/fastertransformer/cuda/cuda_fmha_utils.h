@@ -79,7 +79,7 @@ static bool UseOldTrtFMHA(const fastertransformer::GptInitParameter& gpt_init_pa
 template<typename T>
 static bool UsePagedTrtFMHA(const fastertransformer::GptInitParameter& gpt_init_parameter) {
     bool use_paged_trt_fmha = CheckUseFMHA<T>(gpt_init_parameter);
-    if (!(is_sm8x() || is_sm90() || is_sm70())) {
+    if (!(is_sm8x() || is_sm90())) {
         FT_LOG_INFO("Paged TRT FMHA is disabled for sm %d", get_sm());
         use_paged_trt_fmha = false;
     }
