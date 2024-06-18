@@ -109,6 +109,7 @@ cc_library(
         "attention_logn/*.cpp",
         "gemm_dequantize/*.cc",
         "gemm_group/*.cc",
+        "int8_gemm/*.cc",
         "unittests/test_activation.cu",
         # "moe/*.cc"
     ]),
@@ -207,6 +208,20 @@ py_test(
     name = "th_gemm_group",
     srcs = [
         "gemm_group/th_gemm_group.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops",
+    ],
+    deps = [
+        "//maga_transformer:torch",
+    ],
+)
+
+py_test(
+    name = "th_int8_gemm",
+    srcs = [
+        "int8_gemm/th_int8_gemm.py"
     ],
     data = [
         "//:th_transformer",

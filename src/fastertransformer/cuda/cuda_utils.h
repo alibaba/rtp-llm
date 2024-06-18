@@ -27,6 +27,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <functional>
 #ifdef SPARSITY_ENABLED
 #include <cusparseLt.h>
 #endif
@@ -366,6 +367,27 @@ inline std::string getDeviceName() {
     cudaDeviceProp props;
     check_cuda_error(cudaGetDeviceProperties(&props, device));
     return std::string(props.name);
+}
+
+inline float timing_function(const std::function<void(cudaStream_t)>& operation, int64_t timing_iterations, cudaStream_t stream) {
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaDeviceSynchronize();
+    cudaEventRecord(start, stream);
+
+    for (int64_t iter = 0; iter < timing_iterations; ++iter) {
+        operation(stream);
+    }
+
+    cudaEventRecord(stop, stream);
+    cudaEventSynchronize(stop);
+    float total_time_ms = 0;
+    cudaEventElapsedTime(&total_time_ms, start, stop);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    return total_time_ms / float(timing_iterations);
 }
 
 inline int div_up(int a, int n) {
