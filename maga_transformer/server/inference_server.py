@@ -104,11 +104,11 @@ class InferenceServer(object):
             await self._collect_complete_response_and_record_access_log(request, id, response)
         except asyncio.CancelledError as e:
             self._access_logger.log_exception_access(request, e, id)
-            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1)
+            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
         except BaseException as e:
             # 捕获非Cancel以外所有的异常,所以使用BaseException
             self._access_logger.log_exception_access(request, e, id)
-            kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
+            kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
             yield response_data_prefix + \
                 json.dumps(format_exception(e), ensure_ascii=False) + "\r\n\r\n"
 
@@ -167,7 +167,7 @@ class InferenceServer(object):
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
         id = self._atomic_count.increment()
-        kmonitor.report(AccMetrics.QPS_METRIC, 1)
+        kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unkown")})
         with self._controller:
             try:
                 assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
@@ -193,11 +193,11 @@ class InferenceServer(object):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
             error_code = 409
         elif isinstance(e, asyncio.CancelledError):
-            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1)
+            kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
             error_code = 499
         else:
             error_code = 500
-            kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1)
+            kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
         rep = JSONResponse(format_exception(e), status_code=error_code)
         return rep
 
@@ -247,7 +247,7 @@ class InferenceServer(object):
         if not isinstance(req, dict):
             raise Exception("request body should be json-format")
 
-        kmonitor.report(AccMetrics.QPS_METRIC, 1)
+        kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": req.get("source", "unkown")})
         self._access_logger.log_query_access(req, id)
         is_streaming = self._inference_worker.is_streaming(req)
         self._controller.increment()
