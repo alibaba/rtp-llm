@@ -19,7 +19,7 @@ namespace rtp_llm {
 struct CustomConfig {
     bool reuse_cache = false;
     bool int8_kv_cache = false;
-    std::map<int, std::vector<int>> multi_task_prompt_tokens;
+    std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
 };
 
 std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomConfig& config, GptInitParameter& params) {

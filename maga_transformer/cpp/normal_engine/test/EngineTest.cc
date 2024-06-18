@@ -156,7 +156,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
     CustomConfig config;
     vector<int> prompt_1 = {1, 2, 3};
     vector<int> prompt_2 = {4, 5, 6, 7, 8, 9};
-    config.multi_task_prompt_tokens = {{1, prompt_1}, {2, prompt_2}};
+    config.multi_task_prompt_tokens = {{"1", prompt_1}, {"2", prompt_2}};
     auto gpt_init_params = GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().cache_manager);
