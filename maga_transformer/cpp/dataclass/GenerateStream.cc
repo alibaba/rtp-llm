@@ -34,6 +34,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input, const ft:
         memcpy(complete_token_ids_->dataWithOffset<int32_t>(i * max_seq_len_), generate_input_->input_ids->data(), generate_input_->input_ids->sizeBytes());
     }
 
+    generate_outputs_queue_.setCapacity(1000);
     cum_log_probs_ = device_->allocateBuffer(
         {ft::DataType::TYPE_FP32, {(size_t)tileNum()}, ft::AllocationType::HOST}, {});
     memset(cum_log_probs_->data(), 0, cum_log_probs_->sizeBytes());
@@ -55,7 +56,7 @@ void GenerateStream::cancel() {
 }
 
 absl::StatusOr<GenerateOutputs> GenerateStream::nextOutput() {
-    while (generate_outputs_queue_.isEmpty() && !stopped() && !finished()) {
+    while ((!stopped()) && !finished() && generate_outputs_queue_.isEmpty()) {
         generate_outputs_queue_.waitNotEmpty();
     }
     if (stopped()) {
@@ -431,6 +432,9 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
         memcpy(generate_output.aux_info.cum_log_probs.value()->data(), cum_log_probs_->dataWithOffset<float>(i), sizeof(float));
 
         generate_outputs_->generate_outputs.push_back(generate_output);
+    }
+    while (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
+        generate_outputs_queue_.popFront();
     }
     generate_outputs_queue_.push(*generate_outputs_);
 }

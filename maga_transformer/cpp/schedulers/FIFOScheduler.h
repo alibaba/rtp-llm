@@ -41,7 +41,8 @@ private:
     std::list<GenerateStreamPtr>        waiting_streams_;
     std::list<GenerateStreamPtr>        running_streams_;
     std::shared_ptr<CacheManager>       cache_manager_;
-    int                                 max_seq_len_        = 0;
+    size_t                              max_seq_len_        = 0;
+    size_t                              max_context_batch_size_ = 1;
     int                                 reserve_block_num_  = 0;
     bool                                enable_fallback     = false;
     std::atomic<bool>                   stop_               = false;

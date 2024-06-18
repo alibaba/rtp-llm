@@ -56,6 +56,8 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_incremental = input_py.generate_config.return_incremental
     generate_config_pb.return_hidden_states = input_py.generate_config.return_hidden_states
     generate_config_pb.is_streaming = input_py.generate_config.is_streaming
+    # tmp stream true because cancel has bug
+    generate_config_pb.is_streaming = True
     generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
     
     for i in range(len(input_py.generate_config.stop_words_list)):

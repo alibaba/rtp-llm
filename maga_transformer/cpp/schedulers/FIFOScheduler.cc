@@ -12,6 +12,7 @@ FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
                              const kmonitor::MetricsReporterPtr   metrics_reporter):
     cache_manager_(cache_manager),
     max_seq_len_(params.max_seq_len_),
+    max_context_batch_size_(params.max_context_batch_size_),
     reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->freeBlockNums() / 100),
     metrics_reporter_(metrics_reporter) {}
 
@@ -93,7 +94,7 @@ void FIFOScheduler::evaluateRunningNext() {
 }
 
 bool FIFOScheduler::evaluateRunningMemory(int total_token_size) const {
-    return total_token_size < max_seq_len_;
+    return total_token_size < max_seq_len_ * max_context_batch_size_;
 }
 
 bool FIFOScheduler::evaluateKVCacheMemory(int new_block_num) const {

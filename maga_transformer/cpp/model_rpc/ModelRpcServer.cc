@@ -41,8 +41,14 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
         FT_LOG_DEBUG("request:[%ld] generate next output success", request->request_id());
         GenerateOutputsPB outputs_pb;
         QueryConverter::transResponse(&outputs_pb, &(output_status.value()));
+        if (context->IsCancelled()) {
+            stream->cancel();
+            FT_LOG_DEBUG("request:[%ld] cancel", request->request_id());
+            break;
+        }
         if (!writer->Write(outputs_pb)) {
-            FT_LOG_DEBUG("request:[%ld] write outputs pb failed", request->request_id());
+            FT_LOG_INFO("request:[%ld] write outputs pb failed", request->request_id());
+            stream->cancel();
             break;
         }
     }
