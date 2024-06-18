@@ -47,7 +47,7 @@ class CogVLM2Renderer(CustomChatRenderer):
 
         query_format = ""
         answer_format = ""
-        if text_only and not self.first_query: 
+        if text_only and not self.first_query:
             query_format = "{} "
             answer_format = "{} \n"
         if not text_only:

@@ -149,8 +149,7 @@ class CogVLM2(Llama, MultiModalMixin):
         return position_ids
 
     def extend_context_position_ids(
-        self, position_ids: List[int], context_begin_position: int,
-        context_end_position: int, token_type_ids: torch.Tensor
+        self, context_begin_position: int, context_end_position: int, token_type_ids: torch.Tensor
     ) -> List[int]:
         # construct position ids for rotary embedding, assuming the token_type_ids is [T, V, V, V, V, V, T, T, T]
         # the expected position ids is [0, 1, 2, 2, 2, 3, 4, 5, 6]

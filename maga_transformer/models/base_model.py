@@ -45,7 +45,7 @@ class GenerateInput(PyBaseModel):
 
     @property
     def vision_token_length(self):
-        return self.images[0].shape[0]
+        return self.images[0].shape[0] if len(self.images) > 0 else 0
 
 class AuxInfo(PyBaseModel):
     cost_time: float = 0
@@ -235,14 +235,13 @@ class BaseModel(object):
         return []
 
     def extend_generate_position_ids(
-        self, position_ids: List[int], generate_batch_size: int, num_beams: int,
+        self, generate_batch_size: int, num_beams: int,
         vision_token_length: List[int], seq_lengths_list: List[int]
     ) -> List[int]:
         return [i - 1 for i in seq_lengths_list]
 
     def extend_context_position_ids(
-        self, position_ids: List[int], context_begin_position: int,
-        context_end_position: int, token_type_ids: torch.Tensor
+        self, context_begin_position: int, context_end_position: int, token_type_ids: torch.Tensor
     ) -> List[int]:
         return range(context_begin_position, context_end_position)
 
