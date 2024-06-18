@@ -43,8 +43,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     model_input.sequence_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_decode_batch_size}, ft::AllocationType::HOST}, {});
-    model_input.context_output_indexes =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {context_batch_size}, ft::AllocationType::HOST}, {});
+    model_input.lm_output_indexes =
+        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     model_input.prefix_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     model_input.count_lengths =
@@ -57,7 +57,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int*      input_lengths    = (int*)model_input.input_lengths->data();
     int*      lora_ids         = (int*)model_input.lora_ids->data();
     int*      sequence_lengths = (int*)model_input.sequence_lengths->data();
-    int*      context_output_indexes = (int*)model_input.context_output_indexes->data();
+    int*      lm_output_indexes = (int*)model_input.lm_output_indexes->data();
     int*      prefix_lengths   = (int*)model_input.prefix_lengths->data();
     uint64_t* kv_cache_blocks  = (uint64_t*)model_input.kv_cache_blocks->data();
     uint64_t* kv_cache_scales  = use_int8_kv_cache_ ? (uint64_t*)model_input.kv_cache_scales->data() : nullptr;
@@ -75,6 +75,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             sequence_lengths[batch_idx] = stream->seqLength() - 1; // need remove
             prefix_lengths[batch_idx]   = 0;
             lora_ids[batch_idx]         = stream->loraId();
+            lm_output_indexes[batch_idx] = batch_idx;
             memcpyKvCache(kv_cache_blocks,
                           kv_cache.k_ptr[i],
                           kv_cache.v_ptr[i],
@@ -96,15 +97,15 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     }
 
     int token_idx = batch_idx;
-    int cum_context_seq_len = 0;
+    int cum_output_seq_len = batch_idx;
     for (const auto& stream : context_streams) {
         auto input_tokens    = stream->currentExecuteTokens();
         memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
         token_idx += input_tokens.size();
-        cum_context_seq_len += stream->contextLength();
+        cum_output_seq_len += stream->contextLength();
         input_lengths[batch_idx]  = stream->contextLength();
         prefix_lengths[batch_idx] = stream->reuseLength();
-        context_output_indexes[batch_idx] = cum_context_seq_len - 1;
+        lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
         lora_ids[batch_idx]       = stream->loraId();
         auto kv_cache             = stream->kvCache();
         FT_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
@@ -129,7 +130,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     }
     FT_LOG_DEBUG("input_lengths: %s", model_input.input_lengths->debugStringWithData<int32_t>().c_str());
     FT_LOG_DEBUG("sequence_lengths: %s", model_input.sequence_lengths->debugStringWithData<int32_t>().c_str());
-
     return model_input;
 }
 

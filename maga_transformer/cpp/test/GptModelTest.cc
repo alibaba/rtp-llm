@@ -28,7 +28,7 @@ TEST_F(GptModelTest, testSimple) {
     attention_conf.head_num = 16;
     attention_conf.kv_head_num = 16;
     attention_conf.size_per_head = 64;
-    attention_conf.tokens_per_block = 8;
+    attention_conf.tokens_per_block = 16;
     attention_conf.rope_config.embedding_style = RopeType::Base;
     attention_conf.rope_config.embedding_dim = 64;
     attention_conf.rope_config.embedding_base = 1000000;
@@ -46,11 +46,10 @@ TEST_F(GptModelTest, testSimple) {
     );
 
     const std::vector<int32_t> input_lengths_vec = {3};
-    const std::vector<int32_t> sequence_lengths_vec = {};
 
     auto combo_tokens = createBuffer<int32_t>({3}, {13048, 11, 220}, AllocationType::HOST);
     auto input_lengths = createBuffer<int32_t>({1}, input_lengths_vec, AllocationType::HOST);
-    auto sequence_lengths = createBuffer<int32_t>({0}, sequence_lengths_vec, AllocationType::HOST);
+    auto sequence_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
     auto kv_cache = torch::empty(0);
     auto kv_cache_blocks = allocateKVBlocks(cache_config, input_lengths_vec, kv_cache);
     const auto mask_tensor = create_context_mask(input_lengths_vec).to(torch::kFloat16);
@@ -59,9 +58,9 @@ TEST_F(GptModelTest, testSimple) {
     GptModelInputs inputs = {
         std::move(combo_tokens), std::move(input_lengths), std::move(sequence_lengths)
     };
-    inputs.context_output_indexes = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
+    inputs.lm_output_indexes = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
     inputs.attention_mask = mask_buf;
-    inputs.kv_cache_blocks = std::move(kv_cache_blocks);
+    inputs.kv_cache_blocks = kv_cache_blocks;
     device_->syncAndCheck();
 
     // temporarily disable test for cpu/arm device
@@ -98,7 +97,7 @@ TEST_F(GptModelTest, testSimple) {
     inputs.combo_tokens = createBuffer<int32_t>({1}, {151645}, AllocationType::HOST);
     inputs.input_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
     inputs.sequence_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
-    inputs.context_output_indexes = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
+    inputs.lm_output_indexes = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
     device_->syncAndCheck();
     outputs = model->forward(inputs);
     device_->syncAndCheck();
@@ -112,6 +111,45 @@ TEST_F(GptModelTest, testSimple) {
                 -0.9766, -0.1351,  2.6152, 28.2500, -0.1479}, AllocationType::HOST)),
         1e-1, 1e-2
     );
+
+    // combining two previous queries.
+    inputs.combo_tokens = createBuffer<int32_t>({4}, {151645, 13048, 11, 220}, AllocationType::HOST);
+    inputs.input_lengths = createBuffer<int32_t>({2}, {3, 3}, AllocationType::HOST);
+    inputs.sequence_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
+    inputs.lm_output_indexes = createBuffer<int32_t>({2}, {0, 3}, AllocationType::HOST);
+
+    inputs.kv_cache_blocks = allocateKVBlocks(cache_config, {3, 3}, kv_cache);
+    for (auto layer_id = 0; layer_id < inputs.kv_cache_blocks->shape()[0]; layer_id++) {
+        auto layer_src = kv_cache_blocks->view(layer_id, 1);
+        layer_src.reshape({1, 2, 2});
+        auto layer_dst = inputs.kv_cache_blocks->view(layer_id, 1);
+        layer_dst.reshape({2, 2, 2});
+        device_->copy({layer_dst.view(0, 1), layer_src.view(0, 1)});
+    }
+
+    device_->syncAndCheck();
+    outputs = model->forward(inputs);
+    device_->syncAndCheck();
+    output_tensor = bufferToTensor(*outputs.logits);
+    assertTensorClose(
+        output_tensor.index({torch::indexing::Slice(1, 2), 151645}),
+        bufferToTensor(*createBuffer<float>({1}, {15.7891}, AllocationType::HOST)),
+        1e-1, 5e-2
+    );
+    assertTensorClose(
+        output_tensor.index({torch::indexing::Slice(1, 2), torch::indexing::Slice(0, 3)}),
+        bufferToTensor(*createBuffer<float>({1, 3},
+            {7.1562, -9.3672, -0.8486}, AllocationType::HOST)),
+        0.2, 0.1
+    );
+    assertTensorClose(
+        output_tensor.index({torch::indexing::Slice(0, 1), torch::indexing::Slice(190, 200)}),
+        bufferToTensor(*createBuffer<float>(
+            {10}, {1.1670, -0.6973, -0.6919, -1.7705, -1.4453,
+                -0.9766, -0.1351,  2.6152, 28.2500, -0.1479}, AllocationType::HOST)),
+        1e-1, 1e-2
+    );
+
 }
 
 TEST_F(GptModelTest, testAttentionInputs) {

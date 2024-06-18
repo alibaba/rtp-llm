@@ -485,7 +485,6 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     size_t size_per_head        = params.configs.size_per_head;
 
     if (use_multi_block_mode) {
-        FT_LOG_INFO("USE_MULTI_BLOCK_MODE");
         const int threads_per_value = pow2roundup(size_per_head) * getTypeSize(datatype) / 16;
         // for allocate partial output results memory. Regardless to THDS_PER_BLOCK
         max_seq_len_tile = 256 / threads_per_value;

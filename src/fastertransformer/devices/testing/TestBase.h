@@ -228,7 +228,9 @@ protected:
                                const std::vector<int32_t>& input_lengths,
                                torch::Tensor& kvCache)
     {
-        cache_manager_ = std::make_shared<rtp_llm::CacheManager>(cache_config, device_);
+        if (!cache_manager_) {
+            cache_manager_ = std::make_shared<rtp_llm::CacheManager>(cache_config, device_);
+        }
         auto max_seq_len = *std::max_element(input_lengths.begin(), input_lengths.end());
         max_seq_len = (max_seq_len == 0) ? 1 : max_seq_len;
         const auto tokensPerBlock = cache_config.seq_size_per_block;

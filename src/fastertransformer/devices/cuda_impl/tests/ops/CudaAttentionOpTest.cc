@@ -213,7 +213,7 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto input_lengths_host = torch::from_blob((void*)input_lengths.data(), {(int)batch_size}, int_tensor_options);
 
     size_t tokensPerBlock = 8;
-    
+
     size_t padding_kv_seq_len = ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) * tokensPerBlock;
     padding_kv_seq_len = (kv_seq_len == 0) ? 2 * tokensPerBlock : padding_kv_seq_len;
     auto kvcache_pad = torch::zeros(
@@ -242,10 +242,11 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto input_lengths_device       = createDeviceBuffer<int>(input_lengths_host);
 
     auto rope_config = RopeConfig({RopeType::NOROPE, head_dim, 10000, 1, 2048, 1, 1});
-    
+
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
     rtp_llm::CacheConfig cache_conf(1, block_num, num_heads, head_dim, tokensPerBlock, DataType::TYPE_FP16);
+    cache_manager_ = nullptr;
     auto kv_cache = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
 
     auto common_inputs = AttentionCommonInputs(*input_lengths_device, *sequence_lengths_device);

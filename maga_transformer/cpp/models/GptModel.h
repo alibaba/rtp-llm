@@ -38,7 +38,7 @@ struct GptModelInputs {
     ft::BufferPtr combo_tokens;      // [cumulated_seq_len]
     ft::BufferPtr input_lengths;     // [batch_size]
     ft::BufferPtr sequence_lengths;  // [decoder_batch_size]
-    ft::BufferPtr context_output_indexes; // [context_batch_size]
+    ft::BufferPtr lm_output_indexes; // [context_batch_size]
     ft::BufferPtr prefix_lengths;    // [batch_size, seq_len]
     ft::BufferPtr count_lengths;     // [1]
     ft::BufferPtr max_prefix_length; // [1]

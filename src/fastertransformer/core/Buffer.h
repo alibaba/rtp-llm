@@ -111,7 +111,6 @@ public:
         return debugStringMeta() + ", " + debugDataString<T>(count);
     }
 
-private:
     template<typename T>
     std::string debugDataString(size_t count) const {
         auto base = data<T>();
