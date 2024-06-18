@@ -20,12 +20,12 @@ GptInitParameter::GptInitParameter(int64_t head_num,
     hidden_size_(hidden_size) {
 }
 
-void GptInitParameter::insertMultiTaskPromptTokens(int64_t task_id, std::vector<int64_t> tokens_id) {
+void GptInitParameter::insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id) {
     std::vector<int> new_tokens_id; // to convert tokens of type int64_t to type int32_t
     for (auto token_id : tokens_id) {
         new_tokens_id.push_back(token_id);
     }
-    multi_task_prompt_tokens_[(int)task_id] = new_tokens_id;
+    multi_task_prompt_tokens_[task_id] = new_tokens_id;
 }
 
 void GptInitParameter::setLayerNormType() {

@@ -20,8 +20,8 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-std::unordered_map<int, SystemPromptParams> SystemPromptConstructor::construct(const ft::GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager) {
-    std::unordered_map<int, SystemPromptParams> multi_task_prompt_args;
+std::unordered_map<std::string, SystemPromptParams> SystemPromptConstructor::construct(const ft::GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager) {
+    std::unordered_map<std::string, SystemPromptParams> multi_task_prompt_args;
     for (const auto& item: params.multi_task_prompt_tokens_) {
         const auto& task_id = item.first;
         const auto& tokens_id = item.second;

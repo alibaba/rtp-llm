@@ -25,10 +25,10 @@ struct SystemPromptParams {
 
 class SystemPrompt {
 public:
-    SystemPrompt(const std::unordered_map<int, SystemPromptParams>& prompt_map) : prompt_map_(prompt_map) {}
+    SystemPrompt(const std::unordered_map<std::string, SystemPromptParams>& prompt_map) : prompt_map_(prompt_map) {}
 
     SystemPromptParams getPromptParams(const GenerateConfig& generate_config) {
-        auto task_id = generate_config.task_id;
+        const auto& task_id = generate_config.task_id;
         if (task_id != std::nullopt) {
             auto it = prompt_map_.find(task_id.value());
             if (it == prompt_map_.end()) {
@@ -41,7 +41,7 @@ public:
     }
 
 private:
-    std::unordered_map<int, SystemPromptParams> prompt_map_;
+    std::unordered_map<std::string, SystemPromptParams> prompt_map_;
 };
 
 }  // namespace rtp_llm

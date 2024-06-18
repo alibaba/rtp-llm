@@ -34,7 +34,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->mutable_top_p_decay()->set_value(0.7);
     generate_config_pb->mutable_top_p_min()->set_value(0.3);
     generate_config_pb->mutable_top_p_reset_ids()->set_value(7);
-    generate_config_pb->mutable_task_id()->set_value(8);
+    generate_config_pb->mutable_task_id()->set_value("8");
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
     for (int i = 0; i < 2; ++i) {
@@ -60,7 +60,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_FLOAT_EQ(generate_config->top_p_decay.value(), 0.7);
     ASSERT_FLOAT_EQ(generate_config->top_p_min.value(), 0.3);
     ASSERT_EQ(generate_config->top_p_reset_ids.value(), 7);
-    ASSERT_EQ(generate_config->task_id.value(), 8);
+    ASSERT_EQ(generate_config->task_id.value(), "8");
     ASSERT_EQ(generate_config->calculate_loss, 1);
     ASSERT_TRUE(generate_config->return_hidden_states);
     ASSERT_FALSE(generate_config->return_logits);

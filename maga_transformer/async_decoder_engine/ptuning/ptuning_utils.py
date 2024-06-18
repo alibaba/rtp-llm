@@ -18,7 +18,7 @@ class PtuningConstructor(object):
         self.decoder_engine = decoder_engine
         self.cache_manager = cache_manager
 
-    def construct(self) -> Optional[Union[PrefixParams, Dict[int, PrefixParams]]]:
+    def construct(self) -> Optional[Union[PrefixParams, Dict[str, PrefixParams]]]:
         if self.model.prefix_encoder is not None:
             assert self.model.prefix_tokens is not None
             prefix_prompt = self.model.prefix_encoder(self.model.prefix_tokens.cuda().unsqueeze(0)).squeeze(0)
@@ -42,9 +42,9 @@ class PtuningConstructor(object):
         return PrefixParams(prefix_type=PrefixType.PTuningV2, prefix_length=prefix_seq_length, block_cache=prefix_block_indice, prefix_tensor=None)
 
     def _create_multi_task_prompt_params(self, multi_task_prompt: List[Dict[str, Any]]):
-        multi_task_prompt_args: Dict[int, PrefixParams] = {}
+        multi_task_prompt_args: Dict[str, PrefixParams] = {}
         for info in multi_task_prompt:
-            id: int = info['task_id']
+            id: str = str(info['task_id'])
             prompt: str = info['prompt']
             input_tokens = torch.IntTensor(self.tokenizer.encode(prompt))
             input = GenerateInput(token_ids=input_tokens, generate_config=GenerateConfig(max_new_tokens=1))

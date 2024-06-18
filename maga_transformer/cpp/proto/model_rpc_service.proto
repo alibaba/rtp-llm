@@ -40,7 +40,7 @@ message GenerateConfigPB {
     google.protobuf.FloatValue top_p_decay = 10;
     google.protobuf.FloatValue top_p_min = 11;
     google.protobuf.Int32Value top_p_reset_ids = 12;
-    google.protobuf.Int64Value task_id = 13;
+    google.protobuf.StringValue task_id = 13;
     int32 calculate_loss = 14;
     bool return_incremental = 15;
     bool return_hidden_states = 16;

@@ -34,7 +34,7 @@ public:
     std::optional<float> top_p_decay;
     std::optional<float> top_p_min;
     std::optional<int>   top_p_reset_ids;
-    std::optional<int>   task_id;
+    std::optional<std::string>   task_id;
     std::optional<int>   adapter_name;
 
     std::vector<int>    select_tokens_id;

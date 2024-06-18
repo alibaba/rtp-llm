@@ -3,6 +3,7 @@ import sys
 from typing import Any, Optional
 import asyncio
 import numpy as np
+import functools
 import logging
 import grpc
 import torch
@@ -24,6 +25,9 @@ def trans_option(pb_object, py_object, name):
     if getattr(py_object, name):
         getattr(pb_object, name).value = getattr(py_object, name)
 
+def trans_option_cast(pb_object, py_object, name, func):
+    if getattr(py_object, name):
+        getattr(pb_object, name).value = func(getattr(py_object, name))
 
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
@@ -44,7 +48,7 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
-    trans_option(generate_config_pb, input_py.generate_config, "task_id")
+    trans_option_cast(generate_config_pb, input_py.generate_config, "task_id", functools.partial(str))
 
     generate_config_pb.select_tokens_id.extend(input_py.generate_config.select_tokens_id)
     generate_config_pb.calculate_loss = input_py.generate_config.calculate_loss

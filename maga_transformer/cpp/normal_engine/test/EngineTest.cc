@@ -207,7 +207,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
         query->input_ids                        = createBuffer<int32_t>({7}, {10, 20, 30, 40, 50, 60, 70}, AllocationType::HOST);
         query->generate_config                  = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens  = 1;
-        query->generate_config->task_id         = 2;
+        query->generate_config->task_id         = "2";
         shared_ptr<GenerateStream> stream       = engine->enqueue(query);
 
         ASSERT_TRUE(stream != nullptr);

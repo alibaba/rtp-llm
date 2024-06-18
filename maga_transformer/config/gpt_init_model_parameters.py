@@ -237,7 +237,7 @@ class GptInitModelParameters:
     def update_task_prompt_tokens_id(self, tokenizer):
         if self.multi_task_prompt:
             for info in self.multi_task_prompt:
-                task_id: int = info['task_id']
+                task_id: str = str(info['task_id'])
                 prompt: str = info['prompt']
                 tokens_id = tokenizer.encode(prompt)
                 self.insertMultiTaskPromptTokens(task_id, tokens_id)

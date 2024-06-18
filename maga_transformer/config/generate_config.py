@@ -33,7 +33,7 @@ class GenerateConfig(BaseModel):
     print_stop_words: bool = False
     timeout_ms: int = -1
     chat_id: Optional[str] = None
-    task_id: Optional[int] = None
+    task_id: Optional[Union[str,int]] = None
     request_format: str = RequestFormat.RAW
     # calculate_loss style: 0 for not calculate; 1 for sum; 2 for each token
     calculate_loss: int = 0

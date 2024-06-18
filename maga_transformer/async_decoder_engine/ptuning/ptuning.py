@@ -87,9 +87,9 @@ class Ptuning(PtuningBase):
         return block_indice, self.prefix_params.prefix_length
 
 class MultiTaskPtuning(PtuningBase):
-    def __init__(self, config: GptInitModelParameters, cache_manage: CacheManager, prefix_params_map: Dict[int, PrefixParams]):
+    def __init__(self, config: GptInitModelParameters, cache_manage: CacheManager, prefix_params_map: Dict[str, PrefixParams]):
         self.cache_manage_ = cache_manage
-        self.ptunings_: Dict[int, Ptuning] = {id: Ptuning(config, cache_manage, prefix_params, True) for id, prefix_params in prefix_params_map.items()}
+        self.ptunings_: Dict[str, Ptuning] = {id: Ptuning(config, cache_manage, prefix_params, True) for id, prefix_params in prefix_params_map.items()}
         self.prefix_type = PrefixType.PromptTuning
 
     def get_block_indice(self, block_num: int, generate_config: GenerateConfig) -> Tuple[List[int], int]:
@@ -99,8 +99,7 @@ class MultiTaskPtuning(PtuningBase):
         return self.ptunings_[task_id].get_block_indice(block_num, generate_config)
 
     def get_prefix_params(self, generate_config: GenerateConfig) -> Tuple[PrefixType, Optional[torch.Tensor]]:
-
-        task_id = generate_config.task_id
+        task_id = None if not generate_config.task_id else str(generate_config.task_id)
         if not task_id or task_id not in self.ptunings_:
             return PrefixType.NoPrefix, torch.zeros([0])
 
