@@ -229,8 +229,6 @@ register_model(
     ["CogVLMForCausalLM"],
     [
         "THUDM/cogvlm2-llama3-chat-19B",
-        "THUDM/cogvlm2-llama3-chinese-chat-19B",
-        "cogvlm2-llama3-chat-19B-int4",
-        "THUDM/cogvlm2-llama3-chinese-chat-19B-int4",
+        "THUDM/cogvlm2-llama3-chinese-chat-19B"
     ],
 )
