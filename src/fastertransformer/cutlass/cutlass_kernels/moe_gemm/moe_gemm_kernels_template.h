@@ -38,7 +38,7 @@
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_heuristic.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
-#include "src/fastertransformer/utils/trt_utils.h"
+#include "src/fastertransformer/cuda/trt_utils.h"
 
 #include <cuda.h>
 #include <cuda_fp16.h>

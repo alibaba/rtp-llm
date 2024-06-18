@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 #include "src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
-#include "src/fastertransformer/utils/trt_utils.h"
+#include "src/fastertransformer/cuda/trt_utils.h"
 #include <numeric>
 
 using namespace nvinfer1;

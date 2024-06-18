@@ -155,7 +155,8 @@ cc_library(
     ],
     hdrs = [
         "cuda_utils.h",
-        "Dispatch.h"
+        "Dispatch.h",
+        "trt_utils.h"
     ],
     deps = [
         ":cuda_utils_cu",

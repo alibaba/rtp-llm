@@ -18,7 +18,7 @@
 
 #include "src/fastertransformer/utils/quantization.h"
 #include "src/fastertransformer/cutlass/interface.h"
-#include "src/fastertransformer/utils/trt_utils.h"
+#include "src/fastertransformer/cuda/trt_utils.h"
 
 #include <cassert>
 #include <memory>

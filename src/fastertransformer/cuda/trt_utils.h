@@ -1,6 +1,6 @@
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/utils/exception.h"
-#include "src/fastertransformer/cuda/cuda_utils.h"
+// #include "src/fastertransformer/cuda/cuda_utils.h"
 
 #pragma once
 #define TLLM_LOG_TRACE FT_LOG_TRACE

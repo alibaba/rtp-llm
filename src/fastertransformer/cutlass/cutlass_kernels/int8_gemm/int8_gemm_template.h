@@ -42,7 +42,7 @@
 
 #include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
-#include "src/fastertransformer/utils/trt_utils.h"
+#include "src/fastertransformer/cuda/trt_utils.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_heuristic.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/int8_gemm/int8_gemm.h"
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h"

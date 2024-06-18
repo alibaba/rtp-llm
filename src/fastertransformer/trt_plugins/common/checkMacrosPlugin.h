@@ -16,7 +16,7 @@
  */
 #pragma once
 
-#include "src/fastertransformer/utils/trt_utils.h"
+#include "src/fastertransformer/cuda/trt_utils.h"
 
 namespace tensorrt_llm::plugins
 {

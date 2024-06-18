@@ -19,7 +19,7 @@
 
 #include "src/fastertransformer/utils/quantization.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_kernels.h"
-#include "src/fastertransformer/utils/trt_utils.h"
+#include "src/fastertransformer/cuda/trt_utils.h"
 #include "src/fastertransformer/utils/activation_types.h"
 
 #include <cassert>
