@@ -228,23 +228,23 @@ class BaseModel(object):
         shape = list(t.shape)
         return t.unsqueeze(1).repeat([1, beam_width] + [1] * len(shape[1:])).reshape([-1] + shape[1:]).contiguous()
 
-    def extend_context_combo_token_types(self, combo_token_types: List[int], token_types: List[int]):
-        pass
+    def extend_context_combo_token_types(self, token_types: List[int]) -> List[int]:
+        return []
 
-    def extend_generate_combo_token_types(self, combo_token_types: List[int], combo_tokens: List[int]):
-        pass
+    def extend_generate_combo_token_types(self, combo_tokens: List[int]) -> List[int]:
+        return []
 
     def extend_generate_position_ids(
         self, position_ids: List[int], generate_batch_size: int, num_beams: int,
         vision_token_length: List[int], seq_lengths_list: List[int]
-    ):
-        position_ids.extend([i - 1 for i in seq_lengths_list])
+    ) -> List[int]:
+        return [i - 1 for i in seq_lengths_list]
 
     def extend_context_position_ids(
         self, position_ids: List[int], context_begin_position: int,
         context_end_position: int, token_type_ids: torch.Tensor
-    ):
-        position_ids.extend(range(context_begin_position, context_end_position))
+    ) -> List[int]:
+        return range(context_begin_position, context_end_position)
 
     def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
         return self.word_embedding(inputs)

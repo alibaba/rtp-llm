@@ -10,7 +10,6 @@ from PIL import Image
 from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.models.cogvlm2 import LANGUAGE_TOKEN_TYPE
 from maga_transformer.utils.stop_utils import create_stop_criteria_list
 from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
@@ -300,11 +299,7 @@ class BatchQuery:
             self.reuse_lengths_list.append(stream.reuse_length)
             self.context_lengths_list.append(stream.seq_length - stream.reuse_length * int(self._ptuning_info.count_prefix_length))
             if self.use_expect_attention:
-                if stream.seq_length > 0 and len(stream.input.token_type_ids) == 0:
-                    # when there is no image input, we use language token type for all tokens
-                    token_type_ids[idx, :stream.seq_length] = [LANGUAGE_TOKEN_TYPE] * stream.seq_length
-                else:
-                    token_type_ids[idx, :stream.seq_length] = stream.input.token_type_ids
+                token_type_ids[idx, :stream.seq_length] = stream.input.token_type_ids
 
         lora_ids = []
         for stream in self.streams:
