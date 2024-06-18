@@ -418,7 +418,7 @@ void MoeGemmRunner<T, WeightType>::runGemm<EpilogueTag>(const T* A, const Weight
         for (int i = 0; i < candidate_configs.size(); i++)
         {
             if (tensorrt_llm::kernels::cutlass_kernels::is_valid_split_k_factor(total_rows, gemm_n, gemm_k, candidate_configs[i],
-                    candidate_configs[i].split_k_factor, workspace_bytes, is_weight_only))
+                    workspace_bytes, is_weight_only))
             {
                 valid_configs.push_back(candidate_configs[i]);
             }
@@ -433,7 +433,8 @@ void MoeGemmRunner<T, WeightType>::runGemm<EpilogueTag>(const T* A, const Weight
 
         chosen_conf
             = kernels::cutlass_kernels::estimate_best_config_from_occupancies(valid_configs, occupancies, total_rows,
-                gemm_n, gemm_k, num_experts, split_k_limit, workspace_bytes, multi_processor_count_, is_weight_only);
+                gemm_n, gemm_k, multi_processor_count_);
+
     }
     assert(chosen_conf);
     dispatchToArch<EpilogueTag>(A, B, weight_scales, biases, C, total_rows_before_expert, total_rows, gemm_n, gemm_k,

@@ -462,11 +462,44 @@ std::vector<tkc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<T, WeightType, Quan
     return candidateConfigs;
 }
 
-template<typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
-tkc::CutlassGemmConfig
-CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChosenConfig(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points,
-        const void* biases, void* C, int m, int n, int k, const int group_size,
-        char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
+
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
+std::vector<tkc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getValidConfigs(const void* A, const void* B,
+    const void* weight_scales, const void* weight_zero_points, const void* biases, void* C, int m, int n, int k,
+    const int group_size, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
+{
+
+    static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
+
+    std::vector<tkc::CutlassGemmConfig> candidate_configs
+        = get_candidate_configs(sm_, is_weight_only, false, false, SPLIT_K_LIMIT);
+    std::vector<tkc::CutlassGemmConfig> valid_splitk_configs;
+    for (int i = 0; i < candidate_configs.size(); i++)
+    {
+        if (is_valid_split_k_factor(m, n, k, candidate_configs[i], workspace_bytes, is_weight_only))
+        {
+            valid_splitk_configs.push_back(candidate_configs[i]);
+        }
+    }
+    std::vector<int> occupancies(valid_splitk_configs.size());
+
+    for (size_t ii = 0; ii < valid_splitk_configs.size(); ++ii)
+    {
+        dispatch_to_arch<tkc::EpilogueOpDefault>((const T*) A, (const WeightType*) B, (const T*) weight_scales,
+            (const T*) weight_zero_points, (const T*) biases, (T*) C, m, n, k, group_size, valid_splitk_configs[ii],
+            workspace_ptr, workspace_bytes, stream, &(occupancies[ii]));
+    }
+    std::vector<tkc::CutlassGemmConfig> valid_configs
+        = get_valid_config_from_occupancies(valid_splitk_configs, occupancies);
+
+    return valid_configs;
+
+}
+
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
+tkc::CutlassGemmConfig CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChosenConfig(const void* A, const void* B,
+    const void* weight_scales, const void* weight_zero_points, const void* biases, void* C, int m, int n, int k,
+    const int group_size, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
 {
     // Standard GEMM, so 1 "expert". We use the same function for MoE and regular FFN.
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -489,8 +522,7 @@ CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChosenConfig(const void* A,
     std::vector<tkc::CutlassGemmConfig> valid_configs;
     for (int i = 0; i < candidate_configs.size(); i++)
     {
-        if (is_valid_split_k_factor(
-                m, n, k, candidate_configs[i], candidate_configs[i].split_k_factor, workspace_bytes, is_weight_only))
+        if (is_valid_split_k_factor(m, n, k, candidate_configs[i], workspace_bytes, is_weight_only))
         {
             valid_configs.push_back(candidate_configs[i]);
         }
@@ -503,9 +535,9 @@ CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChosenConfig(const void* A,
             (const T*) weight_zero_points, (const T*) biases, (T*) C, m, n, k, group_size, valid_configs[ii],
             workspace_ptr, workspace_bytes, stream, &(occupancies[ii]));
     }
-    static constexpr int num_experts = 1;
-    tkc::CutlassGemmConfig chosen_config = estimate_best_config_from_occupancies(valid_configs, occupancies, m, n, k,
-        num_experts, SPLIT_K_LIMIT, workspace_bytes, multi_processor_count_, is_weight_only);
+    tkc::CutlassGemmConfig chosen_config
+        = estimate_best_config_from_occupancies(valid_configs, occupancies, m, n, k, multi_processor_count_);
+
     return chosen_config;
 }
 

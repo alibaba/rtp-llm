@@ -83,8 +83,9 @@ void print_config(CutlassGemmConfig config){
 }
 
 bool is_valid_split_k_factor(const int64_t m, const int64_t n, const int64_t k, const CutlassGemmConfig gemm_config,
-    const int split_k_factor, const size_t workspace_bytes, const bool is_weight_only)
+    const size_t workspace_bytes, const bool is_weight_only)
 {
+    int split_k_factor = gemm_config.split_k_factor;
 
     // All tile sizes have a k_tile of 64.
     static constexpr int k_tile = 64;
@@ -212,9 +213,35 @@ std::vector<CutlassGemmConfig> get_candidate_configs(int sm, const bool is_weigh
     return candidate_configs;
 }
 
+std::vector<CutlassGemmConfig> get_valid_config_from_occupancies(
+    const std::vector<CutlassGemmConfig>& candidate_configs, const std::vector<int>& occupancies)
+{
+    if (occupancies.size() != candidate_configs.size())
+    {
+        throw std::runtime_error(
+            "[TensorRT-LLm Error][estimate_best_config_from_occupancies] occpancies and "
+            "candidate configs vectors must have equal length.");
+    }
+
+    std::vector<CutlassGemmConfig> valid_configs;
+
+    for (int ii = 0; ii < candidate_configs.size(); ++ii)
+    {
+        CutlassGemmConfig candidate_config = candidate_configs[ii];
+        int occupancy = occupancies[ii];
+
+        if (occupancy == 0)
+        {
+            continue;
+        }
+        valid_configs.push_back(candidate_config);
+    }
+    return valid_configs;
+}
+
 CutlassGemmConfig estimate_best_config_from_occupancies(const std::vector<CutlassGemmConfig>& candidate_configs,
-    const std::vector<int>& occupancies, const int64_t m, const int64_t n, const int64_t k, const int64_t num_experts,
-    const int split_k_limit, const size_t workspace_bytes, const int multi_processor_count, const int is_weight_only)
+    const std::vector<int>& occupancies, const int64_t m, const int64_t n, const int64_t k,
+    const int multi_processor_count)
 {
 
     if (occupancies.size() != candidate_configs.size())
@@ -232,7 +259,6 @@ CutlassGemmConfig estimate_best_config_from_occupancies(const std::vector<Cutlas
     int config_waves = INT_MAX;
     int current_m_tile = 0;
 
-    const int max_split_k = n >= multi_processor_count * 256 ? 1 : split_k_limit;
     for (int ii = 0; ii < candidate_configs.size(); ++ii)
     {
         CutlassGemmConfig candidate_config = candidate_configs[ii];

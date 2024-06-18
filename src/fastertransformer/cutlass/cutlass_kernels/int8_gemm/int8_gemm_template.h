@@ -375,6 +375,37 @@ std::vector<tkc::CutlassGemmConfig> CutlassInt8GemmRunner<T>::getConfigs() const
 }
 
 template <typename T>
+std::vector<tkc::CutlassGemmConfig> CutlassInt8GemmRunner<T>::getValidConfigs(const void* A, const void* B,
+    tk::QuantMode quantOption, const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k,
+    char* workspacePtr, const size_t workspaceBytes, cudaStream_t stream)
+{
+    // Standard GEMM, so 1 "expert". We use the same function for MoE and regular FFN.
+    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
+
+    std::vector<tkc::CutlassGemmConfig> candidate_configs = getConfigs();
+    std::vector<tkc::CutlassGemmConfig> valid_splitk_configs;
+    for (int i = 0; i < candidate_configs.size(); i++)
+    {
+        if (is_valid_split_k_factor(m, n, k, candidate_configs[i], workspaceBytes, false))
+        {
+            valid_splitk_configs.push_back(candidate_configs[i]);
+        }
+    }
+    std::vector<int> occupancies(valid_splitk_configs.size());
+
+    for (size_t ii = 0; ii < valid_splitk_configs.size(); ++ii)
+    {
+        dispatchToArch(reinterpret_cast<const int8_t*>(A), reinterpret_cast<const int8_t*>(B), quantOption, alphaCol,
+            alphaRow, reinterpret_cast<T*>(C), m, n, k, valid_splitk_configs[ii], workspacePtr, workspaceBytes, stream,
+            &(occupancies[ii]));
+    }
+    std::vector<tkc::CutlassGemmConfig> valid_configs
+        = get_valid_config_from_occupancies(valid_splitk_configs, occupancies);
+
+    return valid_configs;
+}
+
+template <typename T>
 tkc::CutlassGemmConfig CutlassInt8GemmRunner<T>::getChosenConfig(const void* A, const void* B, tk::QuantMode quantOption,
         const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream)
@@ -387,7 +418,7 @@ tkc::CutlassGemmConfig CutlassInt8GemmRunner<T>::getChosenConfig(const void* A, 
     for (int i = 0; i < candidate_configs.size(); i++)
     {
         if (is_valid_split_k_factor(
-                m, n, k, candidate_configs[i], candidate_configs[i].split_k_factor, workspaceBytes, false))
+                m, n, k, candidate_configs[i], workspaceBytes, false))
         {
             valid_configs.push_back(candidate_configs[i]);
         }
@@ -400,10 +431,9 @@ tkc::CutlassGemmConfig CutlassInt8GemmRunner<T>::getChosenConfig(const void* A, 
             alphaRow, reinterpret_cast<T*>(C), m, n, k, valid_configs[ii], workspacePtr, workspaceBytes, stream,
             &(occupancies[ii]));
     }
-    static constexpr int num_experts = 1;
-    static constexpr int is_weight_only = false;
     tkc::CutlassGemmConfig chosen_config = estimate_best_config_from_occupancies(valid_configs, occupancies, m, n, k,
-        num_experts, SPLIT_K_LIMIT, workspaceBytes, mMultiProcessorCount, is_weight_only);
+        mMultiProcessorCount);
+
     return chosen_config;
 }
 

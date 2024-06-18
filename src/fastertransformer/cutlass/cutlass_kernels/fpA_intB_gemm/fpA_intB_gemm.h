@@ -61,19 +61,15 @@ public:
 
     virtual std::vector<tkc::CutlassGemmConfig> getConfigs() const = 0;
 
-    virtual tkc::CutlassGemmConfig getChosenConfig(const void*  A,
-                                                   const void*  B,
-                                                   const void*  weight_scales,
-                                                   const void*  weight_zero_points,
-                                                   const void*  biases,
-                                                   void*        C,
-                                                   int          m,
-                                                   int          n,
-                                                   int          k,
-                                                   const int    group_size,
-                                                   char*        workspace_ptr,
-                                                   const size_t workspace_bytes,
-                                                   cudaStream_t stream) = 0;
+    virtual tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, const void* weight_scales,
+        const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
+        char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
+        = 0;
+
+    virtual std::vector<tkc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, const void* weight_scales,
+        const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
+        char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
+        = 0;
 
 protected:
     static constexpr int SPLIT_K_LIMIT = 7;
@@ -108,6 +104,10 @@ public:
     std::vector<tkc::CutlassGemmConfig> getConfigs() const override;
 
     tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, const void* weight_scales,
+        const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
+        char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream) override;
+
+    std::vector<tkc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, const void* weight_scales,
         const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream) override;
 

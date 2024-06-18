@@ -112,7 +112,7 @@ inline void print_config_file(CutlassGemmConfig config, int m, int n, int k, flo
     std::ofstream outFile(file, open_mode);
     std::string config_to_string = convert_config_to_string(tile_config.block_m, tile_config.block_n, tile_config.block_k, tile_config.warp_m, tile_config.warp_n, tile_config.warp_k);
     if (outFile) {
-        outFile << "{{" << m << "," << n << "," << k << "}, {CutlassTileConfig(" << config_to_string << "," << config.split_k_factor << "," << config.stages << "), " <<time <<"}},"<< std::endl;
+        outFile << "{{" << m << "," << n << "," << k << "}, {CutlassGemmConfig(" << config_to_string << "," << config.split_k_factor << "," << config.stages << "), " <<time <<"}},"<< std::endl;
     } else {
         throw std::runtime_error(std::string("[FT][ERROR] Cannot open file: ") + file + "\n");
     }

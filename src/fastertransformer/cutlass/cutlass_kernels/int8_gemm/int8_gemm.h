@@ -61,6 +61,11 @@ public:
         const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream)
         = 0;
+    
+    virtual std::vector<tkc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, tk::QuantMode quantOption,
+        const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
+        const size_t workspaceBytes, cudaStream_t stream) = 0;
+
 
 protected:
     static constexpr int SPLIT_K_LIMIT = 7;
@@ -85,6 +90,10 @@ public:
     std::vector<tkc::CutlassGemmConfig> getConfigs() const override;
 
     tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, tk::QuantMode quantOption,
+        const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
+        const size_t workspaceBytes, cudaStream_t stream);
+    
+    std::vector<tkc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, tk::QuantMode quantOption,
         const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream);
 

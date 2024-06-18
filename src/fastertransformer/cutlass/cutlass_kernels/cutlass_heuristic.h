@@ -30,10 +30,14 @@ std::vector<tensorrt_llm::cutlass_extensions::CutlassGemmConfig> get_candidate_c
     const bool is_weight_only, const bool simt_configs_only, const bool int8_configs_only = false,
     const int max_split_k = 1);
 
+std::vector<tensorrt_llm::cutlass_extensions::CutlassGemmConfig> get_valid_config_from_occupancies(
+    const std::vector<tensorrt_llm::cutlass_extensions::CutlassGemmConfig>& candidate_configs,
+    const std::vector<int>& occupancies);
+
 tensorrt_llm::cutlass_extensions::CutlassGemmConfig estimate_best_config_from_occupancies(
     const std::vector<tensorrt_llm::cutlass_extensions::CutlassGemmConfig>& candidate_configs,
-    const std::vector<int>& occupancies, const int64_t m, const int64_t n, const int64_t k, const int64_t num_experts,
-    const int split_k_limit, const size_t workspace_bytes, const int multi_processor_count, const int is_weight_only);
+    const std::vector<int>& occupancies, const int64_t m, const int64_t n, const int64_t k,
+    const int multi_processor_count);
 
 struct TileConfig{
     int block_m;
@@ -46,7 +50,7 @@ struct TileConfig{
 
 void print_config(tensorrt_llm::cutlass_extensions::CutlassGemmConfig config);
 bool is_valid_split_k_factor(const int64_t m, const int64_t n, const int64_t k, const tensorrt_llm::cutlass_extensions::CutlassGemmConfig gemm_config,
-    const int split_k_factor, const size_t workspace_bytes, const bool is_weight_only);
+    const size_t workspace_bytes, const bool is_weight_only);
 TileConfig get_tile_config_from_config(tensorrt_llm::cutlass_extensions::CutlassTileConfig tile_config);
 
 } // namespace cutlass_kernels
