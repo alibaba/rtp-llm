@@ -25,6 +25,6 @@ from .cogvlm2 import CogVLM2
 import logging
 try:
     from internal_source.maga_transformer.models import internal_init
-except ImportError:
-    logging.info('no internal_source found')
+except ImportError as e:
+    print("import internal source failed, error: ", str(e))    
     pass

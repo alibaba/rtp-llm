@@ -1,7 +1,7 @@
 import json
 import torch
 import re
-from typing import Any, Dict, List, Union, Tuple, Optional
+from typing import Any, Dict, List, Union, Tuple, Optional, Callable
 from PIL import Image
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
@@ -12,7 +12,7 @@ from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
 
 class BaseImageEmbedding:
-    def image_embedding(self, images, device):
+    def image_embedding(self, images: Any, device: Union[str, torch.device]) -> Any:
         raise NotImplementedError()
 
 class BaseVitWeights:
@@ -32,6 +32,10 @@ class BaseVitWeights:
     @property
     def ft_prefix(self) -> str:
         return self._ft_prefix
+    
+    @ft_prefix.setter
+    def ft_prefix(self, prefix: str) -> None:
+        self._ft_prefix = prefix
     
     def _get_vit_params(self, vit_part: Dict[str, Any], with_prefix: bool = False):
         for vit_name, vit in vit_part.items():
@@ -142,3 +146,6 @@ class MultiModalMixin:
         self.nccl_op_.broadcast_tp([embedding_tensor])
         torch.cuda.current_stream().synchronize()
         return embedding_tensor
+    
+    def process_multimodel_input_func(self, path: str) -> torch.Tensor:
+        raise NotImplementedError()

@@ -4,9 +4,8 @@ import os
 import re
 import json
 import logging
-from typing import List, Any, Tuple, Dict, Optional, Union
-from PIL import Image
-
+from typing import List, Any, Tuple, Dict, Optional, Union, Callable
+from functools import partial
 from transformers import AutoTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -22,6 +21,7 @@ from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader
 from maga_transformer.utils.database import CkptDatabase
+from maga_transformer.utils.multimodel_util import common_image_process_func
 
 class QwenVLImageEmbedding(BaseImageEmbedding):
     def __init__(self, config: Dict[str, Any]):
@@ -200,6 +200,9 @@ class QWen_VL(QWen, MultiModalMixin):
                 input_embeds[i][a + 1: b] = images[idx]
 
         return input_embeds
+    
+    def process_multimodel_input_func(self, path: str) -> torch.Tensor:
+        return common_image_process_func(path, partial(self.visual.image_embedding, device=self.device))
 
     @staticmethod
     def eval_model_size(config: GptInitModelParameters):

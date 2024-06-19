@@ -30,7 +30,8 @@ requirement([
     "sentence-transformers",
     "orjson",
     "xfastertransformer_devel_icx",
-    "xformers"
+    "xformers",
+    "decord"
 ])
 
 filegroup(
@@ -109,7 +110,8 @@ py_library(
         ":tensorrt",
         ":onnx",
         ":xfastertransformer_devel_icx",
-        ":xformers"
+        ":xformers",
+        ":decord",
     ],
 )
 
@@ -305,6 +307,8 @@ py_wheel(
         "sentence-transformers==2.7.0",
         "grpcio==1.62.0",
         "xfastertransformer_devel_icx==1.6.0.0",
+        "decord==0.6.0",
+        "accelerate==0.25.0"
     ] + whl_deps(),
 )
 
@@ -344,7 +348,11 @@ py_wheel(
         "torchvision==0.16.0",
         "einops",
         "prettytable",
-        "pydantic==2.5.3",
+        "pydantic==2.5.3",                
+        "sentence-transformers==2.7.0",
+        "grpcio==1.62.0",
+        "xfastertransformer_devel_icx==1.6.0.0",
+        "decord==0.6.0",
         "timm==0.9.12",
         "kserve",
     ] + whl_deps(),
