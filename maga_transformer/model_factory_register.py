@@ -66,6 +66,8 @@ class ModelDict:
                     return 'chatglm'
                 elif 'chatglm3' in config.get('_name_or_path', ''):
                     return 'chatglm3'
+                elif 'glm-4v' in config.get('_name_or_path', ''):
+                    return 'chatglm4v'
                 else:
                     return 'chatglm2'
             if architecture == 'QWenLMHeadModel':

@@ -17,6 +17,6 @@ class ChatGlmV4(ChatGlmV3):
             config.special_tokens.eos_token_id = config_json['eos_token_id'][0]
             config.special_tokens.stop_words_list = [[x] for x in config_json['eos_token_id']]
         else:
-            config.special_tokens.eos_token_id = config_json['eos_token_id']        
+            config.special_tokens.eos_token_id = config_json['eos_token_id']
     
 register_model('chatglm4', ChatGlmV4, [], ["THUDM/glm4-9b-chat"])

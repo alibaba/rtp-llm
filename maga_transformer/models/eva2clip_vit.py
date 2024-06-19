@@ -1,7 +1,9 @@
+import math
 from argparse import Namespace
 from typing import Any, List
 
 import torch
+import torch.nn.functional as F
 import xformers.ops as xops
 from torch import nn
 from torchvision import transforms
@@ -9,8 +11,7 @@ from transformers.activations import ACT2FN
 
 from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
 
-
-class CogVLM2ImageEmbedding(BaseImageEmbedding):
+class EVA2CLIPImageEmbedding(BaseImageEmbedding):
     def __init__(self, config):
         self.vit = EVA2CLIPModel(config)
         image_size = config.vit_related_params.config["image_size"]
@@ -36,6 +37,42 @@ class CogVLM2ImageEmbedding(BaseImageEmbedding):
             tensor_images = self.vit(tensor_images).to(device=device)
         assert tensor_images.shape[0] == len(images)
         return tensor_images
+
+
+def standard_attention(
+    query_layer, key_layer, value_layer, scaling_attention_score=True
+):
+    if scaling_attention_score:
+        query_layer = query_layer / math.sqrt(query_layer.shape[-1])
+    attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+
+    attention_probs = F.softmax(attention_scores, dim=-1)
+
+    context_layer = torch.matmul(attention_probs, value_layer)
+    return context_layer
+
+
+def attention_fn_default(
+    query_layer, key_layer, value_layer, scaling_attention_score=True
+):
+    if int(torch.__version__.split(".")[0]) >= 2 and scaling_attention_score:
+        # Pytorch 2.0 attention uses very much memory if attention_mask is float, and has NaN bug if attention_mask is None.
+        attn_output = torch.nn.functional.scaled_dot_product_attention(
+            query_layer,
+            key_layer,
+            value_layer,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=False,
+        )
+        return attn_output
+    else:
+        return standard_attention(
+            query_layer,
+            key_layer,
+            value_layer,
+            scaling_attention_score=scaling_attention_score,
+        )
 
 
 class PatchEmbedding(nn.Module):
@@ -68,22 +105,33 @@ class Attention(nn.Module):
         self.query_key_value = nn.Linear(config.hidden_size, config.hidden_size * 3)
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
+        self.enable_xformer = config.enable_xformer
 
     def forward(self, x: "tensor(B, L, D)") -> "tensor(B, L, D)":
         B, L, _ = x.shape
         qkv = self.query_key_value(x)
-        qkv = qkv.reshape(B, L, 3, self.num_heads, -1).permute(
-            2, 0, 1, 3, 4
-        )  # 3, B, L, H, D
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        if self.enable_xformer:
+            qkv = qkv.reshape(B, L, 3, self.num_heads, -1).permute(
+                2, 0, 1, 3, 4
+            )  # 3, B, L, H, D
+            q, k, v = qkv[0], qkv[1], qkv[2]
 
-        out = xops.memory_efficient_attention(
-            q,
-            k,
-            v,
-            scale=self.scale,
-        )
-        output = self.dense(out.view(B, L, -1))
+            out = xops.memory_efficient_attention(
+                q,
+                k,
+                v,
+                scale=self.scale,
+            )
+            output = self.dense(out.view(B, L, -1))
+        else:
+            qkv = qkv.reshape(B, L, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)  # 3, B, H, L, D
+            q, k, v = qkv[0], qkv[1], qkv[2]
+            
+            out = attention_fn_default(
+                q, k, v
+            )
+            output = self.dense(out.transpose(1, 2).reshape(B, L, -1))
+
         output = self.output_dropout(output)
         return output
 
@@ -173,15 +221,19 @@ class EVA2CLIPModel(nn.Module):
         vision_config = Namespace(**config.vit_related_params.config)
         self.patch_embedding = PatchEmbedding(vision_config)
         self.transformer = Transformer(vision_config)
-        self.linear_proj = GLU(config, in_features=vision_config.hidden_size)
+        self.linear_proj = GLU(
+            config,
+            in_features=vision_config.hidden_size if vision_config.vision_hidden_size else config.hidden_size
+        )
         self.conv = nn.Conv2d(
             in_channels=vision_config.hidden_size,
-            out_channels=vision_config.hidden_size,
+            out_channels=vision_config.hidden_size if vision_config.vision_hidden_size else config.hidden_size,
             kernel_size=2,
             stride=2,
         )
         self.boi = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         self.eoi = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+        self.scaling_factor = vision_config.scaling_factor if hasattr(vision_config, 'scaling_factor') else 1.0
 
     @property
     def dtype(self):
@@ -207,4 +259,5 @@ class EVA2CLIPModel(nn.Module):
         boi = self.boi.expand(x.shape[0], -1, -1)
         eoi = self.eoi.expand(x.shape[0], -1, -1)
         x = torch.cat((boi, x, eoi), dim=1)
+        x = x / self.scaling_factor
         return x

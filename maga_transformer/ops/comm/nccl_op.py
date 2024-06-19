@@ -22,5 +22,5 @@ class NcclOp(FTOPBase):
             g_master_info.ip,
             g_master_info.nccl_op_port)
 
-    def broadcast_tp(self, tensors: List[torch.Tensor], root:int = 0):
+    def broadcast_tp(self, tensors: List[torch.Tensor], root: int = 0):
         self.ft_op_.broadcast_tp(tensors, root)

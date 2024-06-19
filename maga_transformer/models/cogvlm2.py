@@ -9,8 +9,8 @@ from transformers import AutoTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, TemplateType
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.models.cogvlm2_vit import CogVLM2ImageEmbedding
-from maga_transformer.models.cogvlm2_weight import CogVLM2VitWeights, CogVLM2WeightInfo
+from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
+from maga_transformer.models.cogvlm2_weight import CogVLM2WeightInfo, CogVLM2VitWeights
 from maga_transformer.models.llama import Llama
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
@@ -18,10 +18,9 @@ from maga_transformer.ops.comm.nccl_op import NcclOp
 LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1
 
-
 class CogVLM2(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        self.visual = CogVLM2ImageEmbedding(config)
+        self.visual = EVA2CLIPImageEmbedding(config)
         self.nccl_op_ = NcclOp()
         config.vit_related_params.vit_weights = CogVLM2VitWeights(
             {"vit": self.visual.vit}
@@ -97,7 +96,7 @@ class CogVLM2(Llama, MultiModalMixin):
         config.inter_size = config_json["intermediate_size"]
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-
+        config.build_position_ids = True
         try:
             template_type_str = config_json.get("template_version", "chat")
             config.template_type = TemplateType[template_type_str]
@@ -108,6 +107,8 @@ class CogVLM2(Llama, MultiModalMixin):
 
         vit_config = config_json["vision_config"]
         config.vit_related_params.config.update(vit_config)
+        config.vit_related_params.config['enable_xformer'] = True
+        config.vit_related_params.config['vision_hidden_size'] = True
         config.special_tokens.bos_token_id = config_json["bos_token_id"]
         config.special_tokens.pad_token_id = config_json["pad_token_id"]
 
@@ -147,7 +148,8 @@ class CogVLM2(Llama, MultiModalMixin):
         return position_ids
 
     def extend_context_position_ids(
-        self, context_begin_position: int, context_end_position: int, token_type_ids: torch.Tensor
+        self, context_begin_position: int, context_end_position: int,
+        token_type_ids: torch.Tensor, token_ids: torch.Tensor
     ) -> List[int]:
         # construct position ids for rotary embedding, assuming the token_type_ids is [T, V, V, V, V, V, T, T, T]
         # the expected position ids is [0, 1, 2, 2, 2, 3, 4, 5, 6]

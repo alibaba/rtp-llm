@@ -241,7 +241,8 @@ class BaseModel(object):
         return [i - 1 for i in seq_lengths_list]
 
     def extend_context_position_ids(
-        self, context_begin_position: int, context_end_position: int, token_type_ids: torch.Tensor
+        self, context_begin_position: int, context_end_position: int,
+        token_type_ids: torch.Tensor, token_ids: torch.Tensor
     ) -> List[int]:
         return range(context_begin_position, context_end_position)
 

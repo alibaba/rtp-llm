@@ -4,7 +4,8 @@ from transformers import PreTrainedTokenizerBase, PreTrainedTokenizer
 
 from maga_transformer.openai.renderers.llama_template import Template, get_template_and_fix_tokenizer
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, RenderedInputs
-from maga_transformer.openai.api_datatype import ChatMessage, RendererInfo, ChatCompletionRequest, RoleEnum
+from maga_transformer.openai.api_datatype import ChatMessage, RendererInfo, \
+    ChatCompletionRequest, RoleEnum, ContentPartTypeEnum
 from maga_transformer.openai.renderer_factory_register import register_renderer
 
 class ChatGlm4Renderer(CustomChatRenderer):
@@ -15,23 +16,24 @@ class ChatGlm4Renderer(CustomChatRenderer):
         renderer_info = super().get_renderer_info()
         return renderer_info
 
-    def get_prefix_tokens(self) -> List[int]:
-        assert isinstance(self.tokenizer, PreTrainedTokenizer)
-        prefix_tokens = [self.tokenizer.convert_tokens_to_ids("[gMASK]"), self.tokenizer.convert_tokens_to_ids("<sop>")]
-        return prefix_tokens
-
-    def build_single_message(self, role: str, metadata: str, message: str) -> Tuple[List[int], str]:
+    def build_single_message(self, role: str, metadata: str, message: str, prefix_message_list: List[str]) -> Tuple[List[int], str]:
         assert isinstance(self.tokenizer, PreTrainedTokenizer)
         assert role in ["system", "user", "assistant", "observation"], role
         role_tokens = [self.tokenizer.convert_tokens_to_ids(f"<|{role}|>")] + self.tokenizer.tokenizer.encode(f"{metadata}\n", disallowed_special=())
+        prefix_message_tokens = []
+        prefix_message = ''
+        if prefix_message_list is not None:
+            prefix_message_tokens = self.tokenizer.convert_tokens_to_ids(prefix_message_list)
+            prefix_message = ''.join(prefix_message_list)
         message_tokens = self.tokenizer.tokenizer.encode(message, disallowed_special=())
-        tokens: List[int] = role_tokens + message_tokens
-        return tokens, str(f"<|{role}|>{metadata}\n{message}")
+        tokens: List[int] = role_tokens + prefix_message_tokens + message_tokens
+        
+        return tokens, str(f"<|{role}|>{metadata}\n{prefix_message + message}")
 
     def handle_single_conversation(self, conversation: List[ChatMessage]):
-        input_ids = self.get_prefix_tokens()
+        input_ids = [self.tokenizer.convert_tokens_to_ids("[gMASK]"), self.tokenizer.convert_tokens_to_ids("<sop>")]
         input_message = "[gMASK]<sop>"
-
+        input_image = []
         for item in conversation:
             if item.role == RoleEnum.tool:
                 tools = item.tool_calls
@@ -54,26 +56,43 @@ class ChatGlm4Renderer(CustomChatRenderer):
                 input_ids.extend(id)
                 input_message += message
             # no metadata yet
+            message_prefix = None
+            message = ""
             if isinstance(item.content, str):
-                id, message = self.build_single_message(
-                    item.role,
-                    "",
-                    item.content
-                )
-                input_ids.extend(id)
-                input_message += message
+                message += item.content
+            elif isinstance(item.content, list):
+                for content_part in item.content:
+                    if content_part.type == ContentPartTypeEnum.text:
+                        assert (isinstance(content_part.text, str))
+                        message += content_part.text
+                    elif content_part.type == ContentPartTypeEnum.image_url:
+                        assert len(input_image) == 0 and message_prefix is None, "Multiple images are not supported"
+                        input_image.append(content_part.image_url.url)
+                        message_prefix = ["<|begin_of_image|>", "<|endoftext|>", "<|end_of_image|>"]
             else:
                 raise Exception(f"unkown chat message: {item.model_dump()}")
+            
+            if message or message_prefix:
+                part_ids, part_messages = self.build_single_message(
+                    item.role,
+                    "",
+                    message,
+                    message_prefix
+                )
+                input_ids.extend(part_ids)
+                input_message += part_messages
 
         assert isinstance(self.tokenizer, PreTrainedTokenizer)
         input_ids.extend([self.tokenizer.convert_tokens_to_ids("<|assistant|>")])
         input_message += "<|assistant|>"
 
-        return input_ids, input_message
+        return input_ids, input_message, input_image
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         assert isinstance(self.tokenizer, PreTrainedTokenizerBase)
-        input_ids, input_message = self.handle_single_conversation(request.messages)
-        return RenderedInputs(input_ids=input_ids, rendered_prompt=input_message)
+        input_ids, input_message, input_image = self.handle_single_conversation(request.messages)
+        return RenderedInputs(input_ids=input_ids, rendered_prompt=input_message, input_images=input_image)
+
 
 register_renderer('chatglm4', ChatGlm4Renderer)
+register_renderer('chatglm4v', ChatGlm4Renderer)

@@ -285,9 +285,7 @@ class BatchQuery:
             self.seq_lengths_list.extend([stream.seq_length] * self.num_beams)
             self.reuse_lengths_list.extend([stream.reuse_length * (1 - int(self._ptuning_info.count_prefix_length))] * self.num_beams)
             self.context_lengths_list.extend([stream.input_length] * self.num_beams)
-            
-            if self.use_expect_attention:
-                self.vision_token_length.extend([stream.input.vision_token_length] * self.num_beams)
+            self.vision_token_length.extend([stream.input.vision_token_length] * self.num_beams)
 
         images = []
         for idx, stream in enumerate(self.context_streams):

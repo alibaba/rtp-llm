@@ -9,6 +9,7 @@ from .bloom import Bloom
 from .chat_glm_v2 import ChatGlmV2
 from .chat_glm_v3 import ChatGlmV3
 from .chat_glm_v4 import ChatGlmV4
+from .chat_glm_v4_vision import ChatGlmV4Vision
 from .qwen import QWen_7B, QWen_13B, QWen_1B8
 from .qwen_v2 import QWenV2
 from .falcon import Falcon

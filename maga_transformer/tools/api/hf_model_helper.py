@@ -16,7 +16,7 @@ class HfModelInfo:
         if model_config_file:
             assert os.path.exists(model_config_file), f"path {model_config_file} is not exist, can't read config"
             with open(model_config_file, 'r') as f:
-                self.model_config =  json.load(f)
+                self.model_config = json.load(f)
             self.hf_local_dir = str(Path(model_config_file).parent)
         
     @property

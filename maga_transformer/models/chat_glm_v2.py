@@ -27,7 +27,7 @@ class ChatGlmV2(GPT):
         "original_rope": true,
         '''
         config = GptInitModelParameters(head_num=32,
-                                        size_per_head= 128,
+                                        size_per_head=128,
                                         layer_num=32,
                                         max_seq_len=8192,
                                         vocab_size=65024)
@@ -48,17 +48,18 @@ class ChatGlmV2(GPT):
         if 'pre_seq_len' in config_json:
             config.pre_seq_len = config_json['pre_seq_len']
         if 'prefix_projection' in config_json:
-            config.prefix_projection = config_json['prefix_projection']        
+            config.prefix_projection = config_json['prefix_projection']
         config.src_quantization_bit = config_json.get('quantization_bit', 0)
         config.rotary_embedding_dim = config.size_per_head
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
-        config = cls.get_rotary_embedding_scale(config, config_json)        
+        config.special_tokens.pad_token_id = config_json.get('pad_token_id', 0)
+        config = cls.get_rotary_embedding_scale(config, config_json)
         cls.update_stop_words(config, config_json)
         return config
     
     @classmethod
     def update_stop_words(cls, config: GptInitModelParameters, config_json: Dict[str, Any]):
-        config.special_tokens.eos_token_id = config_json['eos_token_id']        
+        config.special_tokens.eos_token_id = config_json.get('eos_token_id', 2)
     
     @staticmethod
     def get_rotary_embedding_scale(config, config_json):   
@@ -81,7 +82,6 @@ class ChatGlmV2(GPT):
 
     @staticmethod
     def modify_config(config):
-        config.special_tokens.eos_token_id = 2
         config.use_attention_linear_bias = False
         config.activation_type = "SiGLU"
         config.norm_type = "rmsnorm"

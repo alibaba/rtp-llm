@@ -687,7 +687,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
                                                    nullptr,
                                                    stream_);
 
-	print_bsd(l, "decoder output", decoder_output, 1, h_token_num, hidden_units);
+	    print_bsd(l, "decoder output", decoder_output, 1, h_token_num, hidden_units);
 
         sync_check_cuda_error();
         POP_RANGE;

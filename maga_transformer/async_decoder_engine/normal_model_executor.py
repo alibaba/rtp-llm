@@ -116,7 +116,7 @@ class NormalModelExecutor(ExecutorBase):
 
     def _create_position_ids_for_rotary(self, batch_query: BatchQuery) -> Optional[torch.Tensor]:
         model = self.model_ops.model
-        if model.position_encoding is None and not model.config.use_expert_attention:
+        if model.position_encoding is None and not model.config.build_position_ids:
             return None
         position_ids = []
 
@@ -132,7 +132,9 @@ class NormalModelExecutor(ExecutorBase):
             context_end_position = batch_query.reuse_lengths_list[i + batch_query.generate_batch_size] + \
                 batch_query.context_lengths_list[i + batch_query.generate_batch_size]
             position_ids.extend(model.extend_context_position_ids(
-                context_begin_position, context_end_position, batch_query.context_query_token_type_ids(i)
+                context_begin_position, context_end_position,
+                batch_query.context_query_token_type_ids(i),
+                batch_query.context_query_output_tokens(i)
             ))
         
         return to_cuda(torch.IntTensor(position_ids))
