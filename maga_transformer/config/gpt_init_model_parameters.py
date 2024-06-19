@@ -84,7 +84,7 @@ class VitParameters:
     vit_weights = None
 
 
-class TemplateVersion(Enum):
+class TemplateType(Enum):
     chat = "chat"
     vqa = "vqa"
     base = "image"
@@ -109,7 +109,7 @@ class GptInitModelParameters:
         "need_ffn_act_scale",
         "task_type",
         "add_special_tokens",
-        "template_version",
+        "template_type",
     }
 
     def __init__(self,
@@ -151,7 +151,7 @@ class GptInitModelParameters:
         self.tp_size = g_parallel_info.tp_size
         self.tp_rank = g_parallel_info.tp_rank
         self.add_special_tokens = True
-        self.template_version = TemplateVersion.chat
+        self.template_type = TemplateType.chat
 
         for k, v in kwargs.items():
             setattr(self, k, v)

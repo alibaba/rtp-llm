@@ -10,7 +10,7 @@ from transformers import PreTrainedTokenizerBase
 from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, GenerateOutputs, AuxInfo
 from maga_transformer.models.cogvlm2 import CogVLM2
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.config.gpt_init_model_parameters import TemplateVersion
+from maga_transformer.config.gpt_init_model_parameters import TemplateType
 from maga_transformer.utils.vit_process_engine import VitEngine
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
@@ -30,7 +30,7 @@ class RendererParams:
     max_seq_len: int
     eos_token_id: int
     stop_word_ids_list: List[List[int]]
-    template_version: TemplateVersion = TemplateVersion.chat
+    template_type: TemplateType = TemplateType.chat
 
 @dataclass
 class RenderedInputs:

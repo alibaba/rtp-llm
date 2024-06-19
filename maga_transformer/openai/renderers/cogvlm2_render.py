@@ -6,7 +6,7 @@ from typing import Optional, List, Dict, Any, Union, Callable, Tuple, AsyncGener
 
 from transformers import PreTrainedTokenizerBase
 
-from maga_transformer.config.gpt_init_model_parameters import TemplateVersion
+from maga_transformer.config.gpt_init_model_parameters import TemplateType
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, PromptWithImages
@@ -21,23 +21,23 @@ class CogVLM2Renderer(CustomChatRenderer):
     def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.first_query: bool = True
-        self.template_version = renderer_params.template_version
+        self.template_type = renderer_params.temtemplate_type
 
-    def query_answer_template(self, template_version: TemplateVersion) -> str:
-        if template_version == template_version.base:
+    def query_answer_template(self, template_type: TemplateType) -> str:
+        if template_type == TemplateType.base:
             return "{}", "{}"
-        elif template_version == template_version.vqa:
+        elif template_type == TemplateType.vqa:
             return "Question: {}", " Short answer: {}\n"
-        elif template_version == template_version.chat:
+        elif template_type == TemplateType.chat:
             return "Question: {}", " Answer: {}\n"
         else:
-            raise Exception(f"Unknown template version: {template_version}")
+            raise Exception("Unknown template type")
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithImages:
         prompt = ""
         text_only = True
         images = []
-        template_version = self.template_version
+        template_type = self.temtemplate_type
 
         for message in messages:
             if isinstance(message.content, list):
@@ -51,7 +51,7 @@ class CogVLM2Renderer(CustomChatRenderer):
             query_format = "{} "
             answer_format = "{} \n"
         if not text_only:
-            query_format, answer_format = self.query_answer_template(template_version)
+            query_format, answer_format = self.query_answer_template(template_type)
         
         last_message = ""
         last_format_message = ""
@@ -90,10 +90,10 @@ class CogVLM2Renderer(CustomChatRenderer):
             else:
                 prompt += "USER: {} ASSISTANT:".format(last_message)
         else:
-            if template_version == 'base':
+            if template_type == 'base':
                 prompt += last_message
             else:
-                # remove tail answer_format for template_version 'vqa' and 'chat'
+                # remove tail answer_format for template_type 'vqa' and 'chat'
                 prompt += 'Question: {}{}'.format(last_message, answer_format[:-4])
 
         self.first_query = False

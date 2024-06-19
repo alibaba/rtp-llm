@@ -7,7 +7,7 @@ import torch
 from einops import rearrange
 from transformers import AutoTokenizer
 
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, TemplateVersion
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, TemplateType
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.cogvlm2_vit import CogVLM2ImageEmbedding
 from maga_transformer.models.cogvlm2_weight import CogVLM2VitWeights, CogVLM2WeightInfo
@@ -99,10 +99,10 @@ class CogVLM2(Llama, MultiModalMixin):
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
 
         try:
-            template_version_str = config_json.get("template_version", "chat")
-            config.template_version = TemplateVersion[template_version_str]
+            template_type_str = config_json.get("template_version", "chat")
+            config.template_type = TemplateType[template_type_str]
         except KeyError:
-            raise Exception(f"unknown template_version: {template_version_str}")
+            raise Exception(f"unknown template_type: {template_type_str}")
 
         config.reserve_runtime_mem_mb = 2048
 
