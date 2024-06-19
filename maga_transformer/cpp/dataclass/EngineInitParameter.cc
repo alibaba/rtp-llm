@@ -11,218 +11,252 @@ using namespace fastertransformer;
 
 namespace rtp_llm {
 
-EngineInitParams::EngineInitParams(
-    const ft::GptInitParameter&                                             gpt_init_parameter,
-    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layers_weights,
-    const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights):
-    gpt_init_parameter(gpt_init_parameter),
-    gpt_weights(std::move(WeightsConverter::createGptWeights(layers_weights, global_weights))),
-    layers_weights(layers_weights),
-    global_weights(global_weights) {}
+ft::ConstBufferPtr WeightsConverter::CopyTensorToBufferPtr(torch::Tensor& tensor) {
+    auto buffer = torchTensor2Buffer(tensor);
+    if (need_copy_) {
+        auto new_buffer = device_->allocateBuffer({buffer->type(),
+                                                   buffer->shape(),
+                                                   AllocationType::DEVICE});
+        device_->copy({*new_buffer, *buffer});
+        return new_buffer;
+    } else {
+        return buffer;
+    }
+}
 
-ConstBufferPtr WeightsConverter::mayFindTensor2Buffer(unordered_map<string, th::Tensor> tensor_map, const string& key) {
-    if (tensor_map.count(key) > 0) {
-        auto buffer = torchTensor2Buffer(tensor_map.at(key));
-        if (need_copy_) {
-            auto new_buffer = device_->allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE});
-            device_->copy({*new_buffer, *buffer});
-            return new_buffer;
-        } else {
-            return buffer;
-        }
+ft::ConstBufferPtr
+WeightsConverter::mayFindBuffer(ConstBufferPtrMap& map,
+                                const std::string& key)
+{
+    if (map.count(key) > 0) {
+        return map[key];
     }
     return nullptr;
 }
 
-LayerNormWeightsPtr WeightsConverter::mayCreateLayerNormWeights(unordered_map<string, th::Tensor> tensor_map,
-                                                                const string&                     gamma_key,
-                                                                const string&                     beta_key) {
-    if (tensor_map.count(gamma_key) > 0) {
+ft::LayerNormWeightsPtr
+WeightsConverter::mayCreateLayerNormWeights(ConstBufferPtrMap& map,
+                                            const std::string& gamma_key,
+                                            const std::string& beta_key)   
+{
+    if (map.count(gamma_key) > 0) {
         const auto layer_norm_weights = new LayerNormWeights();
-        layer_norm_weights->gamma     = mayFindTensor2Buffer(tensor_map, gamma_key);
-        layer_norm_weights->beta      = mayFindTensor2Buffer(tensor_map, beta_key);
+        layer_norm_weights->gamma     = mayFindBuffer(map, gamma_key);
+        layer_norm_weights->beta      = mayFindBuffer(map, beta_key);
         return unique_ptr<const LayerNormWeights>(layer_norm_weights);
     }
     return nullptr;
 }
 
-DenseWeightsPtr WeightsConverter::mayCreateDenseWeights(unordered_map<string, th::Tensor> tensor_map,
-                                                        const string&                     kernel_key,
-                                                        const string&                     bias_key) {
-    if (tensor_map.count(kernel_key) > 0) {
+ft::DenseWeightsPtr
+WeightsConverter::mayCreateDenseWeights(ConstBufferPtrMap& map,
+                                        const std::string& kernel_key,
+                                        const std::string& bias_key,
+                                        const std::string& scales_key)
+{
+    if (map.count(kernel_key) > 0) {
         const auto dense_weights = new DenseWeights();
-        dense_weights->kernel    = mayFindTensor2Buffer(tensor_map, kernel_key);
         if (!bias_key.empty()) {
-            dense_weights->bias = mayFindTensor2Buffer(tensor_map, bias_key);
+            dense_weights->bias = mayFindBuffer(map, bias_key);
+        }
+        if (map.count(scales_key) <= 0) {
+            dense_weights->kernel = mayFindBuffer(map, kernel_key);
+        } else {
+            auto kernel = mayFindBuffer(map, kernel_key);
+            auto scales = mayFindBuffer(map, scales_key);
+            // construct qbuffer need kernel and scales has no ref.
+            assert(false);
+            dense_weights->kernel = ConstBufferPtr(
+                new ft::QBuffer(BufferPtr(new Buffer(kernel->where(),
+                                                     kernel->type(),
+                                                     kernel->shape(),
+                                                     kernel->data())),
+                                BufferPtr(new Buffer(scales->where(),
+                                                     scales->type(),
+                                                     scales->shape(),
+                                                     scales->data())),
+                                BufferPtr(new Buffer(scales->where(),
+                                                     scales->type(),
+                                                     {0},
+                                                     nullptr))));
         }
         return unique_ptr<const DenseWeights>(dense_weights);
+        
     }
     return nullptr;
 }
 
-DenseWeightsPtr WeightsConverter::createDenseWeights(unordered_map<string, th::Tensor> tensor_map,
-                                                     const string&                     kernel_key,
-                                                     const string&                     bias_key) {
-    auto weights = mayCreateDenseWeights(tensor_map, kernel_key, bias_key);
-    // assert(weights);
-    return std::move(weights);
+ft::FfnLayerWeights
+WeightsConverter::createFfnWeights(ConstBufferPtrMap& map) {
+    ft::FfnLayerWeights ffn_weights;
+    ffn_weights.up_weight = mayCreateDenseWeights(map,
+                                                  W::ffn_w3,
+                                                  W::ffn_b3,
+                                                  W::ffn_s3);
+
+    ffn_weights.gate_weight = mayCreateDenseWeights(map,
+                                                    W::ffn_w1,
+                                                    W::ffn_b1,
+                                                    W::ffn_s1);
+
+    ffn_weights.down_weight = mayCreateDenseWeights(map,
+                                                    W::ffn_w2,
+                                                    W::ffn_b2,
+                                                    W::ffn_s2);
+
+    ffn_weights.dense_layernorm = mayCreateLayerNormWeights(map,
+                                                            W::ffn_ln_gamma,
+                                                            W::ffn_ln_beta);
+
+    ffn_weights.moe_gating_weight = mayCreateDenseWeights(map,
+                                                          W::moe_gate);
+
+    return ffn_weights;
 }
 
-unique_ptr<const Weights> WeightsConverter::convertPythonWeights(const PyModelWeights& py_weights) {
-    const auto weights = new Weights();
+ft::AttentionLayerWeights
+WeightsConverter::createAttentionWeights(ConstBufferPtrMap& map) {
+    ft::AttentionLayerWeights attention_weights;
+    attention_weights.pre_attention_layernorm = mayCreateLayerNormWeights(map,
+                                                                          W::pre_attn_ln_gamma,
+                                                                          W::pre_attn_ln_beta);
 
-    const auto global_weights = py_weights.model_global_weights_;
-    weights->embedding        = createDenseWeights(global_weights, W::embedding);
+    attention_weights.qkv_weight = mayCreateDenseWeights(map,
+                                                         W::attn_qkv_w,
+                                                         W::attn_qkv_b,
+                                                         W::attn_qkv_s);
+    
+    attention_weights.attention_layernorm = mayCreateLayerNormWeights(map,
+                                                                      W::attn_ln_gamma,
+                                                                      W::attn_ln_beta);
+    attention_weights.output_weight = mayCreateDenseWeights(map,
+                                                            W::attn_o_w,
+                                                            W::attn_o_b,
+                                                            W::attn_o_s);
 
-    weights->pre_decoder_layernorm =
-        mayCreateLayerNormWeights(global_weights, W::pre_decoder_ln_gamma, W::pre_decoder_ln_beta);
-    weights->final_layernorm = mayCreateLayerNormWeights(global_weights, W::final_ln_gamma, W::final_ln_beta);
-
-    const auto layer_num = py_weights.layer_weights_.size();
-    weights->layers.reserve(layer_num);
-    for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-        const auto   py_layer_weights = py_weights.layer_weights_[layer_id];
-        LayerWeights layer_weights;
-
-        layer_weights.pre_layernorm = mayCreateLayerNormWeights(py_layer_weights, W::pre_ln_gamma, W::pre_ln_beta);
-
-        auto& attention_weights = layer_weights.self_attention_weights;
-        attention_weights.pre_attention_layernorm =
-            mayCreateLayerNormWeights(py_layer_weights, W::pre_attn_ln_gamma, W::pre_attn_ln_beta);
-        attention_weights.qkv_weight = createDenseWeights(py_layer_weights, W::attn_qkv_w, W::attn_qkv_b);
-        attention_weights.attention_layernorm =
-            mayCreateLayerNormWeights(py_layer_weights, W::attn_ln_gamma, W::attn_ln_beta);
-        attention_weights.output_weight = createDenseWeights(py_layer_weights, W::attn_o_w, W::attn_o_b);
-
-        layer_weights.post_layernorm = mayCreateLayerNormWeights(py_layer_weights, W::post_ln_gamma, W::post_ln_beta);
-
-        auto& ffn_weights             = layer_weights.ffn_weights;
-        ffn_weights.gate_weight       = createDenseWeights(py_layer_weights, W::ffn_w1, W::ffn_b1);
-        ffn_weights.down_weight       = createDenseWeights(py_layer_weights, W::ffn_w2, W::ffn_b2);
-        ffn_weights.up_weight         = createDenseWeights(py_layer_weights, W::ffn_w3, W::ffn_b3);
-        ffn_weights.dense_layernorm   = mayCreateLayerNormWeights(py_layer_weights, W::ffn_ln_gamma, W::ffn_ln_beta);
-        ffn_weights.moe_gating_weight = createDenseWeights(py_layer_weights, W::moe_gate);
-
-        weights->layers.push_back(std::move(layer_weights));
-    }
-
-    weights->final_layernorm = mayCreateLayerNormWeights(global_weights, W::final_ln_gamma, W::final_ln_beta);
-    weights->lm_head         = createDenseWeights(global_weights, W::lm_head);
-
-    return unique_ptr<const Weights>(weights);
+    return attention_weights;
 }
 
-std::unordered_map<std::string, ft::ConstBufferPtr>
-WeightsConverter::convertPyWeightsMap(py::object py_global_weights) {
-    std::unordered_map<std::string, ft::ConstBufferPtr> global_weights;
-    auto global_weights_cc = ft::convertPyObjectToDict(py_global_weights);
-    for (auto& it : global_weights_cc) {
-        global_weights.emplace(it.first,
-                               ft::torchTensor2Buffer(
-                                   ft::convertPyObjectToTensor(it.second)));
-    }
-    return global_weights;
-}
-
-std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>
-WeightsConverter::convertPyWeightsMapVec(py::object py_layers_weights) {
-    std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>> layers_weights;
-    auto layers_weights_cc = ft::convertPyObjectToVec(py_layers_weights);
-    for (auto& layer_weights : layers_weights_cc) {
-        std::unordered_map<std::string, ft::ConstBufferPtr> weights;
+std::unique_ptr<TensorMaps>
+WeightsConverter::convertLayerWeights(py::object py_layer_weights) {
+    TensorMaps tensor_layer_weights;
+    auto layers_weights_vec = ft::convertPyObjectToVec(py_layer_weights);
+    for (auto& layer_weights : layers_weights_vec) {
+        TensorMap weights;
         for (auto& it : convertPyObjectToDict(layer_weights)) {
-            weights.emplace(it.first,
-                            ft::torchTensor2Buffer(
-                                ft::convertPyObjectToTensor(it.second)));
+            weights.emplace(it.first, ft::convertPyObjectToTensor(it.second));
         }
-        layers_weights.emplace_back(std::move(weights));
+        tensor_layer_weights.emplace_back(std::move(weights));
     }
-    return layers_weights;
+    return std::make_unique<TensorMaps>(std::move(tensor_layer_weights));
 }
 
-ft::Weights WeightsConverter::createGptWeights(
-    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layers_weights_,
-    const std::unordered_map<std::string, ft::ConstBufferPtr>&              weights_) {
-    auto        layers_weights = layers_weights_;
-    auto        weights        = weights_;
+std::unique_ptr<TensorMap>
+WeightsConverter::convertGlobalWeight(py::object py_global_weight) {
+    TensorMap global_weights;
+    auto global_weights_dict = ft::convertPyObjectToDict(py_global_weight);
+    for (auto& it : global_weights_dict) {
+        global_weights.emplace(it.first, ft::convertPyObjectToTensor(it.second));
+    }
+    return std::make_unique<TensorMap>(std::move(global_weights));
+}
+
+std::unique_ptr<ConstBufferPtrMaps>
+WeightsConverter::convertLayerWeights(std::unique_ptr<TensorMaps> tensor_layer_weights) {
+    ConstBufferPtrMaps layer_weights;
+    for (auto& layer_weight : *tensor_layer_weights) {
+        ConstBufferPtrMap weights;
+        for (auto& it : layer_weight) {
+            weights.emplace(it.first, CopyTensorToBufferPtr(it.second));
+        }
+        layer_weights.emplace_back(std::move(weights));
+    }
+    return std::make_unique<ConstBufferPtrMaps>(std::move(layer_weights));
+}
+
+std::unique_ptr<ConstBufferPtrMap> 
+WeightsConverter::convertGlobalWeight(std::unique_ptr<TensorMap> tensor_global_weight) {
+    ConstBufferPtrMap global_weights;
+    for (auto& it : *tensor_global_weight) {
+        global_weights.emplace(it.first, CopyTensorToBufferPtr(it.second));
+    }
+    return std::make_unique<ConstBufferPtrMap>(std::move(global_weights));
+}
+
+std::unique_ptr<ft::Weights>
+WeightsConverter::createGptWeights(py::object layer_weights,
+                                   py::object global_weight)
+{
+    return std::move(createGptWeights(std::move(convertLayerWeights(layer_weights)),
+                                      std::move(convertGlobalWeight(global_weight))));
+}
+
+std::unique_ptr<ft::Weights>
+WeightsConverter::createGptWeights(std::unique_ptr<TensorMaps> layer_weights,
+                                   std::unique_ptr<TensorMap>  global_weight)
+{
+    return std::move(createGptWeights(std::move(convertLayerWeights(std::move(layer_weights))),
+                                      std::move(convertGlobalWeight(std::move(global_weight)))));
+}
+
+std::unique_ptr<ft::Weights>
+WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_weights,
+                                   std::unique_ptr<ConstBufferPtrMap>  global_weight)
+{
+    auto        layers_weights = *layer_weights;
     ft::Weights gpt_weights;
-    gpt_weights.embedding = make_unique<const ft::DenseWeights>(weights[W::embedding]);
-    if (weights[W::prefix_w]) {
-        gpt_weights.prefix_encoder_embedding = make_unique<const ft::DenseWeights>(weights[W::prefix_w]);
-    }
-    if (weights[W::pre_decoder_ln_gamma]) {
-        gpt_weights.pre_decoder_layernorm =
-            make_unique<const ft::LayerNormWeights>(weights[W::pre_decoder_ln_gamma], weights[W::pre_decoder_ln_beta]);
-    }
-    if (weights[W::wpe]) {
-        gpt_weights.position_encoding = make_unique<const ft::DenseWeights>(weights[W::wpe]);
-    }
-    if (weights[W::token_type_embedding]) {
-        gpt_weights.token_type_embedding = make_unique<const ft::DenseWeights>(weights[W::token_type_embedding]);
-    }
-    if (weights[W::final_ln_gamma]) {
-        gpt_weights.final_layernorm =
-            make_unique<const ft::LayerNormWeights>(weights[W::final_ln_gamma], weights[W::final_ln_beta]);
-    }
-    if (weights[W::lm_head]) {
-        gpt_weights.lm_head = make_unique<const ft::DenseWeights>(weights[W::lm_head]);
-    }
+    // make global weight
+    gpt_weights.embedding = mayCreateDenseWeights(*global_weight,
+                                                   W::embedding);
+    gpt_weights.prefix_encoder_embedding = mayCreateDenseWeights(*global_weight,
+                                                                  W::prefix_w);
+    gpt_weights.pre_decoder_layernorm = mayCreateLayerNormWeights(*global_weight,
+                                                                   W::pre_decoder_ln_gamma,
+                                                                   W::pre_decoder_ln_beta);
+    gpt_weights.position_encoding = mayCreateDenseWeights(*global_weight,
+                                                           W::wpe);
+    gpt_weights.token_type_embedding = mayCreateDenseWeights(*global_weight,
+                                                              W::token_type_embedding);
+    gpt_weights.final_layernorm = mayCreateLayerNormWeights(*global_weight,
+                                                             W::final_ln_gamma,
+                                                             W::final_ln_beta);
+    gpt_weights.lm_head = mayCreateDenseWeights(*global_weight,
+                                                 W::lm_head);
+
     for (auto& layer_weights : layers_weights) {
         ft::LayerWeights layer_ws;
-        if (layer_weights[W::pre_ln_gamma]) {
-            layer_ws.pre_layernorm =
-                make_unique<const ft::LayerNormWeights>(layer_weights[W::pre_ln_gamma], layer_weights[W::pre_ln_beta]);
-        }
-        if (layer_weights[W::post_ffn_ln_gamma]) {
-            layer_ws.post_ffn_layernorm = make_unique<const ft::LayerNormWeights>(layer_weights[W::post_ffn_ln_gamma],
-                                                                                  layer_weights[W::post_ffn_ln_beta]);
-        }
-        if (layer_weights[W::post_ln_gamma]) {
-            layer_ws.post_layernorm = make_unique<const ft::LayerNormWeights>(layer_weights[W::post_ln_gamma],
-                                                                              layer_weights[W::post_ln_beta]);
-        }
+        layer_ws.pre_layernorm = mayCreateLayerNormWeights(layer_weights,
+                                                               W::pre_ln_gamma,
+                                                               W::pre_ln_beta);
 
-        auto& attention_weights = layer_ws.self_attention_weights;
-        if (layer_weights[W::pre_attn_ln_gamma]) {
-            attention_weights.pre_attention_layernorm = make_unique<const ft::LayerNormWeights>(
-                layer_weights[W::pre_attn_ln_gamma], layer_weights[W::pre_attn_ln_beta]);
-        }
-        auto qkv_weights_ori       = layer_weights[W::attn_qkv_w]->view(0, layer_weights[W::attn_qkv_w]->shape()[0]);
-        ConstBufferPtr qkv_weights = make_unique<const ft::Buffer>(
-            qkv_weights_ori.where(),
-            qkv_weights_ori.type(),
-            vector<size_t>{qkv_weights_ori.shape()[0], qkv_weights_ori.size() / qkv_weights_ori.shape()[0]},
-            qkv_weights_ori.data());
-        ConstBufferPtr qkv_weights_bias;
-        if (layer_weights[W::attn_qkv_b]) {
-            auto qkv_weights_bias_ori = layer_weights[W::attn_qkv_b]->view(0, layer_weights[W::attn_qkv_b]->shape()[0]);
-            qkv_weights_bias          = make_unique<const ft::Buffer>(qkv_weights_bias_ori.where(),
-                                                             qkv_weights_bias_ori.type(),
-                                                             vector<size_t>{qkv_weights_bias_ori.size()},
-                                                             qkv_weights_bias_ori.data());
-        }
-        attention_weights.qkv_weight = make_unique<const ft::DenseWeights>(qkv_weights, layer_weights[W::attn_qkv_b]);
-        if (layer_weights[W::attn_ln_gamma]) {
-            attention_weights.attention_layernorm = make_unique<const ft::LayerNormWeights>(
-                layer_weights[W::attn_ln_gamma], layer_weights[W::attn_ln_beta]);
-        }
-        attention_weights.output_weight =
-            make_unique<const ft::DenseWeights>(layer_weights[W::attn_o_w], layer_weights[W::attn_o_b]);
+        layer_ws.post_ffn_layernorm = mayCreateLayerNormWeights(layer_weights,
+                                                                    W::post_ffn_ln_gamma,
+                                                                    W::post_ffn_ln_beta);
 
-        auto& ffn_weights     = layer_ws.ffn_weights;
-        ffn_weights.up_weight = make_unique<const ft::DenseWeights>(layer_weights[W::ffn_w3], layer_weights[W::ffn_b3]);
-        ffn_weights.gate_weight =
-            make_unique<const ft::DenseWeights>(layer_weights[W::ffn_w1], layer_weights[W::ffn_b1]);
-        ffn_weights.down_weight =
-            make_unique<const ft::DenseWeights>(layer_weights[W::ffn_w2], layer_weights[W::ffn_b2]);
-        if (layer_weights[W::ffn_ln_gamma]) {
-            ffn_weights.dense_layernorm =
-                make_unique<const ft::LayerNormWeights>(layer_weights[W::ffn_ln_gamma], layer_weights[W::ffn_ln_beta]);
-        }
+        layer_ws.post_layernorm = mayCreateLayerNormWeights(layer_weights,
+                                                                W::post_ln_gamma,
+                                                                W::post_ln_beta);
 
+        layer_ws.self_attention_weights = createAttentionWeights(layer_weights);
+        layer_ws.ffn_weights = createFfnWeights(layer_weights);
         gpt_weights.layers.emplace_back(std::move(layer_ws));
     }
-    return std::move(gpt_weights);
+    return std::make_unique<ft::Weights>(gpt_weights);
 }
+
+
+
+
+/////////////////////////////////deprected///////////////////////////
+
+
+std::unique_ptr<ConstBufferPtrMaps> WeightsConverter::convertLayerWeights_(py::object py_layer_weights) {
+    return convertLayerWeights(std::move(convertLayerWeights(py_layer_weights)));
+}
+    
+std::unique_ptr<ConstBufferPtrMap>  WeightsConverter::convertGlobalWeight_(py::object py_global_weight) {
+    return convertGlobalWeight(std::move(convertGlobalWeight(py_global_weight)));
+}
+
 
 }  // namespace rtp_llm

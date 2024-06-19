@@ -69,7 +69,7 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
         auto post_layernorm_beta =
             make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{hidden_units}, data->data());
         auto qkv_weights = make_unique<const ft::Buffer>(
-            mem_type, data_type, vector<size_t>{hidden_units, 3, hidden_units}, data->data());
+            mem_type, data_type, vector<size_t>{hidden_units, 3 * hidden_units}, data->data());
         auto qkv_weights_b = make_unique<const ft::Buffer>(
             mem_type, data_type, vector<size_t>{hidden_units, 3, hidden_units}, data->data());
         auto attention_layernorm =
@@ -111,7 +111,12 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
         weights.emplace(W::ffn_ln_beta, std::move(ffn_layer_norm_beta));
         layer_weights.push_back(std::move(weights));
     }
-    rtp_llm::EngineInitParams rtp_llm_params(params, layer_weights, global_weights);
+    auto convert = rtp_llm::WeightsConverter(false);
+    rtp_llm::EngineInitParams rtp_llm_params(params,
+                                             layer_weights,
+                                             global_weights,
+                                             std::move(*convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
+                                                                                 std::make_unique<ConstBufferPtrMap>(global_weights))));
     std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params);
     return engine;
 }

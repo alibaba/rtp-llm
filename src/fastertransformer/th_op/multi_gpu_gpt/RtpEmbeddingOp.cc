@@ -16,10 +16,13 @@ RtpEmbeddingOp::RtpEmbeddingOp() {}
 void RtpEmbeddingOp::init(const ft::GptInitParameter& gpt_init_params, py::object handler_impl, py::object py_layers_weights, py::object py_global_weights) {
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
-
-    auto global_weights = rtp_llm::WeightsConverter::convertPyWeightsMap(py_global_weights);
-    auto layers_weights = rtp_llm::WeightsConverter::convertPyWeightsMapVec(py_layers_weights);
-    rtp_llm::EngineInitParams params(gpt_init_params, layers_weights, global_weights);
+    auto convert = rtp_llm::WeightsConverter(false);
+    auto global_weights = convert.convertGlobalWeight_(py_global_weights);
+    auto layers_weights = convert.convertLayerWeights_(py_layers_weights);
+    rtp_llm::EngineInitParams params(gpt_init_params,
+                                     *layers_weights,
+                                     *global_weights,
+                                     std::move(*convert.createGptWeights(py_layers_weights, py_global_weights)));
     if (gpt_init_params.tp_rank_ == 0) {
         // kmon metric init
         (void)rtp_llm::initKmonitorFactory();

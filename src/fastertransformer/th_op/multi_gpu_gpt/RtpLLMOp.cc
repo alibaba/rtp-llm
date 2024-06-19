@@ -25,9 +25,13 @@ void RtpLLMOp::init(const ft::GptInitParameter& gpt_init_params,
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
 
-    auto                      global_weights = rtp_llm::WeightsConverter::convertPyWeightsMap(py_global_weights);
-    auto                      layers_weights = rtp_llm::WeightsConverter::convertPyWeightsMapVec(py_layers_weights);
-    rtp_llm::EngineInitParams params(gpt_init_params, layers_weights, global_weights);
+    auto convert = rtp_llm::WeightsConverter(false);
+    auto global_weights = convert.convertGlobalWeight_(py_global_weights);
+    auto layers_weights = convert.convertLayerWeights_(py_layers_weights);
+    rtp_llm::EngineInitParams params(gpt_init_params,
+                                     *layers_weights,
+                                     *global_weights,
+                                     std::move(*convert.createGptWeights(py_layers_weights, py_global_weights)));
     if (gpt_init_params.tp_rank_ == 0) {
     // kmon metric init
         (void)rtp_llm::initKmonitorFactory();
@@ -42,9 +46,10 @@ void RtpLLMOp::init(const ft::GptInitParameter& gpt_init_params,
 }
 
 void RtpLLMOp::addLoRA(const int64_t lora_id, py::object py_lora_a_weights, py::object py_lora_b_weights) {
-    auto lora_a_weights = rtp_llm::WeightsConverter::convertPyWeightsMapVec(py_lora_a_weights);
-    auto lora_b_weights = rtp_llm::WeightsConverter::convertPyWeightsMapVec(py_lora_b_weights);
-    model_rpc_server_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+    auto convert = rtp_llm::WeightsConverter(false);
+    auto lora_a_weights = convert.convertLayerWeights_(py_lora_a_weights);
+    auto lora_b_weights = convert.convertLayerWeights_(py_lora_b_weights);
+    model_rpc_server_->addLoRA(lora_id, *lora_a_weights, *lora_b_weights);
 }
 
 void RtpLLMOp::removeLoRA(const int64_t lora_id) {

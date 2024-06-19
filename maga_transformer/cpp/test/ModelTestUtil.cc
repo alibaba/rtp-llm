@@ -70,12 +70,13 @@ bool hasNpyFile(std::string dir_path) {
 
 unique_ptr<const Weights> loadWeightsFromDirViaTorchScript(std::string dir_path) {
     PyModelWeights py_weights;
-
+    TensorMap model_global_weights_;
+    TensorMaps layer_weights_;
     auto py_tensors_container = torch::jit::load(dir_path + "/pytorch_tensors.pt");
     for (const auto& key : global_weight_keys) {
         try {
             auto tensor = py_tensors_container.attr(key).toTensor();
-            py_weights.model_global_weights_[key] = tensor;
+            model_global_weights_[key] = tensor;
             FT_LOG_INFO("model Tensor [%s] loaded: %s", key.c_str(), tensor.toString().c_str());
         } catch (const exception& e) {
             FT_LOG_INFO("Tensor [%s] skipped: %s", key.c_str(), e.what());
@@ -109,11 +110,13 @@ unique_ptr<const Weights> loadWeightsFromDirViaTorchScript(std::string dir_path)
                 continue;
             }
         }
-        py_weights.layer_weights_.push_back(move(layer_weights));
+        layer_weights_.push_back(move(layer_weights));
     }
 
     WeightsConverter converter(true);
-    auto weights = converter.convertPythonWeights(py_weights);
+
+    auto weights = converter.createGptWeights(std::make_unique<TensorMaps>(std::move(layer_weights_)),
+                                              std::make_unique<TensorMap>(std::move(model_global_weights_)));
     return weights;
 }
 
