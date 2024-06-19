@@ -51,8 +51,10 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         vit_config = config_dict["vision_config"]
         config.vit_related_params.config.update(vit_config)
         config.build_position_ids = True
+        # use torch to calculate attention in eva2clip
         config.vit_related_params.config["enable_xformer"] = False
-        config.vit_related_params.config['vision_hidden_size'] = False
+        # use initial hidden size for linear_proj and conv layer in eva2clip
+        config.vit_related_params.config['use_vision_hidden_size'] = False
         config.tp_split_emb_and_lm_head = False  # chatglmv4 embedding can't tp
         return config
 
@@ -81,7 +83,6 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
                 # only text
                 position_ids.append(seq_lengths_list[start_idx] - 1)
             else:
-                # ccontain image
                 position_ids.append(seq_lengths_list[start_idx] - vision_token_length[start_idx] + 2)
         return position_ids
 
@@ -102,6 +103,10 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         vision_token_num = eos_pos[0] - bos_pos[0] + 1
         img_begin_position = bos_pos[0].item() + 1
 
+        # construct position ids for rotary embedding, assuming the token ids' type is [T, V, V, V, V, V, T, T, T]
+        # the expected position ids is [0, 1, 2, 2, 2, 3, 4, 5, 6]. Here [0, 1] is the list(range(0, img_begin_position)) part,
+        # [2, 2, 2] is the [img_begin_position] * (vision_token_num - 2) part, and [3, 4, 5, 6] is the last part
+        # see https://huggingface.co/THUDM/glm-4v-9b/blob/main/modeling_chatglm.py#862
         position_ids = list(range(0, img_begin_position)) + \
             [img_begin_position] * (vision_token_num - 2) + \
             list(range(img_begin_position + 1, img_begin_position + 1 + token_ids.shape[0] - eos_pos[0]))
@@ -114,6 +119,7 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
     ) -> Tuple[List[int], List[torch.Tensor], List[int]]:
         if len(images) > 1:
             raise Exception("ChatGLM4V support processes one image at a time")
+
         img_start_token_id: int = self.config.special_tokens.boi_token_id
         img_end_token_id: int = self.config.special_tokens.eoi_token_id
 
@@ -125,20 +131,22 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         if len(img_start_positions) == 0:
             return token_ids, images, []
 
+        # add placehold tokens for image
         patch_size: int = self.config.vit_related_params.config["patch_size"]
         image_size: int = self.config.vit_related_params.config["image_size"]
 
         vision_token_num = (image_size // patch_size // 2) ** 2 + 2
         img_pad_token_id = self.config.special_tokens.pad_token_id
 
-        new_token_ids = token_ids[:img_start_positions[0] + 1] + [img_pad_token_id] * (vision_token_num - 2) + token_ids[img_end_positions[0]:]
+        new_token_ids = token_ids[:img_start_positions[0] + 1] + [img_pad_token_id] * (vision_token_num - 2) + \
+            token_ids[img_end_positions[0]:]
 
         return new_token_ids, images, []
 
     def multimodal_embedding(
         self,
         input_ids: torch.Tensor,
-        images: List[torch.Tensor],
+        images_embedding: List[torch.Tensor],
         token_type_ids: torch.Tensor,
     ):
 
@@ -152,9 +160,10 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
 
         input_embeds = self.word_embedding(input_ids)
 
-        if images != []:
+        # replace virtual placeholder embedding with real image embedding
+        if images_embedding != []:
             for idx, (i, a, b) in enumerate(img_pos):
-                input_embeds[i][a:b + 1] = images[idx]
+                input_embeds[i][a:b + 1] = images_embedding[idx]
 
         return input_embeds
 

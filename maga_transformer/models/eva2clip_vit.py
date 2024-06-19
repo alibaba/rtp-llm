@@ -223,11 +223,11 @@ class EVA2CLIPModel(nn.Module):
         self.transformer = Transformer(vision_config)
         self.linear_proj = GLU(
             config,
-            in_features=vision_config.hidden_size if vision_config.vision_hidden_size else config.hidden_size
+            in_features=vision_config.hidden_size if vision_config.use_vision_hidden_size else config.hidden_size
         )
         self.conv = nn.Conv2d(
             in_channels=vision_config.hidden_size,
-            out_channels=vision_config.hidden_size if vision_config.vision_hidden_size else config.hidden_size,
+            out_channels=vision_config.hidden_size if vision_config.use_vision_hidden_size else config.hidden_size,
             kernel_size=2,
             stride=2,
         )

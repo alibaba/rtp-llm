@@ -1,12 +1,17 @@
 from typing import List, Tuple
 
-from transformers import PreTrainedTokenizerBase, PreTrainedTokenizer
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase
 
-from maga_transformer.openai.renderers.llama_template import Template, get_template_and_fix_tokenizer
-from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, RenderedInputs
-from maga_transformer.openai.api_datatype import ChatMessage, RendererInfo, \
-    ChatCompletionRequest, RoleEnum, ContentPartTypeEnum
+from maga_transformer.openai.api_datatype import (ChatCompletionRequest,
+                                                  ChatMessage,
+                                                  ContentPartTypeEnum,
+                                                  RendererInfo, RoleEnum)
 from maga_transformer.openai.renderer_factory_register import register_renderer
+from maga_transformer.openai.renderers.custom_renderer import (
+    CustomChatRenderer, RenderedInputs, RendererParams)
+from maga_transformer.openai.renderers.llama_template import (
+    Template, get_template_and_fix_tokenizer)
+
 
 class ChatGlm4Renderer(CustomChatRenderer):
     def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
