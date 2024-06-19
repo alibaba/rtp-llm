@@ -27,27 +27,10 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
     def is_multimodal(cls) -> bool:
         return True
 
-    @staticmethod
-    def multimodal_modify_prompt_plugin(
-        prompt: Union[List[Dict[str, Any]], str],
-        images: List[str],
-        img_token: str,
-        **kwargs: Any,
-    ) -> Tuple[str, List[Any]]:
-        prompt, images = MultiModalMixin.multimodal_modify_prompt_plugin(
-            prompt, images, img_token, **kwargs
-        )
-        if img_token in prompt:
-            return prompt, images
-        else:
-            return prompt + (img_token + "\n") * len(images), images
-
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ChatGlmV4._create_config(ckpt_path)
         config_dict = get_config_from_path(ckpt_path)
-        config.special_tokens.boi_token_id = config_dict.get("boi_token_id", 0)
-        config.special_tokens.eoi_token_id = config_dict.get("eoi_token_id", 0)
         vit_config = config_dict["vision_config"]
         config.vit_related_params.config.update(vit_config)
         config.build_position_ids = True
@@ -55,6 +38,8 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         config.vit_related_params.config["enable_xformer"] = False
         # use initial hidden size for linear_proj and conv layer in eva2clip
         config.vit_related_params.config['use_vision_hidden_size'] = False
+        config.vit_related_params.config["boi_token_id"] = config_dict.get("boi_token_id", 0)
+        config.vit_related_params.config["eoi_token_id"] = config_dict.get("eoi_token_id", 0)
         config.tp_split_emb_and_lm_head = False  # chatglmv4 embedding can't tp
         return config
 
@@ -91,8 +76,8 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         token_type_ids: torch.Tensor, token_ids: torch.Tensor
     ) -> List[int]:
 
-        img_start_token_id: int = self.config.special_tokens.boi_token_id
-        img_end_token_id: int = self.config.special_tokens.eoi_token_id
+        img_start_token_id: int = self.config.vit_related_params.config["boi_token_id"]
+        img_end_token_id: int = self.config.vit_related_params.config["eoi_token_id"]
 
         bos_pos = torch.where(token_ids == img_start_token_id)[0]
         eos_pos = torch.where(token_ids == img_end_token_id)[0]
@@ -120,8 +105,8 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         if len(images) > 1:
             raise Exception("ChatGLM4V support processes one image at a time")
 
-        img_start_token_id: int = self.config.special_tokens.boi_token_id
-        img_end_token_id: int = self.config.special_tokens.eoi_token_id
+        img_start_token_id: int = self.config.vit_related_params.config["boi_token_id"]
+        img_end_token_id: int = self.config.vit_related_params.config["eoi_token_id"]
 
         img_start_positions = [i for i, x in enumerate(token_ids) if x == img_start_token_id]
         img_end_positions = [i for i, x in enumerate(token_ids) if x == img_end_token_id]
@@ -150,8 +135,8 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         token_type_ids: torch.Tensor,
     ):
 
-        img_start_token_id: int = self.config.special_tokens.boi_token_id
-        img_end_token_id: int = self.config.special_tokens.eoi_token_id
+        img_start_token_id: int = self.config.vit_related_params.config["boi_token_id"]
+        img_end_token_id: int = self.config.vit_related_params.config["eoi_token_id"]
 
         bos_pos = torch.where(input_ids == img_start_token_id)
         eos_pos = torch.where(input_ids == img_end_token_id)

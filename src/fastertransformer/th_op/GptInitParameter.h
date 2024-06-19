@@ -81,8 +81,6 @@ public:
     int64_t                               bos_token_id_ = -1;
     int64_t                               eos_token_id_ = 0;
     int64_t                               pad_token_id_ = 0;
-    int64_t                               boi_token_id_ = 0;
-    int64_t                               eoi_token_id_ = 0;
     RoleSpecialTokens user_;
     RoleSpecialTokens assistant_;
     RoleSpecialTokens system_;
