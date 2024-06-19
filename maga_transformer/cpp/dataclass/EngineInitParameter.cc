@@ -11,7 +11,7 @@ using namespace fastertransformer;
 
 namespace rtp_llm {
 
-ft::ConstBufferPtr WeightsConverter::CopyTensorToBufferPtr(torch::Tensor& tensor) {
+ft::ConstBufferPtr WeightsConverter::CopyTensorToBufferPtr(const torch::Tensor& tensor) {
     auto buffer = torchTensor2Buffer(tensor);
     if (need_copy_) {
         auto new_buffer = device_->allocateBuffer({buffer->type(),
@@ -25,17 +25,18 @@ ft::ConstBufferPtr WeightsConverter::CopyTensorToBufferPtr(torch::Tensor& tensor
 }
 
 ft::ConstBufferPtr
-WeightsConverter::mayFindBuffer(ConstBufferPtrMap& map,
+WeightsConverter::mayFindBuffer(const ConstBufferPtrMap& map,
                                 const std::string& key)
 {
-    if (map.count(key) > 0) {
-        return map[key];
+    auto it = map.find(key);
+    if (it != map.end()) {
+        return it->second;
     }
     return nullptr;
 }
 
 ft::LayerNormWeightsPtr
-WeightsConverter::mayCreateLayerNormWeights(ConstBufferPtrMap& map,
+WeightsConverter::mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
                                             const std::string& gamma_key,
                                             const std::string& beta_key)   
 {
@@ -49,7 +50,7 @@ WeightsConverter::mayCreateLayerNormWeights(ConstBufferPtrMap& map,
 }
 
 ft::DenseWeightsPtr
-WeightsConverter::mayCreateDenseWeights(ConstBufferPtrMap& map,
+WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
                                         const std::string& kernel_key,
                                         const std::string& bias_key,
                                         const std::string& scales_key)
@@ -65,7 +66,7 @@ WeightsConverter::mayCreateDenseWeights(ConstBufferPtrMap& map,
             auto kernel = mayFindBuffer(map, kernel_key);
             auto scales = mayFindBuffer(map, scales_key);
             // construct qbuffer need kernel and scales has no ref.
-            assert(false);
+            FT_LOG_DEBUG("load qbuffer weight [%s] ", scales_key.c_str());
             dense_weights->kernel = ConstBufferPtr(
                 new ft::QBuffer(BufferPtr(new Buffer(kernel->where(),
                                                      kernel->type(),
@@ -87,7 +88,7 @@ WeightsConverter::mayCreateDenseWeights(ConstBufferPtrMap& map,
 }
 
 ft::FfnLayerWeights
-WeightsConverter::createFfnWeights(ConstBufferPtrMap& map) {
+WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     ft::FfnLayerWeights ffn_weights;
     ffn_weights.up_weight = mayCreateDenseWeights(map,
                                                   W::ffn_w3,
@@ -115,7 +116,7 @@ WeightsConverter::createFfnWeights(ConstBufferPtrMap& map) {
 }
 
 ft::AttentionLayerWeights
-WeightsConverter::createAttentionWeights(ConstBufferPtrMap& map) {
+WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
     ft::AttentionLayerWeights attention_weights;
     attention_weights.pre_attention_layernorm = mayCreateLayerNormWeights(map,
                                                                           W::pre_attn_ln_gamma,

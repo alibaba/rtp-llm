@@ -93,26 +93,26 @@ private:
 
     // helper function
 
-    ft::ConstBufferPtr mayFindBuffer(ConstBufferPtrMap& map,
+    ft::ConstBufferPtr mayFindBuffer(const ConstBufferPtrMap& map,
                                      const std::string& key);
 
-    ft::DenseWeightsPtr mayCreateDenseWeights(ConstBufferPtrMap& map,
+    ft::DenseWeightsPtr mayCreateDenseWeights(const ConstBufferPtrMap& map,
                                               const std::string& kernel_key,
                                               const std::string& bias_key = "",
                                               const std::string& scales_key = "");
 
     ft::LayerNormWeightsPtr
-    mayCreateLayerNormWeights(ConstBufferPtrMap& map,
+    mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
                               const std::string& gamma_key,
                               const std::string& beta_key = "");
     
     ft::FfnLayerWeights
-    createFfnWeights(ConstBufferPtrMap& map);
+    createFfnWeights(const ConstBufferPtrMap& map);
 
     ft::AttentionLayerWeights
-    createAttentionWeights(ConstBufferPtrMap& map);
+    createAttentionWeights(const ConstBufferPtrMap& map);
 
-    ft::ConstBufferPtr CopyTensorToBufferPtr(torch::Tensor& tensor);
+    ft::ConstBufferPtr CopyTensorToBufferPtr(const torch::Tensor& tensor);
 
 private:
     bool            need_copy_;

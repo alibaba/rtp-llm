@@ -183,6 +183,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
         if (params.A.type() == DataType::TYPE_BF16) {
             weight_only_matmul_plguin_->init(nvinfer1::DataType::kBF16, trt_plugins::WeightTypeId::INT8);
         }
+        FT_LOG_DEBUG("use int8 only weight gemm.");
         size_t ws_size = weight_only_matmul_plguin_->getWorkspaceSize(arguments.m,
                                                                       arguments.n,
                                                                       arguments.k);
