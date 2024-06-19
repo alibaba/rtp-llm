@@ -32,8 +32,9 @@ def get_bytes_io_from_url(url: str):
         return buf
     
 def common_image_process_func(url: str, handler_func: Callable[[Any], Any]) -> torch.Tensor:
-    if url in image_cache:
-        return image_cache[url]
+    with cache_lock:
+        if url in image_cache:
+            return image_cache[url]
     try:
         bytes_io = get_bytes_io_from_url(url)
         image = Image.open(bytes_io)
