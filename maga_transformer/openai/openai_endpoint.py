@@ -22,13 +22,13 @@ from maga_transformer.openai.renderers.custom_renderer import RendererParams, \
 from maga_transformer.openai.renderer_factory import ChatRendererFactory
 from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.config.generate_config import GenerateConfig
-from maga_transformer.utils.vit_process_engine import VitEngine
+from maga_transformer.utils.mm_process_engine import MMProcessEngine
 
 class OpenaiEndopoint():
     def __init__(self, model: Union[AsyncModel, BaseModel]):
         self.model = model
         self.max_seq_len = self.model.config.max_seq_len
-        self.vit_engine = VitEngine()
+        self.vit_engine = MMProcessEngine()
 
         tokenizer = self.model.tokenizer
         if (tokenizer == None):

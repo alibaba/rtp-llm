@@ -7,10 +7,10 @@ import torch.nn as nn
 
 from PIL import Image
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
-from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
+from maga_transformer.models.multimodal_mixin import ImageEmbeddingInterface
 from maga_transformer.models.llava_utils import expand2square, process_anyres_image, unpad_image, get_anyres_image_grid_shape
 
-class LlavaImageEmbedding(BaseImageEmbedding):
+class LlavaImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config: Dict[str, Any]):
         if config.get("vision_config", None) != None:
             raise Exception("llava-hf style config is not implemented yet")
@@ -23,7 +23,7 @@ class LlavaImageEmbedding(BaseImageEmbedding):
                 torch.empty(config["hidden_size"]).cuda().half()
             )
         self.config = config
-    
+
     @torch.no_grad()
     def image_embedding(self, images: List[Image.Image], device):
         image_aspect_ratio = self.config["image_aspect_ratio"]

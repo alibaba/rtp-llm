@@ -1,8 +1,10 @@
 import json
 import torch
 import re
+from functools import partial
 from typing import Any, Dict, List, Union, Tuple, Optional, Callable
 from PIL import Image
+from io import BytesIO
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import RequestFormat
@@ -10,9 +12,20 @@ from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeigh
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
+from maga_transformer.utils.multimodel import common_image_process_func, common_audio_process_func
 
-class BaseImageEmbedding:
-    def image_embedding(self, images: Any, device: Union[str, torch.device]) -> Any:
+class MultiModalEmbeddingInterface:
+    @torch.no_grad()
+    def mm_embedding(self, mm_input, device):
+        raise NotImplementedError()
+
+class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
+    @torch.no_grad()
+    def mm_embedding(self, mm_input, device):
+        return common_image_process_func(mm_input, partial(self.image_embedding, device=device))
+
+    @torch.no_grad()
+    def image_embedding(self, images: List[Image.Image], device):
         raise NotImplementedError()
 
 class BaseVitWeights:
@@ -23,7 +36,7 @@ class BaseVitWeights:
     
     def _set_weight_prefix(self):
         self._ckpt_prefix = "model."
-        self._ft_prefix = "self.visual."
+        self._ft_prefix = "self.mm_part."
     
     @property
     def ckpt_prefix(self) -> str:
@@ -64,8 +77,7 @@ class BaseMultiModalWeightInfo:
                 llm_weights.tp_strategy[w_name] = sp_id
 
 class MultiModalMixin:
-    visual: BaseImageEmbedding
-    image_expand_token: int
+    mm_part: MultiModalEmbeddingInterface
     nccl_op_: NcclOp
 
     @staticmethod

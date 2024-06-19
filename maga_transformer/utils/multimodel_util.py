@@ -4,6 +4,7 @@ import json
 import requests
 import asyncio
 import threading
+import torchaudio
 from PIL import Image
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
@@ -11,7 +12,7 @@ from typing import Any, List, Dict, Optional, Callable
 from maga_transformer.utils.lru_dict import LruDict
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 
-image_cache = LruDict(int(os.environ.get('VIT_CACHE_ITEM_NUM', '10')))
+mm_data_cache = LruDict(int(os.environ.get('VIT_CACHE_ITEM_NUM', '10')))
 cache_lock = threading.Lock()
 
 if os.environ.get('DOWNLOAD_HEADERS', '') != '':
@@ -33,8 +34,8 @@ def get_bytes_io_from_url(url: str):
     
 def common_image_process_func(url: str, handler_func: Callable[[Any], Any]) -> torch.Tensor:
     with cache_lock:
-        if url in image_cache:
-            return image_cache[url]
+        if url in mm_data_cache:
+            return mm_data_cache[url]
     try:
         bytes_io = get_bytes_io_from_url(url)
         image = Image.open(bytes_io)
@@ -42,5 +43,19 @@ def common_image_process_func(url: str, handler_func: Callable[[Any], Any]) -> t
         raise Exception(f"cannot download image from {url}, exception {e}")
     image_feature = handler_func([image.convert("RGB")])[0]
     with cache_lock:
-        image_cache[url] = image_feature
+        mm_data_cache[url] = image_feature
+    return image_feature
+
+def common_audio_process_func(url: str, handler_func: Callable[[Any], Any]) -> torch.Tensor:
+    with cache_lock:
+        if url in mm_data_cache:
+            return mm_data_cache[url]
+    try:
+        bytes_io = get_bytes_io_from_url(url)
+        image = torchaudio.open(bytes_io)
+    except Exception as e:
+        raise Exception(f"cannot download audio from {url}, exception {e}")
+    image_feature = handler_func([image.convert("RGB")])[0]
+    with cache_lock:
+        mm_data_cache[url] = image_feature
     return image_feature

@@ -77,14 +77,14 @@ class LlavaTokenizer(object):
 class Llava(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         with torch.cuda.device(torch.device('cuda:0')):
-            self.visual = LlavaImageEmbedding(config.vit_related_params.config)
+            self.mm_part = LlavaImageEmbedding(config.vit_related_params.config)
         self.nccl_op_ = NcclOp()
-        vit_weight_dict: Dict[str, Any] = {"mm_projector": self.visual.mm_projector}
+        vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
         if config.vit_related_params.config["unfreeze_mm_vision_tower"] or \
             "mm_vision_tower" in config.vit_related_params.config["mm_tunable_parts"]:
-            vit_weight_dict["vision_tower"] = self.visual.vision_tower
+            vit_weight_dict["vision_tower"] = self.mm_part.vision_tower
         if "unpad" in config.vit_related_params.config.get("mm_patch_merge_type", "flat"):
-            vit_weight_dict["image_newline"] = self.visual.image_newline
+            vit_weight_dict["image_newline"] = self.mm_part.image_newline
         config.vit_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
         Llama.__init__(self, config)
 

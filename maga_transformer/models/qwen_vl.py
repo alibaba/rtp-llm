@@ -14,7 +14,7 @@ from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo, QwenVLVitWe
 from maga_transformer.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
 from maga_transformer.models.qwen_vl_vit_engine import VITEngine
 from maga_transformer.models.base_model import BaseModel
-from maga_transformer.models.multimodal_mixin import MultiModalMixin, BaseImageEmbedding
+from maga_transformer.models.multimodal_mixin import MultiModalMixin, ImageEmbeddingInterface
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.utils.util import get_device, to_torch_dtype, get_mem_info
 from maga_transformer.ops.comm.nccl_op import NcclOp
@@ -23,7 +23,7 @@ from maga_transformer.utils.model_weights_loader import get_model_weights_loader
 from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.multimodel_util import common_image_process_func
 
-class QwenVLImageEmbedding(BaseImageEmbedding):
+class QwenVLImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config: Dict[str, Any]):
         self.vit = QWen_VL_ViT(**config).cuda().half()
     
@@ -36,9 +36,9 @@ class QwenVLImageEmbedding(BaseImageEmbedding):
 class QWen_VL(QWen, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         with torch.cuda.device(torch.device('cuda:0')):
-            self.visual = QwenVLImageEmbedding(config.vit_related_params.config)
+            self.mm_part = QwenVLImageEmbedding(config.vit_related_params.config)
         self.nccl_op_ = NcclOp()
-        config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.visual.vit})
+        config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})
         
         QWen.__init__(self, config)
 
@@ -57,7 +57,7 @@ class QWen_VL(QWen, MultiModalMixin):
     
     def _prepare_model_weight_loader(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         device = device or get_device()
-        # Load weight only for self.visual
+        # Load weight only for self.mm_part
         compute_dtype = to_torch_dtype(self.config.data_type or self.dtype)
         weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
         database = CkptDatabase(self.config.ckpt_path)
@@ -67,7 +67,7 @@ class QWen_VL(QWen, MultiModalMixin):
     def init_vit_trt(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
         os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
         if VITEngine.should_generate_engine():
-            assert type(self.visual) == QwenVLImageEmbedding
+            assert type(self.mm_part) == QwenVLImageEmbedding
             weight_loader = self._prepare_model_weight_loader(device=device)
             ctype = to_torch_dtype(self.config.data_type or self.dtype)
             vit_weight = self.config.vit_related_params.vit_weights
@@ -82,18 +82,18 @@ class QWen_VL(QWen, MultiModalMixin):
                 param = eval(param_name)
                 param.data = tensor.reshape(param.data.shape).to(ctype).to('cuda:0')
         
-        vit_visual = VITEngine(self.visual.vit, self.config.vit_related_params.config.get("image_size"))
+        vit_visual = VITEngine(self.mm_part.vit, self.config.vit_related_params.config.get("image_size"))
         
-        del self.visual
-        self.visual = None
+        del self.mm_part
+        self.mm_part = None
         import gc
         gc.collect()
         torch.cuda.empty_cache()
-        self.visual = vit_visual
+        self.mm_part = vit_visual
         self.config.vit_related_params.vit_weights = None
     
     def load_vit_weight(self, ctype: str):
-        if type(self.visual) == VITEngine:
+        if type(self.mm_part) == VITEngine:
             # No need to load weight for VITEngine, its weight is inside trt engine.
             return
         else:

@@ -10,7 +10,7 @@ from transformers import PreTrainedTokenizerBase
 from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, GenerateOutputs, AuxInfo
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.gpt_init_model_parameters import TemplateType
-from maga_transformer.utils.vit_process_engine import VitEngine
+from maga_transformer.utils.mm_process_engine import MMProcessEngine
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, UsageInfo, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, \
     RoleEnum, RendererInfo
@@ -114,7 +114,7 @@ class CustomChatRenderer():
 
         token_type_ids = []
         if model.is_multimodal() and len(images) > 0:
-            images = await VitEngine.get(images)
+            images = await MMProcessEngine.get(images)
 
         if model.is_multimodal():
             input_ids, images, token_type_ids = model.expand_token_id(input_ids, images)
