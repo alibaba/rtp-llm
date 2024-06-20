@@ -369,6 +369,29 @@ class GptInitModelParameters:
         return res
 
     def eval_model_size(self):
+        layer_param_bytes = 2
+        if self.quant_algo.getWeightBits() == 8:
+            layer_param_bytes = 1
+        elif self.quant_algo.getWeightBits() == 4:
+            layer_param_bytes = 0.54
+
+        model_size = self.word_emb_param_count * 2 + \
+            self.layer_weight_param_count * layer_param_bytes + \
+                self.gpt_init_params.hidden_size * layer_param_bytes + \
+                self.word_emb_param_count * 2  # maybe some model donot have lm_head
+
+        return model_size
+
+    @property
+    def model_param_count(self):
+        return self.word_emb_param_count*2 + self.layer_weight_param_count + self.gpt_init_params.hidden_size 
+
+    @property
+    def word_emb_param_count(self):
+        return self.vocab_size * self.gpt_init_params.hidden_size
+
+    @property
+    def layer_weight_param_count(self):
         hidden_size = self.gpt_init_params.hidden_size
 
         layer_weight_param_count = 0
@@ -413,17 +436,5 @@ class GptInitModelParameters:
             layer_weight_param_count = layer_weight_param_count + len(self.moe_layer_index) * hidden_size * ffn_export_num
         # other small tensor
         layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * 11
+        return layer_weight_param_count
 
-        word_emb_param_count =  self.vocab_size * hidden_size
-        layer_param_bytes = 2
-        if self.quant_algo.getWeightBits() == 8:
-            layer_param_bytes = 1
-        elif self.quant_algo.getWeightBits() == 4:
-            layer_param_bytes = 0.54
-
-        model_size = word_emb_param_count * 2 + \
-            layer_weight_param_count * layer_param_bytes + \
-                hidden_size * layer_param_bytes + \
-                word_emb_param_count * 2  # maybe some model donot have lm_head
-
-        return model_size

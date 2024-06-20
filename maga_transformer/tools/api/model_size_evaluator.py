@@ -23,7 +23,7 @@ def eval_model_size(env_params, model_type, model_path, ptuning_path):
         tokenizer_path=None
     )
     config: GptInitModelParameters = model_cls.create_config(model_config)
-    return model_cls.eval_model_size(config)
+    return model_cls.eval_model_size(config), model_cls.eval_model_param_count(config)
 
 def calc_hf_model_size(req: Dict[str, Any]):
     model_path = req.get("model_path")
@@ -42,9 +42,9 @@ def calc_hf_model_size(req: Dict[str, Any]):
     if param_count :
         weight_type = get_weight_type_from_env(env_params)
         if weight_type == WEIGHT_TYPE.INT8:
-            return param_count
+            return param_count, param_count
         else:
-            return param_count * 2
+            return param_count * 2, param_count
     return None
 
 def cacl_ft_model_size(req: Dict[str, Any]) -> int:
@@ -56,8 +56,7 @@ def cacl_ft_model_size(req: Dict[str, Any]) -> int:
     if not model_type or not model_path:
         return handler_error(Exception.ERROR_INPUT_FORMAT_ERROR, "bad_input")
 
-    model_size = eval_model_size(env_params, model_type, model_path, ptuning_path)
-    return model_size
+    return eval_model_size(env_params, model_type, model_path, ptuning_path)
 
 
 from fastapi import APIRouter
@@ -72,9 +71,13 @@ def calc_mdoel_size(req: Union[str,Dict[Any, Any]]):
         req = json.loads(req)
 
     if HfModelInfoHelper.is_from_hf(req.get("model_path")):
-        model_size = calc_hf_model_size(req)
+        model_size, param_count = calc_hf_model_size(req)
     else:
-        model_size = cacl_ft_model_size(req)
-    response = {"model_size":model_size} if model_size else {}
+        model_size, param_count = cacl_ft_model_size(req)
+    response = {}
+    if model_size:
+        response["model_size"] = model_size
+    if param_count:
+        response["param_count"] = param_count
 
     return JSONResponse(content = response)

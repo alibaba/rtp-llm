@@ -270,6 +270,9 @@ class BaseModel(object):
     def eval_model_size(config: GptInitModelParameters):
         return config.eval_model_size()
 
+    @staticmethod
+    def eval_model_param_count(config: GptInitModelParameters):
+        return config.model_param_count
     def _create_hf_sampler(self, generate_config: GenerateConfig) -> HuggingfaceSampler:
         return HuggingfaceSampler(generate_config)
 
