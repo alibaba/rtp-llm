@@ -34,6 +34,11 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
             break;
         }
         const auto output_status = stream->nextOutput();
+        if (context->IsCancelled()) {
+            stream->cancel();
+            FT_LOG_DEBUG("request:[%ld] cancel", request->request_id());
+            break;
+        }
         if (!output_status.ok()) {
             FT_LOG_DEBUG("request:[%ld] generate error %s", request->request_id(), output_status.status().ToString().c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, output_status.status().ToString());

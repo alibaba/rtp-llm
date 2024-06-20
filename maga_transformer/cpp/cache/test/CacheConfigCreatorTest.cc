@@ -18,11 +18,20 @@ using namespace fastertransformer;
 namespace rtp_llm {
 
 class CacheConfigCreatorTest: public DeviceTestBase {
+    void SetUp() override {
+        setenv("DEVICE_RESERVE_MEMORY_BYTES", std::to_string(20L * 1024 * 1024).c_str(), 1);
+        DeviceTestBase::SetUp();
+    }
+
+    void TearDown() override {
+        unsetenv("DEVICE_RESERVE_MEMORY_BYTES");
+        DeviceTestBase::TearDown();
+    }
 };
 
 TEST_F(CacheConfigCreatorTest, testGetKVCacheMemorySize) {
     GptInitParameter param;
-    param.reserve_runtime_mem_mb_ = 20;
+    param.reserve_runtime_mem_mb_ = 2;
     param.kv_cache_mem_mb_ = 10;
     CacheConfigCreator creator;
     auto result1 = creator.getKVCacheMemorySize(param);

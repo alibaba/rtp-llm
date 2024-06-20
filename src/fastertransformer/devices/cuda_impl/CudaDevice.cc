@@ -37,6 +37,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         FT_LOG_INFO("cuda device %d has %lu bytes free memory, trying to reserve %lu bytes.",
                     device_id_, free_bytes, tracker_params.target_track_bytes);
         allocator_.reset(new TrackerAllocator(tracker_params));
+        syncAndCheck(); // sync check tracker malloc cuda mem
     } else {
         allocator_.reset(allocator_ptr);
     }

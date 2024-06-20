@@ -18,8 +18,9 @@ void EngineBase::initDevices(const EngineInitParams& params) {
     default_device_params.tp_rank = params.gpt_init_parameter.tp_rank_;
     default_device_params.master_ip = params.gpt_init_parameter.nccl_ip_;
     default_device_params.master_port = params.gpt_init_parameter.nccl_port_;
-    default_device_params.max_batch_size = params.gpt_init_parameter.max_context_batch_size_
-                                         + params.gpt_init_parameter.max_generate_batch_size_;
+    // default_device_params.max_batch_size = params.gpt_init_parameter.max_context_batch_size_
+    //                                      + params.gpt_init_parameter.max_generate_batch_size_;
+    default_device_params.max_batch_size = 1024; // set static max batch size to avoid sampler reset memory
     default_device_params.device_reserve_memory_bytes = -128L * 1024 * 1024; // 64MB
     default_device_params.host_reserve_memory_bytes = 2L * 1024 * 1024 * 1024; // 2GB
     default_device_params.device_reserve_memory_bytes =

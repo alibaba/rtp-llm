@@ -141,8 +141,10 @@ class ModelRpcClient(object):
             logging.warning(f"request: [{input_pb.request_id}] RPC failed: {e.code()}, {e.details()}")
             raise e
         finally:
-           if lora_resource_holder is not None:
-               self.lora_resource_holder.release()
+            if response_iterator:
+                response_iterator.cancel()
+            if lora_resource_holder is not None:
+                self.lora_resource_holder.release()
 
     def stop(self):
         self.rtp_llm_op.stop()

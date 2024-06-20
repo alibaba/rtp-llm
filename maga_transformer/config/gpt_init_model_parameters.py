@@ -326,7 +326,8 @@ class GptInitModelParameters:
 
         load_cutlass_gemm_config(self.quant_algo)
 
-        self.seq_size_per_block = seq_size_per_block
+        self.seq_size_per_block = (int(max(seq_size_per_block, self.max_seq_len // 128)) >> 1) << 1 # must be 2^n
+        self.seq_size_per_block = int(os.environ.get('SEQ_SIZE_PER_BLOCK', self.seq_size_per_block))
         logging.info(f'seq_size_per_block: {self.seq_size_per_block}')
         self.max_generate_batch_size = int(os.environ.get('CONCURRENCY_LIMIT', 128))
         logging.info(f'max_generate_batch_size: {self.max_generate_batch_size}')

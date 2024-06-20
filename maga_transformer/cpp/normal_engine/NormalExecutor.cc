@@ -22,7 +22,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params, ft::DeviceBase* d
     size_t max_batch_size =
         params.gpt_init_parameter.max_context_batch_size_ + params.gpt_init_parameter.max_generate_batch_size_;
     int eos_id = params.gpt_init_parameter.special_tokens_.eos_token_id_;
-    SamplerInitParams sampler_params{device_, eos_id, max_batch_size};
+    SamplerInitParams sampler_params{device_, eos_id, 1024}; // set static max batch size to avoid sampler reset memory
     sampler_.reset(new Sampler(sampler_params));
 
     use_new_device_impl_ = std::getenv("USE_NEW_DEVICE_IMPL");
