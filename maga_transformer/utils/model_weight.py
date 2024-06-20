@@ -125,7 +125,9 @@ def sp_head(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden
     if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
         return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
     else:
-        return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
+        splitted = sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
+        splitted = splitted.reshape(splitted.shape[0], -1)
+        return splitted
 
 def sp_head_s(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
     qkv_hidden_size = t.shape[1]
