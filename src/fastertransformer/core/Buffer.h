@@ -61,7 +61,6 @@ public:
     const std::vector<size_t>& shape() const;
     void*                      data() const;
     void*                      dataWithOffset(size_t offset) const;
-    const DeleterFuncType&     deleter() const;
 
     template<typename T>
     inline T* data() const {
@@ -93,7 +92,8 @@ public:
         return (type_ == DataType::TYPE_QINT8);
     }
 
-    void reshape(const std::vector<size_t>& shape);
+    void updateShape(const std::vector<size_t>& shape);
+    Buffer reshape(const std::vector<size_t>& shape) const;
     Buffer view(size_t offset, size_t size) const; // only from 0-d
     Buffer operator[](size_t offset) const;
 
@@ -131,12 +131,16 @@ public:
 
     std::string debugStringMeta() const;
 
+private:
+    DeleterFuncType getSubBufferDeleter() const ;
+
 protected:
     MemoryType          where_;
     DataType            type_;
     std::vector<size_t> shape_;
     void*               data_;
     DeleterFuncType     deleter_ = nullptr;
+    mutable size_t      view_count_ = 0;
 
 friend class QBuffer;
 

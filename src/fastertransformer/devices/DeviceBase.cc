@@ -94,10 +94,8 @@ SelectOutput DeviceBase::select(const SelectParams& params) {
         selected_shape.begin() + dim + 1, selected_shape.end(), 1UL, std::multiplies<size_t>());
 
     // both src and dst needs to be viewed into 1-d buffer.
-    auto src_view = src.view(0, src.shape()[0]);
-    src_view.reshape({src.size()});
-    auto dst_view = selected->view(0, selected_shape[0]);
-    dst_view.reshape({selected->size()});
+    auto src_view = src.reshape({src.size()});
+    auto dst_view = selected->reshape({selected->size()});
 
     for (auto i = 0; i < idx_buf.shape()[0]; i++) {
         const auto idx = idx_buf.data<int32_t>()[i];

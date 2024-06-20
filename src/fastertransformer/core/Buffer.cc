@@ -7,7 +7,6 @@ using namespace std;
 
 namespace fastertransformer {
 
-
 Buffer::Buffer(const MemoryType where,
                const DataType type,
                const std::vector<size_t>& shape,
@@ -18,9 +17,13 @@ Buffer::Buffer(const MemoryType where,
     , shape_(shape)
     , data_(const_cast<void*>(data))
     , deleter_(deleter)
+    , view_count_(0)
     {}
 
 Buffer::~Buffer() {
+    if (view_count_ > 0) {
+        throw std::runtime_error("Buffer::~Buffer: view_count_ > 0: " + std::to_string(view_count_));
+    }
     if (deleter_) {
         deleter_(this);
     }
@@ -41,10 +44,6 @@ DataType Buffer::type() const {
 
 const std::vector<size_t>& Buffer::shape() const {
     return shape_;
-}
-
-const Buffer::DeleterFuncType& Buffer::deleter() const {
-    return deleter_;
 }
 
 void* Buffer::data() const {
@@ -75,12 +74,32 @@ size_t Buffer::sizeBytes() const {
     return size() * getTypeSize(type_);
 }
 
-void Buffer::reshape(const std::vector<size_t>& shape) {
-    size_t new_shape_size = std::accumulate(shape.begin(), shape.end(), (size_t)1, std::multiplies<size_t>());
+void Buffer::updateShape(const std::vector<size_t>& shape) {
+    size_t new_shape_size = std::accumulate(shape.begin(), shape.end(), (size_t)1,
+                                            std::multiplies<size_t>());
     FT_CHECK_WITH_INFO(
-            new_shape_size == size(),
-            "reshape shape size not match: %d vs %d", new_shape_size, size());
+        new_shape_size == size(),
+        "reshape shape size not match: %d vs %d", new_shape_size, size());
     shape_ = shape;
+}
+
+Buffer::DeleterFuncType Buffer::getSubBufferDeleter() const {
+    this->view_count_++;
+    return [this](Buffer* buffer) -> void {
+        if (this->view_count_ == 0) {
+            throw std::runtime_error("Buffer::getSubBufferDeleter: view_count_ == 0");
+        }
+        this->view_count_--;
+    };
+}
+
+Buffer Buffer::reshape(const std::vector<size_t>& shape) const {
+    size_t new_shape_size = std::accumulate(shape.begin(), shape.end(), (size_t)1,
+                                            std::multiplies<size_t>());
+    FT_CHECK_WITH_INFO(
+        new_shape_size == size(),
+        "reshape shape size not match: %d vs %d", new_shape_size, size());
+    return Buffer(where_, type_, shape, data_, getSubBufferDeleter());
 }
 
 // NOTE: view() always slices the buffer from 0-dim, no matter how many dimensions the buffer has.
@@ -89,7 +108,7 @@ void Buffer::reshape(const std::vector<size_t>& shape) {
 //       user has the responsibility to keep the original buffer alive.
 Buffer Buffer::view(size_t offset, size_t size) const {
     if (offset == 0 && size == shape_[0]) {
-        return Buffer(where_, type_, shape_, data_, nullptr);
+        return Buffer(where_, type_, shape_, data_, getSubBufferDeleter());
     } else {
         FT_CHECK_WITH_INFO(offset + size <= this->shape_[0],
                            "view offset %d + size %d out of range with buffer[%s]",
@@ -97,7 +116,7 @@ Buffer Buffer::view(size_t offset, size_t size) const {
         auto new_shape = shape_;
         new_shape[0] = size;
         const auto offset_size = this->size() / shape_[0] * offset;
-        return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), nullptr);
+        return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), getSubBufferDeleter());
     }
 }
 
@@ -114,7 +133,7 @@ Buffer Buffer::operator[](size_t offset) const {
     auto new_shape = shape_;
     new_shape.erase(new_shape.begin());
     const auto offset_size = this->size() / shape_[0] * offset;
-    return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), nullptr);
+    return Buffer(where_, type_, new_shape, dataWithOffset(offset_size), getSubBufferDeleter());
 }
 
 std::string Buffer::debugStringMeta() const {

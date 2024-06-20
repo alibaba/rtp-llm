@@ -86,18 +86,19 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     if (device->getDeviceProperties().tp_size <= 1) {
         return;
     }
-    const size_t shape_hints_size = 9;
+    const size_t shape_hints_size = 10;
     auto shape_hints = device->allocateBuffer({ft::DataType::TYPE_INT32, {shape_hints_size}, ft::AllocationType::HOST});
     auto shape_hints_ptr = shape_hints->data<int32_t>();
-    shape_hints_ptr[0] = inputs.combo_tokens.get() ? inputs.combo_tokens->size() : 0; // combo_token_size
-    shape_hints_ptr[1] = inputs.input_lengths.get() ? inputs.input_lengths->size() : 0; // total_batch_size
-    shape_hints_ptr[2] = inputs.sequence_lengths.get() ? inputs.sequence_lengths->size() : 0; // generate_batch_size
+    shape_hints_ptr[0] = inputs.combo_tokens.get() ? inputs.combo_tokens->size() : 0;
+    shape_hints_ptr[1] = inputs.input_lengths.get() ? inputs.input_lengths->size() : 0;
+    shape_hints_ptr[2] = inputs.sequence_lengths.get() ? inputs.sequence_lengths->size() : 0;
     shape_hints_ptr[3] = inputs.prefix_lengths.get() ? inputs.prefix_lengths->size() : 0;
     shape_hints_ptr[4] = inputs.count_lengths.get() ? inputs.count_lengths->size() : 0;
     shape_hints_ptr[5] = inputs.max_prefix_length.get() ? inputs.max_prefix_length->size() : 0;
-    shape_hints_ptr[6] = inputs.kv_cache_blocks.get() ? inputs.kv_cache_blocks->shape()[0] : 0; // layer_num
-    shape_hints_ptr[7] = inputs.kv_cache_blocks.get() ? inputs.kv_cache_blocks->shape()[3] : 0; // block_size
-    shape_hints_ptr[8] = inputs.kv_cache_scales.get() != nullptr; // use_block_scale
+    shape_hints_ptr[6] = inputs.kv_cache_blocks.get() ? inputs.kv_cache_blocks->shape()[0] : 0;
+    shape_hints_ptr[7] = inputs.kv_cache_blocks.get() ? inputs.kv_cache_blocks->shape()[3] : 0;
+    shape_hints_ptr[8] = inputs.kv_cache_scales.get() != nullptr;
+    shape_hints_ptr[9] = inputs.lm_output_indexes.get() ? inputs.lm_output_indexes->size() : 0;
     device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
     device->syncAndCheck();
@@ -112,6 +113,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         if (shape_hints_ptr[8]) {
             inputs.kv_cache_scales = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[6], (size_t)shape_hints_ptr[1], 2, (size_t)shape_hints_ptr[7]}, ft::AllocationType::HOST});
         }
+        inputs.lm_output_indexes = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[9]}, ft::AllocationType::HOST});
     }
     std::vector<ft::BufferPtr> buffers;
     buffers.emplace_back(inputs.combo_tokens);
@@ -124,6 +126,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     if (shape_hints_ptr[8]) {
         buffers.emplace_back(inputs.kv_cache_scales);
     }
+    buffers.emplace_back(inputs.lm_output_indexes);
     device->broadcast({buffers, 0});
     device->syncAndCheck();
 }

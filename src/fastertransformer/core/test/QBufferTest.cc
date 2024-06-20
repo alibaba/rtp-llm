@@ -35,7 +35,6 @@ TEST_F(QBufferTest, ValidConstructTest) {
     EXPECT_EQ(qbuffer->type(), DataType::TYPE_QINT8);
     EXPECT_EQ((int64_t)qbuffer->data(), 12345);
     EXPECT_EQ((int64_t)qbuffer->dataWithOffset(5), 12350);
-    EXPECT_EQ(qbuffer->deleter(), nullptr);
     EXPECT_EQ(qbuffer->typeSize(), 1);
     EXPECT_EQ(qbuffer->size(), 10 * 10 * 10);
     EXPECT_EQ(qbuffer->sizeBytes(), 10 * 10 * 10 * 1);
@@ -105,7 +104,7 @@ TEST_F(QBufferTest, Destructor_Test) {
     qbuffer.reset();
     std::string output = testing::internal::GetCapturedStdout();
     EXPECT_EQ(output, "delete buffer: zeros\ndelete buffer: scales\ndelete buffer: kernel\n");
-    
+
 }
 
 TEST_F(QBufferTest, TorchConstructTest) {

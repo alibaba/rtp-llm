@@ -121,10 +121,9 @@ TEST_F(GptModelTest, testSimple) {
     inputs.kv_cache_blocks = allocateKVBlocks(cache_config, {3, 3}, kv_cache);
     for (auto layer_id = 0; layer_id < inputs.kv_cache_blocks->shape()[0]; layer_id++) {
         auto layer_src = kv_cache_blocks->view(layer_id, 1);
-        layer_src.reshape({1, 2, 2});
         auto layer_dst = inputs.kv_cache_blocks->view(layer_id, 1);
-        layer_dst.reshape({2, 2, 2});
-        device_->copy({layer_dst.view(0, 1), layer_src.view(0, 1)});
+        auto reshaped_dst = layer_dst.reshape({2, 2, 2}); // [bs, 2, blocks]
+        device_->copy({reshaped_dst.view(0, 1), layer_src.reshape({1, 2, 2})});
     }
 
     device_->syncAndCheck();
