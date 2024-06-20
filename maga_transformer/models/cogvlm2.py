@@ -1,5 +1,6 @@
 import json
 import os
+from functools import partial
 from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
@@ -14,6 +15,7 @@ from maga_transformer.models.cogvlm2_weight import CogVLM2WeightInfo, CogVLM2Vit
 from maga_transformer.models.llama import Llama
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
+from maga_transformer.utils.multimodel_util import common_image_process_func
 
 LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1
@@ -224,6 +226,9 @@ class CogVLM2(Llama, MultiModalMixin):
                 [token_type_ids == VISION_TOKEN_TYPE], image_features
             )
         return input_embeds
+    
+    def process_multimodel_input_func(self, path: str) -> torch.Tensor:
+        return common_image_process_func(path, partial(self.visual.image_embedding, device=self.device))
 
 
 register_model(

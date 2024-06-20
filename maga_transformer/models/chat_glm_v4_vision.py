@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Any, Dict, List, Tuple, Union
 
 import torch
@@ -11,6 +12,7 @@ from maga_transformer.models.chat_glm_v4_vision_weight import (
 from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
+from maga_transformer.utils.multimodel_util import common_image_process_func
 from maga_transformer.utils.util import get_config_from_path
 
 
@@ -151,6 +153,9 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
                 input_embeds[i][a:b + 1] = images_embedding[idx]
 
         return input_embeds
+    
+    def process_multimodel_input_func(self, path: str) -> torch.Tensor:
+        return common_image_process_func(path, partial(self.visual.image_embedding, device=self.device))
 
 
 register_model("chatglm4v", ChatGlmV4Vision, [], ["THUDM/glm-4v-9b"])
