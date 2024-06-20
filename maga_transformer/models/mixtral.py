@@ -48,7 +48,7 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
             ffn_w1.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w1.weight', identity))
             ffn_w2.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w2.weight', identity))
             ffn_w3.append(CkptWeightInfo('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w3.weight', identity))
-        
+
         layer_weights.append(WeightInfo(W.moe_w1, ffn_w1, stack_))
         layer_weights.append(WeightInfo(W.moe_w2, ffn_w2, stack_))
         layer_weights.append(WeightInfo(W.moe_w3, ffn_w3, stack_))
@@ -56,7 +56,7 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
 
         lora_base_name = "base_model.model.{}.{}.weight"
         lora_weights = []
-        
+
         for lora_name in ['lora_A', 'lora_B']:
             ffn_w1_lora = []
             ffn_w2_lora = []
@@ -68,7 +68,7 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
                     lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w2', lora_name), transpose))
                 ffn_w3_lora.append(CkptWeightInfo(
                     lora_base_name.format('model.layers.{i}.block_sparse_moe.experts.'+ str(num_experts) +'.w3', lora_name), transpose))
-            
+
             lora_weights.append(WeightInfo(W.moe_w1 + "." + lora_name, ffn_w1_lora, stack_))
             lora_weights.append(WeightInfo(W.moe_w2 + "." + lora_name, ffn_w2_lora, stack_))
             lora_weights.append(WeightInfo(W.moe_w3 + "." + lora_name, ffn_w3_lora, stack_))
@@ -91,7 +91,7 @@ class MixtralWeightInfo(ModelDeployWeightInfo):
                          CkptWeightInfo(lora_base_name.format('model.layers.{i}.self_attn.v_proj', 'lora_B'), identity)],
                          functools.partial(merge_qkv_lora_B)))
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy, lora_weights=lora_weights)
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy(), lora_weights=lora_weights)
 
 class Mixtral(GPT):
     @staticmethod

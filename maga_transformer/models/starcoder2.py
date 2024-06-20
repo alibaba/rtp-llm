@@ -99,7 +99,7 @@ class Starcoder2WeightInfo(ModelDeployWeightInfo):
 
         return ModelWeightInfo(layer_weights=layer_weights,
                                weights=weights,
-                               tp_strategy=W.gpt_style_tp_strategy)
+                               tp_strategy=self._get_gpt_style_tp_strategy())
 
 
 StarcoderTokenizer = GPT2TokenizerFast

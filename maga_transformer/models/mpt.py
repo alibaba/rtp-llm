@@ -26,7 +26,7 @@ class MptWeightInfo(ModelDeployWeightInfo):
             WeightInfo(W.ffn_w1, [CkptWeightInfo('transformer.blocks.{i}.ffn.up_proj.weight', identity)], transpose),
             WeightInfo(W.ffn_w2, [CkptWeightInfo('transformer.blocks.{i}.ffn.down_proj.weight', identity)], transpose),
         ]
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
 
 class Mpt(GPT):
     @staticmethod

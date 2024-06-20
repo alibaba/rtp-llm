@@ -73,7 +73,7 @@ class BertWeightInfo(ModelDeployWeightInfo):
             WeightInfo(W.token_type_embedding, [CkptWeightInfo(self._names.TOKEN_TYPE_EMBEDDING)]),
             WeightInfo(W.pre_decoder_ln_beta, [CkptWeightInfo(self._names.EMB_NORM_B)]),
             WeightInfo(W.pre_decoder_ln_gamma, [CkptWeightInfo(self._names.EMB_NORM_W)]),
-        ]        
+        ]
         layer_weights = [
             WeightInfo(W.attn_qkv_w, [
                 CkptWeightInfo(self._names.Q_W),
@@ -102,9 +102,9 @@ class BertWeightInfo(ModelDeployWeightInfo):
         ]
         return ModelWeightInfo(layer_weights=layer_weights,
                                weights=weights,
-                               tp_strategy=W.gpt_style_tp_strategy)
+                               tp_strategy=self._get_gpt_style_tp_strategy())
 
 class RobertaWeightInfo(BertWeightInfo):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        self.model_name = 'roberta'        
+        self.model_name = 'roberta'

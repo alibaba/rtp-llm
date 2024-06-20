@@ -69,7 +69,7 @@ class GPTNeoxWeight(ModelDeployWeightInfo):
                 WeightInfo(W.pre_ln_beta, [CkptWeightInfo('gpt_neox.layers.{i}.post_attention_layernorm.bias', identity)],
                         identity)
             ])
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
 
 class GPTNeox13BWeight(ModelDeployWeightInfo):
     def _get_weight_info(self):
@@ -112,4 +112,4 @@ class GPTNeox13BWeight(ModelDeployWeightInfo):
                        identity),
         ]
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())

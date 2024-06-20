@@ -200,12 +200,12 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                 WeightInfo(W.ffn_w2, [CkptWeightInfo(self._names.FFW2, identity)], transpose),
                 WeightInfo(W.ffn_s2, [CkptWeightInfo(self._names.FFW2_S, identity)], identity),
 
-                WeightInfo(W.attn_qkv_w, [CkptWeightInfo(self._names.W_QKV, 
-                                                         functools.partial(qkv_transpose, hidden_size=self._hidden_size))], 
+                WeightInfo(W.attn_qkv_w, [CkptWeightInfo(self._names.W_QKV,
+                                                         functools.partial(qkv_transpose, hidden_size=self._hidden_size))],
                            transpose),
-                WeightInfo(W.attn_qkv_s, [CkptWeightInfo(self._names.W_QKV_S, identity)], 
+                WeightInfo(W.attn_qkv_s, [CkptWeightInfo(self._names.W_QKV_S, identity)],
                            identity),
-            
+
                 WeightInfo(W.attn_o_smoother, [CkptWeightInfo(self._names.WO_Smoother, identity)], identity),
                 WeightInfo(W.ffn_smoother, [CkptWeightInfo(self._names.FFNW2_Smoother, identity)], identity),
             ]
@@ -221,7 +221,7 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                 WeightInfo(W.ffn_w2, [CkptWeightInfo(self._names.FFW2, concat_1)], transpose),
             ]
             )
-            
+
             if self._names == CohereWeightNames:
                 layer_weights.append(WeightInfo(W.qk_ln_gamma,
                                                 [CkptWeightInfo(self._names.Q_NORM, identity),
@@ -284,7 +284,7 @@ class LlamaWeightInfo(ModelDeployWeightInfo):
                         functools.partial(merge_qkv_lora_B)))
 
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights,
-                               tp_strategy=W.gpt_style_tp_strategy)
+                               tp_strategy=self._get_gpt_style_tp_strategy())
 class GemmaWeightInfo(LlamaWeightInfo):
     def __init__(self, config, tp_size, tp_rank):
         super().__init__(config, tp_size, tp_rank)

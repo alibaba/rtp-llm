@@ -5,6 +5,7 @@ from functools import reduce
 import torch
 import torch.serialization
 import functools
+import copy
 from typing import Any, NamedTuple, Callable, List, Dict, Set, Tuple, Optional, Union
 from maga_transformer.utils.database import FinetuneType, TrainType, CkptFileInfo, LoraConfig
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -133,6 +134,32 @@ def sp_head_s(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broad
     else:
         return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
 
+def get_sp_tensor_gemm8(t: torch.Tensor, qkv_hidden_size: int, hidden_size: int, tp: int, tp_rank: int, kv_broadcast: bool):
+    kv_hidden_size = (qkv_hidden_size - hidden_size) // 2
+    if len(t.shape) == 1:
+        t = t.unsqueeze(0)
+    qs = sp_0(t[:hidden_size, :], tp, tp_rank)
+    if kv_broadcast:
+        ks = t[hidden_size:hidden_size + kv_hidden_size, :]
+        vs = t[hidden_size + kv_hidden_size:, :]
+    else:
+        ks = sp_0(t[hidden_size:hidden_size + kv_hidden_size, :], tp, tp_rank)
+        vs = sp_0(t[hidden_size + kv_hidden_size:, :], tp, tp_rank)
+    return torch.concat([qs, ks, vs], dim=0).contiguous()
+
+def sp_head_gemm_a8(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
+    if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
+        return get_sp_tensor_gemm8(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
+    else:
+        return sp_0(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
+
+def sp_head_s_gemm_a8(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
+    qkv_hidden_size = t.shape[0]
+    if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
+        return get_sp_tensor_gemm8(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
+    else:
+        return sp_0(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
+
 def sp_head_z(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
     qkv_hidden_size = qkv_hidden_size // 8
     hidden_size = hidden_size // 8
@@ -184,7 +211,7 @@ def trans_qkv_b(ts: List[torch.Tensor], hidden_size: int, head_num: int) -> torc
         .permute(1, 0, 2)\
         .reshape(3 * hidden_size)\
         .contiguous()
-        
+
 def qkv_transpose(ts, hidden_size):
     return ts[0].reshape(hidden_size, -1)
 
@@ -307,7 +334,7 @@ class W:
     vision_ffn_w2 = 'vision_ffn_weights.intermediate_weight2.kernel'
 
     # partial moe
-    shared_expert_gate = 'ffn_weights.shared_expert_gate.kernel'    
+    shared_expert_gate = 'ffn_weights.shared_expert_gate.kernel'
     moe_w1   = 'partial_moe_weights.intermediate_weight.kernel'
     moe_b1   = 'partial_moe_weights.intermediate_weight.bias'
     moe_w3   = 'partial_moe_weights.intermediate_weight3.kernel'
@@ -410,7 +437,7 @@ class W:
         attn_o_w,
         ffn_w1,
         ffn_w3,
-        ffn_w2 
+        ffn_w2
     ]
 
     sq_quant_scales = [
@@ -426,7 +453,7 @@ class W:
     sq_quant_shifts = [
         attn_o_shift
     ]
-  
+
     int8_attn_weights = [
         [attn_qkv_w, attn_qkv_s],
         [attn_o_w, attn_o_s],
@@ -594,7 +621,25 @@ class W:
         attn_o_w,
     ]
 
-
+    @staticmethod
+    def gemm_int8_gpt_style_tp_strategy():
+        gemm_a8_weight_tp_strategy: Dict[str, Any] = {
+            W.attn_qkv_w: sp_head_gemm_a8,
+            W.attn_qkv_s: sp_head_s_gemm_a8,
+            W.attn_o_w: sp_neg1,
+            W.attn_o_s: sp_id,
+            W.attn_o_smoother: sp_0,
+            W.attn_o_shift: sp_0,
+            W.ffn_w1: sp_0,
+            W.ffn_s1: sp_0,
+            W.ffn_w3: sp_0,
+            W.ffn_s3: sp_0,
+            W.ffn_w2: sp_neg1,
+            W.ffn_s2: sp_id,
+        }
+        tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
+        tp_strategy.update(gemm_a8_weight_tp_strategy)
+        return tp_strategy
 
 class CkptWeightInfo:
     name: str
@@ -777,7 +822,7 @@ class ModelDeployWeightInfo:
 
         return ModelWeightInfo(layer_weights=layer_weights,
                                weights=weights,
-                               tp_strategy=W.gpt_style_tp_strategy)
+                               tp_strategy=self._get_gpt_style_tp_strategy())
 
     def get_weight_info(self) -> ModelWeightInfo:
         weight_info = self._get_weight_info()
@@ -902,6 +947,13 @@ class ModelDeployWeightInfo:
 
     def _fix_megatron_layer_id_by_offset(self, meta, offset):
         raise NotImplementedError()
+    def _get_gpt_style_tp_strategy(self):
+        if self._quant_algo.isSmoothQuant() or self._quant_algo.isOmniQuant():
+            return W.gemm_int8_gpt_style_tp_strategy()
+        else:
+            return W.gpt_style_tp_strategy
+
+
 
 class LoRAWeightInfo(NamedTuple):
     layer_weights: List[WeightInfo]

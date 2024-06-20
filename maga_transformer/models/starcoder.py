@@ -33,8 +33,7 @@ class StarcoderWeightInfo(ModelDeployWeightInfo):
                 w = self._get_hf_layer_weight_info(layer)
             layer_weights.append(w)
 
-
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
 
     def _get_hf_layer_weight_info(self, layer_id: int) -> List[WeightInfo]:
         layer_weights = [

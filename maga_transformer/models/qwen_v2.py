@@ -66,7 +66,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
         layer_weights: List[List[WeightInfo]] = []
         for layer in range(self._num_layers):
             if self._quant_algo.isGroupwise():
-                inter_padding_size = self._layer_inter_padding_size[layer] if self._layer_inter_padding_size else self._inter_padding_size                
+                inter_padding_size = self._layer_inter_padding_size[layer] if self._layer_inter_padding_size else self._inter_padding_size
                 w = self._get_hf_layer_weight_info(layer)
                 w = get_layer_group_quant_weight_info(w, self._quant_algo, inter_padding_size)
                 layer_weights.append(w)
@@ -74,7 +74,7 @@ class QWenV2Weight(ModelDeployWeightInfo):
                 w = self._get_hf_layer_weight_info(layer)
                 layer_weights.append(w)
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
 
 class QWenV2(QWen):
     @classmethod

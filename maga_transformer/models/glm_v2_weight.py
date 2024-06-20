@@ -59,7 +59,7 @@ class GlmV2WeightInfo(ModelDeployWeightInfo):
                 layer_weights[idx] = WeightInfo(layer_weight.name, new_weight,
                                                 functools.partial(extract_weight_to_half, source_bit_width = self._src_quantization_bit, sufix_func = layer_weight.process_fun))
 
-        model_weight_info = ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+        model_weight_info = ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
         model_weight_info.set_lora(qkv_fun=None, half1=functools.partial(w_half1, inter_size=self._inter_size),
                                        half2=functools.partial(w_half2, inter_size=self._inter_size))
 

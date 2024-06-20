@@ -125,7 +125,7 @@ class QWenWeight(ModelDeployWeightInfo):
             w = self._get_megatron_layer_weight_info(layer)
             layer_weights.append(w)
 
-        model_weight_info = ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+        model_weight_info = ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
         model_weight_info.set_lora(qkv_fun=functools.partial(trans_lora_qkv, head_num=self._head_num, head_size=self._size_per_head))
         return model_weight_info
 
@@ -219,7 +219,7 @@ class QWenWeight(ModelDeployWeightInfo):
                 w = self._get_hf_layer_weight_info(layer)
                 layer_weights.append(w)
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
 
 class QWenBase(GPT):
     @staticmethod

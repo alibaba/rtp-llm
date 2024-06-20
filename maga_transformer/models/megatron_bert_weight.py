@@ -66,13 +66,13 @@ class MegatronBertWeightInfo(ModelDeployWeightInfo):
             WeightInfo(W.embedding, [CkptWeightInfo(self._names.TOKEN_EMBEDDING)]),
             WeightInfo(W.positional_embedding, [CkptWeightInfo(self._names.POSITION_EMBEDDING)]),
             WeightInfo(W.token_type_embedding, [CkptWeightInfo(self._names.TOKEN_TYPE_EMBEDDING)]),
-        ]        
+        ]
         layer_weights = [
             WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('bert.encoder.layer.{i}.attention.ln.weight', identity)],
                        identity),
             WeightInfo(W.pre_ln_beta, [CkptWeightInfo('bert.encoder.layer.{i}.attention.ln.bias', identity)],
                        identity),
-            
+
             WeightInfo(W.attn_qkv_w, [
                 CkptWeightInfo(self._names.Q_W),
                 CkptWeightInfo(self._names.K_W),
@@ -97,5 +97,4 @@ class MegatronBertWeightInfo(ModelDeployWeightInfo):
         ]
         return ModelWeightInfo(layer_weights=layer_weights,
                                weights=weights,
-                               tp_strategy=W.gpt_style_tp_strategy)
-     
+                               tp_strategy=self._get_gpt_style_tp_strategy())

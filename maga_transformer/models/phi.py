@@ -27,7 +27,7 @@ class PhiWeightInfo(ModelDeployWeightInfo):
             WeightInfo(W.ffn_b2, [CkptWeightInfo('layers.{i_1}.mlp.fc2.bias', identity)], identity),
         ]
         # close to falcon
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=W.gpt_style_tp_strategy)
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights, tp_strategy=self._get_gpt_style_tp_strategy())
 
 class Phi(GPT):
     @staticmethod

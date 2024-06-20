@@ -277,7 +277,7 @@ class ModelWeightsLoader:
                     results.append((layer_id, qweight[0].name, qweight_tensor))
 
                 except Exception as e:
-                    logging.error(f'load smooth_quant layer_weight in layer {layer_id} failed: {e}')
+                    logging.error(f'load smooth_quant layer_weight in layer {layer_id} {qweight[0].name} failed: {e}')
                     raise e
 
         load_weight(W.sq_quant_weights, torch.int8)
