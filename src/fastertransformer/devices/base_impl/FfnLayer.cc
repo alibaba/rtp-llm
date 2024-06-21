@@ -1,6 +1,6 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/OpData.h"
-
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 using namespace std;
 
 namespace fastertransformer {
@@ -46,7 +46,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                  std::nullopt,
                                  *(params.weights.up_weight),
                                  std::nullopt});
-
+    printBufferData(*up_output.output, "ffn_up");
     if (FFNDispatch::dispatch(params) == FFNDispatch::FFNType::Gate) {
         {
             auto gate_output = loraLinear({params.input,
@@ -73,11 +73,12 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                     mayGetRef(params.weights.up_weight->bias),
                     std::nullopt,
                     std::nullopt});
-
+        printBufferData(*up_output.output, "ffn_act");
         auto output = loraLinear({*(up_output.output),
                                   std::nullopt,
                                   *(params.weights.down_weight),
                                   std::nullopt});
+        printBufferData(*output.output, "ffn_out");
         return FfnLayerOutput({move(output.output)});
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);

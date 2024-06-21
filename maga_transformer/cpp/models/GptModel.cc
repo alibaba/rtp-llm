@@ -111,6 +111,37 @@ void GptModel::prepareAttentionInputs(
     attention_inputs.attention_mask = inputs.attention_mask;
 }
 
+
+/*
+ *          ┌───────────┐            
+ *          │  hidden   │            
+ *          └─────┬─────┘            
+ *                │                  
+ *                │                  
+ *        ┌───────▼───────┐          
+ *        │ pre_layernorm?├─────────┐
+ *        └───────┬───────┘         │
+ *                │                 │
+ *          ┌─────▼─────┐           │
+ *          │ attention │           │
+ *          └─────┬─────┘           │
+ *                │                 │
+ *        ┌───────▼───────┐         │
+ * ┌──────┤post_attn_norm?◄─────────┘
+ * │      └───────┬───────┘          
+ * │              │                  
+ * │         ┌────▼────┐             
+ * │         │   mlp   │             
+ * │         └────┬────┘             
+ * │              │                  
+ * │         ┌────▼────┐             
+ * └─────────►   add   │             
+ *           └────┬────┘             
+ *                │                  
+ *          ┌─────▼─────┐            
+ *          │ layernorm │            
+ *          └───────────┘            
+ */
 GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto norm_type = description_.norm_type;
     const auto norm_eps = description_.layernorm_eps;
@@ -163,6 +194,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         auto attn_out_buf = device_->allocateBuffer({hidden->type(), hidden->shape()}, {"attn_out_buf"});
         auto residual = hidden;
+        BufferPtr residual2 = nullptr;
         if (layer.pre_layernorm) {
             residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
             device_->layernorm(LayernormParams(
@@ -205,7 +237,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                 residual = attn_hidden;
             }
         } else {
-            hidden = move(attn_hidden);
+            residual2 = attn_hidden;
         }
 
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_input");
@@ -226,7 +258,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             *hidden, *hidden, nullopt,
             norm_type, ft::mayGetRef(layer.post_ffn_layernorm), norm_eps,
             device_props_.ffn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual,
-            nullopt, ft::mayGetRef(layer.ffn_weights.down_weight->bias)));
+            (residual2 == nullptr) ? nullopt : (OptionalConstBufferRef)*residual2,
+            ft::mayGetRef(layer.ffn_weights.down_weight->bias)));
 
         printBufferData(*hidden, "layer_" + to_string(i) + "_final_hidden");
     }

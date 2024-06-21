@@ -36,7 +36,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 n,
                 stream_
             );
-        } else if (params.bias.has_value() || params.residual1.has_value()) {
+        } else if (params.bias.has_value() || params.residual1.has_value() || params.residual2.has_value()) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAddBiasResidual,
                 output.data(),
                 input.data(),
