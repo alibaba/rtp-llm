@@ -161,9 +161,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     auto hidden = device_->embeddingLookup({
             *combo_tokens, *embedding_table, description_.input_embedding_scalar,
             combo_position_ids ? (OptionalConstBufferRef)*combo_position_ids: nullopt,
-            combo_position_ids ? (OptionalConstBufferRef)*weights_.position_encoding->kernel: nullopt,
+            weights_.position_encoding ? (OptionalConstBufferRef)*weights_.position_encoding->kernel: nullopt,
             combo_tokens_type_ids ? (OptionalConstBufferRef)*combo_tokens_type_ids: nullopt,
-            combo_tokens_type_ids ? (OptionalConstBufferRef)*weights_.token_type_embedding->kernel: nullopt});
+            weights_.token_type_embedding ? (OptionalConstBufferRef)*weights_.token_type_embedding->kernel: nullopt});
     if (device_props_.tp_size > 1) {
         hidden = tpSyncEmbeddingOrLogits(hidden);
     }
