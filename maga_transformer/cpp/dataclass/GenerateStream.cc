@@ -445,10 +445,10 @@ void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_rep
 void GenerateStream::reportMetric() {
     if (metrics_reporter_) {
         RtpLLMStreamMetricsCollector collector;
-        collector.qps = finished();
+        collector.qps = finished() || cancelled_;
         collector.cancel_qps = cancelled_;
         collector.error_qps = stopped() && !cancelled_;
-        if (finished()) {
+        if (finished() || cancelled_) {
             collector.reuse_length = reuse_length_;
             collector.input_token_length = inputLength();
             collector.output_token_length = seq_length_ - generate_input_->inputLength();
