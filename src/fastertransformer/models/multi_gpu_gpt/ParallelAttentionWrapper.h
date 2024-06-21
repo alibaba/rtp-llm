@@ -147,14 +147,13 @@ public:
     void QKVGemm(const int                 h_token_num,
                  const int                 layer_id,
                  const T*                  attention_input,
-                 const AttentionWeight<T>* attention_weights,
+                 const DenseWeight<T, T>*  query_weights,
                  T*                        output_buf,
                  int*                      lora_ids,
                  int                       batch_size,
                  const int*                input_lengths,
                  bool                      use_kvcache,
-                 const float*              dynamic_scale = nullptr,
-                 bool                      vision_qkv_weight = false);
+                 const float*              dynamic_scale = nullptr);
 
     void expertQKVGemm(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util,
                        const int                                h_token_num,
@@ -177,11 +176,10 @@ public:
                    const int                 layer_id,
                    const T*                  input,
                    T*                        output,
-                   const AttentionWeight<T>* attention_weights,
+                   const DenseWeight<T, T>*  attention_output_weights,
                    int*                      lora_ids,
                    int                       batch_size,
-                   const int*                input_lengths,
-                   bool                      vision_dense_weight = false);
+                   const int*                input_lengths);
 
     void expertDenseGemm(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util,
                          const int                                h_token_num,

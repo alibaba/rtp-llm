@@ -78,6 +78,8 @@ void GemmRunner<T>::GemmWithBias(int m, int n, int k, const void* inputs, const 
     // weight: [k, n]
     // bias: [n]
     // output: [m, n]
+
+    // Note: The GemmWithBias operation only support fp32, fp16, doesn't support other types 
     cublas_wrapper_->Gemm(CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, weights->kernel, n, reinterpret_cast<const T*>(inputs), k, weights->bias, outputs, n);
 }
 
