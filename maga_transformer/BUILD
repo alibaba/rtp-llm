@@ -31,7 +31,7 @@ requirement([
     "orjson",
     "xfastertransformer_devel_icx",
     "xformers",
-    "decord"
+    "decord",
 ])
 
 filegroup(
@@ -308,7 +308,6 @@ py_wheel(
         "grpcio==1.62.0",
         "xfastertransformer_devel_icx==1.7.2",
         "decord==0.6.0",
-        "accelerate==0.25.0",
         "xformers"
     ] + whl_deps(),
 )

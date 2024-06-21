@@ -37,9 +37,10 @@ FtDynamicDecode<T>::FtDynamicDecode(const size_t vocab_size,
                                     const int master_port):
     vocab_size_(vocab_size), vocab_size_padded_(vocab_size_padded)
 {
-    FT_CHECK_WITH_INFO(
-        vocab_size_padded_ % tensor_para_size == 0,
-        ft::fmtstr("vocab_size (%ld) is not multiple of tensor_para_size (%d).", vocab_size_padded_, tensor_para_size));
+    // no need to check since tp not used in dynamic decoder
+    // FT_CHECK_WITH_INFO(
+    //     vocab_size_padded_ % tensor_para_size == 0,
+    //     ft::fmtstr("vocab_size (%ld) is not multiple of tensor_para_size (%d).", vocab_size_padded_, tensor_para_size));
 
     static std::once_flag flag;
     auto nccl_initialize = [&](){
