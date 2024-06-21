@@ -14,7 +14,7 @@
 * 更多的多模态模型。
 
 ## 量化
-* SmoothQuant支持（W8A8, W4A8）
+* 量化kernel性能调优
 
 ## 性能优化
 * 在 Continuous Batching 上的细致性能调优。
