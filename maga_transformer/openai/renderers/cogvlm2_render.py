@@ -15,13 +15,10 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ContentPart, ContentPartTypeEnum, FunctionCall
 from maga_transformer.openai.renderer_factory_register import register_renderer
 
-text_only_template = "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. USER: {} ASSISTANT:"
-
 class CogVLM2Renderer(CustomChatRenderer):
     def __init__(self, tokenizer: PreTrainedTokenizerBase, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
-        self.first_query: bool = True
-        self.template_type = renderer_params.temtemplate_type
+        self.template_type = renderer_params.template_type
 
     def query_answer_template(self, template_type: TemplateType) -> str:
         if template_type == TemplateType.base:
@@ -35,23 +32,10 @@ class CogVLM2Renderer(CustomChatRenderer):
 
     def _render_messages(self, messages: List[ChatMessage]) -> PromptWithImages:
         prompt = ""
-        text_only = True
         images = []
-        template_type = self.temtemplate_type
+        template_type = self.template_type
 
-        for message in messages:
-            if isinstance(message.content, list):
-                for content_part in message.content:
-                    if content_part.type == ContentPartTypeEnum.image_url:
-                        text_only = False
-
-        query_format = ""
-        answer_format = ""
-        if text_only and not self.first_query:
-            query_format = "{} "
-            answer_format = "{} \n"
-        if not text_only:
-            query_format, answer_format = self.query_answer_template(template_type)
+        query_format, answer_format = self.query_answer_template(template_type)
         
         last_message = ""
         last_format_message = ""
@@ -84,19 +68,11 @@ class CogVLM2Renderer(CustomChatRenderer):
                         images.append(content_part.image_url.url)
 
         # handle latest query
-        if text_only:
-            if self.first_query:
-                prompt += text_only_template.format(last_message)
-            else:
-                prompt += "USER: {} ASSISTANT:".format(last_message)
+        if template_type == 'base':
+            prompt += last_message
         else:
-            if template_type == 'base':
-                prompt += last_message
-            else:
-                # remove tail answer_format for template_type 'vqa' and 'chat'
-                prompt += 'Question: {}{}'.format(last_message, answer_format[:-4])
-
-        self.first_query = False
+            # remove tail answer_format for template_type 'vqa' and 'chat'
+            prompt += 'Question: {}{}'.format(last_message, answer_format[:-4])
 
         return PromptWithImages(prompt=prompt, image_urls=images)
 
