@@ -1,5 +1,10 @@
 [English](README.md) [中文](README_cn.md)
 
+### *News*
+
+- [2024 / 06] We are releasing a brand new version of rtp-llm, which features scheduling and batching framework refactored in c++, complete gpu memory management and allocation track and new Device backend. Check release info for more details !
+- [2024 / 06] We are currently working on support for multiple hardware backends in extensive collaborations with hardware manufacturers. AMD ROCm, Intel CPU and ARM CPU support are on their way, stay tuned for upcoming releases!
+
 ## About
 * rtp-llm is a Large Language Model (LLM) inference acceleration engine developed by Alibaba's Foundation Model Inference Team. It is widely used within Alibaba Group, supporting LLM service across multiple business units including Taobao, Tmall, Idlefish, Cainiao, Amap, Ele.me, AE, and Lazada.
 * The rtp-llm project is a sub-project of the [havenask](https://github.com/alibaba/havenask)
@@ -75,7 +80,7 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
 
 ### FAQ
 1. libcufft.so
-    
+
     **Error log**: `OSError: libcufft.so.11: cannot open shared object file: No such file or directory`
 
     **Resolution**: Please check whether cuda and rtp-llm versions are matched
@@ -129,14 +134,14 @@ Our project is mainly based on [FasterTransformer](https://github.com/NVIDIA/Fas
 * Aquila and Aquila2 (BAAI/AquilaChat2-7B, BAAI/AquilaChat2-34B, BAAI/Aquila-7B, BAAI/AquilaChat-7B, etc.)
 * Baichuan and Baichuan2 (baichuan-inc/Baichuan2-13B-Chat, baichuan-inc/Baichuan-7B)
 * Bloom (bigscience/bloom, bigscience/bloomz)
-* ChatGlm (THUDM/chatglm2-6b, THUDM/chatglm3-6b)
+* ChatGlm (THUDM/chatglm2-6b, THUDM/chatglm3-6b, GLM4, etc)
 * Falcon (tiiuae/falcon-7b, tiiuae/falcon-40b, tiiuae/falcon-rw-7b, etc.)
 * GptNeox (EleutherAI/gpt-neox-20b)
 * GPT BigCode (bigcode/starcoder, bigcode/starcoder2)
 * LLaMA and LLaMA-2 (meta-llama/Llama-2-7b, meta-llama/Llama-2-13b-hf, meta-llama/Llama-2-70b-hf, lmsys/vicuna-33b-v1.3, 01-ai/Yi-34B, xverse/XVERSE-13B, etc.)
 * MPT (mosaicml/mpt-30b-chat, etc.)
 * Phi (microsoft/phi-1_5, etc.)
-* Qwen (Qwen/Qwen-7B, Qwen/Qwen-7B-Chat, Qwen/Qwen-14B, Qwen/Qwen-14B-Chat, Qwen1.5, etc.)
+* Qwen (Qwen, Qwen1.5, Qwen2, etc.)
 * InternLM (internlm/internlm-7b, internlm/internlm-chat-7b, etc.)
 * Gemma (google/gemma-it, etc)
 * Mixtral (mistralai/Mixtral-8x7B-v0.1, etc)
