@@ -22,6 +22,9 @@ VISION_TOKEN_TYPE = 1
 
 class CogVLM2(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
+        quant_algo = config.quant_algo
+        if quant_algo.isGptq() or quant_algo.isAwq() or quant_algo.isSmoothQuant() or quant_algo.isOmniQuant():
+            raise Exception("CogVLM2 only support FP32, BF16, FP16, INT8, not support other quant algorithm")
         self.visual = EVA2CLIPImageEmbedding(config)
         self.nccl_op_ = NcclOp()
         config.vit_related_params.vit_weights = CogVLM2VitWeights(
@@ -32,21 +35,6 @@ class CogVLM2(Llama, MultiModalMixin):
     @classmethod
     def is_multimodal(cls) -> bool:
         return True
-
-    @staticmethod
-    def multimodal_modify_prompt_plugin(
-        prompt: Union[List[Dict[str, Any]], str],
-        images: List[str],
-        img_token: str,
-        **kwargs: Any,
-    ) -> Tuple[str, List[Any]]:
-        prompt, images = MultiModalMixin.multimodal_modify_prompt_plugin(
-            prompt, images, img_token, **kwargs
-        )
-        if img_token in prompt:
-            return prompt, images
-        else:
-            return prompt + (img_token + "\n") * len(images), images
 
     @staticmethod
     def _create_config(ckpt_path):
@@ -182,7 +170,6 @@ class CogVLM2(Llama, MultiModalMixin):
             self, inputs, images, token_type_ids
         )
 
-    @torch.no_grad()
     def expand_token_id(
         self, token_ids: List[int], images: List[torch.Tensor]
     ) -> Tuple[List[int], List[torch.Tensor], List[int]]:

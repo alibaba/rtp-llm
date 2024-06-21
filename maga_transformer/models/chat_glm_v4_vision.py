@@ -100,7 +100,6 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
 
         return position_ids
 
-    @torch.no_grad()
     def expand_token_id(
         self, token_ids: List[int], images: List[torch.tensor]
     ) -> Tuple[List[int], List[torch.Tensor], List[int]]:
