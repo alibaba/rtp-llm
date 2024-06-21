@@ -4,7 +4,6 @@
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 
-#include <assert.h>
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -17,7 +16,7 @@ namespace rtp_llm {
 class GenerateInput {
 public:
     int inputLength() {
-        assert(input_ids->shape().size() == 1);
+        FT_CHECK(input_ids->shape().size() == 1);
         return input_ids->shape()[0];
     }
 

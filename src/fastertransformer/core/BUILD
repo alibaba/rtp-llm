@@ -69,6 +69,7 @@ cc_library(
     copts = copts(),
     deps = [
         ":allocator",
+        "//src/fastertransformer/utils:assert_utils",
     ],
     include_prefix = "src",
     visibility = ["//visibility:public"],

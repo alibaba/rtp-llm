@@ -19,10 +19,10 @@ SpeculativeSamplerOutput SpeculativeSampler::forward(const SpeculativeSamplerInp
     size_t                   vocab_size  = inputs.target_prob->shape()[2];
     size_t                   gen_num_per_circle     = inputs.gen_num_per_circle;
     SpeculativeSamplerOutput output;
-    assert(token_ids->dim() == 2);
-    assert(draft_prob->dim() == 2);
-    assert(target_prob->dim() == 2);
-    assert(token_ids->shape()[0] == 1);  // tmp not support batch
+    FT_CHECK(token_ids->dim() == 2);
+    FT_CHECK(draft_prob->dim() == 2);
+    FT_CHECK(target_prob->dim() == 2);
+    FT_CHECK(token_ids->shape()[0] == 1);  // tmp not support batch
     auto sample_tokens_host =
         device_->allocateBuffer({token_ids->type(), token_ids->shape(), ft::AllocationType::HOST});
     auto draft_prob_host = device_->allocateBuffer({draft_prob->type(), draft_prob->shape(), ft::AllocationType::HOST});

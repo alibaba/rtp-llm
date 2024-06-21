@@ -9,7 +9,9 @@ std::unordered_map<std::string, py::handle> convertPyObjectToDict(py::handle obj
     py::dict py_dict = py::reinterpret_borrow<py::dict>(obj);
     std::unordered_map<std::string, py::handle> map;
     for (auto kv : py_dict) {   
-        assert(py::isinstance<py::str>(kv.first));
+        if (!py::isinstance<py::str>(kv.first)) {
+            throw std::runtime_error("Expected a str, but get " + py::cast<std::string>(obj.str()));
+        }
         map[py::cast<std::string>(kv.first)] = kv.second;
     }
     return map;

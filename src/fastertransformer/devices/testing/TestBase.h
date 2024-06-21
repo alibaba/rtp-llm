@@ -54,7 +54,7 @@ public:
         }
 
         std::string test_binary_str = std::string(test_binary);
-        assert(*test_binary_str.rbegin() != '/');
+        FT_CHECK(*test_binary_str.rbegin() != '/');
         size_t filePos = test_binary_str.rfind('/');
         test_data_path_ = std::string(test_src_dir) + "/" + std::string(test_work_space) + "/"
                         + test_binary_str.substr(0, filePos) + "/";
@@ -92,7 +92,7 @@ protected:
                            AllocationType alloc_type = AllocationType::DEVICE)
     {
         const auto num_elements = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
-        assert(num_elements == data.size());
+        FT_CHECK(num_elements == data.size());
         if (alloc_type == AllocationType::DEVICE) {
             return createDeviceBuffer<T>(shape, data.data());
         } else {
@@ -173,7 +173,7 @@ protected:
                                   tensor.q_per_channel_scales().to(torch::kHalf),
                                   tensor.q_per_channel_zero_points().to(torch::kHalf));
         }
-        assert(tensor.is_cpu());
+        FT_CHECK(tensor.is_cpu());
         auto buffer = torchTensor2Buffer(tensor);
         if (alloc_type == AllocationType::DEVICE) {
             auto device_buffer = device_->allocateBuffer(

@@ -495,7 +495,7 @@ void beam_online_softmax_topk_stage2_kernelLauncher(const float* temp_storage,
                 temp_storage, cum_log_probs, ids, vals, beam_width, parts_per_beam);
         return;
     }
-    assert(0);
+    unreachable();
 }
 
 template<typename T, int MAX_K>
@@ -521,10 +521,10 @@ void topK_softMax_kernelLauncher(const T*        log_probs,
     const int block_sz         = (MAX_K < 16) ? (MAX_K < 8) ? SMALL_TOP_K_SOFTMAX_THREADBLOCK_SIZE : 128 : 64;
     // const int block_sz = SMALL_TOP_K_SOFTMAX_THREADBLOCK_SIZE;
 
-    assert(temp_storage_size % 2 == 0);
-    assert(temp_storage_size >= 2 * batch_size * beam_width * beam_width * 2);
+    FT_CHECK(temp_storage_size % 2 == 0);
+    FT_CHECK(temp_storage_size >= 2 * batch_size * beam_width * beam_width * 2);
     // Beam search needs the sequence lengths of beams to apply length penalty.
-    assert(length_penalty == 0.0f || sequence_lengths != nullptr);
+    FT_CHECK(length_penalty == 0.0f || sequence_lengths != nullptr);
 
     const int topk_buf_offset  = ceil(batch_size * beam_width * beam_width * 2 / 4.) * 4;
     int*      topk_tmp_id_buf  = reinterpret_cast<int*>(temp_storage);

@@ -61,7 +61,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
 }
 
 void QueryConverter::transTensor(TensorPB* t, const ft::Buffer* buffer) {
-    assert(t);
+    FT_CHECK(t != nullptr);
     auto shape       = t->mutable_shape();
     auto shape_array = buffer->shape();
     shape->Resize(shape_array.size(), 0);

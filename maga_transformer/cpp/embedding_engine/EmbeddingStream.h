@@ -1,5 +1,4 @@
 #pragma once
-#include <assert.h>
 #include <cstdint>
 #include <mutex>
 #include <string>

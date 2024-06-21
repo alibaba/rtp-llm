@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <assert.h>
 #include <vector>
 
 #include "src/fastertransformer/layers/BaseLayer.h"

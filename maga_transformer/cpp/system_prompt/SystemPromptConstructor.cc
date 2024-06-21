@@ -1,5 +1,4 @@
 #pragma once
-#include <assert.h>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -38,13 +37,13 @@ std::unordered_map<std::string, SystemPromptParams> SystemPromptConstructor::con
         GenerateStreamPtr stream = engine->enqueue(generate_input);
 
         auto output1 = stream->nextOutput();
-        assert(output1.ok());
-        assert(output1.value().generate_outputs[0].aux_info.output_len == 1);
-        assert(stream->finished());
+        FT_CHECK(output1.ok());
+        FT_CHECK(output1.value().generate_outputs[0].aux_info.output_len == 1);
+        FT_CHECK(stream->finished());
 
         const auto& kv_cache = stream->kvCache();
-        assert(kv_cache.k_ptr.size() == 1);
-        assert(kv_cache.k_ptr[0].size() > 0);
+        FT_CHECK(kv_cache.k_ptr.size() == 1);
+        FT_CHECK(kv_cache.k_ptr[0].size() > 0);
         auto block_indices = cache_manager->convertAddrToIndex(kv_cache.k_ptr[0][0]);
         cache_manager->insertResidentCache(block_indices, tokens_id);
         multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, block_indices);

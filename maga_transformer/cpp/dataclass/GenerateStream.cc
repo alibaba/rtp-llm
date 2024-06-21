@@ -170,7 +170,7 @@ const ft::BufferPtr& GenerateStream::completeTokenIds() {
     return complete_token_ids_;
 }
 std::vector<int> GenerateStream::completeTokenIdsVec(int batch_id) {
-    assert(batch_id < tileNum());
+    FT_CHECK(batch_id < tileNum());
     return fastertransformer::buffer2vector<int>(complete_token_ids_->view(batch_id, 1), seq_length_);
 }
 int GenerateStream::currentExecuteTokenSize() {
@@ -351,7 +351,7 @@ void GenerateStream::update(ft::BufferPtr&     new_tokens,
     // # typically 1 but can be > 1 under speculative decoding
     // # This differs from new_tokens.shape[-1] under beam search case,
     // # which needs to update all the generated tokens each update.
-    assert(new_tokens->dim() == 2);
+    FT_CHECK(new_tokens->dim() == 2);
     auto update_length   = new_tokens->shape()[1];
     auto update_to_pos   = seq_length_ + num_new_tokens;
     auto update_from_pos = update_to_pos - update_length;

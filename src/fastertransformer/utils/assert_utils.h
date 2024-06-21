@@ -46,5 +46,8 @@ inline void myAssert(bool result, const char* const file, int const line, std::s
 
 #define FT_THROW(info) throwRuntimeError(__FILE__, __LINE__, info)
 
+inline void unreachable() {
+    throw std::runtime_error("enter the unreachable code.");
+}
 
 }  // namespace fastertransformer

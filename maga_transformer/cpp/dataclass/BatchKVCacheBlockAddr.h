@@ -1,6 +1,7 @@
 #pragma once
 
 #include "maga_transformer/cpp/cache/KVCacheBlockAddr.h"
+#include "src/fastertransformer/utils/assert_utils.h"
 #include <memory>
 
 namespace rtp_llm {

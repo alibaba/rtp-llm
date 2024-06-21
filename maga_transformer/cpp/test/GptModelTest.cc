@@ -17,9 +17,9 @@ class GptModelTest: public DeviceTestBase {
 TEST_F(GptModelTest, testSimple) {
     const auto path = test_data_path_ + "../../test/model_test/fake_test/testdata/qwen_0.5b";
     auto weights = loadWeightsFromDir(path);
-    assert(weights->lm_head->kernel);
-    assert(weights->embedding);
-    assert(weights->layers.size() == 24);
+    FT_CHECK(weights->lm_head->kernel != nullptr);
+    FT_CHECK(weights->embedding != nullptr);
+    FT_CHECK(weights->layers.size() == 24);
 
     GptModelDescription description;
     description.activation_type = ActivationType::Swiglu;

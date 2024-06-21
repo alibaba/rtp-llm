@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <assert.h>
 
 #include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/cuda/cublas/cublas.h"

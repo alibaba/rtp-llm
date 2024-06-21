@@ -151,7 +151,7 @@ ft::BufferPtr NormalBatchStreamProcessor::createAttentionMask(const MaskParams& 
         }
     }
     if (params.prefix_lengths.size()) {
-        assert(params.prefix_lengths.size() == batch_size);
+        FT_CHECK(params.prefix_lengths.size() == batch_size);
         const int *prefix_lengths = params.prefix_lengths.data<int32_t>();
         auto max_reuse_length = *std::max_element(prefix_lengths, prefix_lengths + batch_size);
         attention_mask = torch::cat({attention_mask, torch::zeros({(int)batch_size, max_input_seq_len, max_reuse_length}).to(torch_type)}, -1);
@@ -170,7 +170,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
                                                const GptModelInputs&  model_inputs,
                                                const GptModelOutputs& model_output) const {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    assert(!stream_groups.empty());
+    FT_CHECK(!stream_groups.empty());
     const auto& context_streams = stream_groups.contextStreams();
     const auto& decode_streams = stream_groups.decodeStreams();
     size_t total_decode_batch_size = stream_groups.totalDecodeBatchSize();

@@ -5,7 +5,6 @@
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 
-#include <assert.h>
 #include <cstdint>
 #include <optional>
 #include <sstream>

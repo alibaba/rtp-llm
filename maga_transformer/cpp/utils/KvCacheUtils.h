@@ -15,7 +15,7 @@ void memcpyKvCache(uint64_t*                    kv_cache_blocks,
                    int                          total_batch_size,
                    int                          batch_idx)
 {
-    assert(k_ptr.size() == v_ptr.size() && layer_nums == k_ptr.size());
+    FT_CHECK(k_ptr.size() == v_ptr.size() && layer_nums == k_ptr.size());
     const size_t layer_stride = total_batch_size * 2 * max_block_size;
     const size_t batch_begin  = batch_idx * 2 * max_block_size;
     for (size_t layer_id = 0; layer_id < layer_nums; ++layer_id) {

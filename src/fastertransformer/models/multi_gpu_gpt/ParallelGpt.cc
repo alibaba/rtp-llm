@@ -383,9 +383,9 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     if (params_.use_kvcache_) {
         if (output_tensors->isExist("block_pointers")) {
             Tensor block_pointers = output_tensors->at("block_pointers");
-            assert(block_pointers.shape()[0] == params_.num_layers_);
-            assert(block_pointers.shape()[1] == total_batch_size);
-            assert(block_pointers.shape()[2] == 2);
+            FT_CHECK(block_pointers.shape()[0] == params_.num_layers_);
+            FT_CHECK(block_pointers.shape()[1] == total_batch_size);
+            FT_CHECK(block_pointers.shape()[2] == 2);
             max_blocks_per_batch = block_pointers.shape()[3];
             block_stride = total_batch_size * 2 * max_blocks_per_batch;
             size_t data_nums = params_.num_layers_ * total_batch_size * max_blocks_per_batch * 2;
@@ -724,7 +724,7 @@ void ParallelGpt<T>::Ffnforward(std::unique_ptr<ExpertAttentionUtil<T>>& expert_
     bool use_moe_instead_ffn = params_.moe_style_ == 1;
     // for cogvlm2, we perform expertFfn when there exists vision tokens in the input(in context stage), otherwise we perform expertFfn directly
     if (expert_attention_util && expert_attention_util->vision_token_length() > 0) {
-        assert(params_.moe_style_ == 0 && !use_moe && !use_moe_instead_ffn);
+        FT_CHECK(params_.moe_style_ == 0 && !use_moe && !use_moe_instead_ffn);
         if (vision) {
             ffn_input_ptr = expert_attention_util->vision_split_buf();
             ffn_output_ptr = expert_attention_util->vision_intermediate_buf();

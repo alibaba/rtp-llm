@@ -97,7 +97,8 @@ DeviceBase* DeviceFactory::getDefaultDevice() {
 
 void DeviceFactory::registerDevice(DeviceType type, DeviceCreatorType creator) {
     auto& registrationMap = getRegistrationMap();
-    assert(registrationMap.find(type) == registrationMap.end());
+    FT_CHECK_WITH_INFO((registrationMap.find(type) == registrationMap.end()),
+        "Can not find device: %d", type);
     registrationMap[type] = creator;
 }
 

@@ -1,6 +1,6 @@
 #pragma once
 #include "src/fastertransformer/core/allocator.h"
-#include <cassert>
+#include "src/fastertransformer/utils/assert_utils.h"
 
 namespace fastertransformer {
 

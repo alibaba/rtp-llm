@@ -179,12 +179,12 @@ public:
     void reorganize(T* output);
 
     void reorganize() {
-        assert(output_buf_);
+        FT_CHECK(output_buf_ != nullptr);
         reorganize(output_buf_);
     }
 
     void split() {
-        assert(input_buf_);
+        FT_CHECK(input_buf_ != nullptr);
         split(input_buf_);
     }
 

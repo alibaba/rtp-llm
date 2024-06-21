@@ -33,7 +33,7 @@ void BatchKVCacheBlockAddr::resize(size_t batch_id, size_t layer_id, int reserve
 }
 
 void BatchKVCacheBlockAddr::append(size_t batch_id, const KVCacheBlockAddr& addr) {
-    assert(k_ptr.size() > batch_id);
+    FT_CHECK(k_ptr.size() > batch_id);
     auto append_func = [](auto& dst_vec, auto& src_vec) {
         dst_vec.insert(dst_vec.end(), src_vec.begin(), src_vec.end());
     };

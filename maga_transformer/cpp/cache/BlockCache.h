@@ -7,6 +7,8 @@
 
 #include "maga_transformer/cpp/utils/LRUCache.h"
 
+#include "src/fastertransformer/utils/assert_utils.h"
+
 namespace rtp_llm {
 
 struct CacheItem {

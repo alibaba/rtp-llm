@@ -205,7 +205,7 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
     const size_t h_token_num      = model_request.combo_tokens->shape()[0];
     GptModelOutputs model_output;
     allocateBuffer(total_batch_size, h_token_num, model_output);
-    assert(params_.head_num_ % tensor_para_.world_size_ == 0);
+    FT_CHECK(params_.head_num_ % tensor_para_.world_size_ == 0);
     const int    local_head_num      = params_.head_num_ / tensor_para_.world_size_;
     const size_t hidden_units        = params_.head_num_ * params_.size_per_head_;
     size_t       context_h_token_num = h_token_num - model_request.generate_batch_size;

@@ -58,7 +58,7 @@ void ParallelLogitsWrapper<T>::forward(ft::Tensor& logits, const ft::Tensor hidd
         nccl_logits = ft::Tensor(ft::MEMORY_GPU, ft::DataType::TYPE_FP32, logits.shape(), logits.getPtr<float>());
     }
 
-    assert(params_.vocab_size_ % tensor_para_.world_size_ == 0);
+    FT_CHECK(params_.vocab_size_ % tensor_para_.world_size_ == 0);
     const int local_vocab_size = params_.vocab_size_ / tensor_para_.world_size_;
     float     alpha            = 1.0f;
     float     beta             = 0.0f;

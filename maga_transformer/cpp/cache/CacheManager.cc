@@ -207,8 +207,13 @@ std::tuple<bool, std::vector<int>, int> CacheManager::mallocWithCacheImpl(int   
                     reuse_block_num, want_block_nums, reuse_block_num, cache_block_num);
         return {false, {}, 0};
     }
-    assert(reuse_block_num <= want_block_nums);
-    assert(reuse_block_num <= cache_block_num);
+    FT_CHECK_WITH_INFO(
+        (reuse_block_num <= want_block_nums),
+        "reuse block nums[%d] is less than need block nums[%d]", reuse_block_num, want_block_nums);
+    
+    FT_CHECK_WITH_INFO(
+        (reuse_block_num <= cache_block_num),
+        "reuse block nums[%d] is less than need block nums[%d]", reuse_block_num, cache_block_num);
 
     std::vector<int> reuse_blocks(cache_blocks.begin(), cache_blocks.begin() + reuse_block_num);
     block_ref_counter_.incrementRefCounter(reuse_blocks);
