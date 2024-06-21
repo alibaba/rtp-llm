@@ -31,7 +31,7 @@ class ModelOutput(BaseModel):
         arbitrary_types_allowed = True
 
 class BatchQuery:
-    def __init__(self, gen_num_per_circle: int, nccl_op: Any, use_expect_attention: bool = False) -> None:
+    def __init__(self, gen_num_per_circle: int, nccl_op: Any, use_expert_attention: bool = False) -> None:
         self.gen_num_per_circle = gen_num_per_circle
         self.nccl_op_ = nccl_op
         if g_parallel_info.tp_size > 1:
@@ -56,7 +56,7 @@ class BatchQuery:
         self._ptuning_info = PrefixInfo()
 
         self.model_output = ModelOutput()
-        self.use_expect_attention: bool = use_expect_attention  # true for cogvlm2, false for other model
+        self.use_expert_attention: bool = use_expert_attention  # true for cogvlm2, false for other model
         self.token_type_ids: torch.Tensor = torch.zeros((0, 0), dtype=torch.int32)
         self.vision_token_length: List[int] = []
 
@@ -274,7 +274,7 @@ class BatchQuery:
         )
 
         token_type_ids = np.zeros((0, 0), dtype=np.int32)
-        if self.use_expect_attention:
+        if self.use_expert_attention:
             token_type_ids = np.zeros((len(self.context_streams), output_token_ids.shape[1]), dtype=np.int32)
 
         for idx, stream in enumerate(self.decode_streams):
@@ -296,7 +296,7 @@ class BatchQuery:
             self.seq_lengths_list.extend([stream.seq_length])
             self.reuse_lengths_list.append(stream.reuse_length)
             self.context_lengths_list.append(stream.seq_length - stream.reuse_length * int(self._ptuning_info.count_prefix_length))
-            if self.use_expect_attention:
+            if self.use_expert_attention:
                 token_type_ids[idx, :stream.seq_length] = stream.input.token_type_ids
 
         lora_ids = []

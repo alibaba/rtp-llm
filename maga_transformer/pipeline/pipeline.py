@@ -24,7 +24,6 @@ from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_s
 from maga_transformer.utils.tokenizer_utils import DecodingState
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.utils.vit_process_engine import VitEngine
-from maga_transformer.models.cogvlm2 import CogVLM2
 
 class Pipeline(object):
     def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[PreTrainedTokenizerBase]):
@@ -241,16 +240,13 @@ class Pipeline(object):
     async def generate_stream(self, token_ids: List[int], images: List[Future[Image.Image]],
                             generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
-        is_cogvlm2 = isinstance(self, CogVLM2) or (hasattr(self, 'model') and isinstance(self.model, CogVLM2)) \
-            or (hasattr(self.model, 'model') and isinstance(self.model.model, CogVLM2))
-        # CogVLM2 will expand token_ids whether there exist an image or not
-        if (self.model.is_multimodal() and len(images) > 0) or is_cogvlm2:
+        if self.model.is_multimodal() and len(images) > 0:
             tasks = [asyncio.create_task(self.vit_engine.get(images))]
             await asyncio.wait(tasks)
             images = tasks[0].result()
-            tasks = [asyncio.create_task(self.model.expand_token_id(token_ids, images))]
-            await asyncio.wait(tasks)
-            token_ids, images, token_type_ids = tasks[0].result()
+
+        if self.model.is_multimodal():
+            token_ids, images, token_type_ids = self.model.expand_token_id(token_ids, images)
 
         token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
 

@@ -115,7 +115,6 @@ class MultiModalMixin:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "raw request format cannot accept dict prompt")
         return prompt, images
     
-    @torch.no_grad()
     def expand_token_id(self, token_ids: List[int], images: List[torch.Tensor]) -> Tuple[List[int], List[torch.Tensor], List[int]]:
         raise NotImplementedError()
 

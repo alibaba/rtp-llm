@@ -181,7 +181,6 @@ class QWen_VL(QWen, MultiModalMixin):
     def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
         return MultiModalMixin.async_input_word_embedding(self, inputs, images, token_type_ids)
 
-    @torch.no_grad()
     def expand_token_id(self, token_ids: List[int], images: List[torch.tensor]) -> Tuple[List[int], List[torch.Tensor], List[int]]:
         return token_ids, images, []
     

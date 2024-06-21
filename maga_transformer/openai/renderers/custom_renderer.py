@@ -8,7 +8,6 @@ from concurrent.futures import Future
 from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, GenerateOutputs, AuxInfo
-from maga_transformer.models.cogvlm2 import CogVLM2
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.gpt_init_model_parameters import TemplateType
 from maga_transformer.utils.vit_process_engine import VitEngine
@@ -114,12 +113,11 @@ class CustomChatRenderer():
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
-        is_cogvlm2 = isinstance(model, CogVLM2) or (hasattr(model, 'model') and isinstance(model.model, CogVLM2)) \
-            or (hasattr(model.model, 'model') and isinstance(model.model.model, CogVLM2))
-        # CogVLM2 will expand token_ids whether there exist an image or not
-        if (model.is_multimodal() and len(images) > 0) or is_cogvlm2:
+        if model.is_multimodal() and len(images) > 0:
             images = await VitEngine.get(images)
-            input_ids, images, token_type_ids = await model.expand_token_id(input_ids, images)
+
+        if model.is_multimodal():
+            input_ids, images, token_type_ids = model.expand_token_id(input_ids, images)
         
         input_token_length = len(input_ids)
 
