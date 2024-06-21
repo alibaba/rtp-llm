@@ -9,9 +9,9 @@ from torch import nn
 from torchvision import transforms
 from transformers.activations import ACT2FN
 
-from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
+from maga_transformer.models.multimodal_mixin import ImageEmbeddingInterface
 
-class EVA2CLIPImageEmbedding(BaseImageEmbedding):
+class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config):
         # To reduce CPU memory, use fp16 for loading EVA2CLIPModel
         torch_default_dtype = torch.get_default_dtype()

@@ -237,7 +237,7 @@ class Pipeline(object):
         return texts, output_lens, decoding_states, token_buffers
 
     @torch.inference_mode()
-    async def generate_stream(self, token_ids: List[int], images: List[Future[Image.Image]],
+    async def generate_stream(self, token_ids: List[int], images: List[Future[torch.Tensor]],
                             generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
         if self.model.is_multimodal() and len(images) > 0:

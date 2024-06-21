@@ -2,8 +2,10 @@ import json
 import torch
 import re
 from functools import partial
-from typing import Any, Dict, List, Union, Tuple, Optional, Callable
+from enum import Enum, auto
+from typing import Any, Dict, List, Union, Tuple, Optional
 from PIL import Image
+import torchaudio
 from io import BytesIO
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
@@ -13,6 +15,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.multimodel import common_image_process_func, common_audio_process_func
+from maga_transformer.models.base_model import EmbeddingOutput
 
 class MultiModalEmbeddingInterface:
     @torch.no_grad()
@@ -26,6 +29,16 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
     @torch.no_grad()
     def image_embedding(self, images: List[Image.Image], device):
+        raise NotImplementedError()
+
+class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
+    @torch.no_grad()
+    def mm_embedding(self, mm_input, device):
+        audio, sample_rate = torchaudio.load(mm_input)
+        return self.audio_embedding(audio, sample_rate, device)
+    
+    @torch.no_grad()
+    def audio_embedding(self, audio: torch.Tensor, sample_rate: int, device):
         raise NotImplementedError()
 
 class BaseVitWeights:
@@ -82,8 +95,8 @@ class MultiModalMixin:
 
     @staticmethod
     def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], tokenizer: Any, add_special_tokens: bool, **kwargs: Any) -> List[int]:
-        if len(prompt) == 0:
-            raise FtRuntimeException(ExceptionType.EMPTY_PROMPT_ERROR, "prompt should have at least one token!")
+        # if len(prompt) == 0:
+        #     raise FtRuntimeException(ExceptionType.EMPTY_PROMPT_ERROR, "prompt should have at least one token!")
         if type(prompt) is not str:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "expect string prompt, actual: " + str(prompt))
         if add_special_tokens:
@@ -148,7 +161,7 @@ class MultiModalMixin:
     def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
         inputs = inputs.reshape(1, -1)
         if g_parallel_info.tp_size <= 1:
-            return self.multimodal_embedding(inputs, images, token_type_ids).squeeze(0)
+            return EmbeddingOutput(self.multimodal_embedding(inputs, images, token_type_ids).squeeze(0), None)
 
         if g_parallel_info.tp_rank == 0:
             embedding_tensor = self.multimodal_embedding(inputs, images, token_type_ids).squeeze(0)
@@ -156,7 +169,7 @@ class MultiModalMixin:
             embedding_tensor = torch.zeros((inputs.shape[1], self.config.head_num * self.config.size_per_head), dtype=self.dtype, device=self.device)
         self.nccl_op_.broadcast_tp([embedding_tensor])
         torch.cuda.current_stream().synchronize()
-        return embedding_tensor
+        return EmbeddingOutput(embedding_tensor, None)
     
     def process_multimodel_input_func(self, path: str) -> torch.Tensor:
         raise NotImplementedError()

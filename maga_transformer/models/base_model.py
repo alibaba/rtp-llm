@@ -18,6 +18,24 @@ from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLin
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
 
+class EmbeddingOutput:
+    text_embedding: torch.Tensor
+    extra_input: Optional[torch.Tensor]
+    extra_input_channel: Optional[torch.Tensor]
+    extra_input_size: Optional[int]
+    extra_input_shape: Optional[torch.Tensor]
+
+    def __init__(self, text_embedding: torch.Tensor, extra_input: Optional[torch.Tensor]):
+        self.text_embedding = text_embedding
+        if extra_input:
+            try:
+                self.extra_input = torch.concat(extra_input)
+                self.extra_input = torch.Tensor(self.extra_input.shape[1:])
+            except:
+                raise Exception("Extra input must have same shape except dim 0")
+        else:
+            self.extra_input = None
+
 # single batch prompt input
 class GenerateInput(PyBaseModel):
     token_ids: torch.Tensor
@@ -247,7 +265,7 @@ class BaseModel(object):
         return range(context_begin_position, context_end_position)
 
     def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
-        return self.word_embedding(inputs)
+        return EmbeddingOutput(self.word_embedding(inputs), None)
 
     def create_context_position_ids(self, input_lengths: Union[List[int], torch.Tensor]):
         return torch.concat([torch.arange(int(input_length), dtype=torch.int32) for input_length in input_lengths], dim=0)

@@ -221,7 +221,7 @@ class Llava(Llama, MultiModalMixin):
         return token_ids, image_features, []
     
     def multimodal_embedding(
-        self, input_ids: torch.Tensor, image_features: List[List[Any]], token_type_ids: torch.Tensor
+        self, input_ids: torch.Tensor, image_features: List[torch.Tensor], token_type_ids: torch.Tensor
     ):
         image_token_index = self.config.vit_related_params.vit_special_token_ids["image_token_index"]
         ignore_token_index = self.config.vit_related_params.vit_special_token_ids["ignore_token_index"]

@@ -5,13 +5,14 @@ import random
 from enum import Enum
 from functools import partial
 from typing import List, Optional, Tuple, Any
+
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery, ModelOutput
 from maga_transformer.async_decoder_engine.cache_manager import CacheManager
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.utils.sample_utils import BaseSampler, SamplerSetupParams, SamplingParams
 from maga_transformer.utils.dump_config_utils import dump_engine_to_table
-from maga_transformer.models.base_model import BaseModel
+from maga_transformer.models.base_model import BaseModel, EmbeddingOutput
 from maga_transformer.ops.gpt_ops.gpt_op import GptOp
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.util import to_cuda, to_cpu
@@ -88,7 +89,7 @@ class NormalModelExecutor(ExecutorBase):
 
     def _process(self, batch_query: BatchQuery) -> torch.Tensor:
         with torch.cuda.nvtx.range('pre_process'):
-            input_embeds, attention_mask, position_ids, token_type_ids = self._pre_process(batch_query)
+            embedding_res, attention_mask, position_ids, token_type_ids = self._pre_process(batch_query)
             k_cache, v_cache = self.cache_manager_.get_kv_cache_base()
             k_cache_scale, v_cache_scale = self.cache_manager_.get_kv_cache_scale_base()
             prefix_lengths, count_length, max_prefix_length = batch_query.get_prefix_args()
@@ -98,7 +99,7 @@ class NormalModelExecutor(ExecutorBase):
 
         with torch.cuda.nvtx.range('run_model'):
             hidden_states = self.model_ops.gpt_op.forward(
-                decoder_input=input_embeds,
+                decoder_input=embedding_res.text_embedding,
                 key_cache=k_cache,
                 value_cache=v_cache,
                 key_cache_scale=k_cache_scale,
@@ -182,7 +183,7 @@ class NormalModelExecutor(ExecutorBase):
 
     def _pre_process(
         self, batch_query: BatchQuery,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Tuple[EmbeddingOutput, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         model = self.model_ops.model
         combo_tokens, images, combo_token_types = self._packed_tokens(batch_query)
         position_ids = self._create_position_ids_for_rotary(batch_query)
@@ -190,9 +191,14 @@ class NormalModelExecutor(ExecutorBase):
             flushed_print("combo_tokens = ", combo_tokens)
 
         assert model.word_embedding is not None
-        input_embeds = model.async_input_word_embedding(combo_tokens, images, combo_token_types)
+        embedding_res: EmbeddingOutput = model.async_input_word_embedding(combo_tokens, images, combo_token_types)
+        input_embeds = embedding_res.text_embedding
+
         if debug_print():
             flushed_print("input_embeds = ", input_embeds)
+            if embedding_res.extra_input is not None:
+                flushed_print("extra_input channel = ", embedding_res.extra_input_channel)
+                flushed_print("extra_input = ", embedding_res.extra_input)
 
         if model.position_encoding is not None:
             input_embeds += model.position_encoding(position_ids)
@@ -208,8 +214,10 @@ class NormalModelExecutor(ExecutorBase):
             attention_mask = None
         else:
             attention_mask = self._create_context_attention_mask(batch_query)
+        
+        embedding_res.text_embedding = input_embeds
 
-        return input_embeds, attention_mask, position_ids, combo_token_types
+        return embedding_res, attention_mask, position_ids, combo_token_types
 
     def _create_context_attention_mask(self, batch_query: BatchQuery):
         if batch_query.has_context_query():

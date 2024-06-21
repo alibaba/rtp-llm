@@ -345,6 +345,18 @@ class W:
     moe_b2   = 'partial_moe_weights.intermediate_weight2.bias'
     moe_gate = 'partial_moe_weights.gate.kernel'
 
+    # cross attn
+    cross_attn_pre_ln_gamma = 'cross_attention_weights_pre_layernorm.gamma'
+    cross_attn_pre_ln_beta = 'cross_attention_weights_pre_layernorm.beta'
+    cross_attn_v_w = 'cross_attention_weights.value_weight.weight'
+    cross_attn_v_b = 'cross_attention_weights.value_weight.bias'
+    cross_attn_k_w = 'cross_attention_weights.key_weight.kernel'
+    cross_attn_k_b = 'cross_attention_weights.key_weight.bias'
+    cross_attn_q_w = 'cross_attention_weights.query_weight.weight'
+    cross_attn_q_b = 'cross_attention_weights.query_weight.bias'
+    cross_attn_o_w = 'cross_attention_weights.output_weight.weight'
+    cross_attn_o_b = 'cross_attention_weights.output_weight.bias'
+
     # lora
     attn_qkv_w_lora_a = 'self_attention_weights.query_weight.kernel.lora_A'
     attn_qkv_w_lora_b = 'self_attention_weights.query_weight.kernel.lora_B'
@@ -552,6 +564,18 @@ class W:
         attn_o_b: sp_id,
         attn_o_smoother: sp_0,
         attn_o_shift: sp_0,
+
+        cross_attn_pre_ln_gamma: sp_id,
+        cross_attn_pre_ln_beta: sp_id,
+        cross_attn_v_w: sp_id,
+        cross_attn_v_b: sp_id,
+        cross_attn_k_w: sp_id,
+        cross_attn_k_b: sp_id,
+        cross_attn_q_w: sp_id,
+        cross_attn_q_b: sp_id,
+        cross_attn_o_w: sp_id,
+        cross_attn_o_b: sp_id,
+
         ffn_w1: sp_neg1,
         vision_ffn_w1: sp_neg1,
         ffn_z1: sp_neg1,

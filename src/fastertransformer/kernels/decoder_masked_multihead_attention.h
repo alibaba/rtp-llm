@@ -117,7 +117,7 @@ struct Multihead_attention_params_base {
 
     // Position id of rotary embedding for CogVlm2
     const int* position_ids = nullptr;
-    // 0: ??
+    // 0: none
     // 1: neox / llama ntk
     // 2: glm
     // 3: glm2

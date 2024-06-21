@@ -38,6 +38,8 @@ public:
     LayerNormWeight<T> pre_attn_layernorm_weights;
     AttentionWeight<T> self_attention_weights;
     LayerNormWeight<T> self_attn_layernorm_weights;
+    AttentionWeight<T> cross_attention_weights;
+    LayerNormWeight<T> cross_attention_layernorm_weights;
     FfnWeight<T>       ffn_weights;
     FfnWeight<T>       vision_ffn_weights;
     FfnWeight<T>       partial_moe_weights;

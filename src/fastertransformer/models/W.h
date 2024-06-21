@@ -34,7 +34,6 @@ static const std::string vision_attn_qkv_w = "self_attention_weights.vision_quer
 static const std::string vision_attn_qkv_b = "self_attention_weights.vision_query_weight.bias";
 static const std::string vision_attn_o_w   = "self_attention_weights.vision_attention_output_weight.kernel";
 
-
 static const std::string ffn_w1       = "ffn_weights.intermediate_weight.kernel";
 static const std::string ffn_b1       = "ffn_weights.intermediate_weight.bias";
 static const std::string ffn_w3       = "ffn_weights.intermediate_weight3.kernel";
@@ -48,6 +47,17 @@ static const std::string post_ffn_ln_beta      = "post_ffn_layernorm_weights.bet
 static const std::string vision_ffn_w1 = "vision_ffn_weights.intermediate_weight.kernel";
 static const std::string vision_ffn_w3 = "vision_ffn_weights.intermediate_weight3.kernel";
 static const std::string vision_ffn_w2 = "vision_ffn_weights.intermediate_weight2.kernel";
+
+static const std::string cross_attn_pre_ln_gamma = "cross_attention_weights_pre_layernorm.gamma";
+static const std::string cross_attn_pre_ln_beta = "cross_attention_weights_pre_layernorm.beta";
+static const std::string cross_attn_v_w = "cross_attention_weights.value_weight.weight";
+static const std::string cross_attn_v_b = "cross_attention_weights.value_weight.bias";
+static const std::string cross_attn_k_w = "cross_attention_weights.key_weight.kernel";
+static const std::string cross_attn_k_b = "cross_attention_weights.key_weight.bias";
+static const std::string cross_attn_q_w = "cross_attention_weights.query_weight.weight";
+static const std::string cross_attn_q_b = "cross_attention_weights.query_weight.bias";
+static const std::string cross_attn_o_w = "cross_attention_weights.output_weight.weight";
+static const std::string cross_attn_o_b = "cross_attention_weights.output_weight.bias";
 
 static const std::string shared_expert_gate_w = "ffn_weights.shared_expert_gate.kernel";
 static const std::string moe_w1   = "partial_moe_weights.intermediate_weight.kernel";
@@ -71,7 +81,6 @@ static const std::string ffn_z3 = "ffn_weights.intermediate_weight3.zero";
 static const std::string ffn_s3 = "ffn_weights.intermediate_weight3.weight_only_quant_scale";
 static const std::string vision_ffn_s3 = "vision_ffn_weights.intermediate_weight3.weight_only_quant_scale";
 static const std::string ffn_act_s = "ffn_weights.intermediate_weight2.act_quant_scale";
-
 static const std::string ffn_z2 = "ffn_weights.intermediate_weight2.zero";
 static const std::string ffn_s2 = "ffn_weights.intermediate_weight2.weight_only_quant_scale";
 static const std::string vision_ffn_s2 = "vision_ffn_weights.intermediate_weight2.weight_only_quant_scale";

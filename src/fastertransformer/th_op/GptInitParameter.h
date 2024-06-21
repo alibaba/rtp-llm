@@ -74,6 +74,7 @@ public:
     int64_t                               bos_token_id_ = -1;
     int64_t                               eos_token_id_ = 0;
     int64_t                               pad_token_id_ = 0;
+    int64_t                               decoder_start_token_id_ = -1;
     RoleSpecialTokens user_;
     RoleSpecialTokens assistant_;
     RoleSpecialTokens system_;
@@ -124,6 +125,9 @@ public:
     int64_t logn_seq_len_  = 2048;
     double  q_scaling_ = 1;
     bool    qk_norm_ = false;
+
+    bool    use_cross_attn_ = false;
+    int64_t cross_attn_input_len_ = 0;
 
     bool use_norm_input_residual_    = false;
     bool use_norm_attn_out_residual_ = false;
