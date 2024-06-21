@@ -4,6 +4,7 @@
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
+#include "src/fastertransformer/kernels/activation_kernels.h"
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/cuda_fmha_utils.h"
@@ -404,8 +405,7 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
                                           const int*                lora_input_lengths,
                                           bool                      use_kvcache,
                                           const float*              dynamic_scale,
-                                          bool                      vision_qkv_weight,
-                                          bool                      add_bias)
+                                          bool                      vision_qkv_weight)
 {
     const int local_head_num        = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
     const int local_head_num_kv     = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
@@ -425,7 +425,7 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
 
-    if (add_bias || (!use_kvcache && params_.rotary_embedding_style_ == 0 && UseFMHA())) {  
+    if (!use_kvcache && params_.rotary_embedding_style_ == 0 && UseFMHA()) {  
         gemm_runner_->GemmWithBias(h_token_num,
                     local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
                     hidden_units_,
@@ -488,13 +488,18 @@ void ParallelAttentionWrapper<T>::expertQKVGemm(std::unique_ptr<ExpertAttentionU
     size_t vision_token_length = expert_attention_util->vision_token_length();
     // skip the vision QKVGemm if there is no vision token in batch
     if (vision_token_length > 0) {
-        // TODO(xyz): handle the case for INT8 Gemm with bias
         QKVGemm(vision_token_length, layer_id, expert_attention_util->vision_split_buf(), attention_weights, expert_attention_util->vision_intermediate_buf(), 
-                lora_ids, batch_size, lora_input_lengths, use_kvcache, dynamic_scale, true, true);
+                lora_ids, batch_size, lora_input_lengths, use_kvcache, dynamic_scale, true);
+
+        // Since GemmWithBias doesn't support INT8, we need to additional add_bias kernal for vision_token to support CogVLM2 in 
+        invokeAddBias(
+            (T*)expert_attention_util->vision_intermediate_buf(), (const T*)attention_weights->attention_output_weight.bias,
+            vision_token_length, qkv_merged_size, stream_
+        );
     }
     
     QKVGemm(expert_attention_util->text_token_length(), layer_id, expert_attention_util->text_split_buf(), attention_weights, 
-        expert_attention_util->text_intermediate_buf(), lora_ids, batch_size, lora_input_lengths, use_kvcache, dynamic_scale, false, false);
+        expert_attention_util->text_intermediate_buf(), lora_ids, batch_size, lora_input_lengths, use_kvcache, dynamic_scale, false);
 
     expert_attention_util->reorganize(qkv_buf_);
     

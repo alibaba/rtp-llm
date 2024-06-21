@@ -154,8 +154,7 @@ public:
                  const int*                input_lengths,
                  bool                      use_kvcache,
                  const float*              dynamic_scale = nullptr,
-                 bool                      vision_qkv_weight = false,
-                 bool                      add_bias    = false);
+                 bool                      vision_qkv_weight = false);
 
     void expertQKVGemm(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util,
                        const int                                h_token_num,

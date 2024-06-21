@@ -70,6 +70,7 @@ class ModelWeightsLoader:
         self._database: BaseDatabase = database
         self._merge_lora = False
         self._static_lora_adapter_name = None
+        self.use_expert_attention = weights_info.use_expert_attention
 
         if isinstance(self._database, CkptDatabase):
             self._weights_info.process_meta_from_ckpt(self._database.PretrainFileList)
@@ -314,7 +315,18 @@ class ModelWeightsLoader:
                     logging.error(f'load int8 layer_weight {weight_list[0]} in layer {layer_id} failed: {e}')
                     raise e
 
+        if self.use_expert_attention:
+            # for CogVLM2, moe is not supported and gated activation is enabled
+            assert not is_moe and is_gated_activation, (
+                "CogVLM2 shouldn't use moe mode and gated activation."
+            )
+        else:
+            # for other models, we empty the list of vision weights
+            W.int8_attn_vision_weights.clear()
+            W.int8_vision_ffn_weights.clear()
+
         convert_weight(W.int8_attn_weights, self.apply_int8)
+        convert_weight(W.int8_attn_vision_weights, self.apply_int8)
 
         if is_gated_activation:
             ffn_weight_lists = W.int8_ffn_weights if is_moe == False else W.int8_partial_moe_weights
@@ -325,6 +337,7 @@ class ModelWeightsLoader:
             convert_weight(ffn_weight_lists, self.moe_apply_int8)
         else:
             convert_weight(ffn_weight_lists, self.apply_int8)
+            convert_weight(W.int8_vision_ffn_weights, self.apply_int8)
 
         if self._weights_info.moe_style_ == 2:
             # convert_weight(W.int8_partial_moe_weights, self.moe_apply_int8)

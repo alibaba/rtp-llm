@@ -60,16 +60,21 @@ static const std::string moe_gate = "partial_moe_weights.gate.kernel";
 
 static const std::string attn_qkv_z = "self_attention_weights.query_weight.zero";
 static const std::string attn_qkv_s = "self_attention_weights.query_weight.weight_only_quant_scale";
+static const std::string vision_attn_qkv_s = "self_attention_weights.vision_query_weight.weight_only_quant_scale";
 static const std::string attn_o_z = "self_attention_weights.attention_output_weight.zero";
 static const std::string attn_o_s = "self_attention_weights.attention_output_weight.weight_only_quant_scale";
+static const std::string vision_attn_o_s = "self_attention_weights.vision_attention_output_weight.weight_only_quant_scale";
 static const std::string ffn_z1 = "ffn_weights.intermediate_weight.zero";
 static const std::string ffn_s1 = "ffn_weights.intermediate_weight.weight_only_quant_scale";
+static const std::string vision_ffn_s1 = "vision_ffn_weights.intermediate_weight.weight_only_quant_scale";
 static const std::string ffn_z3 = "ffn_weights.intermediate_weight3.zero";
 static const std::string ffn_s3 = "ffn_weights.intermediate_weight3.weight_only_quant_scale";
+static const std::string vision_ffn_s3 = "vision_ffn_weights.intermediate_weight3.weight_only_quant_scale";
 static const std::string ffn_act_s = "ffn_weights.intermediate_weight2.act_quant_scale";
 
 static const std::string ffn_z2 = "ffn_weights.intermediate_weight2.zero";
 static const std::string ffn_s2 = "ffn_weights.intermediate_weight2.weight_only_quant_scale";
+static const std::string vision_ffn_s2 = "vision_ffn_weights.intermediate_weight2.weight_only_quant_scale";
 static const std::string moe_z1 = "partial_moe_weights.intermediate_weight.zero";
 static const std::string moe_s1 = "partial_moe_weights.intermediate_weight.weight_only_quant_scale";
 static const std::string moe_z3 = "partial_moe_weights.intermediate_weight3.zero";

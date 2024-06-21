@@ -360,15 +360,20 @@ class W:
     # gptq
     attn_qkv_z = 'self_attention_weights.query_weight.zero'
     attn_qkv_s = 'self_attention_weights.query_weight.weight_only_quant_scale'
+    vision_attn_qkv_s = 'self_attention_weights.vision_query_weight.weight_only_quant_scale'
     attn_o_z = 'self_attention_weights.attention_output_weight.zero'
     attn_o_s = 'self_attention_weights.attention_output_weight.weight_only_quant_scale'
+    vision_attn_o_s = 'self_attention_weights.vision_attention_output_weight.weight_only_quant_scale'
     ffn_z1 = 'ffn_weights.intermediate_weight.zero'
     ffn_s1 = 'ffn_weights.intermediate_weight.weight_only_quant_scale'
+    vision_ffn_s1 = 'vision_ffn_weights.intermediate_weight.weight_only_quant_scale'
     ffn_z3 = 'ffn_weights.intermediate_weight3.zero'
     ffn_s3 = 'ffn_weights.intermediate_weight3.weight_only_quant_scale'
+    vision_ffn_s3 = 'vision_ffn_weights.intermediate_weight3.weight_only_quant_scale'
     ffn_act_s = 'ffn_weights.intermediate_weight2.act_quant_scale'  # gpt_xx model awq quant act need div scales
     ffn_z2 = 'ffn_weights.intermediate_weight2.zero'
     ffn_s2 = 'ffn_weights.intermediate_weight2.weight_only_quant_scale'
+    vision_ffn_s2 = 'vision_ffn_weights.intermediate_weight2.weight_only_quant_scale'
     moe_z1 = 'partial_moe_weights.intermediate_weight.zero'
     moe_s1 = 'partial_moe_weights.intermediate_weight.weight_only_quant_scale'
     moe_z3 = 'partial_moe_weights.intermediate_weight3.zero'
@@ -397,10 +402,15 @@ class W:
 
     quant_w = set([
         attn_qkv_w,
+        vision_attn_qkv_w,
         attn_o_w,
+        vision_attn_o_w,
         ffn_w1,
+        vision_ffn_w1,
         ffn_w2,
+        vision_ffn_w2,
         ffn_w3,
+        vision_ffn_w3,
         moe_w1,
         moe_w2,
         moe_w3,
@@ -461,10 +471,21 @@ class W:
         [attn_o_w, attn_o_s],
     ]
 
+    int8_attn_vision_weights = [
+        [vision_attn_qkv_w, vision_attn_qkv_s],
+        [vision_attn_o_w, vision_attn_o_s],
+    ]
+
     int8_ffn_weights = [
         [ffn_w1, ffn_s1],
         [ffn_w3, ffn_s3],
         [ffn_w2, ffn_s2],
+    ]
+
+    int8_vision_ffn_weights = [
+        [vision_ffn_w1, vision_ffn_s1],
+        [vision_ffn_w3, vision_ffn_s3],
+        [vision_ffn_w2, vision_ffn_s2],
     ]
 
     int8_ffn_weights_2 = [
@@ -807,6 +828,8 @@ class ModelDeployWeightInfo:
 
         self.tie_word_embeddings = config.tie_word_embeddings
         self.need_ffn_act_scale = config.need_ffn_act_scale
+        self.use_expert_attention = config.use_expert_attention
+
 
     def get_preprocessed_weight_info(self, all_names: Set[str]) -> ModelWeightInfo:
         # auto create weight info based on exist tensor names
