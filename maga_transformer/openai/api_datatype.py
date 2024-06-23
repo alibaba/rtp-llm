@@ -43,6 +43,7 @@ class RoleEnum(str, Enum):
 class ContentPartTypeEnum(str, Enum):
     text = "text"
     image_url = "image_url"
+    video_url = "video_url"
 
 class ImageURL(BaseModel):
     url: str
@@ -52,6 +53,7 @@ class ContentPart(BaseModel):
     type: ContentPartTypeEnum
     text: Optional[str] = None
     image_url: Optional[ImageURL] = None
+    video_url: Optional[ImageURL] = None
 
 class ChatMessage(BaseModel):
     role: RoleEnum
