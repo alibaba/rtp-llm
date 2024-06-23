@@ -13,7 +13,12 @@ from maga_transformer.models.multimodal_mixin import BaseImageEmbedding
 
 class EVA2CLIPImageEmbedding(BaseImageEmbedding):
     def __init__(self, config):
+        # To reduce CPU memory, use fp16 for loading EVA2CLIPModel
+        torch_default_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.half)
         self.vit = EVA2CLIPModel(config)
+        torch.set_default_dtype(torch_default_dtype)
+    
         image_size = config.vit_related_params.config["image_size"]
         self.image_transform = transforms.Compose(
             [
