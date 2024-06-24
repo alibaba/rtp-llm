@@ -126,7 +126,7 @@ inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor,
 
 
 inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf, bool copyData = true) {
-    if (buf->isQuantify()) {
+    if (buf->isQBuffer()) {
         throw std::runtime_error("not support qbuffer!");
     }
     auto option = torch::dtype(dataTypeToTorchType(buf->type())).device(memoryTypeToTorchDevice(buf->where())).requires_grad(false);
@@ -144,7 +144,7 @@ inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf, bool copyData
 }
 
 inline std::array<torch::Tensor, 3> QBuffer2torchTensor(const ConstQBufferPtr& buf, bool copyData = true) {
-    if (!buf->isQuantify()) {
+    if (!buf->isQBuffer()) {
         throw std::runtime_error("only support qbuffer!");
     }
 

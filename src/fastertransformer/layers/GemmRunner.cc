@@ -53,9 +53,9 @@ void GemmRunner<T>::Gemm(int m, int n, int k, const void* inputs, const DenseWei
                                                           k,
                                                           stream_);
         } else {
-            size_t ws_size = weight_only_matmul_plguin_->getWorkspaceSize(m, n, k);
+            size_t ws_size = weight_only_matmul_plugin_->getWorkspaceSize(m, n, k);
             allocateWorkspace(ws_size);
-            weight_only_matmul_plguin_->enqueue(reinterpret_cast<const void*>(inputs),
+            weight_only_matmul_plugin_->enqueue(reinterpret_cast<const void*>(inputs),
                                                 reinterpret_cast<const void*>(weights->quant_kernel),
                                                 reinterpret_cast<const void*>(weights->weight_only_quant_scale),
                                                 reinterpret_cast<void*>(outputs),

@@ -88,7 +88,7 @@ public:
                 (type_ == DataType::TYPE_FP64);
     }
 
-    bool isQuantify() const {
+    bool isQBuffer() const {
         return (type_ == DataType::TYPE_QINT8);
     }
 

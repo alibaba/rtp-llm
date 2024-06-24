@@ -43,4 +43,10 @@ std::vector<T> buffer2vector(const Buffer& src) {
     return buffer2vector<T>(src, src.size());
 }
 
+inline void BUFFER_DTYPE_CHECK(const Buffer& buffer, std::vector<DataType> dtypes) {
+    FT_CHECK_WITH_INFO(
+        (std::find(dtypes.begin(), dtypes.end(), buffer.type()) != dtypes.end()),
+        "buffer type[%d] is invalid", buffer.type());
+}
+
 }  // namespace fastertransformer

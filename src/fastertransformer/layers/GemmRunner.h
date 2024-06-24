@@ -24,7 +24,7 @@ private:
     cublasMMWrapper*                           cublas_wrapper_;
 
     tc::QuantAlgo quant_algo_;
-    std::shared_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin>          weight_only_matmul_plguin_;
+    std::shared_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin>          weight_only_matmul_plugin_;
     std::shared_ptr<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin> weight_only_groupwise_matmul_plguin_;
     std::shared_ptr<trt_plugins::SmoothQuantGemmPlugin> smooth_quant_plugin_;
 
@@ -55,7 +55,7 @@ public:
                     std::make_shared<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin>(
                             datatype, true, quant_algo_.getGroupSize(), quant_algo_.getWeightBits());
             } else {
-                weight_only_matmul_plguin_ = std::make_shared<trt_plugins::WeightOnlyQuantMatmulPlugin>(
+                weight_only_matmul_plugin_ = std::make_shared<trt_plugins::WeightOnlyQuantMatmulPlugin>(
                         datatype, trt_plugins::WeightTypeId::INT8);
             }
         }

@@ -81,9 +81,9 @@ void GemmParams::check() const {
 
 GemmType GemmParams::dispatch() const {
 
-    bool a_is_qbuffer = A.isQuantify();
-    bool b_is_qbuffer = B.isQuantify();
-    bool d_is_qbuffer = (D == nullptr) ? false : D->isQuantify();
+    bool a_is_qbuffer = A.isQBuffer();
+    bool b_is_qbuffer = B.isQBuffer();
+    bool d_is_qbuffer = (D == nullptr) ? false : D->isQBuffer();
 
     if (A.dim() == 2) {
         if (!a_is_qbuffer && !b_is_qbuffer && !d_is_qbuffer) {

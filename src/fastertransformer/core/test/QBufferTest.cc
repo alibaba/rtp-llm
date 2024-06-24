@@ -30,7 +30,7 @@ TEST_F(QBufferTest, ValidConstructTest) {
                                          std::move(zeros)));
 
     // buffer method check
-    EXPECT_EQ(qbuffer->isQuantify(), true);
+    EXPECT_EQ(qbuffer->isQBuffer(), true);
     EXPECT_EQ(qbuffer->where(), MemoryType::MEMORY_CPU);
     EXPECT_EQ(qbuffer->type(), DataType::TYPE_QINT8);
     EXPECT_EQ((int64_t)qbuffer->data(), 12345);
@@ -112,7 +112,7 @@ TEST_F(QBufferTest, TorchConstructTest) {
     auto scales = torch::rand({10});
     auto zeros  = torch::randint(0, 10, {10}, at::TensorOptions().dtype(at::ScalarType::Int));
     auto qbuffer = torchTensor2Buffer(tensor, scales, zeros);
-    EXPECT_TRUE(dynamic_pointer_cast<QBuffer>(qbuffer)->isQuantify());
+    EXPECT_TRUE(dynamic_pointer_cast<QBuffer>(qbuffer)->isQBuffer());
     auto result = QBuffer2torchTensor(dynamic_pointer_cast<const QBuffer>(qbuffer));
     EXPECT_TRUE(torch::equal(result[0], tensor));
     EXPECT_TRUE(torch::equal(result[1], scales));

@@ -19,7 +19,7 @@ void CudaDevice::copy(const CopyParams& params) {
                        "dst[%d] and src[%d,] need has same type.",
                        params.src.type(), params.dst.type());
 
-    if (params.dst.isQuantify() && params.src.isQuantify()) {
+    if (params.dst.isQBuffer() && params.src.isQBuffer()) {
         auto dst_ptr = reinterpret_cast<const QBuffer*>(&params.dst);
         auto src_ptr = reinterpret_cast<const QBuffer*>(&params.src);
         copy({dst_ptr->kernel(), src_ptr->kernel()});

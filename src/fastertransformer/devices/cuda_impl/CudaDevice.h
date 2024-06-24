@@ -76,7 +76,7 @@ private:
     std::unique_ptr<cublasAlgoMap> cublas_algo_map_;
     std::unique_ptr<cublasMMWrapper> cublas_mm_wrapper_;
     
-    std::unique_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin> weight_only_matmul_plguin_;
+    std::unique_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin> weight_only_matmul_plugin_;
     std::unique_ptr<trt_plugins::SmoothQuantGemmPlugin> smooth_quant_plugin_;
 
     nvmlDevice_t nvml_device_;

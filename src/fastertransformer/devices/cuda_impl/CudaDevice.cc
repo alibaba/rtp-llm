@@ -65,7 +65,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         cublas_handle_, cublaslt_handle_, stream_, cublas_algo_map_.get(),
         &cublas_wrapper_mutex_, allocator_.get()));
 
-    weight_only_matmul_plguin_ = std::make_unique<trt_plugins::WeightOnlyQuantMatmulPlugin>();
+    weight_only_matmul_plugin_ = std::make_unique<trt_plugins::WeightOnlyQuantMatmulPlugin>();
     
     smooth_quant_plugin_ = std::make_unique<trt_plugins::SmoothQuantGemmPlugin>();
 

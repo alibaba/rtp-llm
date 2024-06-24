@@ -41,7 +41,7 @@ BufferPtr DeviceBase::allocateBuffer(const BufferParams& params, const BufferHin
 BufferPtr DeviceBase::allocateBufferLike(const Buffer& buffer,
                                          const AllocationType atype,
                                          const BufferHints& hints) {
-    if (buffer.isQuantify()) {
+    if (buffer.isQBuffer()) {
         auto kernel = allocateBufferLike((reinterpret_cast<const QBuffer*>(&buffer)->kernel()),
                                          atype,
                                          hints);

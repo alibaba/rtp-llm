@@ -5,6 +5,7 @@
 #include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/utils/ShapeCheck.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 #include "autil/StringUtil.h"
 
 #include <numeric>
@@ -156,6 +157,8 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     }
  
     if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm) {
+        BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_QINT8});
+        BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});
         auto quant_mode = tensorrt_llm::common::QuantMode::fromDescription(true,
                                                                             true,
                                                                             true,
@@ -165,7 +168,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
                                                                             false,
                                                                             false);
         smooth_quant_plugin_->init(quant_mode, nvinfer1DtypeConvert(output->type()));
-        FT_LOG_INFO("use int8 soomth gemm.");
+        FT_LOG_DEBUG("use int8 soomth gemm.");
         size_t ws_size = smooth_quant_plugin_->getWorkspaceSize(arguments.m,
                                                                 arguments.n,
                                                                 arguments.k);
@@ -189,9 +192,12 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     }
 
     if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
-        weight_only_matmul_plguin_->init(nvinfer1DtypeConvert(params.A.type()), trt_plugins::WeightTypeId::INT8);
+        BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16});
+        BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});
+        weight_only_matmul_plugin_->init(nvinfer1DtypeConvert(params.A.type()), trt_plugins::WeightTypeId::INT8);
         FT_LOG_DEBUG("use int8 only weight gemm.");
-        size_t ws_size = weight_only_matmul_plguin_->getWorkspaceSize(arguments.m,
+        
+        size_t ws_size = weight_only_matmul_plugin_->getWorkspaceSize(arguments.m,
                                                                       arguments.n,
                                                                       arguments.k);
         auto workspace = allocateBuffer({DataType::TYPE_BYTES,
@@ -199,7 +205,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
                                           AllocationType::DEVICE},
                                           {"workspace"});
 
-        weight_only_matmul_plguin_->enqueue(params.A.data(),
+        weight_only_matmul_plugin_->enqueue(params.A.data(),
                                             reinterpret_cast<const QBuffer&>(params.B).data(),
                                             reinterpret_cast<const QBuffer&>(params.B).scalesData(),
                                             output->data(),
@@ -227,7 +233,8 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
 
 
     if (params.dispatch() == GemmType::BufferA_BufferB_BufferC_2DGemm) {
-        
+        BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
+        BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
         cublas_mm_wrapper_->Gemm(b_op,
                                  a_op,
                                  arguments.n,
@@ -251,7 +258,8 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     }
 
     if (params.dispatch() == GemmType::BufferA_BufferB_BufferC_3DGemm) {
-
+        BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
+        BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_FP16, DataType::TYPE_BF16, DataType::TYPE_FP32});
         cublas_mm_wrapper_->stridedBatchedGemm(b_op,
                                                a_op,
                                                arguments.n,
