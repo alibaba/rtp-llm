@@ -170,6 +170,16 @@ struct LayernormParams {
     const std::optional<double>   alpha;
 };
 
+enum GemmType : size_t {
+    InvalidGemm = 0,
+    
+    BufferA_BufferB_BufferC_2DGemm,
+    BufferA_BufferB_BufferC_3DGemm,
+
+    QBufferA_BufferB_BufferC_2DGemm,
+    BufferA_QBufferB_BufferC_2DGemm,
+    QBufferA_QBufferB_BufferC_2DGemm,
+};
 
 // D = alpha * op(A) * op(B) + beta * C
 // shapes of A, B, C, D have two options: [m, k], [k, n], [m, n], [m, n]
@@ -205,6 +215,7 @@ struct GemmParams {
     const float beta  = 0.0f;
 
     void check() const;
+    GemmType dispatch() const;
 };
 
 struct GroupedGemmOutput {
@@ -459,10 +470,34 @@ struct LoraLinearParams {
 
 struct QuantizeParams {
     const Buffer&           input;
-    OptionalConstBufferRef  scales;
-    OptionalConstBufferRef  zeros;
     DataType                qtype;
     size_t                  axis;
+    OptionalConstBufferRef  scales;
+    OptionalConstBufferRef  zeros;
+    
+
+    // for soomth quantize
+    OptionalConstBufferRef  smoother;
+    OptionalConstBufferRef  shift;
+
+    QuantizeParams(const Buffer& input,
+                   DataType qtype,
+                   size_t axis) :
+                   input(input),
+                   qtype(qtype),
+                   axis(axis) {}
+
+    QuantizeParams(const Buffer& input,
+                   const Buffer& smoother,
+                   const Buffer& shift,
+                   DataType qtype,
+                   size_t axis) :
+                   input(input),
+                   qtype(qtype),
+                   axis(axis),
+                   smoother(smoother),
+                   shift(shift) {}
+
 };
 
 }  // namespace fastertransformer

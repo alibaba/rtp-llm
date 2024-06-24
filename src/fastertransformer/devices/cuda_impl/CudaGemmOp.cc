@@ -30,36 +30,13 @@ cudaDataType_t dtypeConvert(DataType dtype) {
     }
 };
 
-struct CudaGemmDispatch {
-
-    enum GemmImplementType {
-        cublas_basic_gemm,
-        cublas_batch_gemm,
-        WeightOnlyQuantMatmulPlugin,
-        invalid,
-    };
-
-    static GemmImplementType dispatch(const GemmParams& params) {
-        size_t dim = params.A.dim();
-        if (params.C != std::nullopt) {
-            return GemmImplementType::invalid;
-        }
-        if (dim == 2 && params.A.isFloat() && params.B.isFloat()) {
-
-            return GemmImplementType::cublas_basic_gemm;
-        } else if (dim > 2 && params.A.isFloat() && params.B.isFloat()) {
-
-            return GemmImplementType::cublas_batch_gemm;
-        } else if (dim == 2 && 
-                   (params.A.type() == DataType::TYPE_FP16 || params.A.type() == DataType::TYPE_BF16) &&
-                    params.B.type() == DataType::TYPE_QINT8) {
-            return GemmImplementType::WeightOnlyQuantMatmulPlugin;
-        }
-        return GemmImplementType::invalid;
+nvinfer1::DataType nvinfer1DtypeConvert(DataType dtype) {
+    switch (dtype) {
+        case DataType::TYPE_FP16 : return nvinfer1::DataType::kHALF;
+        case DataType::TYPE_BF16 : return nvinfer1::DataType::kBF16;
+        default: throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
-
 };
-
 
 struct CudaGemmArguments {
     std::vector<size_t> Ashape;
@@ -106,12 +83,16 @@ struct CudaGemmArguments {
         }
 
         ADtype = params.A.type();
-        BDtype = params.A.type();
+        BDtype = params.B.type();
         if (params.C != std::nullopt) {
             CDtype = params.C.value().get().type();
         }
         DDtype = (params.compute_type == DataType::TYPE_INVALID) ?
-                  params.A.type() : params.compute_type;
+                  params.A.type() : params.compute_type;\
+        // int8 gemm
+        if (ADtype == DataType::TYPE_QINT8 && BDtype == DataType::TYPE_QINT8) {
+            DDtype = DataType::TYPE_FP16;
+        }
 
         dim =  params.A.dim();
         batch_size = std::accumulate(Ashape.begin(), Ashape.end() - 2,
@@ -160,13 +141,8 @@ struct CudaGemmArguments {
 ///          C [b, ..., m, n]
 BufferPtr CudaDevice::gemm(const GemmParams& params) {
     params.check();
-
-    using GemmImplementType = CudaGemmDispatch::GemmImplementType;
     CudaGemmArguments arguments(params);
 
-    if (CudaGemmDispatch::dispatch(params) == GemmImplementType::invalid) {
-        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-    }
     BufferPtr output;
     if (params.D) {
         output = params.D;
@@ -178,11 +154,42 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     } else {
         output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
     }
-    
-    if (CudaGemmDispatch::dispatch(params) == GemmImplementType::WeightOnlyQuantMatmulPlugin) {
-        if (params.A.type() == DataType::TYPE_BF16) {
-            weight_only_matmul_plguin_->init(nvinfer1::DataType::kBF16, trt_plugins::WeightTypeId::INT8);
-        }
+ 
+    if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm) {
+        auto quant_mode = tensorrt_llm::common::QuantMode::fromDescription(true,
+                                                                            true,
+                                                                            true,
+                                                                            true,
+                                                                            false,
+                                                                            false,
+                                                                            false,
+                                                                            false);
+        smooth_quant_plugin_->init(quant_mode, nvinfer1DtypeConvert(output->type()));
+        FT_LOG_INFO("use int8 soomth gemm.");
+        size_t ws_size = smooth_quant_plugin_->getWorkspaceSize(arguments.m,
+                                                                arguments.n,
+                                                                arguments.k);
+        auto workspace = allocateBuffer({DataType::TYPE_BYTES,
+                                          {ws_size},
+                                          AllocationType::DEVICE},
+                                          {"workspace"});
+
+        smooth_quant_plugin_->enqueue(reinterpret_cast<const QBuffer&>(params.A).data(),
+                                      reinterpret_cast<const QBuffer&>(params.B).data(),
+                                      reinterpret_cast<const QBuffer&>(params.B).scalesData<float>(),
+                                      reinterpret_cast<const QBuffer&>(params.A).scalesData<float>(),
+                                      output->data(),
+                                      workspace->data<char>(),
+                                      arguments.m,
+                                      arguments.n,
+                                      arguments.k,
+                                      stream_);
+        sync_check_cuda_error();
+        return std::move(output);
+    }
+
+    if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
+        weight_only_matmul_plguin_->init(nvinfer1DtypeConvert(params.A.type()), trt_plugins::WeightTypeId::INT8);
         FT_LOG_DEBUG("use int8 only weight gemm.");
         size_t ws_size = weight_only_matmul_plguin_->getWorkspaceSize(arguments.m,
                                                                       arguments.n,
@@ -194,7 +201,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
 
         weight_only_matmul_plguin_->enqueue(params.A.data(),
                                             reinterpret_cast<const QBuffer&>(params.B).data(),
-                                            reinterpret_cast<const QBuffer&>(params.B).scales_data(),
+                                            reinterpret_cast<const QBuffer&>(params.B).scalesData(),
                                             output->data(),
                                             workspace->data(),
                                             arguments.m,
@@ -204,54 +211,47 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
         sync_check_cuda_error();
         return std::move(output);
     }
+
     auto A_data_type = dtypeConvert(arguments.ADtype);
     auto B_data_type = dtypeConvert(arguments.BDtype);
     auto D_data_type = dtypeConvert(arguments.DDtype);
-    if (params.compute_type == DataType::TYPE_INVALID) {
-        cublasMMWrapperPtr()->setGemmConfig(A_data_type,
-                                            B_data_type,
-                                            D_data_type,
-                                            CUDA_R_32F);
-    } else {
-        cublasMMWrapperPtr()->setGemmConfig(A_data_type,
-                                            B_data_type,
-                                            D_data_type,
-                                            dtypeConvert(params.compute_type));
+    auto computeType = CUDA_R_32F;
+    if (params.compute_type != DataType::TYPE_INVALID) {
+       computeType = dtypeConvert(params.compute_type);
     }
+    const auto A = params.A.data();
+    const auto B = params.B.data();
+    auto D = output->data();
+    auto a_op = opConvert(params.transA);
+    auto b_op = opConvert(params.transB);
 
 
-    if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_basic_gemm) {
-        const auto A = params.A.data();
-        const auto B = params.B.data();
-        auto D = output->data();
-        auto a_op = opConvert(params.transA);
-        auto b_op = opConvert(params.transB);
+    if (params.dispatch() == GemmType::BufferA_BufferB_BufferC_2DGemm) {
+        
         cublas_mm_wrapper_->Gemm(b_op,
                                  a_op,
                                  arguments.n,
                                  arguments.m,
                                  arguments.k,
+                                 &arguments.alpha,
                                  B,
+                                 B_data_type,
                                  arguments.ldb,
                                  A,
+                                 A_data_type,
                                  arguments.lda,
+                                 &arguments.beta,
                                  D,
-                                 arguments.ldc);
+                                 D_data_type,
+                                 arguments.ldc,
+                                 computeType,
+                                 cublasGemmAlgo_t(-1));
         sync_check_cuda_error();
         return move(output);
-    } else if (CudaGemmDispatch::dispatch(params) == GemmImplementType::cublas_batch_gemm) {
-        // convert buffers to ptrs
-        const auto A = params.A.data();
-        const auto B = params.B.data();
-        auto D = output->data();
+    }
 
-        auto a_op = opConvert(params.transA);
-        auto b_op = opConvert(params.transB);
+    if (params.dispatch() == GemmType::BufferA_BufferB_BufferC_3DGemm) {
 
-        auto A_data_type = dtypeConvert(arguments.ADtype);
-        auto B_data_type = dtypeConvert(arguments.BDtype);
-        auto D_data_type = dtypeConvert(arguments.DDtype);
-        auto computeType = dtypeConvert(arguments.DDtype);
         cublas_mm_wrapper_->stridedBatchedGemm(b_op,
                                                a_op,
                                                arguments.n,
@@ -275,10 +275,8 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
                                                computeType);
         sync_check_cuda_error();
         return move(output);
-    } else {
-        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
-    return std::move(output);
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 

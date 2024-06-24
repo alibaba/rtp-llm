@@ -6,6 +6,7 @@
 #include "src/fastertransformer/cuda/cufmha/cufmha.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
+#include "src/fastertransformer/trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
 #include "src/fastertransformer/cutlass/interface.h"
 
 #include <nvml.h>
@@ -76,6 +77,7 @@ private:
     std::unique_ptr<cublasMMWrapper> cublas_mm_wrapper_;
     
     std::unique_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin> weight_only_matmul_plguin_;
+    std::unique_ptr<trt_plugins::SmoothQuantGemmPlugin> smooth_quant_plugin_;
 
     nvmlDevice_t nvml_device_;
     NcclParam nccl_param_;

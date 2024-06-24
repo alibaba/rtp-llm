@@ -79,4 +79,34 @@ void GemmParams::check() const {
 
 }
 
+GemmType GemmParams::dispatch() const {
+
+    bool a_is_qbuffer = A.isQuantify();
+    bool b_is_qbuffer = B.isQuantify();
+    bool d_is_qbuffer = (D == nullptr) ? false : D->isQuantify();
+
+    if (A.dim() == 2) {
+        if (!a_is_qbuffer && !b_is_qbuffer && !d_is_qbuffer) {
+            return GemmType::BufferA_BufferB_BufferC_2DGemm;
+        }
+        if (a_is_qbuffer && !b_is_qbuffer && !d_is_qbuffer) {
+            return GemmType::QBufferA_BufferB_BufferC_2DGemm;
+        }
+        if (!a_is_qbuffer && b_is_qbuffer && !d_is_qbuffer) {
+            return GemmType::BufferA_QBufferB_BufferC_2DGemm;
+        }
+        if (a_is_qbuffer && b_is_qbuffer && !d_is_qbuffer) {
+            return GemmType::QBufferA_QBufferB_BufferC_2DGemm;
+        }
+
+    } else if (A.dim() > 2) {
+        if (!a_is_qbuffer && !b_is_qbuffer && !d_is_qbuffer) {
+            return GemmType::BufferA_BufferB_BufferC_3DGemm;
+        }
+    }
+
+    return GemmType::InvalidGemm;
+}
+
+
 }  // namespace fastertransformer
