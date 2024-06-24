@@ -199,10 +199,10 @@ class Pipeline(object):
         all_texts = []
         output_lens = []
         if len(decoding_states) == 0:
-            # TODO(xinfei.sxf) not special for num beams
             if generate_config.num_beams == 1:
-                decoding_states = [DecodingState()] * len(generate_outputs.generate_outputs)
+                decoding_states = [DecodingState() for _ in range(len(generate_outputs.generate_outputs))]
             else:
+                # num_beams不等于1的情况下，不能进行增量decode，因为过去的token id会变化
                 decoding_states = [None] * len(generate_outputs.generate_outputs)
 
         if len(token_buffers) == 0:
