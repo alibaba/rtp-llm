@@ -43,12 +43,12 @@ TEST_F(QBufferTest, ValidConstructTest) {
     // qbuffer method check
     QBufferPtr qbuffer_ptr= std::dynamic_pointer_cast<QBuffer>(qbuffer);
     EXPECT_EQ((int64_t)qbuffer_ptr->data(), 12345);
-    EXPECT_EQ((int64_t)qbuffer_ptr->scales_data(), 23456);
-    EXPECT_EQ((int64_t)qbuffer_ptr->zeros_data(), 34567);
-    EXPECT_EQ((int64_t)qbuffer_ptr->scales_type(), DataType::TYPE_FP16);
-    EXPECT_EQ((int64_t)qbuffer_ptr->zeros_type(), DataType::TYPE_FP16);
-    EXPECT_EQ((int64_t)qbuffer_ptr->scales_size_bytes(), 10 * 2);
-    EXPECT_EQ((int64_t)qbuffer_ptr->zeros_size_bytes(), 10 * 2);
+    EXPECT_EQ((int64_t)qbuffer_ptr->scalesData(), 23456);
+    EXPECT_EQ((int64_t)qbuffer_ptr->zerosData(), 34567);
+    EXPECT_EQ((int64_t)qbuffer_ptr->scalesType(), DataType::TYPE_FP16);
+    EXPECT_EQ((int64_t)qbuffer_ptr->zerosType(), DataType::TYPE_FP16);
+    EXPECT_EQ((int64_t)qbuffer_ptr->scalesSizebytes(), 10 * 2);
+    EXPECT_EQ((int64_t)qbuffer_ptr-> zerosSizebytes(), 10 * 2);
 }
 
 TEST_F(QBufferTest, CopyConstructTest) {

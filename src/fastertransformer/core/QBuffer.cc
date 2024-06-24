@@ -82,27 +82,27 @@ Buffer QBuffer::kernel() const {
                   nullptr);
 }
 
-void* QBuffer::scales_data() const {
+void* QBuffer::scalesData() const {
     return scales_->data();
 }
 
-void* QBuffer::zeros_data() const {
+void* QBuffer::zerosData() const {
     return zeros_->data();
 }
 
-DataType QBuffer::scales_type() const {
+DataType QBuffer::scalesType() const {
     return scales_->type();
 }
 
-DataType QBuffer::zeros_type() const {
+DataType QBuffer::zerosType() const {
     return zeros_->type();
 }
 
-size_t QBuffer::scales_size_bytes() const {
+size_t QBuffer::scalesSizebytes() const {
     return scales_->sizeBytes();
 }
 
-size_t QBuffer::zeros_size_bytes() const {
+size_t QBuffer:: zerosSizebytes() const {
     return zeros_->sizeBytes();
 }
 

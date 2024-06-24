@@ -22,12 +22,22 @@ public:
     Buffer          scales()                const;
     Buffer          zeros()                 const;
     Buffer          kernel()                const;
-    void*           scales_data()           const;
-    void*           zeros_data()            const;
-    DataType        scales_type()           const;
-    DataType        zeros_type()            const;
-    size_t          scales_size_bytes()      const;
-    size_t          zeros_size_bytes()       const;
+    void*           scalesData()           const;
+    void*           zerosData()            const;
+    DataType        scalesType()           const;
+    DataType        zerosType()            const;
+    size_t          scalesSizebytes()      const;
+    size_t           zerosSizebytes()       const;
+
+    template<typename T>
+    inline T* scalesData() const {
+        return scales_->data<T>();
+    }
+
+    template<typename T>
+    inline T* zerosData() const {
+        return zeros_->data<T>();
+    }
 
 private:
     BufferPtr                      scales_;
