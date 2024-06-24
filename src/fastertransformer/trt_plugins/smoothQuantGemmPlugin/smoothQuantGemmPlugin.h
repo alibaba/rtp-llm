@@ -31,7 +31,7 @@ using SqGemmRunnerPtr = std::shared_ptr<tensorrt_llm::kernels::cutlass_kernels::
 class SmoothQuantGemmPlugin
 {
 public:
-    SmoothQuantGemmPlugin() = delete;
+    SmoothQuantGemmPlugin() = default;
 
     SmoothQuantGemmPlugin(tensorrt_llm::common::QuantMode quantMode, nvinfer1::DataType type);
 
@@ -41,8 +41,9 @@ public:
     int enqueue(const void* A, const void* B, const float* alphaCol, const float* alphaRow, void* C, char* workspace,
         const int m, const int n, const int k, cudaStream_t stream) noexcept;
 
+    void init(tensorrt_llm::common::QuantMode quantMode,
+              nvinfer1::DataType type);
 private:
-    void init(nvinfer1::DataType type);
 
     void configGemm();
 

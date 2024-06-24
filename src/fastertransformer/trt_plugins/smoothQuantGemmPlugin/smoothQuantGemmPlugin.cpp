@@ -25,11 +25,13 @@ using tensorrt_llm::plugins::SmoothQuantGemmPlugin;
 SmoothQuantGemmPlugin::SmoothQuantGemmPlugin(QuantMode quantMode, nvinfer1::DataType type)
     : mQuantMode(quantMode)
 {
-    init(type);
+    init(quantMode, type);
 }
 
-void SmoothQuantGemmPlugin::init(nvinfer1::DataType type)
-{
+void SmoothQuantGemmPlugin::init(tensorrt_llm::common::QuantMode quantMode,
+                                 nvinfer1::DataType type)
+{   
+    mQuantMode = quantMode;
     mType = type;
     if (mType == nvinfer1::DataType::kHALF)
     {
