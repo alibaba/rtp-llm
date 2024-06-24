@@ -20,8 +20,10 @@ class MegatronUtil:
         if len(ckpt_files) > 0:
             return False
         subdirs = list(ckpt_path.rglob(r"mp_rank_??_model_states.pt"))
-        if len(subdirs) > 0:
-            return True
+        for subdir in subdirs:
+            training_config_path = subdir.parent / 'training_config.ini'
+            if not training_config_path.exists():
+                return True
 
         return False
     
