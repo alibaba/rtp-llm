@@ -14,6 +14,15 @@ from maga_transformer.utils.gemm_utils.cutlass_config import load_cutlass_gemm_c
 
 updated_params: Set[str] = set()
 
+def closest_power_of_2(x):
+    if x < 1:
+        return 1
+    power = 1
+    while power * 2 <= x:
+        power *= 2
+    return power
+
+
 def get_pad_size(size: int , align_size: int):
     return (align_size - (size % align_size)) % align_size
 
@@ -326,7 +335,7 @@ class GptInitModelParameters:
 
         load_cutlass_gemm_config(self.quant_algo)
 
-        self.seq_size_per_block = (int(max(seq_size_per_block, self.max_seq_len // 128)) >> 1) << 1 # must be 2^n
+        self.seq_size_per_block = closest_power_of_2(int(max(seq_size_per_block, self.max_seq_len // 128))) # must be 2^n
         self.seq_size_per_block = int(os.environ.get('SEQ_SIZE_PER_BLOCK', self.seq_size_per_block))
         logging.info(f'seq_size_per_block: {self.seq_size_per_block}')
         self.max_generate_batch_size = int(os.environ.get('CONCURRENCY_LIMIT', 128))
