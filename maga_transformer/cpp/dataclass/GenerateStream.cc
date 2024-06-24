@@ -177,7 +177,8 @@ int GenerateStream::currentExecuteTokenSize() {
     return currentExecuteTokens().size();
 }
 vector<int> GenerateStream::contextTokens() const {
-    auto input_tokens = fastertransformer::buffer2vector<int>({ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, {(size_t)seq_length_}, complete_token_ids_->data()});
+    auto input_tokens = fastertransformer::buffer2vector<int>(
+            {ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, {(size_t)seq_length_}, complete_token_ids_->data()});
     if (reuseLength() > 0) {
         return vector<int>(input_tokens.begin() + reuseLength(), input_tokens.end());
     } else {

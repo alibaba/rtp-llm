@@ -951,6 +951,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         POP_RANGE;
     }
     sync_check_cuda_error();
+    // TODO(xinfei.sxf) h_token_num不对
     print_bshd(layer_id, "qkv_weighted_t", qkv_buf_2, 1, h_token_num, local_head_num, params_.size_per_head_);
 }
 

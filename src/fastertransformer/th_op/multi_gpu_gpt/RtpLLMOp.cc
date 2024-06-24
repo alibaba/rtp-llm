@@ -30,6 +30,7 @@ void RtpLLMOp::init(const ft::GptInitParameter& gpt_init_params,
     auto convert = rtp_llm::WeightsConverter(false);
     auto layers_weights = convert.convertLayerWeights_(py_layers_weights);
     auto global_weights = convert.convertGlobalWeight_(py_global_weights);
+    // TODO(xinfei.sxf) fix py_linear_bias_slopes 传递方式
     ft::BufferPtr             linear_bias_slopes;
     if (gpt_init_params.use_attention_linear_bias_) { 
         linear_bias_slopes = ft::torchTensor2Buffer(ft::convertPyObjectToTensor(py_linear_bias_slopes));

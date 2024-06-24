@@ -327,13 +327,13 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
     }
 
     // gpt layer
-    // TODO(xinfei.sxf) 传入position_ids
     ft::TensorMap input_tensors({{"decoder_input", all_hidden_states},
+                                 {"input_lengths", input_lengths},
                                  {"sequence_lengths", sequence_lengths},
                                  {"d_prefix_prompt_lengths", prefix_lengths},
                                  {"count_prefix_length", count_lengths},
                                  {"max_prefix_prompt_length", max_prefix_length},
-                                 {"input_lengths", input_lengths},
+                                 {"combo_position_ids", combo_position_ids},
                                  {"linear_bias_slopes", linear_bias_slopes},
                                  {"lora_ids", lora_ids},
                                  {"lora_input_lengths", lora_input_lengths}});

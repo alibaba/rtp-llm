@@ -115,6 +115,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
     list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
+        // TODO(xinfei.sxf) set detail stop reason to stream
         if (evaluateNewStream(new_streams, *it)) {
             FT_LOG_DEBUG("stream [%ld %p] add to new queue", (*it)->streamId(), (*it).get());
             // if setRunning fails, it must be in stopped state, evict it in next iteration

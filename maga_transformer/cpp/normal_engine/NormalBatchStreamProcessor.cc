@@ -56,9 +56,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {1}, ft::AllocationType::HOST}, {});
     *model_input.max_prefix_length->data<int32_t>() = 0;
     if (has_positional_encoding_) {
-        auto total_len = decode_streams.size() + stream_groups.cumContextSeqLen();
         model_input.combo_position_ids =
-            device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_len}, ft::AllocationType::HOST}, {});
+            device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
     }
 
     int*      merged_tokens    = (int*)model_input.combo_tokens->data();
@@ -112,11 +111,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     int token_idx = batch_idx;
     int cum_output_seq_len = batch_idx;
-    int position_idx = batch_idx;
     for (const auto& stream : context_streams) {
         auto input_tokens    = stream->currentExecuteTokens();
         memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
-        token_idx += input_tokens.size();
         cum_output_seq_len += stream->contextLength();
         input_lengths[batch_idx]  = stream->contextLength();
         prefix_lengths[batch_idx] = stream->reuseLength();
@@ -124,9 +121,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         if (has_positional_encoding_) {
             // TODO(xinfei.sxf) optimize this, reduce cost
             for (uint32_t i = stream->reuseLength(); i < stream->reuseLength() + stream->contextLength(); i++) {
-                combo_position_ids[position_idx + i] = i;
+                combo_position_ids[token_idx + i] = i;
             }
-            position_idx += stream->contextLength();
         }
         lora_ids[batch_idx]           = stream->loraId();
         lora_input_lengths[batch_idx] = input_lengths[batch_idx];
@@ -150,6 +146,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                           batch_idx);
         }
         batch_idx += 1;
+        token_idx += input_tokens.size();
     }
     return model_input;
 }
