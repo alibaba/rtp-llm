@@ -35,8 +35,6 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         vit_config = config_dict["vision_config"]
         config.vit_related_params.config.update(vit_config)
         config.build_position_ids = True
-        # use torch to calculate attention in eva2clip
-        config.vit_related_params.config["enable_xformer"] = False
         # use initial hidden size for linear_proj and conv layer in eva2clip
         config.vit_related_params.config['use_vision_hidden_size'] = False
         config.vit_related_params.config["boi_token_id"] = config_dict.get("boi_token_id", 0)

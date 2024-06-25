@@ -1,15 +1,13 @@
 import math
 from argparse import Namespace
-from typing import Any, List
+from typing import Any, List, Union
 
 import torch
-import torch.nn.functional as F
-import xformers.ops as xops
 from torch import nn
-from torchvision import transforms
 from transformers.activations import ACT2FN
 
 from maga_transformer.models.multimodal_mixin import ImageEmbeddingInterface
+from maga_transformer.models.vit.vit_common import ImageTransform
 
 class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config):
@@ -18,66 +16,14 @@ class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
         torch.set_default_dtype(torch.half)
         self.vit = EVA2CLIPModel(config)
         torch.set_default_dtype(torch_default_dtype)
-    
-        image_size = config.vit_related_params.config["image_size"]
-        self.image_transform = transforms.Compose(
-            [
-                transforms.Resize(
-                    (image_size, image_size),
-                    interpolation=transforms.InterpolationMode.BICUBIC,
-                ),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    (0.48145466, 0.4578275, 0.40821073),
-                    (0.26862954, 0.26130258, 0.27577711),
-                ),
-            ]
-        )
+        self.image_transform = ImageTransform(config.vit_related_params.config["image_size"])
 
-    def image_embedding(self, images: List[Any], device) -> torch.Tensor:
+    def image_embedding(self, images: List[Any], device: Union[str, torch.device]) -> torch.Tensor:
         with torch.inference_mode():
-            tensor_images = torch.stack(
-                [self.image_transform(image) for image in images], dim=0
-            ).to(device=self.vit.device, dtype=self.vit.dtype)
+            tensor_images = self.image_transform.encode(images, device, self.vit.dtype)
             tensor_images = self.vit(tensor_images).to(device=device)
         assert tensor_images.shape[0] == len(images)
         return tensor_images
-
-
-def standard_attention(
-    query_layer, key_layer, value_layer, scaling_attention_score=True
-):
-    if scaling_attention_score:
-        query_layer = query_layer / math.sqrt(query_layer.shape[-1])
-    attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-
-    attention_probs = F.softmax(attention_scores, dim=-1)
-
-    context_layer = torch.matmul(attention_probs, value_layer)
-    return context_layer
-
-
-def attention_fn_default(
-    query_layer, key_layer, value_layer, scaling_attention_score=True
-):
-    if int(torch.__version__.split(".")[0]) >= 2 and scaling_attention_score:
-        # Pytorch 2.0 attention uses very much memory if attention_mask is float, and has NaN bug if attention_mask is None.
-        attn_output = torch.nn.functional.scaled_dot_product_attention(
-            query_layer,
-            key_layer,
-            value_layer,
-            attn_mask=None,
-            dropout_p=0.0,
-            is_causal=False,
-        )
-        return attn_output
-    else:
-        return standard_attention(
-            query_layer,
-            key_layer,
-            value_layer,
-            scaling_attention_score=scaling_attention_score,
-        )
 
 
 class PatchEmbedding(nn.Module):
@@ -105,45 +51,20 @@ class Attention(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.num_heads = config.num_heads
-        head_dim = config.hidden_size // config.num_heads
-        self.scale = head_dim**-0.5
         self.query_key_value = nn.Linear(config.hidden_size, config.hidden_size * 3)
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
-        self.enable_xformer = config.enable_xformer
 
     def forward(self, x: "tensor(B, L, D)") -> "tensor(B, L, D)":
         B, L, _ = x.shape
         qkv = self.query_key_value(x)
-        if self.enable_xformer:
-            qkv = qkv.reshape(B, L, 3, self.num_heads, -1).permute(
-                2, 0, 1, 3, 4
-            )  # 3, B, L, H, D
-            q, k, v = qkv[0], qkv[1], qkv[2]
-
-            out = xops.memory_efficient_attention(
-                q,
-                k,
-                v,
-                scale=self.scale,
-            )
-            output = self.dense(out.view(B, L, -1))
-        else:
-            qkv = qkv.reshape(B, L, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)  # 3, B, H, L, D
-            q, k, v = qkv[0], qkv[1], qkv[2]
-            
-            out = attention_fn_default(
-                q, k, v
-            )
-            output = self.dense(out.transpose(1, 2).reshape(B, L, -1))
-
-        output = self.output_dropout(output)
-        return output
-
-    def attention(self, q, k, v):
-        attn_weights = torch.matmul(q * self.scale, k.transpose(-2, -1))
+        qkv = qkv.reshape(B, L, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)  # 3, B, H, L, D
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn_weights = torch.matmul(q / math.sqrt(q.shape[-1]), k.transpose(-1, -2))
         attn_weights = attn_weights.softmax(dim=-1)
-        output = torch.matmul(attn_weights, v)
+        attn_out = torch.matmul(attn_weights, v)
+        output = self.dense(attn_out.transpose(1, 2).reshape(B, L, -1))
+        output = self.output_dropout(output)
         return output
 
 

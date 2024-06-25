@@ -1,7 +1,7 @@
 import json
 import os
 from functools import partial
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -96,8 +96,6 @@ class CogVLM2(Llama, MultiModalMixin):
 
         vit_config = config_json["vision_config"]
         config.vit_related_params.config.update(vit_config)
-        # use xformer to calculate attention in eva2clip
-        config.vit_related_params.config['enable_xformer'] = True
         # use vision hidden size for linear_proj and conv layer in eva2clip
         config.vit_related_params.config['use_vision_hidden_size'] = True
         config.special_tokens.bos_token_id = config_json["bos_token_id"]

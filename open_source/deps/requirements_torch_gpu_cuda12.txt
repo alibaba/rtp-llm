@@ -1,5 +1,4 @@
 https://download.pytorch.org/whl/cu121/torch-2.1.0%2Bcu121-cp310-cp310-linux_x86_64.whl#sha256=0d4e8c52a1fcf5ed6cfc256d9a370fcf4360958fc79d0b08a51d55e70914df46
-https://download.pytorch.org/whl/cu121/xformers-0.0.22.post4-cp310-cp310-manylinux2014_x86_64.whl#sha256=7075114dbf698b609b599f0d35032c0b2f9a389751e8bbf4dd3c628376b0dd9c
 torchvision==0.16.0
 tensorrt==8.6.1
 -r requirements_base.txt
