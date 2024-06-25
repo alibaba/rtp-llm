@@ -185,7 +185,7 @@ class GangServer:
         logging.info(f'gang worker {g_parallel_info} exchange done')
         # init_process_group会去检查gpu num > 0, 所以测试环境不希望init_process_group
         
-        init_process_timeout = int(os.environ.get('DIST_BARRIER_TIMEOUT', 30))
+        init_process_timeout = int(os.environ.get('DIST_BARRIER_TIMEOUT', 45))
         # 使用ProcessGroupNCCL自带的health check进行一次同步+nccl检测
         if os.environ.get('FAKE_GANG_ENV', None) == None:            
             os.environ['ENABLE_NCCL_HEALTH_CHECK'] = '1'
