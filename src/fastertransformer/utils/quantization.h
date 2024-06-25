@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "stdlib.h"
 #include <cstdint>
 
@@ -25,6 +26,12 @@ namespace common {
 class QuantAlgo{
 public:
     QuantAlgo() = default;
+    QuantAlgo(fastertransformer::QuantAlgo const& quant_algo)
+        : weight_bits_(quant_algo.getWeightBits())
+        , group_size_(quant_algo.getGroupSize())
+        , weight_only_(quant_algo.isWeightOnlyPerCol() || quant_algo.isGptq() || quant_algo.isAwq())
+        , sq_int8_(quant_algo.isSmoothQuant() || quant_algo.isOmniQuant())
+    {}
     QuantAlgo(int weight_bits, int64_t group_size, bool weight_only, bool sq_int8)
         : weight_bits_(weight_bits)
         , group_size_(group_size)

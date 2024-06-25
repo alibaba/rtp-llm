@@ -15,11 +15,9 @@ struct FFNDispatch {
     static FFNType dispatch(const FfnLayerParams& params) {
         if (params.weights.moe_gating_weight != nullptr) {
             return Moe;
-        }
-        else if (isGatedActivation(params.activation_type)) {
+        } else if (isGatedActivation(params.activation_type)) {
             return Gate;
-        }
-        else {
+        } else {
             return NoGate;
         }
     }

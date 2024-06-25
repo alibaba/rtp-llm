@@ -95,7 +95,7 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
         torch_ext::loadWeights<T>(pipeline_para_.world_size_,
                                   pipeline_para_.rank_,
                                   gpt_init_parameter.num_layers_,
-                                  gpt_init_parameter.quant_algo_.toQuantAlgo(),
+                                  tensorrt_llm::common::QuantAlgo(gpt_init_parameter.quant_algo_),
                                   layer_weights_,
                                   &gpt_lora_layer_weights_);
     global_weights_.reset(new GptGlobalWeights<T>(global_weights));
@@ -361,7 +361,7 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
 
     parallel_gpt_decoder_->forward(&output_tensors, &input_tensors, &gpt_layer_weights_);
     sync_check_cuda_error();
-    
+
     // last hidden states
     cudaMemcpyAsync(reinterpret_cast<T*>(last_hidden_states.getPtr<T>()),
                     reinterpret_cast<T*>(all_hidden_states.getPtr<T>()),

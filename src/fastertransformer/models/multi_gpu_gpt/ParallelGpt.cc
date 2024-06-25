@@ -12,7 +12,7 @@ void ParallelGpt<T>::initialize()
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     // 默认stdout输出到文件的逻辑是全缓冲，导致ft_log和autil_log日志刷不出来，手动设置为行缓冲
     setlinebuf(stdout);
-    quant_algo_                 = params_.quant_algo_.toQuantAlgo();
+    quant_algo_                 = tensorrt_llm::common::QuantAlgo(params_.quant_algo_);
     parallel_attention_wrapper_ = new ParallelAttentionWrapper<T>(params_,
                                                                   tensor_para_,
                                                                   stream_,
@@ -656,11 +656,11 @@ void ParallelGpt<T>::forward(TensorMap*                                         
         if (use_expert_attention) {
             expert_attention_util = std::make_unique<ExpertAttentionUtil<T>>(&stream_, allocator_, input_tensors->at("token_type_ids").getPtr<int32_t>(), h_token_num, ffn_input_ptr, ffn_output_ptr);
         }
-        Ffnforward(expert_attention_util, ffn_input_ptr, ffn_output_ptr, h_token_num, activation_in_type,  
+        Ffnforward(expert_attention_util, ffn_input_ptr, ffn_output_ptr, h_token_num, activation_in_type,
             hidden_units, input_tensors, l, total_batch_size, lora_input_lengths, activation_out_type, ffn_batch_size_lora, layer_weight, use_moe, false);
 
         if (use_expert_attention && expert_attention_util->vision_token_length() > 0) {
-            Ffnforward(expert_attention_util, ffn_input_ptr, ffn_output_ptr, h_token_num, activation_in_type, hidden_units, input_tensors, 
+            Ffnforward(expert_attention_util, ffn_input_ptr, ffn_output_ptr, h_token_num, activation_in_type, hidden_units, input_tensors,
             l, total_batch_size, lora_input_lengths, activation_out_type, ffn_batch_size_lora, layer_weight, use_moe, true);
             expert_attention_util->reorganize();
         }
@@ -716,9 +716,9 @@ void ParallelGpt<T>::forward(TensorMap*                                         
 }
 
 template<typename T>
-void ParallelGpt<T>::Ffnforward(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util, 
-        T* ffn_input_ptr, T* ffn_output_ptr, const size_t h_token_num, const DataType activation_in_type, const size_t hidden_units, 
-        const TensorMap* input_tensors, uint l, const size_t total_batch_size, const int* lora_input_lengths, const DataType activation_out_type, 
+void ParallelGpt<T>::Ffnforward(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util,
+        T* ffn_input_ptr, T* ffn_output_ptr, const size_t h_token_num, const DataType activation_in_type, const size_t hidden_units,
+        const TensorMap* input_tensors, uint l, const size_t total_batch_size, const int* lora_input_lengths, const DataType activation_out_type,
         const int ffn_batch_size_lora, ParallelGptDecoderLayerWeight<T>* layer_weight, const bool use_moe, const bool vision) {
     size_t token_length = h_token_num;
     bool use_moe_instead_ffn = params_.moe_style_ == 1;
@@ -767,7 +767,7 @@ void ParallelGpt<T>::Ffnforward(std::unique_ptr<ExpertAttentionUtil<T>>& expert_
 
     ffn_layer_->forward(&ffn_output_tensors,
         &ffn_input_tensors,
-        use_moe_instead_ffn ? &layer_weight->partial_moe_weights: 
+        use_moe_instead_ffn ? &layer_weight->partial_moe_weights:
             vision ? &layer_weight->vision_ffn_weights: &layer_weight->ffn_weights,
         use_moe_instead_ffn);
 

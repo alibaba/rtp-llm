@@ -93,13 +93,13 @@ cc_library(
     name = "memory_utils",
     srcs = [
         "memory_utils.cu",
-
     ],
     hdrs = [
         "memory_utils.h",
 
     ],
     deps = [
+        "//:gpt_init_params_hdr",
         "//src/fastertransformer/cutlass:cutlass_interface",
         ":cuda_utils",
         "//src/fastertransformer/utils:utils",

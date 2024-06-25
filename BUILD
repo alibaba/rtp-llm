@@ -46,6 +46,9 @@ cc_library(
     srcs = [
         "src/fastertransformer/th_op/GptInitParameter.cc"
     ],
+    hdrs = [
+        "src/fastertransformer/th_op/GptInitParameterRegister.h",
+    ],
     deps = [
         ":gpt_init_params_hdr",
         "//src/fastertransformer/utils:py_utils",
@@ -70,7 +73,7 @@ filegroup(
     srcs = glob([
         "src/fastertransformer/th_op/**/*.h"],
     exclude=[
-        "src/fastertransformer/th_op/GptInitParameter.h"
+        "src/fastertransformer/th_op/GptInitParameter.h",
     ]),
 )
 

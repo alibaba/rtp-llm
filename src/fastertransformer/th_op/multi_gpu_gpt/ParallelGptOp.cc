@@ -21,7 +21,7 @@ FtGpt<T>::FtGpt(const ft::GptInitParameter&   gpt_init_parameter,
     cublas_wrapper_mutex_ = new std::mutex();
 
     ft::ftNcclInitialize(tensor_para_, pipeline_para_, tensor_para_size, pipeline_para_size, master_ip, master_port);
-    
+
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
     (void)rtp_llm::initKmonitorFactory();
@@ -42,10 +42,10 @@ FtGpt<T>::FtGpt(const ft::GptInitParameter&   gpt_init_parameter,
     gpt_layer_weights_ = loadWeights<T>(pipeline_para_.world_size_,
                                         pipeline_para_.rank_,
                                         gpt_init_parameter_.num_layers_,
-                                        gpt_init_parameter_.quant_algo_.toQuantAlgo(),
+                                        tensorrt_llm::common::QuantAlgo(gpt_init_parameter.quant_algo_),
                                         weights,
                                         &gpt_lora_layer_weights_);
-    
+
     auto stream        = at::cuda::getCurrentCUDAStream().stream();
     auto cublas_handle = at::cuda::getCurrentCUDABlasHandle();
     cublasSetStream(cublas_handle, stream);
@@ -134,11 +134,11 @@ void FtGpt<T>::forward(th::Tensor&              decoder_output,
     if (linear_bias_slopes.has_value()) {
         input_tensors.insert("linear_bias_slopes", convert_tensor<T>(linear_bias_slopes.value()));
     }
-    if (count_prefix_length.has_value()) {        
+    if (count_prefix_length.has_value()) {
         input_tensors.insert("count_prefix_length", convert_tensor<bool>(count_prefix_length.value()));
     }
 
-    if (prefix_prompt_lengths.has_value()) {        
+    if (prefix_prompt_lengths.has_value()) {
         input_tensors.insert("d_prefix_prompt_lengths", convert_tensor<int>(prefix_prompt_lengths.value()));
     }
 

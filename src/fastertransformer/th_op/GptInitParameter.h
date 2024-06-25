@@ -2,8 +2,6 @@
 
 #include "src/fastertransformer/utils/layernorm_types.h"
 #include "src/fastertransformer/utils/activation_types.h"
-#include "src/fastertransformer/utils/quantization.h"
-#include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 
 #include <vector>
 #include <map>
@@ -33,11 +31,6 @@ public:
         , weight_bits_(bits)
         , group_size_(group_size)
     {}
-    tensorrt_llm::common::QuantAlgo toQuantAlgo() const {
-        return tensorrt_llm::common::QuantAlgo(weight_bits_, group_size_,
-                                               isWeightOnlyPerCol() || isGptq() || isAwq(),
-                                               isSmoothQuant() || isOmniQuant());
-    }
     bool isWeightOnlyPerCol() const {
         return quant_method_ == WeightOnlyPerCol;
     }
@@ -135,7 +128,6 @@ public:
     bool use_norm_input_residual_    = false;
     bool use_norm_attn_out_residual_ = false;
 
-    std::string weights_data_type_ = "fp16";
     std::string data_type_         = "fp16";
 
     int64_t              max_seq_len_                = 0;
@@ -210,7 +202,5 @@ public:
     void setActivationType();
     bool isGatedActivation();
 };
-
-void registerGptInitParameter(py::module m);
 
 }

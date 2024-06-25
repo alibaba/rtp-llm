@@ -3,7 +3,6 @@
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 namespace rtp_llm {
 template<typename T>

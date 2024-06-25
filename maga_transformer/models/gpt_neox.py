@@ -48,7 +48,6 @@ class GPTNeox(GPT):
         config.size_per_head = config_json['hidden_size'] // config_json['num_attention_heads']
         config.layer_num = config_json['num_hidden_layers']
         config.vocab_size = config_json['vocab_size']
-        config.weights_data_type = config_json['torch_dtype']
         config.layernorm_eps = config_json['layer_norm_eps']
         config.inter_size = config_json['intermediate_size']
         config.inter_padding_size = config.inter_size
@@ -65,7 +64,7 @@ class GPTNeox(GPT):
         config.norm_type = 'layernorm'
         config.use_norm_input_residual = True
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
-        
+
         return config
 
 class GPTNeox13B(GPTNeox):
@@ -109,7 +108,6 @@ class GPTNeox13B(GPTNeox):
         config.size_per_head = config_json['hidden_size'] // config_json['num_attention_heads']
         config.layer_num = config_json['num_hidden_layers']
         config.vocab_size = config_json['vocab_size']
-        config.weights_data_type = config_json['torch_dtype']
         config.layernorm_eps = config_json['layer_norm_eps']
         config.inter_size = config_json['intermediate_size']
         config.inter_padding_size = config.inter_size
@@ -117,7 +115,7 @@ class GPTNeox13B(GPTNeox):
         config.special_tokens.eos_token_id = config_json['eos_token_id']
         if config_json.get('rope_scaling', None):
             if config_json['rope_scaling']['type'] == 'dynamic':
-                config.rotary_embedding_scale = config_json['rope_scaling']['factor'] 
+                config.rotary_embedding_scale = config_json['rope_scaling']['factor']
                 config.dynamic_embedding_max_pos = config_json.get('max_position_embeddings', 2048)
         return config
 

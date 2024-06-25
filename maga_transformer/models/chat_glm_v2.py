@@ -40,7 +40,6 @@ class ChatGlmV2(GPT):
         config.layer_num = config_json['num_layers']
         config.max_seq_len = config_json.get('seq_length', 8192)
         config.vocab_size = config_json['padded_vocab_size']
-        config.weights_data_type = config_json['torch_dtype']
         config.layernorm_eps = config_json['layernorm_epsilon']
         config.inter_size = config_json['ffn_hidden_size']
         config.add_bias_linear = config_json['add_bias_linear']
@@ -56,16 +55,16 @@ class ChatGlmV2(GPT):
         config = cls.get_rotary_embedding_scale(config, config_json)
         cls.update_stop_words(config, config_json)
         return config
-    
+
     @classmethod
     def update_stop_words(cls, config: GptInitModelParameters, config_json: Dict[str, Any]):
         config.special_tokens.eos_token_id = config_json.get('eos_token_id', 2)
-    
+
     @staticmethod
-    def get_rotary_embedding_scale(config, config_json):   
+    def get_rotary_embedding_scale(config, config_json):
         config.rotary_embedding_scale = config_json.get("rope_ratio", 1)
         return config
-    
+
     @staticmethod
     def default_config():
         config = GptInitModelParameters(head_num=32,
@@ -87,7 +86,7 @@ class ChatGlmV2(GPT):
         config.norm_type = "rmsnorm"
         config.rotary_embedding_dim = 128
         config.rotary_embedding_style = 3
-        
+
         return config
 
     @classmethod

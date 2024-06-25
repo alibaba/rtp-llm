@@ -1,4 +1,5 @@
 #include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "src/fastertransformer/th_op/GptInitParameterRegister.h"
 
 namespace fastertransformer {
 
@@ -94,7 +95,7 @@ void registerGptInitParameter(py::module m) {
 
 #undef DEF_PROPERTY
 #undef REGISTER_PROPERTYS
-  
+
 #define DEF_PROPERTY(name) .def_readwrite(#name, &RoleSpecialTokens::name##_)
 
 #define REGISTER_PROPERTYS                      \
@@ -175,7 +176,6 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(input_embedding_scalar, input_embedding_scalar_)       \
     DEF_PROPERTY(use_norm_input_residual, use_norm_input_residual_)     \
     DEF_PROPERTY(use_norm_attn_out_residual, use_norm_attn_out_residual_) \
-    DEF_PROPERTY(weights_data_type, weights_data_type_)                 \
     DEF_PROPERTY(data_type, data_type_)                                 \
     DEF_PROPERTY(has_positional_encoding, has_positional_encoding_)     \
     DEF_PROPERTY(has_pre_decoder_layernorm, has_pre_decoder_layernorm_) \

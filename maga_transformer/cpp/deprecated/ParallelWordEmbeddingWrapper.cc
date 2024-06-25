@@ -5,7 +5,6 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
 
 namespace ft = fastertransformer;
-namespace th = torch;
 namespace rtp_llm {
 
 template<typename T>
