@@ -26,7 +26,9 @@ class LruDict(object):
         return self._dict.pop(key)
 
     def poplast(self) -> Tuple[Any, Any]:
-        return self._dict.popitem()
+        k, v = self._dict.peek_last_item()
+        self._dict.pop(k)
+        return k, v
     
     def len(self):
         return len(self._dict)

@@ -301,11 +301,11 @@ class BlockCache(object):
             return []
         
         cache_key = self.hash_key(token_list)
-        cache_item: CacheItem = CacheItem(token_list, block_indice, cache_key, is_resident) 
         # if cache has this key, reject put to protect resident item
         if cache_key in self.cache:
             return block_indice
-            
+
+        cache_item: CacheItem = CacheItem(token_list, block_indice, cache_key, is_resident)
         self.cache[cache_key] = cache_item
         return []
     
