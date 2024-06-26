@@ -71,5 +71,8 @@ void ModelRpcServiceImpl::removeLoRA(const int64_t lora_id) {
     (void)engine_->removeLoRA(lora_id);
 }
 
+KVCacheInfo ModelRpcServiceImpl::getKVCacheInfo() const {
+    return engine_->getKVCacheInfo();
+}
 
 }  // namespace rtp_llm

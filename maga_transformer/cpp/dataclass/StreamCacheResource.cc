@@ -46,7 +46,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 }
 
 bool StreamCacheResource::initKVBlock() {
-    auto             block_num = needKVCacheBlockNums();
+    auto             block_num = singleBatchNeedBlocks(stream_->inputLength() / seqSizePerBlock() * seqSizePerBlock());
     KVCacheBlockAddr kv_cache_block_addr;
     int              reuse_length;
     bool             success;
@@ -69,25 +69,15 @@ bool StreamCacheResource::initKVBlock() {
         setKVCache(batch_block);
         stream_->setReuseLength(reuse_length);
     }
-    return success;
+    return success && incrKVBlock();
 }
 
-int StreamCacheResource::singleBatchNeedBlocks() const {
-    return std::max((stream_->seqLength() + seqSizePerBlock() - 1) / seqSizePerBlock() - maxBlockSize(), 0);
-}
-
-int StreamCacheResource::needKVCacheBlockNums() const {
-    int block_batch = 1;
-    if (stream_->isContextStream()) {
-        block_batch = 1;
-    } else {
-        block_batch = stream_->tileNum();
-    }
-    return singleBatchNeedBlocks() * block_batch;
+int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
+    return std::max((seq_len + seqSizePerBlock() - 1) / seqSizePerBlock() - maxBlockSize(), 0);
 }
 
 bool StreamCacheResource::incrKVBlock() {
-    auto blocks_num = singleBatchNeedBlocks();
+    auto blocks_num = singleBatchNeedBlocks(stream_->seqLength());
     if (blocks_num <= 0) {
         return true;
     }

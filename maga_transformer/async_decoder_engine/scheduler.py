@@ -1,16 +1,11 @@
-import os
 import logging
-from collections import deque
-from typing import Any, List, Optional, Union, Dict
+from typing import Any, List, Dict
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.batch_query import BatchQuery
-from maga_transformer.async_decoder_engine.schedule_strategy import PerfTestScheduleStrategy, create_schedule_strategy
+from maga_transformer.async_decoder_engine.schedule_strategy import BasicScheduleStrategy
 from maga_transformer.async_decoder_engine.stream_cache_manager import StreamCacheManager
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
-from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
-from maga_transformer.metrics import kmonitor, AccMetrics
 from maga_transformer.utils.thread_safe_deque import ThreadSafeDeque
 
 class Scheduler:
@@ -25,11 +20,7 @@ class Scheduler:
 
         self.batch_query = BatchQuery(gen_num_per_circle, nccl_op, config.use_expert_attention)
         self._waiting_streams: ThreadSafeDeque = ThreadSafeDeque()
-        self._schedule_strategy = create_schedule_strategy(config, stream_cache_manager)
-
-    # just for perf test
-    def enable_perf_test_schedule_strategy(self):
-        self._schedule_strategy = PerfTestScheduleStrategy(None, self._stream_cache_manager)
+        self._schedule_strategy = BasicScheduleStrategy(config, stream_cache_manager)
 
     def create_config_json(self) -> Dict[str, Any]:
         config_json = {
@@ -102,3 +93,6 @@ class Scheduler:
 
     def have_streams(self):
         return self.wait_stream_size() > 0 or len(self.batch_query.streams) > 0
+
+    def get_kv_cache_info(self):
+        return self._stream_cache_manager.get_kv_cache_info()

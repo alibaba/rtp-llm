@@ -19,8 +19,8 @@ public:
             if (stream->isContextStream()) {
                 context_streams_.push_back(stream);
                 model_execute_token_size_ += stream->currentExecuteTokenSize();
-                total_model_batch_size_ += 1;
-                total_sampler_batch_size_ += stream->batchSize();
+                total_context_batch_size_ += stream->batchSize();
+                total_sampler_batch_size_ += stream->tileNum();
                 max_block_size_ = std::max(max_block_size_, stream->maxBlockSize());
                 max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
                 max_context_seq_len_ = std::max(max_context_seq_len_, (size_t)stream->contextLength());
@@ -29,8 +29,7 @@ public:
             } else {
                 decode_streams_.push_back(stream);
                 model_execute_token_size_ += stream->currentExecuteTokenSize();
-                total_model_batch_size_ += stream->batchSize();
-                total_sampler_batch_size_ += stream->batchSize();
+                total_sampler_batch_size_ += stream->tileNum();
                 total_decode_batch_size_  += stream->batchSize(); 
                 max_block_size_ = std::max(max_block_size_, stream->maxBlockSize());
                 max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
@@ -41,8 +40,11 @@ public:
     size_t totalDecodeBatchSize() const {
         return total_decode_batch_size_;
     }
+    size_t totalContextBatchSize() const {
+        return total_context_batch_size_;
+    }
     size_t totalModelBatchSize() const {
-        return total_model_batch_size_;
+        return total_decode_batch_size_ + total_context_batch_size_;
     }
     size_t totalSamplerBatchSize() const {
         return total_sampler_batch_size_;
@@ -99,7 +101,9 @@ public:
         debug_string << "StreamGroups { "
                      << "context_stream_ids: " << context_stream_ids.str()
                      << ", decode_stream_ids: " << decode_stream_ids.str()
-                     << ", total_model_batch_size: " << total_model_batch_size_
+                     << ", total_decode_batch_size: " << total_decode_batch_size_
+                     << ", total_context_batch_size: " << total_context_batch_size_
+                     << ", total_model_batch_size: " << totalModelBatchSize()
                      << ", total_sampler_batch_size: " << total_sampler_batch_size_
                      << ", max_block_size: " << max_block_size_
                      << ", model_execute_token_size: " << model_execute_token_size_ << ", max_seq_len: " << max_seq_len_
@@ -110,9 +114,9 @@ public:
 private:
     std::list<GenerateStreamPtr> context_streams_;
     std::list<GenerateStreamPtr> decode_streams_;
-    size_t                       total_model_batch_size_   = 0;
     size_t                       total_sampler_batch_size_ = 0;
     size_t                       total_decode_batch_size_  = 0;
+    size_t                       total_context_batch_size_ = 0;
     size_t                       max_block_size_           = 0;
     size_t                       model_execute_token_size_ = 0;
     size_t                       max_seq_len_              = 0;

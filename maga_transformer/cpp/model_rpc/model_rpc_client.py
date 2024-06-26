@@ -1,6 +1,6 @@
 
 import sys
-from typing import Any, Optional
+from typing import Any, Optional, AsyncGenerator
 import asyncio
 import numpy as np
 import functools
@@ -18,7 +18,7 @@ from maga_transformer.cpp.proto.model_rpc_service_pb2 import AuxInfoPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputPB, GenerateOutputsPB
 from maga_transformer.distribute.worker_info import g_master_info
 from maga_transformer.utils.model_weight import LoraResource, LoraResourceHolder
-
+from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 request_counter = AtomicCounter()
 
 def trans_option(pb_object, py_object, name):
@@ -80,7 +80,7 @@ def trans_tensor(t: TensorPB):
         raise Exception("unkown error type")
     
 
-def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB):
+def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> GenerateOutputs:
     logging.debug("outputs_pb = ", outputs_pb)
     outputs_py = GenerateOutputs()
     for output_pb in outputs_pb.generate_outputs:
@@ -117,13 +117,17 @@ class ModelRpcClient(object):
             address = f'localhost:{g_master_info.model_rpc_port}'
         self._address = address
 
-    async def enqueue(self, input: GenerateInput) -> GenerateOutput:
+    def check_input(self, input: GenerateInput):
+        if input.generate_config.num_beams > 1:
+            raise FtRuntimeException(ExceptionType.ERROR_GENERATE_CONFIG_FORMAT, "rpc model not support beam search now")
+
+    async def enqueue(self, input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
+        self.check_input(input)
         lora_resource_holder = None
         if input.generate_config.adapter_name is not None:
             lora_resource_holder = LoraResourceHolder(self._lora_resource, input.generate_config.adapter_name)
             input.lora_id = lora_resource_holder.lora_id
         input_pb = trans_input(input)
-        
         response_iterator = None
         try:
             async with grpc.aio.insecure_channel(self._address) as channel:
@@ -139,18 +143,11 @@ class ModelRpcClient(object):
             if response_iterator:
                 response_iterator.cancel()
             logging.warning(f"request: [{input_pb.request_id}] RPC failed: {e.code()}, {e.details()}")
+            raise FtRuntimeException(ExceptionType.MALLOC_ERROR if e.details() == 'INTERNAL: LACK MEM' else ExceptionType.UNKNOWN_ERROR, e.details())
+        except Exception as e:
             raise e
         finally:
             if response_iterator:
                 response_iterator.cancel()
             if lora_resource_holder is not None:
-                self.lora_resource_holder.release()
-
-    def stop(self):
-        self.rtp_llm_op.stop()
-
-
-if __name__ == '__main__':
-    client = ModelRpcClient()
-    input = GenerateInput()
-    asyncio.run(client.generate_stream(input))
+                lora_resource_holder.release()

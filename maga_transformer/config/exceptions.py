@@ -12,6 +12,8 @@ class ExceptionType(IntEnum):
     UNSUPPORTED_OPERATION = 515
     ERROR_GENERATE_CONFIG_FORMAT = 516
     UPDATE_ERROR = 601
+    MALLOC_ERROR = 602
+    TIMEOUT_ERROR = 603
     
 
 class FtRuntimeException(Exception):

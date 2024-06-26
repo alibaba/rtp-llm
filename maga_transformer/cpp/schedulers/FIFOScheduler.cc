@@ -108,7 +108,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
     for (auto& stream : streams) {
         total_token_size += stream->contextLength();
     }
-    return evaluateKVCacheMemory(new_stream->needKVCacheBlockNums() + reserve_block_num_)
+    return evaluateKVCacheMemory(new_stream->nextNeedBlockNums() + reserve_block_num_)
            && evaluateRunningMemory(total_token_size) && new_stream->initKVBlock();
 }
 
@@ -126,7 +126,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
         } else if (running_streams_.empty() && new_streams.empty()) {
             // It is impossible for this stream to acquire enough resources
             FT_LOG_DEBUG("stream [%ld] can not add to new queue", (*it)->streamId());
-            (*it)->setStop("can not be add input queue");
+            (*it)->setStop("LACK MEM");
             it++;
         } else {
             // try to join new streams in the next schedule cycle

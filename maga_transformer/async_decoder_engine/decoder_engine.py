@@ -5,10 +5,11 @@ import time
 import threading
 import traceback
 import asyncio
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Dict
+from typing_extensions import override
 from maga_transformer.utils.util import get_mem_info, AtomicCounter
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.base_model import GenerateInput, GenerateOutput
+from maga_transformer.models.base_model import GenerateInput, GenerateOutputs
 from maga_transformer.async_decoder_engine.scheduler import Scheduler
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -17,8 +18,9 @@ from maga_transformer.utils.time_util import Timer
 from maga_transformer.async_decoder_engine.normal_model_executor import ExecutorBase
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
 from maga_transformer.utils.model_weight import LoraResourceHolder
+from maga_transformer.async_decoder_engine.base_engine import BaseEngine, KVCacheInfo
 
-class DecoderEngine:
+class DecoderEngine(BaseEngine):
     def __init__(self, executor: ExecutorBase, scheduler: Scheduler, config: GptInitModelParameters) -> None:
         self.executor_ = executor
         self.scheduler_ = scheduler
@@ -26,24 +28,27 @@ class DecoderEngine:
         self.wait_decode_counter_ = AtomicCounter()
         logging.info(f'last mem info:{get_mem_info().used} {get_mem_info().free}')
 
+    @override
     def start(self):
         self.need_stop_ = False
         self.thread = threading.Thread(target=self.run_engine, daemon=True)
         self.thread.start()
 
+    @override
     def stop(self):
         logging.info("decoder engine begin stop")
         self.need_stop_ = True
         self.thread.join()
         logging.info("decoder engine stop done")
 
-    def decode(self, input: GenerateInput) -> AsyncGenerator[GenerateOutput, None]:
-        stream = self.create_stream(input)        
+    @override
+    def decode(self, input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
+        stream = self.create_stream(input)
         # 保证性能测试时能凑批到一起，都用一个起始 counter
         init_counter = self.wait_decode_counter_.get()
         return self._generator_loop_wrap(stream, init_counter)
 
-    async def _generator_loop_wrap(self, stream: GenerateStream, init_counter: int):
+    async def _generator_loop_wrap(self, stream: GenerateStream, init_counter: int) -> AsyncGenerator[GenerateOutputs, None]:
         try:
             async for output in self._generate_loop(stream, init_counter):
                 yield output
@@ -52,21 +57,21 @@ class DecoderEngine:
             error_msg = f"request_id = {stream._stream_id}, exception type = {type(e)}, exception str {str(e)}"
             logging.info(error_msg)
             # Note: can't release resources here
-            stream.set_stop(error_msg)
+            stream.set_stop(error_msg, e)
             raise e
 
-    async def _generate_loop(self, stream: GenerateStream, init_counter: int):
+    async def _generate_loop(self, stream: GenerateStream, init_counter: int) -> AsyncGenerator[GenerateOutputs, None]:
         counter = init_counter
         while True:
             while True:
                 new_counter = self.wait_decode_counter_.get()
                 if stream.stopped:
-                    raise Exception(stream.stop_reason)
+                    raise stream.exception
                 if new_counter != counter:
                     counter = new_counter
                     break
                 await asyncio.sleep(0.001)
-                
+
             output = stream.output
             yield output
             if output.generate_outputs[0].finished:
@@ -78,7 +83,7 @@ class DecoderEngine:
         kmonitor.report(GaugeMetrics.ASYNC_WAIT_QUERY_SIZE_METRIC,
                         self.scheduler_.wait_stream_size())
         kmonitor.report(GaugeMetrics.ASYNC_ITERATE_LANTENCY, cost_ms)
-    
+
     # public for ptuning
     def create_stream(self, input: GenerateInput) -> GenerateStream:
         if input.prompt_length <= 0:
@@ -119,7 +124,7 @@ class DecoderEngine:
                 self.executor_.process(batch_query)
 
                 torch.cuda.nvtx.range_push('update')
-                if g_parallel_info.tp_rank == 0:                    
+                if g_parallel_info.tp_rank == 0:
                     self.scheduler_.prepare_next_step()
                 torch.cuda.nvtx.range_pop()
 
@@ -143,3 +148,14 @@ class DecoderEngine:
         while not self.need_stop_:
             self.step()
         logging.info("need stop flag is true, exit run_engine")
+
+    @override
+    def update_lora(self, lora_infos: Dict[str, str]) -> None:
+        with Timer() as timer:
+            self.executor_.model_ops.gpt_op.weight.lora_resource.update(lora_infos)
+        logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
+
+    @override
+    def get_kv_cache_info(self) -> KVCacheInfo:
+        available_kv_cache, total_kv_cache = self.scheduler_.get_kv_cache_info()
+        return KVCacheInfo(available_kv_cache=available_kv_cache, total_kv_cache=total_kv_cache)

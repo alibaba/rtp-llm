@@ -20,6 +20,7 @@ public:
                  const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights);
     void removeLoRA(const int64_t lora_id);
 
+    KVCacheInfo getKVCacheInfo() const;
 private:
     std::unique_ptr<NormalEngine> engine_ = nullptr;
 };

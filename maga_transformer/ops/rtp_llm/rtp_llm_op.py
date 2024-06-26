@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 import torch
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
@@ -40,3 +40,8 @@ class RtpLLMOp(FTOPBase):
                 
     def stop(self):
         self.ft_op.stop() # type: ignore
+
+    def get_kv_cache_info(self) -> Tuple[int, int]:
+        available_kv_cache, total_kv_cache = self.ft_op.get_kv_cache_info() # type: ignore
+        return available_kv_cache, total_kv_cache
+

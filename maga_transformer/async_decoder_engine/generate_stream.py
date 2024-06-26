@@ -13,6 +13,7 @@ from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.models.base_model import GenerateInput, GenerateOutput, GenerateOutputs
 from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
 from maga_transformer.utils.util import AtomicCounter
+from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 
 class Status(Enum):
     WAITING = 0
@@ -38,6 +39,7 @@ class GenerateStream(BaseModel):
     medusa_state: Any = None
     _stream_id: int = PrivateAttr(default_factory=int)
     _released: bool = PrivateAttr(default_factory=bool)
+    exception: Any = None
 
     def __init__(self, input: GenerateInput, max_seq_len: int=2048):
         super().__init__()
@@ -148,13 +150,14 @@ class GenerateStream(BaseModel):
             
             return outputs
 
-    def set_stop(self, err: str):
+    def set_stop(self, err: str, e: Exception):
         with self._lock:
             self._status.status = Status.STOPPED
             self._status.error_info = err
+            self.exception = e
 
-    def stop_and_release(self, err: str):
-        self.set_stop(err)
+    def stop_and_release(self, err: str, e: Exception):
+        self.set_stop(err, e)
         self.release_resource()
 
     def set_running(self):
@@ -190,7 +193,8 @@ class GenerateStream(BaseModel):
     def check_timeout(self):
         running_time = current_time_ms() - self._begin_time
         if self.generate_config.timeout_ms > 0 and self.generate_config.timeout_ms < running_time:
-            self.stop_and_release(f"query has been running {running_time} ms, it's timeout")
+            error_msg = f"query has been running {running_time} ms, it's timeout"
+            self.stop_and_release(error_msg, FtRuntimeException(ExceptionType.TIMEOUT_ERROR, error_msg))
 
     def _report_wait_time(self):
         kmonitor.report(GaugeMetrics.ASYNC_WAIT_WAIT_TIME_METRIC, current_time_ms() - self._begin_time)

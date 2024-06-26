@@ -8,6 +8,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.async_decoder_engine.ptuning import Ptuning, PrefixParams, MultiTaskPtuning, PrefixType
 from maga_transformer.async_decoder_engine.ptuning.ptuning import PrefixInfo
 from maga_transformer.async_decoder_engine.generate_stream import GenerateStream
+from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 
 class StreamCacheManager:
     def __init__(self, config: GptInitModelParameters, cache_manger: CacheManager, gen_num_per_circle: int) -> None:
@@ -82,7 +83,7 @@ class StreamCacheManager:
                                for _ in range(stream.generate_config.num_beams)]
                 stream.add_block_index(block_index)
             except Exception as e:
-                stream.stop_and_release('LACK_MEM')
+                stream.stop_and_release('LACK_MEM', FtRuntimeException(ExceptionType.MALLOC_ERROR, 'LACK_MEM'))
                 logging.warning(f"lack of mem, finished. err: {str(e)}")
 
     def enough_kvcache(self, streams: List[GenerateStream]):
@@ -132,4 +133,7 @@ class StreamCacheManager:
         return self.cache_manager_.get_kv_cache_base()
 
     def block_used_ratio(self) -> float:
-        return self.cache_manager_._block_used_ratio()
+        return self.cache_manager_.block_used_ratio()
+
+    def get_kv_cache_info(self) -> Tuple[int, int]:
+        return self.cache_manager_.get_kv_cache_info()

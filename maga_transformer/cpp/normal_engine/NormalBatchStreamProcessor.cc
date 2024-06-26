@@ -23,7 +23,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     auto           context_streams = stream_groups.contextStreams();
     auto           decode_streams  = stream_groups.decodeStreams();
     GptModelInputs model_input;
-    size_t         context_batch_size       = context_streams.size();
     size_t         current_tokens_size      = stream_groups.modelExecuteTokenSize();
     size_t         total_batch_size         = stream_groups.totalModelBatchSize();
     size_t         total_decode_batch_size  = stream_groups.totalDecodeBatchSize();
@@ -73,13 +72,13 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int       batch_idx        = 0;
 
     for (const auto& stream : decode_streams) {
-        auto currentTokens      = stream->currentExecuteTokens();
         auto current_batch_size = stream->batchSize();
-        memcpy(merged_tokens + batch_idx, currentTokens.data(), currentTokens.size() * sizeof(int));
         auto kv_cache = stream->kvCache();
         FT_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
         FT_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
         for (auto i = 0; i < current_batch_size; ++i) {
+            auto currentTokens      = stream->currentExecuteTokens(i);
+            merged_tokens[batch_idx] = currentTokens[0];
             input_lengths[batch_idx]    = stream->inputLength();
             sequence_lengths[batch_idx] = stream->seqLength() - 1; // need remove
             prefix_lengths[batch_idx]   = 0;
@@ -112,41 +111,44 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int token_idx = batch_idx;
     int cum_output_seq_len = batch_idx;
     for (const auto& stream : context_streams) {
-        auto input_tokens    = stream->currentExecuteTokens();
-        memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
-        cum_output_seq_len += stream->contextLength();
-        input_lengths[batch_idx]  = stream->contextLength();
-        prefix_lengths[batch_idx] = stream->reuseLength();
-        lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
-        if (has_positional_encoding_) {
-            // TODO(xinfei.sxf) optimize this, reduce cost
-            for (uint32_t i = stream->reuseLength(); i < stream->reuseLength() + stream->contextLength(); i++) {
-                combo_position_ids[token_idx + i] = i;
-            }
-        }
-        lora_ids[batch_idx]           = stream->loraId();
-        lora_input_lengths[batch_idx] = input_lengths[batch_idx];
+        auto current_batch_size = stream->batchSize();
         auto kv_cache                 = stream->kvCache();
         FT_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
         FT_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
-        memcpyKvCache(kv_cache_blocks,
-                      kv_cache.k_ptr[0],
-                      kv_cache.v_ptr[0],
-                      num_layers_,
-                      max_block_size,
-                      total_batch_size,
-                      batch_idx);
-        if (use_int8_kv_cache_) {
-            memcpyKvCache(kv_cache_scales,
-                          kv_cache.k_scale_ptr[0],
-                          kv_cache.v_scale_ptr[0],
+        for (auto i = 0; i < current_batch_size; ++i) {
+            auto input_tokens    = stream->currentExecuteTokens(i);
+            memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
+            cum_output_seq_len += stream->contextLength();
+            input_lengths[batch_idx]  = stream->contextLength();
+            prefix_lengths[batch_idx] = stream->reuseLength();
+            lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
+            if (has_positional_encoding_) {
+                // TODO(xinfei.sxf) optimize this, reduce cost
+                for (uint32_t i = stream->reuseLength(); i < stream->reuseLength() + stream->contextLength(); i++) {
+                    combo_position_ids[token_idx + i] = i;
+                }
+            }
+            lora_ids[batch_idx]           = stream->loraId();
+            lora_input_lengths[batch_idx] = input_lengths[batch_idx];
+            memcpyKvCache(kv_cache_blocks,
+                          kv_cache.k_ptr[i],
+                          kv_cache.v_ptr[i],
                           num_layers_,
                           max_block_size,
                           total_batch_size,
                           batch_idx);
+            if (use_int8_kv_cache_) {
+                memcpyKvCache(kv_cache_scales,
+                              kv_cache.k_scale_ptr[i],
+                              kv_cache.v_scale_ptr[i],
+                              num_layers_,
+                              max_block_size,
+                              total_batch_size,
+                              batch_idx);
+            }
+            batch_idx += 1;
+            token_idx += input_tokens.size();
         }
-        batch_idx += 1;
-        token_idx += input_tokens.size();
     }
     return model_input;
 }
@@ -225,7 +227,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
         const auto& complete_token_ids = stream->completeTokenIds();
         auto        complete_seq_len   = complete_token_ids->shape()[1];
         auto        seq_len            = stream->seqLength();
-        auto        current_batch_size = stream->batchSize();
+        auto        current_batch_size = stream->tileNum();
         const auto& cum_log_probs      = stream->cumLogProbs();
 
         memcpy(sampler_inputs.cum_log_probs->dataWithOffset<float>(batch_idx), cum_log_probs->data(), cum_log_probs->sizeBytes());
@@ -265,7 +267,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     batch_idx += total_decode_batch_size;
     size_t logits_offset = batch_idx;
     for (auto& stream : context_streams) {
-        auto current_batch_size = stream->batchSize();
+        auto current_batch_size = stream->tileNum();
         for (int i = 0; i < current_batch_size; ++i) {
             device_->copy({sampler_inputs.logits->view(batch_idx, 1), model_output.logits->view(logits_offset, 1)});
             batch_idx += 1;
@@ -296,7 +298,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
     int batch_idx = 0;
     int offset = 0;
     for (auto& stream : stream_groups.allStreams()) {
-        auto current_batch_size = stream->batchSize();
+        auto current_batch_size = stream->tileNum();
         auto batch = stream->isContextStream() ? 1 : current_batch_size;
         auto batch_logits = model_output.logits->view(offset, batch);
         auto batch_hidden_states = model_output.hidden_states->view(offset, batch);

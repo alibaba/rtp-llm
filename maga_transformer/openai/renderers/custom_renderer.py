@@ -171,7 +171,8 @@ class CustomChatRenderer():
                     )
                 )
 
-        async for output in output_generator:
+        output: GenerateOutput = None
+        async for outputs in output_generator:
             if index == 0:
                 yield StreamResponseObject(
                     choices=[ChatCompletionResponseStreamChoice(
@@ -183,7 +184,8 @@ class CustomChatRenderer():
                 )
 
             index += 1
-            output_ids = self._clean_output_ids(output.generate_outputs[0].output_ids)
+            output = outputs.generate_outputs[0]
+            output_ids = self._clean_output_ids(output.output_ids)
             output_token_length = len(output_ids)
             finish_reason = self._check_finish_reason(output_ids, input_token_length)
             output_ids = self._remove_stop_word_ids(output_ids)

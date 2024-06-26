@@ -64,6 +64,10 @@ absl::Status NormalEngine::removeLoRA(const int64_t lora_id) {
     return status;
 }
 
+KVCacheInfo NormalEngine::getKVCacheInfo() const {
+    return resource_context_.cache_manager->getKVCacheInfo();
+}
+
 absl::Status NormalEngine::startLoop() {
     FT_LOG_INFO("start normal engine loop");
     running_ = true;

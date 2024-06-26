@@ -42,7 +42,6 @@ public:
     virtual int tryReleaseKVBlock(int nums);
     virtual void releaseResource();
     int nextNeedBlockNums() const;
-    int needKVCacheBlockNums() const;
     
     std::shared_ptr<GenerateInput> generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig();
@@ -70,10 +69,10 @@ public:
     const ft::BufferPtr& cumLogProbs() const;
 
     const ft::BufferPtr& completeTokenIds();
-    std::vector<int> completeTokenIdsVec(int batch_id = 0);
+    std::vector<int> completeTokenIdsVec(int batch_idx = 0);
     int currentExecuteTokenSize();
-    std::vector<int> contextTokens() const;
-    std::vector<int> currentExecuteTokens() const;
+    std::vector<int> contextTokens(int batch_idx = 0) const;
+    std::vector<int> currentExecuteTokens(int batch_idx) const;
 
     void checkTimeout();
     void setStop(const std::string& err_msg);
@@ -138,7 +137,6 @@ protected:
     SystemPromptParams                  prompt_param_;
     bool                                is_context_stream_     = true;
     size_t                              iter_count_            = 0;
-    size_t                              batch_size_            = 1;
     int                                 reuse_length_          = 0;
     bool                                done_                  = false;
     bool                                cancelled_             = false;
@@ -147,9 +145,10 @@ protected:
     kmonitor::MetricsReporterPtr        metrics_reporter_      = nullptr;
     ft::SpecialTokens                   special_tokens_;
     ft::BufferPtr                       cum_log_probs_;
-
     autil::SynchronizedQueue<GenerateOutputs>  generate_outputs_queue_;
 
+    // just for bool test
+    bool perf_test_ = false;
     friend class StreamCacheResource;
 };
 

@@ -18,6 +18,12 @@
 
 namespace ft = fastertransformer;
 namespace rtp_llm {
+
+struct KVCacheInfo {
+    size_t available_kv_cache;
+    size_t total_kv_cache;
+};
+
 class CacheManager {
 public:
     struct SeqPosition {
@@ -41,6 +47,7 @@ public:
     const BlockRefCounter& blockRefCounter() const;
     const BlockCache&      blockCache() const;
     size_t                 freeBlockNums() const;
+    KVCacheInfo            getKVCacheInfo() const;
     size_t                 cacheItemNum() const;
     const KVCacheBuffer&   kvCacheBuffer() const;
 

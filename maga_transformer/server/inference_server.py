@@ -30,6 +30,7 @@ from maga_transformer.openai.api_datatype import ChatCompletionRequest
 from maga_transformer.server.inference_worker import InferenceWorker, TokenizerEncodeResponse
 from maga_transformer.server.misc import format_exception
 from maga_transformer.config.task_type import TaskType
+from maga_transformer.async_decoder_engine.base_engine import KVCacheInfo
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -279,3 +280,7 @@ class InferenceServer(object):
             return JSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
             return JSONResponse(format_exception(e), status_code=500)
+
+    def get_kv_cache_info(self) -> KVCacheInfo:
+        assert self._inference_worker
+        return self._inference_worker.model.get_kv_cache_info()

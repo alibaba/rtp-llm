@@ -31,9 +31,9 @@ public:
                          const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) override;
 
     absl::Status removeLoRA(const int64_t lora_id) override;
+    KVCacheInfo getKVCacheInfo() const override;
     absl::Status step();
     absl::Status startLoop();
-
     void reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {
             metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
@@ -57,7 +57,6 @@ private:
     std::atomic<bool>              running_{false};
     std::unique_ptr<Executor>      executor_;
     std::unique_ptr<SchedulerBase> scheduler_;
-    std::shared_ptr<CacheManager>  cache_manager_;
     const ft::GptInitParameter     params_;
     ResourceContext                resource_context_;
     kmonitor::MetricsReporterPtr   metrics_reporter_ = nullptr;

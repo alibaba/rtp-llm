@@ -7,10 +7,11 @@ from threading import Lock, Thread
 from typing import List, Set, Tuple, NamedTuple, Any, Dict
 
 from maga_transformer.utils.lru_dict import LruDict
-from maga_transformer.utils.concurrency_controller import ConcurrencyException
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.cache_config import CacheConfig
+from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
+
 
 class SeqPosition(NamedTuple):
     indice: int
@@ -91,7 +92,7 @@ class CacheManager:
 
     def __malloc(self, nums: int) -> List[int]:
         if self.free_block_nums < nums:
-            raise ConcurrencyException(f"failed to malloc {nums} blocks, only {self.free_block_nums} blocks left")
+            raise FtRuntimeException(ExceptionType.MALLOC_ERROR, f"failed to malloc {nums} blocks, only {self.free_block_nums} blocks left")
         else:
             result = [self.free_blocks_index.pop() for _ in range(nums)]
             
@@ -130,7 +131,7 @@ class CacheManager:
                 break
             self.__free([indices])
             
-    def free_with_cache(self, block_indice: List[List[int]], token_ids: List[int], ) -> None:
+    def free_with_cache(self, block_indice: List[List[int]], token_ids: List[int]) -> None:
         self._insert_into_cache(block_indice, token_ids, is_resident=False)
         
     def insert_resident_cache(self, block_indice: List[int], token_ids: List[int]):
@@ -211,6 +212,10 @@ class CacheManager:
 
     def block_used_ratio(self) -> float:
         return 100.0 * (1 - (self.free_block_nums / self.block_nums))
+
+    def get_kv_cache_info(self) -> Tuple[int, int]:
+        # block 0 is reserved, so total block num need - 1
+        return self.free_block_nums * self.seq_size_per_block, (self.block_nums - 1) * self.seq_size_per_block
 
     def start(self):
         self._running = True

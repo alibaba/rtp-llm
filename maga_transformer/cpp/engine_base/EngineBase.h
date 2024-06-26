@@ -26,8 +26,11 @@ public:
     virtual absl::Status removeLoRA(const int64_t lora_id) = 0;
 
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
-    virtual absl::Status stop()                                           = 0;
+    virtual absl::Status stop() = 0;
 
+    virtual KVCacheInfo getKVCacheInfo() const {
+        return {0, 0};
+    }
 protected:
     ft::DeviceBase* device_;
 };

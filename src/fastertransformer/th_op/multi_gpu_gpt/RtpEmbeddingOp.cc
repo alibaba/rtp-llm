@@ -40,6 +40,7 @@ void RtpEmbeddingOp::init(const ft::GptInitParameter& gpt_init_params, py::objec
 void RtpEmbeddingOp::stop() {
     if (!is_server_shutdown_) {
         (void)embedding_engine_->stop();
+        is_server_shutdown_ = true;
     }
 }
 

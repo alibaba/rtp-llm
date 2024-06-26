@@ -46,11 +46,6 @@ class Pipeline(object):
         assert self.tokenizer is not None
         return self.tokenizer.decode([token_id])
 
-    # just for perf test
-    def enable_perf_test_schedule_strategy(self):
-        if isinstance(self.model, AsyncModel):
-            self.model.enable_perf_test_schedule_strategy()
-
     @staticmethod
     def create_generate_config(generate_config: Union[GenerateConfig, Dict[str, Any]], vocab_size: int,
                                special_tokens: Any, tokenizer: PreTrainedTokenizerBase, **kwargs: Any) -> GenerateConfig:
@@ -194,7 +189,7 @@ class Pipeline(object):
                       stop_word_id_slices: List[int],
                       decoding_states: List[DecodingState],
                       token_buffers: List[str],
-                      **kwargs: Any) -> Tuple[List[Any], List[List[int]], List[str]]:
+                      **kwargs: Any) -> Tuple[List[Any], List[int], List[DecodingState], List[str]]:
         texts = []
         all_texts = []
         output_lens = []
@@ -263,24 +258,30 @@ class Pipeline(object):
         stop_word_ids = generate_config.stop_words_list
         stop_word_id_slices = get_stop_word_slices(stop_word_ids)
 
-        stream = self.model.enqueue(input)
+        stream: AsyncGenerator[GenerateOutputs, None] = self.model.enqueue(input)
 
         decoding_states: List[DecodingState] = []
         token_buffers: List[str] = []
+        generate_outputs_cache = GenerateOutputs()
 
         # TODO(xinfei.sxf) add batch and stop test
         async for generate_outputs in stream:
+            if not generate_outputs_cache.generate_outputs:
+                generate_outputs_cache.generate_outputs = generate_outputs.generate_outputs
+            else:
+                generate_outputs_cache.generate_outputs = [out if out.finished else generate_outputs.generate_outputs[i]
+                                                           for i, out in enumerate(generate_outputs_cache.generate_outputs)]
+            assert len(generate_outputs_cache.generate_outputs) == len(generate_outputs.generate_outputs)
             begin_time = current_time_ms()
             generate_texts, output_lens, decoding_states, token_buffers = self.decode_tokens(
-                generate_config, generate_outputs, stop_word_strs, stop_word_str_slices,
+                generate_config, generate_outputs_cache, stop_word_strs, stop_word_str_slices,
                 stop_word_ids, stop_word_id_slices, decoding_states, token_buffers, **kwargs)
 
             kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
 
-            yield GenerateResponse(generate_outputs=generate_outputs, generate_texts=generate_texts)
-
-            if all(output.finished for output in generate_outputs.generate_outputs):
-                kmonitor.report(GaugeMetrics.FT_ITERATE_COUNT_METRIC, generate_outputs.generate_outputs[0].aux_info.iter_count)
+            yield GenerateResponse(generate_outputs=generate_outputs_cache, generate_texts=generate_texts)
+            if all(output.finished for output in generate_outputs_cache.generate_outputs):
+                kmonitor.report(GaugeMetrics.FT_ITERATE_COUNT_METRIC, generate_outputs_cache.generate_outputs[0].aux_info.iter_count)
                 for l in output_lens:
                     kmonitor.report(GaugeMetrics.OUTPUT_TOKEN_SIZE_METRIC, l)
                 break

@@ -9,6 +9,7 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
+#include <tuple>
 
 using namespace std;
 
@@ -63,6 +64,11 @@ void RtpLLMOp::removeLoRA(const int64_t lora_id) {
     model_rpc_server_->removeLoRA(lora_id);
 }
 
+std::tuple<int64_t, int64_t> RtpLLMOp::getKVCacheInfo() {
+    auto info = model_rpc_server_->getKVCacheInfo();
+    return std::make_tuple(info.available_kv_cache, info.total_kv_cache);
+}
+
 void RtpLLMOp::_init(const int64_t model_rpc_port, const rtp_llm::EngineInitParams params) {
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     model_rpc_server_.reset(new rtp_llm::ModelRpcServiceImpl(params));
@@ -100,6 +106,7 @@ void registerRtpLLMOp(const py::module& m) {
         .def("init", &torch_ext::RtpLLMOp::init)
         .def("add_lora", &torch_ext::RtpLLMOp::addLoRA)
         .def("remove_lora", &torch_ext::RtpLLMOp::removeLoRA)
+        .def("get_kv_cache_info", &torch_ext::RtpLLMOp::getKVCacheInfo)
         .def("stop", &torch_ext::RtpLLMOp::stop);
 }
 

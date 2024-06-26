@@ -32,8 +32,7 @@ public:
     int  tryReleaseKVBlock(size_t nums);
     void freeBatchBlocks(size_t batch_id, std::vector<void*>& blocks);
     void releaseResource();
-    int  needKVCacheBlockNums() const;
-    int  singleBatchNeedBlocks() const;
+    int  singleBatchNeedBlocks(int seq_len) const;
     int  maxBlockSize() const;
 
     const BatchKVCacheBlockAddr& kvCache() const;

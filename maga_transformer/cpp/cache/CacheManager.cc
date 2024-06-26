@@ -177,6 +177,11 @@ size_t CacheManager::freeBlockNums() const {
     return free_blocks_index_.size();
 }
 
+KVCacheInfo CacheManager::getKVCacheInfo() const {
+    // block 0 is reserved, so total block num need - 1
+    return {freeBlockNums() * seq_size_per_block_, (config_.block_nums - 1) * seq_size_per_block_};
+}
+
 size_t CacheManager::cacheItemNum() const {
     return block_cache_.size();
 }

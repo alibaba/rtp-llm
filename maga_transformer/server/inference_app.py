@@ -77,8 +77,11 @@ class InferenceApp(object):
 
         @app.get("/worker_status")
         def worker_status():
+            info = self.inference_server.get_kv_cache_info()
             return {
                 "available_concurrency": self.inference_server._controller.get_available_concurrency(),
+                "available_kv_cache": info.available_kv_cache,
+                "total_kv_cache": info.total_kv_cache,
                 "alive": True,
             }
 

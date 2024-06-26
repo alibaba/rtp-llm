@@ -20,9 +20,9 @@ from maga_transformer.async_decoder_engine.medusa.medusa_model_executor import M
 from maga_transformer.async_decoder_engine.medusa.utils import generate_medusa_buffers
 from maga_transformer.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
 from maga_transformer.async_decoder_engine.decoder_engine import DecoderEngine
-from maga_transformer.async_decoder_engine.batch_query import BatchQuery
-from maga_transformer.async_decoder_engine.schedule_strategy import create_schedule_strategy
+from maga_transformer.async_decoder_engine.rpc_engine import RPCEngine
 from maga_transformer.async_decoder_engine.ptuning.ptuning_utils import PtuningConstructor
+from maga_transformer.async_decoder_engine.base_engine import BaseEngine
 
 class ExecutorType(Enum):
     Normal = "normal"
@@ -40,19 +40,27 @@ def check_exeutor_type(model: BaseModel, config: GptInitModelParameters, specula
         return ExecutorType.Embedding
     return ExecutorType.Normal
 
-def create_engine(model: BaseModel, config: GptInitModelParameters, speculative_model: Any = None, speculative_config: Optional[GptInitModelParameters] = None) -> DecoderEngine:
+def create_engine(model: BaseModel, config: GptInitModelParameters, speculative_model: Any = None, speculative_config: Optional[GptInitModelParameters] = None, use_rpc: bool = True) -> BaseEngine:
     executor_type = check_exeutor_type(model, config, speculative_model, speculative_config)
     logging.info(f"executor_type: {executor_type}")
     if executor_type == ExecutorType.Normal:
-        return _create_normal_engine(model, config)
+        if use_rpc:
+            return _create_cpp_engine(model, config)
+        else:
+            return _create_normal_engine(model, config)
     elif executor_type == ExecutorType.Speculative:
+        assert speculative_config
         return _create_sp_engine(model, config, speculative_model, speculative_config)
     elif executor_type == ExecutorType.Medusa:
         return _create_medusa_engine(model, config)
     elif executor_type == ExecutorType.Embedding:
-            return EmbeddingCppEngine(model)
+        return EmbeddingCppEngine(model)
     else:
         raise Exception(f"unsupported executor type: {executor_type}")
+
+def _create_cpp_engine(model: BaseModel, config: GptInitModelParameters) -> RPCEngine:
+    logging.info(f'ft op mem info: used: {get_mem_info().used} free: {get_mem_info().free}')
+    return RPCEngine(model, None)
 
 def _create_normal_engine(model: BaseModel, config: GptInitModelParameters) -> DecoderEngine:
     model_ops = _create_ops(ModelType.Normal, model, config)

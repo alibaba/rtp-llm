@@ -19,7 +19,7 @@ public:
     void removeLoRA(const int64_t lora_id);
     void stop();
     void _init(int64_t model_rpc_port, const rtp_llm::EngineInitParams maga_init_params);
-
+    std::tuple<int64_t, int64_t> getKVCacheInfo();
     // std::shared_ptr<rtp_llm::GenerateStream> forward(std::shared_ptr<rtp_llm::GenerateInput> query);
 
 private:
