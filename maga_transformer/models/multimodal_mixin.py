@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import torch
@@ -220,16 +221,36 @@ class MultiModalMixin:
             
         try: 
             os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
+
+            visual_trt_engine = MultiModelTRTEngine(
+                model_name, vit_params.config.get("image_size"), device, dtype
+            )
+
             if MultiModelTRTEngine.trt_engine_cached(model_name, dtype):
                 self._load_vit_weight(weights_info, ckpt_path, vit_params, device, dtype)
+                
+                # create cached dir if not exists
+                output_dir = MultiModelTRTEngine.cache_path(model_name, dtype)
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                
+                visual_trt_engine.export_onnx(self.visual.vit)
+                
+                # gc VIT network, release GPU memory for generating trt engine
+                del self.visual
+                self.visual = None
+                vit_params.vit_weights = None
+                gc.collect()
+                torch.cuda.empty_cache()
 
-            # pass vit variable life cycle to vit_network, so that we can gc it in MultiModelTRTEngine
-            vit_network = self.visual.vit
-            self.visual = None
-            vit_params.vit_weights = None
-            self.visual = MultiModelTRTEngine(
-                model_name, vit_network, vit_params.config.get("image_size"), device, dtype
-            )
+                visual_trt_engine.generate_trt_engine()
+
+                # create a completion file to mark that the trt engine has been generated and cached
+                MultiModelTRTEngine.completion_file_path(model_name, dtype).touch()
+
+
+            visual_trt_engine.load_trt_engine()
+            self.visual = visual_trt_engine
 
         except Exception as e:
             raise RuntimeError(f"init vit trt error: {e}")
