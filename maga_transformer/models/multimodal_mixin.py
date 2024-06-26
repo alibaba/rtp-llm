@@ -9,6 +9,7 @@ from decord import VideoReader, cpu
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import RequestFormat
+from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
 from maga_transformer.models.base_model import EmbeddingOutput
 from maga_transformer.models.multimodel.multimodel_trt_engine import MultiModelTRTEngine
 from maga_transformer.utils.database import CkptDatabase
@@ -17,7 +18,6 @@ from maga_transformer.utils.model_weights_loader import get_model_weights_loader
 from maga_transformer.utils.multimodal_util import get_bytes_io_from_url, data_cache_
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, VitParameters
 from maga_transformer.ops.comm.nccl_op import NcclOp
-from maga_transformer.distribute.worker_info import g_parallel_info
 
 class MultiModalEmbeddingInterface:
     @torch.no_grad()
@@ -78,6 +78,7 @@ class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
 
     @torch.no_grad()
     def video_embedding(self, video: List[Image.Image], device):
+
 
 
 class BaseImageEmbedding:
@@ -210,7 +211,7 @@ class MultiModalMixin:
         return weight_loader
 
     def init_vit_trt(
-            self, model_name: str, weights_info: ModelDeployWeightInfo, ckpt_path: str,
+            self, model_name: str, g_parallel_info: ParallelInfo, weights_info: ModelDeployWeightInfo, ckpt_path: str,
             vit_params: VitParameters, device: Union[str, torch.device], dtype: torch.dtype
     ):
         # check whether VIT tensorrt exist
@@ -227,26 +228,32 @@ class MultiModalMixin:
             )
 
             if MultiModelTRTEngine.trt_engine_cached(model_name, dtype):
-                self._load_vit_weight(weights_info, ckpt_path, vit_params, device, dtype)
-                
-                # create cached dir if not exists
-                output_dir = MultiModelTRTEngine.cache_path(model_name, dtype)
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
-                
-                visual_trt_engine.export_onnx(self.visual.vit)
-                
-                # gc VIT network, release GPU memory for generating trt engine
-                del self.visual
-                self.visual = None
-                vit_params.vit_weights = None
-                gc.collect()
-                torch.cuda.empty_cache()
 
-                visual_trt_engine.generate_trt_engine()
+                if g_parallel_info.tp_rank == 0:
+                    self._load_vit_weight(weights_info, ckpt_path, vit_params, device, dtype)
+                    
+                    # create cached dir if not exists
+                    output_dir = MultiModelTRTEngine.cache_path(model_name, dtype)
+                    if not os.path.exists(output_dir):
+                        os.makedirs(output_dir)
+                    
+                    visual_trt_engine.export_onnx(self.visual.vit)
+                    
+                    # gc VIT network, release GPU memory for generating trt engine
+                    del self.visual
+                    self.visual = None
+                    vit_params.vit_weights = None
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
-                # create a completion file to mark that the trt engine has been generated and cached
-                MultiModelTRTEngine.completion_file_path(model_name, dtype).touch()
+                    visual_trt_engine.generate_trt_engine()
+
+                    # create a completion file to mark that the trt engine has been generated and cached
+                    MultiModelTRTEngine.completion_file_path(model_name, dtype).touch()
+                
+                # for TP > 1, other tps should wait tp0 to generate trt engine
+                if g_parallel_info.tp_size > 1:
+                    self.nccl_op_.barrier()
 
 
             visual_trt_engine.load_trt_engine()

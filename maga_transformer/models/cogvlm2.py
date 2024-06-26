@@ -1,7 +1,6 @@
 import json
 import os
-from functools import partial
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
 import torch
@@ -9,12 +8,14 @@ from einops import rearrange
 from transformers import AutoTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, TemplateType
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from maga_transformer.models.cogvlm2_weight import CogVLM2WeightInfo, CogVLM2VitWeights
 from maga_transformer.models.llama import Llama
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
+from maga_transformer.utils.util import to_torch_dtype
 
 LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1
@@ -30,6 +31,15 @@ class CogVLM2(Llama, MultiModalMixin):
             {"vit": self.mm_part.vit}
         )
         Llama.__init__(self, config)
+
+    def load(self, device: Union[str, torch.device] = 'cuda:0'):
+        if os.environ.get("VIT_TRT", "0") == "1":
+            weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
+            self.init_vit_trt(
+                "cogvlm2", g_parallel_info, weights_info, self.config.ckpt_path,
+                self.config.vit_related_params, device, to_torch_dtype(self.config.data_type)
+            )
+        super().load(device=device)
 
     @classmethod
     def is_multimodal(cls) -> bool:
