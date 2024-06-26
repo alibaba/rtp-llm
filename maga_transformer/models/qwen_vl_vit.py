@@ -5,19 +5,18 @@
 
 from collections import OrderedDict
 import math
-import requests
-import os
 from functools import partial
 from PIL import Image
-from typing import Callable, Optional, Sequence, Tuple, List, Any
+from typing import Callable, Optional, List, Union
 import numpy as np
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
-from torchvision import transforms
-from torchvision.transforms import InterpolationMode
+
+from maga_transformer.models.multimodel.multimodel_common import ImageTransform
+
 
 def get_abs_pos(abs_pos, tgt_size):
     # abs_pos: L, C
@@ -327,26 +326,6 @@ class TransformerBlock(nn.Module):
             x = r(x, attn_mask=attn_mask)
         return x
 
-
-class Preprocess:
-
-    def __init__(self, image_size: int):
-        mean = (0.48145466, 0.4578275, 0.40821073)
-        std = (0.26862954, 0.26130258, 0.27577711)
-        self.image_transform = transforms.Compose([
-            transforms.Resize((image_size, image_size),
-                              interpolation=InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
-
-    def encode(self, images: List[Any]) -> torch.Tensor:
-        res = []
-        for image in images:
-            res.append(self.image_transform(image))
-        res = torch.stack(res, dim=0)
-        return res
-
 class VisionTransformer(nn.Module):
 
     def __init__(
@@ -367,7 +346,7 @@ class VisionTransformer(nn.Module):
         self.grid_size = (image_height // patch_height, image_width // patch_width)
         self.output_dim = output_dim
 
-        self.image_pre_obj = Preprocess(image_size)
+        self.image_transform = ImageTransform(image_size)
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
 
         # class embeddings and positional embeddings
@@ -421,6 +400,6 @@ class VisionTransformer(nn.Module):
 
         return x
 
-    def encode(self, images: List[Image.Image]):
-        images = self.image_pre_obj.encode(images)
-        return self(images)
+    def encode(self, images: List[Image.Image], device: Union[str, torch.device], dtype: torch.dtype):
+        tensor_images = self.image_transform.encode(images, device, dtype)
+        return self(tensor_images)

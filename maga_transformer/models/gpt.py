@@ -134,7 +134,7 @@ class GPT(BaseModel):
             self.weight.lora_resource.update(lora_infos)
         logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
-    def load(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+    def load(self, device: Union[str, torch.device] = 'cuda:0'):
         self._load_weights(device)
         self._initialize_from_weight(device)
 

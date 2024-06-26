@@ -2,11 +2,9 @@ import os
 import torch
 import json
 import requests
-import asyncio
 import threading
 from io import BytesIO
-from concurrent.futures import ThreadPoolExecutor, as_completed, Future
-from typing import Any, List, Dict, Optional, Callable
+from typing import Any, Callable
 from maga_transformer.utils.lru_dict import LruDict
 
 if os.environ.get('DOWNLOAD_HEADERS', '') != '':

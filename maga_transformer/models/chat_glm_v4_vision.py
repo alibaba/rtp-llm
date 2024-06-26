@@ -1,10 +1,12 @@
 from functools import partial
-from typing import Any, Dict, List, Tuple, Union
+import os
+from typing import List, Tuple, Union
 
 import torch
 
 from maga_transformer.config.gpt_init_model_parameters import \
     GptInitModelParameters
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.chat_glm_v4 import ChatGlmV4
 from maga_transformer.models.chat_glm_v4_vision_weight import (
@@ -12,7 +14,7 @@ from maga_transformer.models.chat_glm_v4_vision_weight import (
 from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
-from maga_transformer.utils.util import get_config_from_path
+from maga_transformer.utils.util import get_config_from_path, to_torch_dtype
 
 
 class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
@@ -27,6 +29,15 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
     @classmethod
     def is_multimodal(cls) -> bool:
         return True
+
+    def load(self, device: Union[str, torch.device] = 'cuda:0'):
+        if os.environ.get("VIT_TRT", "0") == "1":
+            weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
+            self.init_vit_trt(
+                "chatglm4v", weights_info, self.config.ckpt_path,
+                self.config.vit_related_params, device, to_torch_dtype(self.config.data_type)
+            )
+        super().load(device=device)
 
     @classmethod
     def _create_config(cls, ckpt_path: str):

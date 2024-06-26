@@ -1,20 +1,22 @@
 import json
+import os
 import torch
 import re
-from functools import partial
-from enum import Enum, auto
 from typing import Any, Dict, List, Union, Tuple, Optional
 from PIL import Image
 from decord import VideoReader, cpu
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import RequestFormat
+from maga_transformer.models.base_model import EmbeddingOutput
+from maga_transformer.models.multimodel.multimodel_trt_engine import MultiModelTRTEngine
+from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.utils.model_weights_loader import get_model_weights_loader
+from maga_transformer.utils.multimodal_util import get_bytes_io_from_url, data_cache_
+from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, VitParameters
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.utils.multimodal_util import get_bytes_io_from_url, data_cache_
-from maga_transformer.models.base_model import EmbeddingOutput
 
 class MultiModalEmbeddingInterface:
     @torch.no_grad()
@@ -75,6 +77,10 @@ class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
 
     @torch.no_grad()
     def video_embedding(self, video: List[Image.Image], device):
+
+
+class BaseImageEmbedding:
+    def image_embedding(self, images: Any, device: Union[str, torch.device]) -> Any:
         raise NotImplementedError()
 
 class BaseVitWeights:
@@ -179,7 +185,60 @@ class MultiModalMixin:
     def expand_token_id(self, token_ids: List[int], images: List[torch.Tensor]) -> Tuple[List[int], List[torch.Tensor], List[int]]:
         raise NotImplementedError()
 
+    def _load_vit_weight(
+        self, weights_info: ModelDeployWeightInfo, ckpt_path: str, vit_params: VitParameters,
+        device: Union[str, torch.device], dtype: torch.dtype
+    ):
+        # Load weight only for self.visual
+        
+        database = CkptDatabase(ckpt_path)
+        weight_loader = get_model_weights_loader(weights_info, database, compute_dtype=dtype)
+        vit_weight = vit_params.vit_weights
+        ckpt_prefix= vit_weight.ckpt_prefix
+        ft_prefix = vit_weight.ft_prefix
+        vit_weight_names = vit_weight.weight_names
+
+        for vit_weight_name in vit_weight_names:
+            ckpt_weight_name = ckpt_prefix + vit_weight_name
+            param_name = ft_prefix + vit_weight_name
+            param_name = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', param_name)
+            tensor = weight_loader.load_tensor(ckpt_weight_name)[0]
+            param = eval(param_name)
+            param.data = tensor.reshape(param.data.shape).to(dtype).to(device)
+
+        return weight_loader
+
+    def init_vit_trt(
+            self, model_name: str, weights_info: ModelDeployWeightInfo, ckpt_path: str,
+            vit_params: VitParameters, device: Union[str, torch.device], dtype: torch.dtype
+    ):
+        # check whether VIT tensorrt exist
+        try:
+            import tensorrt
+        except ImportError:
+            raise RuntimeError("tensorrt library not fonnd")
+            
+        try: 
+            os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
+            if MultiModelTRTEngine.trt_engine_cached(model_name, dtype):
+                self._load_vit_weight(weights_info, ckpt_path, vit_params, device, dtype)
+
+            # pass vit variable life cycle to vit_network, so that we can gc it in MultiModelTRTEngine
+            vit_network = self.visual.vit
+            self.visual = None
+            vit_params.vit_weights = None
+            self.visual = MultiModelTRTEngine(
+                model_name, vit_network, vit_params.config.get("image_size"), device, dtype
+            )
+
+        except Exception as e:
+            raise RuntimeError(f"init vit trt error: {e}")
+
     def load_vit_weight(self, ctype: str):
+        if isinstance(self.visual, MultiModelTRTEngine):
+            # No need to load weight for MultiModelTRTEngine, its weight is inside trt engine.
+            return
+
         vit_weight = self.config.vit_related_params.vit_weights
         ckpt_prefix = vit_weight.ckpt_prefix
         ft_prefix = vit_weight.ft_prefix
