@@ -1,14 +1,6 @@
 load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts",)
 package(default_visibility = ["//visibility:public"])
 
-cc_library(
-    name = "ini_reader",
-    hdrs = [
-        "INIReader.h",
-    ],
-    copts = copts(),
-    visibility = ["//src:__subpackages__"],
-)
 
 cc_library(
     name = "cuda_driver",

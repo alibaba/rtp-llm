@@ -1,5 +1,6 @@
 #pragma once
 
+#include "src/fastertransformer/utils/exception.h"
 #include "src/fastertransformer/utils/logger.h"
 
 #include <fstream>
@@ -17,10 +18,9 @@ namespace fastertransformer {
 [[noreturn]] inline void throwRuntimeError(const char* const file, int const line, std::string const& info = "") {
     auto error_msg = std::string("[FT][ERROR] ") + info + " Assertion fail: " + file + ":"
                              + std::to_string(line) + " \n";
-    std::cerr << error_msg << std::endl;
     fflush(stdout);
     fflush(stderr);
-    throw std::runtime_error(error_msg);
+    throw NEW_FT_EXCEPTION(error_msg);
 }
 
 inline void myAssert(bool result, const char* const file, int const line, std::string const& info = "") {
@@ -47,7 +47,7 @@ inline void myAssert(bool result, const char* const file, int const line, std::s
 #define FT_THROW(info) throwRuntimeError(__FILE__, __LINE__, info)
 
 inline void unreachable() {
-    throw std::runtime_error("enter the unreachable code.");
+    throw NEW_FT_EXCEPTION("unreachable error");
 }
 
 }  // namespace fastertransformer

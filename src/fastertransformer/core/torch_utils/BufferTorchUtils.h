@@ -69,7 +69,6 @@ inline DataType torchDTypeToDataType(caffe2::TypeMeta dtype) {
 
     switch (dtype.toScalarType()) {
         FOREACH_BUFFER_TORCH_TYPE_MAP(TYPE_CASE);
-        TYPE_CASE(TYPE_QINT8, c10::kQInt8);
     default:
         FT_LOG_ERROR("Unsupported data type: [%d]%s", dtype.toScalarType(), dtype.name().data());
         throw std::runtime_error("Unsupported data type " + std::to_string((int8_t)(dtype.toScalarType())));
