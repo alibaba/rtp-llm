@@ -19,6 +19,7 @@ cc_library(
         "//src/fastertransformer/rocm:rocm_types_hdr",
         "//src/fastertransformer/rocm:rocm_utils",
         "//src/fastertransformer/kernels:hello_kernel",
+        "//src/fastertransformer/kernels:gpt_kernels_rocm",
     ],
     visibility = ["//visibility:public"],
     copts = rocm_copts(),

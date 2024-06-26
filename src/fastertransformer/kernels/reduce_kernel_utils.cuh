@@ -16,6 +16,8 @@
 #pragma once
 #include <array>
 #include <assert.h>
+
+#if USING_CUDA
 #if ((__CUDACC_VER_MAJOR__ > 11) || (__CUDACC_VER_MAJOR__ == 11 && __CUDACC_VER_MINOR__ >= 0))
 #include <cooperative_groups/reduce.h>
 #else
@@ -25,11 +27,15 @@
 
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
+
+namespace cg = cooperative_groups;
+#endif
+
 #include <float.h>
 #include <type_traits>
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 
-namespace cg = cooperative_groups;
+
 
 namespace fastertransformer {
 
@@ -256,6 +262,7 @@ __inline__ __device__ T blockReduceMaxV2(T* val)
     return (T)0.0f;
 }
 
+#if USING_CUDA
 template<int NUM>
 __inline__ __device__ void cgBlockReduceSumElements(float* element_list, float* cgBlockReduceSumElements_shm)
 {
@@ -287,6 +294,7 @@ __inline__ __device__ void cgBlockReduceSumElements(float* element_list, float* 
         }
     }
 }
+#endif
 
 template<typename T, int MAX_K>
 struct TopK {

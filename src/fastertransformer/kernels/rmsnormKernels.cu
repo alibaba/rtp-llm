@@ -73,7 +73,7 @@ __global__ void generalRmsNorm(T* output, T* normed_output, const T* input, cons
     const bool with_per_tensor_scaling = scale_orig_quant_per_tensor != nullptr;
     const float_packed_t scale_orig_quant
         = cuda_cast<float_packed_t>(with_per_tensor_scaling ? *scale_orig_quant_per_tensor : 0.0f);
-    T_scalar amax = 1e-6f;
+    T_scalar amax(1e-6f);
 
     for (int i = tidx; i < n_elems; i += blockDim.x)
     {
@@ -173,8 +173,10 @@ void dispatch_rmsnorm_type_square_method(T* output, T* normed_output, const T* i
 {
     if (shmem_size >= (48 << 10))
     {
+#if USING_CUDA
         cudaError_t ret = cudaFuncSetAttribute(generalRmsNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA>,
             cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+#endif
     }
     generalRmsNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA><<<grid, block, shmem_size, stream>>>(output, normed_output,
         input, bias, residual1, gamma, beta, eps, tokens, hidden_dim, scale_orig_quant_per_tensor,

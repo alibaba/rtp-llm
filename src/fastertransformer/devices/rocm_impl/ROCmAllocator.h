@@ -6,13 +6,13 @@
 
 namespace fastertransformer {
 
-template<AllocatorType AType, MemoryType MType, hipError_t (*Alloc)(void**, size_t), hipError_t (*Free)(void*)>
-class AllocatorT: public TypedAllocator<AType> {
+
+template<AllocatorType AType, MemoryType MType,
+         hipError_t (*Alloc)(void**, size_t), hipError_t (*Free)(void*)>
+class ROCmAllocator: public TypedAllocator<AType> {
 public:
-    AllocatorT() {}
-    ~AllocatorT() {
-        FT_LOG_INFO("rocm allocator destroyed"); /* TODO(rocm): Free all memory? */
-    }
+    ROCmAllocator() {}
+    ~ROCmAllocator() { FT_LOG_INFO("rocm allocator destroyed"); /* TODO(rocm): Free all memory? */ }
 
     MemoryType memoryType() const {
         return MType;
@@ -20,32 +20,29 @@ public:
 
     void* malloc(size_t size) {
         void* ptr = nullptr;
-        HIP_CHECK(Alloc(&ptr, size));
+        (void)Alloc(&ptr, size);
         return ptr;
     };
 
     void free(void** ptr) {
-        HIP_CHECK(Free(*ptr));
+        (void)Free(*ptr);
         *ptr = nullptr;
     };
 
     // not expected to be called
     void* reMalloc(void* ptr, size_t size) {
-        FT_LOG_ERROR("rocm allocator doesn't support reMalloc");
-        fflush(stdout);
+        /* TODO(rocm): Missing */
+        FT_LOG_ERROR("rocm allocator doesn't support remalloc");
         abort();
     };
 };
 
 template<>
-class Allocator<AllocatorType::ROCM>: public AllocatorT<AllocatorType::ROCM, MEMORY_GPU, hipMalloc, hipFree> {};
-
-static inline hipError_t hipHostMalloc(void** ptr, size_t size) {
-    return ::hipHostMalloc(ptr, size, 0);
-}
+class Allocator<AllocatorType::ROCM>:
+    public ROCmAllocator<AllocatorType::ROCM, MEMORY_GPU, hipMalloc, hipFree> {};
 
 template<>
 class Allocator<AllocatorType::ROCM_HOST>:
-    public AllocatorT<AllocatorType::ROCM_HOST, MEMORY_CPU_PINNED, hipHostMalloc, hipHostFree> {};
+    public ROCmAllocator<AllocatorType::ROCM_HOST, MEMORY_CPU_PINNED, hipMallocHost, hipHostFree> {};
 
 }  // namespace fastertransformer
