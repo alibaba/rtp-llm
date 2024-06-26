@@ -16,6 +16,7 @@
 
 #include "src/fastertransformer/kernels/add_residual_kernels.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#include "src/fastertransformer/utils/assert_utils.h"
 
 namespace fastertransformer {
 

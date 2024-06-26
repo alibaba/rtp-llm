@@ -754,7 +754,7 @@ __global__ void generalLayerNormWithPadding(const T* __restrict input,
     }
     __syncthreads();
 
-    Scalar_T abs_max = 1e-6f;
+    Scalar_T abs_max(1e-6f);
 
     for (int i = tid; i < real_n; i += blockDim.x) {
         const int index    = blockIdx.x * padding_n + i;
@@ -774,7 +774,7 @@ __global__ void generalLayerNormWithPadding(const T* __restrict input,
 
     if (DYNAMIC_SCALING) {
         float          abs_max_f               = blockAllReduceMax(cuda_cast<float>(abs_max));
-        const Scalar_T dynamic_per_token_scale = 127. / abs_max_f;
+        const Scalar_T dynamic_per_token_scale(127. / abs_max_f);
         for (int i = tid; i < real_n; i += blockDim.x) {
             const int index                                        = blockIdx.x * padding_n + i;
             reinterpret_cast<Int8_Packed_T*>(normed_output)[index] = cuda_cast<Int8_Packed_T>(
@@ -814,8 +814,10 @@ void invokeGeneralLayerNormWithPadding(T*           out,
     if (dynamic_quant) {
         size_t maxbytes = real_n * sizeof(T);
         if (maxbytes >= (48 << 10)) {
+#if USING_CUDA
             check_cuda_error(cudaFuncSetAttribute(
                 generalLayerNormWithPadding<T, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, maxbytes));
+#endif
         }
         generalLayerNormWithPadding<T, true><<<grid, block, maxbytes, stream>>>(
             input, gamma, beta, out, layernorm_eps, m, real_n, padding_n, scale, dynamic_scale, int8_mode);

@@ -1,4 +1,7 @@
 load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts", "rocm_copts")
+load("@local_config_rocm//rocm:build_defs.bzl",
+    "if_rocm",
+)
 
 cc_library(
     name = "cublas",
@@ -350,6 +353,7 @@ cc_library(
         "cuda_bf16_fallbacks.cuh",
     ],
     deps = [
+
         "//src/fastertransformer/rocm:rocm_types_hdr",
         "//src/fastertransformer/core:tensor_hdr",
     ],

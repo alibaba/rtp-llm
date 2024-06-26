@@ -16,11 +16,12 @@
 
 #include "src/fastertransformer/kernels/activation_kernels.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
-#include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
 
+#if USING_CUDA
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
+#endif
 #endif
 
 namespace fastertransformer {

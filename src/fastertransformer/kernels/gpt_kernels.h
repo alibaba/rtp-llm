@@ -16,8 +16,12 @@
 
 #pragma once
 
+#if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#else
+#include "src/fastertransformer/rocm/cuda_shims.h"
+#endif
 #include <unordered_map>
 
 #include "src/fastertransformer/core/Tensor.h"

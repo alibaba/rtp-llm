@@ -16,10 +16,12 @@
 
 #pragma once
 
-#include "src/fastertransformer/cuda/cuda_utils.h"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include <assert.h>
+#if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#endif
 #include <stdint.h>
 
 namespace fastertransformer {
