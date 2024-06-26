@@ -113,14 +113,14 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                          params.smoother.has_value() ? params.smoother.value().get().data<float>() : nullptr,
                                          params.shift.has_value() ? params.shift.value().get().data<float>() : nullptr,
                                          stream_);
-
+        sync_check_cuda_error();
         return BufferPtr(new QBuffer(std::move(kernel),
                                     std::move(scales),
                                     std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
                                                                     DataType::TYPE_INVALID,
                                                                     {0},
                                                                     nullptr)))));
-        sync_check_cuda_error();
+        
     } else {
         unreachable();
     }

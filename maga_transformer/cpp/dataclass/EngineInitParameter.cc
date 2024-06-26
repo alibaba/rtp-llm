@@ -54,7 +54,7 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
                                         const std::string& kernel_key,
                                         const std::string& bias_key,
                                         const std::string& scales_key)
-{
+{   
     if (map.count(kernel_key) > 0) {
         const auto dense_weights = new DenseWeights();
         if (!bias_key.empty()) {
@@ -111,6 +111,9 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
 
     ffn_weights.moe_gating_weight = mayCreateDenseWeights(map,
                                                           W::moe_gate);
+    
+    ffn_weights.smoother_weight = mayCreateDenseWeights(map,
+                                                        W::ffn_smoother);
 
     return ffn_weights;
 }
@@ -134,6 +137,13 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
                                                             W::attn_o_w,
                                                             W::attn_o_b,
                                                             W::attn_o_s);
+    
+    attention_weights.shift_weight = mayCreateDenseWeights(map,
+                                                           W::attn_o_shift);
+    
+    attention_weights.smoother_weight = mayCreateDenseWeights(map,
+                                                              W::attn_o_smoother);
+
 
     return attention_weights;
 }

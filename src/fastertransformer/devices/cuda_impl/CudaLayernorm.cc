@@ -11,35 +11,48 @@ using namespace std;
 namespace fastertransformer {
 
 LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
-    const auto& input = params.input;
-    auto& output = params.norm_output;
-    const auto& weights = params.weights;
-    const auto& gamma = weights ? weights->get().gamma.get()->data() : nullptr;
-    const auto& beta = (weights && weights->get().beta) ? weights->get().beta.get()->data() : nullptr;
-
+    BufferPtr input = params.input;
+    BufferPtr norm_output = input;
+    float* scales_ptr = nullptr;
+    int8_t* quant_output = nullptr;
+    const auto data_type = input->type();
+    const auto m = input->shape()[0];
+    const auto n = input->shape()[1];
+    auto norm_weight = params.norm_weight;
+    const auto& gamma = norm_weight ? norm_weight->get().gamma.get()->data() : nullptr;
+    const auto& beta = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
     const auto norm_type = params.norm_type;
-    const auto data_type = input.type();
-    const auto m = input.shape()[0];
-    const auto n = input.shape()[1];
     const auto eps = params.eps;
 
-    if (!weights.has_value()) {
-        if (params.alpha.has_value() || (norm_type == NormType::alphanorm)) {
-            const auto alpha = params.alpha.value_or(1.0f);
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAlphaAddBiasResidual,
-                output.data(),
-                input.data(),
-                params.residual1 ? params.residual1.value().get().data() : nullptr,
-                params.bias ? params.bias.value().get().data() : nullptr,
-                alpha,
-                m,
-                n,
-                stream_
-            );
-        } else if (params.bias.has_value() || params.residual1.has_value() || params.residual2.has_value()) {
+    if (!params.is_inplace && params.qscheme == QScheme::NoQuantize) {
+        norm_output = allocateBufferLike(*params.input);
+    } else if (params.qscheme == Qint8PerChannelLastAxis) {
+        auto kernel = allocateBuffer({DataType::TYPE_INT8,
+                                            {input->shape()},
+                                            AllocationType::DEVICE},
+                                            {"kernel"});
+        auto scales = allocateBuffer({DataType::TYPE_FP32,
+                                        {input->shape()[1]},
+                                        AllocationType::DEVICE},
+                                        {"scales"});
+        norm_output = BufferPtr(new QBuffer(std::move(kernel),
+                                            std::move(scales),
+                                            std::move(BufferPtr(
+                                                new Buffer(MemoryType::MEMORY_GPU,
+                                                DataType::TYPE_INVALID,
+                                                {0},
+                                                nullptr)))));
+        quant_output = std::dynamic_pointer_cast<QBuffer>(norm_output)->kernel().data<int8_t>();
+        scales_ptr = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
+    }
+
+    if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {
+        // TODO(lidongjin) 
+        // we can merge invokeAddBiasResidual and invokeAlphaAddBiasResidual into a singel func.
+        if (params.alpha == 0.f || params.bias.has_value() || params.residual1.has_value() || params.residual2.has_value()) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAddBiasResidual,
-                output.data(),
-                input.data(),
+                norm_output->data(),
+                input->data(),
                 params.residual1 ? params.residual1.value().get().data() : nullptr,
                 params.residual2 ? params.residual2.value().get().data() : nullptr,
                 params.bias.has_value() ? params.bias.value().get().data() : nullptr,
@@ -49,23 +62,29 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 n,
                 stream_
             );
-        } else {
-            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+            sync_check_cuda_error();
+            return LayernormOutput({std::move(norm_output), nullptr});
+        } else if (params.alpha != 0.f) {
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAlphaAddBiasResidual,
+                norm_output->data(),
+                input->data(),
+                params.residual1 ? params.residual1.value().get().data() : nullptr,
+                params.bias ? params.bias.value().get().data() : nullptr,
+                params.alpha,
+                m,
+                n,
+                stream_);
+            sync_check_cuda_error();
+            return LayernormOutput({norm_output, nullptr});
         }
-        sync_check_cuda_error();
-        return;
     }
 
-    if (!(norm_type == NormType::layernorm || norm_type == NormType::rmsnorm)) {
-        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-    }
-    if (params.residual1.has_value() || params.bias.has_value()) {
-        const auto& add_bias_output = params.add_bias_output ? params.add_bias_output.value().get() : output;
-        if (params.norm_type == NormType::layernorm) {
+    if (params.norm_type == NormType::layernorm) {
+        if (params.residual1.has_value() || params.bias.has_value()) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeGeneralAddBiasResidualLayerNorm,
-                add_bias_output.data(),
-                output.data(),
-                input.data(),
+                (params.before_norm_output == nullptr) ? norm_output->data() : params.before_norm_output->data(),
+                norm_output->data(),
+                input->data(),
                 params.bias ? params.bias.value().get().data() : nullptr,
                 params.residual1 ? params.residual1.value().get().data() : nullptr,
                 gamma,
@@ -76,34 +95,15 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 stream_,
                 true, // use_diff_of_squares
                 nullptr, // scale
-                nullptr, // dynamic_scale
-                nullptr  // out_quant
+                scales_ptr, // dynamic_scale
+                quant_output // out_quant
             );
-        } else if (params.norm_type == NormType::rmsnorm) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAddBiasResidualRmsNorm,
-                add_bias_output.data(),
-                output.data(),
-                input.data(),
-                params.bias ? params.bias.value().get().data() : nullptr,
-                params.residual1 ? params.residual1.value().get().data() : nullptr,
-                gamma,
-                beta,
-                eps,
-                m,
-                n,
-                stream_,
-                nullptr, // scale
-                nullptr, // dynamic_scale
-                nullptr  // out_quant
-            );
+            sync_check_cuda_error();
+            return LayernormOutput({norm_output, params.before_norm_output});
         } else {
-            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-        }
-    } else {
-        if (params.norm_type == NormType::layernorm) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeGeneralLayerNorm,
-                output.data(),
-                input.data(),
+                norm_output->data(),
+                input->data(),
                 gamma,
                 beta,
                 eps,
@@ -112,29 +112,54 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 stream_,
                 true, // use_diff_of_squares
                 nullptr, // scale
-                nullptr, // dynamic_scale
-                nullptr  // out_quant
+                scales_ptr, // dynamic_scale
+                quant_output // out_quant
             );
-        } else if (params.norm_type == NormType::rmsnorm) {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeGeneralRmsNorm,
-                output.data(),
-                input.data(),
-                gamma,
-                beta,
-                eps,
-                m,
-                n,
-                stream_,
-                nullptr, // scale
-                nullptr, // dynamic_scale
-                nullptr  // out_quant
-            );
-        } else {
-            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+            sync_check_cuda_error();
+            return LayernormOutput({norm_output, params.before_norm_output});
         }
     }
-    sync_check_cuda_error();
-    return;
+
+    if (params.norm_type == NormType::rmsnorm) {
+        if (params.residual1.has_value() || params.bias.has_value()) {
+           DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAddBiasResidualRmsNorm,
+                                            params.before_norm_output->data(),
+                                            norm_output->data(),
+                                            input->data(),
+                                            params.bias ? params.bias.value().get().data() : nullptr,
+                                            params.residual1 ? params.residual1.value().get().data() : nullptr,
+                                            gamma,
+                                            beta,
+                                            eps,
+                                            m,
+                                            n,
+                                            stream_,
+                                            nullptr, // scale
+                                            scales_ptr, // dynamic_scale
+                                            quant_output // out_quant
+                                        );
+            sync_check_cuda_error();
+            return LayernormOutput({norm_output, params.before_norm_output});
+        } else {
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeGeneralRmsNorm,
+                norm_output->data(),
+                input->data(),
+                gamma,
+                beta,
+                eps,
+                m,
+                n,
+                stream_,
+                nullptr, // scale
+                scales_ptr, // dynamic_scale
+                quant_output // out_quant
+            );
+            sync_check_cuda_error();
+            return LayernormOutput({norm_output, params.before_norm_output});
+        }
+    }
+    
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 

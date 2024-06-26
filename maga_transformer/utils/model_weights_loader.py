@@ -273,9 +273,15 @@ class ModelWeightsLoader:
                 elif len(qweight) > 1:
                     raise Exception(f"found more than one weight {quant_weight} in layer {layer_id}")
                 try:
+                    
                     qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=datatype)
                     qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor).contiguous().clone().to(device)
+                    # int4
+                    if (qweight_tensor.dim() == 2):
+                        qweight_tensor = qweight_tensor.reshape(qweight_tensor.shape[-1], -1)
                     results.append((layer_id, qweight[0].name, qweight_tensor))
+                    
+                    # logging.info(f"load qweight tensor {quant_weight} in layer {layer_id} and shape is {qweight_tensor.shape}")
 
                 except Exception as e:
                     logging.error(f'load smooth_quant layer_weight in layer {layer_id} {qweight[0].name} failed: {e}')

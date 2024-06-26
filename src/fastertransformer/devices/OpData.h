@@ -130,44 +130,55 @@ struct ConcatParams {
     const size_t dim = 0;
 };
 
-using LayernormOutput = void;
+struct LayernormOutput {
+    BufferPtr output;
+    BufferPtr before_norm_output;
+};
 
 struct LayernormParams {
-    LayernormParams(
-        const Buffer& input,
-        const Buffer& norm_output,
-        const OptionalBufferRef add_bias_output,
 
-        const NormType norm_type,
-        const std::optional<std::reference_wrapper<const LayerNormWeights>> weights = std::nullopt,
-        const std::optional<double> eps = std::nullopt,
-        const OptionalConstBufferRef residual1 = std::nullopt,
-        const OptionalConstBufferRef residual2 = std::nullopt,
-        const OptionalConstBufferRef bias = std::nullopt,
-        const std::optional<double> alpha = std::nullopt
-    ) : input(input),
-        norm_output(norm_output),
-        add_bias_output(add_bias_output),
-        norm_type(norm_type),
-        weights(weights),
-        eps(eps.value_or(1e-6)),
-        residual1(residual1),
-        residual2(residual2),
-        bias(bias),
-        alpha(alpha) {}
 
-    const Buffer&  input;
+    LayernormParams(BufferPtr input,
+                    BufferPtr before_norm_output,
+                    const std::optional<std::reference_wrapper<const LayerNormWeights>> norm_weight,
+                    OptionalConstBufferRef residual1,
+                    OptionalConstBufferRef residual2,
+                    OptionalConstBufferRef bias,
+                    double alpha,
+                    double eps,
+                    bool is_inplace,
+                    NormType norm_type,
+                    QScheme qscheme = QScheme::NoQuantize) : 
+                    input(std::move(input)),
+                    before_norm_output(std::move(before_norm_output)),
+                    norm_weight(norm_weight),
+                    residual1(residual1),
+                    residual2(residual2),
+                    bias(bias),
+                    alpha(alpha),
+                    eps(eps),
+                    is_inplace(is_inplace),
+                    norm_type(norm_type),
+                    qscheme(qscheme) {};
 
-    const Buffer& norm_output;
-    const OptionalBufferRef add_bias_output;
 
-    const NormType norm_type;
-    const std::optional<std::reference_wrapper<const LayerNormWeights>> weights;
-    const double eps;
+
+    BufferPtr input;
+    BufferPtr before_norm_output;
+
+    const std::optional<std::reference_wrapper<const LayerNormWeights>> norm_weight;
+    
     const OptionalConstBufferRef  residual1;
     const OptionalConstBufferRef  residual2;
     const OptionalConstBufferRef  bias;
-    const std::optional<double>   alpha;
+    
+    const NormType norm_type;
+    
+    const double alpha;
+    const double eps;
+
+    const bool is_inplace;
+    const QScheme qscheme;
 };
 
 enum GemmType : size_t {
@@ -488,8 +499,8 @@ struct QuantizeParams {
                    axis(axis) {}
 
     QuantizeParams(const Buffer& input,
-                   const Buffer& smoother,
-                   const Buffer& shift,
+                   OptionalConstBufferRef smoother,
+                   OptionalConstBufferRef shift,
                    DataType qtype,
                    size_t axis) :
                    input(input),

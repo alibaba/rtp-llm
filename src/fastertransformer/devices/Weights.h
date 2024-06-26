@@ -69,6 +69,9 @@ struct AttentionLayerWeights {
     std::shared_ptr<const DenseWeights>     output_weight;
     std::shared_ptr<const LoraWeightsMap>   output_lora_weights;
 
+    std::shared_ptr<const DenseWeights>     smoother_weight;
+    std::shared_ptr<const DenseWeights>     shift_weight;
+
     AttentionLayerWeights() = default;
 
     AttentionLayerWeights(std::shared_ptr<const DenseWeights> qkv_weight) :
@@ -87,6 +90,8 @@ struct FfnLayerWeights {
     std::shared_ptr<const LayerNormWeights> dense_layernorm;
 
     std::shared_ptr<const DenseWeights>     moe_gating_weight;
+
+    std::shared_ptr<const DenseWeights>     smoother_weight;
 
     FfnLayerWeights() = default;
 

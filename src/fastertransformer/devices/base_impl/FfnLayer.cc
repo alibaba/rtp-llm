@@ -44,26 +44,20 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                                  *(params.weights.up_weight),
                                  std::nullopt});
     printBufferData(*up_output.output, "ffn_up");
+
     if (FFNDispatch::dispatch(params) == FFNDispatch::FFNType::Gate) {
-        {
-            auto gate_output = loraLinear({params.input,
-                                        std::nullopt,
-                                        *(params.weights.gate_weight),
-                                        std::nullopt});
+        auto gate_output = loraLinear({params.input,
+                                    std::nullopt,
+                                    *(params.weights.gate_weight),
+                                    std::nullopt});
 
-            activation({params.activation_type,
-                        *(up_output.output),
-                        mayGetRef(params.weights.up_weight->bias),
-                        *(gate_output.output),
-                        std::nullopt});
-            gate_output.output.reset();
-        }
-
-        auto output = loraLinear({*(up_output.output),
-                                  std::nullopt,
-                                  *(params.weights.down_weight),
-                                  std::nullopt});
-        return FfnLayerOutput({move(output.output)});
+        activation({params.activation_type,
+                    *(up_output.output),
+                    mayGetRef(params.weights.up_weight->bias),
+                    *(gate_output.output),
+                    std::nullopt});
+        gate_output.output.reset();
+        
     } else if (FFNDispatch::dispatch(params) == FFNDispatch::FFNType::NoGate) {
         activation({params.activation_type,
                     *(up_output.output),
@@ -71,15 +65,34 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                     std::nullopt,
                     std::nullopt});
         printBufferData(*up_output.output, "ffn_act");
-        auto output = loraLinear({*(up_output.output),
-                                  std::nullopt,
-                                  *(params.weights.down_weight),
-                                  std::nullopt});
-        printBufferData(*output.output, "ffn_out");
-        return FfnLayerOutput({move(output.output)});
+        
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
+
+    if (params.weights.smoother_weight != nullptr) {
+        auto up_output_ = quantize(QuantizeParams(
+                                     *up_output.output,
+                                     *(params.weights.smoother_weight->kernel),
+                                     std::nullopt,
+                                     DataType::TYPE_QINT8,
+                                     1));
+        auto output = loraLinear({*(up_output_),
+                                    std::nullopt,
+                                    *(params.weights.down_weight),
+                                    std::nullopt});
+        printBufferData(*output.output, "ffn_out");
+
+        return FfnLayerOutput({move(output.output)});
+    }
+
+    auto output = loraLinear({*(up_output.output),
+                            std::nullopt,
+                            *(params.weights.down_weight),
+                            std::nullopt});
+    printBufferData(*output.output, "ffn_out");
+
+    return FfnLayerOutput({move(output.output)});
 }
 
 }; // namespace fastertransformer

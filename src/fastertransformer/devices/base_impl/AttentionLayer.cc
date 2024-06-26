@@ -36,12 +36,6 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     // typically local_head_num * size_per_head + 2 * local_head_num_kv * size_per_head
     const auto qkv_merged_size = qkv_weight->kernel->shape()[1];
 
-    // attention layer output is preallocated to avoid memory fragmentation
-    // note that this output is returned and further used as residual
-    auto output = params.output ? params.output
-                : allocateBuffer({input.type(), {h_token_num, output_weight->kernel->shape()[1]}},
-                                 {"attn_layer_out"});
-
     // NOTE: Cuda implementation fused adding qkv_weight->bias in invokeAddFusedQKVBiasTranspose kernel call.
     // other devices need to be careful about this.
     // maybe add a device property here.
@@ -50,7 +44,14 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     printBufferData(*(qkv_weight->kernel), "qkv kernel");
     printBufferData(*qkv, "qkv");
 
-    const auto qkv_output = allocateBuffer({input.type(), {h_token_num, qkv_hidden_size}}, {"qkv_output"});
+    // attention layer output is preallocated to avoid memory fragmentation
+    // note that this output is returned and further used as residual
+    auto dtype = (input.isQBuffer() ? qkv->type() : input.type());
+    auto output = params.output ? params.output
+                : allocateBuffer({dtype, {h_token_num, output_weight->kernel->shape()[1]}},
+                                 {"attn_layer_out"});
+
+    auto qkv_output = allocateBuffer({dtype, {h_token_num, qkv_hidden_size}}, {"qkv_output"});
 
     auto generate_qkv = qkv->view(0, generate_batch_size);
     auto generate_output = qkv_output->view(0, generate_batch_size);
@@ -76,6 +77,21 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         contextAttention({context_qkv, context_output, params.common, params.weights, params.configs});
     }
     printBufferData(*qkv_output, "qkv_output");
+
+    if(params.weights.smoother_weight) {
+        OptionalConstBufferRef shift_weight = (params.weights.shift_weight == nullptr) ?
+                                               nullopt :
+                                               (OptionalConstBufferRef)*params.weights.shift_weight->kernel;
+
+        auto qkv_output_ = quantize({*qkv_output,
+                                     *params.weights.smoother_weight->kernel,
+                                     shift_weight,
+                                     DataType::TYPE_QINT8,
+                                     1});
+        gemm({*qkv_output_, *(output_weight->kernel), nullopt, output});
+
+        return {move(output)};
+    }
 
     gemm({*qkv_output, *(output_weight->kernel), nullopt, output});
 
