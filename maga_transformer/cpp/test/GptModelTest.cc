@@ -65,7 +65,8 @@ TEST_F(GptModelTest, testSimple) {
 
     // temporarily disable test for cpu/arm device
     // enable this back when device is ready.
-    if (DeviceFactory::getDefaultDevice()->getDeviceProperties().type != DeviceType::Cuda) {
+    if (DeviceFactory::getDefaultDevice()->getDeviceProperties().type != DeviceType::Cuda && 
+        DeviceFactory::getDefaultDevice()->getDeviceProperties().type != DeviceType::ROCm) {
         try {
             auto outputs = model->forward(inputs);
             printBufferData(*outputs.logits, "logits");

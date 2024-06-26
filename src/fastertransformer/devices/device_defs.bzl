@@ -21,6 +21,7 @@ def device_test_envs():
         },
         "//:using_rocm": {
             "TEST_USING_DEVICE": "ROCM",
+            "LD_PRELOAD": "/opt/conda310/lib/python3.10/site-packages/torch/lib/libtorch_cpu.so",
         },
         "//conditions:default": {
             "TEST_USING_DEVICE": "CPU",

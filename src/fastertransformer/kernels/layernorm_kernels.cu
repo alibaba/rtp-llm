@@ -189,7 +189,7 @@ __global__ void generalLayerNorm(T* output, T* normed_output, const T* input, co
     const bool with_per_tensor_scaling = scale_orig_quant_per_tensor != nullptr;
     const float_packed_t scale_orig_quant
         = cuda_cast<float_packed_t>(with_per_tensor_scaling ? *scale_orig_quant_per_tensor : 0.0f);
-    T_scalar amax = 1e-6f;
+    T_scalar amax(1e-6f);
 
     const int n_elems = hidden_dim / num_elems_T;
     for (int i = tidx; i < n_elems; i += blockDim.x)
@@ -325,9 +325,11 @@ void dispatch_layernorm_type_square_method(T* output, T* normed_output, const T*
 {
     if (shmem_size >= (48 << 10))
     {
+#if USING_CUDA
         cudaError_t ret
             = cudaFuncSetAttribute(generalLayerNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, RETURN_NORMED_OUTPUT, USE_DIFF_OF_SQUARES>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
+#endif
     }
     generalLayerNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, RETURN_NORMED_OUTPUT, USE_DIFF_OF_SQUARES>
         <<<grid, block, shmem_size, stream>>>(output, normed_output, input, bias, residual, gamma, beta, eps, tokens,

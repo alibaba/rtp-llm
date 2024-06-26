@@ -24,6 +24,10 @@
 #include "src/fastertransformer/rocm/cuda_shims.h"
 #endif
 
+#if !USING_CUDA
+#define __CUDA_ARCH__ 0
+#endif
+
 namespace fastertransformer {
 
 #ifdef ENABLE_BF16
@@ -296,5 +300,9 @@ inline __device__ __nv_bfloat162 bf16hfma2(__nv_bfloat162 a, __nv_bfloat162 b, _
 }
 
 #endif // ENABLE_BF16
+
+#if !USING_CUDA
+#undef __CUDA_ARCH__
+#endif
 
 }  // namespace fastertransformer

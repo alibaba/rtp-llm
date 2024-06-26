@@ -57,12 +57,25 @@ cc_library(
 )
 
 cc_library(
-    name = "hello_kernel",
+    name = "gpt_kernels_rocm",
     srcs = [
         "hello_world.cu",
+        "gpt_kernels.cu",
+        "add_residual_kernels.cu",
+        "alpha_layernorm_kernels.cu",
+        "rmsnormKernels.cu",
+        "layernorm_kernels.cu",
+        "activation_kernels.cu",
     ],
     hdrs = [
         "hello_world.h",
+        "gpt_kernels.h",
+        "add_residual_kernels.h",
+        "alpha_layernorm_kernels.h",
+        "reduce_kernel_utils.cuh",
+        "rmsnormKernels.h",
+        "layernorm_kernels.h",
+        "activation_kernels.h",
     ],
     deps = [
         "@local_config_rocm//rocm:rocm_headers",

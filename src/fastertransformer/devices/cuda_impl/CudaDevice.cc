@@ -24,6 +24,40 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     check_cuda_error(cudaSetDevice(device_id_));
     check_cuda_error(cudaStreamCreate(&stream_));
 
+    auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
+    allocator_ptr->setStream(stream_);
+    auto cublasptr = new Allocator<AllocatorType::CUDA_HOST>(device_id_);
+    host_allocator_ptr->setStream(stream_);
+
+    if (params.device_reserve_memory_bytes) {
+        size_t free_bytes, total_bytes;
+        check_cuda_error(cudaMemGetInfo(&free_bytes, &total_bytes));
+        TrackerAllocatorParams tracker_params;
+        tracker_params.real_allocator = allocator_ptr;
+        tracker_params.target_track_bytes = params.device_reserve_memory_bytes > 0
+            ? params.device_reserve_memory_bytes
+            : free_bytes + params.device_reserve_memory_bytes;
+        tracker_params.align_size = 16;
+        FT_LOG_INFO("cuda device %d has %lu bytes free memory, trying to reserve %lu bytes.",
+                    device_id_, free_bytes, tracker_params.target_track_bytes);
+        allocator_.reset(new TrackerAllocator(tracker_params));
+    } else {
+        allocator_.reset(allocator_ptr);
+    }
+
+    if (params.host_reserve_memory_bytes) {
+        RUNTIME_ASSERT_OP_ARG(params.host_reserve_memory_bytes > 0,
+            "cuda host memory can not reserve as much as possible (%lu), must specify concrete size.",
+            params.host_reserve_memory_bytes);
+        TrackerAllocatorParams tracker_params;
+        tracker_params.real_allocator = host_allocator_ptr;
+        tracker_params.target_track_bytes = params.host_reserve_memory_bytes;
+        tracker_params.align_size = 32; // required by avx512
+        host_allocator_.reset(new TrackerAllocator(tracker_params));
+    } else {
+        host_allocator_.reset(host_allocator_ptr);
+    }
+
     check_cuda_error(cublasCreate(&cublas_handle_));
     check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     check_cuda_error(cublasSetStream(cublas_handle_, stream_));
