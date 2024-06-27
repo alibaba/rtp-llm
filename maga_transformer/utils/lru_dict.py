@@ -25,6 +25,7 @@ class LruDict(object):
     def pop(self, key: str):
         return self._dict.pop(key)
 
+    # ATTENTION: popitem api leads to memory leak
     def poplast(self) -> Tuple[Any, Any]:
         k, v = self._dict.peek_last_item()
         self._dict.pop(k)
