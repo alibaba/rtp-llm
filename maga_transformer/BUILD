@@ -49,6 +49,7 @@ py_library(
     deps = [
         ":torch",
         ":torchvision",
+        "decord",
         ":lru-dict",
         ":cpm_kernels",
         ":prettytable",

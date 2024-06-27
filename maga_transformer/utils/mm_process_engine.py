@@ -15,7 +15,7 @@ class MMProcessEngine:
             self.executor = ThreadPoolExecutor()
 
     def submit(self, urls: List[str], model):
-        return [asyncio.wrap_future(self.executor.submit(mm_process, url, lambda x: model.mm_part.mm_embedding(x, model.device))) for url in urls]
+        return [asyncio.wrap_future(self.executor.submit(model.mm_part.mm_embedding, url, model.device)) for url in urls]
 
     @staticmethod
     async def get(futures: List[Future[torch.Tensor]], time_out: int = 10) -> List[torch.Tensor]:

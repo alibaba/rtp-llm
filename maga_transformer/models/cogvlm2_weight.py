@@ -181,7 +181,7 @@ class CogVLM2Weight(ModelDeployWeightInfo):
 class CogVLM2VitWeights(BaseVitWeights):
     def _set_weight_prefix(self):
         self._ckpt_prefix = "model.vision."
-        self._ft_prefix = "self.visual.vit."
+        self._ft_prefix = "self.mm_part.vit."
 
 
 class CogVLM2WeightInfo(CogVLM2Weight, BaseMultiModalWeightInfo):

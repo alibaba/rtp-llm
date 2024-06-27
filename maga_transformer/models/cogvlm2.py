@@ -15,7 +15,7 @@ from maga_transformer.models.cogvlm2_weight import CogVLM2WeightInfo, CogVLM2Vit
 from maga_transformer.models.llama import Llama
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
-from maga_transformer.utils.multimodel_util import common_image_process_func
+from maga_transformer.utils.multimodal_util import common_image_process_func
 
 LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1
@@ -25,10 +25,10 @@ class CogVLM2(Llama, MultiModalMixin):
         quant_algo = config.quant_algo
         if quant_algo.isGptq() or quant_algo.isAwq() or quant_algo.isSmoothQuant() or quant_algo.isOmniQuant():
             raise Exception("CogVLM2 only support FP32, BF16, FP16, INT8, not support other quant algorithm")
-        self.visual = EVA2CLIPImageEmbedding(config)
+        self.mm_part = EVA2CLIPImageEmbedding(config)
         self.nccl_op_ = NcclOp()
         config.vit_related_params.vit_weights = CogVLM2VitWeights(
-            {"vit": self.visual.vit}
+            {"vit": self.mm_part.vit}
         )
         Llama.__init__(self, config)
 
@@ -213,10 +213,6 @@ class CogVLM2(Llama, MultiModalMixin):
                 [token_type_ids == VISION_TOKEN_TYPE], image_features
             )
         return input_embeds
-    
-    def process_multimodel_input_func(self, path: str) -> torch.Tensor:
-        return common_image_process_func(path, partial(self.visual.image_embedding, device=self.device))
-
 
 register_model(
     "cogvlm2",

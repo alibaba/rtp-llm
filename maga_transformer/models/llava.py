@@ -16,7 +16,7 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.llava_vit import LlavaImageEmbedding
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.utils.multimodel_util import common_image_process_func
+from maga_transformer.utils.multimodal_util import common_image_process_func
 
 class LlavaTokenizer(object):
     def __init__(self, 
@@ -283,8 +283,5 @@ class Llava(Llama, MultiModalMixin):
 
         assert input_ids.shape[1] == new_input_embeds.shape[1]
         return new_input_embeds.type(to_torch_dtype(self.config.data_type))
-    
-    def process_multimodel_input_func(self, path: str) -> torch.Tensor:
-        return common_image_process_func(path, partial(self.visual.image_embedding, device=self.device))
 
 register_model("llava", Llava, ["LlavaLlamaForCausalLM"])

@@ -23,12 +23,7 @@ from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_s
             truncate_response_with_stop_words, truncate_token_with_stop_word_id, match_stop_words
 from maga_transformer.utils.tokenizer_utils import DecodingState
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
-<<<<<<< HEAD
-from maga_transformer.utils.vit_process_engine import VitEngine
-=======
-from maga_transformer.models.cogvlm2 import CogVLM2
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
->>>>>>> refactor: refactor mm process engine
 
 class Pipeline(object):
     def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[PreTrainedTokenizerBase]):

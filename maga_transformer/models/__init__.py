@@ -22,7 +22,6 @@ from .bert import Bert
 from .megatron_bert import MegatronBert
 from .qwen_v2_moe import Qwen2Moe
 from .cogvlm2 import CogVLM2
-from .whisper import Whisper
 
 import logging
 try:

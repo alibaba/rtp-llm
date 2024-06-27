@@ -5,8 +5,6 @@ from functools import partial
 from enum import Enum, auto
 from typing import Any, Dict, List, Union, Tuple, Optional
 from PIL import Image
-import torchaudio
-from io import BytesIO
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import RequestFormat
@@ -14,7 +12,7 @@ from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeigh
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.utils.multimodel import common_image_process_func, common_audio_process_func
+from maga_transformer.utils.multimodal_util import common_image_process_func, common_audio_process_func, common_viedo_process_func
 from maga_transformer.models.base_model import EmbeddingOutput
 
 class MultiModalEmbeddingInterface:
@@ -34,11 +32,19 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
     @torch.no_grad()
     def mm_embedding(self, mm_input, device):
-        audio, sample_rate = torchaudio.load(mm_input)
-        return self.audio_embedding(audio, sample_rate, device)
+        return common_audio_process_func(mm_input, partial(self.audio_embedding, device=device))
     
     @torch.no_grad()
     def audio_embedding(self, audio: torch.Tensor, sample_rate: int, device):
+        raise NotImplementedError()
+
+class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
+    @torch.no_grad()
+    def mm_embedding(self, mm_input, device):
+        return common_viedo_process_func(mm_input, partial(self.video_embedding, device=device))
+    
+    @torch.no_grad()
+    def video_embedding(self, video: List[Image.Image], device):
         raise NotImplementedError()
 
 class BaseVitWeights:
@@ -170,6 +176,3 @@ class MultiModalMixin:
         self.nccl_op_.broadcast_tp([embedding_tensor])
         torch.cuda.current_stream().synchronize()
         return EmbeddingOutput(embedding_tensor, None)
-    
-    def process_multimodel_input_func(self, path: str) -> torch.Tensor:
-        raise NotImplementedError()
