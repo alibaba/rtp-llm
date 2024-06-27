@@ -188,7 +188,8 @@ class Pipeline(object):
                       stop_word_id_slices: List[int],
                       decoding_states: List[DecodingState],
                       token_buffers: List[str],
-                      **kwargs: Any) -> Tuple[List[Any], List[int], List[DecodingState], List[str]]:
+                      ouput_tokens_list: List[torch.Tensor],
+                      **kwargs: Any) -> Tuple[List[str], List[int], List[DecodingState], List[str], List[torch.Tensor]]:
         texts = []
         all_texts = []
         output_lens = []
@@ -202,9 +203,15 @@ class Pipeline(object):
         if len(token_buffers) == 0:
             token_buffers = [""] * len(generate_outputs.generate_outputs)
 
+        if len(ouput_tokens_list) == 0:
+            ouput_tokens_list = [torch.empty(0, dtype=torch.int32) for _ in range(len(generate_outputs.generate_outputs))]
+
         i = 0
         for generate_output in generate_outputs.generate_outputs:
-            tokens = generate_output.output_ids.cpu()
+            if self.model.config.use_rpc:
+                ouput_tokens_list[i] = torch.cat((ouput_tokens_list[i], generate_output.output_ids), dim=1)
+                generate_output.output_ids = ouput_tokens_list[i]
+            tokens = generate_output.output_ids
             tokens = remove_padding_eos(tokens, self._special_tokens.eos_token_id)
             output_lens.append(tokens.nelement())
             
@@ -228,7 +235,7 @@ class Pipeline(object):
             texts.append(text)
             all_texts.append(all_text)
             i += 1
-        return texts, output_lens, decoding_states, token_buffers
+        return texts, output_lens, decoding_states, token_buffers, ouput_tokens_list
 
     @torch.inference_mode()
     async def generate_stream(self, token_ids: List[int], images: List[Future[torch.Tensor]],
@@ -260,6 +267,7 @@ class Pipeline(object):
         stream: AsyncGenerator[GenerateOutputs, None] = self.model.enqueue(input)
 
         decoding_states: List[DecodingState] = []
+        ouput_tokens_list: List[torch.Tensor] = []
         token_buffers: List[str] = []
         generate_outputs_cache = GenerateOutputs()
 
@@ -272,9 +280,9 @@ class Pipeline(object):
                                                            for i, out in enumerate(generate_outputs_cache.generate_outputs)]
             assert len(generate_outputs_cache.generate_outputs) == len(generate_outputs.generate_outputs)
             begin_time = current_time_ms()
-            generate_texts, output_lens, decoding_states, token_buffers = self.decode_tokens(
+            generate_texts, output_lens, decoding_states, token_buffers, ouput_tokens_list = self.decode_tokens(
                 generate_config, generate_outputs_cache, stop_word_strs, stop_word_str_slices,
-                stop_word_ids, stop_word_id_slices, decoding_states, token_buffers, **kwargs)
+                stop_word_ids, stop_word_id_slices, decoding_states, token_buffers, ouput_tokens_list, **kwargs)
 
             kmonitor.report(GaugeMetrics.POST_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
 

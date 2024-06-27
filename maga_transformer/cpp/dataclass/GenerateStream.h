@@ -137,6 +137,7 @@ protected:
     SystemPromptParams                  prompt_param_;
     bool                                is_context_stream_     = true;
     size_t                              iter_count_            = 0;
+    size_t                              last_output_pos_       = 0;
     int                                 reuse_length_          = 0;
     bool                                done_                  = false;
     bool                                cancelled_             = false;

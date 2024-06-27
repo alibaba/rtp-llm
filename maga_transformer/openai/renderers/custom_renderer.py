@@ -137,7 +137,8 @@ class CustomChatRenderer():
         async for response in self.render_response_stream(output_generator, 
                                                           request, 
                                                           generate_config,
-                                                          input_token_length):
+                                                          input_token_length,
+                                                          model.config.use_rpc):
             yield response
 
     async def render_response_stream(
@@ -145,7 +146,8 @@ class CustomChatRenderer():
             output_generator: AsyncGenerator[GenerateOutputs, None],
             request: ChatCompletionRequest,
             generate_config: GenerateConfig,
-            input_token_length: int
+            input_token_length: int,
+            is_rpc: bool
     ) -> AsyncGenerator[StreamResponseObject, None]:
         index = 0
         output_token_length = 0
@@ -172,6 +174,7 @@ class CustomChatRenderer():
                 )
 
         output: GenerateOutput = None
+        output_tokens_list = torch.empty(0, dtype=torch.int32)
         async for outputs in output_generator:
             if index == 0:
                 yield StreamResponseObject(
@@ -185,7 +188,12 @@ class CustomChatRenderer():
 
             index += 1
             output = outputs.generate_outputs[0]
-            output_ids = self._clean_output_ids(output.output_ids)
+            if is_rpc:
+                # rpc mode incremental return output_ids
+                output_tokens_list = torch.cat((output_tokens_list, output.output_ids), dim=1)
+                output.output_ids = output_tokens_list
+            output_ids = output.output_ids
+            output_ids = self._clean_output_ids(output_ids)
             output_token_length = len(output_ids)
             finish_reason = self._check_finish_reason(output_ids, input_token_length)
             output_ids = self._remove_stop_word_ids(output_ids)

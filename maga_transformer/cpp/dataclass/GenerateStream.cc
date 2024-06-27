@@ -25,6 +25,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     special_tokens_(params.special_tokens_) {
     updatePrefix(resource_context.system_prompt);
     seq_length_ = generate_input_->inputLength();
+    last_output_pos_ = seq_length_;
+    
     begin_time_us_      = autil::TimeUtility::currentTimeInMicroSeconds();
     device_             = ft::DeviceFactory::getDefaultDevice();
     complete_token_ids_ = device_->allocateBuffer(
@@ -62,6 +64,7 @@ void GenerateStream::cancel() {
 }
 
 absl::StatusOr<GenerateOutputs> GenerateStream::nextOutput() {
+    // TODO(xinfei.sxf) 某些case下会出现1s的等待
     while ((!stopped()) && !finished() && generate_outputs_queue_.isEmpty()) {
         generate_outputs_queue_.waitNotEmpty();
     }
@@ -413,7 +416,7 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
     device_->copy({*cum_log_probs_, cum_log_probs});
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    size_t output_len = seq_length_ - inputLength();
+    size_t output_len = seq_length_ - last_output_pos_;
     generate_outputs_->generate_outputs.clear();
     for (size_t i = 0; i < tileNum(); i++) {
         GenerateOutput generate_output;
@@ -422,7 +425,7 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {1lu, output_len}, ft::AllocationType::HOST}, {});
         // TODO(xinfei.sxf) optimize this copy : only copy last token
         memcpy(generate_output.output_ids->data(),
-               complete_token_ids_->view(i, 1).dataWithOffset<int32_t>(inputLength()),
+               complete_token_ids_->view(i, 1).dataWithOffset<int32_t>(last_output_pos_),
                sizeof(int32_t) * output_len);
         if (generate_input_->generate_config->return_logits) {
             ft::BufferPtr host_logits;
@@ -458,6 +461,7 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
         generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
         generate_output.aux_info.input_len    = generate_input_->promptLength();
         generate_output.aux_info.prefix_len   = generate_input_->prefix_length;
+        // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
         generate_output.aux_info.output_len   = seq_length_ - generate_input_->inputLength();
         generate_output.aux_info.reuse_len    = reuse_length_;
 
@@ -469,10 +473,15 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
 
         generate_outputs_->generate_outputs.push_back(generate_output);
     }
-    while (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
-        generate_outputs_queue_.popFront();
+    if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
+        /* No matter if the queue is full for any reason, 
+           the stream will be set to stop directly to prevent the push to queue from getting stuck. */
+        setStop("queue is full");
+        return;
+    } else {
+        generate_outputs_queue_.push(*generate_outputs_);
     }
-    generate_outputs_queue_.push(*generate_outputs_);
+    last_output_pos_ = seq_length_;
 }
 
 void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {
