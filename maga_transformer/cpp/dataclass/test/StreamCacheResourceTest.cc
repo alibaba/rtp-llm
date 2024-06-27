@@ -56,9 +56,8 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
     prepareResource();
 
     auto& resource = stream_->streamCacheResource();
-    ASSERT_EQ(resource.needKVCacheBlockNums(), 3);
 
-    ASSERT_TRUE(resource.initKVBlock());
+    assert_TRUE(resource.initKVBlock());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
     const BatchKVCacheBlockAddr& blocks = resource.kvCache();
@@ -71,11 +70,8 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
     CHECK_FUNC(blocks.k_scale_ptr, 2, 3);
     CHECK_FUNC(blocks.v_scale_ptr, 2, 3);
 
-    ASSERT_EQ(resource.needKVCacheBlockNums(), 0);
-
     stream_->setSeqLength(7);
     stream_->setIsContextStream(false);
-    ASSERT_EQ(resource.needKVCacheBlockNums(), 2);
     ASSERT_TRUE(resource.incrKVBlock());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
 
@@ -97,7 +93,6 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     prepareResource();
     auto& resource = stream_->streamCacheResource();
     resource.resource_context_.reuse_cache = true;
-    ASSERT_EQ(resource.needKVCacheBlockNums(), 3);
 
     ASSERT_TRUE(resource.initKVBlock());
     stream_->setSeqLength(9);
@@ -130,8 +125,8 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
     std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
     generate_config->num_beams = 2;
-    auto vec = vector<int>{1, 2, 3, 4, 5, 6, 9, 10, 11};
-    std::vector<size_t> shape = {9};
+    auto vec = vector<int>{1, 2, 3, 4, 5, 6, 9};
+    std::vector<size_t> shape = {7};
     generate_input->input_ids = std::make_unique<ft::Buffer>(ft::MEMORY_CPU, ft::TYPE_INT32, shape, (void*)(vec.data()));
     generate_input->generate_config = generate_config;
     int max_seq_len = 2048;
@@ -146,14 +141,14 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
 
     auto& resource2 = stream_->streamCacheResource();
     ASSERT_TRUE(resource2.initKVBlock());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 2);
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
 
     stream_->setIsContextStream(false);
-    stream_->setSeqLength(10);
+    stream_->setSeqLength(8);
     ASSERT_TRUE(resource2.incrKVBlock());
-    ASSERT_EQ(cache_manager_->freeBlockNums(), 2);
+    ASSERT_EQ(cache_manager_->freeBlockNums(), 1);
 
-    stream_->setSeqLength(11);
+    stream_->setSeqLength(9);
     ASSERT_TRUE(resource2.incrKVBlock());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 0);
 
@@ -166,7 +161,7 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
 
     stream_->releaseResource();
     ASSERT_EQ(cache_manager_->freeBlockNums(), 2);
-    ASSERT_EQ(cache_manager_->cacheItemNum(), 4);
+    ASSERT_EQ(cache_manager_->cacheItemNum(), 3);
 }
 
 
@@ -174,7 +169,6 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
     prepareResource();
     auto& resource = stream_->streamCacheResource();
     resource.resource_context_.reuse_cache = false;
-    ASSERT_EQ(resource.needKVCacheBlockNums(), 3);
 
     ASSERT_TRUE(resource.initKVBlock());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 5);

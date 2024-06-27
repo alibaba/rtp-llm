@@ -37,7 +37,7 @@ class EmbeddingCppEngine(BaseEngine):
     async def decode(self, input: EngineInputs) -> AsyncGenerator[EngineOutputs, None]:
         output = EngineOutputs(outputs=None, input_length=0)
         await asyncio.to_thread(self.decode_sync, input, output)
-        yield output
+        return output
 
     @override
     def update_lora(self, lora_infos: Dict[str, str]) -> None:

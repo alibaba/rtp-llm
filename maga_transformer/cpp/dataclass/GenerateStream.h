@@ -75,8 +75,8 @@ public:
     std::vector<int> currentExecuteTokens(int batch_idx) const;
 
     void checkTimeout();
-    void setStop(const std::string& err_msg);
-    void stopAndRelease(const std::string& err_msg);
+    void setStop(const std::string& err_msg, absl::StatusCode err_code = absl::StatusCode::kInternal);
+    void stopAndRelease(const std::string& err_msg, absl::StatusCode err_code = absl::StatusCode::kInternal);
     bool isDoneWithoutLock(int batch_id) const;
     void setPaused();
     bool setRunning();

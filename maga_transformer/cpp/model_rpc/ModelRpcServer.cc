@@ -9,10 +9,26 @@
 #include <memory>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 
 using namespace std;
 
 namespace rtp_llm {
+
+// TODO: not use absl::status
+int transErrorCode(absl::StatusCode code) {
+    const static std::unordered_map<int, int> error_code_map = {
+        {8, 602}, // kResourceExhausted, MALLOC_ERROR
+        {4, 603}, // kDeadlineExceeded, TIMEOUT_ERROR
+        {13, 514} // kInternal, UNKNOWN_ERROR
+    };
+    auto it = error_code_map.find((int)code);
+    if (it != error_code_map.end()) {
+        return it->second;
+    } else {
+        return 514;
+    }
+}
 
 ModelRpcServiceImpl::ModelRpcServiceImpl(
     const EngineInitParams& maga_init_params) {
@@ -40,8 +56,18 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
             break;
         }
         if (!output_status.ok()) {
-            FT_LOG_DEBUG("request:[%ld] generate error %s", request->request_id(), output_status.status().ToString().c_str());
-            return grpc::Status(grpc::StatusCode::INTERNAL, output_status.status().ToString());
+            FT_LOG_INFO("request:[%ld] generate error %s", request->request_id(), output_status.status().ToString().c_str());
+            auto status = output_status.status();
+            ErrorDetailsPB error_details;
+            error_details.set_error_code(transErrorCode(status.code()));
+            error_details.set_error_message(status.ToString());
+            std::string error_details_serialized;
+            if (error_details.SerializeToString(&error_details_serialized)) {
+                return grpc::Status(grpc::StatusCode::INTERNAL, status.ToString(), error_details_serialized);
+            } else {
+                FT_LOG_INFO("request:[%ld] SerializeToString error", request->request_id());
+                return grpc::Status(grpc::StatusCode::INTERNAL, status.ToString());
+            }
         }
         FT_LOG_DEBUG("request:[%ld] generate next output success", request->request_id());
         GenerateOutputsPB outputs_pb;

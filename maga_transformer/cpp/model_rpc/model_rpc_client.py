@@ -16,6 +16,7 @@ from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateConfigPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import AuxInfoPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputPB, GenerateOutputsPB
+from maga_transformer.cpp.proto.model_rpc_service_pb2 import ErrorDetailsPB
 from maga_transformer.distribute.worker_info import g_master_info
 from maga_transformer.utils.model_weight import LoraResource, LoraResourceHolder
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
@@ -142,8 +143,13 @@ class ModelRpcClient(object):
             # TODO(xinfei.sxf) 非流式的请求无法取消了
             if response_iterator:
                 response_iterator.cancel()
-            logging.warning(f"request: [{input_pb.request_id}] RPC failed: {e.code()}, {e.details()}")
-            raise FtRuntimeException(ExceptionType.MALLOC_ERROR if e.details() == 'INTERNAL: LACK MEM' else ExceptionType.UNKNOWN_ERROR, e.details())
+            logging.error(f"request: [{input_pb.request_id}] RPC failed: {e.code()}, {e.details()}")
+            error_details = ErrorDetailsPB()
+            metadata = e.trailing_metadata()
+            if 'grpc-status-details-bin' in metadata and error_details.ParseFromString(metadata['grpc-status-details-bin']):
+                raise FtRuntimeException(error_details.error_code, error_details.error_message)
+            else:
+                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
         except Exception as e:
             raise e
         finally:

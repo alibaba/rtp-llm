@@ -1,13 +1,13 @@
 #pragma once
-#include "maga_transformer/cpp/dataclass/GenerateConfig.h"
-#include "src/fastertransformer/core/Buffer.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
-
 #include <cstdint>
 #include <optional>
 #include <sstream>
 #include <string>
+#include "absl/status/status.h"
+#include "maga_transformer/cpp/dataclass/GenerateConfig.h"
+#include "src/fastertransformer/core/Buffer.h"
+#include "src/fastertransformer/core/BufferHelper.h"
+#include "src/fastertransformer/devices/DeviceFactory.h"
 
 namespace ft = fastertransformer;
 
@@ -96,8 +96,9 @@ enum class GenerateState {
 };
 
 struct GenerateStatus {
-    GenerateState status = GenerateState::WAITING;
-    std::string   error_info;
+    GenerateState    status = GenerateState::WAITING;
+    absl::StatusCode error_code;
+    std::string      error_info;
 };
 
 }  // namespace rtp_llm

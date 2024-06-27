@@ -126,7 +126,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
         } else if (running_streams_.empty() && new_streams.empty()) {
             // It is impossible for this stream to acquire enough resources
             FT_LOG_DEBUG("stream [%ld] can not add to new queue", (*it)->streamId());
-            (*it)->setStop("LACK MEM");
+            (*it)->setStop("LACK MEM", absl::StatusCode::kResourceExhausted);
             it++;
         } else {
             // try to join new streams in the next schedule cycle

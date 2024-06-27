@@ -66,7 +66,8 @@ absl::StatusOr<GenerateOutputs> GenerateStream::nextOutput() {
         generate_outputs_queue_.waitNotEmpty();
     }
     if (stopped()) {
-        return absl::InternalError(stopReason());
+        std::lock_guard<std::mutex> lock(output_mutex_);
+        return absl::Status(generate_status_.error_code, generate_status_.error_info);
     }
     if (generate_outputs_queue_.isEmpty()) {
         return absl::InternalError("no output any more");
@@ -219,19 +220,24 @@ void GenerateStream::checkTimeout() {
     auto timeout_ms      = generate_input_->generate_config->timeout_ms;
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
         stopAndRelease("query has been running " + std::to_string(running_time_ms) + " ms, "
-                       + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
+                       + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout",
+                       absl::StatusCode::kDeadlineExceeded);
     }
 }
-void GenerateStream::setStop(const std::string& err_msg) {
+
+void GenerateStream::setStop(const std::string& err_msg, absl::StatusCode err_code) {
     std::lock_guard<std::mutex> lock(output_mutex_);
     FT_LOG_WARNING("stop stream: %d %s", streamId(), err_msg.c_str());
     generate_status_.status     = GenerateState::STOPPED;
+    generate_status_.error_code = err_code;
     generate_status_.error_info = err_msg;
 }
-void GenerateStream::stopAndRelease(const std::string& err_msg) {
-    setStop(err_msg);
+
+void GenerateStream::stopAndRelease(const std::string& err_msg, absl::StatusCode err_code) {
+    setStop(err_msg, err_code);
     releaseResource();
 }
+
 void GenerateStream::setPaused() {
     std::lock_guard<std::mutex> lock(output_mutex_);
     if (stoppedWithoutLock()) {
@@ -241,6 +247,7 @@ void GenerateStream::setPaused() {
     generate_status_.status = GenerateState::PAUSED;
     last_pause_us_          = autil::TimeUtility::currentTimeInMicroSeconds();
 }
+
 bool GenerateStream::setRunning() {
     std::lock_guard<std::mutex> lock(output_mutex_);
     if (stoppedWithoutLock()) {
@@ -249,23 +256,28 @@ bool GenerateStream::setRunning() {
     generate_status_.status = GenerateState::RUNNING;
     return true;
 }
+
 void GenerateStream::setFinishedWithoutLock() {
     generate_status_.status = GenerateState::FINISHED;
     for (int i = 0; i < tileNum(); ++i) {
         sub_generate_status_[i].status = GenerateState::FINISHED;
     }
 }
+
 bool GenerateStream::stoppedWithoutLock() {
     return generate_status_.status == GenerateState::STOPPED;
 }
+
 bool GenerateStream::stopped() {
     std::lock_guard<std::mutex> lock(output_mutex_);
     return generate_status_.status == GenerateState::STOPPED;
 }
+
 std::string GenerateStream::stopReason() {
     std::lock_guard<std::mutex> lock(output_mutex_);
     return generate_status_.error_info;
 }
+
 bool GenerateStream::finished() {
     std::lock_guard<std::mutex> lock(output_mutex_);
     return generate_status_.status == GenerateState::FINISHED;
@@ -274,12 +286,15 @@ bool GenerateStream::finished() {
 void GenerateStream::setKVCache(const BatchKVCacheBlockAddr& kv_cache_block_addr) {
     stream_cache_resource_.setKVCache(kv_cache_block_addr);
 }
+
 const BatchKVCacheBlockAddr& GenerateStream::kvCache() const {
     return stream_cache_resource_.kvCache();
 }
+
 const ResourceContext& GenerateStream::resourceContext() const {
     return stream_cache_resource_.resourceContext();
 }
+
 size_t GenerateStream::maxBlockSize() const {
     return stream_cache_resource_.maxBlockSize();
 }
@@ -289,6 +304,7 @@ bool GenerateStream::needFinish() {
                                    generate_input_->generate_config->max_new_tokens + generate_input_->inputLength())
            || needFinishBySPTokens();
 }
+
 bool GenerateStream::needFinishBySPTokens() {
     matchEosToken();
     matchStopWordsList();
@@ -301,11 +317,13 @@ bool GenerateStream::needFinishBySPTokens() {
         return generate_status.status == GenerateState::FINISHED;
     });
 }
+
 void GenerateStream::matchEosToken() {
     for (int i = 0; i < tileNum(); ++i) {
         matchEosToken(i);
     }
 }
+
 void GenerateStream::matchEosToken(int batch_id) {
     int* token_ids_ = (int*)complete_token_ids_->view(batch_id, 1).data();
     if (special_tokens_.eos_token_id_ == token_ids_[seq_length_ - 1]) {
@@ -323,6 +341,7 @@ void GenerateStream::matchStopWordsList() {
         matchStopWordsList(i);
     }
 }
+
 void GenerateStream::matchStopWordsList(int batch_id) {
     int* token_ids_ = (int*)complete_token_ids_->view(batch_id, 1).data();
     // note: stop_words_list in generate_config contains stop_words_list in special_tokens

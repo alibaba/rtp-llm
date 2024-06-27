@@ -83,6 +83,11 @@ message GenerateOutputsPB {
     repeated GenerateOutputPB generate_outputs = 2;
 }
 
+message ErrorDetailsPB {
+    int64 error_code = 1;
+    string error_message = 2;
+}
+
 service ModelRpcService {
     rpc generate_stream(GenerateInputPB) returns (stream GenerateOutputsPB);
 }

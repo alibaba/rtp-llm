@@ -69,7 +69,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 0);
     ASSERT_TRUE(stream->stopped());
-    ASSERT_EQ(stream->stopReason(), "can not be add input queue");
+    ASSERT_EQ(stream->stopReason(), "LACK MEM");
 
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
@@ -105,7 +105,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     ASSERT_TRUE(streams_status2.ok());
     ASSERT_EQ(streams_status2.value().size(), 0);
     ASSERT_TRUE(stream->stopped());
-    ASSERT_EQ(stream->stopReason(), "can not be add input queue");
+    ASSERT_EQ(stream->stopReason(), "LACK MEM");
     ASSERT_EQ(cache_manager->freeBlockNums(), 2);
 
     auto streams_status3 = scheduler.schedule();
