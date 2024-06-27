@@ -618,8 +618,11 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
     int64_t* host_block_pointers_  = input_tensors->getPtr<int64_t>("host_block_pointers", nullptr);
     const int64_t* block_scale_pointers_ = input_tensors->getPtr<int64_t>("block_scale_pointers", nullptr);
     const int      max_blocks_per_batch  = block_pointers_ ? input_tensors->at("block_pointers").shape()[3] : 0;
-    const int64_t* block_pointers =
+    int64_t* block_pointers =
         block_pointers_ ? block_pointers_ + generate_batch_size * 2 * max_blocks_per_batch : block_pointers_;
+    int64_t* host_block_pointers =
+        host_block_pointers_ ? host_block_pointers_ + generate_batch_size * 2 * max_blocks_per_batch : host_block_pointers_;
+
     const int64_t* block_scale_pointers = block_scale_pointers_ ?
                                               block_scale_pointers_ + generate_batch_size * 2 * max_blocks_per_batch :
                                               block_scale_pointers_;
@@ -760,8 +763,8 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                                         cu_kv_seqlens,
                                                         max_context_seq_length + max_context_prefix_length,
                                                         qkv_buf_2,        // context_buf_,
-                                                        block_pointers_,  // block_pointers,
-                                                        host_block_pointers_,
+                                                        block_pointers,  // block_pointers,
+                                                        host_block_pointers,
                                                         context_batch_size,    // batch_size
                                                         context_h_token_num,   // localNbTokens,
                                                         max_blocks_per_batch,  // max_blocks_per_sequence
