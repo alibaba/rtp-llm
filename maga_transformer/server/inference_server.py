@@ -283,4 +283,7 @@ class InferenceServer(object):
 
     def get_kv_cache_info(self) -> KVCacheInfo:
         assert self._inference_worker
-        return self._inference_worker.model.get_kv_cache_info()
+        if self._inference_worker.model:
+            return self._inference_worker.model.get_kv_cache_info()
+        else:
+            return KVCacheInfo(available_kv_cache=0, total_kv_cache=0)

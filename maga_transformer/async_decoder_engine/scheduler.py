@@ -82,8 +82,8 @@ class Scheduler:
             self._waiting_streams.appendleft(stream)
         self._stream_cache_manager.incr_kvcache(self.batch_query.streams)
 
-    def update_all_errors(self, err: str):
-        self.batch_query.update_all_errors(err)
+    def update_all_errors(self, err: str, e: Exception):
+        self.batch_query.update_all_errors(err, e)
 
     def running_batch_size(self) -> int:
         return self.batch_query.total_batch_size

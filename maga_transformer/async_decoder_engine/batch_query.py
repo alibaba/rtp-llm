@@ -314,9 +314,9 @@ class BatchQuery:
         self.calculate_loss = [c.calculate_loss for c in self.generate_configs[self.generate_batch_size:]]
         self.check()
 
-    def update_all_errors(self, err: str):
+    def update_all_errors(self, err: str, e: Exception):
         for stream in self.streams:
-            stream.stop_and_release(err)
+            stream.stop_and_release(err, e)
         self.context_streams.clear()
         self.decode_streams.clear()
 

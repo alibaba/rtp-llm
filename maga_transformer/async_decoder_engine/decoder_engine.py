@@ -132,7 +132,7 @@ class DecoderEngine(BaseEngine):
 
         except Exception as e:
             if batch_query:
-                self.scheduler_.update_all_errors(str(e))
+                self.scheduler_.update_all_errors(str(e), e)
             logging.error(
                 f'process run error: {e}, Traceback: {traceback.format_exc()}'
             )

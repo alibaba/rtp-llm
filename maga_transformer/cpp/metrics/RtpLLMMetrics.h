@@ -141,6 +141,7 @@ class RtpLLMCacheMetricsCollector final {
 public:
     int64_t kv_cache_item_num = 0;
     int64_t kv_cache_left_seq = 0;
+    int64_t kv_cache_used_ratio = 0;
 };
 
 class RtpLLMCacheMetrics: public kmonitor::MetricsGroup {
@@ -151,6 +152,7 @@ public:
 public:
     kmonitor::MutableMetric* kv_cache_item_num_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_left_seq_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_used_ratio_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
