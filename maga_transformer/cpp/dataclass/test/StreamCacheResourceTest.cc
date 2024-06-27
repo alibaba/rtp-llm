@@ -57,7 +57,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 
     auto& resource = stream_->streamCacheResource();
 
-    assert_TRUE(resource.initKVBlock());
+    ASSERT_TRUE(resource.initKVBlock());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 5);
     ASSERT_EQ(resource.maxBlockSize(), 3);
     const BatchKVCacheBlockAddr& blocks = resource.kvCache();

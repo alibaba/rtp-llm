@@ -8,7 +8,6 @@ import unittest
 from unittest import TestCase, main
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.test.model_test.test_util.fake_model_loader import FakeModelLoader
-from maga_transformer.async_decoder_engine.rpc_model import RpcModel
 from maga_transformer.config.exceptions import FtRuntimeException
 from maga_transformer.pipeline.pipeline import Pipeline
 from concurrent.futures import ThreadPoolExecutor
@@ -53,7 +52,7 @@ class RpcModelTest(TestCase):
                                                  weight_type=WEIGHT_TYPE.FP16,
                                                  max_seq_len=max_seq_len,
                                                  test_rpc_model=True)
-        model: RpcModel = self.fake_model_loader.load_model()
+        model = self.fake_model_loader.load_model()
         pipeline = Pipeline(model, model.tokenizer)
         return pipeline
 
