@@ -105,8 +105,8 @@ loadWeights(int                                                             pp_s
         gpt_layer_weights[i]->partial_moe_weights.gating_weight.kernel              = maybe_get<T>(weights[i], W::moe_gate);
         gpt_layer_weights[i]->ffn_weights.shared_expert_gating_weight.kernel        = maybe_get<T>(weights[i], W::shared_expert_gate_w);
 
-        gpt_layer_weights[i]->cross_attention_layernorm_weights.kernel               = maybe_get<T>(weights[i], W::cross_attn_pre_ln_gamma);
-        gpt_layer_weights[i]->cross_attention_layernorm_weights.bias                 = maybe_get<T>(weights[i], W::cross_attn_pre_ln_beta);
+        gpt_layer_weights[i]->cross_attention_layernorm_weights.gamma                = maybe_get<T>(weights[i], W::cross_attn_pre_ln_gamma);
+        gpt_layer_weights[i]->cross_attention_layernorm_weights.beta                 = maybe_get<T>(weights[i], W::cross_attn_pre_ln_beta);
         gpt_layer_weights[i]->cross_attention_weights.query_weight.kernel            = maybe_get<T>(weights[i], W::cross_attn_q_w);
         gpt_layer_weights[i]->cross_attention_weights.query_weight.bias              = maybe_get<T>(weights[i], W::cross_attn_q_b);
         gpt_layer_weights[i]->cross_attention_weights.key_weight.kernel              = maybe_get<T>(weights[i], W::cross_attn_k_w);
