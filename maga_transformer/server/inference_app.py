@@ -4,10 +4,14 @@ import json
 import time
 import logging
 import logging.config
+from typing_extensions import override
 import uvicorn
-from typing import Union, Any, Dict
+from uvicorn import Server, Config
+import asyncio
+import socket
+from typing import Union, Any, Dict, Optional, List
 
-from fastapi import FastAPI
+from fastapi import FastAPI, status, HTTPException
 from fastapi import Request as RawRequest
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,11 +28,26 @@ from maga_transformer.models.base_model import BaseModel
 from maga_transformer.server.inference_server import InferenceServer
 from maga_transformer.server.misc import check_is_master, check_is_worker
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
+from maga_transformer.utils.util import AtomicCounter
 
 # make buffer larger to avoid throw exception "RemoteProtocolError Receive buffer too long"
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
+
+active_requests = AtomicCounter()
+server_shutdown = False
+
+class GracefulShutdownServer(Server):
+    @override
+    async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
+        global server_shutdown
+        server_shutdown = True
+        global active_requests
+        while active_requests.get() > 0:
+            logging.info(f"wait {active_requests.get()} requests finish for 1s")
+            await asyncio.sleep(1)
+        await super().shutdown(sockets)
 
 class InferenceApp(object):
     def __init__(self):
@@ -40,8 +59,18 @@ class InferenceApp(object):
         self.inference_server.wait_all_worker_ready()
 
         timeout_keep_alive = int(os.environ.get("TIMEOUT_KEEP_ALIVE", 5))
-        uvicorn.run(app, host="0.0.0.0", port=g_worker_info.server_port, log_config=UVICORN_LOGGING_CONFIG,
-                    timeout_keep_alive = timeout_keep_alive, h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE)
+        config = Config(
+            app,
+            host="0.0.0.0",
+            port=g_worker_info.server_port,
+            log_config=UVICORN_LOGGING_CONFIG,
+            timeout_keep_alive=timeout_keep_alive,
+            h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
+        )
+        server = GracefulShutdownServer(config)
+        server.run()
+        # uvicorn.run(app, host="0.0.0.0", port=g_worker_info.server_port, log_config=UVICORN_LOGGING_CONFIG,
+        #             timeout_keep_alive = timeout_keep_alive, h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE)
 
     def create_app(self):
         middleware = [
@@ -55,9 +84,27 @@ class InferenceApp(object):
         ]
         app = FastAPI(middleware=middleware)
 
+        def check_shutdown():
+            global server_shutdown
+            if server_shutdown:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="this server has been shutdown"
+                )
+
         @app.on_event("startup")
         async def startup():
             RunVar("_default_thread_limiter").set(CapacityLimiter(self.inference_server._controller.max_concurrency * 2))
+
+        @app.middleware("http")
+        async def count_requests(request: RawRequest, call_next):
+            global active_requests
+            active_requests.increment()
+            try:
+                response = await call_next(request)
+                return response
+            finally:
+                active_requests.decrement()
 
         @app.get("/health")
         @app.post("/health")
@@ -69,14 +116,17 @@ class InferenceApp(object):
         @app.post("/status")
         @app.post("/health_check")
         async def health():
+            check_shutdown()
             return "ok"
 
         @app.get("/")
         async def health():
+            check_shutdown()
             return {"status": "home"}
 
         @app.get("/worker_status")
         def worker_status():
+            check_shutdown()
             info = self.inference_server.get_kv_cache_info()
             return {
                 "available_concurrency": self.inference_server._controller.get_available_concurrency(),
