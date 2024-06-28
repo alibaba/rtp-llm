@@ -612,16 +612,11 @@ class ModelWeightsLoader:
         for ckpt_weight in weight_info.weights:
             name = ckpt_weight.tensor_name(layer_id)
             try:
-                print(self.load_tensor(name, datatype))
                 before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(name, datatype)))
             except Exception as e:
                 raise Exception('load %s failed, except: %s' % (name, str(e)))
 
         after_merge_tensor = weight_info.process_fun(before_merge_tensors).to(datatype)
-        print(weight_info.name.format(layer_id), after_merge_tensor.shape, after_merge_tensor)
-        print('===')
-        import sys
-        sys.stdout.flush()
         return after_merge_tensor
 
     def _split_and_sanitize_tensor(self, tensor: torch.Tensor, weight: WeightInfo):

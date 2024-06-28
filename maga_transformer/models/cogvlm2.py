@@ -15,7 +15,6 @@ from maga_transformer.models.cogvlm2_weight import CogVLM2WeightInfo, CogVLM2Vit
 from maga_transformer.models.llama import Llama
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
-from maga_transformer.utils.multimodal_util import common_image_process_func
 
 LANGUAGE_TOKEN_TYPE = 0
 VISION_TOKEN_TYPE = 1

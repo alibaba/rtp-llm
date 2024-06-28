@@ -32,11 +32,12 @@ class WhisperAudioEmbedding(AudioEmbeddingInterface):
         self.embedding_length = embedding_length
     
     @torch.no_grad()
-    def audio_embedding(self, audio: torch.Tensor, sample_rate: int, device):
+    def audio_embedding(self, audio: Tuple[torch.Tensor, int], device):
+        audio_data, sample_rate = audio
         if sample_rate != self.sampling_rate:
             resampler = Resample(orig_freq = sample_rate, new_freq = self.sampling_rate)
-            audio = resampler(audio)
-        features = self.processor(np.array(audio), sampling_rate=self.sampling_rate, return_tensors="pt").input_features
+            audio_data = resampler(audio_data)
+        features = self.processor(np.array(audio_data), sampling_rate=self.sampling_rate, return_tensors="pt").input_features
         features = self.encoder(features.to(device).half())
         # features type is BaseModelOutput
         res = features.last_hidden_state

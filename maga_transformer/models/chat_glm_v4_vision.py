@@ -12,7 +12,6 @@ from maga_transformer.models.chat_glm_v4_vision_weight import (
 from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from maga_transformer.models.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
-from maga_transformer.utils.multimodal_util import common_image_process_func
 from maga_transformer.utils.util import get_config_from_path
 
 

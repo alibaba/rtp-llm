@@ -4,7 +4,9 @@ import re
 from functools import partial
 from enum import Enum, auto
 from typing import Any, Dict, List, Union, Tuple, Optional
+# import torchaudio
 from PIL import Image
+from decord import VideoReader, cpu
 
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import RequestFormat
@@ -12,36 +14,63 @@ from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeigh
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.utils.multimodal_util import common_image_process_func, common_audio_process_func, common_viedo_process_func
+from maga_transformer.utils.multimodal_util import get_bytes_io_from_url, check_cache, insert_cache
 from maga_transformer.models.base_model import EmbeddingOutput
 
 class MultiModalEmbeddingInterface:
     @torch.no_grad()
-    def mm_embedding(self, mm_input, device):
-        raise NotImplementedError()
+    def mm_embedding(self, url: str, device):
+        cached_res = check_cache(url)
+        if cached_res is None:
+            try:
+                bytes_io = get_bytes_io_from_url(url)
+                mm_input = self._mm_preprocess(bytes_io)
+            except Exception as e:
+                raise Exception(f"cannot download image from {url}, exception {e}")
+            features = self.mm_process(mm_input, device)
+            insert_cache(url, features)
+            return features
+        else:
+            return cached_res
+            
+    def _mm_preprocess(self, data):
+        raise NotImplementedError
+
+    @torch.no_grad()
+    def mm_process(self, mm_input, device):
+        raise NotImplementedError
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
+    def _mm_preprocess(self, data):
+        return Image.open(data).convert("RGB")
+    
     @torch.no_grad()
-    def mm_embedding(self, mm_input, device):
-        return common_image_process_func(mm_input, partial(self.image_embedding, device=device))
+    def mm_process(self, mm_input, device):
+        return self.image_embedding([mm_input], device)[0]
 
     @torch.no_grad()
     def image_embedding(self, images: List[Image.Image], device):
         raise NotImplementedError()
 
 class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
-    @torch.no_grad()
-    def mm_embedding(self, mm_input, device):
-        return common_audio_process_func(mm_input, partial(self.audio_embedding, device=device))
+    def _mm_preprocess(self, data):
+        return torchaudio.load(data)
     
     @torch.no_grad()
-    def audio_embedding(self, audio: torch.Tensor, sample_rate: int, device):
+    def mm_process(self, mm_input, device):
+        return self.audio_embedding(mm_input, device)
+
+    @torch.no_grad()
+    def audio_embedding(self, audio: Tuple[torch.Tensor, int], device):
         raise NotImplementedError()
 
 class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
+    def _mm_preprocess(self, data):
+        return VideoReader(data, ctx=cpu(0))
+    
     @torch.no_grad()
-    def mm_embedding(self, mm_input, device):
-        return common_viedo_process_func(mm_input, partial(self.video_embedding, device=device))
+    def mm_process(self, mm_input, device):
+        return self.video_embedding(mm_input, device)
     
     @torch.no_grad()
     def video_embedding(self, video: List[Image.Image], device):

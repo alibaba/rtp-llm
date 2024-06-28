@@ -16,7 +16,6 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.llava_vit import LlavaImageEmbedding
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.utils.multimodal_util import common_image_process_func
 
 class LlavaTokenizer(object):
     def __init__(self, 
