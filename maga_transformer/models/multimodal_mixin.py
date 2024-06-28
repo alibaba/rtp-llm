@@ -4,7 +4,6 @@ import re
 from functools import partial
 from enum import Enum, auto
 from typing import Any, Dict, List, Union, Tuple, Optional
-# import torchaudio
 from PIL import Image
 from decord import VideoReader, cpu
 
@@ -32,7 +31,7 @@ class MultiModalEmbeddingInterface:
             return features
         else:
             return cached_res
-            
+
     def _mm_preprocess(self, data):
         raise NotImplementedError
 
@@ -43,7 +42,7 @@ class MultiModalEmbeddingInterface:
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
     def _mm_preprocess(self, data):
         return Image.open(data).convert("RGB")
-    
+
     @torch.no_grad()
     def mm_process(self, mm_input, device):
         return self.image_embedding([mm_input], device)[0]
@@ -54,8 +53,10 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
 class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
     def _mm_preprocess(self, data):
+        # temporary
+        import torchaudio
         return torchaudio.load(data)
-    
+
     @torch.no_grad()
     def mm_process(self, mm_input, device):
         return self.audio_embedding(mm_input, device)
@@ -67,11 +68,11 @@ class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
 class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
     def _mm_preprocess(self, data):
         return VideoReader(data, ctx=cpu(0))
-    
+
     @torch.no_grad()
     def mm_process(self, mm_input, device):
         return self.video_embedding(mm_input, device)
-    
+
     @torch.no_grad()
     def video_embedding(self, video: List[Image.Image], device):
         raise NotImplementedError()
@@ -81,23 +82,23 @@ class BaseVitWeights:
         self.weight_names: List[str] = []
         self._set_weight_prefix()
         self._get_vit_params(vit_part, with_prefix)
-    
+
     def _set_weight_prefix(self):
         self._ckpt_prefix = "model."
         self._ft_prefix = "self.mm_part."
-    
+
     @property
     def ckpt_prefix(self) -> str:
         return self._ckpt_prefix
-    
+
     @property
     def ft_prefix(self) -> str:
         return self._ft_prefix
-    
+
     @ft_prefix.setter
     def ft_prefix(self, prefix: str) -> None:
         self._ft_prefix = prefix
-    
+
     def _get_vit_params(self, vit_part: Dict[str, Any], with_prefix: bool = False):
         for vit_name, vit in vit_part.items():
             if isinstance(vit, torch.nn.Module):
@@ -108,7 +109,7 @@ class BaseVitWeights:
             elif isinstance(vit, torch.nn.Parameter):
                 self.weight_names.append(vit_name)
             else:
-                raise Exception("Unknown vit part type")                
+                raise Exception("Unknown vit part type")
 
 class BaseMultiModalWeightInfo:
     def __init__(self, config: GptInitModelParameters):
@@ -130,8 +131,8 @@ class MultiModalMixin:
 
     @staticmethod
     def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], tokenizer: Any, add_special_tokens: bool, **kwargs: Any) -> List[int]:
-        # if len(prompt) == 0:
-        #     raise FtRuntimeException(ExceptionType.EMPTY_PROMPT_ERROR, "prompt should have at least one token!")
+        if len(prompt) == 0:
+            raise FtRuntimeException(ExceptionType.EMPTY_PROMPT_ERROR, "prompt should have at least one token!")
         if type(prompt) is not str:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "expect string prompt, actual: " + str(prompt))
         if add_special_tokens:
@@ -141,7 +142,7 @@ class MultiModalMixin:
             return tokenizer.encode(prompt, add_special_tokens=False)
 
     @staticmethod
-    def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str], 
+    def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str],
                                         img_token: str, **kwargs: Any) -> Tuple[str, List[str]]:
         # should delete after chatapi interface update
         if kwargs.get('generate_config', {})['request_format'] == RequestFormat.CHAT_API:
@@ -174,7 +175,7 @@ class MultiModalMixin:
         elif isinstance(prompt, List):
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "raw request format cannot accept dict prompt")
         return prompt, images
-    
+
     def expand_token_id(self, token_ids: List[int], images: List[torch.Tensor]) -> Tuple[List[int], List[torch.Tensor], List[int]]:
         raise NotImplementedError()
 

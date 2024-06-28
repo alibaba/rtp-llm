@@ -49,15 +49,11 @@ static const std::string vision_ffn_w3 = "vision_ffn_weights.intermediate_weight
 static const std::string vision_ffn_w2 = "vision_ffn_weights.intermediate_weight2.kernel";
 
 static const std::string cross_attn_pre_ln_gamma = "cross_attention_weights_pre_layernorm.gamma";
-static const std::string cross_attn_pre_ln_beta = "cross_attention_weights_pre_layernorm.beta";
-static const std::string cross_attn_v_w = "cross_attention_weights.value_weight.weight";
-static const std::string cross_attn_v_b = "cross_attention_weights.value_weight.bias";
-static const std::string cross_attn_k_w = "cross_attention_weights.key_weight.kernel";
-static const std::string cross_attn_k_b = "cross_attention_weights.key_weight.bias";
-static const std::string cross_attn_q_w = "cross_attention_weights.query_weight.weight";
-static const std::string cross_attn_q_b = "cross_attention_weights.query_weight.bias";
-static const std::string cross_attn_o_w = "cross_attention_weights.output_weight.weight";
-static const std::string cross_attn_o_b = "cross_attention_weights.output_weight.bias";
+static const std::string cross_attn_pre_ln_beta  = "cross_attention_weights_pre_layernorm.beta";
+static const std::string cross_attn_qkv_w = "cross_attention_weights.query_weight.weight";
+static const std::string cross_attn_qkv_b = "cross_attention_weights.query_weight.bias";
+static const std::string cross_attn_o_w   = "cross_attention_weights.output_weight.weight";
+static const std::string cross_attn_o_b   = "cross_attention_weights.output_weight.bias";
 
 static const std::string shared_expert_gate_w = "ffn_weights.shared_expert_gate.kernel";
 static const std::string moe_w1   = "partial_moe_weights.intermediate_weight.kernel";

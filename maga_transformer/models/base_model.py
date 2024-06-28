@@ -21,11 +21,8 @@ FT_DEFAULT_MAX_NEW_TOKENS = 2048
 class EmbeddingOutput:
     text_embedding: torch.Tensor
     extra_input: Optional[torch.Tensor]
-    extra_input_channel: Optional[torch.Tensor]
-    extra_input_size: Optional[int]
-    extra_input_shape: Optional[torch.Tensor]
 
-    def __init__(self, text_embedding: torch.Tensor, extra_input: Optional[torch.Tensor]):
+    def __init__(self, text_embedding: torch.Tensor, extra_input: Optional[List[torch.Tensor]]):
         self.text_embedding = text_embedding
         if extra_input:
             try:
@@ -74,7 +71,7 @@ class AuxInfo(PyBaseModel):
     output_len: int = 0
     cum_log_probs: List[float] = []
     beam_responses: List[str] = []
-    
+
 class GenerateOutput(PyBaseModel):
     hidden_states: Optional[torch.Tensor] = None
     output_ids: Optional[torch.Tensor] = None
@@ -116,7 +113,7 @@ class GenerateContext(NamedTuple):
 
 class ModelConfig:
     def __init__(
-            self, 
+            self,
             model_type: str = "",
             ckpt_path: str = "",
             tokenizer_path: str = "",
@@ -151,7 +148,7 @@ class ModelConfig:
 
     def add_ref_module(self, ref_module: Optional[torch.nn.Module]):
         self.ref_module = ref_module
-    
+
     def add_ref_dict(self, ref_dict: Dict[str, torch.Tensor]):
         self.ref_dict = ref_dict
 

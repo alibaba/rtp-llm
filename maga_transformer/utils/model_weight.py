@@ -284,7 +284,6 @@ def merge_qkv_lora_B(ts: List[torch.Tensor]):
                       torch.cat((t_k, k,   t_k), dim=1),
                       torch.cat((t_v, t_v, v  ), dim=1))).T.contiguous()
 
-
 class W:
     # global
     embedding = 'embedding'
@@ -348,12 +347,8 @@ class W:
     # cross attn
     cross_attn_pre_ln_gamma = 'cross_attention_weights_pre_layernorm.gamma'
     cross_attn_pre_ln_beta = 'cross_attention_weights_pre_layernorm.beta'
-    cross_attn_v_w = 'cross_attention_weights.value_weight.weight'
-    cross_attn_v_b = 'cross_attention_weights.value_weight.bias'
-    cross_attn_k_w = 'cross_attention_weights.key_weight.kernel'
-    cross_attn_k_b = 'cross_attention_weights.key_weight.bias'
-    cross_attn_q_w = 'cross_attention_weights.query_weight.weight'
-    cross_attn_q_b = 'cross_attention_weights.query_weight.bias'
+    cross_attn_qkv_w = 'cross_attention_weights.query_weight.weight'
+    cross_attn_qkv_b = 'cross_attention_weights.query_weight.bias'
     cross_attn_o_w = 'cross_attention_weights.output_weight.weight'
     cross_attn_o_b = 'cross_attention_weights.output_weight.bias'
 
@@ -548,6 +543,7 @@ class W:
         final_ln_beta: sp_id,
         pre_ln_gamma: sp_id,
         pre_ln_beta: sp_id,
+
         pre_attn_ln_gamma: sp_id,
         pre_attn_ln_beta: sp_id,
         qk_ln_gamma: sp_head_qk_norm,
@@ -567,13 +563,9 @@ class W:
 
         cross_attn_pre_ln_gamma: sp_id,
         cross_attn_pre_ln_beta: sp_id,
-        cross_attn_v_w: sp_id,
-        cross_attn_v_b: sp_id,
-        cross_attn_k_w: sp_id,
-        cross_attn_k_b: sp_id,
-        cross_attn_q_w: sp_id,
-        cross_attn_q_b: sp_id,
-        cross_attn_o_w: sp_id,
+        cross_attn_qkv_w: sp_head,
+        cross_attn_qkv_b: sp_head_b,
+        cross_attn_o_w: sp_0,
         cross_attn_o_b: sp_id,
 
         ffn_w1: sp_neg1,
@@ -593,6 +585,7 @@ class W:
         ffn_b2: sp_id,
         ffn_act_s: sp_0,
         ffn_smoother: sp_0,
+
         moe_w1: sp_0,
         moe_z1: sp_0,
         moe_s1: sp_0,
@@ -605,9 +598,11 @@ class W:
         moe_z2: sp_neg1,
         moe_s2: sp_neg1,
         moe_b2: sp_neg1,
+
         post_ln_beta: sp_id,
         post_ln_gamma: sp_id,
         positional_embedding: sp_neg1,
+
         attn_qkv_w_lora_a: sp_id,
         attn_qkv_w_lora_b: sp_head_lora,
         attn_o_w_lora_a: sp_0,
