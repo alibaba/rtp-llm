@@ -142,6 +142,28 @@ void ROCmDevice::copy(const CopyParams& params) {
     (void)hipStreamSynchronize(stream_);
 }
 
+TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
+    const auto& input = params.input;
+    const auto data_type = input.type();
+    const auto shape = input.shape();
+
+    RUNTIME_ASSERT_OP_ARG(shape.size() == 2 || shape.size() == 3,
+        "You can only transpose a 2D buffer, but got [%s]", input.debugString().c_str());
+    if (shape.size() == 2) {
+        auto output = allocateBuffer({data_type, {shape[1], shape[0]}});
+        DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis01,
+                                            output->data(), input.data(), shape[0], shape[1], stream_
+                                            );
+        return std::move(output);
+    } else {
+        auto output = allocateBuffer({data_type, {shape[1], shape[0], shape[2]}});
+        DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis012,
+                                            output->data(), input.data(), shape[0], shape[1], shape[2], stream_
+                                            );
+        return std::move(output);
+    }
+}
+
 void ROCmDevice::syncAndCheck() {
     HIP_CHECK(hipStreamSynchronize(stream_));
 }
