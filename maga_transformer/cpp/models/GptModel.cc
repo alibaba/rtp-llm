@@ -113,12 +113,12 @@ void GptModel::prepareAttentionInputs(
 
 
 /*
- *          ┌───────────┐            
- *          │  hidden   │            
- *          └─────┬─────┘            
- *                │                  
- *                │                  
- *        ┌───────▼───────┐          
+ *          ┌───────────┐
+ *          │  hidden   │
+ *          └─────┬─────┘
+ *                │
+ *                │
+ *        ┌───────▼───────┐
  *        │ pre_layernorm?├─────────┐
  *        └───────┬───────┘         │
  *                │                 │
@@ -128,19 +128,19 @@ void GptModel::prepareAttentionInputs(
  *                │                 │
  *        ┌───────▼───────┐         │
  * ┌──────┤post_attn_norm?◄─────────┘
- * │      └───────┬───────┘          
- * │              │                  
- * │         ┌────▼────┐             
- * │         │   mlp   │             
- * │         └────┬────┘             
- * │              │                  
- * │         ┌────▼────┐             
- * └─────────►   add   │             
- *           └────┬────┘             
- *                │                  
- *          ┌─────▼─────┐            
- *          │ layernorm │            
- *          └───────────┘            
+ * │      └───────┬───────┘
+ * │              │
+ * │         ┌────▼────┐
+ * │         │   mlp   │
+ * │         └────┬────┘
+ * │              │
+ * │         ┌────▼────┐
+ * └─────────►   add   │
+ *           └────┬────┘
+ *                │
+ *          ┌─────▼─────┐
+ *          │ layernorm │
+ *          └───────────┘
  */
 GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto norm_type = description_.norm_type;
@@ -275,8 +275,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_input");
         auto ffn_output = device_->ffnLayer(FfnLayerParams({
             *hidden,
+            description_.ffn_conf,
             layer.ffn_weights,
-            description_.activation_type,
             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt
         }));
         hidden = ffn_output.hidden_states;

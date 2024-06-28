@@ -38,7 +38,7 @@ WeightsConverter::mayFindBuffer(const ConstBufferPtrMap& map,
 ft::LayerNormWeightsPtr
 WeightsConverter::mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
                                             const std::string& gamma_key,
-                                            const std::string& beta_key)   
+                                            const std::string& beta_key)
 {
     if (map.count(gamma_key) > 0) {
         const auto layer_norm_weights = new LayerNormWeights();
@@ -54,7 +54,7 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
                                         const std::string& kernel_key,
                                         const std::string& bias_key,
                                         const std::string& scales_key)
-{   
+{
     if (map.count(kernel_key) > 0) {
         const auto dense_weights = new DenseWeights();
         if (!bias_key.empty()) {
@@ -82,7 +82,7 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
                                                      nullptr))));
         }
         return unique_ptr<const DenseWeights>(dense_weights);
-        
+
     }
     return nullptr;
 }
@@ -90,30 +90,32 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
 ft::FfnLayerWeights
 WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     ft::FfnLayerWeights ffn_weights;
-    ffn_weights.up_weight = mayCreateDenseWeights(map,
-                                                  W::ffn_w3,
-                                                  W::ffn_b3,
-                                                  W::ffn_s3);
 
-    ffn_weights.gate_weight = mayCreateDenseWeights(map,
-                                                    W::ffn_w1,
-                                                    W::ffn_b1,
-                                                    W::ffn_s1);
+    ffn_weights.dense_layernorm = mayCreateLayerNormWeights(map, W::ffn_ln_gamma, W::ffn_ln_beta);
+    ffn_weights.smoother_weight = mayCreateDenseWeights(map, W::ffn_smoother);
+    ffn_weights.moe_gating_weight = mayCreateDenseWeights(map, W::moe_gate);
 
-    ffn_weights.down_weight = mayCreateDenseWeights(map,
-                                                    W::ffn_w2,
-                                                    W::ffn_b2,
-                                                    W::ffn_s2);
+    if (ffn_weights.moe_gating_weight) {
+        ffn_weights.up_weight = mayCreateDenseWeights(map, W::moe_w3, W::moe_b3, W::moe_s3);
+        ffn_weights.gate_weight = mayCreateDenseWeights(map, W::moe_w1, W::moe_b1, W::moe_s1);
+        ffn_weights.down_weight = mayCreateDenseWeights(map, W::moe_w2, W::moe_b2, W::moe_s2);
 
-    ffn_weights.dense_layernorm = mayCreateLayerNormWeights(map,
-                                                            W::ffn_ln_gamma,
-                                                            W::ffn_ln_beta);
-
-    ffn_weights.moe_gating_weight = mayCreateDenseWeights(map,
-                                                          W::moe_gate);
-    
-    ffn_weights.smoother_weight = mayCreateDenseWeights(map,
-                                                        W::ffn_smoother);
+        // for qwen moe
+        ffn_weights.shared_expert_gate = mayCreateDenseWeights(map, W::shared_expert_gate_w);
+        if (ffn_weights.shared_expert_gate) {
+            ffn_weights.shared_expert = make_shared<ft::FfnLayerWeights>();
+            ffn_weights.shared_expert->up_weight = mayCreateDenseWeights(
+                map, W::ffn_w3, W::ffn_b3, W::ffn_s3);
+            ffn_weights.shared_expert->gate_weight = mayCreateDenseWeights(
+                map, W::ffn_w1, W::ffn_b1, W::ffn_s1);
+            ffn_weights.shared_expert->down_weight = mayCreateDenseWeights(
+                map, W::ffn_w2, W::ffn_b2, W::ffn_s2);
+        }
+    } else {
+        ffn_weights.up_weight = mayCreateDenseWeights(map, W::ffn_w3, W::ffn_b3, W::ffn_s3);
+        ffn_weights.gate_weight = mayCreateDenseWeights(map, W::ffn_w1, W::ffn_b1, W::ffn_s1);
+        ffn_weights.down_weight = mayCreateDenseWeights(map, W::ffn_w2, W::ffn_b2, W::ffn_s2);
+    }
 
     return ffn_weights;
 }
@@ -129,7 +131,7 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
                                                          W::attn_qkv_w,
                                                          W::attn_qkv_b,
                                                          W::attn_qkv_s);
-    
+
     attention_weights.attention_layernorm = mayCreateLayerNormWeights(map,
                                                                       W::attn_ln_gamma,
                                                                       W::attn_ln_beta);
@@ -137,10 +139,10 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
                                                             W::attn_o_w,
                                                             W::attn_o_b,
                                                             W::attn_o_s);
-    
+
     attention_weights.shift_weight = mayCreateDenseWeights(map,
                                                            W::attn_o_shift);
-    
+
     attention_weights.smoother_weight = mayCreateDenseWeights(map,
                                                               W::attn_o_smoother);
 
@@ -185,7 +187,7 @@ WeightsConverter::convertLayerWeights(std::unique_ptr<TensorMaps> tensor_layer_w
     return std::make_unique<ConstBufferPtrMaps>(std::move(layer_weights));
 }
 
-std::unique_ptr<ConstBufferPtrMap> 
+std::unique_ptr<ConstBufferPtrMap>
 WeightsConverter::convertGlobalWeight(std::unique_ptr<TensorMap> tensor_global_weight) {
     ConstBufferPtrMap global_weights;
     for (auto& it : *tensor_global_weight) {
@@ -264,7 +266,7 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
 std::unique_ptr<ConstBufferPtrMaps> WeightsConverter::convertLayerWeights_(py::object py_layer_weights) {
     return convertLayerWeights(std::move(convertLayerWeights(py_layer_weights)));
 }
-    
+
 std::unique_ptr<ConstBufferPtrMap>  WeightsConverter::convertGlobalWeight_(py::object py_global_weight) {
     return convertGlobalWeight(std::move(convertGlobalWeight(py_global_weight)));
 }

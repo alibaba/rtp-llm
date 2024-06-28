@@ -7,9 +7,11 @@
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 #include "src/fastertransformer/trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_kernels.h"
 #include "src/fastertransformer/cutlass/interface.h"
 
 #include <nvml.h>
+
 namespace trt_plugins = tensorrt_llm::plugins;
 
 namespace fastertransformer {
@@ -34,11 +36,12 @@ private:
     void checkUseTrtV1FMHA();
     void checkUseTrtV2FMHA();
     void checkUseMultiBlockMode();
-
+    void initMoeRunner();
 
 public:
     cudaStream_t getStream() {return stream_;}
     NcclParam getNcclParam() {return nccl_param_;}
+
 public:
     void copy(const CopyParams& params);
     TransposeOutput transpose(const TransposeParams& params);
@@ -46,11 +49,13 @@ public:
     SelectOutput select(const SelectParams& params);
     LayernormOutput layernorm(const LayernormParams& params);
     BufferPtr gemm(const GemmParams& params);
+    DotProductOutput dotProduct(const DotProductParams& params);
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params);
     void activation(const ActivationParams& params);
     BufferPtr softmax(const SoftmaxParams& params);
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params);
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);
+    FfnLayerOutput moeFfnLayer(const FfnLayerParams& params);
     void sampleGreedy(const GreedyParams& params);
     void broadcast(const BroadcastParams& params);
     void allReduce(const AllReduceParams& params);
@@ -75,7 +80,7 @@ private:
     std::mutex cublas_wrapper_mutex_;
     std::unique_ptr<cublasAlgoMap> cublas_algo_map_;
     std::unique_ptr<cublasMMWrapper> cublas_mm_wrapper_;
-    
+
     std::unique_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin> weight_only_matmul_plugin_;
     std::unique_ptr<trt_plugins::SmoothQuantGemmPlugin> smooth_quant_plugin_;
 
@@ -89,6 +94,8 @@ private:
     bool use_trtv2_fmha         = false;
     bool use_openSource_fmha    = false;
     bool use_multi_block_mode   = false;
+
+    std::unique_ptr<tensorrt_llm::kernels::CutlassMoeFCRunnerInterface> moe_runner_;
 };
 
 } // namespace fastertransformer

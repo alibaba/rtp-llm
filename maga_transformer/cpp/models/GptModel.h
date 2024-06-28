@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 struct GptModelDescription {
     ft::AttentionConfigs attention_conf;
-    ft::ActivationType   activation_type;
+    ft::FfnConfigs       ffn_conf;
     ft::NormType         norm_type;
     double               layernorm_eps = 1e-5;
     size_t               vocab_size = 0;

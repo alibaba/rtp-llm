@@ -146,7 +146,7 @@ FfnLayerOutput CpuDevice::ffnLayer(const FfnLayerParams& params) {
     const auto& up_weight = *(params.weights.up_weight->kernel);
     const auto& down_weight = *(params.weights.down_weight->kernel);
 
-    const auto act_t = params.activation_type;
+    const auto act_t = params.configs.activation_type;
     xft::ActivationType at;
     if (act_t == ActivationType::Swiglu) { // gated-silu
         at = xft::ActivationType::SILU;

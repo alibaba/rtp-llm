@@ -14,6 +14,11 @@ EngineBase::EngineBase(const EngineInitParams& params) {
 void EngineBase::initDevices(const EngineInitParams& params) {
     auto global_params = ft::DeviceFactory::getDefaultGlobalDeviceParams();
     auto& default_device_params = global_params.device_params[0].second;
+    default_device_params.model_data_type = ft::getDataType(params.gpt_init_parameter.data_type_);
+    const auto& quant_algo = params.gpt_init_parameter.quant_algo_;
+    default_device_params.weight_bits = quant_algo.isQuant()
+                                      ? quant_algo.getWeightBits()
+                                      : ft::getTypeSize(default_device_params.model_data_type);
     default_device_params.tp_size = params.gpt_init_parameter.tp_size_;
     default_device_params.tp_rank = params.gpt_init_parameter.tp_rank_;
     default_device_params.master_ip = params.gpt_init_parameter.nccl_ip_;

@@ -30,6 +30,7 @@ enum class ActivationType
     Identity,
     GeluNoneApproximate,
     GeGluNoneApproximate,
+    Sigmoid,
     InvalidType
 };
 

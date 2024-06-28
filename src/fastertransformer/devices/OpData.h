@@ -136,19 +136,17 @@ struct LayernormOutput {
 };
 
 struct LayernormParams {
-
-
     LayernormParams(BufferPtr input,
                     BufferPtr before_norm_output,
                     const std::optional<std::reference_wrapper<const LayerNormWeights>> norm_weight,
-                    OptionalConstBufferRef residual1,
-                    OptionalConstBufferRef residual2,
-                    OptionalConstBufferRef bias,
-                    double alpha,
-                    double eps,
-                    bool is_inplace,
-                    NormType norm_type,
-                    QScheme qscheme = QScheme::NoQuantize) : 
+                    OptionalConstBufferRef residual1 = std::nullopt,
+                    OptionalConstBufferRef residual2 = std::nullopt,
+                    OptionalConstBufferRef bias = std::nullopt,
+                    double alpha = 1.0f,
+                    double eps = 1e-5,
+                    bool is_inplace = true,
+                    NormType norm_type = NormType::layernorm,
+                    QScheme qscheme = QScheme::NoQuantize) :
                     input(std::move(input)),
                     before_norm_output(std::move(before_norm_output)),
                     norm_weight(norm_weight),
@@ -167,13 +165,13 @@ struct LayernormParams {
     BufferPtr before_norm_output;
 
     const std::optional<std::reference_wrapper<const LayerNormWeights>> norm_weight;
-    
+
     const OptionalConstBufferRef  residual1;
     const OptionalConstBufferRef  residual2;
     const OptionalConstBufferRef  bias;
-    
+
     const NormType norm_type;
-    
+
     const double alpha;
     const double eps;
 
@@ -183,7 +181,7 @@ struct LayernormParams {
 
 enum GemmType : size_t {
     InvalidGemm = 0,
-    
+
     BufferA_BufferB_BufferC_2DGemm,
     BufferA_BufferB_BufferC_3DGemm,
 
@@ -254,6 +252,16 @@ struct GroupedGemmParams {
     const std::vector<Buffer>& B;
     const std::vector<Buffer>& C;
     std::vector<Buffer>&       D;
+};
+
+using DotProductOutput = BufferPtr;
+
+// output = A * B
+// A: [m], B: [m] or [m, dim_1, ..., dim_n]
+struct DotProductParams {
+    const Buffer& A;
+    const Buffer& B;
+    BufferPtr output = nullptr;
 };
 
 struct EmbeddingLookupParams {
@@ -342,25 +350,39 @@ struct AttentionLayerParams {
     const OptionalConstBufferRef    residual; // for intel xft
 };
 
+struct MoeConfigs {
+    size_t expert_num;
+    size_t top_k;
+    bool normalize_expert_scale;
+
+    int64_t moe_inter_padding_size;
+    bool has_moe_norm;
+};
+
+struct FfnConfigs {
+    ActivationType activation_type;
+    std::optional<MoeConfigs> moe_configs = std::nullopt;
+};
+
 struct FfnLayerOutput {
     BufferPtr hidden_states;
 };
 
 struct FfnLayerParams {
     FfnLayerParams(const Buffer& input,
+                   const FfnConfigs& configs,
                    const FfnLayerWeights& weights,
-                   const ActivationType atype,
                    const OptionalConstBufferRef residual = std::nullopt) :
     input(input),
+    configs(configs),
     weights(weights),
-    activation_type(atype),
     residual(residual)
     {}
 
     const Buffer& input;
 
+    const FfnConfigs&            configs;
     const FfnLayerWeights&       weights;
-    const ActivationType         activation_type;
 
     const OptionalConstBufferRef residual; // for intel xft
 
@@ -485,7 +507,7 @@ struct QuantizeParams {
     size_t                  axis;
     OptionalConstBufferRef  scales;
     OptionalConstBufferRef  zeros;
-    
+
 
     // for soomth quantize
     OptionalConstBufferRef  smoother;

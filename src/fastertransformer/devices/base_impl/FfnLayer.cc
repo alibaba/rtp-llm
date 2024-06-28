@@ -1,98 +1,86 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
+
 using namespace std;
 
 namespace fastertransformer {
 
-struct FFNDispatch {
-    enum FFNType {
-        NoGate,
-        Gate,
-        Moe,
-    };
-
-    static FFNType dispatch(const FfnLayerParams& params) {
-        if (params.weights.moe_gating_weight != nullptr) {
-            return Moe;
-        } else if (isGatedActivation(params.activation_type)) {
-            return Gate;
-        } else {
-            return NoGate;
-        }
-    }
-};
-
-
-/// @brief   feed forward neural network ops
-/// @details output = Gemm(Act(Gemm(input, W1) + b1), W2) + b2
-///          input(array) : [m, k]
-///          W1(array) : [k, n]
-///          b1(array) : [m, n]
-///          W2(array) : [m, n]
-///          b2(array)
-///          output(array)
 FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
-    const auto& input = params.input;
-    const auto& up_weight = *(params.weights.up_weight->kernel);
-    const auto& down_weight = *(params.weights.down_weight->kernel);
-
     RUNTIME_ASSERT_OP_ARG(!params.residual, "default FFN implementation does not support residual!");
 
-    auto up_output = loraLinear({params.input,
-                                 std::nullopt,
-                                 *(params.weights.up_weight),
-                                 std::nullopt});
-    printBufferData(*up_output.output, "ffn_up");
+    BufferPtr output;
+    BufferPtr shared_expert_output;
 
-    if (FFNDispatch::dispatch(params) == FFNDispatch::FFNType::Gate) {
-        auto gate_output = loraLinear({params.input,
-                                    std::nullopt,
-                                    *(params.weights.gate_weight),
-                                    std::nullopt});
+    if (params.weights.moe_gating_weight) {
+        output = moeFfnLayer(params).hidden_states;
 
-        activation({params.activation_type,
-                    *(up_output.output),
-                    mayGetRef(params.weights.up_weight->bias),
-                    *(gate_output.output),
-                    std::nullopt});
-        gate_output.output.reset();
-        
-    } else if (FFNDispatch::dispatch(params) == FFNDispatch::FFNType::NoGate) {
-        activation({params.activation_type,
-                    *(up_output.output),
-                    mayGetRef(params.weights.up_weight->bias),
-                    std::nullopt,
-                    std::nullopt});
-        printBufferData(*up_output.output, "ffn_act");
-        
+        // for qwen moe
+        // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
+        if (params.weights.shared_expert) {
+            auto shared_expert_params = params;
+            shared_expert_output = ffnLayer({params.input,
+                                             params.configs,
+                                             *(params.weights.shared_expert),
+                                             params.residual}).hidden_states;
+
+            auto shared_gate = gemm({params.input, *(params.weights.shared_expert_gate->kernel)});
+            activation({ActivationType::Sigmoid, *shared_gate});
+            shared_expert_output = dotProduct({
+                shared_gate->reshape({shared_gate->size()}), *shared_expert_output});
+        }
     } else {
-        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-    }
+        const auto& input = params.input;
+        const auto& up_weight = *(params.weights.up_weight->kernel);
+        const auto& down_weight = *(params.weights.down_weight->kernel);
 
-    if (params.weights.smoother_weight != nullptr) {
-        auto up_output_ = quantize(QuantizeParams(
-                                     *up_output.output,
-                                     *(params.weights.smoother_weight->kernel),
-                                     std::nullopt,
-                                     DataType::TYPE_QINT8,
-                                     1));
-        auto output = loraLinear({*(up_output_),
+        auto up_output = loraLinear({params.input,
                                     std::nullopt,
-                                    *(params.weights.down_weight),
-                                    std::nullopt});
-        printBufferData(*output.output, "ffn_out");
+                                    *(params.weights.up_weight),
+                                    std::nullopt}).output;
+        printBufferData(*up_output, "ffn_up");
 
-        return FfnLayerOutput({move(output.output)});
-    }
+        if (isGatedActivation(params.configs.activation_type)) {
+            auto gate_output = loraLinear({params.input,
+                                        std::nullopt,
+                                        *(params.weights.gate_weight),
+                                        std::nullopt});
 
-    auto output = loraLinear({*(up_output.output),
+            activation({params.configs.activation_type,
+                        *(up_output),
+                        mayGetRef(params.weights.up_weight->bias),
+                        *(gate_output.output),
+                        std::nullopt});
+        } else {
+            activation({params.configs.activation_type,
+                        *(up_output),
+                        mayGetRef(params.weights.up_weight->bias),
+                        std::nullopt,
+                        std::nullopt});
+        }
+
+        if (params.weights.smoother_weight != nullptr) {
+            up_output = quantize(QuantizeParams(
+                *up_output, *(params.weights.smoother_weight->kernel),
+                std::nullopt, DataType::TYPE_QINT8, 1));
+        }
+
+        printBufferData(*up_output, "ffn_act");
+        output = loraLinear({*(up_output),
                             std::nullopt,
                             *(params.weights.down_weight),
-                            std::nullopt});
-    printBufferData(*output.output, "ffn_out");
+                            std::nullopt}).output;
+    }
 
-    return FfnLayerOutput({move(output.output)});
+    if (shared_expert_output || params.weights.dense_layernorm) {
+        shared_expert_output = layernorm({
+            output, nullptr, mayGetRef(params.weights.dense_layernorm),
+            mayGetRef(shared_expert_output)
+        }).output;
+    }
+
+    printBufferData(*output, "ffn_out");
+    return FfnLayerOutput({move(output)});
 }
 
 }; // namespace fastertransformer

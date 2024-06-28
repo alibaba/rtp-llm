@@ -95,18 +95,15 @@ public:
         auto up_proj    = tensorToBuffer(params.up_proj, alloc_type);
         auto down_proj  = tensorToBuffer(params.down_proj, alloc_type);
 
-        FfnLayerWeights weights (
-            std::make_unique<const DenseWeights>(
-                DenseWeights(up_proj)),
-            std::make_unique<const DenseWeights>(
-                DenseWeights(gate_proj)),
-            std::make_unique<const DenseWeights>(
-                DenseWeights(down_proj))
-        );
+        FfnLayerWeights weights;
+        weights.up_weight = std::make_unique<const DenseWeights>(DenseWeights(up_proj));
+        weights.down_weight = std::make_unique<const DenseWeights>(DenseWeights(down_proj));
+        weights.gate_weight = std::make_unique<const DenseWeights>(DenseWeights(gate_proj));
 
+        FfnConfigs ffn_configs({Atype});
         FfnLayerParams Opparams(*input,
-                                weights,
-                                Atype);
+                                ffn_configs,
+                                weights);
 
         auto output  = this->device_->ffnLayer(Opparams);
         return FfnLayerTestOutput({bufferToTensor(*(output.hidden_states))});

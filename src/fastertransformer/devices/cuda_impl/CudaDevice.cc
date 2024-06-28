@@ -11,6 +11,9 @@
 #include <curand_kernel.h>
 #include <unistd.h>
 
+using namespace tensorrt_llm;
+using namespace tensorrt_llm::kernels;
+
 namespace fastertransformer {
 
 static const size_t DEFAULT_MAX_BATCH_SIZE = 256;
@@ -66,7 +69,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         &cublas_wrapper_mutex_, allocator_.get()));
 
     weight_only_matmul_plugin_ = std::make_unique<trt_plugins::WeightOnlyQuantMatmulPlugin>();
-    
+
     smooth_quant_plugin_ = std::make_unique<trt_plugins::SmoothQuantGemmPlugin>();
 
     auto ret = nvmlInit();
@@ -105,6 +108,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     checkUseTrtV2FMHA();
     checkUseOpenSourceFMHA();
     checkUseMultiBlockMode();
+    initMoeRunner();
 }
 
 CudaDevice::~CudaDevice() {
@@ -225,6 +229,25 @@ void CudaDevice::checkUseMultiBlockMode() {
     use_multi_block_mode = true;
 }
 
+void CudaDevice::initMoeRunner() {
+    // copied and adapted from src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.cpp
+    const auto data_type = init_params_.model_data_type;
+    const auto weights_bits = init_params_.weight_bits;
+    if (data_type == DataType::TYPE_FP16 && weights_bits == sizeof(half)) {
+        moe_runner_ = std::make_unique<CutlassMoeFCRunner<half, half>>();
+    } else if (data_type == DataType::TYPE_FP32 && weights_bits == sizeof(float)) {
+        moe_runner_ = std::make_unique<CutlassMoeFCRunner<float, float>>();
+    } else if (data_type == DataType::TYPE_FP16 && weights_bits == 8) {
+        moe_runner_ = std::make_unique<CutlassMoeFCRunner<half, uint8_t>>();
+    } else if (data_type == DataType::TYPE_BF16 && weights_bits == sizeof(__nv_bfloat16)) {
+        moe_runner_ = std::make_unique<CutlassMoeFCRunner<__nv_bfloat16, __nv_bfloat16>>();
+    } else if (data_type == DataType::TYPE_BF16 && weights_bits == 8) {
+        moe_runner_ = std::make_unique<CutlassMoeFCRunner<__nv_bfloat16, uint8_t>>();
+    } else {
+        FT_LOG_WARNING("MoE runner can not be initialized via compute type %d and weights bits %d",
+                        data_type, weights_bits);
+    }
+}
 
 // TODO(wangyin.yx): fill all memory status.
 DeviceStatus CudaDevice::getDeviceStatus() {

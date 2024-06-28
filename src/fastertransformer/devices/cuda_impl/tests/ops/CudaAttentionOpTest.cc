@@ -145,8 +145,8 @@ void CudaAttentionOpTest::contextAttentionOpTest(size_t batch_size,
     common_inputs.decoder_max_seq_len = 0;
 
     auto buffer_nullptr = BufferPtr(nullptr);
-    auto attention_weight   = AttentionLayerWeights(std::make_unique<const DenseWeights>(
-                                                    DenseWeights(buffer_nullptr, bias_device)));
+    auto attention_weight   = AttentionLayerWeights();
+    attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
     auto attention_config   = AttentionConfigs({num_heads,
                                                 num_key_value_heads,
@@ -257,9 +257,8 @@ void CudaAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     common_inputs.decoder_max_seq_len = step - 1;
 
     auto buffer_nullptr = BufferPtr(nullptr);
-    auto attention_weight = AttentionLayerWeights(std::make_unique<const DenseWeights>(
-                                                    DenseWeights(buffer_nullptr, bias_device)));
-
+    auto attention_weight = AttentionLayerWeights();
+    attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
     auto token_num = batch_size * seq_len;
 

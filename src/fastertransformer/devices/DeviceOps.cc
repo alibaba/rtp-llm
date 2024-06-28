@@ -42,6 +42,10 @@ GroupedGemmOutput DeviceOps::groupedGemm(const GroupedGemmParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+DotProductOutput DeviceOps::dotProduct(const DotProductParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 BufferPtr DeviceOps::embeddingLookup(const EmbeddingLookupParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
@@ -67,6 +71,10 @@ AttentionLayerOutput DeviceOps::attentionLayer(const AttentionLayerParams& param
 }
 
 FfnLayerOutput DeviceOps::ffnLayer(const FfnLayerParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+FfnLayerOutput DeviceOps::moeFfnLayer(const FfnLayerParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

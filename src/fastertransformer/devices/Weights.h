@@ -42,7 +42,7 @@ struct DenseWeights {
                  ConstBufferPtr& bias) :
                  kernel(std::move(kernel)),
                  bias(std::move(bias)) {};
-    
+
     DenseWeights(BufferPtr& kernel,
                  BufferPtr& bias) :
                  kernel(std::move(kernel)),
@@ -71,11 +71,6 @@ struct AttentionLayerWeights {
 
     std::shared_ptr<const DenseWeights>     smoother_weight;
     std::shared_ptr<const DenseWeights>     shift_weight;
-
-    AttentionLayerWeights() = default;
-
-    AttentionLayerWeights(std::shared_ptr<const DenseWeights> qkv_weight) :
-                          qkv_weight(qkv_weight) {};
 };
 
 struct FfnLayerWeights {
@@ -93,14 +88,10 @@ struct FfnLayerWeights {
 
     std::shared_ptr<const DenseWeights>     smoother_weight;
 
-    FfnLayerWeights() = default;
-
-    FfnLayerWeights(std::shared_ptr<const DenseWeights> up_weight,
-                    std::shared_ptr<const DenseWeights> gate_weight,
-                    std::shared_ptr<const DenseWeights> down_weight) :
-                    up_weight(up_weight),
-                    gate_weight(gate_weight),
-                    down_weight(down_weight) {}
+    // these fields are for Qwen Mode model.
+    // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
+    std::shared_ptr<FfnLayerWeights>        shared_expert;
+    std::shared_ptr<const DenseWeights>     shared_expert_gate;
 };
 
 struct LayerWeights {

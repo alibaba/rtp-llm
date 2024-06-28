@@ -22,7 +22,7 @@ TEST_F(GptModelTest, testSimple) {
     FT_CHECK(weights->layers.size() == 24);
 
     GptModelDescription description;
-    description.activation_type = ActivationType::Swiglu;
+    description.ffn_conf.activation_type = ActivationType::Swiglu;
     description.norm_type = NormType::rmsnorm;
     auto& attention_conf = description.attention_conf;
     attention_conf.head_num = 16;

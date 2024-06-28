@@ -1,6 +1,8 @@
 #pragma once
 #include <stddef.h>
 #include <string>
+#include "src/fastertransformer/core/Types.h"
+#include "src/fastertransformer/th_op/GptInitParameter.h"
 
 namespace fastertransformer {
 
@@ -14,7 +16,12 @@ enum class DeviceType {
 
 struct DeviceInitParams {
     size_t device_id       = 0;
-    size_t max_batch_size = 256;
+    size_t max_batch_size  = 256;
+
+    // this model_data_type is same as template type T in ParallelGpt
+    DataType model_data_type  = DataType::TYPE_INVALID;
+    // bits might be quantized.
+    size_t weight_bits  = 0;
 
     size_t tp_rank         = 0;
     size_t tp_size         = 1;

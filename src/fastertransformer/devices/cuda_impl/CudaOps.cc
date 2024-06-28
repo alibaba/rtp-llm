@@ -181,6 +181,48 @@ SelectOutput CudaDevice::select(const SelectParams& params) {
     return std::move(output);
 }
 
+DotProductOutput CudaDevice::dotProduct(const DotProductParams& params) {
+    const auto& A = params.A;
+    const auto& B = params.B;
+
+    RUNTIME_ASSERT_OP_ARG(A.shape().size() == 1, "A must be 1D, but got %d", A.shape().size());
+    const auto m = A.shape()[0];
+    RUNTIME_ASSERT_OP_ARG(B.shape()[0] == m,
+                          "A and B must have same 0-d size, but got %d vs %d", m, B.shape()[0]);
+    const auto n = B.size() / m;
+
+    RUNTIME_ASSERT_OP_ARG(A.type() == B.type(),
+                          "A and B must have same type, but got %d vs %d", A.type(), B.type());
+    const auto data_type = A.type();
+
+    BufferPtr output;
+    if (params.output) {
+        output = params.output;
+        RUNTIME_ASSERT_OP_ARG(output->type() == data_type,
+                              "Output type must be same as A and B, but got %d vs %d",
+                              output->type(), data_type);
+        RUNTIME_ASSERT_OP_ARG(output->shape()[0] == n,
+                              "Output 0-d size must be %d, but got %d", n, output->shape()[0]);
+        RUNTIME_ASSERT_OP_ARG(output->size() == B.size(),
+                              "Output size must be %d, but got %d", B.size(), output->size());
+    } else {
+        output = allocateBuffer({data_type, B.shape()});
+    }
+
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+        data_type,
+        invokeScaledDot,
+        output->data(),
+        B.data(),
+        A.data(),
+        m,
+        n,
+        stream_
+    );
+
+    return move(output);
+}
+
 inline ncclDataType_t getNcclDataType(DataType type) {
     switch (type) {
         case DataType::TYPE_INT8: return ncclInt8;

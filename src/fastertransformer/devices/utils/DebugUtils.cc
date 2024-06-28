@@ -12,6 +12,11 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
         return;
     }
 
+    if (buffer.isQBuffer()) {
+        printf("skip QBuffer [%s]: %s", hint.c_str(), buffer.debugString().c_str());
+        return;
+    }
+
     if (!device) {
         device = DeviceFactory::getDefaultDevice();
     }
