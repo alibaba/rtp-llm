@@ -1,5 +1,5 @@
 #include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
-#include "maga_transformer/cpp/utils/StringUtil.h"
+#include "maga_transformer/cpp/utils/LinearBiasUtil.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
@@ -51,15 +51,13 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
     ft::NcclParam                                                           tensor_para,
     ft::NcclParam                                                           pipeline_para,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
-    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-    const ft::ConstBufferPtr&                                               linear_bias_slopes):
+    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights):
     params_(gpt_init_parameter),
     data_type_(ft::getTensorType<T>()),
     device_(dynamic_cast<ft::CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda))),
     tensor_para_(tensor_para),
-    pipeline_para_(pipeline_para),
-    linear_bias_slopes_(linear_bias_slopes)
-{
+    pipeline_para_(pipeline_para) {
+        
     allocator_      = device_->getAllocator();
     cublas_wrapper_ = device_->cublasMMWrapperPtr();
     stream_         = device_->stream();
@@ -99,6 +97,8 @@ ParallelModelWrapperImpl<T>::ParallelModelWrapperImpl(
                                   layer_weights_,
                                   &gpt_lora_layer_weights_);
     global_weights_.reset(new GptGlobalWeights<T>(global_weights));
+
+    linear_bias_slopes_ = createLinearBias(gpt_init_parameter, device_);
 
     initialize();
 }
@@ -475,8 +475,7 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
 ParallelModelWrapper::ParallelModelWrapper(
     const GptInitParameter&                                                 gpt_init_parameter,
     const std::unordered_map<std::string, ft::ConstBufferPtr>&              global_weights,
-    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights,
-    const ft::ConstBufferPtr&                                               linear_bias_slopes) {
+    const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& layer_weights) {
     auto device = dynamic_cast<ft::CudaDevice*>(ft::DeviceFactory::getDevice(ft::DeviceType::Cuda));
     ft::NcclParam pipeline_para;
     auto tensor_para = device->getNcclParam();
@@ -485,7 +484,7 @@ ParallelModelWrapper::ParallelModelWrapper(
     {                                                                                           \
         model_wrapper_ = new ParallelModelWrapperImpl<T_>(                                      \
                 gpt_init_parameter, tensor_para, pipeline_para,                                 \
-                global_weights, layer_weights, linear_bias_slopes);                             \
+                global_weights, layer_weights);                                                 \
     }
 
     switch (getScalarType(gpt_init_parameter.data_type_)) {

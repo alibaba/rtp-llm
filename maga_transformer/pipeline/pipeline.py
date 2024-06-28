@@ -206,6 +206,7 @@ class Pipeline(object):
         if len(ouput_tokens_list) == 0:
             ouput_tokens_list = [torch.empty(0, dtype=torch.int32) for _ in range(len(generate_outputs.generate_outputs))]
 
+        # TODO(xinfei.sxf) remove i
         i = 0
         for generate_output in generate_outputs.generate_outputs:
             # all model incremental return output_ids

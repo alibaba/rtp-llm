@@ -13,7 +13,7 @@ public:
     RtpLLMOp();
     ~RtpLLMOp();
     void init(const ft::GptInitParameter& gpt_init_parameter, py::object py_layer_weights,
-              py::object py_weights, py::object py_linear_bias_slopes);
+              py::object py_weights);
 
     void addLoRA(const int64_t lora_id, py::object lora_a_weights, py::object lora_b_weights);
     void removeLoRA(const int64_t lora_id);

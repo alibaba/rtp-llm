@@ -14,7 +14,7 @@ namespace torch_ext {
 RtpEmbeddingOp::RtpEmbeddingOp() {}
 
 void RtpEmbeddingOp::init(const ft::GptInitParameter& gpt_init_params, py::object handler_impl,
-                          py::object py_layers_weights, py::object py_global_weights, py::object py_linear_bias_slopes) {
+                          py::object py_layers_weights, py::object py_global_weights) {
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
     auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);

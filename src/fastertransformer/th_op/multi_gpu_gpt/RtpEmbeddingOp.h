@@ -22,7 +22,7 @@ public:
     RtpEmbeddingOp();
     ~RtpEmbeddingOp();
     void init(const ft::GptInitParameter& gpt_init_params, py::object handler_impl,
-              const py::object py_layer_weights, const py::object py_weights, py::object py_linear_bias_slopes);
+              const py::object py_layer_weights, const py::object py_weights);
     void stop();
 
     th::Tensor decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id);

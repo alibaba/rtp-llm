@@ -111,7 +111,7 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
     MACRO(DataType::TYPE_FP16, half, __VA_ARGS__)          \
     MACRO(DataType::TYPE_BF16, __nv_bfloat16, __VA_ARGS__) \
     default: \
-        FT_CHECK(false);
+        FT_CHECK_WITH_INFO(false, "unsupport data type");
 
 #define DISPATCH_FOR_EACH_NUMERIC_TYPE(MACRO, ...)         \
     MACRO(DataType::TYPE_INT8, int8_t, __VA_ARGS__)        \

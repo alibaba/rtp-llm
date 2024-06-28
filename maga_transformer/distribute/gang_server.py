@@ -195,6 +195,7 @@ class GangServer:
                                     world_size=g_parallel_info.world_size, 
                                     timeout=timedelta(seconds=init_process_timeout))
         else:
+            # TODO(xinfei.sxf) 没看懂啊
             # 由于后续会进行health check，且init_process_group默认不进行block，因此使用memory barrier进行一次同步                
             self.memory_barrier(master_url, timeout=init_process_timeout)
 

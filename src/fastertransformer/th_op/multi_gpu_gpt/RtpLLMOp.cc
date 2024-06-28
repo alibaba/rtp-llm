@@ -22,8 +22,7 @@ RtpLLMOp::RtpLLMOp() {}
 
 void RtpLLMOp::init(const ft::GptInitParameter& gpt_init_params,
                     py::object                  py_layers_weights,
-                    py::object                  py_global_weights,
-                    py::object                  py_linear_bias_slopes) {
+                    py::object                  py_global_weights) {
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
