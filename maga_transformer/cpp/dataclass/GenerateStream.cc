@@ -505,7 +505,7 @@ std::string GenerateStream::debugString() const {
                  << "generate_input:" << generate_input_->debugString() << ", max_seq_len:" << max_seq_len_
                  << ", input_length:" << inputLength() << ", seq_length:" << seq_length_
                  << ", reuse_length:" << reuse_length_ << ", batch_size:" << batchSize()
-                 << ", tile_num:" <<tileNum() << "}";
+                 << ", tile_num:" << tileNum() << "}";
     return debug_string.str();
 }
 

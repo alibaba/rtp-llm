@@ -16,7 +16,7 @@ class EmbeddingCppEngine(BaseEngine):
         self.cpp_engine = RtpEmbeddingOp()
 
     @override
-    def stop(self) ->None:
+    def stop(self) -> None:
         self.cpp_engine.stop()
 
     @override
