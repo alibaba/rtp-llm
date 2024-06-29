@@ -48,6 +48,30 @@ cc_library(
 )
 
 cc_library(
+    name = "hipblas",
+    srcs = ["rocm/lib/%{hipblas_lib}"],
+    data = ["rocm/lib/%{hipblas_lib}"],
+    includes = [
+        ".",
+        "rocm/include",
+    ],
+    linkstatic = 1,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "hipblaslt",
+    srcs = ["rocm/lib/%{hipblaslt_lib}"],
+    data = ["rocm/lib/%{hipblaslt_lib}"],
+    includes = [
+        ".",
+        "rocm/include",
+    ],
+    linkstatic = 1,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "hipfft",
     srcs = ["rocm/lib/%{hipfft_lib}"],
     data = ["rocm/lib/%{hipfft_lib}"],
@@ -115,6 +139,8 @@ cc_library(
         ":rocm_headers",
         ":hip",
         ":rocblas",
+        ":hipblas",
+        ":hipblaslt",
         ":hipfft",
         ":hiprand",
         ":miopen",

@@ -57,12 +57,14 @@ public:
     const char* what() const noexcept override {
         std::stringstream ss;
         ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message;
-        return ss.str().c_str();
+        s_ = ss.str();
+        return s_.c_str();
     }
 
     const OpStatus& status() const { return status_; }
 private:
     OpStatus status_;
+    mutable std::string s_;
 };
 
 using OptionalConstBufferRef    = std::optional<std::reference_wrapper<const Buffer>>;
@@ -289,7 +291,7 @@ struct AttentionCommonInputs {
     BufferPtr lora_ids;
     BufferPtr lora_input_lengths;
 
-    AttentionCommonInputs() = default;
+    AttentionCommonInputs() = delete; // can't be default due to const Buffer& input_lengths
 
     AttentionCommonInputs(const Buffer& input_lengths,
                           const Buffer& sequence_lengths) :

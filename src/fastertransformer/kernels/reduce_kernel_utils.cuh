@@ -41,16 +41,20 @@ namespace fastertransformer {
 
 template<typename T>
 __device__ __inline__ T __ldg_func(const T* ptr) {
+#if defined(USING_ROCM)
+    return *ptr;
+#else
     return __ldg(ptr);
+#endif
 }
 
 #ifdef ENABLE_BF16
 template<>
 __device__ __inline__ __nv_bfloat16 __ldg_func<__nv_bfloat16>(const __nv_bfloat16* ptr) {
-#if __CUDA_ARCH__ >= 800
-    return __ldg(ptr);
-#else
+#if __CUDA_ARCH__ < 800 || defined(USING_ROCM)
     return *ptr;
+#else
+    return __ldg(ptr);
 #endif
 }
 #endif

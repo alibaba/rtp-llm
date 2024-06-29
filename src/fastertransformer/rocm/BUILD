@@ -4,6 +4,7 @@ cc_library(
     name = "rocm_types_hdr",
     hdrs = [
         "cuda_shims.h",
+        "amd_bfloat16.h",        
     ],
     deps = [
         "@local_config_rocm//rocm:rocm_headers",
