@@ -57,12 +57,14 @@ public:
     const char* what() const noexcept override {
         std::stringstream ss;
         ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message;
-        return ss.str().c_str();
+        s_ = ss.str();
+        return s_.c_str();
     }
 
     const OpStatus& status() const { return status_; }
 private:
     OpStatus status_;
+    mutable std::string s_;
 };
 
 using OptionalConstBufferRef    = std::optional<std::reference_wrapper<const Buffer>>;

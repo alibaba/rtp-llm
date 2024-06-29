@@ -774,7 +774,7 @@ __global__ void generalLayerNormWithPadding(const T* __restrict input,
 
     if (DYNAMIC_SCALING) {
         float          abs_max_f               = blockAllReduceMax(cuda_cast<float>(abs_max));
-        const Scalar_T dynamic_per_token_scale(127. / abs_max_f);
+        const Scalar_T dynamic_per_token_scale(float(127. / abs_max_f));
         for (int i = tid; i < real_n; i += blockDim.x) {
             const int index                                        = blockIdx.x * padding_n + i;
             reinterpret_cast<Int8_Packed_T*>(normed_output)[index] = cuda_cast<Int8_Packed_T>(

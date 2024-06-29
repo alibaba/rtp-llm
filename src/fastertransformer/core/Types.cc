@@ -13,11 +13,7 @@
 #endif
 
 #if USING_ROCM
-#include <hip/hip_fp16.h>
-#ifdef ENABLE_BF16
-#include <hip/hip_bf16.h>  // define __hip_bfloat16 type
-// #include <hip/hip_bfloat16.h> // define   hip_bfloat16 type
-#endif
+#include "src/fastertransformer/rocm/cuda_shims.h"
 #endif
 
 namespace fastertransformer {

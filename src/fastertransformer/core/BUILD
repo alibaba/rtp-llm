@@ -1,4 +1,4 @@
-load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts",)
+load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts", "rocm_copts")
 
 cc_library(
     name = "types_hdr",
@@ -18,10 +18,11 @@ cc_library(
     ] + select({
         "//:using_cuda": ["@local_config_cuda//cuda:cuda"],
         "//:using_rocm": ["@local_config_rocm//rocm:rocm_headers",
-                          "@local_config_rocm//rocm:rocm"],
+                          "@local_config_rocm//rocm:rocm",
+                          "//src/fastertransformer/rocm:rocm_types_hdr"],
         "//conditions:default": [],
     }),
-    copts = cuda_copts(),
+    copts = rocm_copts(),
     visibility = ["//visibility:public"],
 )
 
@@ -146,6 +147,6 @@ cc_library(
         "//:using_rocm": ["//src/fastertransformer/rocm:rocm_utils"],
         "//conditions:default": [],
     }),
-    copts = copts(),
+    copts = rocm_copts(),
     visibility = ["//visibility:public"],
 )
