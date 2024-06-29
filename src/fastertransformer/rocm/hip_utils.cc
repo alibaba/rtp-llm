@@ -2,6 +2,6 @@
 
 namespace fastertransformer {
 namespace rocm {
-    
+
 }  // namespace rocm
 }  // namespace fastertransformer

@@ -2,21 +2,17 @@
 #include "src/fastertransformer/devices/rocm_impl/ROCmAllocator.h"
 #include "src/fastertransformer/core/TrackerAllocator.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/kernels/gpt_kernels.h"
-#include "src/fastertransformer/kernels/layernorm_kernels.h"
-#include "src/fastertransformer/kernels/rmsnormKernels.h"
-#include "src/fastertransformer/kernels/add_residual_kernels.h"
-#include "src/fastertransformer/kernels/activation_kernels.h"
-#include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/utils/ShapeCheck.h"
 #include <cstring>
 
 #include "src/fastertransformer/kernels/hello_world.h"
 
 // TODO(rocm): Idealy we just link compiler_rt for this symbol.
+#if ENABLE_BF16
 extern "C" half __truncdfhf2(double a) {
     return (half)(float)a;
 }
+#endif
 
 namespace fastertransformer {
 using namespace fastertransformer::rocm;
@@ -165,7 +161,7 @@ TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
 }
 
 void ROCmDevice::syncAndCheck() {
-    HIP_CHECK(hipStreamSynchronize(stream_));
+    (void)hipDeviceSynchronize();
 }
 
 SelectOutput ROCmDevice::select(const SelectParams& params) {

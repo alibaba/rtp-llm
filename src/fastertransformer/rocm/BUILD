@@ -7,6 +7,12 @@ cc_library(
     ],
     deps = [
         "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:rocm",
+        "@local_config_rocm//rocm:rocblas",
+        "//src/fastertransformer/utils:logger",
+        "//src/fastertransformer/utils:assert_utils",
+        "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/core:allocator",
     ],
     copts = rocm_copts(),
     include_prefix = "src",
