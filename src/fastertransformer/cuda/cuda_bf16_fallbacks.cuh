@@ -134,6 +134,32 @@ inline __device__ __nv_bfloat16 bf16hmul(const __nv_bfloat16 x, const __nv_bfloa
 #endif
 }
 
+// fix 
+inline __device__ __nv_bfloat162 bf16h2div2(const __nv_bfloat162 x, const __nv_bfloat162 y) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+    float fxl, fxh, fyl, fyh;
+    fxl = __low2float(x);
+    fxh = __high2float(x);
+    fyl = __low2float(y);
+    fyh = __high2float(y);
+    assert(fyl != 0.0f && fyh != 0.0f && "Division by zero!");
+    return __floats2bfloat162_rn(fxl / fyl, fxh / fyh);
+#else
+    return __h2div(x, y);
+#endif
+}
+
+inline __device__ __nv_bfloat16 bf16hdiv(const __nv_bfloat16 x, const __nv_bfloat16 y) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+    float fx = __bfloat162float(x);
+    float fy = __bfloat162float(y);
+    assert(fy != 0.0f && "bf16hdiv Division by zero!");
+    return __float2bfloat16(fx / fy);
+#else 
+    return __hdiv(x, y);
+#endif
+}
+
 inline __device__ __nv_bfloat162 bf16hfma2(const __nv_bfloat162 x, const __nv_bfloat162 y, const __nv_bfloat162 z) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
     float fxl, fxh, fyl, fyh, fzl, fzh;
