@@ -86,7 +86,10 @@ void ParallelWordEmbeddingWrapper<T>::forward(ft::Tensor&      embeddings,
         auto embedding_buf = std::make_shared<ft::Buffer>(
             ft::MemoryType::MEMORY_GPU, ft::getTensorType<T>(),
             nccl_embeddings.shape(), nccl_embeddings.getPtr<T>());
-        device_->allGather({{embedding_buf}});
+        // explicit types cast for params
+        std::vector<ft::BufferPtr> buffer_vector = {embedding_buf};
+        ft::AllGatherParams params = {buffer_vector};
+        device_->allGather(params);
         ft::invokeTransposeAxis012(embeddings.getPtr<T>(),
                                   nccl_embeddings.getPtr<T>(),
                                   tensor_para_.world_size_,
