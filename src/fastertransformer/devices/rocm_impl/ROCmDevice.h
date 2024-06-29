@@ -1,5 +1,10 @@
 #pragma once
 
+#include <hip/hip_runtime.h>
+#if ENABLE_BF16
+#include <hip/hip_fp16.h>
+#endif
+
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/rocm/hip_utils.h"
 #include "src/fastertransformer/rocm/hipblasMMWrapper.h"

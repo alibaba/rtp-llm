@@ -353,7 +353,6 @@ cc_library(
         "cuda_bf16_fallbacks.cuh",
     ],
     deps = [
-
         "//src/fastertransformer/rocm:rocm_types_hdr",
         "//src/fastertransformer/core:tensor_hdr",
     ],
