@@ -20,6 +20,8 @@ test_deps = [
     "//src/fastertransformer/devices/rocm_impl:rocm_impl",
     "//src/fastertransformer/devices/testing:device_test_utils",
     "//src/fastertransformer/devices/base_tests:base_tests",
+    "@local_config_rocm//rocm:rocm_headers",
+    "@local_config_rocm//rocm:rocblas",
 ] + torch_deps()
 
 cc_test(
