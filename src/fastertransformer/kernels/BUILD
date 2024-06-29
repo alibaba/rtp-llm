@@ -82,6 +82,17 @@ cc_library(
         "decoder_masked_multihead_attention_utils.h",
         "reduce_kernel_utils.cuh",
         "rotary_position_embedding.h",
+        "_vector_abs_max.h",
+        "_convert_from_float.h",
+        "_convert_to_float.h",
+        "_cast_to_int8.h",
+        "_add.h",
+        "_mul.h",
+        "_fma.h",
+        "_sum_dot_zero.h",
+        "_logn_attention.h",
+        "_convert_from_fp8.h",
+        "_convert_to_fp8.h",
     ],
 
     

@@ -3,7 +3,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
-#include "hip_bf16_fallbacks.cuh"
+#include "src/fastertransformer/cuda/cuda_bf16_fallbacks.cuh"
 // #include "hip_fp8_utils.h"
 
 namespace fastertransformer {

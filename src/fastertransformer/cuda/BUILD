@@ -354,6 +354,8 @@ cc_library(
     ],
     deps = [
         "//src/fastertransformer/rocm:rocm_types_hdr",
+        "//src/fastertransformer/core:types",
+        "//src/fastertransformer/rocm:rocm_utils",
         "//src/fastertransformer/core:tensor_hdr",
     ],
     copts = copts(),

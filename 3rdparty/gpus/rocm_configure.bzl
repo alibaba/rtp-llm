@@ -475,6 +475,18 @@ def _find_libs(repository_ctx, rocm_config):
             cpu_value,
             rocm_config.rocm_toolkit_path + "/lib",
         ),
+        "hipblas": _find_rocm_lib(
+            "hipblas",
+            repository_ctx,
+            cpu_value,
+            rocm_config.rocm_toolkit_path + "/lib",
+        ),
+        "hipblaslt": _find_rocm_lib(
+            "hipblaslt",
+            repository_ctx,
+            cpu_value,
+            rocm_config.rocm_toolkit_path + "/lib",
+        ),
         "hipfft": _find_rocm_lib(
             "hipfft",
             repository_ctx,
@@ -586,6 +598,8 @@ def _create_dummy_repository(repository_ctx):
         {
             "%{hip_lib}": _lib_name("hip", cpu_value),
             "%{rocblas_lib}": _lib_name("rocblas", cpu_value),
+            "%{hipblas_lib}": _lib_name("hipblas", cpu_value),
+            "%{hipblaslt_lib}": _lib_name("hipblaslt", cpu_value),
             "%{miopen_lib}": _lib_name("miopen", cpu_value),
             "%{rccl_lib}": _lib_name("rccl", cpu_value),
             "%{hipfft_lib}": _lib_name("hipfft", cpu_value),
@@ -802,6 +816,8 @@ def _create_local_rocm_repository(repository_ctx):
         {
             "%{hip_lib}": rocm_libs["hip"].file_name,
             "%{rocblas_lib}": rocm_libs["rocblas"].file_name,
+            "%{hipblas_lib}": rocm_libs["hipblas"].file_name,
+            "%{hipblaslt_lib}": rocm_libs["hipblaslt"].file_name,
             "%{hipfft_lib}": rocm_libs["hipfft"].file_name,
             "%{hiprand_lib}": rocm_libs["hiprand"].file_name,
             "%{miopen_lib}": rocm_libs["miopen"].file_name,
