@@ -19,8 +19,9 @@
 #if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#else
-#include "src/fastertransformer/rocm/cuda_shims.h"
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
 #endif
 #include <stdlib.h>
 

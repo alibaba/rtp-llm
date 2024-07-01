@@ -16,9 +16,18 @@
 
 #pragma once
 
-#include "src/fastertransformer/kernels/gpt_kernels.h"
+// #include "src/fastertransformer/kernels/gpt_kernels.h"
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/cuda/cuda_utils.h"
+#endif
+
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_type_utils.cuh"
+#include "src/fastertransformer/rocm/hip_utils.h"
+using namespace fastertransformer::rocm;
+#endif
+
 #include <stdint.h>
 
 #ifdef ENABLE_BF16
@@ -50,17 +59,25 @@ struct __align__(8) fp8_8_t {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline __device__ float half_to_float(uint16_t h) {
+#if USING_ROCM
+    return __half2float(*reinterpret_cast<__half_raw*>(&h));
+#else
     float f;
     asm volatile("cvt.f32.f16 %0, %1;\n" : "=f"(f) : "h"(h));
     return f;
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline __device__ float2 half2_to_float2(uint32_t v) {
+#if USING_ROCM
+    return __half22float2(*reinterpret_cast<__half2_raw*>(&v));
+#else
     uint16_t lo, hi;
     asm volatile("mov.b32 {%0, %1}, %2;\n" : "=h"(lo), "=h"(hi) : "r"(v));
     return make_float2(half_to_float(lo), half_to_float(hi));
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -139,17 +156,27 @@ inline __device__ bf16_8_t add(bf16_8_t a, bf16_8_t b) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline __device__ uint16_t add(uint16_t a, uint16_t b) {
+#if USING_ROCM
+    __half_raw out = __hadd(*reinterpret_cast<__half_raw*>(&a), *reinterpret_cast<__half_raw*>(&b));
+    return *reinterpret_cast<uint16_t*>(&(out.data));
+#else
     uint16_t c;
     asm volatile("add.f16 %0, %1, %2;\n" : "=h"(c) : "h"(a), "h"(b));
     return c;
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline __device__ uint32_t add(uint32_t a, uint32_t b) {
+#if USING_ROCM
+    __half2 out = __hadd2(*reinterpret_cast<__half2_raw*>(&a), *reinterpret_cast<__half2_raw*>(&b));
+    return *reinterpret_cast<uint32_t*>(&(out.data));
+#else
     uint32_t c;
     asm volatile("add.f16x2 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
     return c;
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -201,7 +228,12 @@ inline __device__ uint16_t float_to_half(float f) {
     float zero = 0.f;
     asm volatile("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(tmp.u32) : "f"(zero), "f"(f));
 #else
+#if USING_ROCM
+    __half_raw out = __float2half(f);
+    return *reinterpret_cast<uint16_t*>(&(out.data));
+#else
     asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[0]) : "f"(f));
+#endif
 #endif
     return tmp.u16[0];
 }
@@ -216,8 +248,13 @@ inline __device__ uint32_t float2_to_half2(float2 f) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(tmp.u32) : "f"(f.y), "f"(f.x));
 #else
+#if USING_ROCM
+    __half2 out = __float22half2_rn(f);
+    return *reinterpret_cast<uint32_t*>(&(out.data));
+#else
     asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[0]) : "f"(f.x));
     asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[1]) : "f"(f.y));
+#endif
 #endif
     return tmp.u32;
 }
@@ -323,9 +360,14 @@ inline __device__ Float8_ add(uint4 a, Float8_ fb) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline __device__ uint32_t h0_h0(uint16_t a) {
+#if USING_ROCM
+    __half2 out = __half2half2(*reinterpret_cast<__half_raw*>(&a));
+    return *reinterpret_cast<uint32_t*>(&(out.data));
+#else
     uint32_t b;
     asm volatile("mov.b32 %0, {%1, %1};" : "=r"(b) : "h"(a));
     return b;
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -459,9 +501,15 @@ inline __device__ Float8_ add(bf16_8_t a, Float8_ fb) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline __device__ uint32_t fma(uint32_t a, uint32_t b, uint32_t c) {
+#if USING_ROCM
+    __half2 out = __hfma2(
+        *reinterpret_cast<__half2_raw*>(&a), *reinterpret_cast<__half2_raw*>(&b), *reinterpret_cast<__half2_raw*>(&c));
+    return *reinterpret_cast<uint32_t*>(&(out.data));
+#else
     uint32_t d;
     asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(d) : "r"(a), "r"(b), "r"(c));
     return d;
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1119,7 +1167,7 @@ inline __device__ Float8_ fma(uint16_t a, int64_t b, Float8_ fc) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
+#ifdef ENABLE_BF16
 inline __device__ Float8_ fma(bf16_8_t a, int64_t b, Float8_ fc) {
     Float8_ fd;
 
@@ -1143,7 +1191,7 @@ inline __device__ Float8_ fma(bf16_8_t a, int64_t b, Float8_ fc) {
 inline __device__ Float8_ fma(__nv_bfloat16 a, int64_t b, Float8_ fc) {
     return fma(__bfloat162float(a), b, fc);
 }
-
+#endif
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Acc, typename A, typename B>
@@ -1236,18 +1284,28 @@ inline __device__ Float8_ mul(float a, Float8_ b) {
 
 template<>
 inline __device__ uint16_t mul(uint16_t a, uint16_t b) {
+#if USING_ROCM
+    __half_raw out = __hmul(*reinterpret_cast<__half_raw*>(&a), *reinterpret_cast<__half_raw*>(&b));
+    return *reinterpret_cast<uint16_t*>(&(out.data));
+#else
     uint16_t c;
     asm volatile("mul.f16 %0, %1, %2;\n" : "=h"(c) : "h"(a), "h"(b));
     return c;
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<>
 inline __device__ uint32_t mul(uint32_t a, uint32_t b) {
+#if USING_ROCM
+    __half2 out = __hmul2(*reinterpret_cast<__half2_raw*>(&a), *reinterpret_cast<__half2_raw*>(&b));
+    return *reinterpret_cast<uint32_t*>(&(out.data));
+#else
     uint32_t c;
     asm volatile("mul.f16x2 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
     return c;
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1545,8 +1603,8 @@ inline __device__ bf16_8_t mul(__nv_bfloat16 a, bf16_8_t b) {
 
 template<>
 inline __device__ float mul(__nv_bfloat16 a, __nv_bfloat16 b) {
-    float fa = (float)a;
-    float fb = (float)b;
+    float fa = __bfloat162float(a);
+    float fb = __bfloat162float(b);
     return fa * fb;
 }
 
@@ -2152,7 +2210,7 @@ __device__ __inline__ void logn_attention(uint4& vec, const int seq_idx, const i
 
 __device__ __inline__ void logn_attention(__nv_bfloat162& vec, const int seq_idx, const int logn_seq_len) {
     if (seq_idx > logn_seq_len) {
-        __nv_bfloat16 scalar = __nv_bfloat16((logf(seq_idx + 1) / logf(logn_seq_len)));
+        __nv_bfloat16 scalar = __float2bfloat16((logf(seq_idx + 1) / logf(logn_seq_len)));
         vec.x                = vec.x * scalar;
         vec.y                = vec.y * scalar;
     }
@@ -2160,15 +2218,14 @@ __device__ __inline__ void logn_attention(__nv_bfloat162& vec, const int seq_idx
 
 __device__ __inline__ void logn_attention(__nv_bfloat16& vec, const int seq_idx, const int logn_seq_len) {
     if (seq_idx > logn_seq_len) {
-        __nv_bfloat16 scalar = __nv_bfloat16((logf(seq_idx + 1) / logf(logn_seq_len)));
+        __nv_bfloat16 scalar = __float2bfloat16((logf(seq_idx + 1) / logf(logn_seq_len)));
         vec                  = vec * scalar;
     }
 }
 
 __device__ __inline__ void logn_attention(bf16_8_t& vec, const int seq_idx, const int logn_seq_len) {
     if (seq_idx > logn_seq_len) {
-        __nv_bfloat16  scalar  = __nv_bfloat16((logf(seq_idx + 1) / logf(logn_seq_len)));
-        __nv_bfloat162 scalar2 = __nv_bfloat162(scalar, scalar);
+        __nv_bfloat162 scalar2 = __float2bfloat162_rn((logf(seq_idx + 1) / logf(logn_seq_len)));
         vec.x                  = vec.x * scalar2;
         vec.y                  = vec.y * scalar2;
         vec.z                  = vec.z * scalar2;
@@ -2178,8 +2235,7 @@ __device__ __inline__ void logn_attention(bf16_8_t& vec, const int seq_idx, cons
 
 __device__ __inline__ void logn_attention(bf16_4_t& vec, const int seq_idx, const int logn_seq_len) {
     if (seq_idx > logn_seq_len) {
-        __nv_bfloat16  scalar  = __nv_bfloat16((logf(seq_idx + 1) / logf(logn_seq_len)));
-        __nv_bfloat162 scalar2 = __nv_bfloat162(scalar, scalar);
+        __nv_bfloat162 scalar2 = __float2bfloat162_rn((logf(seq_idx + 1) / logf(logn_seq_len)));
         vec.x                  = vec.x * scalar2;
         vec.y                  = vec.y * scalar2;
     }
@@ -2320,113 +2376,113 @@ inline __device__ void convert_from_float(int64_t* dst, float4 src) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename A>
-inline __device__ typename packed_type<float, num_elems<A>::value>::type convert_to_float(A u) {
-    return {};
-}
+// template<typename A>
+// inline __device__ typename packed_type<float, num_elems<A>::value>::type convert_to_float(A u) {
+//     return {};
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<>
-inline __device__ float4 convert_to_float(float4 u) {
-    return u;
-}
+// template<>
+// inline __device__ float4 convert_to_float(float4 u) {
+//     return u;
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<>
-inline __device__ float2 convert_to_float(float2 u) {
-    return u;
-}
+// template<>
+// inline __device__ float2 convert_to_float(float2 u) {
+//     return u;
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<>
-inline __device__ float convert_to_float(float u) {
-    return u;
-}
+// template<>
+// inline __device__ float convert_to_float(float u) {
+//     return u;
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<>
-inline __device__ Float8_ convert_to_float(uint4 u) {
-    Float8_ f8;
-    f8.x = half2_to_float2(u.x);
-    f8.y = half2_to_float2(u.y);
-    f8.z = half2_to_float2(u.z);
-    f8.w = half2_to_float2(u.w);
-    return f8;
-}
+// template<>
+// inline __device__ Float8_ convert_to_float(uint4 u) {
+//     Float8_ f8;
+//     f8.x = half2_to_float2(u.x);
+//     f8.y = half2_to_float2(u.y);
+//     f8.z = half2_to_float2(u.z);
+//     f8.w = half2_to_float2(u.w);
+//     return f8;
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<>
-inline __device__ float4 convert_to_float(uint2 u) {
-    float4 ret;
-    float2 f2x = half2_to_float2(u.x);
-    float2 f2y = half2_to_float2(u.y);
-    ret.x      = f2x.x;
-    ret.y      = f2x.y;
-    ret.z      = f2y.x;
-    ret.w      = f2y.y;
-    return ret;
-}
+// template<>
+// inline __device__ float4 convert_to_float(uint2 u) {
+//     float4 ret;
+//     float2 f2x = half2_to_float2(u.x);
+//     float2 f2y = half2_to_float2(u.y);
+//     ret.x      = f2x.x;
+//     ret.y      = f2x.y;
+//     ret.z      = f2y.x;
+//     ret.w      = f2y.y;
+//     return ret;
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<>
-inline __device__ float2 convert_to_float(uint32_t u) {
-    return half2_to_float2(u);
-}
+// template<>
+// inline __device__ float2 convert_to_float(uint32_t u) {
+//     return half2_to_float2(u);
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<>
-inline __device__ float convert_to_float(half u) {
-    return static_cast<float>(u);
-}
+// template<>
+// inline __device__ float convert_to_float(half u) {
+//     return static_cast<float>(u);
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#ifdef ENABLE_BF16
-template<>
-inline __device__ float convert_to_float(__nv_bfloat16 u) {
-    return static_cast<float>(u);
-}
+// #ifdef ENABLE_BF16
+// template<>
+// inline __device__ float convert_to_float(__nv_bfloat16 u) {
+//     return static_cast<float>(u);
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<>
-inline __device__ float2 convert_to_float(__nv_bfloat162 u) {
-    return bf1622float2(u);
-}
+// template<>
+// inline __device__ float2 convert_to_float(__nv_bfloat162 u) {
+//     return bf1622float2(u);
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<>
-inline __device__ float4 convert_to_float(bf16_4_t u) {
-    float4 ret;
-    float2 f2x = bf1622float2(u.x);
-    float2 f2y = bf1622float2(u.y);
-    ret.x      = f2x.x;
-    ret.y      = f2x.y;
-    ret.z      = f2y.x;
-    ret.w      = f2y.y;
-    return ret;
-}
+// template<>
+// inline __device__ float4 convert_to_float(bf16_4_t u) {
+//     float4 ret;
+//     float2 f2x = bf1622float2(u.x);
+//     float2 f2y = bf1622float2(u.y);
+//     ret.x      = f2x.x;
+//     ret.y      = f2x.y;
+//     ret.z      = f2y.x;
+//     ret.w      = f2y.y;
+//     return ret;
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<>
-inline __device__ Float8_ convert_to_float(bf16_8_t u) {
-    Float8_ f8;
-    f8.x = bf1622float2(u.x);
-    f8.y = bf1622float2(u.y);
-    f8.z = bf1622float2(u.z);
-    f8.w = bf1622float2(u.w);
-    return f8;
-}
-#endif
+// template<>
+// inline __device__ Float8_ convert_to_float(bf16_8_t u) {
+//     Float8_ f8;
+//     f8.x = bf1622float2(u.x);
+//     f8.y = bf1622float2(u.y);
+//     f8.z = bf1622float2(u.z);
+//     f8.w = bf1622float2(u.w);
+//     return f8;
+// }
+// #endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -2687,62 +2743,62 @@ inline __device__ void convert_to_fp8(fp8_8_t* v, const Float8_ u) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ int8_t cast_to_int8(float val) {
-    union {
-        int8_t  int8[2];
-        int16_t int16;
-    };
+// inline __device__ int8_t cast_to_int8(float val) {
+//     union {
+//         int8_t  int8[2];
+//         int16_t int16;
+//     };
 
-    asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=h"(int16) : "f"(val));
-    return int8[0];
-}
+//     asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=h"(int16) : "f"(val));
+//     return int8[0];
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ int32_t cast_to_int8(float2 val) {
-    union {
-        int8_t  int8[2];
-        int32_t int32;
-    };
+// inline __device__ int32_t cast_to_int8(float2 val) {
+//     union {
+//         int8_t  int8[2];
+//         int32_t int32;
+//     };
 
-    int8[0] = cast_to_int8(val.x);
-    int8[1] = cast_to_int8(val.y);
-    return int32;
-}
+//     int8[0] = cast_to_int8(val.x);
+//     int8[1] = cast_to_int8(val.y);
+//     return int32;
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ int32_t cast_to_int8(float4 val) {
-    union {
-        int8_t  int8[4];
-        int32_t int32;
-    };
+// inline __device__ int32_t cast_to_int8(float4 val) {
+//     union {
+//         int8_t  int8[4];
+//         int32_t int32;
+//     };
 
-    int8[0] = cast_to_int8(val.x);
-    int8[1] = cast_to_int8(val.y);
-    int8[2] = cast_to_int8(val.z);
-    int8[3] = cast_to_int8(val.w);
-    return int32;
-}
+//     int8[0] = cast_to_int8(val.x);
+//     int8[1] = cast_to_int8(val.y);
+//     int8[2] = cast_to_int8(val.z);
+//     int8[3] = cast_to_int8(val.w);
+//     return int32;
+// }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
+// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ int64_t cast_to_int8(Float8_ val) {
-    union {
-        int8_t  int8[8];
-        int64_t int64;
-    };
+// inline __device__ int64_t cast_to_int8(Float8_ val) {
+//     union {
+//         int8_t  int8[8];
+//         int64_t int64;
+//     };
 
-    int8[0] = cast_to_int8(val.x.x);
-    int8[1] = cast_to_int8(val.x.y);
-    int8[2] = cast_to_int8(val.y.x);
-    int8[3] = cast_to_int8(val.y.y);
-    int8[4] = cast_to_int8(val.z.x);
-    int8[5] = cast_to_int8(val.z.y);
-    int8[6] = cast_to_int8(val.w.x);
-    int8[7] = cast_to_int8(val.w.y);
-    return int64;
-}
+//     int8[0] = cast_to_int8(val.x.x);
+//     int8[1] = cast_to_int8(val.x.y);
+//     int8[2] = cast_to_int8(val.y.x);
+//     int8[3] = cast_to_int8(val.y.y);
+//     int8[4] = cast_to_int8(val.z.x);
+//     int8[5] = cast_to_int8(val.z.y);
+//     int8[6] = cast_to_int8(val.w.x);
+//     int8[7] = cast_to_int8(val.w.y);
+//     return int64;
+// }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -2786,14 +2842,14 @@ inline __device__ void load_8bits_kv_cache_vec(Vec_k* vec, const __nv_fp8_e4m3* 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename Vec_k>
-inline __device__ void store_8bits_kv_cache_vec(int8_t* pointer, const Vec_k& vec, int idx, float scale) {
-    using Packed_8bits_t     = typename packed_type<int8_t, num_elems<Vec_k>::value>::type;
-    using Packed_Float_t     = typename packed_type<float, num_elems<Vec_k>::value>::type;
-    Packed_8bits_t out_quant = cast_to_int8(mul<Packed_Float_t>(scale, convert_to_float(vec)));
+// template<typename Vec_k>
+// inline __device__ void store_8bits_kv_cache_vec(int8_t* pointer, const Vec_k& vec, int idx, float scale) {
+//     using Packed_8bits_t     = typename packed_type<int8_t, num_elems<Vec_k>::value>::type;
+//     using Packed_Float_t     = typename packed_type<float, num_elems<Vec_k>::value>::type;
+//     Packed_8bits_t out_quant = cast_to_int8(mul<Packed_Float_t>(scale, convert_to_float(vec)));
 
-    *reinterpret_cast<Packed_8bits_t*>(&pointer[idx]) = out_quant;
-}
+//     *reinterpret_cast<Packed_8bits_t*>(&pointer[idx]) = out_quant;
+// }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 

@@ -109,7 +109,6 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
 #define DISPATCH_FOR_EACH_COMPUTE_TYPE(MACRO, ...)         \
     MACRO(DataType::TYPE_FP32, float, __VA_ARGS__)         \
     MACRO(DataType::TYPE_FP16, half, __VA_ARGS__)          \
-    MACRO(DataType::TYPE_BF16, __nv_bfloat16, __VA_ARGS__) \
     default: \
         FT_CHECK_WITH_INFO(false, "unsupport data type");
 

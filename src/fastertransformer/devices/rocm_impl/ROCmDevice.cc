@@ -15,7 +15,7 @@ extern "C" half __truncdfhf2(double a) {
 #endif
 
 namespace fastertransformer {
-using namespace fastertransformer::rocm;
+using namespace rocm;
 
 ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     RUNTIME_ASSERT_OP_ARG(params.tp_rank == 0, "rocm device doesn't support nccl");
@@ -55,6 +55,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
 
     hipblasCreate(&hipblas_handle_);
     hipblasLtCreate(&hipblaslt_handle_);
+
     hipblas_algo_map_.reset(new hipblasAlgoMap(GEMM_CONFIG));
     hipblas_mm_wrapper_.reset(new hipblasMMWrapper(hipblas_handle_,
                                                    hipblaslt_handle_,
@@ -417,9 +418,9 @@ void ROCmDevice::activation(const ActivationParams& params) {
     DISPATCH(states.type(), params.atype, states.data(), bias, gate, gate_bias, m, n, stream_);
 }
 
-AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& params) {
-    std::cerr << "contextAttention\n";
-}
+// AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& params) {
+//     std::cerr << "contextAttention\n";
+// }
 
 BufferPtr ROCmDevice::testVecAdd(const BufferPtr a, const BufferPtr b) {
     BufferPtr           output;

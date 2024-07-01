@@ -19,13 +19,15 @@
 #if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#else
-#include "src/fastertransformer/rocm/cuda_shims.h"
+#include "src/fastertransformer/cuda/memory_utils.h"
+#endif
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#include "src/fastertransformer/rocm/hip_utils.h"
 #endif
 #include <unordered_map>
 
 #include "src/fastertransformer/core/Tensor.h"
-#include "src/fastertransformer/cuda/memory_utils.h"
 
 namespace fastertransformer {
 
