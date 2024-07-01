@@ -20,8 +20,14 @@
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/rotary_position_embedding.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/cuda/cuda_utils.h"
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_type_utils.cuh"
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
 #include <cstdlib>
 
 namespace fastertransformer {
@@ -656,6 +662,7 @@ __global__ void softmax_kernel_h2_v2(T*        attn_score,
     }
 }
 
+#if 0 //no need for softmax, amd using Flash Attention
 #define LAUNCH_MAKSED_SOFTMAX_(T_, ITEMS_PER_THREAD)                                                                   \
     block.x /= ITEMS_PER_THREAD;                                                                                       \
     block.x = (block.x + 31) / 32 * 32;                                                                                \
@@ -814,6 +821,7 @@ void invokeMaskedSoftmax(MaskedSoftmaxParam<__nv_bfloat16, __nv_bfloat16>& param
 
 #undef LAUNCH_MAKSED_SOFTMAX
 #undef LAUNCH_MAKSED_SOFTMAX_
+#endif
 
 template<typename T>
 __global__ void transpose(const T*     src,
@@ -903,6 +911,7 @@ void invokeTransposeQKV(T*           dst,
                     (half2*)src, (half2*)dst, batch_size, seq_len, head_num, size_per_head / 2, scale, int8_mode);
             }
 
+#ifdef ENABLE_BF16
             else if constexpr (CompileConfig::enable_bf16) {
                 transpose<__nv_bfloat162><<<grid, block, 0, stream>>>((__nv_bfloat162*)src,
                                                                       (__nv_bfloat162*)dst,
@@ -913,6 +922,7 @@ void invokeTransposeQKV(T*           dst,
                                                                       scale,
                                                                       int8_mode);
             }
+#endif
         }
         else {
             block.x = seq_per_block * size_per_head;
@@ -2011,7 +2021,7 @@ __global__ void transpose4dBatchMajorKVCache(const T*      kSrc,
         // If T is fp16/bf16, T_src is uint4 and num_elems<T_src>::value returns 8
         // packed_type<int8_t ...>::type becomes uint32_t or uint64_t respectively
         // FIXME num_elems semantic is confusing
-        inBlockIdx = inBlockIdx * sizeof(packed_type<T_dst, num_elems<T_src>::value>::type);
+        inBlockIdx = inBlockIdx * sizeof(typename packed_type<T_dst, num_elems<T_src>::value>::type);
         // Cast float scale to dst data type.
         // using T_scale = typename kv_cache_scale_type_t<T, T_cache>::Type;
         // T_scale scaleOrigQuant;
@@ -2455,6 +2465,7 @@ INSTANTIATEADDHEAD3SIZEQKVBIAS(__nv_bfloat16);
 #endif
 #undef INSTANTIATEADDHEAD3SIZEQKVBIAS
 
+#if 0 //no need for softmax, amd using Flash Attention
 /*******************  invokeMaskedSoftMaxWithRelPosBias  ***********************/
 
 // grid = (window_len/word_per_thread, window_num*num_head, batch_size)
@@ -2801,6 +2812,7 @@ INSTANTIATEMASKEDSOFTMAXWITHRELPOSBIAS(half);
 INSTANTIATEMASKEDSOFTMAXWITHRELPOSBIAS(__nv_bfloat16);
 #endif
 #undef INSTANTIATEMASKEDSOFTMAXWITHRELPOSBIAS
+#endif
 
 template<typename T>
 __global__ void transpose_attentions(

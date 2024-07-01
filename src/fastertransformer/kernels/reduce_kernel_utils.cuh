@@ -29,11 +29,11 @@
 #include <curand_kernel.h>
 
 namespace cg = cooperative_groups;
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #endif
 
 #include <float.h>
 #include <type_traits>
-#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 
 
 

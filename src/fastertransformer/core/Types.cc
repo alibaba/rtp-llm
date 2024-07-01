@@ -4,9 +4,17 @@
 #include <cstdint>
 #include <immintrin.h>
 
-#if GOOGLE_CUDA
+#if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#endif
+
+#if USING_ROCM
+#include <hip/hip_fp16.h>
+#ifdef ENABLE_BF16
+#include <hip/hip_bf16.h>  // define __hip_bfloat16 type
+// #include <hip/hip_bfloat16.h> // define   hip_bfloat16 type
+#endif
 #endif
 
 namespace fastertransformer {
@@ -26,10 +34,10 @@ namespace fastertransformer {
     F(DataType::TYPE_BYTES, char); \
     F(DataType::TYPE_STR, std::string);
 
-#if GOOGLE_CUDA
+#if 1
 #define FT_FOREACH_DEVICE_TYPE(F) \
     F(DataType::TYPE_FP16, half); \
-    F(DataType::TYPE_BF16, __nv_bfloat16);
+    /*F(DataType::TYPE_BF16, __nv_bfloat16);*/
 #else
 struct fake_half {
     uint16_t x;

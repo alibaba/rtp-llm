@@ -468,7 +468,9 @@ DEFINE_INVOKETRANSPOSE(int64_t);
 DEFINE_INVOKETRANSPOSE(uint64_t);
 DEFINE_INVOKETRANSPOSE(float);
 DEFINE_INVOKETRANSPOSE(half);
+#ifdef ENABLE_BF16
 DEFINE_INVOKETRANSPOSE(__nv_bfloat16);
+#endif
 
 template<typename T>
 __global__ void transposeAxis12(T* out, T* in, const int dim0, const int dim1, const int dim2, const int dim3)

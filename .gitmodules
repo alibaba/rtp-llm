@@ -1,0 +1,3 @@
+[submodule "src/fastertransformer/rocm/composable_kernel"]
+        path = src/fastertransformer/rocm/composable_kernel
+        url = https://github.com/ROCm/composable_kernel.git

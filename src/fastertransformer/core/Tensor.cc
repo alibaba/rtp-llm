@@ -16,7 +16,12 @@
 
 #include "Tensor.h"
 
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
 #include "src/fastertransformer/utils/string_utils.h"
 
 #include "stdlib.h"

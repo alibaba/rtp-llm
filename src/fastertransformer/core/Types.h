@@ -63,6 +63,20 @@ inline DataType getDataType(const std::string& type_str) {
     return data_type;
 }
 
+inline std::string getDataTypeStr(const DataType& data_type) {
+    std::string type_str;
+    if (data_type == TYPE_FP16) {
+        type_str = "fp16";
+    } else if (data_type == TYPE_BF16) {
+        type_str = "bf16";
+    } else if (data_type == TYPE_FP32) {
+        type_str = "fp32";
+    } else {
+        throw std::runtime_error("wrong data type");
+    }
+    return type_str;
+}
+
 template<typename T>
 DataType getTensorType();
 
