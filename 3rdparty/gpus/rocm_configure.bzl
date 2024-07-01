@@ -184,7 +184,8 @@ def _rocm_include_path(repository_ctx, rocm_config):
 
     # Add HIP-Clang headers
     print("rocm_config.rocm_toolkit_path: ", rocm_config.rocm_toolkit_path)
-    inc_dirs.append(rocm_config.rocm_toolkit_path + "/lib/llvm/lib/clang/17/include")
+    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/17/include")
+    inc_dirs.append(rocm_config.rocm_toolkit_path + "/llvm/lib/clang/18/include")
 
     # Add rocrand and hiprand headers
     inc_dirs.append(rocm_config.rocm_toolkit_path + "/rocrand/include")
@@ -498,6 +499,12 @@ def _find_libs(repository_ctx, rocm_config):
             cpu_value,
             rocm_config.rocm_toolkit_path + "/lib",
         ),
+        "hipblaslt": _find_rocm_lib(
+            "hipblaslt",
+            repository_ctx,
+            cpu_value,
+            rocm_config.rocm_toolkit_path + "/lib",
+        ),
     }
 
 def _get_rocm_config(repository_ctx):
@@ -583,6 +590,7 @@ def _create_dummy_repository(repository_ctx):
             "%{rccl_lib}": _lib_name("rccl", cpu_value),
             "%{hipfft_lib}": _lib_name("hipfft", cpu_value),
             "%{hiprand_lib}": _lib_name("hiprand", cpu_value),
+            "%{hipblaslt_lib}": _lib_name("hipblaslt", cpu_value),
             "%{copy_rules}": "",
             "%{rocm_headers}": "",
         },
@@ -798,13 +806,13 @@ def _create_local_rocm_repository(repository_ctx):
             "%{hiprand_lib}": rocm_libs["hiprand"].file_name,
             "%{miopen_lib}": rocm_libs["miopen"].file_name,
             "%{rccl_lib}": rocm_libs["rccl"].file_name,
+            "%{hipblaslt_lib}": rocm_libs["hipblaslt"].file_name,
             "%{copy_rules}": "\n".join(copy_rules),
             "%{rocm_headers}": ('":rocm-include",\n' +
-                                '":hipfft-include",\n' +
-                                '":rocblas-include",\n' +
-                                '":miopen-include",\n' +
-                                '":rccl-include",\n' +
-                                hiprand_include +
+#                                 '":rocblas-include",\n' +
+#                                 '":miopen-include",\n' +
+#                                 '":rccl-include",\n' +
+#                                 hiprand_include +
                                 rocrand_include),
         },
     )
@@ -833,7 +841,7 @@ def _create_local_rocm_repository(repository_ctx):
 
     rocm_defines["%{unfiltered_compile_flags}"] = to_list_of_strings([
         "-DTENSORFLOW_USE_ROCM=1",
-        "-D__HIP_PLATFORM_HCC__",
+        "-D__HIP_PLATFORM_AMD__",
         "-DEIGEN_USE_HIP",
     ] + _if_hipcc_is_hipclang(repository_ctx, rocm_config, [
         #
