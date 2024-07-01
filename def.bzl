@@ -141,11 +141,12 @@ def torch_deps():
 
 def copts():
     return [
-        "-DTHRUST_IGNORE_CUB_VERSION_CHECK",
         "-DTORCH_CUDA",
+    ] + if_cuda([
+        "-DTHRUST_IGNORE_CUB_VERSION_CHECK",
         "-DUSE_C10D_NCCL",
         "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE",
-    ]
+    ])
 
 def cuda_copts():
     # add --objdir-as-tempdir to rm tmp file after build
