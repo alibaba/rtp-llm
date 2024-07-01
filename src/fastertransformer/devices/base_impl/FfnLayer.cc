@@ -1,6 +1,7 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 
 using namespace std;
 
@@ -18,7 +19,6 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         // for qwen moe
         // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
         if (params.weights.shared_expert) {
-            auto shared_expert_params = params;
             shared_expert_output = ffnLayer({params.input,
                                              params.configs,
                                              *(params.weights.shared_expert),

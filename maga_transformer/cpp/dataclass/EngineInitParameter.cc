@@ -91,30 +91,27 @@ ft::FfnLayerWeights
 WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     ft::FfnLayerWeights ffn_weights;
 
+    ffn_weights.up_weight   = mayCreateDenseWeights(map, W::ffn_w3, W::ffn_b3, W::ffn_s3);
+    ffn_weights.gate_weight = mayCreateDenseWeights(map, W::ffn_w1, W::ffn_b1, W::ffn_s1);
+    ffn_weights.down_weight = mayCreateDenseWeights(map, W::ffn_w2, W::ffn_b2, W::ffn_s2);
+
+    ffn_weights.moe_gating_weight = mayCreateDenseWeights(map, W::moe_gate);
+    ffn_weights.moe_up_weight     = mayCreateDenseWeights(map, W::moe_w3, W::moe_b3, W::moe_s3);
+    ffn_weights.moe_gate_weight   = mayCreateDenseWeights(map, W::moe_w1, W::moe_b1, W::moe_s1);
+    ffn_weights.moe_down_weight   = mayCreateDenseWeights(map, W::moe_w2, W::moe_b2, W::moe_s2);
+
     ffn_weights.dense_layernorm = mayCreateLayerNormWeights(map, W::ffn_ln_gamma, W::ffn_ln_beta);
     ffn_weights.smoother_weight = mayCreateDenseWeights(map, W::ffn_smoother);
-    ffn_weights.moe_gating_weight = mayCreateDenseWeights(map, W::moe_gate);
 
+    // for qwen moe
     if (ffn_weights.moe_gating_weight) {
-        ffn_weights.up_weight = mayCreateDenseWeights(map, W::moe_w3, W::moe_b3, W::moe_s3);
-        ffn_weights.gate_weight = mayCreateDenseWeights(map, W::moe_w1, W::moe_b1, W::moe_s1);
-        ffn_weights.down_weight = mayCreateDenseWeights(map, W::moe_w2, W::moe_b2, W::moe_s2);
-
-        // for qwen moe
         ffn_weights.shared_expert_gate = mayCreateDenseWeights(map, W::shared_expert_gate_w);
         if (ffn_weights.shared_expert_gate) {
             ffn_weights.shared_expert = make_shared<ft::FfnLayerWeights>();
-            ffn_weights.shared_expert->up_weight = mayCreateDenseWeights(
-                map, W::ffn_w3, W::ffn_b3, W::ffn_s3);
-            ffn_weights.shared_expert->gate_weight = mayCreateDenseWeights(
-                map, W::ffn_w1, W::ffn_b1, W::ffn_s1);
-            ffn_weights.shared_expert->down_weight = mayCreateDenseWeights(
-                map, W::ffn_w2, W::ffn_b2, W::ffn_s2);
+            ffn_weights.shared_expert->up_weight = move(ffn_weights.up_weight);
+            ffn_weights.shared_expert->gate_weight = move(ffn_weights.gate_weight);
+            ffn_weights.shared_expert->down_weight = move(ffn_weights.down_weight);
         }
-    } else {
-        ffn_weights.up_weight = mayCreateDenseWeights(map, W::ffn_w3, W::ffn_b3, W::ffn_s3);
-        ffn_weights.gate_weight = mayCreateDenseWeights(map, W::ffn_w1, W::ffn_b1, W::ffn_s1);
-        ffn_weights.down_weight = mayCreateDenseWeights(map, W::ffn_w2, W::ffn_b2, W::ffn_s2);
     }
 
     return ffn_weights;

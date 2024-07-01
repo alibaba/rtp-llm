@@ -291,7 +291,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                        ft::mayGetRef(layer.post_ffn_layernorm),
                                                                        device_props_.ffn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual,
                                                                        (residual2 == nullptr) ? nullopt : (OptionalConstBufferRef)*residual2,
-                                                                       ft::mayGetRef(layer.ffn_weights.down_weight->bias),
+                                                                       ft::mayGetRef(WEIGHT_MAY_GET_BIAS(layer.ffn_weights.down_weight)),
                                                                        1.0f,
                                                                        norm_eps,
                                                                        true,

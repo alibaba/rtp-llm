@@ -75,13 +75,17 @@ struct AttentionLayerWeights {
 
 struct FfnLayerWeights {
     std::shared_ptr<const DenseWeights>     up_weight;
+    std::shared_ptr<const DenseWeights>     moe_up_weight;
     std::shared_ptr<const LoraWeightsMap>   up_lora_weights;
 
     std::shared_ptr<const DenseWeights>     gate_weight;
+    std::shared_ptr<const DenseWeights>     moe_gate_weight;
     std::shared_ptr<const LoraWeightsMap>   gate_lora_weights;
 
     std::shared_ptr<const DenseWeights>     down_weight;
+    std::shared_ptr<const DenseWeights>     moe_down_weight;
     std::shared_ptr<const LoraWeightsMap>   down_lora_weights;
+
     std::shared_ptr<const LayerNormWeights> dense_layernorm;
 
     std::shared_ptr<const DenseWeights>     moe_gating_weight;
@@ -96,9 +100,9 @@ struct FfnLayerWeights {
 
 struct LayerWeights {
     std::shared_ptr<const LayerNormWeights> pre_layernorm;
-    AttentionLayerWeights self_attention_weights;
+    AttentionLayerWeights                   self_attention_weights;
     std::shared_ptr<const LayerNormWeights> post_layernorm;
-    FfnLayerWeights       ffn_weights;
+    FfnLayerWeights                         ffn_weights;
     std::shared_ptr<const LayerNormWeights> post_ffn_layernorm;
 };
 

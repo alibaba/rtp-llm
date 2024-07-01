@@ -70,10 +70,6 @@ using OptionalBufferRef         = std::optional<std::reference_wrapper<Buffer>>;
 
 using OptionalConstLoraMapRef    = std::optional<std::reference_wrapper<const LoraWeightsMap>>;
 
-template <typename T>
-inline std::optional<std::reference_wrapper<T>> mayGetRef(const std::shared_ptr<T>& ptr) {
-    return ptr ? std::optional<std::reference_wrapper<T>>(*ptr) : std::nullopt;
-}
 
 using CloneOutput = BufferPtr;
 

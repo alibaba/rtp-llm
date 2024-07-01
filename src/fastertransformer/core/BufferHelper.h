@@ -49,4 +49,17 @@ inline void BUFFER_DTYPE_CHECK(const Buffer& buffer, std::vector<DataType> dtype
         "buffer type[%d] is invalid", buffer.type());
 }
 
+#define BUFFER_GET_SCALE_IF_Q_BUFFER(buf) \
+    ((buf)->isQBuffer() ? dynamic_cast<const QBuffer*>(buf.get())->scalesData() : nullptr)
+#define OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(buf) \
+    ((buf) ? buf->data() : nullptr)
+
+#define WEIGHT_MAY_GET_BIAS(weights) \
+    (weights) ? weights->bias : nullptr
+
+template <typename T>
+inline std::optional<std::reference_wrapper<T>> mayGetRef(const std::shared_ptr<T>& ptr) {
+    return ptr ? std::optional<std::reference_wrapper<T>>(*ptr) : std::nullopt;
+}
+
 }  // namespace fastertransformer
