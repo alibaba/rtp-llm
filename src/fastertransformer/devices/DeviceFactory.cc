@@ -25,7 +25,7 @@ DeviceType getDeviceType(const std::string& device_name) {
 GlobalDeviceParams DeviceFactory::getDefaultGlobalDeviceParams() {
     GlobalDeviceParams params;
     const std::vector<DeviceType> types_to_try = {
-        DeviceType::Cuda, DeviceType::Yitian, DeviceType::ArmCpu, DeviceType::Cpu};
+        DeviceType::Cuda, DeviceType::Yitian, DeviceType::ArmCpu, DeviceType::Cpu, DeviceType::ROCm};
     for (const auto type : types_to_try) {
         if (getRegistrationMap().find(type) != getRegistrationMap().end()) {
             FT_LOG_INFO("found device type %d, use as default.", static_cast<int>(type));
