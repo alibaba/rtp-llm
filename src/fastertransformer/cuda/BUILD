@@ -49,6 +49,28 @@ cc_library(
 )
 
 cc_library(
+    name = "cuggemm",
+    srcs = [
+        "cuggemm/cuggemm.cc",
+    ],
+    hdrs = [
+        "cuggemm/cuggemm.h",
+    ],
+    deps = [
+        ":cuda_utils",
+        "//src/fastertransformer/core:types",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+        "//src/fastertransformer/cutlass:cutlass_interface",
+        # TODO(lidongjin) cutlass_interface dependece gpt_init_params_hdr is not good.
+        "//:gpt_init_params_hdr",
+    ],
+    copts = copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "nccl",
     srcs = [
         "nccl/nccl_utils_torch.cc",
@@ -182,6 +204,7 @@ cc_library(
         ":nvtx",
         ":cublas",
         ":cufmha",
+        "cuggemm",
         ":cuda_utils",
         ":cuda_fmha_utils",
         ":memory_utils",

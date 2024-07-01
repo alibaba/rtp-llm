@@ -108,5 +108,41 @@ GemmType GemmParams::dispatch() const {
     return GemmType::InvalidGemm;
 }
 
+// target independence params check
+void GroupedGemmParams::check() const {
+
+    auto a_size = A.size();
+    auto b_size = B.size();
+    auto c_size = (C.has_value()) ? C.value().size() : a_size;
+    FT_CHECK_WITH_INFO((a_size == b_size && b_size == c_size),
+        "group gemm needs all arguments to have same size.");
+
+    for (int i = 0; i < a_size; i++) {
+        auto a_dim = A[i]->dim();
+        auto b_dim = B[i]->dim();
+        auto c_dim = (C.has_value()) ? C.value()[i]->dim() : a_dim;
+        FT_CHECK_WITH_INFO((a_dim == 2 && b_dim == 2 && c_dim == 2),
+            "group gemm needs A, B, C dim equal to 2.");
+
+        auto a_type = A[i]->type();
+        auto b_type = B[i]->type();
+        auto c_type = (C.has_value()) ? C.value()[i]->type() : a_type;
+        FT_CHECK_WITH_INFO((a_type == b_type && b_type == c_type),
+            "group gemm needs A, B, C has same dtype.");
+
+
+        auto m_a = A[i]->shape()[0];
+        auto k_a = A[i]->shape()[1];
+        auto k_b = B[i]->shape()[0];
+        auto n_b = B[i]->shape()[1];
+        auto m_c = (C.has_value()) ? C.value()[i]->shape()[0] : m_a;
+        auto n_c = (C.has_value()) ? C.value()[i]->shape()[1] : n_b;
+        FT_CHECK_WITH_INFO((m_a == m_c && k_a == k_b && n_b == n_c),
+            "group gemm[%d] A, B, C (m ,n, k) valid.", i);
+
+    }
+}
+
+
 
 }  // namespace fastertransformer

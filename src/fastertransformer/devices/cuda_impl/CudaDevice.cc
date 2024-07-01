@@ -104,6 +104,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     }
     cufmha_runner_.reset(new cufmha());
     cufmha_runner_->init(stream_);
+    cuggemm_runner_.reset(new cuggemm());
+    cuggemm_runner_->init(stream_);
     checkUseTrtV1FMHA();
     checkUseTrtV2FMHA();
     checkUseOpenSourceFMHA();

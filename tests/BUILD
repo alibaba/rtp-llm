@@ -204,19 +204,6 @@ py_test(
     ],
 )
 
-py_test(
-    name = "th_gemm_group",
-    srcs = [
-        "gemm_group/th_gemm_group.py"
-    ],
-    data = [
-        "//:th_transformer",
-        ":test_ops",
-    ],
-    deps = [
-        "//maga_transformer:torch",
-    ],
-)
 
 py_test(
     name = "th_int8_gemm",

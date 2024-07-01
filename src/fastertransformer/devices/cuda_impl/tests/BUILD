@@ -87,6 +87,18 @@ cc_test(
 )
 
 cc_test(
+    name = "cuda_group_gemm_op_test",
+    srcs = [
+        "ops/CudaGroupGemmOpTest.cc",
+    ],
+    data = [],
+    env = test_envs,
+    copts = cuda_copts() + copts() + torch_deps(),
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
+
+cc_test(
     name = "cuda_act_op_test",
     srcs = [
         "ops/CudaActOpTest.cc",

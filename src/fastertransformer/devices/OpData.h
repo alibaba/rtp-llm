@@ -224,30 +224,21 @@ struct GemmParams {
 };
 
 struct GroupedGemmOutput {
-    BufferPtr D;
+    std::vector<BufferPtr> output;
 };
 
-// D = alpha * op(A) * op(B) + beta * C
-// shapes of each A, B, C, D needs to be [m, k], [k, n], [m, n], [m, n]
+// C = alpha * op(A) * op(B) + beta * C
+// shapes of each A, B, C needs to be [m, k], [k, n], [m, n]
 struct GroupedGemmParams {
-    using OutputType = GroupedGemmOutput;
 
-    GroupedGemmParams(
-        const std::vector<Buffer>& A,
-        const std::vector<Buffer>& B,
-        std::vector<Buffer>& C
-    ) : A(A), B(B), C(C), D(C) {}
-    GroupedGemmParams(
-        const std::vector<Buffer>& A,
-        const std::vector<Buffer>& B,
-        const std::vector<Buffer>& C,
-        std::vector<Buffer>&       D
-    ) : A(A), B(B), C(C), D(D) {}
 
-    const std::vector<Buffer>& A;
-    const std::vector<Buffer>& B;
-    const std::vector<Buffer>& C;
-    std::vector<Buffer>&       D;
+    const std::vector<BufferPtr>& A;
+    const std::vector<BufferPtr>& B;
+    std::optional<std::vector<BufferPtr>> C = std::nullopt;
+    const float alpha = 1.0f;
+    const float beta = 1.0f;
+
+    void check() const;
 };
 
 using DotProductOutput = BufferPtr;
