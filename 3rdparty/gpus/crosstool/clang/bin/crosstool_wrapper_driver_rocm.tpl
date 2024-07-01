@@ -80,6 +80,7 @@ def GetHostCompilerOptions(argv):
   parser.add_argument('--sysroot', nargs=1)
   parser.add_argument('-g', nargs='*', action='append')
   parser.add_argument('-fno-canonical-system-headers', action='store_true')
+  parser.add_argument('-no-canonical-prefixes', action='store_true')
 
   args, _ = parser.parse_known_args(argv)
 
@@ -93,6 +94,8 @@ def GetHostCompilerOptions(argv):
     opts += ' -g' + ' -g'.join(sum(args.g, []))
   #if args.fno_canonical_system_headers:
   #  opts += ' -fno-canonical-system-headers'
+  if args.no_canonical_prefixes:
+    opts += ' -no-canonical-prefixes'
   if args.sysroot:
     opts += ' --sysroot ' + args.sysroot[0]
 
@@ -166,7 +169,7 @@ def InvokeHipcc(argv, log=False):
   # Unfortunately, there are other options that have -c prefix too.
   # So allowing only those look like C/C++ files.
   src_files = [f for f in src_files if
-               re.search('\.cpp$|\.cc$|\.c$|\.cxx$|\.C$', f)]
+               re.search('\.cpp$|\.cc$|\.c$|\.cxx$|\.C$|\.cu$', f)]
   srcs = ' '.join(src_files)
   out = ' -o ' + out_file[0]
 
@@ -184,6 +187,7 @@ def InvokeHipcc(argv, log=False):
   # of link time. This allows the default host compiler (gcc) be used as the
   # linker for TensorFlow on ROCm platform.
   hipccopts += ' -fno-gpu-rdc '
+  hipccopts += ' -Wno-unused-command-line-argument '
   hipccopts += undefines
   hipccopts += defines
   hipccopts += std_options
@@ -271,7 +275,7 @@ def main():
                                if not flag.startswith(('--rocm_log'))]
 
     # XXX: SE codes need to be built with gcc, but need this macro defined
-    cpu_compiler_flags.append("-D__HIP_PLATFORM_HCC__")
+    cpu_compiler_flags.append("-D__HIP_PLATFORM_AMD__")
     if VERBOSE: print(' '.join([CPU_COMPILER] + cpu_compiler_flags))
     return subprocess.call([CPU_COMPILER] + cpu_compiler_flags)
 

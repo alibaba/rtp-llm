@@ -1,14 +1,17 @@
 load(
     "@local_config_cuda//cuda:build_defs.bzl",
     "cuda_default_copts",
-    "if_cuda",
+    _if_cuda = "if_cuda",
 )
 
 load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "rocm_default_copts",
-    "if_rocm",
+    _if_rocm = "if_rocm",
 )
+
+if_rocm = _if_rocm
+if_cuda = _if_cuda
 
 def rpm_library(
         name,
