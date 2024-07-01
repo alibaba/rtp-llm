@@ -7,7 +7,9 @@ cc_library(
     ]),
     srcs = glob([
         "*.cc",
-    ]),
+    ], 
+    # exclude=["ROCmAttentionOp.cc"]
+    ),
     deps = [
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",

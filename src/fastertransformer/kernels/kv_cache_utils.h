@@ -14,11 +14,18 @@
  * limitations under the License.
  */
 #pragma once
-#include "src/fastertransformer/cuda/cuda_utils.h"
 #include <assert.h>
 #include <cmath>
+
+#if USING_CUDA
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#endif
+
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
 
 namespace fastertransformer {
 

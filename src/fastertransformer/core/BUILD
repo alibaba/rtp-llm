@@ -17,6 +17,8 @@ cc_library(
         ":types_hdr",
     ] + select({
         "//:using_cuda": ["@local_config_cuda//cuda:cuda"],
+        "//:using_rocm": ["@local_config_rocm//rocm:rocm_headers",
+                          "@local_config_rocm//rocm:rocm"],
         "//conditions:default": [],
     }),
     copts = cuda_copts(),
@@ -138,8 +140,12 @@ cc_library(
     deps = [
         ":tensor_hdr",
         ":types",
-        "//src/fastertransformer/cuda:cuda_utils",
-    ],
+        # "//src/fastertransformer/cuda:cuda_utils",
+    ] + select({
+        "//:using_cuda": ["//src/fastertransformer/cuda:cuda_utils"],
+        "//:using_rocm": ["//src/fastertransformer/rocm:rocm_utils"],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     visibility = ["//visibility:public"],
 )
