@@ -256,7 +256,7 @@ def main():
                                if not flag.startswith(('--rocm_log'))]
 
     # XXX: SE codes need to be built with gcc, but need this macro defined
-    cpu_compiler_flags.append("-D__HIP_PLATFORM_HCC__")
+    cpu_compiler_flags.append("-D__HIP_PLATFORM_AMD__")
     if VERBOSE: print(' '.join([CPU_COMPILER] + cpu_compiler_flags))
     return subprocess.call([CPU_COMPILER] + cpu_compiler_flags)
 
