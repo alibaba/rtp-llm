@@ -1,18 +1,15 @@
-#include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#pragma once
 
 #include <torch/torch.h>
+#include "src/fastertransformer/devices/testing/TestBase.h"
 
 using namespace std;
 using namespace fastertransformer;
 
-class CudaOpsTest: public DeviceTestBase {
+class GeneralOpsTest: public DeviceTestBase {
 public:
-};
 
-// TODO(wangyin.yx): transfer these tests to BasicDeviceTest when cpu ready.
-
-TEST_F(CudaOpsTest, testCopyWithSlicing) {
+void testCopyWithSlicing() {
     using TestT = int32_t;
 
     vector<TestT> input = {1, 2, 3, 4, 5, 6, 7, 8};
@@ -27,7 +24,7 @@ TEST_F(CudaOpsTest, testCopyWithSlicing) {
     assertBufferValueEqual<TestT>(*dst, {3, 4, 7, 8});
 }
 
-TEST_F(CudaOpsTest, testTranspose) {
+void testTranspose() {
     auto input = createBuffer<int32_t>({4, 3}, {
         1, 2, 3,
         4, 5, 6,
@@ -42,11 +39,9 @@ TEST_F(CudaOpsTest, testTranspose) {
     auto output = device_->transpose({*input});
     EXPECT_EQ(output->shape(), std::vector<size_t>({3, 4}));
     assertBufferValueEqual(*output, expected);
-
-    sync_check_cuda_error();
 }
 
-TEST_F(CudaOpsTest, testConvert) {
+void testConvert() {
     auto source = createBuffer<float>({7}, {0, -10, -1234, 1, 100, 10000, 3456});
     auto tensor = bufferToTensor(*source);
     auto testTypes = {
@@ -64,7 +59,7 @@ TEST_F(CudaOpsTest, testConvert) {
     }
 }
 
-TEST_F(CudaOpsTest, testQBufferCopy) {
+void testQBufferCopy() {
     auto tensor = torch::ones({5}, torch::kInt8);
     auto scales = torch::ones({5}, torch::kFloat);
     auto zeros  = torch::ones({5}, torch::kFloat);
@@ -88,7 +83,7 @@ TEST_F(CudaOpsTest, testQBufferCopy) {
     EXPECT_TRUE(torch::equal(result_dst[2], zeros));
 }
 
-TEST_F(CudaOpsTest, testConcat) {
+void testConcat() {
     auto src1 = createBuffer<float>({4, 3}, {
         0, 1, 2,
         3, 4, 5,
@@ -116,7 +111,7 @@ TEST_F(CudaOpsTest, testConcat) {
     assertTensorClose(bufferToTensor(*result), expected, 1e-6, 1e-6);
 }
 
-TEST_F(CudaOpsTest, testSelect) {
+void testSelect() {
     auto src = createBuffer<float>({6, 5}, {
         0, 1, 2, 3, 4,
         5, 6, 7, 8, 9,
@@ -141,8 +136,8 @@ TEST_F(CudaOpsTest, testSelect) {
     assertTensorClose(bufferToTensor(*result2), expected, 1e-6, 1e-6);
 }
 
-TEST_F(CudaOpsTest, testSelect1d) {
-    auto src = createBuffer<float>({2, 6}, {
+void testSelect1d() {
+        auto src = createBuffer<float>({2, 6}, {
         0, 1, 2, 3, 4, 5,
         10, 11, 12, 13, 14, 15
     });
@@ -180,3 +175,28 @@ TEST_F(CudaOpsTest, testSelect1d) {
         {27, 28, 29}
     }, torch::kFloat32);
 }
+
+void testEmbeddingLookup() {
+    const auto vocab_size = 102400;
+    const auto hidden_size = 1024;
+    const auto seq_len = 4;
+
+    auto ids_vec = vector<int32_t>{100, 20000, 2010, 1024};
+    auto ids = createBuffer<int32_t>({seq_len}, ids_vec);
+    auto table_tensor = torch::rand(
+        {vocab_size, hidden_size}, torch::Device(torch::kCPU)
+    ).to(torch::kHalf);
+    auto table = createDeviceBuffer<half>(table_tensor);
+    auto output = device_->embeddingLookup({*ids, *table});
+    auto output_tensor = bufferToTensor(*output);
+    std::cout << "output_tensor: " << output_tensor << std::endl;
+
+    auto ids_tensor = bufferToTensor(*ids);
+    std::cout << "ids: " << ids_tensor << std::endl;
+    auto expected_values = table_tensor.index_select(0, ids_tensor);
+    std::cout << "expected: " << expected_values << output_tensor << std::endl;
+
+    ASSERT_TRUE(torch::allclose(expected_values, output_tensor, 1e-03, 1e-03));
+}
+
+};

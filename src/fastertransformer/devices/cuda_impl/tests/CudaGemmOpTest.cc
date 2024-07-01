@@ -7,57 +7,6 @@ using namespace fastertransformer;
 class CudaGemmOpTest: public GemmOpTest {
 
 public:
-
-GemmOpTestOutput BasicCUDAQGemmOpRun(GemmOpTestInput& input) {
-    auto A = tensorToBuffer(input.A);
-    auto host_B = tensorToBuffer(input.B, AllocationType::HOST);
-    auto QB = device_->quantize({*host_B,
-                                 DataType::TYPE_QINT8,
-                                 1});
-    auto device_B  = device_->clone({*QB});
-    auto D = device_->allocateBuffer({A->type(), {A->shape()[0], device_B->shape()[1]}});
-    GemmParams params {*A, *device_B, std::nullopt, D};
-    device_->gemm(params);
-    return GemmOpTestOutput({bufferToTensor(*D)});
-}
-
-GemmOpTestOutput qInt8xQInt82DGemmOpRun(GemmOpTestInput& input) {
-    auto A = tensorToBuffer(input.A);
-    auto B = tensorToBuffer(input.B);
-    auto QB = device_->quantize({*B,
-                                 DataType::TYPE_QINT8,
-                                 1});
-    auto QA = device_->quantize({*A,
-                                 DataType::TYPE_QINT8,
-                                 1});
-    auto D = device_->allocateBuffer({DataType::TYPE_FP16, {QA->shape()[0], QB->shape()[1]}});
-    GemmParams params {*QA, *QB, std::nullopt, D};
-    device_->gemm(params);
-    return GemmOpTestOutput({bufferToTensor(*D)});
-}
-
-void BasicQGemmOpTest(size_t m,
-                      size_t n,
-                      size_t k,
-                      DataType dtype)
-{
-    auto input = PrepareGemmOpInput(m, n, k, dtype);
-    auto result = BasicCUDAQGemmOpRun(input);
-    auto result_ref = BasicGemmTorchRefRun(input);
-    assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C, 1e-2, 1e-2);
-}
-
-void qInt8QInt82DGemmOpTest(size_t m,
-                            size_t n,
-                            size_t k)
-{
-    auto input = PrepareGemmOpInput(m, n, k, DataType::TYPE_FP32);
-    auto result = qInt8xQInt82DGemmOpRun(input);
-    auto result_ref =GemmOpTestOutput(
-        {torch::matmul(input.A.to(torch::kFloat), input.B.t().to(torch::kFloat))}
-    );
-    assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C, 1e-2, 1e-2);
-}
 };
 
 

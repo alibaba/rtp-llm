@@ -253,8 +253,10 @@ void CudaDevice::initMoeRunner(const DataType compute_type, const DataType weigh
     } else if (compute_type == DataType::TYPE_BF16 && weights_type == DataType::TYPE_QINT8) {
         initMoeRunnerImpl<__nv_bfloat16, uint8_t>(moe_runner_);
     } else {
-        FT_LOG_WARNING("MoE runner can not be initialized via compute type %d and weights bits %d",
-                        compute_type, weights_type);
+        RUNTIME_ASSERT_OP_ARG(
+            false,
+            "MoE runner can not be initialized via compute type %d and weights bits %d",
+            compute_type, weights_type);
     }
 }
 

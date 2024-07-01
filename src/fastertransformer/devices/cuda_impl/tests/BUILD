@@ -63,9 +63,9 @@ cc_test(
 )
 
 cc_test(
-    name = "cuda_ops_test",
+    name = "cuda_general_ops_test",
     srcs = [
-        "CudaOpsTest.cc",
+        "CudaGeneralOpsTest.cc",
     ],
     data = [],
     env = test_envs,
@@ -77,7 +77,7 @@ cc_test(
 cc_test(
     name = "cuda_gemm_op_test",
     srcs = [
-        "ops/CudaGemmOpTest.cc",
+        "CudaGemmOpTest.cc",
     ],
     data = [],
     env = test_envs,
@@ -101,7 +101,7 @@ cc_test(
 cc_test(
     name = "cuda_act_op_test",
     srcs = [
-        "ops/CudaActOpTest.cc",
+        "CudaActOpTest.cc",
     ],
     data = [],
     env = test_envs,
@@ -113,7 +113,7 @@ cc_test(
 cc_test(
     name = "cuda_ffn_op_test",
     srcs = [
-        "ops/CudaFFnOpTest.cc",
+        "CudaFFnOpTest.cc",
     ],
     data = [],
     env = test_envs,
@@ -125,7 +125,7 @@ cc_test(
 cc_test(
     name = "cuda_attention_op_test",
     srcs = [
-        "ops/CudaAttentionOpTest.cc",
+        "CudaAttentionOpTest.cc",
     ],
     data = [],
     env = test_envs,
@@ -149,7 +149,7 @@ cc_test(
 cc_test(
     name = "cuda_softmax_op_test",
     srcs = [
-        "ops/CudaSoftmaxOpTest.cc",
+        "CudaSoftmaxOpTest.cc",
     ],
     data = [],
     env = test_envs,
@@ -162,18 +162,6 @@ cc_test(
     name = "cuda_sampler_test",
     srcs = [
         "CudaSamplerTest.cc",
-    ],
-    data = [],
-    env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
-    deps = test_deps,
-)
-
-cc_test(
-    name = "embedding_lookup_test",
-    srcs = [
-        "EmbeddingLookupTest.cc",
     ],
     data = [],
     env = test_envs,

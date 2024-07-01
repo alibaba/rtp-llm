@@ -1,0 +1,12 @@
+#include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
+#include "src/fastertransformer/devices/base_tests/GeneralOpsTest.hpp"
+
+RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testCopyWithSlicing);
+RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testTranspose);
+RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testConvert);
+RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testQBufferCopy);
+RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testSelect1d);
+RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testSelect);
+RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testConcat);
+RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testEmbeddingLookup);
+

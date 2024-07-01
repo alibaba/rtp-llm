@@ -360,6 +360,11 @@ protected:
     size_t host_reserve_memory_size_ = 1L * 1024 * 1024 * 1024; // 1GB;
 };
 
+#define RTP_LLM_RUN_DEVICE_TEST(test_class, case_name, ...) \
+    TEST_F(test_class, case_name) {                         \
+        case_name(__VA_ARGS__);                             \
+    }
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
