@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -45,8 +46,9 @@ void CacheManager::reportMetricsLoop() {
             RtpLLMCacheMetricsCollector collector;
             collector.kv_cache_item_num = block_cache_.size();
             collector.kv_cache_left_seq = freeBlockNums() * seq_size_per_block_;
+            collector.kv_cache_used_ratio = 1.0 * (config_.block_nums - freeBlockNums()) / config_.block_nums;
             metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(nullptr, &collector);
-            sleep(1); // 1s
+            std::this_thread::sleep_for(std::chrono::seconds(1)); // 1s
         }
     }
 }
@@ -215,7 +217,7 @@ std::tuple<bool, std::vector<int>, int> CacheManager::mallocWithCacheImpl(int   
     FT_CHECK_WITH_INFO(
         (reuse_block_num <= want_block_nums),
         "reuse block nums[%d] is less than need block nums[%d]", reuse_block_num, want_block_nums);
-    
+
     FT_CHECK_WITH_INFO(
         (reuse_block_num <= cache_block_num),
         "reuse block nums[%d] is less than need block nums[%d]", reuse_block_num, cache_block_num);

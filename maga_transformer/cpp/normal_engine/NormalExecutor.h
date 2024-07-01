@@ -9,6 +9,7 @@
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "src/fastertransformer/core/Types.h"
+#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 
@@ -34,6 +35,7 @@ private:
     std::unique_ptr<ParallelModelWrapper>       model_wrapper_;
 #endif
     kmonitor::MetricsReporterPtr                metrics_reporter_ = nullptr;
+    MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
 
     ft::DataType                                dtype_               = ft::DataType::TYPE_FP16 ;
     bool                                        is_causal_           = true;

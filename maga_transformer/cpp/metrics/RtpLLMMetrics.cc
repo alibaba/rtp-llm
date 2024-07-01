@@ -1,6 +1,7 @@
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
+#include "maga_transformer/cpp/metrics/KmonParam.h"
 
 namespace rtp_llm {
 
@@ -10,6 +11,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMSchedulerMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKernelMetrics);
 
@@ -57,7 +59,7 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
 }
 
 bool RtpEmbeddingStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_latency_us");    
+    REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(wait_latency_us_metric, "rtp_llm_wait_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(input_token_length_metric, "rtp_llm_input_token_length");
     return true;
@@ -112,6 +114,19 @@ void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExec
     REPORT_MUTABLE_METRIC(max_seq_len, collector->max_seq_len);
 }
 
+bool RtpLLMTokenPSMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(context_tps_metric, "rtp_llm_context_tps");
+    REGISTER_GAUGE_MUTABLE_METRIC(generate_tps_metric, "rtp_llm_generate_tps");
+    REGISTER_GAUGE_MUTABLE_METRIC(total_tps_metric, "rtp_llm_total_tps");
+    return true;
+}
+
+void RtpLLMTokenPSMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(context_tps_metric, collector->context_tps);
+    REPORT_MUTABLE_METRIC(generate_tps_metric, collector->generate_tps);
+    REPORT_MUTABLE_METRIC(total_tps_metric, collector->total_tps);
+}
+
 bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_item_num_metric, "rtp_llm_kv_cache_item_num");
     REGISTER_GAUGE_MUTABLE_METRIC(kv_cache_left_seq_metric, "rtp_llm_kv_cache_left_seq");
@@ -155,15 +170,34 @@ std::string getEnvWithDefault(const std::string& name, const std::string& defaul
 }
 
 bool initKmonitorFactory() {
+    KmonParam param;
+    param.init();
+    if (!param.kmonitorMetricsReporterCacheLimit.empty()) {
+        size_t limit = 0;
+        if (autil::StringUtil::fromString<size_t>(param.kmonitorMetricsReporterCacheLimit, limit) || limit > 0) {
+            kmonitor::MetricsReporter::setMetricsReporterCacheLimit(limit);
+            FT_LOG_INFO("set metrics reporter cache limit [%lu].", limit);
+        }
+    }
+
+    if (param.kmonitorNormalSamplePeriod > 0) {
+        FT_LOG_INFO("set kmonitor normal sample period [%d] seconds.", param.kmonitorNormalSamplePeriod);
+        kmonitor::MetricLevelConfig config;
+        config.period[kmonitor::NORMAL] = (unsigned int)param.kmonitorNormalSamplePeriod;
+        kmonitor::MetricLevelManager::SetGlobalLevelConfig(config);
+    }
+
     kmonitor::MetricsConfig metricsConfig;
-    metricsConfig.set_tenant_name("default");
-    metricsConfig.set_service_name(getEnvWithDefault("kmonitorServiceName", ""));
-    metricsConfig.set_sink_address(getEnvWithDefault("HIPPO_SLAVE_IP", "localhost") + ":4141");
-    metricsConfig.set_enable_log_file_sink(false);
-    metricsConfig.set_enable_prometheus_sink(false);
-    metricsConfig.set_manually_mode(false);
+    metricsConfig.set_tenant_name(param.kmonitorTenant);
+    metricsConfig.set_service_name(param.kmonitorServiceName);
+    metricsConfig.set_sink_address((param.kmonitorSinkAddress + ":" + param.kmonitorPort).c_str());
+    metricsConfig.set_enable_log_file_sink((param.kmonitorEnableLogFileSink));
+    metricsConfig.set_manually_mode(param.kmonitorManuallyMode);
     metricsConfig.set_inited(true);
-    metricsConfig.AddGlobalTag("hippo_slave_ip", getEnvWithDefault("HIPPO_SLAVE_IP", ""));
+    metricsConfig.AddGlobalTag("hippo_slave_ip", param.hippoSlaveIp);
+    for (auto &pair : param.kmonitorTags) {
+        metricsConfig.AddGlobalTag(pair.first, pair.second);
+    }
     if (!kmonitor::KMonitorFactory::Init(metricsConfig)) {
         FT_LOG_ERROR("init kmonitor factory failed with");
         return false;
@@ -171,7 +205,7 @@ bool initKmonitorFactory() {
     FT_LOG_INFO("before KMonitorFactory::Start(), config");
     kmonitor::KMonitorFactory::Start();
     FT_LOG_INFO("KMonitorFactory::Start() finished");
-    kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, getEnvWithDefault("kmonitorMetricsPrefix", ""));
+    kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, param.kmonitorMetricsPrefix);
     FT_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
     return true;
 }

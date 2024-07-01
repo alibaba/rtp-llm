@@ -2,6 +2,9 @@
 
 #include "autil/Log.h"
 #include "kmonitor/client/MetricsReporter.h"
+#include <chrono>
+#include <thread>
+#include <unistd.h>
 
 namespace kmonitor {
 class MetricsTags;
@@ -112,6 +115,77 @@ public:
 
 private:
     AUTIL_LOG_DECLARE();
+};
+
+class RtpLLMTokenPSMetricsCollector final {
+public:
+    void merge(const RtpLLMTokenPSMetricsCollector* collector) {
+        if (collector) {
+            context_tps += collector->context_tps;
+            generate_tps += collector->generate_tps;
+            total_tps += collector->total_tps;
+        }
+    }
+public:
+    int64_t context_tps  = 0;
+    int64_t generate_tps = 0;
+    int64_t total_tps    = 0;
+};
+
+class RtpLLMTokenPSMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* context_tps_metric  = nullptr;
+    kmonitor::MutableMetric* generate_tps_metric = nullptr;
+    kmonitor::MutableMetric* total_tps_metric    = nullptr;
+private:
+    AUTIL_LOG_DECLARE();
+};
+
+template<typename MetricsType, typename CollectType>
+class MetricsLoopReporter {
+public:
+    explicit MetricsLoopReporter(const kmonitor::MetricsReporterPtr metrics_reporter, int interval_ms = 1000)
+        :collector_(CollectType()),
+         interval_ms_(interval_ms),
+         metrics_reporter_(metrics_reporter) {
+        if (metrics_reporter_) {
+            metrics_reporter_thread_ = std::thread(&MetricsLoopReporter<MetricsType, CollectType>::reportLoop, this);
+        }
+    }
+
+    ~MetricsLoopReporter() {
+        stop_ = true;
+        if (metrics_reporter_thread_.joinable()) {
+            metrics_reporter_thread_.join();
+        }
+    }
+
+    void report(const CollectType *collector) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        collector_.merge(collector);
+    }
+private:
+    void reportLoop() {
+        while (metrics_reporter_ && !stop_) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                metrics_reporter_->report<MetricsType, CollectType>(nullptr, &collector_);
+                collector_ = CollectType();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+        }
+    }
+private:
+    std::mutex mutex_;
+    bool stop_ = false;
+    CollectType collector_;
+    int interval_ms_ = 1000;
+    std::thread metrics_reporter_thread_;
+    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 };
 
 class RtpLLMExecutorMetricsCollector final {

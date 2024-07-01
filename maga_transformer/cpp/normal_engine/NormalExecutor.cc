@@ -4,7 +4,6 @@
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
-#include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/devices/Weights.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
@@ -16,6 +15,7 @@ namespace rtp_llm {
 NormalExecutor::NormalExecutor(const EngineInitParams& params, ft::DeviceBase* device):
     Executor(device),
     metrics_reporter_(params.metrics_reporter),
+    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)),
     dtype_(ft::getDataType(params.gpt_init_parameter.data_type_)),
     is_causal_(params.gpt_init_parameter.is_causal_)
 {
@@ -119,12 +119,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
 void NormalExecutor::reportMetrics(const StreamGroups& stream_groups) {
     if (metrics_reporter_) {
-        RtpLLMExecutorMetricsCollector collector;
-        collector.context_batch_size  = stream_groups.contextStreams().size();
-        collector.generate_batch_size = stream_groups.totalModelBatchSize() - stream_groups.contextStreams().size();
-        collector.execute_token_size  = stream_groups.modelExecuteTokenSize();
-        collector.max_seq_len         = stream_groups.maxSeqLen();
-        metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &collector);
+        RtpLLMExecutorMetricsCollector executor_collector;
+        executor_collector.context_batch_size  = stream_groups.contextStreams().size();
+        executor_collector.generate_batch_size = stream_groups.totalDecodeBatchSize();
+        executor_collector.execute_token_size  = stream_groups.modelExecuteTokenSize();
+        executor_collector.max_seq_len         = stream_groups.maxSeqLen();
+        metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &executor_collector);
+
+        RtpLLMTokenPSMetricsCollector tps_collector;
+        tps_collector.context_tps = stream_groups.modelExecuteTokenSize() - stream_groups.totalDecodeBatchSize();
+        tps_collector.generate_tps = stream_groups.totalDecodeBatchSize();
+        tps_collector.total_tps = stream_groups.modelExecuteTokenSize();
+        tps_reporter_.report(&tps_collector);
     }
 }
 

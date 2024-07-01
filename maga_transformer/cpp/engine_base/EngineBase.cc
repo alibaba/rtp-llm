@@ -26,7 +26,7 @@ void EngineBase::initDevices(const EngineInitParams& params) {
     int max_batch_size = params.gpt_init_parameter.max_context_batch_size_
                          + params.gpt_init_parameter.max_generate_batch_size_;
     default_device_params.max_batch_size = std::max(1024, max_batch_size * 2); // set static max batch size to avoid sampler reset memory
-    default_device_params.device_reserve_memory_bytes = -128L * 1024 * 1024; // 64MB
+    default_device_params.device_reserve_memory_bytes = -128L * 1024 * 1024; // 128MB
     default_device_params.host_reserve_memory_bytes = 2L * 1024 * 1024 * 1024; // 2GB
     default_device_params.device_reserve_memory_bytes =
         EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", default_device_params.device_reserve_memory_bytes);
