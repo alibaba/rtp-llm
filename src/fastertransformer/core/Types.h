@@ -45,6 +45,8 @@ enum DataType : std::uint8_t {
     TYPE_STR       = 16,
     TYPE_VOID      = 17,
     TYPE_QINT8     = 18,
+    TYPE_INT4X2    = 19,
+    TYPE_QINT4X2   = 20,
 };
 
 inline DataType getDataType(const std::string& type_str) {
@@ -65,6 +67,8 @@ template<typename T>
 DataType getTensorType();
 
 size_t getTypeSize(DataType type);
+
+size_t getTypeBits(DataType type);
 
 } // namespace fastertransformer
 

@@ -89,7 +89,8 @@ public:
     }
 
     bool isQBuffer() const {
-        return (type_ == DataType::TYPE_QINT8);
+        return (type_ == DataType::TYPE_QINT8) ||
+               (type_ == DataType::TYPE_QINT4X2);
     }
 
     void updateShape(const std::vector<size_t>& shape);

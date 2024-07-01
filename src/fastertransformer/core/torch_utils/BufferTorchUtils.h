@@ -82,9 +82,6 @@ inline c10::ScalarType dataTypeToTorchType(DataType data_type) {
     case type: { \
         return torch_type;   \
     }
-    if(data_type == DataType::TYPE_QINT8) {
-        return c10::kQInt8;
-    }
 
     switch (data_type) {
         FOREACH_BUFFER_TORCH_TYPE_MAP(TYPE_CASE);

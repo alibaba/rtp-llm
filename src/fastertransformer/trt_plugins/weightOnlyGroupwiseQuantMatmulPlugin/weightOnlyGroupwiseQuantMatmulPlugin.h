@@ -34,7 +34,7 @@ using WeightOnlyGemmRunnerPtr = std::shared_ptr<WeightOnlyGemmRunner>;
 class WeightOnlyGroupwiseQuantMatmulPlugin
 {
 public:
-    WeightOnlyGroupwiseQuantMatmulPlugin() = delete;
+    WeightOnlyGroupwiseQuantMatmulPlugin() = default;
 
     WeightOnlyGroupwiseQuantMatmulPlugin(nvinfer1::DataType type, bool has_zeros, int group_size, int weight_bits);
 
@@ -53,10 +53,10 @@ public:
                    const int    k,
                    cudaStream_t stream) noexcept;
 
-private:
     // group_size: 64, 128
     void init(nvinfer1::DataType type, bool has_zeros,int group_size, int weight_bits);
 
+private:
     void configGemm();
 
 private:

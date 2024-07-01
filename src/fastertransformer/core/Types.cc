@@ -88,7 +88,30 @@ size_t getTypeSize(DataType type) {
         default:
             return 0;
     }
+#undef CASE
+}
 
+size_t getTypeBits(DataType type) {
+#define CASE(DT, T) { \
+    case DT: { \
+        return TypeTrait<T>::size * 8; \
+    } \
+}
+
+    switch (type) {
+        FT_FOREACH_TYPE(CASE);
+        FT_FOREACH_DEVICE_TYPE(CASE);
+        CASE(DataType::TYPE_QINT8, int8_t);
+        case TYPE_QINT4X2: {
+            return 4;
+        }
+        case TYPE_INT4X2: {
+            return 4;
+        }
+        default:
+            return 0;
+    }
+#undef CASE
 }
 
 

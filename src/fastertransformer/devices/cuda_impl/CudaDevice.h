@@ -9,6 +9,7 @@
 #include "src/fastertransformer/trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 #include "src/fastertransformer/trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_kernels.h"
+#include "src/fastertransformer/trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
 #include "src/fastertransformer/cutlass/interface.h"
 
 #include <nvml.h>
@@ -85,6 +86,8 @@ private:
 
     std::unique_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin> weight_only_matmul_plugin_;
     std::unique_ptr<trt_plugins::SmoothQuantGemmPlugin> smooth_quant_plugin_;
+
+    std::unique_ptr<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin> weight_only_groupwise_matmul_plguin_;
 
     nvmlDevice_t nvml_device_;
     NcclParam nccl_param_;

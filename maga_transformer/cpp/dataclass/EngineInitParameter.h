@@ -43,7 +43,7 @@ public:
 public:
     ft::GptInitParameter         gpt_init_parameter;
     ft::Weights                  gpt_weights;
-    
+
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
 
     // TODO(): rm old impl init
@@ -78,11 +78,11 @@ public:
     std::unique_ptr<ft::Weights>
     createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_weights,
                      std::unique_ptr<ConstBufferPtrMap>  global_weight);
-    
+
 
     // TODO(): rm old impl init
     std::unique_ptr<ConstBufferPtrMaps> convertLayerWeights_(py::object py_layer_weights);
-    
+
     std::unique_ptr<ConstBufferPtrMap>  convertGlobalWeight_(py::object py_global_weight);
 
 private:
@@ -92,8 +92,8 @@ private:
 
     std::unique_ptr<ConstBufferPtrMaps>
     convertLayerWeights(std::unique_ptr<TensorMaps> tensor_layer_weights);
-    
-    std::unique_ptr<ConstBufferPtrMap> 
+
+    std::unique_ptr<ConstBufferPtrMap>
     convertGlobalWeight(std::unique_ptr<TensorMap> tensor_global_weight);
 
     // helper function
@@ -104,13 +104,14 @@ private:
     ft::DenseWeightsPtr mayCreateDenseWeights(const ConstBufferPtrMap& map,
                                               const std::string& kernel_key,
                                               const std::string& bias_key = "",
-                                              const std::string& scales_key = "");
+                                              const std::string& scales_key = "",
+                                              const std::string& zeros_key = "");
 
     ft::LayerNormWeightsPtr
     mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
                               const std::string& gamma_key,
                               const std::string& beta_key = "");
-    
+
     ft::FfnLayerWeights
     createFfnWeights(const ConstBufferPtrMap& map);
 

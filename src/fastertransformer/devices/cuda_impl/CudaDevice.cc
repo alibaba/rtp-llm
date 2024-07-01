@@ -72,6 +72,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
 
     smooth_quant_plugin_ = std::make_unique<trt_plugins::SmoothQuantGemmPlugin>();
 
+    weight_only_groupwise_matmul_plguin_ = std::make_unique<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin>();
+
     auto ret = nvmlInit();
     FT_CHECK(ret == NVML_SUCCESS);
     ret = nvmlDeviceGetHandleByIndex(device_id_, &nvml_device_);

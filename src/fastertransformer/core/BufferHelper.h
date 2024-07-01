@@ -9,14 +9,6 @@
 
 namespace fastertransformer {
 
-inline DataType QBufferDtype2BufferDtype(DataType dtype) {
-    if (dtype == DataType::TYPE_QINT8) {
-        return DataType::TYPE_INT8;
-    } else {
-        return DataType::TYPE_INVALID;
-    }
-}
-
 template <typename T>
 BufferPtr vector2Buffer(const std::vector<T>& vec) {
     const auto& shape = std::vector{vec.size()};

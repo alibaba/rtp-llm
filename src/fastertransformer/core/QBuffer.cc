@@ -14,7 +14,7 @@ QBuffer::QBuffer(BufferPtr kernel,
 {
     FT_CHECK_WITH_INFO(
        (kernel.use_count() == 1 &&
-        scales.use_count() == 1 && 
+        scales.use_count() == 1 &&
         zeros.use_count() == 1),
         "kerenl[%d], scales[%d] and zeros[%d] buffers need to have no ref cout.",
         kernel.use_count(),
@@ -28,14 +28,10 @@ QBuffer::QBuffer(BufferPtr kernel,
     scales.reset();
     zeros.reset();
 
-    FT_CHECK_WITH_INFO(
-        (type_ == DataType::TYPE_INT8 ||
-         type_ == DataType::TYPE_QINT8),
-        "kerenl buffer datatype[%d] must be int8.", type_
+    type_ = BufferDtype2QBufferDtype(type_);
+    FT_CHECK_WITH_INFO((type_ != DataType::TYPE_INVALID),
+        "kerenl buffer datatype[%d] must be int8 or int4x2.", type_
     );
-    if(type_ == DataType::TYPE_INT8) {
-        type_ = DataType::TYPE_QINT8;
-    }
 
     FT_CHECK_WITH_INFO(
         ((scales_->dim() == 1 || scales_->dim() == 2) &&
@@ -51,7 +47,7 @@ QBuffer::QBuffer(BufferPtr kernel,
         "scales[%d] and zeros[%d] must in same memory.",
         scales_->where(), zeros_->where()
     );
-                    
+
 };
 
 

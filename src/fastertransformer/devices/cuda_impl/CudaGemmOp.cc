@@ -155,7 +155,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     } else {
         output = allocateBuffer({arguments.DDtype, arguments.Dshape, AllocationType::DEVICE}, {"gemm_output"});
     }
- 
+
     if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm) {
         BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_QINT8});
         BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});
@@ -192,30 +192,70 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     }
 
     if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
-        BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16});
-        BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});
-        weight_only_matmul_plugin_->init(nvinfer1DtypeConvert(params.A.type()), trt_plugins::WeightTypeId::INT8);
-        FT_LOG_DEBUG("use int8 only weight gemm.");
-        
-        size_t ws_size = weight_only_matmul_plugin_->getWorkspaceSize(arguments.m,
-                                                                      arguments.n,
-                                                                      arguments.k);
-        auto workspace = allocateBuffer({DataType::TYPE_BYTES,
-                                          {ws_size},
-                                          AllocationType::DEVICE},
-                                          {"workspace"});
+        if (reinterpret_cast<const QBuffer&>(params.B).zerosData() != nullptr) {
+            FT_LOG_DEBUG("use group wise int4 gemm.");
+            FT_CHECK(reinterpret_cast<const QBuffer&>(params.B). scales().dim() == 2);
+            size_t kernel_dim0 = params.B.shape()[0];
+            size_t scales_dim0 = reinterpret_cast<const QBuffer&>(params.B). scales().shape()[0];
+            FT_CHECK((kernel_dim0 % scales_dim0 == 0));
+            size_t group_size = (kernel_dim0 / scales_dim0);
+            FT_CHECK((group_size == 64 || group_size == 128));
+            size_t type_bits = getTypeBits(params.B.type());
+            FT_CHECK((type_bits == 4));
 
-        weight_only_matmul_plugin_->enqueue(params.A.data(),
-                                            reinterpret_cast<const QBuffer&>(params.B).data(),
-                                            reinterpret_cast<const QBuffer&>(params.B).scalesData(),
-                                            output->data(),
-                                            workspace->data(),
-                                            arguments.m,
-                                            arguments.n,
-                                            arguments.k,
-                                            stream_);
-        sync_check_cuda_error();
-        return std::move(output);
+            weight_only_groupwise_matmul_plguin_->init(nvinfer1DtypeConvert(params.A.type()),
+                                                       true,
+                                                       group_size,
+                                                       4);
+            size_t ws_size = weight_only_groupwise_matmul_plguin_->getWorkspaceSize(arguments.m,
+                                                                                    arguments.n,
+                                                                                    arguments.k);
+            auto workspace = allocateBuffer({DataType::TYPE_BYTES,
+                                             {ws_size},
+                                             AllocationType::DEVICE},
+                                             {"workspace"});
+
+            weight_only_groupwise_matmul_plguin_->enqueue(params.A.data(),
+                                                          reinterpret_cast<const QBuffer&>(params.B).data(),
+                                                          reinterpret_cast<const QBuffer&>(params.B).scalesData(),
+                                                          reinterpret_cast<const QBuffer&>(params.B).zerosData(),
+                                                          nullptr,
+                                                          output->data(),
+                                                          workspace->data(),
+                                                          arguments.m,
+                                                          arguments.n,
+                                                          arguments.k,
+                                                          stream_);
+            sync_check_cuda_error();
+            return std::move(output);
+
+        } else {
+            BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16});
+            BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});
+            weight_only_matmul_plugin_->init(nvinfer1DtypeConvert(params.A.type()), trt_plugins::WeightTypeId::INT8);
+            FT_LOG_DEBUG("use int8 only weight gemm.");
+
+            size_t ws_size = weight_only_matmul_plugin_->getWorkspaceSize(arguments.m,
+                                                                          arguments.n,
+                                                                          arguments.k);
+            auto workspace = allocateBuffer({DataType::TYPE_BYTES,
+                                            {ws_size},
+                                            AllocationType::DEVICE},
+                                            {"workspace"});
+
+            weight_only_matmul_plugin_->enqueue(params.A.data(),
+                                                reinterpret_cast<const QBuffer&>(params.B).data(),
+                                                reinterpret_cast<const QBuffer&>(params.B).scalesData(),
+                                                output->data(),
+                                                workspace->data(),
+                                                arguments.m,
+                                                arguments.n,
+                                                arguments.k,
+                                                stream_);
+            sync_check_cuda_error();
+            return std::move(output);
+        }
+
     }
 
     auto A_data_type = dtypeConvert(arguments.ADtype);

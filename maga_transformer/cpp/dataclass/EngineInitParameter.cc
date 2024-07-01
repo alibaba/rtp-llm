@@ -53,7 +53,8 @@ ft::DenseWeightsPtr
 WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
                                         const std::string& kernel_key,
                                         const std::string& bias_key,
-                                        const std::string& scales_key)
+                                        const std::string& scales_key,
+                                        const std::string& zeros_key)
 {
     if (map.count(kernel_key) > 0) {
         const auto dense_weights = new DenseWeights();
@@ -62,7 +63,7 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
         }
         if (map.count(scales_key) <= 0) {
             dense_weights->kernel = mayFindBuffer(map, kernel_key);
-        } else {
+        } else if (map.count(zeros_key) <= 0) {
             auto kernel = mayFindBuffer(map, kernel_key);
             auto scales = mayFindBuffer(map, scales_key);
             // construct qbuffer need kernel and scales has no ref.
@@ -80,6 +81,26 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
                                                      scales->type(),
                                                      {0},
                                                      nullptr))));
+        } else {
+            auto kernel = mayFindBuffer(map, kernel_key);
+            auto scales = mayFindBuffer(map, scales_key);
+            auto zeros  = mayFindBuffer(map, zeros_key);
+            FT_LOG_DEBUG("load qbuffer weight [%s] ", zeros_key.c_str());
+
+            dense_weights->kernel = ConstBufferPtr(
+                new ft::QBuffer(BufferPtr(new Buffer(kernel->where(),
+                                                     DataType::TYPE_INT4X2,
+                                                     {kernel->shape()[0], kernel->shape()[1] * 2},
+                                                     kernel->data())),
+                                BufferPtr(new Buffer(scales->where(),
+                                                     scales->type(),
+                                                     scales->shape(),
+                                                     scales->data())),
+                                BufferPtr(new Buffer(zeros->where(),
+                                                     zeros->type(),
+                                                     zeros->shape(),
+                                                     zeros->data()))));
+            FT_LOG_DEBUG("weight shape is [%s] ", autil::StringUtil::toString(dense_weights->kernel->shape()).c_str());
         }
         return unique_ptr<const DenseWeights>(dense_weights);
 
@@ -91,9 +112,9 @@ ft::FfnLayerWeights
 WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     ft::FfnLayerWeights ffn_weights;
 
-    ffn_weights.up_weight   = mayCreateDenseWeights(map, W::ffn_w3, W::ffn_b3, W::ffn_s3);
-    ffn_weights.gate_weight = mayCreateDenseWeights(map, W::ffn_w1, W::ffn_b1, W::ffn_s1);
-    ffn_weights.down_weight = mayCreateDenseWeights(map, W::ffn_w2, W::ffn_b2, W::ffn_s2);
+    ffn_weights.up_weight   = mayCreateDenseWeights(map, W::ffn_w3, W::ffn_b3, W::ffn_s3, W::ffn_z3);
+    ffn_weights.gate_weight = mayCreateDenseWeights(map, W::ffn_w1, W::ffn_b1, W::ffn_s1, W::ffn_z1);
+    ffn_weights.down_weight = mayCreateDenseWeights(map, W::ffn_w2, W::ffn_b2, W::ffn_s2, W::ffn_z2);
 
     ffn_weights.moe_gating_weight = mayCreateDenseWeights(map, W::moe_gate);
     ffn_weights.moe_up_weight     = mayCreateDenseWeights(map, W::moe_w3, W::moe_b3, W::moe_s3);
@@ -127,7 +148,8 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
     attention_weights.qkv_weight = mayCreateDenseWeights(map,
                                                          W::attn_qkv_w,
                                                          W::attn_qkv_b,
-                                                         W::attn_qkv_s);
+                                                         W::attn_qkv_s,
+                                                         W::attn_qkv_z);
 
     attention_weights.attention_layernorm = mayCreateLayerNormWeights(map,
                                                                       W::attn_ln_gamma,
@@ -135,7 +157,8 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
     attention_weights.output_weight = mayCreateDenseWeights(map,
                                                             W::attn_o_w,
                                                             W::attn_o_b,
-                                                            W::attn_o_s);
+                                                            W::attn_o_s,
+                                                            W::attn_o_z);
 
     attention_weights.shift_weight = mayCreateDenseWeights(map,
                                                            W::attn_o_shift);

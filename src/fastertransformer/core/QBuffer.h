@@ -12,7 +12,7 @@ enum QScheme : size_t {
 class QBuffer final : public Buffer {
 
 public:
-    
+
     QBuffer(BufferPtr kernel,
             BufferPtr scales,
             BufferPtr zeros);
@@ -32,7 +32,7 @@ public:
     DataType        scalesType()           const;
     DataType        zerosType()            const;
     size_t          scalesSizebytes()      const;
-    size_t           zerosSizebytes()       const;
+    size_t          zerosSizebytes()       const;
 
     template<typename T>
     inline T* scalesData() const {
@@ -53,7 +53,25 @@ private:
 using ConstQBufferPtr = std::shared_ptr<const QBuffer>;
 using QBufferPtr = std::shared_ptr<QBuffer>;
 
+inline DataType QBufferDtype2BufferDtype(DataType dtype) {
+    if (dtype == DataType::TYPE_QINT8 || dtype == DataType::TYPE_INT8) {
+        return DataType::TYPE_INT8;
+    } else if (dtype == TYPE_QINT4X2 || dtype == DataType::TYPE_INT4X2) {
+        return DataType::TYPE_INT4X2;
+    } else {
+        return DataType::TYPE_INVALID;
+    }
+}
 
+inline DataType BufferDtype2QBufferDtype(DataType dtype) {
+    if (dtype == DataType::TYPE_QINT8 || dtype == DataType::TYPE_INT8) {
+        return DataType::TYPE_QINT8;
+    } else if (dtype == TYPE_QINT4X2 || dtype == DataType::TYPE_INT4X2) {
+        return DataType::TYPE_QINT4X2;
+    } else {
+        return DataType::TYPE_INVALID;
+    }
+}
 
 
 } // namespace fastertransformer
