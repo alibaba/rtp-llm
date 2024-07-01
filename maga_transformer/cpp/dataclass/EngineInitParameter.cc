@@ -121,7 +121,6 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     ffn_weights.moe_gate_weight   = mayCreateDenseWeights(map, W::moe_w1, W::moe_b1, W::moe_s1);
     ffn_weights.moe_down_weight   = mayCreateDenseWeights(map, W::moe_w2, W::moe_b2, W::moe_s2);
 
-    ffn_weights.dense_layernorm = mayCreateLayerNormWeights(map, W::ffn_ln_gamma, W::ffn_ln_beta);
     ffn_weights.smoother_weight = mayCreateDenseWeights(map, W::ffn_smoother);
 
     // for qwen moe

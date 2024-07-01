@@ -96,14 +96,14 @@ class ModelWeightsLoader:
     @property
     def static_lora_adapter_name(self):
         return self._static_lora_adapter_name
-        
+
     def set_data_type(self, data_type):
         self._data_type = data_type
 
     def show_warns(self, lora_name: str = "", only_dump_lora: bool = False):
         if isinstance(self._database, ModuleDatabase):
             return
-        
+
         if not only_dump_lora:
             self._weight_log.record_missed_tensor(
                 set(self._database.get_pretrain_tensor_names()))
@@ -244,7 +244,7 @@ class ModelWeightsLoader:
                 convert_weight(ffn_weight_lists, self.preprocess_moe_groupwise_weight_params)
             else:
                 convert_weight(ffn_weight_lists, self.preprocess_groupwise_weight_params)
-        # load act_scales 
+        # load act_scales
         if self._weights_info.need_ffn_act_scale:
             try:
                 ffn_act_scales_weight = [weight for weight in layer_weights if weight.name == W.ffn_act_s]
@@ -273,14 +273,14 @@ class ModelWeightsLoader:
                 elif len(qweight) > 1:
                     raise Exception(f"found more than one weight {quant_weight} in layer {layer_id}")
                 try:
-                    
+
                     qweight_tensor = self._load_and_convert_tensor(qweight[0], layer_id=layer_id, datatype=datatype)
                     qweight_tensor = self._split_tensor(qweight[0].name, qweight_tensor).contiguous().clone().to(device)
                     # int4
                     if (qweight_tensor.dim() == 2):
                         qweight_tensor = qweight_tensor.reshape(qweight_tensor.shape[-1], -1)
                     results.append((layer_id, qweight[0].name, qweight_tensor))
-                    
+
                     # logging.info(f"load qweight tensor {quant_weight} in layer {layer_id} and shape is {qweight_tensor.shape}")
 
                 except Exception as e:
@@ -460,6 +460,7 @@ class ModelWeightsLoader:
             int8_scales.append(scale)
         int8_weight = torch.stack(int8_weights, dim=0)
         int8_scale = torch.stack(int8_scales, dim=0)
+        int8_weight = int8_weight.reshape([int8_weight.shape[0], int8_weight.shape[-1], -1])
         return int8_weight.to(device), int8_scale.to(device)
 
     def unpack_int32_into_int16(self, w_packed: torch.Tensor, int8: bool):

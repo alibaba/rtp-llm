@@ -72,10 +72,9 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                             std::nullopt}).output;
     }
 
-    if (shared_expert_output || params.weights.dense_layernorm) {
+    if (shared_expert_output) {
         shared_expert_output = layernorm({
-            output, nullptr, mayGetRef(params.weights.dense_layernorm),
-            mayGetRef(shared_expert_output)
+            output, nullptr, nullopt, mayGetRef(shared_expert_output)
         }).output;
     }
 

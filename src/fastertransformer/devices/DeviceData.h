@@ -18,11 +18,6 @@ struct DeviceInitParams {
     size_t device_id       = 0;
     size_t max_batch_size  = 256;
 
-    // this model_data_type is same as template type T in ParallelGpt
-    DataType model_data_type  = DataType::TYPE_INVALID;
-    // bits might be quantized.
-    size_t weight_bits  = 0;
-
     size_t tp_rank         = 0;
     size_t tp_size         = 1;
     // this ip:port pair should be unused, typically provided by gang,

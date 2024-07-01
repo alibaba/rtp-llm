@@ -86,8 +86,6 @@ struct FfnLayerWeights {
     std::shared_ptr<const DenseWeights>     moe_down_weight;
     std::shared_ptr<const LoraWeightsMap>   down_lora_weights;
 
-    std::shared_ptr<const LayerNormWeights> dense_layernorm;
-
     std::shared_ptr<const DenseWeights>     moe_gating_weight;
 
     std::shared_ptr<const DenseWeights>     smoother_weight;

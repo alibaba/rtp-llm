@@ -11,6 +11,7 @@
 #include <curand_kernel.h>
 #include <unistd.h>
 
+using namespace std;
 using namespace tensorrt_llm;
 using namespace tensorrt_llm::kernels;
 
@@ -72,7 +73,6 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     checkUseTrtV2FMHA();
     checkUseOpenSourceFMHA();
     checkUseMultiBlockMode();
-    initMoeRunner();
 
     auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
     allocator_ptr->setStream(stream_);
@@ -232,23 +232,29 @@ void CudaDevice::checkUseMultiBlockMode() {
     use_multi_block_mode = true;
 }
 
-void CudaDevice::initMoeRunner() {
-    // copied and adapted from src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.cpp
-    const auto data_type = init_params_.model_data_type;
-    const auto weights_bits = init_params_.weight_bits;
-    if (data_type == DataType::TYPE_FP16 && weights_bits == sizeof(half)) {
-        moe_runner_ = std::make_unique<CutlassMoeFCRunner<half, half>>();
-    } else if (data_type == DataType::TYPE_FP32 && weights_bits == sizeof(float)) {
-        moe_runner_ = std::make_unique<CutlassMoeFCRunner<float, float>>();
-    } else if (data_type == DataType::TYPE_FP16 && weights_bits == 8) {
-        moe_runner_ = std::make_unique<CutlassMoeFCRunner<half, uint8_t>>();
-    } else if (data_type == DataType::TYPE_BF16 && weights_bits == sizeof(__nv_bfloat16)) {
-        moe_runner_ = std::make_unique<CutlassMoeFCRunner<__nv_bfloat16, __nv_bfloat16>>();
-    } else if (data_type == DataType::TYPE_BF16 && weights_bits == 8) {
-        moe_runner_ = std::make_unique<CutlassMoeFCRunner<__nv_bfloat16, uint8_t>>();
+template <typename ComputeT, typename WeightsT>
+void initMoeRunnerImpl(unique_ptr<CutlassMoeFCRunnerInterface>& moe_runner) {
+    if (moe_runner && dynamic_cast<CutlassMoeFCRunner<ComputeT, WeightsT>*>(moe_runner.get())) {
+        return;
+    } else {
+        moe_runner.reset(new CutlassMoeFCRunner<ComputeT, WeightsT>());
+    }
+}
+
+void CudaDevice::initMoeRunner(const DataType compute_type, const DataType weights_type) {
+    if (compute_type == DataType::TYPE_FP16 && weights_type == DataType::TYPE_FP16) {
+        initMoeRunnerImpl<half, half>(moe_runner_);
+    } else if (compute_type == DataType::TYPE_FP32 && weights_type == DataType::TYPE_FP32) {
+        initMoeRunnerImpl<float, float>(moe_runner_);
+    } else if (compute_type == DataType::TYPE_FP16 && weights_type == DataType::TYPE_QINT8) {
+        initMoeRunnerImpl<half, uint8_t>(moe_runner_);
+    } else if (compute_type == DataType::TYPE_BF16 && weights_type == DataType::TYPE_BF16) {
+        initMoeRunnerImpl<__nv_bfloat16, __nv_bfloat16>(moe_runner_);
+    } else if (compute_type == DataType::TYPE_BF16 && weights_type == DataType::TYPE_QINT8) {
+        initMoeRunnerImpl<__nv_bfloat16, uint8_t>(moe_runner_);
     } else {
         FT_LOG_WARNING("MoE runner can not be initialized via compute type %d and weights bits %d",
-                        data_type, weights_bits);
+                        compute_type, weights_type);
     }
 }
 

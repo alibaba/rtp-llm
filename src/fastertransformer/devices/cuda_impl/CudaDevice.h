@@ -38,7 +38,7 @@ private:
     void checkUseTrtV1FMHA();
     void checkUseTrtV2FMHA();
     void checkUseMultiBlockMode();
-    void initMoeRunner();
+    void initMoeRunner(const DataType compute_type, const DataType weights_type);
 
 public:
     cudaStream_t getStream() {return stream_;}
