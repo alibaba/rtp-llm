@@ -141,6 +141,7 @@ struct LayernormParams {
                     double alpha = 1.0f,
                     double eps = 1e-5,
                     bool is_inplace = true,
+                    bool return_normed_output = false,
                     NormType norm_type = NormType::layernorm,
                     QScheme qscheme = QScheme::NoQuantize) :
                     input(std::move(input)),
@@ -151,6 +152,7 @@ struct LayernormParams {
                     bias(bias),
                     alpha(alpha),
                     eps(eps),
+                    return_normed_output(return_normed_output),
                     is_inplace(is_inplace),
                     norm_type(norm_type),
                     qscheme(qscheme) {};
@@ -172,6 +174,7 @@ struct LayernormParams {
     const double eps;
 
     const bool is_inplace;
+    const bool return_normed_output;
     const QScheme qscheme;
 };
 

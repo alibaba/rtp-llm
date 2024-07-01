@@ -58,7 +58,7 @@ class Pipeline(object):
         config.convert_select_tokens(vocab_size, tokenizer)
         return config
 
-    def __call__(self, prompt: List[str], images: Optional[List[List[str]]] = None, **kwargs: Any) -> Iterator[GenerateResponse]:
+    def __call__(self, prompt: str, images: Optional[List[str]] = None, **kwargs: Any) -> Iterator[GenerateResponse]:
         # if not multimodal model, just pass images = [[]] * len(prompt)
         return self.pipeline(prompt, images, **kwargs)
 
@@ -136,7 +136,6 @@ class Pipeline(object):
         kmonitor.report(GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.num_beams)
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
-
         return self.generate_stream(token_ids, images, generate_config, **kwargs)
 
     def process_stop_id(self,

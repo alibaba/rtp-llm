@@ -87,6 +87,8 @@ static const std::string moe_s3 = "partial_moe_weights.intermediate_weight3.weig
 static const std::string moe_z2 = "partial_moe_weights.intermediate_weight2.zero";
 static const std::string moe_s2 = "partial_moe_weights.intermediate_weight2.weight_only_quant_scale";
 
+static const std::string attn_i_smoother = "self_attention_weights.query_weight.smoother";
+static const std::string attn_i_shift = "self_attention_weights.query_weight.shift";
 static const std::string attn_o_smoother = "self_attention_weights.attention_output_weight.smoother";
 static const std::string attn_o_shift = "self_attention_weights.attention_output_weight.shift";
 static const std::string ffn_smoother = "ffn_weights.intermediate_weight2.smoother";

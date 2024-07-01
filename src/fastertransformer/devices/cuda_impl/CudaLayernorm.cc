@@ -96,7 +96,8 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 true, // use_diff_of_squares
                 nullptr, // scale
                 scales_ptr, // dynamic_scale
-                quant_output // out_quant
+                quant_output, // out_quant
+                params.return_normed_output
             );
             sync_check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
@@ -113,7 +114,8 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 true, // use_diff_of_squares
                 nullptr, // scale
                 scales_ptr, // dynamic_scale
-                quant_output // out_quant
+                quant_output, // out_quant
+                params.return_normed_output
             );
             sync_check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});

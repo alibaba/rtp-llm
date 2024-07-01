@@ -88,13 +88,12 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                      shift_weight,
                                      DataType::TYPE_QINT8,
                                      1});
-        gemm({*qkv_output_, *(output_weight->kernel), nullopt, output});
 
-        return {move(output)};
+        gemm({*qkv_output_, *(output_weight->kernel), nullopt, output});    
+    } else {
+        gemm({*qkv_output, *(output_weight->kernel), nullopt, output});
     }
-
-    gemm({*qkv_output, *(output_weight->kernel), nullopt, output});
-
+    
     return {move(output)};
 }
 

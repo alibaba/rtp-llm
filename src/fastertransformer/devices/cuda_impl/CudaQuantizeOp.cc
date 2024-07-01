@@ -93,7 +93,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
     } else if (params.input.where() == MemoryType::MEMORY_GPU) {
         FT_CHECK_WITH_INFO((params.input.dim() == 2),
             "cuda quantize only support 2D input.");
-        FT_LOG_INFO("invoke invokePerTokenQuantization");
+        // FT_LOG_INFO("invoke invokePerTokenQuantization");
         auto scales = allocateBuffer({DataType::TYPE_FP32,
                                     {params.input.shape()[1]},
                                     getMemAllocationType(params.input.where())},

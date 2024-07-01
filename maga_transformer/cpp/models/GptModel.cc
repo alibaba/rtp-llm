@@ -180,8 +180,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                 0.f,
                                                                 norm_eps,
                                                                 true,
+                                                                false,
                                                                 norm_type,
-                                                                qscheme));
+                                                                QScheme::NoQuantize));
         hidden = move(decoder_input.output);
     }
 
@@ -218,9 +219,15 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                             0.f,
                                                                             norm_eps,
                                                                             true,
+                                                                            false,
                                                                             norm_type,
                                                                             qscheme));
             hidden = move(pre_layernorm_output.output);
+        } else if (qscheme == QScheme::Qint8PerChannelLastAxis) {
+            FT_CHECK_WITH_INFO(layer.pre_attention_smoother_weight->kernel != nullptr, "smooth kernel should not be nullptr");
+            auto quantized_output = device_->quantize(QuantizeParams(
+                *hidden, *(layer.pre_attention_smoother_weight->kernel), std::nullopt, DataType::TYPE_QINT8, 1));
+            hidden = move(quantized_output);
         }
 
         BufferPtr layer_kv_blocks_ptr;
@@ -256,18 +263,14 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                          0.f,
                                                          norm_eps,
                                                          false,
+                                                         description_.post_layernorm,
                                                          norm_type,
                                                          qscheme);
 
             auto post_layernorm_output = device_->layernorm(post_layernorm_params);
             hidden = std::move(post_layernorm_output.output);
             attn_hidden = std::move(post_layernorm_output.before_norm_output);
-
-            if (description_.post_layernorm) {
-                residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
-            } else {
-                residual = attn_hidden;
-            }
+            residual = attn_hidden;
         } else {
             residual2 = attn_hidden;
         }
@@ -295,6 +298,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                        1.0f,
                                                                        norm_eps,
                                                                        true,
+                                                                       false,
                                                                        norm_type,
                                                                        QScheme::NoQuantize));
         hidden = std::move(ffn_layernorm_output.output);
@@ -312,6 +316,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                   0.f,
                                                                   norm_eps,
                                                                   true,
+                                                                  false,
                                                                   norm_type));
         hidden = std::move(final_layernorm.output);
     }

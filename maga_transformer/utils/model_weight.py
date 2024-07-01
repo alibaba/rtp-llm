@@ -389,6 +389,7 @@ class W:
     moe_s2 = 'partial_moe_weights.intermediate_weight2.weight_only_quant_scale'
 
     # sq
+    attn_i_smoother = 'self_attention_weights.query_weight.smoother'
     attn_o_smoother = 'self_attention_weights.attention_output_weight.smoother'
     attn_o_shift = 'self_attention_weights.attention_output_weight.shift'
     ffn_smoother = 'ffn_weights.intermediate_weight2.smoother'
@@ -427,6 +428,7 @@ class W:
         ffn_s2,
         ffn_act_s,
         ffn_s3,
+        attn_i_smoother,
         attn_o_smoother,
         attn_o_shift,
         ffn_smoother
@@ -465,6 +467,7 @@ class W:
         ffn_s1,
         ffn_s2,
         ffn_s3,
+        attn_i_smoother,
         attn_o_smoother,
         ffn_smoother
     ]
@@ -558,6 +561,7 @@ class W:
         attn_o_z: sp_0,
         attn_o_s: sp_0,
         attn_o_b: sp_id,
+        attn_i_smoother: sp_0,
         attn_o_smoother: sp_0,
         attn_o_shift: sp_0,
 

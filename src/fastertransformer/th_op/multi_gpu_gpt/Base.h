@@ -128,6 +128,9 @@ loadWeights(int                                                             pp_s
             gpt_layer_weights[i]->ffn_weights.output_weight.smoother = maybe_get<float>(weights[i], W::ffn_smoother);
             gpt_layer_weights[i]->self_attention_weights.attention_output_weight.smoother = maybe_get<float>(weights[i], W::attn_o_smoother);
             gpt_layer_weights[i]->self_attention_weights.attention_output_weight.shift = maybe_get<float>(weights[i], W::attn_o_shift);
+            gpt_layer_weights[i]->self_attention_weights.query_weight.smoother = maybe_get<float>(weights[i], W::attn_i_smoother);
+            gpt_layer_weights[i]->self_attention_weights.query_weight.shift = maybe_get<float>(weights[i], W::attn_i_shift);
+
         }
         else if (quant_algo.weightOnly()) {
             gpt_layer_weights[i]->self_attention_weights.query_weight.weight_only_quant_scale                   = maybe_get<T>(weights[i], W::attn_qkv_s);

@@ -161,7 +161,7 @@ __inline__ __device__ Tf compute_layernorm(Tf val, float s_mean, float s_varianc
  *           amax per row. A final pass scales to int8 accordingly, and writes output to
  *           normed_output_quant.
  */
-template <typename T, bool IS_OUTPUT, bool IS_BIAS, bool RESIDUAL, bool IS_BETA, bool USE_DIFF_OF_SQUARES = false>
+template <typename T, bool IS_OUTPUT, bool IS_BIAS, bool RESIDUAL, bool IS_BETA, bool RETURN_NORMED_OUTPUT, bool USE_DIFF_OF_SQUARES = false>
 __global__ void generalLayerNorm(T* output, T* normed_output, const T* input, const T* bias, const T* residual,
     const T* gamma, const T* beta, const float eps, int tokens, int hidden_dim,
     const float* scale_orig_quant_per_tensor, float* scale_orig_quant_per_token, int8_t* normed_output_quant)
@@ -219,13 +219,11 @@ __global__ void generalLayerNorm(T* output, T* normed_output, const T* input, co
                 in_val = input[index];
             }
             val = add(val, in_val);
+            if (!RETURN_NORMED_OUTPUT) {
+                output[index] = val;
+            }
         }
         shmem[i] = val;
-
-        if (IS_OUTPUT)
-        {
-            output[index] = val;
-        }
 
         const float_packed_t val_f = cuda_cast<float_packed_t>(val);
         local_sum += cuda_sum<float>(val_f);
@@ -282,7 +280,9 @@ __global__ void generalLayerNorm(T* output, T* normed_output, const T* input, co
         const float_packed_t val_f = cuda_cast<float_packed_t>(shmem[i]);
         const T val
             = cuda_cast<T>(compute_layernorm<float_packed_t, T, IS_BETA>(val_f, s_mean, s_variance, gamma, beta, i));
-
+        if (RETURN_NORMED_OUTPUT && IS_OUTPUT) {
+            output[index] = val;
+        }
         if (with_per_token_scaling)
         {
             amax = cuda_max(cuda_max<T_scalar, T>(cuda_abs(val)), amax);
@@ -317,7 +317,7 @@ __global__ void generalLayerNorm(T* output, T* normed_output, const T* input, co
     }
 }
 
-template <typename T, bool IS_OUTPUT, bool IS_BIAS, bool RESIDUAL, bool IS_BETA, bool USE_DIFF_OF_SQUARES>
+template <typename T, bool IS_OUTPUT, bool IS_BIAS, bool RESIDUAL, bool IS_BETA, bool RETURN_NORMED_OUTPUT, bool USE_DIFF_OF_SQUARES>
 void dispatch_layernorm_type_square_method(T* output, T* normed_output, const T* input, const T* bias,
     const T* residual, const T* gamma, const T* beta, const float eps, int tokens, int hidden_dim,
     const float* scale_orig_quant_per_tensor, float* scale_orig_quant_per_token, int8_t* normed_output_quant,
@@ -326,31 +326,51 @@ void dispatch_layernorm_type_square_method(T* output, T* normed_output, const T*
     if (shmem_size >= (48 << 10))
     {
         cudaError_t ret
-            = cudaFuncSetAttribute(generalLayerNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, USE_DIFF_OF_SQUARES>,
+            = cudaFuncSetAttribute(generalLayerNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, RETURN_NORMED_OUTPUT, USE_DIFF_OF_SQUARES>,
                 cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size);
     }
-    generalLayerNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, USE_DIFF_OF_SQUARES>
+    generalLayerNorm<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, RETURN_NORMED_OUTPUT, USE_DIFF_OF_SQUARES>
         <<<grid, block, shmem_size, stream>>>(output, normed_output, input, bias, residual, gamma, beta, eps, tokens,
             hidden_dim, scale_orig_quant_per_tensor, scale_orig_quant_per_token, normed_output_quant);
 }
 
-template <typename T, bool IS_OUTPUT, bool IS_BIAS, bool RESIDUAL, bool IS_BETA>
-void dispatch_layernorm_type(T* output, T* normed_output, const T* input, const T* bias, const T* residual,
+template <typename T, bool IS_OUTPUT, bool IS_BIAS, bool RESIDUAL, bool IS_BETA, bool RETURN_NORMED_OUTPUT>
+void dispatch_layernorm_return_normed(T* output, T* normed_output, const T* input, const T* bias, const T* residual,
     const T* gamma, const T* beta, const float eps, int tokens, int hidden_dim,
     const float* scale_orig_quant_per_tensor, float* scale_orig_quant_per_token, int8_t* normed_output_quant,
     const dim3 grid, const dim3 block, const size_t shmem_size, cudaStream_t stream, bool use_diff_of_squares)
 {
     if (use_diff_of_squares)
     {
-        dispatch_layernorm_type_square_method<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, true>(output, normed_output,
+        dispatch_layernorm_type_square_method<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, RETURN_NORMED_OUTPUT, true>(output, normed_output,
             input, bias, residual, gamma, beta, eps, tokens, hidden_dim, scale_orig_quant_per_tensor,
             scale_orig_quant_per_token, normed_output_quant, grid, block, shmem_size, stream);
     }
     else
     {
-        dispatch_layernorm_type_square_method<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, false>(output, normed_output,
+        dispatch_layernorm_type_square_method<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, RETURN_NORMED_OUTPUT, false>(output, normed_output,
             input, bias, residual, gamma, beta, eps, tokens, hidden_dim, scale_orig_quant_per_tensor,
             scale_orig_quant_per_token, normed_output_quant, grid, block, shmem_size, stream);
+    }
+}
+
+template <typename T, bool IS_OUTPUT, bool IS_BIAS, bool RESIDUAL, bool IS_BETA>
+void dispatch_layernorm_type(T* output, T* normed_output, const T* input, const T* bias, const T* residual,
+    const T* gamma, const T* beta, const float eps, int tokens, int hidden_dim,
+    const float* scale_orig_quant_per_tensor, float* scale_orig_quant_per_token, int8_t* normed_output_quant,
+    const dim3 grid, const dim3 block, const size_t shmem_size, cudaStream_t stream, bool use_diff_of_squares, bool return_normed_output)
+{
+    if (return_normed_output)
+    {
+        dispatch_layernorm_return_normed<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, true>(output, normed_output,
+            input, bias, residual, gamma, beta, eps, tokens, hidden_dim, scale_orig_quant_per_tensor,
+            scale_orig_quant_per_token, normed_output_quant, grid, block, shmem_size, stream, return_normed_output);
+    }
+    else
+    {
+        dispatch_layernorm_return_normed<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, false>(output, normed_output,
+            input, bias, residual, gamma, beta, eps, tokens, hidden_dim, scale_orig_quant_per_tensor,
+            scale_orig_quant_per_token, normed_output_quant, grid, block, shmem_size, stream, return_normed_output);
     }
 }
 
@@ -358,19 +378,19 @@ template <typename T, bool IS_OUTPUT, bool IS_BIAS, bool RESIUDAL>
 void dispatch_layernorm_beta(T* output, T* normed_output, const T* input, const T* bias, const T* residual,
     const T* gamma, const T* beta, const float eps, int tokens, int hidden_dim,
     const float* scale_orig_quant_per_tensor, float* scale_orig_quant_per_token, int8_t* normed_output_quant,
-    const dim3 grid, const dim3 block, const size_t shmem_size, cudaStream_t stream, bool use_diff_of_squares)
+    const dim3 grid, const dim3 block, const size_t shmem_size, cudaStream_t stream, bool use_diff_of_squares, bool return_normed_output)
 {
     if (beta != nullptr)
     {
         dispatch_layernorm_type<T, IS_OUTPUT, IS_BIAS, RESIUDAL, true>(output, normed_output, input, bias, residual,
             gamma, beta, eps, tokens, hidden_dim, scale_orig_quant_per_tensor, scale_orig_quant_per_token,
-            normed_output_quant, grid, block, shmem_size, stream, use_diff_of_squares);
+            normed_output_quant, grid, block, shmem_size, stream, use_diff_of_squares, return_normed_output);
     }
     else
     {
         dispatch_layernorm_type<T, IS_OUTPUT, IS_BIAS, RESIUDAL, false>(output, normed_output, input, bias, residual,
             gamma, beta, eps, tokens, hidden_dim, scale_orig_quant_per_tensor, scale_orig_quant_per_token,
-            normed_output_quant, grid, block, shmem_size, stream, use_diff_of_squares);
+            normed_output_quant, grid, block, shmem_size, stream, use_diff_of_squares, return_normed_output);
     }
 }
 
@@ -378,19 +398,19 @@ template <typename T, bool IS_OUTPUT, bool IS_BIAS>
 void dispatch_layernorm_residual(T* output, T* normed_output, const T* input, const T* bias, const T* residual,
     const T* gamma, const T* beta, const float eps, int tokens, int hidden_dim,
     const float* scale_orig_quant_per_tensor, float* scale_orig_quant_per_token, int8_t* normed_output_quant,
-    const dim3 grid, const dim3 block, const size_t shmem_size, cudaStream_t stream, bool use_diff_of_squares)
+    const dim3 grid, const dim3 block, const size_t shmem_size, cudaStream_t stream, bool use_diff_of_squares, bool return_normed_output)
 {
     if (residual != nullptr)
     {
         dispatch_layernorm_beta<T, IS_OUTPUT, IS_BIAS, true>(output, normed_output, input, bias, residual, gamma, beta,
             eps, tokens, hidden_dim, scale_orig_quant_per_tensor, scale_orig_quant_per_token, normed_output_quant, grid,
-            block, shmem_size, stream, use_diff_of_squares);
+            block, shmem_size, stream, use_diff_of_squares, return_normed_output);
     }
     else
     {
         dispatch_layernorm_beta<T, IS_OUTPUT, IS_BIAS, false>(output, normed_output, input, bias, residual, gamma, beta,
             eps, tokens, hidden_dim, scale_orig_quant_per_tensor, scale_orig_quant_per_token, normed_output_quant, grid,
-            block, shmem_size, stream, use_diff_of_squares);
+            block, shmem_size, stream, use_diff_of_squares, return_normed_output);
     }
 }
 
@@ -398,19 +418,19 @@ template <typename T, bool IS_OUTPUT>
 void dispatch_layernorm_bias(T* output, T* normed_output, const T* input, const T* bias, const T* residual,
     const T* gamma, const T* beta, const float eps, int tokens, int hidden_dim,
     const float* scale_orig_quant_per_tensor, float* scale_orig_quant_per_token, int8_t* normed_output_quant,
-    const dim3 grid, const dim3 block, const size_t shmem_size, cudaStream_t stream, bool use_diff_of_squares)
+    const dim3 grid, const dim3 block, const size_t shmem_size, cudaStream_t stream, bool use_diff_of_squares, bool return_normed_output)
 {
     if (bias != nullptr)
     {
         dispatch_layernorm_residual<T, IS_OUTPUT, true>(output, normed_output, input, bias, residual, gamma, beta, eps,
             tokens, hidden_dim, scale_orig_quant_per_tensor, scale_orig_quant_per_token, normed_output_quant, grid,
-            block, shmem_size, stream, use_diff_of_squares);
+            block, shmem_size, stream, use_diff_of_squares, return_normed_output);
     }
     else
     {
         dispatch_layernorm_residual<T, IS_OUTPUT, false>(output, normed_output, input, bias, residual, gamma, beta, eps,
             tokens, hidden_dim, scale_orig_quant_per_tensor, scale_orig_quant_per_token, normed_output_quant, grid,
-            block, shmem_size, stream, use_diff_of_squares);
+            block, shmem_size, stream, use_diff_of_squares, return_normed_output);
     }
 }
 
@@ -419,26 +439,26 @@ void dispatch_layernorm_output(T* output, T* normed_output, const T* input, cons
     const T* gamma, const T* beta, const float eps, int tokens, int hidden_dim,
     const float* scale_orig_quant_per_tensor, float* scale_orig_quant_per_token, int8_t* normed_output_quant,
     const dim3 grid, const dim3 block, const size_t shmem_size, cudaStream_t stream, bool use_diff_of_squares,
-    bool is_output)
+    bool is_output, bool return_normed_output)
 {
     if (is_output)
     {
         dispatch_layernorm_bias<T, true>(output, normed_output, input, bias, residual, gamma, beta, eps, tokens,
             hidden_dim, scale_orig_quant_per_tensor, scale_orig_quant_per_token, normed_output_quant, grid, block,
-            shmem_size, stream, use_diff_of_squares);
+            shmem_size, stream, use_diff_of_squares, return_normed_output);
     }
     else
     {
         dispatch_layernorm_bias<T, false>(output, normed_output, input, bias, residual, gamma, beta, eps, tokens,
             hidden_dim, scale_orig_quant_per_tensor, scale_orig_quant_per_token, normed_output_quant, grid, block,
-            shmem_size, stream, use_diff_of_squares);
+            shmem_size, stream, use_diff_of_squares, return_normed_output);
     }
 }
 
 template <typename T>
 void invokeGeneralLayerNorm(T* out, const T* input, const T* gamma, const T* beta, const float eps, const int tokens,
     const int hidden_dim, cudaStream_t stream, bool use_diff_of_squares, const float* scale, float* dynamic_scale,
-    int8_t* out_quant)
+    int8_t* out_quant, bool return_normed_output)
 {
     dim3 grid(tokens);
     dim3 block(min(hidden_dim, 1024));
@@ -460,19 +480,19 @@ void invokeGeneralLayerNorm(T* out, const T* input, const T* gamma, const T* bet
         dispatch_layernorm_output(reinterpret_cast<Tp*>(out), reinterpret_cast<Tp*>(out),
             reinterpret_cast<const Tp*>(out), (const Tp*) nullptr, reinterpret_cast<const Tp*>(input),
             reinterpret_cast<const Tp*>(gamma), reinterpret_cast<const Tp*>(beta), eps, tokens, hidden_dim, scale,
-            dynamic_scale, out_quant, grid, block, shmem_size, stream, use_diff_of_squares, false);
+            dynamic_scale, out_quant, grid, block, shmem_size, stream, use_diff_of_squares, false, return_normed_output);
     }
     else
     {
         dispatch_layernorm_output(out, out, (const T*) out, (const T*) nullptr, input, gamma, beta, eps, tokens,
-            hidden_dim, scale, dynamic_scale, out_quant, grid, block, shmem_size, stream, use_diff_of_squares, false);
+            hidden_dim, scale, dynamic_scale, out_quant, grid, block, shmem_size, stream, use_diff_of_squares, false, return_normed_output);
     }
 }
 
 template <typename T>
 void invokeGeneralAddBiasResidualLayerNorm(T* out, T* norm_output, const T* input, const T* bias, const T* residual,
     const T* gamma, const T* beta, const float eps, const int tokens, const int hidden_dim, cudaStream_t stream,
-    bool use_diff_of_squares, const float* scale, float* dynamic_scale, int8_t* out_quant)
+    bool use_diff_of_squares, const float* scale, float* dynamic_scale, int8_t* out_quant, bool return_normed_output)
 {
     dim3 grid(tokens);
     dim3 block(min(hidden_dim, 1024));
@@ -495,19 +515,19 @@ void invokeGeneralAddBiasResidualLayerNorm(T* out, T* norm_output, const T* inpu
             reinterpret_cast<const Tp*>(input), reinterpret_cast<const Tp*>(bias),
             reinterpret_cast<const Tp*>(residual), reinterpret_cast<const Tp*>(gamma),
             reinterpret_cast<const Tp*>(beta), eps, tokens, hidden_dim, scale, dynamic_scale, out_quant, grid, block,
-            shmem_size, stream, use_diff_of_squares, true);
+            shmem_size, stream, use_diff_of_squares, true, return_normed_output);
     }
     else
     {
         dispatch_layernorm_output(out, norm_output, input, bias, residual, gamma, beta, eps, tokens, hidden_dim, scale,
-            dynamic_scale, out_quant, grid, block, shmem_size, stream, use_diff_of_squares, true);
+            dynamic_scale, out_quant, grid, block, shmem_size, stream, use_diff_of_squares, true, return_normed_output);
     }
 }
 
 #define INSTANTIATE_GENERAL_LAYERNORM(T)                                                                               \
     template void invokeGeneralLayerNorm(T* out, const T* input, const T* gamma, const T* beta, const float eps,       \
         const int tokens, const int hidden_dim, cudaStream_t stream, bool use_diff_of_squares, const float* scale,     \
-        float* dynamic_scale, int8_t* out_quant);
+        float* dynamic_scale, int8_t* out_quant, bool return_normed_output);
 
 INSTANTIATE_GENERAL_LAYERNORM(float);
 INSTANTIATE_GENERAL_LAYERNORM(half);
@@ -518,7 +538,7 @@ INSTANTIATE_GENERAL_LAYERNORM(__nv_bfloat16);
 #define INSTANTIATE_GENERAL_ADD_BIAS_RESDIAUL_LAYERNORM(T)                                                             \
     template void invokeGeneralAddBiasResidualLayerNorm(T* out, T* norm_output, const T* input, const T* bias,         \
         const T* residual, const T* gamma, const T* beta, const float eps, const int tokens, const int hidden_dim,     \
-        cudaStream_t stream, bool use_diff_of_squares, const float* scale, float* dynamic_scale, int8_t* out_quant);
+        cudaStream_t stream, bool use_diff_of_squares, const float* scale, float* dynamic_scale, int8_t* out_quant, bool return_normed_output);
 
 INSTANTIATE_GENERAL_ADD_BIAS_RESDIAUL_LAYERNORM(float);
 INSTANTIATE_GENERAL_ADD_BIAS_RESDIAUL_LAYERNORM(half);
