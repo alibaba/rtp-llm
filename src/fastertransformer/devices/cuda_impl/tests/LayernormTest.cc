@@ -52,6 +52,7 @@ protected:
                                                                     0.f,
                                                                     1e-6,
                                                                     false,
+                                                                    false,
                                                                     NormType::layernorm));
 
         auto expected_output = torch::layer_norm(
@@ -69,6 +70,7 @@ protected:
                                                                         0.f,
                                                                         1e-6,
                                                                         false,
+                                                                        false,
                                                                         NormType::layernorm));
 
         // test case 2: general layer norm with residual and add_bias output
@@ -81,6 +83,7 @@ protected:
                                                                     std::nullopt,
                                                                     0.f,
                                                                     1e-6,
+                                                                    false,
                                                                     false,
                                                                     NormType::layernorm));
 
@@ -101,6 +104,7 @@ protected:
                                                                     0.f,
                                                                     1e-6,
                                                                     false,
+                                                                    false, 
                                                                     NormType::rmsnorm));
 
         expected_output = rmsNorm(
@@ -118,6 +122,7 @@ protected:
                                                                         0.f,
                                                                         1e-6,
                                                                         false,
+                                                                        false,
                                                                         NormType::rmsnorm));
 
         // test case 4: rms norm with residual and add_bias output
@@ -130,6 +135,7 @@ protected:
                                                                     std::nullopt,
                                                                     0.f,
                                                                     1e-6,
+                                                                    false,
                                                                     false,
                                                                     NormType::rmsnorm));
 
@@ -148,6 +154,7 @@ protected:
                                                                     std::nullopt,
                                                                     0.f,
                                                                     1e-6,
+                                                                    false,
                                                                     false,
                                                                     NormType::layernorm,
                                                                     QScheme::Qint8PerChannelLastAxis));
@@ -268,6 +275,7 @@ TEST_F(LayerNormTest, testAddBiasResidual) {
                                                           1.f,
                                                           0.f,
                                                           false,
+                                                          false,
                                                           NormType::alphanorm));
 
                                                         
@@ -284,6 +292,7 @@ TEST_F(LayerNormTest, testAddBiasResidual) {
                                                      1.f,
                                                      0.f,
                                                      true,
+                                                     false,
                                                      NormType::alphanorm));
 
     assertBufferValueEqual(*norm_output.output, vector<float>({1.11, 2.22, 3.33, 1.44, 2.55, 3.66}));

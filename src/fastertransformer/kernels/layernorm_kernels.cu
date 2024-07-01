@@ -364,13 +364,13 @@ void dispatch_layernorm_type(T* output, T* normed_output, const T* input, const 
     {
         dispatch_layernorm_return_normed<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, true>(output, normed_output,
             input, bias, residual, gamma, beta, eps, tokens, hidden_dim, scale_orig_quant_per_tensor,
-            scale_orig_quant_per_token, normed_output_quant, grid, block, shmem_size, stream, return_normed_output);
+            scale_orig_quant_per_token, normed_output_quant, grid, block, shmem_size, stream, use_diff_of_squares);
     }
     else
     {
         dispatch_layernorm_return_normed<T, IS_OUTPUT, IS_BIAS, RESIDUAL, IS_BETA, false>(output, normed_output,
             input, bias, residual, gamma, beta, eps, tokens, hidden_dim, scale_orig_quant_per_tensor,
-            scale_orig_quant_per_token, normed_output_quant, grid, block, shmem_size, stream, return_normed_output);
+            scale_orig_quant_per_token, normed_output_quant, grid, block, shmem_size, stream, use_diff_of_squares);
     }
 }
 
