@@ -121,6 +121,10 @@ SPECIALIZE_CAST_TO(__nv_bfloat16, int64_t);
 SPECIALIZE_CAST_TO(__nv_bfloat16, uint64_t);
 SPECIALIZE_CAST_TO(__nv_bfloat16, __half);
 SPECIALIZE_CAST_TO(__half, __nv_bfloat16);
+SPECIALIZE_CAST_TO(__nv_bfloat16, int8_t)
+SPECIALIZE_CAST_TO(__nv_bfloat16, uint8_t)
+SPECIALIZE_CAST_TO(__nv_bfloat16, int32_t)
+SPECIALIZE_CAST_TO(__nv_bfloat16, uint32_t)
 
 // TODO: change this to use efficient cuda kernel
 template<typename DstT, typename SrcT>
