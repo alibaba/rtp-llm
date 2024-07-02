@@ -43,15 +43,15 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 }
 
 bool StreamCacheResource::initKVBlock() {
-    auto             block_num = singleBatchNeedBlocks(stream_->inputLength() / seqSizePerBlock() * seqSizePerBlock());
+    auto             align_block_num = singleBatchNeedBlocks(stream_->seqLength() / seqSizePerBlock() * seqSizePerBlock());
     KVCacheBlockAddr kv_cache_block_addr;
     int              reuse_length;
     bool             success;
     if (resource_context_.reuse_cache) {
         std::tie(success, kv_cache_block_addr, reuse_length) =
-            resource_context_.cache_manager->mallocWithCache(block_num, stream_->completeTokenIdsVec());
+            resource_context_.cache_manager->mallocWithCache(align_block_num, stream_->completeTokenIdsVec());
     } else {
-        std::tie(success, kv_cache_block_addr) = resource_context_.cache_manager->malloc(block_num);
+        std::tie(success, kv_cache_block_addr) = resource_context_.cache_manager->malloc(align_block_num);
         reuse_length                           = 0;
     }
 

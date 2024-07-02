@@ -88,6 +88,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int token_idx = batch_idx;
     int cum_output_seq_len = batch_idx;
     for (const auto& stream : context_streams) {
+        // context stream也需要batch运行是为了fallback的场景和perf test的场景
         auto current_batch_size = stream->batchSize();
         auto kv_cache                 = stream->kvCache();
         FT_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());

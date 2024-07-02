@@ -85,6 +85,7 @@ public:
     std::string stopReason();
     bool finished();
     void setFinishedWithoutLock();
+    size_t iterCount() const;
 
     const ResourceContext& resourceContext() const;
     void setKVCache(const BatchKVCacheBlockAddr &kv_cache_block_addr);

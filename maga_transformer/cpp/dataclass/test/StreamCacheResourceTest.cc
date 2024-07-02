@@ -156,7 +156,6 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     ASSERT_EQ(cache_manager_->cacheItemNum(), 3);
 }
 
-
 TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock) {
     prepareResource();
     auto& resource = stream_->streamCacheResource();

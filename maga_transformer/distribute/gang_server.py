@@ -121,7 +121,7 @@ class GangServer:
                 time.sleep(sleep_time)    
     
     def wait_infernece_server_ready(self):
-        for member in self._gang_info.workers():                
+        for member in self._gang_info.workers():
             url = f'http://{member.ip}:{member.server_port}/health'
             try:
                 resposne = requests.get(url, timeout=1)
@@ -187,7 +187,7 @@ class GangServer:
         
         init_process_timeout = int(os.environ.get('DIST_BARRIER_TIMEOUT', 45))
         # 使用ProcessGroupNCCL自带的health check进行一次同步+nccl检测
-        if os.environ.get('FAKE_GANG_ENV', None) == None:            
+        if os.environ.get('FAKE_GANG_ENV', None) == None:
             os.environ['ENABLE_NCCL_HEALTH_CHECK'] = '1'
             dist.init_process_group(backend=dist.Backend.NCCL, 
                                     init_method=master_url, 
@@ -195,7 +195,6 @@ class GangServer:
                                     world_size=g_parallel_info.world_size, 
                                     timeout=timedelta(seconds=init_process_timeout))
         else:
-            # TODO(xinfei.sxf) 没看懂啊
             # 由于后续会进行health check，且init_process_group默认不进行block，因此使用memory barrier进行一次同步                
             self.memory_barrier(master_url, timeout=init_process_timeout)
 

@@ -62,7 +62,9 @@ public:
     void freeWithCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
     void insertResidentCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
 
+    // TODO(xinfei.sxf) fix this index?
     void setKVBlockValue(int kindex, int vindex, ft::BufferPtr& k_value, ft::BufferPtr& v_value);
+    std::tuple<ft::BufferPtr, ft::BufferPtr> getKVBlockValue(int block_index);
     void blockCopy(int src_block_index, int dest_block_index);
 
     void reportMetricsLoop();

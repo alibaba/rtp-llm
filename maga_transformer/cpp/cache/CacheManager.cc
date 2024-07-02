@@ -290,30 +290,60 @@ void CacheManager::incrBlockRefCounter(const std::vector<int>& indices) {
 void CacheManager::setKVBlockValue(int kindex, int vindex, ft::BufferPtr& k_value, ft::BufferPtr& v_value) {
     auto layer_stride = config_.block_nums * config_.kv_block_stride;
     for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
-        // k
-        auto kdst = (int8_t*)kv_cache_.k_blocks->data() + layer_num * layer_stride + kindex * config_.kv_block_stride;
-        auto ksrc = (int8_t*)k_value->data() + layer_num * config_.kv_block_stride;
-        auto kdst_buffer = Buffer(
-            kv_cache_.k_blocks->where(), k_value->type(), {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, kdst);
-        auto ksrc_buffer = Buffer(
-            k_value->where(), k_value->type(), {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, ksrc);
-        device_->copy({kdst_buffer, ksrc_buffer});
-        // v
-        auto vdst = (int8_t*)kv_cache_.v_blocks->data() + layer_num * layer_stride + vindex * config_.kv_block_stride;
-        auto vsrc = (int8_t*)v_value->data() + layer_num * config_.kv_block_stride;
-        auto vdst_buffer = Buffer(
-            kv_cache_.v_blocks->where(), v_value->type(), {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, vdst);
-        auto vsrc_buffer = Buffer(
-            v_value->where(), v_value->type(), {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, vsrc);
-        device_->copy({vdst_buffer, vsrc_buffer});
+
+        auto copyFunc = [&](ft::BufferPtr& src_value, ft::BufferPtr& dst_blocks){
+            auto dst_data = dst_blocks->data() + layer_num * layer_stride + kindex * config_.kv_block_stride;
+            auto src_data = src_value->data() + layer_num * config_.kv_block_stride;
+            auto dst_buffer = Buffer(
+                dst_blocks->where(), src_value->type(), {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, dst_data);
+            auto src_buffer = Buffer(
+                src_value->where(), src_value->type(), {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, src_data);
+            device_->copy({dst_buffer, src_buffer});
+        };
+
+        copyFunc(k_value, kv_cache_.k_blocks);
+        copyFunc(v_value, kv_cache_.v_blocks);
     }
 }
 
+std::tuple<ft::BufferPtr, ft::BufferPtr> CacheManager::getKVBlockValue(int block_index) {
+    auto layer_stride = config_.block_nums * config_.kv_block_stride;
+    auto kdst_buffer = device_->allocateBuffer(
+            {config_.dtype, {config_.layer_num, config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, ft::AllocationType::DEVICE});
+    auto vdst_buffer = device_->allocateBuffer(
+            {config_.dtype, {config_.layer_num, config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, ft::AllocationType::DEVICE});
+    for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
+
+        auto copyFunc = [&](ft::BufferPtr& src_blocks, ft::BufferPtr& dst_buffer){
+            auto src_data = src_blocks->data() + layer_num * layer_stride + block_index * config_.kv_block_stride;
+            auto src_buffer = Buffer(
+                src_blocks->where(), config_.dtype, {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, src_data);
+            device_->copy({dst_buffer->view(layer_num, 1)[0], src_buffer});
+        };
+
+        copyFunc(kv_cache_.k_blocks, kdst_buffer);
+        copyFunc(kv_cache_.v_blocks, vdst_buffer);
+    }
+    return {kdst_buffer, vdst_buffer};
+}
+
 void CacheManager::blockCopy(int src_block_index, int dest_block_index) {
-    // kv_cache_.k_blocks.index({torch::indexing::Slice(), dest_block_index, torch::indexing::Ellipsis}) =
-    //     kv_cache_.k_blocks.index({torch::indexing::Slice(), src_block_index, torch::indexing::Ellipsis});
-    // kv_cache_.v_blocks.index({torch::indexing::Slice(), dest_block_index, torch::indexing::Ellipsis}) =
-    //     kv_cache_.v_blocks.index({torch::indexing::Slice(), src_block_index, torch::indexing::Ellipsis});
+    auto layer_stride = config_.block_nums * config_.kv_block_stride;
+    for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
+        auto copyFunc = [&](ft::BufferPtr& buffer_blocks){
+            auto dst_data = buffer_blocks->data() + layer_num * layer_stride + dest_block_index * config_.kv_block_stride;
+            auto src_data = buffer_blocks->data() + layer_num * layer_stride + src_block_index * config_.kv_block_stride;
+            auto dst_buffer = Buffer(
+                buffer_blocks->where(), config_.dtype, {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, dst_data);
+            auto src_buffer = Buffer(
+                buffer_blocks->where(), config_.dtype, {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, src_data);
+            device_->copy({dst_buffer, src_buffer});
+        };
+
+        // copy value
+        copyFunc(kv_cache_.k_blocks);
+        copyFunc(kv_cache_.v_blocks);
+    }
 }
 
 void CacheManager::copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list,

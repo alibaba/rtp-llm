@@ -286,6 +286,10 @@ bool GenerateStream::finished() {
     return generate_status_.status == GenerateState::FINISHED;
 }
 
+size_t GenerateStream::iterCount() const {
+    return iter_count_;
+}
+
 void GenerateStream::setKVCache(const BatchKVCacheBlockAddr& kv_cache_block_addr) {
     stream_cache_resource_.setKVCache(kv_cache_block_addr);
 }

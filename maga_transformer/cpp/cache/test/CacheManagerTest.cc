@@ -18,13 +18,13 @@ namespace rtp_llm {
 class CacheManagerTest: public DeviceTestBase {
 protected:
     CacheConfig init_config() {
+        // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
         CacheConfig config(1, 4, 1, 1, 1, ft::TYPE_INT8);
         return config;
     }
 
     CacheConfig init_complex_config() {
-        // layer_num_, uint block_nums_, uint local_head_num_kv_, uint size_per_head_, uint seq_size_per_block_,
-        // ft::DataType dtype_
+        // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
         CacheConfig config(2, 4, 3, 5, 6, ft::TYPE_INT8);
         return config;
     }
@@ -392,5 +392,34 @@ TEST_F(CacheManagerTest, testSeqSizePerBlock) {
     ASSERT_EQ(reuseNum4, 4);
 }
 
+
+TEST_F(CacheManagerTest, testSetBlockValue) {
+    // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
+    CacheConfig cache_config(2, 4, 1, 1, 2, ft::TYPE_INT8);
+    CacheManager cache_manager(cache_config, device_);
+    ASSERT_EQ(cache_manager.freeBlockNums(), 3);
+
+    vector<int8_t> k_vec(cache_config.kv_block_size, 1);
+    vector<int8_t> v_vec(cache_config.kv_block_size, 1);
+    auto k_buffer = ft::vector2Buffer(k_vec);
+    auto v_buffer = ft::vector2Buffer(v_vec);
+    cache_manager.setKVBlockValue(1, 1, k_buffer, v_buffer);
+
+    auto testFunc = [&](int block_index, int block_value){
+        auto [kbuffer, vbuffer] = cache_manager.getKVBlockValue(block_index);
+        auto host_kbuffer = device_->clone({*kbuffer, AllocationType::HOST});
+        auto host_vbuffer = device_->clone({*vbuffer, AllocationType::HOST});
+        ASSERT_EQ(cache_config.kv_block_size, host_kbuffer->size());
+        ASSERT_EQ(cache_config.kv_block_size, host_vbuffer->size());
+        for (size_t i = 0; i < host_kbuffer->size(); i++) {
+            ASSERT_EQ(block_value, host_kbuffer->data<int8_t>()[i]);
+            ASSERT_EQ(block_value, host_vbuffer->data<int8_t>()[i]);
+        }
+    };
+    testFunc(1, 1);
+
+    cache_manager.blockCopy(1, 3);
+    testFunc(3, 1);
+}
 
 }  // namespace rtp_llm

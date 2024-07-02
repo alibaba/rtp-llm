@@ -55,7 +55,7 @@ struct CacheConfig {
         debug_string << "CacheConfig { "
                      << "layer_num: " << layer_num << ", block_nums: " << block_nums << ", block_size: " << block_size
                      << ", local_head_num_kv: " << local_head_num_kv << ", size_per_head: " << size_per_head
-                     << ", seq_size_per_block: " << seq_size_per_block << ", dtype: " << dtype
+                     << ", seq_size_per_block: " << seq_size_per_block << ", dtype: " << int(dtype)
                      << ", reserve_runtime_mem_mb: " << reserve_runtime_mem_mb << "}";
         return debug_string.str();
     }
