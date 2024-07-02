@@ -194,7 +194,7 @@ inline __device__ __nv_bfloat162 bf16exp2(const __nv_bfloat162 x) {
 #endif
 }
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800) 
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800) && !defined(USE_CUDA12)
 inline __device__ __nv_bfloat162 operator+(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hadd2(x, y); };
 inline __device__ __nv_bfloat162 operator+=(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hadd2(x, y); };
 inline __device__ __nv_bfloat162 operator-(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hsub2(x, y); };
