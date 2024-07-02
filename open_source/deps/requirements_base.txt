@@ -33,3 +33,12 @@ grpcio==1.62.0
 xfastertransformer_devel_icx==1.7.2
 decord==0.6.0
 accelerate==0.25.0
+# add qwen agent package
+json5
+dashscope>=1.11.0
+jieba
+openai
+pdfplumber
+pydantic>=2.3.0
+rank_bm25
+snowballstemmer

@@ -3,7 +3,21 @@ import os
 from pprint import pformat
 from typing import Dict, Iterator, List, Optional
 
+# region youmi
+# 因为openai本地包和线上包重名，所以这里先删除本地包，然后再导入
+import sys
+path_index_list = -1
+path_remove = ""
+for idx, path in enumerate(sys.path):
+    if path.endswith("maga_transformer/maga_transformer"):
+        path_index_list = idx
+        break
+if path_index_list > -1:
+    path_remove = sys.path.pop(path_index_list)
 import openai
+if path_remove:
+    sys.path.insert(path_index_list, path_remove)
+# end region
 
 if openai.__version__.startswith('0.'):
     from openai.error import OpenAIError  # noqa
