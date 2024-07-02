@@ -212,14 +212,12 @@ inline __device__ __nv_bfloat16 operator*(const __nv_bfloat16 x, const __nv_bflo
 inline __device__ __nv_bfloat16 operator*=(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hmul(x, y); };
 inline __device__ __nv_bfloat16 operator/(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hdiv(x, y); };
 inline __device__ __nv_bfloat16 operator/=(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hdiv(x, y); };
-
+#endif
 
 inline __device__ __nv_bfloat162 make_bfloat162(const __nv_bfloat16 x, const __nv_bfloat16 y)
 {
     __nv_bfloat162 t; t.x = x; t.y = y; return t;
 }
-
-#endif
 
 inline __device__ __nv_bfloat16 bf16hadd(__nv_bfloat16 a, __nv_bfloat16 b, __nv_bfloat16 c) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
