@@ -28,8 +28,8 @@ build --define=using_cuda=true --define=using_cuda_nvcc=true
 build --crosstool_top=@local_config_cuda//crosstool:toolchain
 build --action_env CUDA_TOOLKIT_PATH="/usr/local/cuda/"
 build --host_action_env CUDA_TOOLKIT_PATH="/usr/local/cuda/"
-build --action_env TF_CUDA_VERSION="11.8"
-build --host_action_env TF_CUDA_VERSION="11.8"
+build --action_env TF_CUDA_VERSION="11.4" # 11.8 12.1
+build --host_action_env TF_CUDA_VERSION="11.4" # 11.8 12.1
 build --action_env TF_CUDA_PATHS="/usr/local/cuda/"
 build --host_action_env TF_CUDA_PATHS="/usr/local/cuda/"
 build --action_env TF_CUDA_CLANG="0"
