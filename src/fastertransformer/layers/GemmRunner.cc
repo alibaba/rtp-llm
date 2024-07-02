@@ -39,9 +39,9 @@ void GemmRunner<T>::Gemm(int m, int n, int k, const void* inputs, const DenseWei
         FT_CHECK_WITH_INFO(weights->weight_only_quant_scale,
                            "weight_only_quant_scale is needed in weight only int4 quant");
         if (quant_algo_.getGroupSize() > 0) {
-            size_t ws_size = weight_only_groupwise_matmul_plguin_->getWorkspaceSize(m, n, k);
+            size_t ws_size = weight_only_groupwise_matmul_plugin_->getWorkspaceSize(m, n, k);
             allocateWorkspace(ws_size);
-            weight_only_groupwise_matmul_plguin_->enqueue(reinterpret_cast<const void*>(inputs),
+            weight_only_groupwise_matmul_plugin_->enqueue(reinterpret_cast<const void*>(inputs),
                                                           reinterpret_cast<const void*>(weights->quant_kernel),
                                                           reinterpret_cast<const void*>(weights->weight_only_quant_scale),
                                                           reinterpret_cast<const void*>(weights->quant_zeros),
@@ -79,7 +79,7 @@ void GemmRunner<T>::GemmWithBias(int m, int n, int k, const void* inputs, const 
     // bias: [n]
     // output: [m, n]
 
-    // Note: The GemmWithBias operation only support fp32, fp16, doesn't support other types 
+    // Note: The GemmWithBias operation only support fp32, fp16, doesn't support other types
     cublas_wrapper_->Gemm(CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, weights->kernel, n, reinterpret_cast<const T*>(inputs), k, weights->bias, outputs, n);
 }
 

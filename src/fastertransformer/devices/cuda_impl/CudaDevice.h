@@ -87,7 +87,7 @@ private:
     std::unique_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin> weight_only_matmul_plugin_;
     std::unique_ptr<trt_plugins::SmoothQuantGemmPlugin> smooth_quant_plugin_;
 
-    std::unique_ptr<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin> weight_only_groupwise_matmul_plguin_;
+    std::unique_ptr<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin> weight_only_groupwise_matmul_plugin_;
 
     nvmlDevice_t nvml_device_;
     NcclParam nccl_param_;

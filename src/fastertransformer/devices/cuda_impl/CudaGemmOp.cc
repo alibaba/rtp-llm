@@ -203,11 +203,11 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
             size_t type_bits = getTypeBits(params.B.type());
             FT_CHECK((type_bits == 4));
 
-            weight_only_groupwise_matmul_plguin_->init(nvinfer1DtypeConvert(params.A.type()),
+            weight_only_groupwise_matmul_plugin_->init(nvinfer1DtypeConvert(params.A.type()),
                                                        true,
                                                        group_size,
-                                                       4);
-            size_t ws_size = weight_only_groupwise_matmul_plguin_->getWorkspaceSize(arguments.m,
+                                                       type_bits);
+            size_t ws_size = weight_only_groupwise_matmul_plugin_->getWorkspaceSize(arguments.m,
                                                                                     arguments.n,
                                                                                     arguments.k);
             auto workspace = allocateBuffer({DataType::TYPE_BYTES,
@@ -215,7 +215,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
                                              AllocationType::DEVICE},
                                              {"workspace"});
 
-            weight_only_groupwise_matmul_plguin_->enqueue(params.A.data(),
+            weight_only_groupwise_matmul_plugin_->enqueue(params.A.data(),
                                                           reinterpret_cast<const QBuffer&>(params.B).data(),
                                                           reinterpret_cast<const QBuffer&>(params.B).scalesData(),
                                                           reinterpret_cast<const QBuffer&>(params.B).zerosData(),

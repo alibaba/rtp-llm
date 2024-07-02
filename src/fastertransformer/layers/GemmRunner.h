@@ -25,7 +25,7 @@ private:
 
     tc::QuantAlgo quant_algo_;
     std::shared_ptr<trt_plugins::WeightOnlyQuantMatmulPlugin>          weight_only_matmul_plugin_;
-    std::shared_ptr<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin> weight_only_groupwise_matmul_plguin_;
+    std::shared_ptr<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin> weight_only_groupwise_matmul_plugin_;
     std::shared_ptr<trt_plugins::SmoothQuantGemmPlugin> smooth_quant_plugin_;
 
     char* workspace_ = nullptr;
@@ -51,7 +51,7 @@ public:
             smooth_quant_plugin_ = std::make_shared<trt_plugins::SmoothQuantGemmPlugin>(quant_mode, datatype);
         } else if (quant_algo_.weightOnly()) {
             if (quant_algo_.getGroupSize() > 0) {
-                weight_only_groupwise_matmul_plguin_ =
+                weight_only_groupwise_matmul_plugin_ =
                     std::make_shared<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin>(
                             datatype, true, quant_algo_.getGroupSize(), quant_algo_.getWeightBits());
             } else {
