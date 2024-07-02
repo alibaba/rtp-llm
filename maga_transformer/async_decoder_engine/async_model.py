@@ -11,6 +11,7 @@ from maga_transformer.async_decoder_engine.engine_creator import create_engine
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.task_type import TaskType
 from maga_transformer.async_decoder_engine.base_engine import KVCacheInfo
+from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 
 class AsyncModel:
     def __init__(self, model: BaseModel, sp_model: Optional[BaseModel] = None, use_rpc: bool = True) -> None:
@@ -49,6 +50,13 @@ class AsyncModel:
     def enqueue(self, input: GenerateInput):
         if g_parallel_info.tp_size > 1 and g_parallel_info.tp_rank > 0:
             raise Exception('bug, not supposed to be here')
+        if input.prompt_length <= 0:
+            raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
+                                     f"model tokens can not be empty, request length is {input.prompt_length}")
+        max_new_tokens = min(self.config.max_seq_len - input.prompt_length, input.generate_config.max_new_tokens)
+        if max_new_tokens <= 0:
+            raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
+                                     f"model max tokens is {self.config.max_seq_len}, request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}")
         return self.decoder_engine_.decode(input)
 
     def get_kv_cache_info(self) -> KVCacheInfo:

@@ -86,13 +86,6 @@ class DecoderEngine(BaseEngine):
 
     # public for ptuning
     def create_stream(self, input: GenerateInput) -> GenerateStream:
-        if input.prompt_length <= 0:
-            raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
-                                     f"model tokens can not be empty, request length is {input.prompt_length}")
-        max_new_tokens = min(self.config_.max_seq_len - input.prompt_length, input.generate_config.max_new_tokens)
-        if max_new_tokens <= 0:
-            raise FtRuntimeException(ExceptionType.LONG_PROMPT_ERROR,
-                                     f"model max tokens is {self.config_.max_seq_len}, request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}")
         stream = GenerateStream(input=input,
                                 max_seq_len=self.config_.max_seq_len)
         if input.generate_config.adapter_name is not None:
