@@ -215,7 +215,7 @@ class RtpLLMCacheMetricsCollector final {
 public:
     int64_t kv_cache_item_num = 0;
     int64_t kv_cache_left_seq = 0;
-    int64_t kv_cache_used_ratio = 0;
+    float kv_cache_used_ratio = 0;
 };
 
 class RtpLLMCacheMetrics: public kmonitor::MetricsGroup {

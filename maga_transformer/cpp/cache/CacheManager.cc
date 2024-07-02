@@ -46,7 +46,7 @@ void CacheManager::reportMetricsLoop() {
             RtpLLMCacheMetricsCollector collector;
             collector.kv_cache_item_num = block_cache_.size();
             collector.kv_cache_left_seq = freeBlockNums() * seq_size_per_block_;
-            collector.kv_cache_used_ratio = 1.0 * (config_.block_nums - freeBlockNums()) / config_.block_nums;
+            collector.kv_cache_used_ratio = 100.0 * (config_.block_nums - freeBlockNums()) / config_.block_nums;
             metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(nullptr, &collector);
             std::this_thread::sleep_for(std::chrono::seconds(1)); // 1s
         }
