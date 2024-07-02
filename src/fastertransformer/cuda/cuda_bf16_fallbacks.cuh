@@ -195,9 +195,14 @@ inline __device__ __nv_bfloat162 bf16exp2(const __nv_bfloat162 x) {
 }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800) && !defined(USE_CUDA12)
-inline __device__ __nv_bfloat162 operator*(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hmul2(x, y); };
 inline __device__ __nv_bfloat162 operator+(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hadd2(x, y); };
+inline __device__ __nv_bfloat162 operator+=(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hadd2(x, y); };
+inline __device__ __nv_bfloat162 operator-(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hsub2(x, y); };
+inline __device__ __nv_bfloat162 operator-=(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hsub2(x, y); };
+inline __device__ __nv_bfloat162 operator*(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hmul2(x, y); };
+inline __device__ __nv_bfloat162 operator*=(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16hmul2(x, y); };
 inline __device__ __nv_bfloat162 operator/(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16h2div2(x, y); };
+inline __device__ __nv_bfloat162 operator/=(const __nv_bfloat162 x, const __nv_bfloat162 y) { return bf16h2div2(x, y); };
 
 inline __device__ __nv_bfloat16 operator+(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hadd(x, y); };
 inline __device__ __nv_bfloat16 operator+=(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hadd(x, y); };
@@ -207,6 +212,7 @@ inline __device__ __nv_bfloat16 operator*(const __nv_bfloat16 x, const __nv_bflo
 inline __device__ __nv_bfloat16 operator*=(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hmul(x, y); };
 inline __device__ __nv_bfloat16 operator/(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hdiv(x, y); };
 inline __device__ __nv_bfloat16 operator/=(const __nv_bfloat16 x, const __nv_bfloat16 y) { return bf16hdiv(x, y); };
+
 
 inline __device__ __nv_bfloat162 make_bfloat162(const __nv_bfloat16 x, const __nv_bfloat16 y)
 {
