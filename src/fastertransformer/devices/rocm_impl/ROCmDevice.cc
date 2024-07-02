@@ -2,7 +2,9 @@
 #include "src/fastertransformer/devices/rocm_impl/ROCmAllocator.h"
 #include "src/fastertransformer/core/TrackerAllocator.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
+#include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/utils/ShapeCheck.h"
+#include "src/fastertransformer/cuda/Dispatch.h"
 #include <cstring>
 
 #include "src/fastertransformer/kernels/hello_world.h"

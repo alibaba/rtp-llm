@@ -59,6 +59,7 @@ cc_library(
 cc_library(
     name = "gpt_kernels_rocm",
     srcs = [
+
         "hello_world.cu",
         "gpt_kernels.cu",
         "add_residual_kernels.cu",
