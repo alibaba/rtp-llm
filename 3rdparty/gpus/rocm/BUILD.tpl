@@ -97,6 +97,18 @@ cc_library(
 )
 
 cc_library(
+    name = "hipblaslt",
+    srcs = ["rocm/lib/%{hipblaslt_lib}"],
+    data = ["rocm/lib/%{hipblaslt_lib}"],
+    includes = [
+        ".",
+        "rocm/include",
+    ],
+    linkstatic = 1,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "rocm",
     visibility = ["//visibility:public"],
     deps = [

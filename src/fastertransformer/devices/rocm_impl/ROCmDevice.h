@@ -4,22 +4,25 @@
 
 namespace fastertransformer {
 
-class ROCmDevice : public DeviceBase {
+class ROCmDevice: public DeviceBase {
 public:
     ROCmDevice(const DeviceInitParams& params);
     ~ROCmDevice();
 
-public:
     DeviceProperties getDeviceProperties() override;
-    IAllocator* getAllocator() override { return allocator_.get(); }
-    IAllocator* getHostAllocator() override { return allocator_.get(); }
-
-public:
-    void copy(const CopyParams& params);
+    IAllocator*      getAllocator() override {
+        return allocator_.get();
+    }
+    IAllocator* getHostAllocator() override {
+        return hostAllocator_.get();
+    }
+    void copy(const CopyParams& params) override;
+    void syncAndCheck() override;
 
 private:
     std::unique_ptr<IAllocator> allocator_;
+    std::unique_ptr<IAllocator> hostAllocator_;
+    hipStream_t                 stream_ = nullptr;
 };
 
-} // namespace fastertransformer
-
+}  // namespace fastertransformer
