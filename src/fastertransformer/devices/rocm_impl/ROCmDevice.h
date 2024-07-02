@@ -1,5 +1,9 @@
 #pragma once
 
+#include "src/fastertransformer/devices/DeviceOps.h"
+#include "src/fastertransformer/devices/DeviceData.h"
+#include "src/fastertransformer/devices/BufferManager.h"
+
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #if ENABLE_BF16

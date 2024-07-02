@@ -60,3 +60,39 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
 )
+
+cc_test(
+    name = "rocm_act_op_test",
+    srcs = [
+        "ops/RocmActOpTest.cc",
+    ],
+    data = [],
+    env = device_test_envs(),
+    copts = test_copts + copts(),
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
+
+cc_test(
+    name = "rocm_ffn_op_test",
+    srcs = [
+        "ops/RocmFFnOpTest.cc",
+    ],
+    data = [],
+    env = device_test_envs(),
+    copts = test_copts + copts(),
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
+
+cc_test(
+    name = "embedding_lookup_test",
+    srcs = [
+        "ops/EmbeddingLookupTest.cc",
+    ],
+    data = [],
+    env = device_test_envs(),
+    copts = test_copts + copts(),
+    linkopts = test_linkopts,
+    deps = test_deps,
+)

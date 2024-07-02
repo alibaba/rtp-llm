@@ -15,7 +15,13 @@
  */
 
 #include "src/fastertransformer/kernels/activation_kernels.h"
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#endif
+#if USING_ROCM
+using namespace fastertransformer::rocm;
+#include "src/fastertransformer/rocm/hip_type_utils.cuh"
+#endif
 #include "src/fastertransformer/cuda/memory_utils.h"
 
 #if USING_CUDA
