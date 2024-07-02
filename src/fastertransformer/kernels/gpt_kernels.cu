@@ -15,7 +15,7 @@
  */
 
 #include <assert.h>
-#include "src/fastertransformer/cuda/cuda_bf16_fallbacks.cuh"
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
