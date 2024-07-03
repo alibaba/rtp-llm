@@ -13,13 +13,13 @@ from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeigh
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.utils.multimodal_util import get_bytes_io_from_url, check_cache, insert_cache
+from maga_transformer.utils.multimodal_util import get_bytes_io_from_url, data_cache_
 from maga_transformer.models.base_model import EmbeddingOutput
 
 class MultiModalEmbeddingInterface:
     @torch.no_grad()
     def mm_embedding(self, url: str, device):
-        cached_res = check_cache(url)
+        cached_res = data_cache_.check_cache(url)
         if cached_res is None:
             try:
                 bytes_io = get_bytes_io_from_url(url)
@@ -27,7 +27,7 @@ class MultiModalEmbeddingInterface:
             except Exception as e:
                 raise Exception(f"cannot download image from {url}, exception {e}")
             features = self.mm_process(mm_input, device)
-            insert_cache(url, features)
+            data_cache_.insert_cache(url, features)
             return features
         else:
             return cached_res

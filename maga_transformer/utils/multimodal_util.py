@@ -9,9 +9,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from typing import Any, List, Dict, Optional, Callable
 from maga_transformer.utils.lru_dict import LruDict
 
-mm_data_cache = LruDict(int(os.environ.get('MM_CACHE_ITEM_NUM', '10')))
-cache_lock = threading.Lock()
-
 if os.environ.get('DOWNLOAD_HEADERS', '') != '':
     HTTP_HEADS = json.loads(os.environ['DOWNLOAD_HEADERS'])
 else:
@@ -29,13 +26,27 @@ def get_bytes_io_from_url(url: str):
             buf = BytesIO(fh.read())
         return buf
     
-def check_cache(url: str):
-    with cache_lock:
-        if url in mm_data_cache:
-            return mm_data_cache[url]
-        else:
+class MMDataCache(object):
+    def __init__(self):
+        self.mm_data_cache: Optional[LruDict] = None
+        self.cache_lock = threading.Lock()
+        self.cache_size = int(os.environ.get('MM_CACHE_ITEM_NUM', '10'))
+        if self.cache_size > 0:
+            self.mm_data_cache = LruDict(self.cache_size)        
+    
+    def check_cache(self, url: str):
+        if self.mm_data_cache == None:
             return None
+        with self.cache_lock:
+            if url in self.mm_data_cache:
+                return self.mm_data_cache[url]
+            else:
+                return None
+        
+    def insert_cache(self, url: str, features: torch.Tensor):
+        if self.mm_data_cache == None:
+            return
+        with self.cache_lock:
+            self.mm_data_cache[url] = features
 
-def insert_cache(url: str, features: torch.Tensor):
-    with cache_lock:
-        mm_data_cache[url] = features
+data_cache_ = MMDataCache()
