@@ -201,7 +201,7 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
             size_t group_size = (kernel_dim0 / scales_dim0);
             FT_CHECK((group_size == 64 || group_size == 128));
             size_t type_bits = getTypeBits(params.B.type());
-            FT_CHECK((type_bits == 4));
+            FT_CHECK((type_bits == 4 || type_bits == 8));
 
             weight_only_groupwise_matmul_plugin_->init(nvinfer1DtypeConvert(params.A.type()),
                                                        true,

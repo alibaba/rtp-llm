@@ -54,7 +54,11 @@ public:
 
 class WeightsConverter {
 public:
-    WeightsConverter(bool need_copy): need_copy_(need_copy) {
+    WeightsConverter(bool need_copy,
+                     ft::QuantAlgo quant_alog = ft::QuantAlgo()) :
+                     need_copy_(need_copy),
+                     quant_algo_(quant_alog)
+    {
         if (need_copy_) {
             device_ = ft::DeviceFactory::getDefaultDevice();
         }
@@ -122,6 +126,7 @@ private:
 
 private:
     bool            need_copy_;
+    ft::QuantAlgo   quant_algo_;
     ft::DeviceBase* device_;
 };
 

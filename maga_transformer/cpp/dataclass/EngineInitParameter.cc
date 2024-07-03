@@ -86,11 +86,16 @@ WeightsConverter::mayCreateDenseWeights(const ConstBufferPtrMap& map,
             auto scales = mayFindBuffer(map, scales_key);
             auto zeros  = mayFindBuffer(map, zeros_key);
             FT_LOG_DEBUG("load qbuffer weight [%s] ", zeros_key.c_str());
-
+            auto dtype_ = kernel->type();
+            auto shape_ = kernel->shape();
+            if (quant_algo_.getWeightBits() == 4) {
+                dtype_ = DataType::TYPE_INT4X2;
+                shape_ = {kernel->shape()[0], kernel->shape()[1] * 2};
+            }
             dense_weights->kernel = ConstBufferPtr(
                 new ft::QBuffer(BufferPtr(new Buffer(kernel->where(),
-                                                     DataType::TYPE_INT4X2,
-                                                     {kernel->shape()[0], kernel->shape()[1] * 2},
+                                                     dtype_,
+                                                     shape_,
                                                      kernel->data())),
                                 BufferPtr(new Buffer(scales->where(),
                                                      scales->type(),
