@@ -4,7 +4,7 @@ load("//src/fastertransformer/devices:device_defs.bzl",
 
 test_copts = [
     "-fno-access-control",
-] + copts()
+] + rocm_copts()
 
 test_linkopts = [
     "-lpython3.10",
