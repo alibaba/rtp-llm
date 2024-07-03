@@ -42,6 +42,7 @@ public:
     virtual int tryReleaseKVBlock(int nums);
     virtual void releaseResource();
     int nextNeedBlockNums() const;
+    void incrFallbackBlock(int fallback_blocks);
     
     std::shared_ptr<GenerateInput> generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig();
@@ -62,8 +63,11 @@ public:
     int seqLength() const;
     int contextLength() const;
     int prefixLength() const;
+    int inputPrefixLength() const;
     int reuseLength() const;
     void setReuseLength(int reuse_length);
+    int fallbackPrefixLength() const;
+    void setFallbackPrefixLength(int fallback_prefix_length);
 
     bool isContextStream() const;
     const ft::BufferPtr& cumLogProbs() const;
@@ -74,6 +78,7 @@ public:
     std::vector<int> contextTokens(int batch_idx = 0) const;
     std::vector<int> currentExecuteTokens(int batch_idx) const;
 
+    void step();
     void checkTimeout();
     void setStop(const std::string& err_msg, absl::StatusCode err_code = absl::StatusCode::kInternal);
     void stopAndRelease(const std::string& err_msg, absl::StatusCode err_code = absl::StatusCode::kInternal);
@@ -82,6 +87,7 @@ public:
     bool setRunning();
     bool stoppedWithoutLock();
     bool stopped();
+    bool paused();
     std::string stopReason();
     bool finished();
     void setFinishedWithoutLock();
@@ -136,15 +142,20 @@ protected:
     std::condition_variable             update_cv_;
     StreamCacheResource                 stream_cache_resource_;
     SystemPromptParams                  prompt_param_;
-    bool                                is_context_stream_     = true;
-    size_t                              iter_count_            = 0;
-    size_t                              last_output_pos_       = 0;
-    int                                 reuse_length_          = 0;
-    bool                                done_                  = false;
-    bool                                cancelled_             = false;
-    bool                                released_              = false;
-    bool                                need_release_resource_ = true;
-    kmonitor::MetricsReporterPtr        metrics_reporter_      = nullptr;
+    bool                                is_context_stream_      = true;
+    size_t                              iter_count_             = 0;
+    size_t                              last_output_pos_        = 0;
+    int                                 reuse_length_           = 0;
+    int                                 fallback_blocks_        = 0;
+    int                                 fallback_times_         = 0;
+    int                                 fallback_prefix_length_ = 0;
+    int                                 max_fallback_times_     = 0;
+    bool                                done_                   = false;
+    bool                                cancelled_              = false;
+    bool                                released_               = false;
+    bool                                need_release_resource_  = true;
+
+    kmonitor::MetricsReporterPtr        metrics_reporter_       = nullptr;
     ft::SpecialTokens                   special_tokens_;
     ft::BufferPtr                       cum_log_probs_;
     autil::SynchronizedQueue<GenerateOutputs>  generate_outputs_queue_;

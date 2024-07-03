@@ -102,6 +102,8 @@ void QueryConverter::transResponse(GenerateOutputsPB* outputs, const GenerateOut
         auto aux_info = output->mutable_aux_info();
         aux_info->set_cost_time_us(response.aux_info.cost_time_us);
         aux_info->set_iter_count(response.aux_info.iter_count);
+        aux_info->set_fallback_tokens(response.aux_info.fallback_tokens);
+        aux_info->set_fallback_times(response.aux_info.fallback_times);
         aux_info->set_input_len(response.aux_info.input_len);
         aux_info->set_reuse_len(response.aux_info.reuse_len);
         aux_info->set_prefix_len(response.aux_info.prefix_len);

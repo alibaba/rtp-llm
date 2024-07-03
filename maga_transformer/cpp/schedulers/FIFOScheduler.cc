@@ -14,6 +14,7 @@ FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
     max_seq_len_(params.max_seq_len_),
     max_context_batch_size_(params.max_context_batch_size_),
     reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->freeBlockNums() / 100),
+    enable_partial_fallback_(params.enable_partial_fallback_),
     metrics_reporter_(metrics_reporter) {}
 
 FIFOScheduler::~FIFOScheduler() {
@@ -62,21 +63,36 @@ int FIFOScheduler::runningNextBlockNum() const {
     return total_need_block_nums;
 }
 
+// TODO(xinfei.sxf) Is there any situation where the request cannot be ended?
 void FIFOScheduler::evaluateRunningNext() {
-    if (running_streams_.empty()) {
-        return;
+    int running_next_block_num = runningNextBlockNum();
+    // Only in the case of partial fallback, the stream in the waiting queue may hold blocks resources.
+    if (enable_partial_fallback_) {
+        for (auto& stream : waiting_streams_) {
+            int need_block_num = (int)runningNextBlockNum() - (int)cache_manager_->freeBlockNums();
+            if (need_block_num <= 0) {
+                break;
+            }
+            if (stream->maxBlockSize()) {
+                FT_LOG_INFO("lack mem, stream [%ld] in watting queue try release blocks, "
+                    "it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
+                    stream->streamId(), stream->inputLength(), stream->seqLength(), stream->maxBlockSize(), need_block_num);
+                stream->tryReleaseKVBlock(need_block_num);
+            }
+        }
     }
 
-    int running_next_block_num = runningNextBlockNum();
     while (!running_streams_.empty()) {
         int need_block_num = (int)runningNextBlockNum() - (int)cache_manager_->freeBlockNums();
         if (need_block_num <= 0) {
             break;
         }
         auto& last_stream = *(running_streams_.rbegin());
-        last_stream->tryReleaseKVBlock(last_stream->maxBlockSize());
+        int need_release_blocks = enable_partial_fallback_ ? need_block_num : last_stream->maxBlockSize();
+        FT_LOG_INFO("lack mem, stream [%ld] fallback to wait, it's input_length:%d seq_length:%d, hold block size:%d, release block size:%d",
+            last_stream->streamId(), last_stream->inputLength(), last_stream->seqLength(), last_stream->maxBlockSize(), need_release_blocks);
+        last_stream->tryReleaseKVBlock(need_release_blocks);
         last_stream->setPaused();
-        FT_LOG_INFO("lack mem, stream [%ld] fallback to wait and input_length:%d seq_length:%d", last_stream->streamId(), last_stream->inputLength(), last_stream->seqLength());
         waiting_streams_.emplace_front(last_stream);
         running_streams_.pop_back();
     }
@@ -98,16 +114,23 @@ bool FIFOScheduler::evaluateRunningMemory(int total_token_size) const {
 }
 
 bool FIFOScheduler::evaluateKVCacheMemory(int new_block_num) const {
+    FT_LOG_DEBUG("stream runningNextBlockNum = %d, new_block_num = %d, cache_manager_->freeBlockNums() = %d",
+        runningNextBlockNum(), new_block_num, cache_manager_->freeBlockNums());
     return runningNextBlockNum() + new_block_num <= cache_manager_->freeBlockNums();
 }
 
-// TODO(xinfei.sxf) 在考虑reuse cache的情况下，评估不准确，应该立刻申请资源试试。
+// TODO(xinfei.sxf) When considering reuse cache, the evaluation is not accurate, so we should try to apply for resources immediately.
 bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
                                       const GenerateStreamPtr&       new_stream) const {
     int total_token_size = new_stream->contextLength() + running_streams_.size();
     for (auto& stream : streams) {
         total_token_size += stream->contextLength();
     }
+
+    FT_LOG_DEBUG("stream [%d], new_stream->nextNeedBlockNums() = %d, reserve_block_num = %d, "
+    "total_token_size = %d, evaluateRunningMemory(total_token_size) = %d",
+    new_stream->streamId(), new_stream->nextNeedBlockNums(), reserve_block_num_, total_token_size, evaluateRunningMemory(total_token_size));
+
     return evaluateKVCacheMemory(new_stream->nextNeedBlockNums() + reserve_block_num_)
            && evaluateRunningMemory(total_token_size) && new_stream->initKVBlock();
 }
@@ -124,9 +147,11 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
                 it = waiting_streams_.erase(it);
             }
         } else if (running_streams_.empty() && new_streams.empty()) {
-            // It is impossible for this stream to acquire enough resources
+            // TODO(xinfei.sxf) At this time, you can also release the blocks held by other waiting streams
             FT_LOG_DEBUG("stream [%ld] can not add to new queue", (*it)->streamId());
+            // TODO(xinfei.sxf) Return some tokens...
             (*it)->setStop("LACK MEM", absl::StatusCode::kResourceExhausted);
+            (*it)->releaseResource();
             it++;
         } else {
             // try to join new streams in the next schedule cycle
@@ -143,7 +168,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     });
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
-    // TODO(xinfei.sxf) 刚踢出running的可能马上又加入了running
+    // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     auto running_stream_size = running_streams_.size();
     evaluateRunningNext();
     auto fallback_stream_size = running_stream_size - running_streams_.size();

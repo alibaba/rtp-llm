@@ -141,12 +141,18 @@ static bool CheckUseFMHA(const fastertransformer::GptInitParameter& params) {
 
 template<typename T>
 static bool CheckQKVLengthEqual(const fastertransformer::GptInitParameter& params)  {
-    char* block_cache_env = std::getenv("REUSE_CACHE");
+    char* reuse_cache_env = std::getenv("REUSE_CACHE");
     bool  not_prefix =
-        params.pre_seq_len_ == 0 && (block_cache_env == nullptr || std::string(block_cache_env) != "1");
+        params.pre_seq_len_ == 0 && (reuse_cache_env == nullptr || std::string(reuse_cache_env) != "1");
     char* multi_task_prompt_env = std::getenv("MULTI_TASK_PROMPT");
     char* multi_task_prompt_str_env = std::getenv("MULTI_TASK_PROMPT_STR");
     char* sp_model_env = std::getenv("SP_MODEL_TYPE");
+
+    char* enable_partial_fallback_env = std::getenv("ENABLE_PARTIAL_FALLBACK");
+    if (enable_partial_fallback_env != nullptr && std::string(enable_partial_fallback_env) == "1") {
+        FT_LOG_INFO("QKV length not equal: enable part fallback");
+        return false;
+    }
 
     if (!not_prefix){
         FT_LOG_INFO("QKV length not equal: use kv cache reuse");

@@ -28,6 +28,9 @@ public:
     int64_t input_token_length     = 0;
     int64_t output_token_length    = 0;
     int64_t query_batch_size       = 0;
+
+    int64_t fallback_tokens        = 0;
+    int64_t fallback_times         = 0;
 };
 
 class RtpLLMStreamMetrics: public kmonitor::MetricsGroup {
@@ -49,6 +52,8 @@ public:
     kmonitor::MutableMetric* output_token_length_metric    = nullptr;
     kmonitor::MutableMetric* query_batch_size_metric       = nullptr;
 
+    kmonitor::MutableMetric* fallback_tokens_metric        = nullptr;
+    kmonitor::MutableMetric* fallback_times_metric         = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

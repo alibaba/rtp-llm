@@ -92,7 +92,9 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
                                     input_len=output_pb.aux_info.input_len,
                                     reuse_len=output_pb.aux_info.reuse_len,
                                     prefix_len=output_pb.aux_info.prefix_len,
-                                    output_len=output_pb.aux_info.output_len
+                                    output_len=output_pb.aux_info.output_len,
+                                    fallback_tokens=output_pb.aux_info.fallback_tokens,
+                                    fallback_times=output_pb.aux_info.fallback_times
                                     )
         if output_pb.aux_info.HasField('cum_log_probs'):
             output_py.aux_info.cum_log_probs = trans_tensor(output_pb.aux_info.cum_log_probs).tolist()

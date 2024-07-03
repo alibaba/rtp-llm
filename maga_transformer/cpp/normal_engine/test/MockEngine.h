@@ -29,7 +29,6 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
     params.max_seq_len_ = 20;
     params.vocab_size_ = 20;
     params.hidden_size_ = 128;
-    // auto params = GptInitParameter(2, 64, 2, 20, 20, 128);
     params.head_num_kv_ = 2;
     params.block_nums_  = 100;
     params.reuse_cache_ = config.reuse_cache;

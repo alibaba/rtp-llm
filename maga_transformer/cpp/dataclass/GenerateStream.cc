@@ -22,12 +22,15 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     stream_cache_resource_(this, resource_context, input->need_release_resource),
     need_release_resource_(input->need_release_resource),
     metrics_reporter_(metrics_reporter),
-    special_tokens_(params.special_tokens_) {
+    special_tokens_(params.special_tokens_),
+    max_fallback_times_(params.max_fallback_times_) {
+
+    begin_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+
     updatePrefix(resource_context.system_prompt);
     seq_length_ = generate_input_->inputLength();
     last_output_pos_ = seq_length_;
     
-    begin_time_us_      = autil::TimeUtility::currentTimeInMicroSeconds();
     device_             = ft::DeviceFactory::getDefaultDevice();
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
@@ -92,7 +95,12 @@ bool GenerateStream::incrKVBlock() {
 }
 
 int GenerateStream::tryReleaseKVBlock(int nums) {
-    return stream_cache_resource_.tryReleaseKVBlock(nums);
+    if (fallback_times_ >= max_fallback_times_) {
+        return 0;
+    }
+    auto release_blocks = stream_cache_resource_.tryReleaseKVBlock(nums);
+    incrFallbackBlock(release_blocks);
+    return release_blocks;
 }
 void GenerateStream::releaseResource() {
     if (need_release_resource_) {
@@ -102,6 +110,11 @@ void GenerateStream::releaseResource() {
 int GenerateStream::nextNeedBlockNums() const {
     // TODO: maybe need fix when context and reuse
     return stream_cache_resource_.singleBatchNeedBlocks(seq_length_) * batchSize();
+}
+
+void GenerateStream::incrFallbackBlock(int fallback_blocks) {
+    fallback_blocks_ += fallback_blocks;
+    fallback_times_ += 1;
 }
 
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
@@ -164,10 +177,13 @@ int GenerateStream::seqLength() const {
 }
 
 int GenerateStream::contextLength() const {
-    return seq_length_ - reuse_length_;
+    return seq_length_ - prefixLength();
+}
+int GenerateStream::inputPrefixLength() const {
+    return generate_input_->prefix_length;
 }
 int GenerateStream::prefixLength() const {
-    return generate_input_->prefix_length;
+    return fallback_prefix_length_ ? fallback_prefix_length_ : reuse_length_;
 }
 
 int GenerateStream::reuseLength() const {
@@ -176,6 +192,14 @@ int GenerateStream::reuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
+}
+
+int GenerateStream::fallbackPrefixLength() const {
+    return fallback_prefix_length_;
+}
+
+void GenerateStream::setFallbackPrefixLength(int fallback_prefix_length) {
+    fallback_prefix_length_ = fallback_prefix_length;
 }
 
 bool GenerateStream::isContextStream() const {
@@ -202,8 +226,8 @@ int GenerateStream::currentExecuteTokenSize() {
 vector<int> GenerateStream::contextTokens(int batch_idx) const {
     auto input_tokens = fastertransformer::buffer2vector<int>(
             (*complete_token_ids_)[batch_idx].view(0, seq_length_));
-    if (reuseLength() > 0) {
-        return vector<int>(input_tokens.begin() + reuseLength(), input_tokens.end());
+    if (prefixLength() > 0) {
+        return vector<int>(input_tokens.begin() + prefixLength(), input_tokens.end());
     } else {
         return input_tokens;
     }
@@ -215,6 +239,14 @@ vector<int> GenerateStream::currentExecuteTokens(int batch_idx) const {
         return contextTokens(batch_idx);
     } else {
         return {*(*complete_token_ids_)[batch_idx].dataWithOffset<int>(seq_length_ - 1)};
+    }
+}
+
+void GenerateStream::step() {
+    // iter_count represents the times of the stream participates in running
+    iter_count_++;
+    if (isContextStream()) {
+        setFallbackPrefixLength(0);
     }
 }
 
@@ -274,6 +306,11 @@ bool GenerateStream::stoppedWithoutLock() {
 bool GenerateStream::stopped() {
     std::lock_guard<std::mutex> lock(output_mutex_);
     return generate_status_.status == GenerateState::STOPPED;
+}
+
+bool GenerateStream::paused() {
+    std::lock_guard<std::mutex> lock(output_mutex_);
+    return generate_status_.status == GenerateState::PAUSED;
 }
 
 std::string GenerateStream::stopReason() {
@@ -383,10 +420,9 @@ void GenerateStream::update(ft::BufferPtr&    new_tokens,
     if (stoppedWithoutLock()) {
         return;
     }
-    if (iter_count_ == 0) {
+    if (seq_length_ == generate_input_->inputLength()) {
         first_token_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     }
-    iter_count_ += 1;
     // # NOTE: new tokens indicate num of newly genearted tokens
     // # typically 1 but can be > 1 under speculative decoding
     // # This differs from new_tokens.shape[-1] under beam search case,
@@ -425,6 +461,9 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
     for (size_t i = 0; i < tileNum(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count = iter_count_;
+        generate_output.aux_info.fallback_tokens = fallback_blocks_ * stream_cache_resource_.seqSizePerBlock();
+        generate_output.aux_info.fallback_times = fallback_times_;
+
         generate_output.output_ids =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {1lu, output_len}, ft::AllocationType::HOST}, {});
         // TODO(xinfei.sxf) optimize this copy : only copy last token
@@ -507,6 +546,8 @@ void GenerateStream::reportMetric() {
             collector.first_token_latency_us = first_token_time_us_;
             collector.wait_latency_us        = wait_time_us_;
             collector.pause_latency_us       = pause_time_us_;
+            collector.fallback_tokens        = fallback_blocks_ * stream_cache_resource_.seqSizePerBlock();
+            collector.fallback_times         = fallback_times_;
         }
         metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(nullptr, &collector);
     }

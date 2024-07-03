@@ -44,7 +44,7 @@ private:
     size_t                              max_seq_len_        = 0;
     size_t                              max_context_batch_size_ = 1;
     int                                 reserve_block_num_  = 0;
-    bool                                enable_fallback     = false;
+    bool                                enable_partial_fallback_ = false;
     std::atomic<bool>                   stop_               = false;
     std::mutex                          lock_;
     std::condition_variable             cond_;

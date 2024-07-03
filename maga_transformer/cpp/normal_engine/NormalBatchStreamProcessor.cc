@@ -83,6 +83,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                         kv_cache.batch_offset[i].size() * sizeof(int));
             batch_idx += 1;
         }
+
+        stream->step();
     }
 
     int token_idx = batch_idx;
@@ -98,7 +100,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
             cum_output_seq_len += stream->contextLength();
             input_lengths[batch_idx]  = stream->contextLength();
-            prefix_lengths[batch_idx] = stream->reuseLength();
+            prefix_lengths[batch_idx] = stream->prefixLength();
             lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
             if (has_positional_encoding_) {
                 // TODO(xinfei.sxf) optimize this, reduce cost
@@ -114,6 +116,8 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             batch_idx += 1;
             token_idx += input_tokens.size();
         }
+
+        stream->step();
     }
     return model_input;
 }

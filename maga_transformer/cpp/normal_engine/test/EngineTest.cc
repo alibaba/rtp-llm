@@ -139,7 +139,6 @@ TEST_F(NormalEngineTest, testNewDevice) {
     query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
     query->generate_config                 = make_shared<GenerateConfig>();
     query->generate_config->max_new_tokens = 1;
-    // query->generate_config->is_streaming   = true;
 
     shared_ptr<GenerateStream> stream = engine->enqueue(query);
 

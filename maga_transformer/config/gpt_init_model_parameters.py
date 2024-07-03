@@ -348,6 +348,12 @@ class GptInitModelParameters:
         logging.info(f'kv_cache_mem_mb: {self.kv_cache_mem_mb}')
         self.block_nums = int(os.environ.get('TEST_BLOCK_NUM', 0))
         logging.info(f'block_nums: {self.block_nums}')
+        
+        self.enable_partial_fallback = bool(int(os.environ.get('ENABLE_PARTIAL_FALLBACK', 0)))
+        logging.info(f'enable_partial_fallback: {self.enable_partial_fallback}')
+        
+        self.max_fallback_times = int(os.environ.get('MAX_FALLBACK_TIMES', 1024))
+        
         self.scheduler_reserve_resource_ratio = int(os.environ.get('SCHEDUlER_RESERVE_RESOURCE_RATIO', 5))
         logging.info(f'scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}')
         self.reuse_cache = os.environ.get('REUSE_CACHE', None) == '1' or os.environ.get('USE_BLOCK_CACHE', None) == '1'

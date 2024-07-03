@@ -59,6 +59,8 @@ public:
     int                                              prefix_len     = 0;
     int                                              reuse_len      = 0;
     int                                              output_len     = 0;
+    int                                              fallback_tokens = 0;
+    int                                              fallback_times  = 0;
     std::optional<ft::ConstBufferPtr>                cum_log_probs;
 };
 

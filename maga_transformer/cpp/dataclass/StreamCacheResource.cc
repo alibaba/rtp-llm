@@ -47,6 +47,13 @@ bool StreamCacheResource::initKVBlock() {
     KVCacheBlockAddr kv_cache_block_addr;
     int              reuse_length;
     bool             success;
+    auto current_block_size = maxBlockSize();
+    if (current_block_size) {
+        // 说明是部分回退的场景
+        auto fallback_prefix_length = current_block_size * seqSizePerBlock();
+        stream_->setFallbackPrefixLength(fallback_prefix_length);
+        return incrKVBlock();
+    }
     if (resource_context_.reuse_cache) {
         std::tie(success, kv_cache_block_addr, reuse_length) =
             resource_context_.cache_manager->mallocWithCache(align_block_num, stream_->completeTokenIdsVec());
@@ -101,6 +108,7 @@ bool StreamCacheResource::incrKVBlock() {
         batch_block_addr_.append(i, resource[resource_index]);
         resource_index++;
     }
+
     return true;
 }
 
