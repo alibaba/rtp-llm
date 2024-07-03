@@ -5,6 +5,7 @@
 
 using namespace std;
 using namespace fastertransformer;
+using namespace rocm;
 
 class EmbeddingLookupTest: public DeviceTestBase {
 };
