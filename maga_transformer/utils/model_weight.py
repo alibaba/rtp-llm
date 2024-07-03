@@ -100,6 +100,9 @@ def sp_neg1(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tens
 def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor:
     return t
 
+def stack_(ts: List[torch.Tensor]):
+    return torch.stack(ts, dim=0)
+
 def get_sp_tensor(t: torch.Tensor, qkv_hidden_size: int, hidden_size: int, tp: int, tp_rank: int, kv_broadcast: bool):
     kv_hidden_size = (qkv_hidden_size - hidden_size) // 2
     if len(t.shape) == 1:

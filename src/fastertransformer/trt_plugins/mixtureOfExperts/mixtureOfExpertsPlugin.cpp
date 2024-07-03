@@ -16,6 +16,7 @@
  */
 #include "src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 #include "src/fastertransformer/cuda/trt_utils.h"
+#include "src/fastertransformer/utils/utils.h"
 #include <numeric>
 
 using namespace nvinfer1;
@@ -25,9 +26,9 @@ using namespace tensorrt_llm::kernels;
 using tensorrt_llm::plugins::MixtureOfExpertsPlugin;
 
 
-MixtureOfExpertsPlugin::MixtureOfExpertsPlugin(int number_of_experts, int top_k, bool normalize_expert_scale, 
-    int expert_hidden_size, int expert_inter_size, fastertransformer::ActivationType activation_type, 
-    nvinfer1::DataType type, nvinfer1::DataType weight_type, MOEExpertScaleNormalizationMode normalization_mode)
+MixtureOfExpertsPlugin::MixtureOfExpertsPlugin(int number_of_experts, int top_k, bool normalize_expert_scale,
+    int expert_hidden_size, int expert_inter_size, fastertransformer::ActivationType activation_type,
+    nvinfer1::DataType type, nvinfer1::DataType weight_type,  bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode)
     : mNumExperts(number_of_experts)
     , mK(top_k)
     , mNormalizeExpertScale(normalize_expert_scale)
@@ -36,6 +37,8 @@ MixtureOfExpertsPlugin::MixtureOfExpertsPlugin(int number_of_experts, int top_k,
     , mActivationType(activation_type)
     , mType(type)
     , mWeightType(weight_type)
+    , mHasZeros(has_zeros)
+    , mGroupSize(group_size)
     // , mQuantMode(quant_mode)
     // , mTPSize(tp_size)
     // , mTPRank(tp_rank)
@@ -47,40 +50,22 @@ MixtureOfExpertsPlugin::MixtureOfExpertsPlugin(int number_of_experts, int top_k,
 
 void MixtureOfExpertsPlugin::init()
 {
-    if (mType == DataType::kHALF && mWeightType == DataType::kHALF)
-    {
-        mMOERunner = std::make_unique<CutlassMoeFCRunner<half, half>>();
+    if (mWeightType == DataType::kINT8 || mWeightType == DataType::kINT4){
+        T_SWITCH(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&]{
+            V_SWITCH(mHasZeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY, [&]{
+                T_SWITCH(mWeightType == DataType::kINT4, WT, cutlass::uint4b_t, uint8_t, [&] {
+                    mMOERunner
+                        = std::make_shared<CutlassMoeFCRunner<T, WT, Q>>();
+                });
+            });
+        });
     }
-    else if (mType == DataType::kFLOAT && mWeightType == DataType::kFLOAT)
-    {
-        mMOERunner = std::make_unique<CutlassMoeFCRunner<float, float>>();
-    }
-    else if (mType == DataType::kHALF && mWeightType == DataType::kINT8)
-    {
-        // if (mQuantMode.hasInt4Weights())
-        // {
-        //     mMOERunner = std::make_unique<CutlassMoeFCRunner<half, cutlass::uint4b_t>>();
-        // }
-        // else
-        // {
-            mMOERunner = std::make_unique<CutlassMoeFCRunner<half, uint8_t>>();
-        // }
+    else if(mWeightType == DataType::kHALF){
+        mMOERunner = std::make_shared<CutlassMoeFCRunner<half, half, cutlass::WeightOnlyQuantOp::UNDEFINED>>();
     }
 #ifdef ENABLE_BF16
-    else if (mType == DataType::kBF16 && mWeightType == DataType::kBF16)
-    {
-        mMOERunner = std::make_unique<CutlassMoeFCRunner<__nv_bfloat16, __nv_bfloat16>>();
-    }
-    else if (mType == DataType::kBF16 && mWeightType == DataType::kINT8)
-    {
-        // if (mQuantMode.hasInt4Weights())
-        // {
-        //     mMOERunner = std::make_unique<CutlassMoeFCRunner<__nv_bfloat16, cutlass::uint4b_t>>();
-        // }
-        // else
-        // {
-            mMOERunner = std::make_unique<CutlassMoeFCRunner<__nv_bfloat16, uint8_t>>();
-        // }
+    else if(mWeightType == DataType::kBF16){
+        mMOERunner = std::make_shared<CutlassMoeFCRunner<__nv_bfloat16, __nv_bfloat16, cutlass::WeightOnlyQuantOp::UNDEFINED>>();
     }
 #endif
     else
@@ -94,7 +79,7 @@ size_t MixtureOfExpertsPlugin::getWorkspaceSize(int num_tokens)
 
     size_t moe_workspace_size = mMOERunner->getWorkspaceSize(
         num_tokens, mExpertHiddenSize, mExpertInterSize, mNumExperts, mK, mActivationType, getParallelismConfig());
-    
+
         return moe_workspace_size;
 }
 
@@ -118,12 +103,15 @@ int MixtureOfExpertsPlugin::enqueue(
     const float* moe_gates,
     const void* fc1_expert_weight,
     const void* fc1_quant_scale,
+    const void* fc1_quant_zeros,
     const void* fc1_expert_bias,
     const void* fc2_expert_weight,
     const void* fc2_quant_scale,
+    const void* fc2_quant_zeros,
     const void* fc2_expert_bias,
     const void* fc3_expert_weight,
     const void* fc3_quant_scale,
+    const void* fc3_quant_zeros,
     const void* fc3_expert_bias,
     const int num_rows,
     void* workspace,
@@ -136,26 +124,30 @@ int MixtureOfExpertsPlugin::enqueue(
     cudaStream_t stream) noexcept
 {
     const int num_not_finished = num_rows; // TODO Take this as an input
-    MOEParallelismConfig parallelism_config = getParallelismConfig(); 
+    MOEParallelismConfig parallelism_config = getParallelismConfig();
 
     mMOERunner->runMoe(
         input,   // const void*
         moe_gates,
         fc1_expert_weight,
         fc1_quant_scale,
+        fc1_quant_zeros,
         fc1_expert_bias,
-        mActivationType, 
+        mActivationType,
         fc2_expert_weight,
         fc2_quant_scale,
+        fc2_quant_zeros,
         fc2_expert_bias,
         fc3_expert_weight,
         fc3_quant_scale,
+        fc3_quant_zeros,
         fc3_expert_bias,
-        num_rows, 
-        mExpertHiddenSize, 
+        num_rows,
+        mExpertHiddenSize,
         mExpertInterSize,
-        mNumExperts, 
-        mK, 
+        mNumExperts,
+        mK,
+        mGroupSize,
         mNormalizeExpertScale,
         reinterpret_cast<char*>(workspace),
         // Outputs
@@ -166,8 +158,8 @@ int MixtureOfExpertsPlugin::enqueue(
         expert_scale, // void*
         src_row_to_dst_row, // int*
         export_for_src_row,  // int*
-        parallelism_config, 
-        mNormalizationMode, 
+        parallelism_config,
+        mNormalizationMode,
         stream);
 
     return 0;

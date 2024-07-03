@@ -33,6 +33,7 @@ enum class DataType : int32_t
     kFP8 = 6,
     kBF16 = 7,
     kINT64 = 8,
+    kINT4 = 9,
 };
 }
 

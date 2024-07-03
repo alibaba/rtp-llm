@@ -17,6 +17,7 @@
 
 #pragma once
 // #include "cutlass/gemm/gemm.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/weight_only_quant_op.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 #include "src/fastertransformer/utils/activation_types.h"
@@ -150,19 +151,23 @@ public:
                         const float*                      gating_output,
                         const void*                       fc1_expert_weights,
                         const void*                       fc1_scales,
+                        const void*                       fc1_zeros,
                         const void*                       fc1_expert_biases,
                         fastertransformer::ActivationType fc1_activation_type,
                         const void*                       fc2_expert_weights,
                         const void*                       fc2_scales,
+                        const void*                       fc2_zeros,
                         const void*                       fc2_expert_biases,
                         const void*                       fc3_expert_weights,
                         const void*                       fc3_scales,
+                        const void*                       fc3_zeros,
                         const void*                       fc3_expert_biases,
                         const int                         num_rows,
                         const int                         hidden_size,
                         const int                         inter_size,
                         const int                         num_experts,
                         const int                         k,
+                        const int                         group_size,
                         const bool                        normalize_expert_scale,
                         char*                             workspace_ptr,
                         void*                             final_output,
@@ -182,6 +187,7 @@ public:
 // Avoid making several duplicates of this class.
 template<typename T,          /*The type used for activations/scales/compute*/
          typename WeightType, /* The type for the MoE weights */
+         cutlass::WeightOnlyQuantOp QuantOp,
          typename Enable = void>
 class CutlassMoeFCRunner: public CutlassMoeFCRunnerInterface {
 public:
@@ -208,19 +214,23 @@ public:
                 const float*                      gating_output,
                 const void*                       fc1_expert_weights,
                 const void*                       fc1_scales,
+                const void*                       fc1_zeros,
                 const void*                       fc1_expert_biases,
                 fastertransformer::ActivationType fc1_activation_type,
                 const void*                       fc2_expert_weights,
                 const void*                       fc2_scales,
+                const void*                       fc2_zeros,
                 const void*                       fc2_expert_biases,
                 const void*                       fc3_expert_weights,
                 const void*                       fc3_scales,
+                const void*                       fc3_zeros,
                 const void*                       fc3_expert_biases,
                 const int                         num_rows,
                 const int                         hidden_size,
                 const int                         inter_size,
                 const int                         num_experts,
                 const int                         k,
+                const int                         group_size,
                 const bool                        normalize_expert_scale,
                 char*                             workspace_ptr,
                 void*                             final_output,
@@ -260,7 +270,7 @@ private:
 
 private:
     CubKeyValueSorter            sorter_;
-    MoeGemmRunner<T, WeightType> moe_gemm_runner_;
+    MoeGemmRunner<T, WeightType, QuantOp> moe_gemm_runner_;
 
     // Pointers
     int*   source_rows_;
@@ -276,8 +286,8 @@ private:
     T* glu_inter_result_;
 };
 
-template<typename WeightType>
-class CutlassMoeFCRunner<float, WeightType, typename std::enable_if_t<!std::is_same<float, WeightType>::value>>:
+template<typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
+class CutlassMoeFCRunner<float, WeightType, QuantOp, typename std::enable_if_t<!std::is_same<float, WeightType>::value>>:
     public CutlassMoeFCRunnerInterface {
 public:
     CutlassMoeFCRunner() = default;
@@ -300,19 +310,23 @@ public:
                 const float*                      gating_output,
                 const void*                       fc1_expert_weights,
                 const void*                       fc1_scales,
+                const void*                       fc1_zeros,
                 const void*                       fc1_expert_biases,
                 fastertransformer::ActivationType fc1_activation_type,
                 const void*                       fc2_expert_weights,
                 const void*                       fc2_scales,
+                const void*                       fc2_zeros,
                 const void*                       fc2_expert_biases,
-                const void*                       fc3_expert_weights_void,
-                const void*                       fc3_scales_void,
-                const void*                       fc3_expert_biases_void,
+                const void*                       fc3_expert_weights,
+                const void*                       fc3_scales,
+                const void*                       fc3_zeros,
+                const void*                       fc3_expert_biases,
                 const int                         num_rows,
                 const int                         hidden_size,
                 const int                         inter_size,
                 const int                         num_experts,
                 const int                         k,
+                const int                         group_size,
                 const bool                        normalize_expert_scale,
                 char*                             workspace_ptr,
                 void*                             final_output,

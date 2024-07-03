@@ -19,6 +19,8 @@
 namespace tensorrt_llm
 {
 #ifdef ENABLE_BF16
-template class MoeGemmRunner<__nv_bfloat16, cutlass::uint4b_t>;
+template class MoeGemmRunner<__nv_bfloat16, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>;
+template class MoeGemmRunner<__nv_bfloat16, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY>;
+template class MoeGemmRunner<__nv_bfloat16, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>;
 #endif
 } // namespace tensorrt_llm

@@ -124,17 +124,19 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
         print_bsd(layer_id, "moe gate", moe_gates_buf_, 1, m, expert_num_);
 
         if (quant_algo_.weightOnly()) {
-            FT_CHECK_WITH_INFO(quant_algo_.getGroupSize() == 0, "moe only support scale_per_col");
             moe_plugin_->enqueue(input_tensor,
                                  moe_gates_buf_,
                                  ffn_weights->intermediate_weight.quant_kernel,
                                  ffn_weights->intermediate_weight.weight_only_quant_scale,
+                                 ffn_weights->intermediate_weight.quant_zeros,
                                  ffn_weights->intermediate_weight.bias,
                                  ffn_weights->output_weight.quant_kernel,
                                  ffn_weights->output_weight.weight_only_quant_scale,
+                                 ffn_weights->output_weight.quant_zeros,
                                  ffn_weights->output_weight.bias,
                                  ffn_weights->intermediate_weight2.quant_kernel,
                                  ffn_weights->intermediate_weight2.weight_only_quant_scale,
+                                 ffn_weights->intermediate_weight2.quant_zeros,
                                  ffn_weights->intermediate_weight2.bias,
                                  m,
                                  moe_fc_workspace_,
@@ -150,11 +152,14 @@ void FfnLayer<T>::forward(TensorMap* output_tensors, TensorMap* input_tensors, c
                                  moe_gates_buf_,
                                  ffn_weights->intermediate_weight.kernel,
                                  nullptr,
+                                 nullptr,
                                  ffn_weights->intermediate_weight.bias,
                                  ffn_weights->output_weight.kernel,
                                  nullptr,
+                                 nullptr,
                                  ffn_weights->output_weight.bias,
                                  ffn_weights->intermediate_weight2.kernel,
+                                 nullptr,
                                  nullptr,
                                  ffn_weights->intermediate_weight2.bias,
                                  m,
@@ -408,9 +413,12 @@ FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
 
         if (quant_algo.getWeightBits() == 8) {
             weight_type = nvinfer1::DataType::kINT8;
+        } else if (quant_algo.getWeightBits() == 4) {
+            weight_type = nvinfer1::DataType::kINT4;
         } else if (quant_algo.getWeightBits() != 0) {
-            FT_LOG_ERROR("MOE only support int8");
-        } else {
+            FT_LOG_ERROR("MOE not support quant bits: %d", quant_algo.getWeightBits());
+        }
+        else {
             weight_type = data_type;
         }
 
@@ -428,6 +436,8 @@ FfnLayer<T>::FfnLayer(size_t                            max_batch_size,
                                                                                       activation_type,
                                                                                       data_type,
                                                                                       weight_type,
+                                                                                      quant_algo.getGroupSize() > 0,
+                                                                                      quant_algo.getGroupSize(),
                                                                                       moe_norm_mode);
     }
     lora_gemm_ = std::make_shared<LoraGemm<T>>(stream, allocator, cublas_wrapper);

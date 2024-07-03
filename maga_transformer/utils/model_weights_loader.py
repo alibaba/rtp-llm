@@ -477,16 +477,17 @@ class ModelWeightsLoader:
 
     def preprocess_moe_groupwise_weight_params(self, qweight_int32, qzeros_int32, scales_fp16, device: str, gptq: bool, awq: bool, weight_bits: int):
         assert qweight_int32.dim() == 3
-        qweight_list = torch.chunk(tensor, qweight_int32.shape[0], dim=0)
-        qzeros_list = torch.chunk(tensor, qzeros_int32.shape[0], dim=0)
-        scales_list = torch.chunk(tensor, scales_fp16.shape[0], dim=0)
+
+        qweight_list = torch.chunk(qweight_int32, qweight_int32.shape[0], dim=0)
+        qzeros_list = torch.chunk(qzeros_int32, qzeros_int32.shape[0], dim=0)
+        scales_list = torch.chunk(scales_fp16, scales_fp16.shape[0], dim=0)
         processed_weights = []
         processed_zeros = []
         processed_scalses = []
         for w, z, s in zip(qweight_list, qzeros_list, scales_list):
-            w = torch.squeeze(w)
-            z = torch.squeeze(z)
-            s = torch.squeeze(s)
+            w = torch.squeeze(w).transpose(1, 0).contiguous()
+            z = torch.squeeze(z).transpose(1, 0).contiguous()
+            s = torch.squeeze(s).transpose(1, 0).contiguous()
             p_w, p_z, p_s = self.preprocess_groupwise_weight_params(w, z, s, device, gptq, awq, weight_bits)
             processed_weights.append(p_w)
             processed_zeros.append(p_z)

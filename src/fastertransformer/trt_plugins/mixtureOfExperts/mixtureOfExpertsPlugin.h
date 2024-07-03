@@ -21,6 +21,7 @@
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_kernels.h"
 #include "src/fastertransformer/cuda/trt_utils.h"
 #include "src/fastertransformer/utils/activation_types.h"
+#include "cutlass/numeric_types.h"
 
 #include <cassert>
 // #include <mpi.h>
@@ -44,7 +45,7 @@ public:
     MixtureOfExpertsPlugin() = delete;
     MixtureOfExpertsPlugin(int number_of_experts, int top_k, bool normalize_expert_scale, int expert_hidden_size, 
         int expert_inter_size, fastertransformer::ActivationType activation_type, nvinfer1::DataType type, 
-        nvinfer1::DataType weight_type, MOEExpertScaleNormalizationMode normalization_mode);
+        nvinfer1::DataType weight_type,  bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode);
 
     void init();
 
@@ -56,12 +57,15 @@ public:
     const float* moe_gates,
     const void* fc1_expert_weight,
     const void* fc1_quant_scale,
+    const void* fc1_quant_zero,
     const void* fc1_expert_bias,
     const void* fc2_expert_weight,
     const void* fc2_quant_scale,
+    const void* fc2_quant_zero,
     const void* fc2_expert_bias,
     const void* fc3_expert_weight,
     const void* fc3_quant_scale,
+    const void* fc3_quant_zero,
     const void* fc3_expert_bias,
     const int num_rows,
     void* workspace,
@@ -74,7 +78,7 @@ public:
     cudaStream_t stream) noexcept;
 
 private:
-    std::unique_ptr<kernels::CutlassMoeFCRunnerInterface> mMOERunner{};
+    std::shared_ptr<kernels::CutlassMoeFCRunnerInterface> mMOERunner{};
     int mNumExperts{};
     int mK{};
     int mExpertHiddenSize{};
@@ -83,6 +87,8 @@ private:
     fastertransformer::ActivationType mActivationType;
     nvinfer1::DataType mType{};
     nvinfer1::DataType mWeightType{};
+    bool mHasZeros;
+    int mGroupSize;
     // tensorrt_llm::common::QuantMode mQuantMode;
     // int mTPSize{};
     // int mTPRank{};

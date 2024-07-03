@@ -18,5 +18,7 @@
 
 namespace tensorrt_llm
 {
-template class MoeGemmRunner<half, uint8_t>;
+template class MoeGemmRunner<half, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>;
+template class MoeGemmRunner<half, uint8_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY>;
+template class MoeGemmRunner<half, uint8_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>;
 }

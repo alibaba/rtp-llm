@@ -7,12 +7,10 @@ import json
 from typing import List, Any
 
 from maga_transformer.models.qwen_v2 import QWenV2, QWenV2Weight
-from maga_transformer.utils.model_weight import W, WeightInfo, CkptWeightInfo, identity, transpose_pad, transpose
+from maga_transformer.utils.model_weight import W, WeightInfo, CkptWeightInfo, identity, transpose_pad, transpose, stack_
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.model_factory_register import register_model
 
-def stack_(ts: List[torch.Tensor]):
-    return torch.stack(ts, dim=0)
 
 class QWenV2MoeWeight(QWenV2Weight):
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
@@ -53,6 +51,7 @@ class Qwen2Moe(QWenV2):
         config.expert_num = config_json['num_experts']
         config.moe_inter_padding_size=config_json['moe_intermediate_size']
         config.inter_size = config_json['shared_expert_intermediate_size']
+        config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.has_moe_norm = False
         # step for moe layer
         config.moe_style = 2
@@ -60,7 +59,7 @@ class Qwen2Moe(QWenV2):
 
         # todo
         # qwen2 moe is supposed to have different inter size for moe and normal layers
-        # so there should be two config for ffnlayer 
+        # so there should be two config for ffnlayer
         if moe_step != 1:
             raise Exception("Paritial moe weights for qwen2 is not implemented yet!")
         config.moe_layer_index = [i for i in range(moe_step - 1,  config.layer_num, moe_step)]

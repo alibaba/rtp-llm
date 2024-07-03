@@ -18,15 +18,36 @@
 #pragma once
 #include "src/fastertransformer/cutlass/cutlass_kernels/gemm_configs.h"
 #include "src/fastertransformer/utils/activation_types.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/weight_only_quant_op.h"
 #include <cuda_runtime_api.h>
 #include <optional>
 
 namespace tensorrt_llm
 {
 
-template <typename T, /*The type used for activations/scales/compute*/
-    typename WeightType /* The type for the MoE weights */>
-class MoeGemmRunner
+class MoeGemmRunnerInterface
+{
+public:
+    MoeGemmRunnerInterface () {}
+    
+    virtual ~MoeGemmRunnerInterface () {}
+
+    virtual void setBestConfig(std::optional<cutlass_extensions::CutlassGemmConfig> best_config) = 0;
+
+    virtual void moeGemmBiasAct(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points, const void* biases, void* C,
+        int64_t* total_rows_before_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, int group_size,
+        fastertransformer::ActivationType activation_type, cudaStream_t stream) = 0;
+
+    virtual void moeGemm(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points, void* C, int64_t* total_rows_before_expert,
+        int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, int group_size, cudaStream_t stream) = 0;
+
+    virtual std::vector<cutlass_extensions::CutlassGemmConfig> getConfigs() = 0;
+
+
+}; 
+
+template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
+class MoeGemmRunner : public virtual MoeGemmRunnerInterface
 {
 public:
     MoeGemmRunner();
@@ -36,30 +57,48 @@ public:
         best_config_ = std::move(best_config);
     }
 
-    void moeGemmBiasAct(const T* A, const WeightType* B, const T* weight_scales, const T* biases, T* C,
-        int64_t* total_rows_before_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
+    void moeGemmBiasAct(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points, const void* biases, void* C,
+        int64_t* total_rows_before_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, int group_size,
         fastertransformer::ActivationType activation_type, cudaStream_t stream);
 
-    void moeGemm(const T* A, const WeightType* B, const T* weight_scales, T* C, int64_t* total_rows_before_expert,
-        int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, cudaStream_t stream);
+    void moeGemm(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points, void* C, int64_t* total_rows_before_expert,
+        int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, int group_size, cudaStream_t stream);
 
     std::vector<cutlass_extensions::CutlassGemmConfig> getConfigs();
 
 private:
     template <typename EpilogueTag>
-    void dispatchToArch(const T* A, const WeightType* B, const T* weight_scales, const T* biases, T* C,
-        int64_t* total_rows_before_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
+    void dispatchToArch(const T* A, const WeightType* B, const T* weight_scales, const T* weight_zero_points, const T* biases, T* C,
+        int64_t* total_rows_before_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, int group_size,
         cutlass_extensions::CutlassGemmConfig gemm_config, cudaStream_t stream, int* occupancy = nullptr);
 
     template <typename EpilogueTag>
-    void runGemm(const T* A, const WeightType* B, const T* weight_scales, const T* biases, T* C,
-        int64_t* total_rows_before_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts,
+    void runGemm(const T* A, const WeightType* B, const T* weight_scales, const T* weight_zero_points, const T* biases, T* C,
+        int64_t* total_rows_before_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, int group_size,
         cudaStream_t stream);
 
 private:
     int sm_;
     int multi_processor_count_;
     std::optional<cutlass_extensions::CutlassGemmConfig> best_config_{};
+};
+
+template <typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
+class MoeGemmRunner<float, WeightType, QuantOp> : public virtual MoeGemmRunnerInterface
+{
+public:
+    MoeGemmRunner();
+
+    void setBestConfig(std::optional<cutlass_extensions::CutlassGemmConfig> best_config) {}
+
+    void moeGemmBiasAct(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points, const void* biases, void* C,
+        int64_t* total_rows_before_expert, int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, int group_size,
+        fastertransformer::ActivationType activation_type, cudaStream_t stream);
+
+    void moeGemm(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points,void* C, int64_t* total_rows_before_expert,
+        int64_t total_rows, int64_t gemm_n, int64_t gemm_k, int num_experts, int group_size, cudaStream_t stream);
+
+    std::vector<cutlass_extensions::CutlassGemmConfig> getConfigs();
 };
 
 } // namespace tensorrt_llm
