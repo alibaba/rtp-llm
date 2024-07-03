@@ -1,5 +1,6 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
@@ -181,15 +182,25 @@ SelectOutput CudaDevice::select(const SelectParams& params) {
     return std::move(output);
 }
 
-DotProductOutput CudaDevice::dotProduct(const DotProductParams& params) {
+MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
     const auto& A = params.A;
     const auto& B = params.B;
 
-    RUNTIME_ASSERT_OP_ARG(A.shape().size() == 1, "A must be 1D, but got %d", A.shape().size());
-    const auto m = A.shape()[0];
-    RUNTIME_ASSERT_OP_ARG(B.shape()[0] == m,
-                          "A and B must have same 0-d size, but got %d vs %d", m, B.shape()[0]);
-    const auto n = B.size() / m;
+    int m, n;
+    if (A.shape() == B.shape()) {
+        m = A.size();
+        n = 1;
+    } else if (A.size() == 1) {
+        m = 1;
+        n = B.size();
+    } else if (A.shape().size() == 1 && B.shape()[0] == A.shape()[0]) {
+        m = A.shape()[0];
+        n = B.size() / m;
+    } else {
+        RUNTIME_ASSERT_OP_ARG(false,
+            "multiply can not be applied to A[%s] and B[%s]",
+            A.debugString().c_str(), B.debugString().c_str());
+    }
 
     RUNTIME_ASSERT_OP_ARG(A.type() == B.type(),
                           "A and B must have same type, but got %d vs %d", A.type(), B.type());
@@ -219,6 +230,8 @@ DotProductOutput CudaDevice::dotProduct(const DotProductParams& params) {
         n,
         stream_
     );
+
+    printBufferData(*output, "multiply_output");
 
     return move(output);
 }

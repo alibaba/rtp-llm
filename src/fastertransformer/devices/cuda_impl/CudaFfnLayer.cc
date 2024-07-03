@@ -17,6 +17,9 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
     const auto hidden_dim = hidden.shape()[1];
     const auto num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
     const auto top_k = moe_conf.top_k;
+
+    // moe up, gate weights expected shape: [num_expert, expert_hidden_size, hidden_dim]
+    // moe down weights expected shape: [num_expert, hidden_dim, expert_hidden_size]
     // NOTE: fp16/bf16 moe ffn layout differs from int8 weights.
     // This difference is caused by kernel implementation, and ignored here.
     const auto expert_hidden_size = params.weights.moe_up_weight->kernel->shape()[1];

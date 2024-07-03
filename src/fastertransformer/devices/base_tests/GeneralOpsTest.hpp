@@ -137,7 +137,7 @@ void testSelect() {
 }
 
 void testSelect1d() {
-        auto src = createBuffer<float>({2, 6}, {
+    auto src = createBuffer<float>({2, 6}, {
         0, 1, 2, 3, 4, 5,
         10, 11, 12, 13, 14, 15
     });
@@ -189,14 +189,37 @@ void testEmbeddingLookup() {
     auto table = createDeviceBuffer<half>(table_tensor);
     auto output = device_->embeddingLookup({*ids, *table});
     auto output_tensor = bufferToTensor(*output);
-    std::cout << "output_tensor: " << output_tensor << std::endl;
 
     auto ids_tensor = bufferToTensor(*ids);
-    std::cout << "ids: " << ids_tensor << std::endl;
     auto expected_values = table_tensor.index_select(0, ids_tensor);
-    std::cout << "expected: " << expected_values << output_tensor << std::endl;
 
     ASSERT_TRUE(torch::allclose(expected_values, output_tensor, 1e-03, 1e-03));
+}
+
+void testMultiply() {
+    const auto m = 16;
+    auto n = 8;
+
+    auto A = torch::rand({m}, torch::kFloat16);
+    auto B = torch::rand({m}, torch::kFloat16);
+
+    auto A_buf = tensorToBuffer(A);
+    auto B_buf = tensorToBuffer(B);
+
+    auto ref = A.to(torch::kFloat32) * (B.to(torch::kFloat32));
+    auto result = device_->multiply({*A_buf, *B_buf});
+
+    auto result_tensor = bufferToTensor(*result);
+    assertTensorClose(result_tensor, ref);
+
+    B = torch::rand({m, n}, torch::kFloat16);
+    B_buf = tensorToBuffer(B);
+
+    ref = A.to(torch::kFloat32) * (B.to(torch::kFloat32).t());
+    result = device_->multiply({*A_buf, *B_buf});
+
+    result_tensor = bufferToTensor(*result);
+    assertTensorClose(result_tensor, ref.t());
 }
 
 };

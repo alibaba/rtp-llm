@@ -9,4 +9,5 @@ RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testSelect1d);
 RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testSelect);
 RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testConcat);
 RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testEmbeddingLookup);
+RTP_LLM_RUN_DEVICE_TEST(GeneralOpsTest, testMultiply);
 

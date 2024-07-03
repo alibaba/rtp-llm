@@ -244,11 +244,11 @@ struct GroupedGemmParams {
     void check() const;
 };
 
-using DotProductOutput = BufferPtr;
+using MultiplyOutput = BufferPtr;
 
 // output = A * B
 // A: [m], B: [m] or [m, dim_1, ..., dim_n]
-struct DotProductParams {
+struct MultiplyParams {
     const Buffer& A;
     const Buffer& B;
     BufferPtr output = nullptr;
@@ -343,10 +343,10 @@ struct AttentionLayerParams {
 struct MoeConfigs {
     size_t expert_num;
     size_t top_k;
-    bool normalize_expert_scale;
 
-    int64_t moe_inter_padding_size;
-    bool has_moe_norm;
+    bool normalize_expert_scale        = false;
+    int64_t moe_inter_padding_size     = 0;
+    bool has_moe_norm                  = false;
 };
 
 struct FfnConfigs {

@@ -35,6 +35,7 @@ protected:
                                                             1.f,
                                                             0.f,
                                                             false,
+                                                            false,
                                                             NormType::alphanorm));
 
 
@@ -51,6 +52,7 @@ protected:
                                                         1.f,
                                                         0.f,
                                                         true,
+                                                        false,
                                                         NormType::alphanorm));
 
         assertBufferValueEqual(*norm_output.output, vector<float>({1.11, 2.22, 3.33, 1.44, 2.55, 3.66}));

@@ -26,7 +26,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
 
             auto shared_gate = gemm({params.input, *(params.weights.shared_expert_gate->kernel)});
             activation({ActivationType::Sigmoid, *shared_gate});
-            shared_expert_output = dotProduct({
+            shared_expert_output = multiply({
                 shared_gate->reshape({shared_gate->size()}), *shared_expert_output});
         }
     } else {

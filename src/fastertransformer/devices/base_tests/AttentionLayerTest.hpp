@@ -39,7 +39,6 @@ protected:
 };
 
 torch::Tensor fakeAttentionInputs(const int64_t hidden_size, const int64_t token_num) {
-    torch::manual_seed(1234);
     return torch::rand({token_num, hidden_size});
 }
 
@@ -103,7 +102,6 @@ void AttentionLayerTest<T>::testAttentionLayer(
 
     // 2. compute reference implementation result
     GptAttention gpt_attention(attention_conf);
-    torch::manual_seed(1234);
     torch::nn::init::normal_(gpt_attention->q_proj->weight);
     torch::nn::init::normal_(gpt_attention->k_proj->weight);
     torch::nn::init::normal_(gpt_attention->v_proj->weight);

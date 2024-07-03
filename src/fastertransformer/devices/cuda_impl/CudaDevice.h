@@ -52,7 +52,7 @@ public:
     LayernormOutput layernorm(const LayernormParams& params);
     BufferPtr gemm(const GemmParams& params);
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params);
-    DotProductOutput dotProduct(const DotProductParams& params);
+    MultiplyOutput multiply(const MultiplyParams& params);
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params);
     void activation(const ActivationParams& params);
     BufferPtr softmax(const SoftmaxParams& params);

@@ -22,7 +22,7 @@ public:
     virtual LayernormOutput layernorm(const LayernormParams& params);
     virtual BufferPtr gemm(const GemmParams& params);
     virtual GroupedGemmOutput groupedGemm(const GroupedGemmParams& params);
-    virtual DotProductOutput dotProduct(const DotProductParams& params);
+    virtual MultiplyOutput multiply(const MultiplyParams& params);
     virtual BufferPtr embeddingLookup(const EmbeddingLookupParams& params);
     virtual void activation(const ActivationParams& params);
     virtual BufferPtr softmax(const SoftmaxParams& params);

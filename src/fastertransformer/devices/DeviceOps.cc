@@ -42,7 +42,7 @@ GroupedGemmOutput DeviceOps::groupedGemm(const GroupedGemmParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-DotProductOutput DeviceOps::dotProduct(const DotProductParams& params) {
+MultiplyOutput DeviceOps::multiply(const MultiplyParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

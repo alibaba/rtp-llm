@@ -28,6 +28,7 @@ public:
 
         initTestDevices();
         initTestDataDir();
+        torch::manual_seed(114514);
     }
 
     virtual void initTestDevices() {
