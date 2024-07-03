@@ -52,7 +52,6 @@ class StreamCacheManager:
         else:
             block_indice = self.cache_manager_.malloc(block_num)
             reuse_length = 0
-
         stream.set_kvcache([block_indice], reuse_length)
         stream.add_resource_dtor(lambda: self.free_block_cache(stream))
 
@@ -60,20 +59,42 @@ class StreamCacheManager:
         input_token_ids = stream.complete_token_ids[0].numpy().tolist()
         if len(self.config_.vit_related_params.vit_special_token_ids) > 0:
             # for qwen_vl; todo llava
-            img_start_id = self.config_.vit_related_params.vit_special_token_ids.get('image_start_id', -1)
-            img_end_id = self.config_.vit_related_params.vit_special_token_ids.get('image_end_id', -1)
-            if img_start_id > 0 and img_end_id > 0:
-                start_token_list = [index for index, id in enumerate(input_token_ids) if id == img_start_id]
-                end_token_list = [index for index, id in enumerate(input_token_ids) if id == img_end_id]
-                if len(start_token_list) == len(end_token_list) and all([idx < idy for idx, idy in zip(start_token_list, end_token_list)]):
-                    block_indice, reuse_length = self.cache_manager_.malloc_with_cache(block_num, input_token_ids)
-                    for i in range(len(start_token_list)):
-                        if reuse_length > start_token_list[i] and reuse_length <= end_token_list[i]:
-                            reuse_length = start_token_list[i]
-                            return block_indice, reuse_length
-                else:
-                    raise Exception(f"unclosed image tag pair in {input_token_ids}")
-        return self.cache_manager_.malloc_with_cache(block_num, input_token_ids)
+            return self._cal_kvcache_reuse_length_for_multimodal(block_num, input_token_ids)
+        else:
+            return self.cache_manager_.malloc_with_cache(block_num, input_token_ids)
+
+    def _cal_kvcache_reuse_length_for_multimodal(self, block_num: int, input_token_ids: List[int]):
+        img_start_id = self.config_.vit_related_params.vit_special_token_ids.get('image_start_id', -1)
+        img_end_id = self.config_.vit_related_params.vit_special_token_ids.get('image_end_id', -1)
+        if img_start_id > 0 and img_end_id > 0:
+            start_token_list = [index for index, id in enumerate(input_token_ids) if id == img_start_id]
+            end_token_list = [index for index, id in enumerate(input_token_ids) if id == img_end_id]
+            if len(start_token_list) == len(end_token_list) and all([idx < idy for idx, idy in zip(start_token_list, end_token_list)]):
+                block_indice, reuse_length = self.cache_manager_.malloc_with_cache(block_num, input_token_ids)
+                origin_length = reuse_length
+                image_num = len(start_token_list)
+
+                # shrink reuse length to align
+                for i in reversed(range(image_num)):
+                    if reuse_length > start_token_list[i] and reuse_length <= end_token_list[i]:
+                        reuse_length = (start_token_list[i] + 1) // self.cache_manager_.config.seq_size_per_block * self.cache_manager_.config.seq_size_per_block
+                    elif reuse_length > end_token_list[i]:
+                        break
+                if origin_length - reuse_length > 0:
+                    reuse_block_idx = reuse_length // self.cache_manager_.config.seq_size_per_block
+                    origin_reuse_block_idx = origin_length // self.cache_manager_.config.seq_size_per_block
+                    self.cache_manager_.free([block_indice[reuse_block_idx: origin_reuse_block_idx]])
+                    block_indice = block_indice[:reuse_block_idx] + block_indice[origin_reuse_block_idx:]
+                    try:
+                        block_indice = block_indice + self.cache_manager_.malloc(origin_reuse_block_idx - reuse_block_idx)
+                    except Exception as e:
+                        self.cache_manager_.free([block_indice])
+                        raise e
+                return block_indice, reuse_length
+            else:
+                raise Exception(f"unclosed image tag pair in {input_token_ids}")
+        else:
+            raise Exception(f"illegal img_start_id: {img_start_id} and img_end_id: {img_end_id}")
 
     def incr_kvcache(self, streams: List[GenerateStream]):
         malloc_sizes = self._collect_malloc_sizes(streams)
