@@ -64,8 +64,6 @@ void CudaDevice::activation(const ActivationParams& params) {
         RUNTIME_ASSERT_OP_ARG(!params.bias, "Sigmoid does not support bias");
         RUNTIME_ASSERT_OP_ARG(!params.gate, "Sigmoid does not support gate");
         RUNTIME_ASSERT_OP_ARG(!params.gate_bias, "Sigmoid does not support gate_bias");
-        printf("type: %d\n", params.states.type());
-        printf("states: %s", states.debugString().c_str());
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             data_type, invokeSigmoid,
             states.data(), states.size(), 1.0f, stream_

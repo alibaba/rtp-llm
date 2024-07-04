@@ -36,7 +36,7 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
 
     const auto worksapce = allocateBuffer({DataType::TYPE_BYTES, {ws_size}});
 
-    const auto fc2_result = allocateBuffer({type, {token_num, top_k, expert_hidden_size}});
+    const auto fc2_result = allocateBuffer({type, {token_num, top_k, hidden_dim}});
     const auto expert_scales = allocateBuffer({DataType::TYPE_FP32, {pad_to_multiple_of_16(token_num * top_k)}});
     const auto expanded_source_row_to_dest = allocateBuffer({DataType::TYPE_INT32, {pad_to_multiple_of_16(token_num * top_k)}});
     const auto expert_for_source_row = allocateBuffer({DataType::TYPE_INT32, {pad_to_multiple_of_16(token_num * top_k)}});
