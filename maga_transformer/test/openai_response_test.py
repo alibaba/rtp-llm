@@ -114,6 +114,46 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         assert(response.choices[0].finish_reason)
         self.assertEqual(FinisheReason.length, response.choices[0].finish_reason)
 
+    async def test_parse_qwen_agent_function_call(self):
+        os.environ["MODEL_TYPE"] = "qwen_agent"
+        tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
+        self.model.tokenizer = tokenizer
+        self.endpoint = OpenaiEndopoint(self.model)
+        test_ids = [35946, 85106, 47872, 11622, 455, 11080, 69364, 5333, 36407, 45912, 104307, 144575, 18149, 144575, 25, 633, 11080, 69364, 198, 144575, 47483, 144575, 25, 5212, 2527, 788, 330, 113074, 11, 10236, 122, 236, 28404, 497, 330, 3843, 788, 330, 69, 47910, 16707, 144575, 14098, 144575]
+        # print(f"===test ids decode {tokenizer.decode(test_ids)}")
+        render_params = RendererParams(
+            model_type="qwen_agent",
+            max_seq_len=1024,
+            eos_token_id=tokenizer.eos_token_id or 0,
+            stop_word_ids_list=[],
+        )
+        chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
+        request = ChatCompletionRequest(messages=[])
+        id_generator = fake_output_generator(test_ids, 1024, tokenizer.eos_token_id or 0)
+        stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig(), 314)
+        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        # response = [x async for x in generate][-1]
+        # response = await generate.gen_complete_response_once()
+        # print(response.choices[0].model_dump_json())
+        async for x in generate:
+            response = x
+            response = await generate.gen_complete_response_once()
+            print(response.choices[0].model_dump_json())
+        self.assertEqual(1, len(response.choices))
+        self.assertEqual(json.loads(response.choices[0].model_dump_json()), {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "我需要调用get_current_weather API来获取天气",
+                "function_call": {
+                    "name": "get_current_weather",
+                    "arguments": "{\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}"
+                },
+                "tool_calls": None
+            },
+            "finish_reason": "function_call"
+        })
+
     def test_chatglm_stop_word(self):
         os.environ["MODEL_TYPE"] = "chatglm3"
         tokenizer = ChatGLMTokenizer.from_pretrained(

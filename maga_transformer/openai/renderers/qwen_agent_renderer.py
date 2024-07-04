@@ -2,7 +2,6 @@ import pathlib
 current_file_path = pathlib.Path(__file__).parent.absolute()
 import sys
 sys.path.insert(0, str(current_file_path))
-print(sys.path)
 import copy
 import json
 import re
@@ -38,7 +37,8 @@ class ProcessedOutput:
 class QwenAgentRenderer(CustomChatRenderer):
     def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
-        
+        self.add_extra_stop_words(["✿RESULT✿","✿RETURN✿"])
+        self.stop_words_list.extend(self.extra_stop_words)
 
         self.template_chat_renderer: Optional[BasicRenderer] = None
         try:
@@ -53,6 +53,7 @@ class QwenAgentRenderer(CustomChatRenderer):
             'model': 'qwen'
         } # model 设置以qwen开头，且没设置server，会直接路由初始化 qwen_dashcope 这个类，我们要用里面的处理逻辑
         self.qwen_llm = get_chat_model(llm_cfg)
+    
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         # 将request转换为qwen的idx输入
@@ -81,17 +82,17 @@ class QwenAgentRenderer(CustomChatRenderer):
     def _parse_function_response(self, response: str) -> Optional[DeltaMessage]:
         # 处理function call 的流式信息
         func_name, func_args = "", ""
-        i = response.rfind("\nAction:")
-        j = response.rfind("\nAction Input:")
-        k = response.rfind("\nObservation:")
+        i = response.rfind("✿FUNCTION✿:")
+        j = response.rfind("\n✿ARGS✿:")
+        k = response.rfind("\n✿RESULT✿")
         if 0 <= i < j:  # If the text has `Action` and `Action input`,
             if k < j:  # but does not contain `Observation`,
                 # then it is likely that `Observation` is omitted by the LLM,
                 # because the output text may have discarded the stop word.
-                response = response.rstrip() + "\nObservation:"  # Add it back.
-            k = response.rfind("\nObservation:")
-            func_name = response[i + len("\nAction:") : j].strip()
-            func_args = response[j + len("\nAction Input:") : k].strip()
+                response = response.rstrip() + "\n✿RESULT✿"  # Add it back.
+            k = response.rfind("\n✿RESULT✿")
+            func_name = response[i + len("✿FUNCTION✿:") : j].strip()
+            func_args = response[j + len("\n✿ARGS✿:") : k].strip()
         logging.info(f"parsed function from response: [{response}]: {func_name}, {func_args}")
         if func_name:
             return DeltaMessage(
@@ -99,9 +100,7 @@ class QwenAgentRenderer(CustomChatRenderer):
                 function_call=FunctionCall(name=func_name, arguments=func_args),
             )
         return None
-        # z = response.rfind("\nFinal Answer: ")
-        # if z >= 0:
-        #     response = response[z + len("\nFinal Answer: ") :]
+
 
     def _process_output_ids_tensor(
             self, input_length, output_ids_tensor: torch.Tensor, finished: bool = False
@@ -116,7 +115,6 @@ class QwenAgentRenderer(CustomChatRenderer):
         output_ids = self._remove_stop_word_ids(output_ids)
         output_str = self.tokenizer.decode(output_ids)
         output_str = output_str.strip(u'\uFFFD')
-
         for stop_word in self.stop_words_list:
             output_str = output_str.replace(stop_word, "")
         return ProcessedOutput(output_str, output_length, finish_reason)
@@ -152,23 +150,24 @@ class QwenAgentRenderer(CustomChatRenderer):
             processed_output = self._process_output_ids_tensor(
                 input_token_length, output.output_ids, output.finished)
             output_string = processed_output.output_str.strip()
+            # print(f"==============> {output_string}")
             output_length = len(processed_output.output_str)
             finish_reason = processed_output.finish_reason
             output_token_length = processed_output.output_token_length
 
-            if (output_string.endswith("\nAction:")):
+            if (output_string.endswith("✿FUNCTION✿:")):
                 generating_function_call = True
                 continue
 
             if (generating_function_call):
                 continue
 
-            if (output_length > responded_length + len('\nAction:')):
-                delta_string = output_string[responded_length : output_length - len('\nAction:')]
+            if (output_length > responded_length + len('✿FUNCTION✿:')):
+                delta_string = output_string[responded_length : output_length - len('✿FUNCTION✿:')]
                 trunc_string = truncate_response_with_stop_words(delta_string, stop_word_slice_list)
                 if trunc_string != delta_string:
                     continue
-                responded_string = output_string[: output_length - len('\nAction:')]
+                responded_string = output_string[: output_length - len('✿FUNCTION✿:')]
                 responded_length = len(responded_string)
 
                 yield StreamResponseObject(
@@ -198,7 +197,7 @@ class QwenAgentRenderer(CustomChatRenderer):
                     choices=[ChatCompletionResponseStreamChoice(
                         index=index,
                         delta=function_message,
-                        finish_reason=finish_reason,
+                        # finish_reason=finish_reason,
                     )],
                     usage=UsageInfo(
                         prompt_tokens=input_token_length,
