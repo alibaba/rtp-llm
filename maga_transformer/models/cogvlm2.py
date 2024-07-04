@@ -35,7 +35,7 @@ class CogVLM2(Llama, MultiModalMixin):
     def load(self, device: Union[str, torch.device] = 'cuda:0'):
         if os.environ.get("VIT_TRT", "0") == "1":
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
-            self.init_vit_trt(
+            self.init_mm_trt(
                 "cogvlm2", g_parallel_info, weights_info, self.config.ckpt_path,
                 self.config.vit_related_params, device, to_torch_dtype(self.config.data_type)
             )

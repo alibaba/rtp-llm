@@ -1,4 +1,3 @@
-import gc
 import logging
 import os
 import time
@@ -8,6 +7,7 @@ from typing import List, Union
 import torch
 from torch import nn
 
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.multimodel.multimodel_common import ImageTransform
 
 try:
@@ -222,13 +222,17 @@ class MultiModelTRTEngine(nn.Module):
         return output
 
     def encode(self, image_paths: List[str], device: Union[str, torch.device]):
-        images = self.image_transform.encode(image_paths, self.device, self.dtype)
+        images = self.image_transform.encode(image_paths, device, self.dtype)
         return self(images)
 
     def image_embedding(
         self, images: List[str], device: Union[str, torch.device]
     ) -> torch.Tensor:
-        if len(images) != 0:
-            images = self.encode(images, device)
-            assert images.shape[0] == len(images)
-        return images.to(device=device)
+        # TRT engine doesn't support TP, here we only transform image in rank 0,
+        # later input embedding result will be broadcast from rank 0 in async_input_word_embedding
+        if g_parallel_info.tp_rank == 0:
+            if len(images) != 0:
+                images = self.encode(images, device)
+            return images.to(device=device)
+        else:
+            return torch.zeros((len(images), self.output_shape[1:]), self.dtype).to(device=device)

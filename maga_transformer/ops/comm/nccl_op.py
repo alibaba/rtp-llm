@@ -24,8 +24,3 @@ class NcclOp(FTOPBase):
 
     def broadcast_tp(self, tensors: List[torch.Tensor], root: int = 0):
         self.ft_op_.broadcast_tp(tensors, root)
-
-    def barrier(self):
-        dummy_tensor = torch.zeros(1)
-        self.ft_op_.broadcast_tp([dummy_tensor], 0)
-        torch.cuda.current_stream().synchronize()
