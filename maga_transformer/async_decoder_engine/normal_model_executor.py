@@ -192,13 +192,13 @@ class NormalModelExecutor(ExecutorBase):
             flushed_print("combo_tokens = ", combo_tokens)
 
         if debug_print():
-            print(f"batch_query context streams num = {len(batch_query.context_streams)}")
-            print(f"batch_query decode streams num = {len(batch_query.decode_streams)}")
+            flushed_print(f"batch_query context streams num = {len(batch_query.context_streams)}")
+            flushed_print(f"batch_query decode streams num = {len(batch_query.decode_streams)}")
 
             for stream in batch_query.context_streams:
-                print(f"batch_query context stream: stream = {stream._stream_id} input_len = {stream.input_length}")
+                flushed_print(f"batch_query context stream: stream = {stream._stream_id} input_len = {stream.input_length}")
             for stream in batch_query.decode_streams:
-                print(f"batch_query decode stream: stream = {stream._stream_id} input_len = {stream.input_length}")
+                flushed_print(f"batch_query decode stream: stream = {stream._stream_id} input_len = {stream.input_length}")
 
         assert model.word_embedding is not None
         embedding_res: EmbeddingOutput = model.async_input_word_embedding(combo_tokens, images, combo_token_types)

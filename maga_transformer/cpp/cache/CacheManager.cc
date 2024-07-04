@@ -9,6 +9,7 @@
 #include "maga_transformer/cpp/common/fatal_util.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
+#include "maga_transformer/cpp/utils/StringUtil.h"
 
 using namespace std;
 using namespace fastertransformer;
@@ -134,9 +135,14 @@ size_t CacheManager::freeBlockNums() const {
     return free_blocks_index_.size();
 }
 
+// TODO(xinfei.sxf) consider blocks in block cache is referenced by stream
+size_t CacheManager::availableBlockNums() const {
+    return freeBlockNums() + block_cache_.holdBlockNums();
+}
+
 KVCacheInfo CacheManager::getKVCacheInfo() const {
     // block 0 is reserved, so total block num need - 1
-    return {freeBlockNums() * seq_size_per_block_, (config_.block_nums - 1) * seq_size_per_block_};
+    return {availableBlockNums() * seq_size_per_block_, (config_.block_nums - 1) * seq_size_per_block_};
 }
 
 size_t CacheManager::cacheItemNum() const {
@@ -153,8 +159,11 @@ std::tuple<bool, KVCacheBlockAddr, int> CacheManager::mallocWithCache(int       
     return {success, {block_indices}, reuse_length};
 }
 
-std::tuple<bool, std::vector<int>, int> CacheManager::mallocWithCacheImpl(int                     want_block_nums,
-                                                                          const std::vector<int>& token_ids) {
+int CacheManager::match(const std::vector<int>& token_ids) {
+    return matchImpl(token_ids).reuse_length;
+}
+
+CacheManager::MatchInfo CacheManager::matchImpl(const std::vector<int>& token_ids) {
     auto [cache_blocks, common_length] = block_cache_.match(token_ids);
 
     int cache_block_num  = cache_blocks.size();
@@ -163,34 +172,35 @@ std::tuple<bool, std::vector<int>, int> CacheManager::mallocWithCacheImpl(int   
     int reuse_block_num  = reuse_length / config_.seq_size_per_block;
     reuse_length         = reuse_block_num * config_.seq_size_per_block;
 
-    if (reuse_block_num > want_block_nums || reuse_block_num > cache_block_num) {
-        FT_LOG_ERROR("reuse_block_num[%d] should not be greater than want_block_nums[%d], "
-                    "and reuse_block_num[%d] should not be greater than cache_block_num[%d]",
-                    reuse_block_num, want_block_nums, reuse_block_num, cache_block_num);
-        return {false, {}, 0};
-    }
-    FT_CHECK_WITH_INFO(
-        (reuse_block_num <= want_block_nums),
-        "reuse block nums[%d] is less than need block nums[%d]", reuse_block_num, want_block_nums);
-
     FT_CHECK_WITH_INFO(
         (reuse_block_num <= cache_block_num),
         "reuse block nums[%d] is less than need block nums[%d]", reuse_block_num, cache_block_num);
 
-    std::vector<int> reuse_blocks(cache_blocks.begin(), cache_blocks.begin() + reuse_block_num);
-    block_ref_counter_.incrementRefCounter(reuse_blocks);
-    maybeFreeBlockFromCache(want_block_nums - reuse_block_num);
+    return {cache_blocks, cache_block_num, reuse_length, reuse_block_num};
+}
 
-    auto [success, new_blocks] = mallocImpl(want_block_nums - reuse_block_num);
+std::tuple<bool, std::vector<int>, int> CacheManager::mallocWithCacheImpl(int                     want_block_nums,
+                                                                          const std::vector<int>& token_ids) {
+    auto match_info = matchImpl(token_ids);
+
+    FT_CHECK_WITH_INFO(
+        (match_info.reuse_block_num <= want_block_nums),
+        "reuse block nums[%d] is less than need block nums[%d]", match_info.reuse_block_num, want_block_nums);
+
+    std::vector<int> reuse_blocks(match_info.cache_blocks.begin(), match_info.cache_blocks.begin() + match_info.reuse_block_num);
+    block_ref_counter_.incrementRefCounter(reuse_blocks);
+    maybeFreeBlockFromCache(want_block_nums - match_info.reuse_block_num);
+
+    auto [success, new_blocks] = mallocImpl(want_block_nums - match_info.reuse_block_num);
     if (success) {
         reuse_blocks.insert(reuse_blocks.end(), new_blocks.begin(), new_blocks.end());
         if (metrics_reporter_) {
             RtpLLMCacheReuseMetricsCollector collector;
-            collector.kv_cache_reuse_length = reuse_length;
+            collector.kv_cache_reuse_length = match_info.reuse_length;
             metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
         }
 
-        return {true, reuse_blocks, reuse_length};
+        return {true, reuse_blocks, match_info.reuse_length};
     } else {
         free(reuse_blocks);
         return {false, {}, 0};
@@ -272,6 +282,7 @@ void CacheManager::insertIntoCache(const std::vector<int>& block_indices,
     if (token_ids.size() > 1) {
         size_t                  cache_len   = token_ids.size() - 1;
         size_t                  block_len   = std::min(block_indices.size(), cache_len / seq_size_per_block_);
+        cache_len                           = block_len * seq_size_per_block_;
         std::vector<int>        indices =
             block_cache_.put(std::vector<int>(token_ids.begin(), token_ids.begin() + cache_len),
                              std::vector<int>(block_indices.begin(), block_indices.begin() + block_len),

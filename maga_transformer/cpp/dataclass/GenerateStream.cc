@@ -22,14 +22,18 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     stream_cache_resource_(this, resource_context, input->need_release_resource),
     need_release_resource_(input->need_release_resource),
     metrics_reporter_(metrics_reporter),
-    special_tokens_(params.special_tokens_) {
+    special_tokens_(params.special_tokens_),
+    enable_fast_gen_(params.enable_fast_gen_) {
 
     begin_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
 
     updatePrefix(resource_context.system_prompt);
     seq_length_ = generate_input_->inputLength();
     last_output_pos_ = seq_length_;
-    
+    common_len_ = seq_length_;
+    adjusted_common_len_ = tileNum() == 1 ? seq_length_ : seq_length_ / seqSizePerBlock() * seqSizePerBlock();
+    max_chunk_len_ = seq_length_;
+
     device_             = ft::DeviceFactory::getDefaultDevice();
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
@@ -55,9 +59,36 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         sub_generate_status_[i].status = GenerateState::WAITING;
     }
 
+    stream_cache_resource_.init(tileNum());
+
     perf_test_ = autil::EnvUtil::getEnv("PERF_TEST", false);
     // TODO: need fix context block copy
     perf_test_ = true;
+}
+
+absl::StatusOr<int> GenerateStream::acquireCapacity(int token_capacity) {
+    if (token_capacity <= 0) {
+        return absl::InternalError("token_capacity is <= 0");
+    }
+    if (isChunkStream()) {
+        // TODO(xinfei.sxf) add min_chunk_len ?
+        if (current_chunk_len_ == 0) {
+            current_chunk_len_ = reuse_length_;
+        }
+        auto remaining_token = max_chunk_len_ - current_chunk_len_;
+        last_chunk_len_ = current_chunk_len_;
+        if (token_capacity > remaining_token) {
+            current_chunk_len_ = max_chunk_len_;
+            return remaining_token;
+        } else {
+            current_chunk_len_ += token_capacity;
+            return token_capacity;
+        }
+    } else if (!isContextStream()) {
+        return 1;
+    }
+    FT_CHECK(false);
+    return absl::InternalError("unexpected call");
 }
 
 void GenerateStream::cancel() {
@@ -80,17 +111,17 @@ absl::StatusOr<GenerateOutputs> GenerateStream::nextOutput() {
     return generate_outputs_queue_.getAndPopFront();
 }
 
-bool GenerateStream::initKVBlock() {
+absl::StatusOr<int> GenerateStream::initKVBlock(int token_capacity) {
     if (generate_status_.status == GenerateState::WAITING) {
         wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     } else if (generate_status_.status == GenerateState::PAUSED) {
         pause_time_us_ += autil::TimeUtility::currentTimeInMicroSeconds() - last_pause_us_;
     }
-    return stream_cache_resource_.initKVBlock();
+    return stream_cache_resource_.initKVBlock(token_capacity);
 }
 
-bool GenerateStream::incrKVBlock() {
-    return stream_cache_resource_.incrKVBlock();
+absl::StatusOr<int>GenerateStream::incrKVBlock(int token_capacity) {
+    return stream_cache_resource_.incrKVBlock(token_capacity);
 }
 
 int GenerateStream::tryReleaseKVBlock(int nums) {
@@ -168,18 +199,48 @@ int GenerateStream::inputLength() const {
     return generate_input_->inputLength();
 }
 
+int GenerateStream::currentChunkLen() const {
+    return current_chunk_len_;
+}
+
+void GenerateStream::resetChunkLen(int chunk_len, int max_chunk_len) {
+    last_chunk_len_ = 0;
+    current_chunk_len_ = chunk_len;
+    max_chunk_len_ = max_chunk_len;
+}
+
 int GenerateStream::seqLength() const {
     return seq_length_;
 }
 
+int GenerateStream::commonLen() const {
+    return common_len_;
+}
+
+int GenerateStream::adjustedCommonLen() const {
+    return adjusted_common_len_;
+}
+
+int GenerateStream::seqSizePerBlock() const {
+    return stream_cache_resource_.seqSizePerBlock();
+}
+
 int GenerateStream::contextLength() const {
-    return seq_length_ - prefixLength();
+    int begin_pos = prefixLength();
+    int end_pos = isChunkStream() ? currentChunkLen() : seq_length_;
+    return end_pos - begin_pos;
 }
 int GenerateStream::inputPrefixLength() const {
     return generate_input_->prefix_length;
 }
+
 int GenerateStream::prefixLength() const {
-    return fallback_prefix_length_ ? fallback_prefix_length_ : reuse_length_;
+    if (fallback_prefix_length_) {
+        return fallback_prefix_length_;
+    } else if (last_chunk_len_) {
+        return last_chunk_len_;
+    }
+    return reuse_length_;
 }
 
 int GenerateStream::reuseLength() const {
@@ -202,6 +263,10 @@ bool GenerateStream::isContextStream() const {
     return is_context_stream_;
 }
 
+bool GenerateStream::isChunkStream() const {
+    return enable_fast_gen_ && current_chunk_len_ < max_chunk_len_;
+}
+
 const ft::BufferPtr& GenerateStream::cumLogProbs() const {
     return cum_log_probs_;
 }
@@ -215,18 +280,18 @@ std::vector<int> GenerateStream::completeTokenIdsVec(int batch_idx) {
     return fastertransformer::buffer2vector<int>(complete_token_ids_->view(batch_idx, 1), seq_length_);
 }
 
+std::vector<int> GenerateStream::commonCompleteTokenIdsVec(int batch_idx) {
+    FT_CHECK(batch_idx < tileNum());
+    return fastertransformer::buffer2vector<int>(complete_token_ids_->view(batch_idx, 1), common_len_);
+}
+
 int GenerateStream::currentExecuteTokenSize() {
     return currentExecuteTokens(0).size() * batchSize();
 }
 
 vector<int> GenerateStream::contextTokens(int batch_idx) const {
-    auto input_tokens = fastertransformer::buffer2vector<int>(
-            (*complete_token_ids_)[batch_idx].view(0, seq_length_));
-    if (prefixLength() > 0) {
-        return vector<int>(input_tokens.begin() + prefixLength(), input_tokens.end());
-    } else {
-        return input_tokens;
-    }
+    return fastertransformer::buffer2vector<int>(
+            (*complete_token_ids_)[batch_idx].view(prefixLength(), contextLength()));
 }
 
 vector<int> GenerateStream::currentExecuteTokens(int batch_idx) const {
@@ -432,7 +497,7 @@ void GenerateStream::update(ft::BufferPtr&    new_tokens,
     for (int i = 0; i < tileNum(); ++i) {
         *(*complete_token_ids_)[i].dataWithOffset<int>(seq_length_) = ((int*)new_tokens->data())[i];
     }
-    seq_length_ += num_new_tokens;
+    setSeqLength(seq_length_ + num_new_tokens);
     bool finished = needFinish();
     if (finished) {
         setFinishedWithoutLock();
@@ -457,7 +522,7 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
     for (size_t i = 0; i < tileNum(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count = iter_count_;
-        generate_output.aux_info.fallback_tokens = fallback_blocks_ * stream_cache_resource_.seqSizePerBlock();
+        generate_output.aux_info.fallback_tokens = fallback_blocks_ * seqSizePerBlock();
         generate_output.aux_info.fallback_times = fallback_times_;
 
         generate_output.output_ids =
@@ -542,7 +607,7 @@ void GenerateStream::reportMetric() {
             collector.first_token_latency_us = first_token_time_us_;
             collector.wait_latency_us        = wait_time_us_;
             collector.pause_latency_us       = pause_time_us_;
-            collector.fallback_tokens        = fallback_blocks_ * stream_cache_resource_.seqSizePerBlock();
+            collector.fallback_tokens        = fallback_blocks_ * seqSizePerBlock();
             collector.fallback_times         = fallback_times_;
         }
         metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(nullptr, &collector);
@@ -554,13 +619,23 @@ std::string GenerateStream::debugString() const {
     debug_string << "GenerateStream {"
                  << "generate_input:" << generate_input_->debugString() << ", max_seq_len:" << max_seq_len_
                  << ", input_length:" << inputLength() << ", seq_length:" << seq_length_
-                 << ", reuse_length:" << reuse_length_ << ", batch_size:" << batchSize()
+                 << ", reuse_length:" << reuse_length_ << ", current_chunk_len:" << current_chunk_len_
+                 << ", last_chunk_len_:" << last_chunk_len_ << ", max_chunk_len_:" << max_chunk_len_
+                 << ", batch_size:" << batchSize()
                  << ", tile_num:" << tileNum() << "}";
     return debug_string.str();
 }
 
+void GenerateStream::resetCommonLen() {
+    if (tileNum() == 1) {
+        common_len_ = seq_length_;
+        adjusted_common_len_ = seq_length_;
+    }
+}
+
 void GenerateStream::setSeqLength(int seq_length) {
     seq_length_ = seq_length;
+    resetCommonLen();
 }
 
 void GenerateStream::setIsContextStream(bool is_context_stream) {

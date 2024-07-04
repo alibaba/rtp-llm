@@ -9,8 +9,12 @@ using namespace std;
 
 namespace rtp_llm {
 
+void StreamCacheResource::init(int batch_size) {
+    batch_block_addr_.resize(batch_size);
+}
+
 void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) {
-    if (blocks.size() == batch_block_addr_.batch_offset[batch_id].size() && resource_context_.reuse_cache) {
+    if (blocks.size() == batch_block_addr_.blockSize(batch_id) && resource_context_.reuse_cache) {
         auto tokens_id = stream_->completeTokenIdsVec(batch_id);
         resource_context_.cache_manager->freeWithCache(blocks, tokens_id);
     } else {
@@ -29,95 +33,113 @@ void StreamCacheResource::releaseResource() {
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     FT_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
     size_t release_blocks_num = 0;
+    size_t reserved_blocks = 0;
 
-    for (size_t batch_id = 0; batch_id < batch_block_addr_.batch_offset.size(); batch_id++) {
-        auto& blocks = batch_block_addr_.batch_offset[batch_id];
-        size_t reserver_blocks = std::max(0, int(blocks.size()) - int(nums));
-        // NOTE: all batch has same number of blocks
-        release_blocks_num = blocks.size() - reserver_blocks;
-        vector<int> release_blocks(blocks.begin() + reserver_blocks, blocks.end());
+    // NOTE: all batch has same number of blocks
+    for (size_t batch_id = 0; batch_id < batch_block_addr_.batchSize(); batch_id++) {
+        const auto& blocks = batch_block_addr_.blocks(batch_id);
+        reserved_blocks = std::max(0, int(blocks.size()) - int(nums));
+        release_blocks_num = blocks.size() - reserved_blocks;
+        vector<int> release_blocks(blocks.begin() + reserved_blocks, blocks.end());
         freeBatchBlocks(batch_id, release_blocks);
-        batch_block_addr_.resize(batch_id, reserver_blocks);
+        batch_block_addr_.resize(batch_id, reserved_blocks);
+    }
+    stream_->setFallbackPrefixLength(reserved_blocks * seqSizePerBlock());
+    if (stream_->enable_fast_gen_) {
+        stream_->resetChunkLen(reserved_blocks * seqSizePerBlock(), stream_->seqLength());
     }
     return release_blocks_num;
-}
-
-bool StreamCacheResource::initKVBlock() {
-    auto             align_block_num = singleBatchNeedBlocks(stream_->seqLength() / seqSizePerBlock() * seqSizePerBlock());
-    KVCacheBlockAddr kv_cache_block_addr;
-    int              reuse_length;
-    bool             success;
-    auto current_block_size = maxBlockSize();
-    if (current_block_size) {
-        // 说明是部分回退的场景
-        auto fallback_prefix_length = current_block_size * seqSizePerBlock();
-        stream_->setFallbackPrefixLength(fallback_prefix_length);
-        return incrKVBlock();
-    }
-    if (resource_context_.reuse_cache) {
-        std::tie(success, kv_cache_block_addr, reuse_length) =
-            resource_context_.cache_manager->mallocWithCache(align_block_num, stream_->completeTokenIdsVec());
-    } else {
-        std::tie(success, kv_cache_block_addr) = resource_context_.cache_manager->malloc(align_block_num);
-        reuse_length                           = 0;
-    }
-
-    if (success) {
-        batch_block_addr_.clear();
-        int                   tile_num = stream_->tileNum();
-        auto kv_cache = resource_context_.cache_manager->kvCacheBuffer();
-        BatchKVCacheBlockAddr batch_blocks;
-        batch_block_addr_.pushBack(kv_cache_block_addr);
-        for (uint32_t i = 1; i < tile_num; i++) {
-            // clone increased block reference count
-            batch_block_addr_.pushBack(kv_cache_block_addr.clone(resource_context_.cache_manager));
-        }
-        stream_->setReuseLength(reuse_length);
-    }
-    return success && incrKVBlock();
 }
 
 int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
     return std::max((seq_len + seqSizePerBlock() - 1) / seqSizePerBlock() - maxBlockSize(), 0);
 }
 
-bool StreamCacheResource::incrKVBlock() {
-    auto blocks_num = singleBatchNeedBlocks(stream_->seqLength());
-    if (blocks_num <= 0) {
-        return true;
+// TODO(xinfei.sxf) 保证这个函数的原子性
+absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity) {
+    auto current_block_size = maxBlockSize();
+    if (current_block_size) {
+        // partial fallback
+        return incrKVBlock(token_capacity);
     }
-    auto                          batch_size  = stream_->tileNum();
-    bool                          all_success = true;
-    std::vector<KVCacheBlockAddr> resource;
-    for (uint32_t i = 0; i < batch_size; i++) {
-        auto [success, kv_cache_block_addr] = resource_context_.cache_manager->malloc(blocks_num);
+
+    if (resource_context_.reuse_cache) {
+        KVCacheBlockAddr kv_cache_block_addr;
+        int              reuse_length;
+        bool             success = true;
+
+        auto common_tokens_vec = stream_->commonCompleteTokenIdsVec();
+        reuse_length = resource_context_.cache_manager->match(common_tokens_vec);
+        stream_->setReuseLength(reuse_length);
+
+        auto reuse_block_num = reuse_length / seqSizePerBlock();
+        std::tie(success, kv_cache_block_addr, reuse_length) =
+            resource_context_.cache_manager->mallocWithCache(reuse_block_num, common_tokens_vec);
         if (success) {
-            resource.push_back(kv_cache_block_addr);
+            batch_block_addr_.appendClone(kv_cache_block_addr, resource_context_.cache_manager);
         } else {
-            all_success = false;
-            break;
+            return absl::InternalError("malloc with cache failed");
         }
     }
-    if (!all_success) {
-        resource_context_.cache_manager->free(resource);
-        return false;
+
+    return incrKVBlock(token_capacity);
+}
+
+absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity) {
+    // TODO(xinfei.sxf) rollback token_capacity
+    // TODO(xinfei.sxf) add reserver_blocks
+    int real_occupy = 0;
+    if (stream_->enable_fast_gen_) {
+        if (stream_->isChunkStream() || !stream_->isContextStream()) {
+            auto result = stream_->acquireCapacity(token_capacity);
+            if (!result.ok()) {
+                return result;
+            }
+            real_occupy = result.value();
+        }
+    }
+    auto seq_len = stream_->isChunkStream() ? stream_->currentChunkLen() : stream_->seqLength();
+    auto common_seq_len = std::min(seq_len, stream_->adjustedCommonLen());
+    auto common_blocks_nums = singleBatchNeedBlocks(common_seq_len);
+
+    auto [success, kv_cache_block_addr] = resource_context_.cache_manager->malloc(common_blocks_nums);
+    if (!success) {
+        return absl::InternalError("malloc failed");
+    }
+    batch_block_addr_.appendClone(kv_cache_block_addr, resource_context_.cache_manager);
+
+    auto extra_blocks_num = singleBatchNeedBlocks(seq_len);
+    if (extra_blocks_num <= 0) {
+        return real_occupy;
+    }
+    if (extra_blocks_num) {
+        auto                          batch_size  = stream_->tileNum();
+        bool                          all_success = true;
+        std::vector<KVCacheBlockAddr> resource;
+        // TODO(xinfei.sxf) optimize code -> call malloc only once
+        for (uint32_t i = 0; i < batch_size; i++) {
+            auto [success, kv_cache_block_addr] = resource_context_.cache_manager->malloc(extra_blocks_num);
+            if (success) {
+                resource.push_back(kv_cache_block_addr);
+            } else {
+                all_success = false;
+                break;
+            }
+        }
+
+        if (!all_success) {
+            resource_context_.cache_manager->free(resource);
+            return absl::InternalError("malloc failed");
+        }
+
+        batch_block_addr_.append(resource);
     }
 
-    int resource_index = 0;
-    for (int i = 0; i < batch_size; i++) {
-        batch_block_addr_.append(i, resource[resource_index]);
-        resource_index++;
-    }
-
-    return true;
+    return real_occupy;
 }
 
 int StreamCacheResource::maxBlockSize() const {
-    size_t max_block_size = 0;
-    for (auto& blocks : batch_block_addr_.batch_offset) {
-        max_block_size = std::max(max_block_size, blocks.size());
-    }
-    return max_block_size;
+    return batch_block_addr_.maxBlockSize();
 }
 
 const BatchKVCacheBlockAddr& StreamCacheResource::kvCache() const {

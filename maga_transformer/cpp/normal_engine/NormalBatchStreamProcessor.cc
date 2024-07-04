@@ -92,16 +92,18 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         auto kv_cache                 = stream->kvCache();
         FT_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
         FT_LOG_DEBUG("context stream: %s", stream->debugString().c_str());
+
+        // TODO(xinfei.sxf) deal with adjusted common seq len.
         for (auto i = 0; i < current_batch_size; ++i) {
             auto input_tokens    = stream->currentExecuteTokens(i);
             memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
-            cum_output_seq_len += stream->contextLength();
-            input_lengths[batch_idx]  = stream->contextLength();
+            cum_output_seq_len += input_tokens.size();
+            input_lengths[batch_idx] = input_tokens.size();
             prefix_lengths[batch_idx - total_decode_batch_size] = stream->prefixLength();
             lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
             if (has_positional_encoding_) {
                 // TODO(xinfei.sxf) optimize this, reduce cost
-                for (uint32_t i = stream->reuseLength(); i < stream->reuseLength() + stream->contextLength(); i++) {
+                for (uint32_t i = stream->reuseLength(); i < stream->reuseLength() + input_tokens.size(); i++) {
                     combo_position_ids[token_idx + i - stream->reuseLength()] = i;
                 }
             }
@@ -116,7 +118,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
         stream->step();
     }
-
+    
     return model_input;
 }
 
@@ -163,6 +165,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     size_t total_decode_batch_size = stream_groups.totalDecodeBatchSize();
     auto all_streams = stream_groups.allStreams();
 
+    // TODO(xinfei.sxf) don't sample for chunk stream
     SamplerInputs sampler_inputs;
     sampler_inputs.step   = stream_groups.maxSeqLen();;
     auto total_batch_size = stream_groups.totalSamplerBatchSize();
@@ -265,6 +268,9 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
     int batch_idx = 0;
     int offset = 0;
     for (auto& stream : stream_groups.allStreams()) {
+        if (stream->isChunkStream()) {
+            continue;
+        }
         auto current_batch_size = stream->tileNum();
         auto batch = stream->isContextStream() ? 1 : current_batch_size;
         auto batch_logits = model_output.logits->view(offset, batch);

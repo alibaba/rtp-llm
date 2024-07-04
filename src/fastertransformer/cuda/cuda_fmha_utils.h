@@ -154,6 +154,12 @@ static bool CheckQKVLengthEqual(const fastertransformer::GptInitParameter& param
         return false;
     }
 
+    char* enable_fast_gen_env = std::getenv("ENABLE_FAST_GEN");
+    if (enable_fast_gen_env != nullptr && std::string(enable_fast_gen_env) == "1") {
+        FT_LOG_INFO("QKV length not equal: enable fast gen");
+        return false;
+    }
+
     if (!not_prefix){
         FT_LOG_INFO("QKV length not equal: use kv cache reuse");
         return false;

@@ -9,7 +9,7 @@ void KVCacheBlockAddr::clear() {
     offset.clear();
 }
 
-KVCacheBlockAddr KVCacheBlockAddr::clone(std::shared_ptr<CacheManager>& cache_manager) {
+KVCacheBlockAddr KVCacheBlockAddr::clone(std::shared_ptr<CacheManager>& cache_manager) const {
     if (!offset.empty()) {
         cache_manager->incrBlockRefCounter(offset);
     }

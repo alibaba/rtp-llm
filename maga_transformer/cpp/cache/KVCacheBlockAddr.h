@@ -10,7 +10,7 @@ class CacheManager;
 class KVCacheBlockAddr {
 public:
     void clear();
-    KVCacheBlockAddr clone(std::shared_ptr<CacheManager>& cache_manager);
+    KVCacheBlockAddr clone(std::shared_ptr<CacheManager>& cache_manager) const;
 
 public:
     // [max_block_per_seq]

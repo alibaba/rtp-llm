@@ -215,6 +215,8 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(reserve_runtime_mem_mb, reserve_runtime_mem_mb_)       \
     DEF_PROPERTY(reuse_cache, reuse_cache_)                             \
     DEF_PROPERTY(enable_partial_fallback, enable_partial_fallback_)     \
+    DEF_PROPERTY(enable_fast_gen, enable_fast_gen_)                     \
+    DEF_PROPERTY(max_context_len, max_context_len_)                     \
     DEF_PROPERTY(int8_kv_cache, int8_kv_cache_)                         \
     DEF_PROPERTY(is_causal, is_causal_)                                 \
     DEF_PROPERTY(use_medusa, use_medusa_)                               \

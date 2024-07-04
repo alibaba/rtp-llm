@@ -186,6 +186,8 @@ public:
     int64_t  kv_cache_mem_mb_                  = 0;
     bool     reuse_cache_                      = false;
     bool     enable_partial_fallback_          = false;
+    bool     enable_fast_gen_                  = false;
+    int64_t  max_context_len_                  = 0;
 
     bool use_medusa_ = false;
     bool use_expert_attention_ = false; // true for CogVLM2, false for other models

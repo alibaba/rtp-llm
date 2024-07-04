@@ -1,5 +1,7 @@
 #pragma once
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/dataclass/BatchKVCacheBlockAddr.h"
@@ -27,8 +29,9 @@ public:
     ~StreamCacheResource() {
         releaseResource();
     }
-    bool initKVBlock();
-    bool incrKVBlock();
+    void init(int batch_size);
+    absl::StatusOr<int> initKVBlock(int token_capacity);
+    absl::StatusOr<int> incrKVBlock(int token_capacity);
     int  tryReleaseKVBlock(size_t nums);
     void freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void releaseResource();

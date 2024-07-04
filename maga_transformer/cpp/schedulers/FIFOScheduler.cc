@@ -15,6 +15,8 @@ FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
     max_context_batch_size_(params.max_context_batch_size_),
     reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->freeBlockNums() / 100),
     enable_partial_fallback_(params.enable_partial_fallback_),
+    enable_fast_gen_(params.enable_fast_gen_),
+    max_context_len_(params.max_context_len_),
     metrics_reporter_(metrics_reporter) {}
 
 FIFOScheduler::~FIFOScheduler() {
@@ -97,42 +99,53 @@ void FIFOScheduler::evaluateRunningNext() {
         running_streams_.pop_back();
     }
 
+    if (enable_fast_gen_) {
+        token_capacity_ = max_context_len_;
+        FT_LOG_DEBUG("initial token_capacity is %d", token_capacity_);
+    }
+
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-        if (!(*it)->incrKVBlock()) {
+        auto result = (*it)->incrKVBlock(token_capacity_);
+        if (!result.ok()) {
             (*it)->setStop("incrKVBlock failed");
             (*it)->releaseResource();
             FT_LOG_WARNING("stream [%ld] incr block failed", (*it)->streamId());
             it = running_streams_.erase(it);
         } else {
+            if (enable_fast_gen_) {
+                token_capacity_ -= result.value();
+                FT_LOG_DEBUG("after stream [%d] acquireCapacity, token_capacity is %d", (*it)->streamId(), token_capacity_);
+            }
             it++;
         }
     }
 }
 
-bool FIFOScheduler::evaluateRunningMemory(int total_token_size) const {
-    return total_token_size < max_seq_len_ * max_context_batch_size_;
+bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
+                                         const GenerateStreamPtr&       new_stream) const {
+    if (!enable_fast_gen_) {
+        int total_token_size = new_stream->contextLength() + running_streams_.size();
+        for (auto& stream : streams) {
+            total_token_size += stream->contextLength();
+        }
+        return total_token_size < max_seq_len_ * max_context_batch_size_;
+    } else {
+        return true;
+    }
 }
 
-bool FIFOScheduler::evaluateKVCacheMemory(int new_block_num) const {
-    FT_LOG_DEBUG("stream runningNextBlockNum = %d, new_block_num = %d, cache_manager_->freeBlockNums() = %d",
-        runningNextBlockNum(), new_block_num, cache_manager_->freeBlockNums());
-    return runningNextBlockNum() + new_block_num <= cache_manager_->freeBlockNums();
-}
-
-// TODO(xinfei.sxf) When considering reuse cache, the evaluation is not accurate, so we should try to apply for resources immediately.
 bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
-                                      const GenerateStreamPtr&       new_stream) const {
-    int total_token_size = new_stream->contextLength() + running_streams_.size();
-    for (auto& stream : streams) {
-        total_token_size += stream->contextLength();
+                                      const GenerateStreamPtr&       new_stream) {
+    if (!evaluateRunningMemory(streams, new_stream)) {
+        return false;
     }
 
-    FT_LOG_DEBUG("stream [%d], new_stream->nextNeedBlockNums() = %d, reserve_block_num = %d, "
-    "total_token_size = %d, evaluateRunningMemory(total_token_size) = %d",
-    new_stream->streamId(), new_stream->nextNeedBlockNums(), reserve_block_num_, total_token_size, evaluateRunningMemory(total_token_size));
-
-    return evaluateKVCacheMemory(new_stream->nextNeedBlockNums() + reserve_block_num_)
-           && evaluateRunningMemory(total_token_size) && new_stream->initKVBlock();
+    auto result = new_stream->initKVBlock(token_capacity_);
+    if (result.ok() && enable_fast_gen_) {
+        token_capacity_ -= result.value();
+        FT_LOG_DEBUG("after stream [%d] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
+    }
+    return result.ok() && cache_manager_->freeBlockNums() >= reserve_block_num_; 
 }
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {

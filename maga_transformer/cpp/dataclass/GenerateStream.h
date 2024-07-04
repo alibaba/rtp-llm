@@ -37,8 +37,8 @@ public:
     absl::StatusOr<GenerateOutputs>     nextOutput();
 
     // Only used in C++ world.
-    virtual bool initKVBlock();
-    virtual bool incrKVBlock();
+    virtual absl::StatusOr<int> initKVBlock(int token_capacity);
+    virtual absl::StatusOr<int> incrKVBlock(int token_capacity);
     virtual int tryReleaseKVBlock(int nums);
     virtual void releaseResource();
     int nextNeedBlockNums() const;
@@ -61,6 +61,11 @@ public:
     size_t maxSeqLen() const;
     int inputLength() const;
     int seqLength() const;
+    void setSeqLength(int seq_length);
+    int commonLen() const;
+    int adjustedCommonLen() const;
+    void resetCommonLen();
+    int seqSizePerBlock() const;
     int contextLength() const;
     int prefixLength() const;
     int inputPrefixLength() const;
@@ -69,13 +74,19 @@ public:
     int fallbackPrefixLength() const;
     void setFallbackPrefixLength(int fallback_prefix_length);
 
+    absl::StatusOr<int> acquireCapacity(int token_capacity);
+    int currentChunkLen() const;
+    void resetChunkLen(int chunck_len, int max_chunk_len);
+
     bool isContextStream() const;
+    bool isChunkStream() const;
     const ft::BufferPtr& cumLogProbs() const;
 
     const ft::BufferPtr& completeTokenIds();
     std::vector<int> completeTokenIdsVec(int batch_idx = 0);
+    std::vector<int> commonCompleteTokenIdsVec(int batch_idx = 0);
     int currentExecuteTokenSize();
-    std::vector<int> contextTokens(int batch_idx = 0) const;
+    std::vector<int> contextTokens(int batch_idx) const;
     std::vector<int> currentExecuteTokens(int batch_idx) const;
 
     void step();
@@ -120,7 +131,6 @@ public:
     std::string debugString() const;
 
     // for test
-    void setSeqLength(int seq_length);
     void setIsContextStream(bool is_context_stream);
     StreamCacheResource& streamCacheResource();
 
@@ -153,6 +163,14 @@ protected:
     bool                                cancelled_              = false;
     bool                                released_               = false;
     bool                                need_release_resource_  = true;
+
+    bool                                enable_fast_gen_        = false;
+    int                                 current_chunk_len_      = 0;
+    int                                 last_chunk_len_         = 0;
+    int                                 max_chunk_len_          = 0;
+
+    int                                 common_len_             = 0;
+    int                                 adjusted_common_len_    = 0;
 
     kmonitor::MetricsReporterPtr        metrics_reporter_       = nullptr;
     ft::SpecialTokens                   special_tokens_;
