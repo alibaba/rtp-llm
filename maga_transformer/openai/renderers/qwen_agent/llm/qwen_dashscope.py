@@ -1,7 +1,7 @@
 import os
 from http import HTTPStatus
 from pprint import pformat
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Union, Literal
 
 import dashscope
 
@@ -9,6 +9,12 @@ from qwen_agent.llm.base import ModelServiceError, register_llm
 from qwen_agent.llm.schema import ASSISTANT, DEFAULT_SYSTEM_MESSAGE, SYSTEM, USER, Message
 from qwen_agent.llm.text_base import BaseTextChatModel
 from qwen_agent.log import logger
+# region youmi
+import copy
+from qwen_agent.settings import DEFAULT_MAX_INPUT_TOKENS
+from qwen_agent.utils.utils import has_chinese_messages, merge_generate_cfgs
+from qwen_agent.llm.base import _truncate_input_messages_roughly
+# end region
 
 
 @register_llm('qwen_dashscope')
@@ -77,6 +83,80 @@ class QwenChatAtDS(BaseTextChatModel):
         else:
             *_, final_response = it  # return the final response without streaming
             return final_response
+
+    # region youmi generate completion prompt
+    def generate_completion_prompt(
+        self,
+        messages: List[Union[Message, Dict]],
+        functions: Optional[List[Dict]] = None,
+        extra_generate_cfg: Optional[Dict] = None
+    ) -> str:
+        """ copy from LLM chat interface.
+
+        Args:
+            messages: Inputted messages.
+            functions: Inputted functions for function calling. OpenAI format supported.
+        Returns:
+            the generated prompt
+        """
+        generate_cfg = merge_generate_cfgs(base_generate_cfg=self.generate_cfg, new_generate_cfg=extra_generate_cfg)
+        if 'lang' in generate_cfg:
+            lang: Literal['en', 'zh'] = generate_cfg.pop('lang')
+        else:
+            lang: Literal['en', 'zh'] = 'zh' if has_chinese_messages(messages) else 'en'
+
+        messages = copy.deepcopy(messages)
+
+        _return_message_type = 'dict'
+        new_messages = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                new_messages.append(Message(**msg))
+            else:
+                new_messages.append(msg)
+                _return_message_type = 'message'
+        messages = new_messages
+
+        if messages[0].role != SYSTEM:
+            messages = [Message(role=SYSTEM, content=DEFAULT_SYSTEM_MESSAGE)] + messages
+
+        # Not precise. It's hard to estimate tokens related with function calling and multimodal items.
+        messages = _truncate_input_messages_roughly(
+            messages=messages,
+            max_tokens=generate_cfg.pop('max_input_tokens', DEFAULT_MAX_INPUT_TOKENS),
+        )
+
+        messages = self._preprocess_messages(messages, lang=lang)
+
+        if 'function_choice' in generate_cfg:
+            fn_choice = generate_cfg['function_choice']
+            valid_fn_choices = [f.get('name', f.get('name_for_model', None)) for f in (functions or [])]
+            valid_fn_choices = ['auto', 'none'] + [f for f in valid_fn_choices if f]
+            if fn_choice not in valid_fn_choices:
+                raise ValueError(f'The value of function_choice must be one of the following: {valid_fn_choices}. '
+                                 f'But function_choice="{fn_choice}" is received.')
+            if fn_choice == 'auto':
+                del generate_cfg['function_choice']
+            if fn_choice == 'none':
+                raise NotImplementedError('Not implemented function_choice="none" yet.')  # TODO:
+
+        if functions:
+            fncall_mode = True
+        else:
+            fncall_mode = False
+            for k in ['parallel_function_calls', 'function_choice']:
+                if k in generate_cfg:
+                    del generate_cfg[k]
+
+        if fncall_mode:
+            messages = self._prepend_fncall_system(messages, functions, lang=lang)
+            prompt = self._build_text_completion_prompt(messages)
+            return prompt
+        else:
+            prompt = self._build_text_completion_prompt(messages)
+            return prompt
+    # end region
+    
 
     @staticmethod
     def _build_text_completion_prompt(messages: List[Message]) -> str:

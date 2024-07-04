@@ -205,26 +205,24 @@ Thought:"""
         logging.info(f"rendered prompt: \n{prompt}\n-----------------------------------")
         expected_prompt = \
 """<|im_start|>system
-你是一个有用的助手<|im_end|>
+你是一个有用的助手
+
+# 工具
+
+## 你拥有如下工具：
+
+### get_current_weather
+
+get_current_weather: Get the current weather in a given location. 输入参数：{"type": "object", "properties": {"location": {"type": "string", "description": "The city and state, e.g. San Francisco, CA"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location"]} 此工具的输入应为JSON对象。
+
+## 你可以在回复中插入零次、一次或多次以下命令以调用工具：
+
+✿FUNCTION✿: 工具名称，必须是[get_current_weather]之一。
+✿ARGS✿: 工具输入
+✿RESULT✿: 工具结果
+✿RETURN✿: 根据工具结果进行回复，需将图片用![](url)渲染出来<|im_end|>
 <|im_start|>user
-Answer the following questions as best you can. You have access to the following APIs:
-
-get_current_weather: Call this tool to interact with the get_current_weather API. What is the get_current_weather API useful for? Get the current weather in a given location. Parameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The city and state, e.g. San Francisco, CA"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location"]}
-
-Use the following format:
-
-Question: the input question you must answer
-Thought: you should always think about what to do
-Action: the action to take, should be one of [get_current_weather]
-Action Input: the input to the action
-Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can be repeated zero or more times)
-Thought: I now know the final answer
-Final Answer: the final answer to the original input question
-
-Begin!
-
-Question: 波士顿天气如何？<|im_end|>
+波士顿天气如何？<|im_end|>
 <|im_start|>assistant
 """
         logging.info(f"expected prompt: \n{expected_prompt}\n-----------------------------------")
@@ -255,32 +253,29 @@ Question: 波士顿天气如何？<|im_end|>
         logging.info(f"rendered prompt: \n{prompt}\n-----------------------------------")
         expected_prompt = \
 """<|im_start|>system
-You are a helpful assistant.<|im_end|>
+你是一个有用的助手
+
+# 工具
+
+## 你拥有如下工具：
+
+### get_current_weather
+
+get_current_weather: Get the current weather in a given location. 输入参数：{"type": "object", "properties": {"location": {"type": "string", "description": "The city and state, e.g. San Francisco, CA"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location"]} 此工具的输入应为JSON对象。
+
+## 你可以在回复中插入零次、一次或多次以下命令以调用工具：
+
+✿FUNCTION✿: 工具名称，必须是[get_current_weather]之一。
+✿ARGS✿: 工具输入
+✿RESULT✿: 工具结果
+✿RETURN✿: 根据工具结果进行回复，需将图片用![](url)渲染出来<|im_end|>
 <|im_start|>user
-Answer the following questions as best you can. You have access to the following APIs:
-
-get_current_weather: Call this tool to interact with the get_current_weather API. What is the get_current_weather API useful for? Get the current weather in a given location. Parameters: {"type": "object", "properties": {"location": {"type": "string", "description": "The city and state, e.g. San Francisco, CA"}, "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}}, "required": ["location"]}
-
-Use the following format:
-
-Question: the input question you must answer
-Thought: you should always think about what to do
-Action: the action to take, should be one of [get_current_weather]
-Action Input: the input to the action
-Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can be repeated zero or more times)
-Thought: I now know the final answer
-Final Answer: the final answer to the original input question
-
-Begin!
-
-Question: 波士顿天气如何？<|im_end|>
+波士顿天气如何？<|im_end|>
 <|im_start|>assistant
-Thought: 我需要调用get_current_weather API来获取天气
-Action: get_current_weather
-Action Input: {"location": "Boston, MA"}
-Observation: {"temperature": "22", "unit": "celsius", "description": "Sunny"}
-Thought:"""
+我需要调用get_current_weather API来获取天气✿FUNCTION✿: get_current_weather
+✿ARGS✿: {"location": "Boston, MA"}
+✿RESULT✿: {"temperature": "22", "unit": "celsius", "description": "Sunny"}
+✿RETURN✿"""
         logging.info(f"expected prompt: \n{expected_prompt}\n-----------------------------------")
         logging.info(f"actual prompt: \n{prompt}\n-----------------------------------")
         assert (prompt == expected_prompt)
