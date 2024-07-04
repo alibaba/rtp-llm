@@ -100,17 +100,6 @@ static bool UsePagedTrtFMHA(const fastertransformer::GptInitParameter& gpt_init_
         FT_LOG_INFO("Paged TRT FMHA is disabled for by ENABLE_PAGED_TRT_FMHA=OFF env");
         use_paged_trt_fmha = false;
     }
-    char* fmha_env = std::getenv("ENABLE_TRT_FMHA");
-    if (fmha_env && std::string(fmha_env) == "OFF") {
-        FT_LOG_INFO("Paged TRT FMHA is disabled for by ENABLE_TRT_FMHA=OFF env");
-        use_paged_trt_fmha = false;
-    }
-    // for test
-    char* force_paged_fmha_env = std::getenv("FORCE_ENABLE_PAGED_TRT_FMHA");
-    if (force_paged_fmha_env && std::string(force_paged_fmha_env) == "ON") {
-        FT_LOG_INFO("Paged TRT FMHA is force opened by FORCE_ENABLE_PAGED_TRT_FMHA=ON env");
-        use_paged_trt_fmha = true;
-    }
     return use_paged_trt_fmha;
 }
 
