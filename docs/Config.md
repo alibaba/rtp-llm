@@ -12,7 +12,7 @@
 
 
 * `TOKENIZER_PATH` 和 `CHECKPOINT_PATH` 必须为本地路径。
-* `MODEL_TYPE` 目前支持 `chatglm``chat_glm``chatglm2``chat_glm_2``chatglm3``chat_glm_3``glm_130b``gpt_bigcode``starcoder2``wizardcoder``sgpt_bloom``sgpt_bloom_vector``bloom``llama``gemma``xverse``llava``baichuan``gpt_neox``qwen_7b``qwen_13b``qwen_1b8``qwen_2``qwen_vl``falcon``mpt``internlm``phi``aquila`
+* `MODEL_TYPE` 目前支持 `chatglm``chat_glm``chatglm2``chat_glm_2``chatglm3``chat_glm_3``glm_130b``gpt_bigcode``starcoder2``wizardcoder``sgpt_bloom``sgpt_bloom_vector``bloom``llama``gemma``xverse``llava``baichuan``gpt_neox``qwen_7b``qwen_13b``qwen_1b8``qwen_2``qwen_vl``falcon``mpt``internlm``phi``aquila``cogvlm2``chatglm4v`
 
 ## 高级选项
 | 环境变量名 | 类型 | 说明 |
@@ -23,6 +23,7 @@
 | `TP_SPLIT_EMB_AND_LMHEAD` | `str`, optional | TensorParallel时是否切分Emb和LmHead计算(1:打开，0:关闭) |
 | `REUSE_CACHE` | `str`, optional | query之间复用kvcache |
 | `EXTRA_DATA_PATH` | `str`, optional | 除了ckpt/tokenizer,额外需要的数据,比如LLAVA的 VIT数据 |
+| `VIT_TRT` | `int`, optional | 是否使用TRT来加速VIT模型(1:打开，0:关闭) |
 
 ## 注意事项
 1. 默认模型运行时的 log_level=WARNING，可以添加环境变量`PY_LOG_LEVEL=INFO` 显示更多日志

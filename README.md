@@ -99,6 +99,11 @@ curl -XPOST http://localhost:8088 -d '{"prompt": "hello, what is your name", "ge
      1. change pip mirror repository in open_source/deps/pip.bzl, add extra_pip_args=["--index_url=xxx"]
      2. pip install requirements manually, especially for pytorch, for that bazel build has a 600s timeout by default, which may not be enough for pytorch downloading
 
+4. Curl error
+    **Error log**: `thread '<unnamed>' panicked at 'index out of bounds: the len is 1 but the index is 1', /root/.cargo/registry/src/github.com-1ecc6299db9ec823/regex-1.8.1/src/dfa.rs:1415:45`
+
+    **Resolution**: upgrade tiktoken to 0.7.0
+
 ## Documentation
 * [Test in Deploy Docker](docs/DeployDocker.md)
 * [Serving Example](docs/OpenAI-Tutorial.md)

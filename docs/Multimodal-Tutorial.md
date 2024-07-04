@@ -62,5 +62,32 @@ export FT_SERVER_TEST=1
 python3 -m maga_transformer.start_server
 
 # request to server
-curl -XPOST http://localhost:8088 -d '{"prompt": "Picture 1:<img>https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg</img>\n这是什么", "generate_config: {"max_new_tokens": 1000}}'
+``` python
+import requests
+chat_messages = [
+    {
+        "role": "user",
+        "content": [
+        {
+            "image_url": {
+            "url": image_path
+            },
+            "type": "image_url"
+        },
+        {
+            "text": "描述一下这张图片",
+            "type": "text"
+        }
+        ],
+        "name": None
+  }
+]
+openai_request = {
+    "temperature": 0.0,
+    "top_p": 0.1,
+    "messages": chat_messages
+}
+response = requests.post(f"http://localhost:{port}/v1/chat/completions", json=openai_request)
+print(response.json())
+
 ```
