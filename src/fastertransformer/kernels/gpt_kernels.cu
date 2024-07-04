@@ -15,6 +15,7 @@
  */
 
 #include <assert.h>
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
@@ -49,7 +50,14 @@ __global__ void embedding_lookup_kernel(T*                    from_tensor,
         T         pos_embed       = (T)0.0f;
         T         type_embed      = (T)0.0f;
         embedding = embedding_table[input_id * hidden_units + col_index];
-        embedding *= input_embedding_scalar;
+        // embedding *= input_embedding_scalar;
+        if constexpr (std::is_same<T, __nv_bfloat16>::value) {
+            embedding *= __double2bfloat16(input_embedding_scalar);
+        } else if constexpr (std::is_same<T, __half>::value){
+            embedding *= static_cast<T>(input_embedding_scalar);
+        } else {
+            embedding *= input_embedding_scalar;
+        }
 
         if constexpr(USE_POS_EMB) {
             assert(pos_table != nullptr);

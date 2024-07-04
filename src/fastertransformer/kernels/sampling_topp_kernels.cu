@@ -1309,15 +1309,15 @@ addBiasSoftMax(T* logits, const T* bias, const int* end_ids, const bool* finishe
     for (int tid = threadIdx.x; tid < n_padded; tid += blockDim.x) {
         if (tid < n) {
             if (finish) {
-                logits[offset + tid] = (tid == end_ids[bid]) ? MAX_T_VAL : -MAX_T_VAL;
+                logits[offset + tid] = (tid == end_ids[bid]) ? static_cast<T>(MAX_T_VAL) : static_cast<T>(-MAX_T_VAL);
             }
             else {
-                T bias_val = (bias != nullptr) ? bias[tid] : (T)0.0f;
+                T bias_val = (bias != nullptr) ? bias[tid] : static_cast<T>(0.0f);
                 logits[offset + tid] += bias_val;
             }
         }
         else {
-            logits[offset + tid] = -MAX_T_VAL;
+            logits[offset + tid] = static_cast<T>(-MAX_T_VAL);
         }
         max_val = max(max_val, (float)logits[offset + tid]);
     }
