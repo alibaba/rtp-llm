@@ -198,6 +198,7 @@ Thought:"""
             "messages": messages,
             "functions": functions,
             "stream": False,
+            "extend_fields":{"lang":"zh"}
         })
 
         ids = chat_renderer.render_chat(request).input_ids

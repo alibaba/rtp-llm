@@ -63,6 +63,7 @@ class QwenAgentRenderer(CustomChatRenderer):
         
         messages = []
         functions = []
+        extra_generate_cfg = request.extend_fields if request.extend_fields else {}
 
         if request.messages:
             messages = [msg.model_dump() for msg in request.messages]
@@ -75,9 +76,10 @@ class QwenAgentRenderer(CustomChatRenderer):
                         del func[k]
                 functions.append(func)
 
-        completion_prompt = self.qwen_llm.generate_completion_prompt(messages, functions)
+        completion_prompt = self.qwen_llm.generate_completion_prompt(messages, functions, extra_generate_cfg)
         input_ids = self.tokenizer.encode(completion_prompt)
         return RenderedInputs(input_ids=input_ids)
+
 
     def _parse_function_response(self, response: str) -> Optional[DeltaMessage]:
         # 处理function call 的流式信息
@@ -85,9 +87,8 @@ class QwenAgentRenderer(CustomChatRenderer):
         i = response.rfind("✿FUNCTION✿:")
         j = response.rfind("\n✿ARGS✿:")
         k = response.rfind("\n✿RESULT✿")
-        if 0 <= i < j:  # If the text has `Action` and `Action input`,
-            if k < j:  # but does not contain `Observation`,
-                # then it is likely that `Observation` is omitted by the LLM,
+        if 0 <= i < j:  # i index ✿FUNCTION✿
+            if k < j:  # j index \n✿ARGS✿ k index \n✿RESULT✿
                 # because the output text may have discarded the stop word.
                 response = response.rstrip() + "\n✿RESULT✿"  # Add it back.
             k = response.rfind("\n✿RESULT✿")
