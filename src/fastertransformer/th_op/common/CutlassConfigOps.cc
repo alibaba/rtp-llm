@@ -51,9 +51,16 @@ void insertFp16Int4GemmConfig(int64_t m, int64_t n, int64_t k, std::string tile_
     auto gemm_config = getConfigFromStr(tile_config, split_k, stage);
     GemmConfigMap::registerEntryForFp16Int4Lut(m, n, k, gemm_config);
 }
+
+void insertW8A8GemmConfig(int64_t m, int64_t n, int64_t k, std::string tile_config, int64_t split_k, int64_t stage) {
+    auto gemm_config = getConfigFromStr(tile_config, split_k, stage);
+    GemmConfigMap::registerEntryForW8A8Lut(m, n, k, gemm_config);
+}
 }
 
 static auto insert_fp16_int8_gemm_config =
     torch::RegisterOperators("fastertransformer::insert_fp16_int8_gemm_config", &torch_ext::insertFp16Int8GemmConfig);
 static auto insert_fp16_int4_gemm_config =
     torch::RegisterOperators("fastertransformer::insert_fp16_int4_gemm_config", &torch_ext::insertFp16Int4GemmConfig);
+static auto insert_w8a8_gemm_config =
+    torch::RegisterOperators("fastertransformer::insert_w8a8_gemm_config", &torch_ext::insertW8A8GemmConfig);

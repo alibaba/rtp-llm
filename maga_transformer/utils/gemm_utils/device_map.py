@@ -8,20 +8,20 @@ class LutInfo(object):
     def __init__(self, glob: str):
         self._glob = glob
         self._cur_path = self._get_files_from_glob(glob)
-    
+
     def get_files(self):
         return self._cur_path
-    
+
     def _get_files_from_glob(self, file_pattern: str):
         config_files = glob.glob(file_pattern)
         return config_files
 
 class DeviceMap(object):
-    ALL_QUANT_INFOS = ["int4", "int8"]
+    ALL_QUANT_INFOS = ["int4", "int8", "w8a8"]
     def __init__(self):
         self._device_map: Dict[str, List[str]] = {}
         self._lut_map: Dict[str, Dict[str, LutInfo]] = defaultdict(dict)
-        
+
     def register(self, key: str, value: List[str], lut_dir_path: str):
         if key in self._device_map:
             raise Exception(f"device {key} registered multi times")
@@ -29,7 +29,7 @@ class DeviceMap(object):
         for quant_info in self.ALL_QUANT_INFOS:
             file_pattern = self._generate_file_pattern(key, quant_info, lut_dir_path)
             self._lut_map[key][quant_info] = LutInfo(file_pattern)
-            
+
     def _generate_file_pattern(self, device: str, quant_info: str, lut_dir_path: str):
         pattern = "_".join([device.lower(), quant_info, "*", "config.ini"])
         return os.path.join(lut_dir_path, pattern)
@@ -38,8 +38,8 @@ class DeviceMap(object):
         for k, v in self._device_map.items():
             if device_name in v:
                 return k
-        raise Exception(f"Device {device_name} not supported yet") 
-    
+        raise Exception(f"Device {device_name} not supported yet")
+
     def get_lut_info(self, device_name: str, quant_info: str):
         device = self.from_str(device_name)
         if device not in self._lut_map:
@@ -55,7 +55,7 @@ def register_device(key: str, value: List[str], path: str):
     global _DEVICE_MAP
     _DEVICE_MAP.register(key, value, path)
 
-    
+
 def get_device(name: str):
     global _DEVICE_MAP
     return _DEVICE_MAP.from_str(name).lower()

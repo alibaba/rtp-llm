@@ -18,6 +18,7 @@
 
 #include "src/fastertransformer/cutlass/cutlass_kernels/gemm_configs.h"
 #include "src/fastertransformer/utils/quantization.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/gemm_lut.h"
 #include <cuda_runtime_api.h>
 
 namespace tk = tensorrt_llm::common;
@@ -61,7 +62,7 @@ public:
         const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream)
         = 0;
-    
+
     virtual std::vector<tkc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, tk::QuantMode quantOption,
         const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream) = 0;
@@ -92,7 +93,7 @@ public:
     tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, tk::QuantMode quantOption,
         const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream);
-    
+
     std::vector<tkc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, tk::QuantMode quantOption,
         const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream);
@@ -104,6 +105,7 @@ private:
 
     int mSm;
     int mMultiProcessorCount;
+    const GemmLut* gemm_lut_;
 };
 
 } // namespace cutlass_kernels

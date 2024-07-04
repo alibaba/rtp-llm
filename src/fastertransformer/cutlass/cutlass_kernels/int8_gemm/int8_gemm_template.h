@@ -313,6 +313,7 @@ CutlassInt8GemmRunner<T>::CutlassInt8GemmRunner()
     check_cuda_error(cudaGetDevice(&device));
     mSm = ft::getSMVersion();
     check_cuda_error(cudaDeviceGetAttribute(&mMultiProcessorCount, cudaDevAttrMultiProcessorCount, device));
+    gemm_lut_ = get_gemm_lut<uint8_t, uint8_t>();
 }
 
 template <typename T>
@@ -412,6 +413,17 @@ tkc::CutlassGemmConfig CutlassInt8GemmRunner<T>::getChosenConfig(const void* A, 
 {
     // Standard GEMM, so 1 "expert". We use the same function for MoE and regular FFN.
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
+
+    GemmParamKey cur_key{m, n, k};
+    if (gemm_lut_ != nullptr)
+    {
+        auto iter = gemm_lut_->find({cur_key});
+        if (iter != gemm_lut_->end())
+        {
+            CutlassGemmConfig specified_config = iter->second;
+            return specified_config;
+        }
+    }
 
     std::vector<tkc::CutlassGemmConfig> candidate_configs = getConfigs();
     std::vector<tkc::CutlassGemmConfig> valid_configs;
