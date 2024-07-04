@@ -44,11 +44,7 @@
 #include <math.h>
 #include <sstream>
 
-<<<<<<< HEAD
 namespace ft = fastertransformer;
-=======
-using namespace fastertransformer;
->>>>>>> feat - support moe int4
 
 namespace tensorrt_llm
 {
@@ -136,7 +132,8 @@ void genericMoeGemmKernelLauncher(T const* A, WeightType const* B, T const* weig
     typename EpilogueOp::Params epilogue_op(
         ElementAccumulator(1.f), biases ? ElementAccumulator(1.f) : ElementAccumulator(0.f));
 
-    typename GemmGrouped::Arguments args(num_experts, threadblock_count, group_size, epilogue_op,
+    const int kernel_group_size = group_size == 0 ? gemm_k : group_size;
+    typename GemmGrouped::Arguments args(num_experts, threadblock_count, kernel_group_size, epilogue_op,
         reinterpret_cast<ElementType const*>(A), reinterpret_cast<CutlassWeightType const*>(B),
         reinterpret_cast<ElementType const*>(weight_scales), reinterpret_cast<ElementType const*>(weight_zero_points),
         reinterpret_cast<ElementType const*>(biases), reinterpret_cast<ElementType*>(C), total_rows_before_expert,
@@ -376,7 +373,7 @@ MoeGemmRunner<T, WeightType, QuantOp>::MoeGemmRunner()
 {
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));
-    sm_ = getSMVersion();
+    sm_ = ft::getSMVersion();
     check_cuda_error(cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
 }
 

@@ -232,26 +232,30 @@ void CudaDevice::checkUseMultiBlockMode() {
     use_multi_block_mode = true;
 }
 
-template <typename ComputeT, typename WeightsT>
+template <typename ComputeT, typename WeightsT, cutlass::WeightOnlyQuantOp QuantOp>
 void initMoeRunnerImpl(unique_ptr<CutlassMoeFCRunnerInterface>& moe_runner) {
-    if (moe_runner && dynamic_cast<CutlassMoeFCRunner<ComputeT, WeightsT>*>(moe_runner.get())) {
+    if (moe_runner && dynamic_cast<CutlassMoeFCRunner<ComputeT, WeightsT, QuantOp>*>(moe_runner.get())) {
         return;
     } else {
-        moe_runner.reset(new CutlassMoeFCRunner<ComputeT, WeightsT>());
+        moe_runner.reset(new CutlassMoeFCRunner<ComputeT, WeightsT, QuantOp>());
     }
 }
 
 void CudaDevice::initMoeRunner(const DataType compute_type, const DataType weights_type) {
     if (compute_type == DataType::TYPE_FP16 && weights_type == DataType::TYPE_FP16) {
-        initMoeRunnerImpl<half, half>(moe_runner_);
+        initMoeRunnerImpl<half, half, cutlass::WeightOnlyQuantOp::UNDEFINED>(moe_runner_);
     } else if (compute_type == DataType::TYPE_FP32 && weights_type == DataType::TYPE_FP32) {
-        initMoeRunnerImpl<float, float>(moe_runner_);
+        initMoeRunnerImpl<float, float, cutlass::WeightOnlyQuantOp::UNDEFINED>(moe_runner_);
     } else if (compute_type == DataType::TYPE_FP16 && weights_type == DataType::TYPE_QINT8) {
-        initMoeRunnerImpl<half, uint8_t>(moe_runner_);
+        initMoeRunnerImpl<half, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>(moe_runner_);
     } else if (compute_type == DataType::TYPE_BF16 && weights_type == DataType::TYPE_BF16) {
-        initMoeRunnerImpl<__nv_bfloat16, __nv_bfloat16>(moe_runner_);
+        initMoeRunnerImpl<__nv_bfloat16, __nv_bfloat16, cutlass::WeightOnlyQuantOp::UNDEFINED>(moe_runner_);
     } else if (compute_type == DataType::TYPE_BF16 && weights_type == DataType::TYPE_QINT8) {
-        initMoeRunnerImpl<__nv_bfloat16, uint8_t>(moe_runner_);
+        initMoeRunnerImpl<__nv_bfloat16, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>(moe_runner_);
+    } else if (compute_type == DataType::TYPE_FP16 && weights_type == DataType::TYPE_QINT4X2) {
+        initMoeRunnerImpl<half, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>(moe_runner_);
+    } else if (compute_type == DataType::TYPE_BF16 && weights_type == DataType::TYPE_QINT4X2) {
+        initMoeRunnerImpl<__nv_bfloat16, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>(moe_runner_);
     } else {
         RUNTIME_ASSERT_OP_ARG(
             false,

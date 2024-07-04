@@ -460,7 +460,6 @@ class ModelWeightsLoader:
             int8_scales.append(scale)
         int8_weight = torch.stack(int8_weights, dim=0)
         int8_scale = torch.stack(int8_scales, dim=0)
-        int8_weight = int8_weight.reshape([int8_weight.shape[0], int8_weight.shape[-1], -1])
         return int8_weight.to(device), int8_scale.to(device)
 
     def unpack_int32_into_int16(self, w_packed: torch.Tensor, int8: bool):

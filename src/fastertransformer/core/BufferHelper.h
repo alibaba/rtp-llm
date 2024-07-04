@@ -44,6 +44,8 @@ inline void BUFFER_DTYPE_CHECK(const Buffer& buffer, std::vector<DataType> dtype
 
 #define BUFFER_GET_SCALE_IF_Q_BUFFER(buf) \
     ((buf)->isQBuffer() ? dynamic_cast<const QBuffer*>(buf.get())->scalesData() : nullptr)
+#define BUFFER_GET_ZERO_IF_Q_BUFFER(buf) \
+    ((buf)->isQBuffer() ? dynamic_cast<const QBuffer*>(buf.get())->zerosData() : nullptr)
 #define OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(buf) \
     ((buf) ? buf->data() : nullptr)
 

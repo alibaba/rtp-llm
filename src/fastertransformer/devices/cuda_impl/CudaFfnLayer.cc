@@ -17,12 +17,15 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
     const auto hidden_dim = hidden.shape()[1];
     const auto num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
     const auto top_k = moe_conf.top_k;
+    // TODO group_size
+    auto group_size = 0;
+    if (params.weights.moe_gate_weight->kernel->isQBuffer()) {
+        if ( dynamic_cast<const QBuffer*>(params.weights.moe_gate_weight->kernel.get())->zerosData() != nullptr) {
+            group_size = params.weights.moe_gate_weight->kernel->shape()[1]
+                         / dynamic_cast<const QBuffer*>(params.weights.moe_gate_weight->kernel.get())->zeros().shape()[1];
+        }
+    }
 
-    // moe up, gate weights expected shape: [num_expert, expert_hidden_size, hidden_dim]
-    // moe down weights expected shape: [num_expert, hidden_dim, expert_hidden_size]
-    // NOTE: fp16/bf16 moe ffn layout differs from int8 weights.
-    // This difference is caused by kernel implementation, and ignored here.
-    const auto expert_hidden_size = params.weights.moe_up_weight->kernel->shape()[1];
 
     const auto output = allocateBuffer({type, {token_num, hidden_dim}});
 
@@ -31,7 +34,7 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
 
     initMoeRunner(type, weights.moe_up_weight->kernel->type());
     const auto ws_size = moe_runner_->getWorkspaceSize(
-        token_num, hidden_dim, expert_hidden_size, num_expert,
+        token_num, hidden_dim, moe_conf.moe_inter_padding_size, num_expert,
         top_k, params.configs.activation_type, {});
 
     const auto worksapce = allocateBuffer({DataType::TYPE_BYTES, {ws_size}});
@@ -50,19 +53,23 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
         gate->data<float>(),
         weights.moe_gate_weight->kernel->data(),
         BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
+        BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
         OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_gate_weight->bias),
         params.configs.activation_type,
         weights.moe_down_weight->kernel->data(),
         BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_down_weight->kernel),
+        BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_down_weight->kernel),
         OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_down_weight->bias),
         weights.moe_up_weight->kernel->data(),
         BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_up_weight->kernel),
+        BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_up_weight->kernel),
         OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_up_weight->bias),
         token_num,
         hidden_dim,
-        expert_hidden_size,
+        moe_conf.moe_inter_padding_size,
         num_expert,
         top_k,
+        group_size,
         moe_conf.normalize_expert_scale,
         worksapce->data<char>(),
         // output

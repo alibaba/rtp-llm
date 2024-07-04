@@ -44,7 +44,7 @@ public:
                 (size_t)params.expert_num_,
                 (size_t)params.moe_k_,
                 params.moe_normalize_expert_scale_,
-                params.moe_inter_padding_size_,
+                params.moe_inter_padding_size_ / params.tp_size_,
                 params.has_moe_norm_
             }) : std::nullopt;
         ft::FfnConfigs ffn_config{

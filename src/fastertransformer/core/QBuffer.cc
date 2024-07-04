@@ -34,9 +34,9 @@ QBuffer::QBuffer(BufferPtr kernel,
     );
 
     FT_CHECK_WITH_INFO(
-        ((scales_->dim() == 1 || scales_->dim() == 2) &&
-         (zeros_->dim() == 1 || zeros_->dim() == 2)),
-        "dim of scales[%d] and zero_points[%d] must be 1 or 2.",
+        ((scales_->dim() == 1 || scales_->dim() == 2 || scales_->dim() == 3) &&
+         (zeros_->dim() == 1 || zeros_->dim() == 2 || zeros_->dim() == 3)),
+        "dim of scales[%d] and zero_points[%d] must be 1, 2, 3.",
         scales_->dim(), zeros_->dim()
     );
 
