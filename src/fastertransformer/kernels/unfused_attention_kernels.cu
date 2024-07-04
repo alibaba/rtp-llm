@@ -1591,8 +1591,9 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
         }
     }
 
-    const int position_id = position_ids == nullptr ? -1 : position_ids[token_idx];
-    const int input_len = cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx];
+    const int position_id = position_ids == nullptr ? -1 : position_ids[token_idx];    
+    const int pre_len = cu_seqlens[batch_idx];
+    const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope(rotary_embedding_style,
                 q,
                 k,
@@ -1628,7 +1629,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     size_t dest_q_idx = batch_idx * size_per_head * seq_len * head_num + head_idx * size_per_head * seq_len
                            + seq_idx * size_per_head + tidx * vec_size;
     if constexpr (USE_PAGED_FMHA) {
-        dest_q_idx = batch_idx * size_per_head * seq_len * head_num + seq_idx * size_per_head * head_num
+        dest_q_idx = (pre_len + seq_idx) * size_per_head * head_num
                      + head_idx * size_per_head + tidx * vec_size;
     }
 
