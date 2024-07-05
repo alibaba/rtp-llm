@@ -120,7 +120,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         inputs.max_prefix_length = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[5]}, ft::AllocationType::HOST});
         inputs.kv_cache_blocks = device->allocateBuffer({ft::DataType::TYPE_UINT64, {(size_t)shape_hints_ptr[6], (size_t)shape_hints_ptr[1], 2, (size_t)shape_hints_ptr[7]}, ft::AllocationType::HOST});
         if (shape_hints_ptr[8]) {
-            inputs.kv_cache_scales = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[6], (size_t)shape_hints_ptr[1], 2, (size_t)shape_hints_ptr[7]}, ft::AllocationType::HOST});
+            inputs.kv_cache_scales = device->allocateBuffer({ft::DataType::TYPE_UINT64, {(size_t)shape_hints_ptr[6], (size_t)shape_hints_ptr[1], 2, (size_t)shape_hints_ptr[7]}, ft::AllocationType::HOST});
         }
         inputs.lm_output_indexes = device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[9]}, ft::AllocationType::HOST});
         if (shape_hints_ptr[10]) {

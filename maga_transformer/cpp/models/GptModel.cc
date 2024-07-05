@@ -194,8 +194,12 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     prepareAttentionInputs(inputs, attention_common_inputs);
     BufferPtr input_kv_blocks;
+    BufferPtr input_kv_cache_scales;
     if (inputs.kv_cache_blocks) {
         input_kv_blocks = device_->clone({*inputs.kv_cache_blocks, AllocationType::DEVICE, {"kv_block_ptrs"}});
+    }
+    if (inputs.kv_cache_scales) {
+        input_kv_cache_scales = device_->clone({*inputs.kv_cache_scales, AllocationType::DEVICE, {"kv_scales_ptrs"}});
     }
 
     printBufferData(*hidden, "input_hidden");
@@ -235,6 +239,12 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             auto layer_buffer = (*input_kv_blocks)[i];
             layer_kv_blocks_ptr = std::make_unique<Buffer>(layer_buffer.where(), layer_buffer.type(), layer_buffer.shape(), layer_buffer.data());
             attention_common_inputs.kv_cache_blocks = *layer_kv_blocks_ptr;
+        }
+        BufferPtr layer_kv_cache_scales_ptr;
+        if (input_kv_cache_scales) {
+            auto layer_buffer = (*input_kv_cache_scales)[i];
+            layer_kv_cache_scales_ptr = std::make_unique<Buffer>(layer_buffer.where(), layer_buffer.type(), layer_buffer.shape(), layer_buffer.data());
+            attention_common_inputs.kv_cache_scales = *layer_kv_cache_scales_ptr;
         }
 
         auto attn_output = device_->attentionLayer(AttentionLayerParams({

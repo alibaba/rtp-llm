@@ -270,6 +270,8 @@ struct AttentionCommonInputs {
     // [batch_size, 2, block_length], int64 block pointers
     OptionalBufferRef kv_cache_blocks;
 
+    OptionalBufferRef kv_cache_scales;
+
     ConstBufferPtr cu_seqlens;
     ConstBufferPtr padding_offset;
 

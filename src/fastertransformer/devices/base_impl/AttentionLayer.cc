@@ -30,6 +30,14 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
             "kv_cache_blocks shape in attention layer should be [batch_size, 2, block_length]"
             ", but got %s", kv_cache_blocks.value().get().debugString().c_str());
     }
+    const auto &kv_cache_scales = params.common.kv_cache_scales;
+    if (kv_cache_scales.has_value()) {
+        const auto &shape = kv_cache_scales.value().get().shape();
+        RUNTIME_ASSERT_OP_ARG(
+            ((shape.size() == 3) && (shape[0] == input_lengths.shape()[0]) && (shape[1] == 2)),
+            "kv_cache_blocks shape in attention layer should be [batch_size, 2, block_length]"
+            ", but got %s", kv_cache_scales.value().get().debugString().c_str());
+    }
 
     // typically local_head_num * size_per_head
     const auto qkv_hidden_size = output_weight->kernel->shape()[0];
@@ -58,21 +66,33 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     auto generate_kv_blocks = kv_cache_blocks
         ? kv_cache_blocks.value().get().view(0, generate_batch_size)
         : Buffer::emptyBuffer();
+    auto generate_kv_scales = kv_cache_scales
+        ? kv_cache_scales.value().get().view(0, generate_batch_size)
+        : Buffer::emptyBuffer();
     auto context_qkv = qkv->view(generate_batch_size, context_token_num);
     auto context_output = qkv_output->view(generate_batch_size, context_token_num);
     auto context_kv_blocks = kv_cache_blocks
         ? kv_cache_blocks.value().get().view(generate_batch_size, context_batch_size)
+        : Buffer::emptyBuffer();
+    auto context_kv_scales = kv_cache_scales
+        ? kv_cache_scales.value().get().view(generate_batch_size, context_batch_size)
         : Buffer::emptyBuffer();
 
     if (generate_batch_size) {
         if (kv_cache_blocks) {
             params.common.kv_cache_blocks = generate_kv_blocks;
         }
+        if (kv_cache_scales) {
+            params.common.kv_cache_scales = generate_kv_scales;
+        }
         decoderSelfAttention({generate_qkv, generate_output, params.common, params.weights, params.configs});
     }
     if (context_batch_size) {
         if (kv_cache_blocks) {
             params.common.kv_cache_blocks = context_kv_blocks;
+        }
+        if (kv_cache_scales) {
+            params.common.kv_cache_scales = context_kv_scales;
         }
         contextAttention({context_qkv, context_output, params.common, params.weights, params.configs});
     }
@@ -89,11 +109,11 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                      DataType::TYPE_QINT8,
                                      1});
 
-        gemm({*qkv_output_, *(output_weight->kernel), nullopt, output});    
+        gemm({*qkv_output_, *(output_weight->kernel), nullopt, output});
     } else {
         gemm({*qkv_output, *(output_weight->kernel), nullopt, output});
     }
-    
+
     return {move(output)};
 }
 

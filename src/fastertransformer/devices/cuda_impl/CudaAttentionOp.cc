@@ -31,6 +31,12 @@ void writeContextKvCache(
         batch_size, max_blocks_per_batch, params.configs.tokens_per_block, 0);
     KvCacheDataType cache_type = KvCacheDataType::BASE;
     kv_block_array.data        = (int64_t *)kv_blocks.data();
+    if (params.common.kv_cache_scales.has_value()) {
+        const auto& kv_scales = params.common.kv_cache_scales.value().get();
+        kv_block_array.scale     = (int64_t *)(kv_scales.data());
+        kv_block_array.int8_mode = true;
+        cache_type               = KvCacheDataType::INT8;
+    }
 
     invokeTranspose4dBatchMajor<T>(
         k.data<T>(),
@@ -289,6 +295,11 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     KVBlockArray kv_block_array(batch_size, max_blocks_per_seq, params.configs.tokens_per_block, 0);
     kv_block_array.data = reinterpret_cast<int64_t*>(
         params.common.kv_cache_blocks.value().get().data());
+    if (params.common.kv_cache_scales.has_value()) {
+        const auto& kv_scales = params.common.kv_cache_scales.value().get();
+        kv_block_array.scale     = reinterpret_cast<int64_t*>(kv_scales.data());
+        kv_block_array.int8_mode = true;
+    }
 
     fusedQKV_masked_attention_dispatch<T, KVBlockArray>(
         qkv_buf_ptr,
