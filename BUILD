@@ -160,7 +160,6 @@ cc_binary(
     deps = [
         ":th_transformer_lib",
         ":gpt_init_params_hdr",
-        "//src/fastertransformer/devices/cpu_impl:cpu_impl",
     ] + select({
         "//:using_cuda": [
             "cutlass_kernels_interface",

@@ -144,6 +144,7 @@ cc_library(
         ":utils",
         "//src/fastertransformer/devices:devices_base",
     ] + select({
+        "//:using_cuda": [],
         "//:using_rocm": [],
         "//conditions:default": [
             "//src/fastertransformer/devices/cpu_impl:cpu_impl",

@@ -40,17 +40,17 @@ for path in sys.path:
     try:
         if "xfastertransformer-devel" in os.listdir(path):
             xft_lib_path = f"{path}/xfastertransformer-devel/lib"
-            logging.info(f"load libxfastertransformer.so from {xft_lib_path}")
             from ctypes import cdll
             cdll.LoadLibrary(f"{xft_lib_path}/libxfastertransformer.so")
             xft_loaded = True
+            logging.info(f"loaded libxfastertransformer.so from {xft_lib_path}")
             break
         else:
-            logging.info(f"checked path [{path}] for xft, not found.")
+            logging.debug(f"checked path [{path}] for xft, not found.")
     except:
         pass
 if not xft_loaded:
-    logging.info("failed to load xfastertransformer-devel package")
+    logging.info("xfastertransformer-devel package not loaded, this won't affect run.")
 
 
 try:
