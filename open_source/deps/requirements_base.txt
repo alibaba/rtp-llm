@@ -39,6 +39,5 @@ dashscope>=1.11.0
 jieba
 openai
 pdfplumber
-pydantic>=2.3.0
 rank_bm25
 snowballstemmer

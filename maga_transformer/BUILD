@@ -31,6 +31,15 @@ requirement([
     "orjson",
     "xfastertransformer_devel_icx",
     "decord",
+    # add qwen agent package
+    "pydantic",
+    "json5",
+    "dashscope",
+    "jieba",
+    "openai",
+    "pdfplumber",
+    "rank_bm25",
+    "snowballstemmer",
 ])
 
 filegroup(
