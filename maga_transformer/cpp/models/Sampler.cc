@@ -53,7 +53,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             : Buffer::emptyBuffer();
         auto sample_cum_log_probs = device_->allocateBuffer(
             {inputs.cum_log_probs->type(), {sample_seq_num}});
-        device_->copy({*sample_cum_log_probs, *inputs.cum_log_probs, 0, from_seq_idx, sample_seq_num});
+        device_->copy({*sample_cum_log_probs, inputs.cum_log_probs->view(from_seq_idx, sample_seq_num)});
 
 #define MAY_GET_BUFFER_VIEW(buffer_ptr) \
         (buffer_ptr.get() ? buffer_ptr->view(from_batch_idx, sample_batch_size) : Buffer::emptyBuffer())
@@ -83,7 +83,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
 
-        device_->copy({*inputs.cum_log_probs, *sample_cum_log_probs, from_seq_idx, 0, sample_seq_num});
+        device_->copy({inputs.cum_log_probs->view(from_seq_idx, sample_seq_num), *sample_cum_log_probs});
 
         from_batch_idx = sample_to_batch_idx + 1;
         sample_to_batch_idx = from_batch_idx;

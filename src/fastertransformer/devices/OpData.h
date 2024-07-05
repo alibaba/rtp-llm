@@ -87,10 +87,6 @@ struct CloneParams {
 struct CopyParams {
     const Buffer& dst;
     const Buffer& src;
-
-    size_t dst_offset  = 0;
-    size_t src_offset  = 0;
-    int64_t copy_length = -1;
 };
 
 using SelectOutput = BufferPtr;

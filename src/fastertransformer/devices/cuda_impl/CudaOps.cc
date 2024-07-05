@@ -17,7 +17,7 @@ namespace fastertransformer {
 
 void CudaDevice::copy(const CopyParams& params) {
     FT_CHECK_WITH_INFO(params.src.type() == params.dst.type(),
-                       "dst[%d] and src[%d,] need has same type.",
+                       "copy dst[%d] and src[%d] need has same type.",
                        params.src.type(), params.dst.type());
 
     if (params.dst.isQBuffer() && params.src.isQBuffer()) {
@@ -29,23 +29,8 @@ void CudaDevice::copy(const CopyParams& params) {
         return;
     }
 
-    const auto src_offset = params.src_offset;
-    const auto dst_offset = params.dst_offset;
-    auto copy_length = params.copy_length;
-
-    if (copy_length < 0) {
-        RUNTIME_ASSERT_OP_ARG(params.src.shape()[0] == params.dst.shape()[0],
-            "src and dst 0-dim size mismatch: [%s] vs [%s]",
-            params.src.debugString().c_str(), params.dst.debugString().c_str());
-        copy_length = params.src.shape()[0];
-    }
-
-    if (copy_length == 0) {
-        return;
-    }
-
-    const auto src = params.src.view(src_offset, copy_length);
-    const auto dst = params.dst.view(dst_offset, copy_length);
+    const auto& src = params.src;
+    const auto& dst = params.dst;
 
     RUNTIME_ASSERT_OP_ARG(src.sizeBytes() == dst.sizeBytes(),
         "src and dst copy size mismatch: [%s] vs [%s]",

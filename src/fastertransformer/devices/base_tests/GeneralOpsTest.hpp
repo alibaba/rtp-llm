@@ -16,11 +16,11 @@ void testCopyWithSlicing() {
     auto src = createHostBuffer({4, 2}, input.data());
     auto dst = createBuffer<TestT>({2, 2}, {0, 0, 0, 0});
 
-    device_->copy({*dst, *src, 0, 1, 2});
+    device_->copy({*dst, src->view(1, 2)});
 
     assertBufferValueEqual<TestT>(*dst, {3, 4, 5, 6});
 
-    device_->copy({*dst, *src, 1, 3, 1});
+    device_->copy({dst->view(1, 1), src->view(3, 1)});
     assertBufferValueEqual<TestT>(*dst, {3, 4, 7, 8});
 }
 

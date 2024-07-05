@@ -90,7 +90,7 @@ SelectOutput DeviceBase::select(const SelectParams& params) {
 
     const auto pre_select_size = std::accumulate(
         selected_shape.begin(), selected_shape.begin() + dim, 1UL, std::multiplies<size_t>());
-    const auto post_select_stride = std::accumulate(
+    const auto post_select_stride = (int32_t)std::accumulate(
         selected_shape.begin() + dim + 1, selected_shape.end(), 1UL, std::multiplies<size_t>());
 
     // both src and dst needs to be viewed into 1-d buffer.
@@ -102,7 +102,7 @@ SelectOutput DeviceBase::select(const SelectParams& params) {
         for (auto j = 0; j < pre_select_size; j++) {
             const auto src_offset = j * src.shape()[dim] * post_select_stride + idx * post_select_stride;
             const auto dst_offset = j * idx_buf.size() * post_select_stride + i * post_select_stride;
-            copy({dst_view, src_view, dst_offset, src_offset, (int32_t)post_select_stride});
+            copy({dst_view.view(dst_offset, post_select_stride), src_view.view(src_offset, post_select_stride)});
         }
     }
 
@@ -146,7 +146,7 @@ ConcatOutput DeviceBase::concat(const ConcatParams& params) {
             "Concat input [%d] type %d does not match concated type %d.",
             i, input->type(), type);
 
-        copy({*concated, *input, offset, 0, (int64_t)shape[0]});
+        copy({concated->view(offset, (int64_t)shape[0]), *input});
         offset += shape[0];
     }
     return move(concated);
