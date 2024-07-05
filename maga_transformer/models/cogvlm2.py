@@ -13,7 +13,7 @@ from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from maga_transformer.models.cogvlm2_weight import CogVLM2WeightInfo, CogVLM2VitWeights
 from maga_transformer.models.llama import Llama
-from maga_transformer.models.multimodal_mixin import MultiModalMixin
+from maga_transformer.models.multimodel.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.utils.util import to_torch_dtype
 

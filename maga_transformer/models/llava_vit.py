@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from PIL import Image
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
-from maga_transformer.models.multimodal_mixin import ImageEmbeddingInterface
+from maga_transformer.models.multimodel.multimodel_common import ImageEmbeddingInterface
 from maga_transformer.models.llava_utils import expand2square, process_anyres_image, unpad_image, get_anyres_image_grid_shape
 
 class LlavaImageEmbedding(ImageEmbeddingInterface):

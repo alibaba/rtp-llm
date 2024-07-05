@@ -1,25 +1,19 @@
 import os
 import json
 import torch
-import re
 
 import numpy as np
 from typing import List, Any, Dict, Tuple, Union
-from PIL import Image
 from torchaudio.transforms import Resample
-from transformers import AutoConfig, CLIPVisionConfig, AutoTokenizer
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 from transformers.models.whisper.processing_whisper import WhisperProcessor
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.llava_weight import LlavaWeightInfo
 from maga_transformer.models.gpt import GPT
-from maga_transformer.models.base_model import BaseModel
-from maga_transformer.models.multimodal_mixin import MultiModalMixin, BaseVitWeights, AudioEmbeddingInterface
+from maga_transformer.models.multimodel.multimodal_mixin import MultiModalMixin, BaseVitWeights
+from maga_transformer.models.multimodel.multimodel_common import AudioEmbeddingInterface
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.models.llava_vit import LlavaImageEmbedding
-from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.models.base_model import EmbeddingOutput
 from maga_transformer.models.whisper_weight import WhisperWeightInfo

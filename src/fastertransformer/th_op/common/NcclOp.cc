@@ -19,7 +19,7 @@ NcclOp::~NcclOp()
     ft::ftNcclParamDestroy(pipeline_para_);
 }
 
-void NcclOp::broadcast_tp(std::vector<th::Tensor> tensors, int64_t root)
+void NcclOp::broadcast_tp(std::vector<th::Tensor> tensors, int64_t root, bool timeout)
 {
     if (tensor_para_.world_size_ == 1) {
         return;
@@ -36,7 +36,7 @@ void NcclOp::broadcast_tp(std::vector<th::Tensor> tensors, int64_t root)
         ft::ftNcclGroupEnd();
     }
     if (tensor_para_.rank_ == root){
-        ft::ftNcclStreamSynchronize(tensor_para_, stream);
+        ft::ftNcclStreamSynchronize(tensor_para_, stream, timeout);
     }
     sync_check_cuda_error();
 }

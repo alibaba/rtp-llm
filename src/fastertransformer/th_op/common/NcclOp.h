@@ -14,7 +14,7 @@ public:
 
     ~NcclOp();
 
-    void broadcast_tp(std::vector<th::Tensor> tensors, int64_t root);
+    void broadcast_tp(std::vector<th::Tensor> tensors, int64_t root, bool timeout=true);
 
 private:
     size_t        tensor_para_size_;

@@ -5,8 +5,6 @@ import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-from decord import VideoReader, cpu
-from PIL import Image
 
 from maga_transformer.config.exceptions import (ExceptionType,
                                                 FtRuntimeException)
@@ -14,73 +12,14 @@ from maga_transformer.config.generate_config import RequestFormat
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, VitParameters
 from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
 from maga_transformer.models.base_model import EmbeddingOutput
+from maga_transformer.models.multimodel.multimodel_common import MultiModalEmbeddingInterface
 from maga_transformer.models.multimodel.multimodel_trt_engine import MultiModelTRTEngine
 from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeightInfo, WeightInfo, sp_id, identity
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader
-from maga_transformer.utils.multimodal_util import get_bytes_io_from_url, data_cache_
+
 from maga_transformer.ops.comm.nccl_op import NcclOp
 
-class MultiModalEmbeddingInterface:
-    @torch.no_grad()
-    def mm_embedding(self, url: str, device):
-        cached_res = data_cache_.check_cache(url)
-        if cached_res is None:
-            try:
-                bytes_io = get_bytes_io_from_url(url)
-                mm_input = self._mm_preprocess(bytes_io)
-            except Exception as e:
-                raise Exception(f"cannot download image from {url}, exception {e}")
-            features = self.mm_process(mm_input, device)
-            data_cache_.insert_cache(url, features)
-            return features
-        else:
-            return cached_res
-
-    def _mm_preprocess(self, data):
-        raise NotImplementedError
-
-    @torch.no_grad()
-    def mm_process(self, mm_input, device):
-        raise NotImplementedError
-
-class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
-    def _mm_preprocess(self, data):
-        return Image.open(data).convert("RGB")
-
-    @torch.no_grad()
-    def mm_process(self, mm_input, device):
-        return self.image_embedding([mm_input], device)[0]
-
-    @torch.no_grad()
-    def image_embedding(self, images: List[Image.Image], device):
-        raise NotImplementedError()
-
-class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
-    def _mm_preprocess(self, data):
-        # temporary
-        import torchaudio
-        return torchaudio.load(data)
-
-    @torch.no_grad()
-    def mm_process(self, mm_input, device):
-        return self.audio_embedding(mm_input, device)
-
-    @torch.no_grad()
-    def audio_embedding(self, audio: Tuple[torch.Tensor, int], device):
-        raise NotImplementedError()
-
-class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
-    def _mm_preprocess(self, data):
-        return VideoReader(data, ctx=cpu(0))
-
-    @torch.no_grad()
-    def mm_process(self, mm_input, device):
-        return self.video_embedding(mm_input, device)
-
-    @torch.no_grad()
-    def video_embedding(self, video: List[Image.Image], device):
-        raise NotImplementedError()
 
 class BaseVitWeights:
     def __init__(self, vit_part: Dict[str, Any], with_prefix: bool = False):
@@ -116,6 +55,7 @@ class BaseVitWeights:
             else:
                 raise Exception("Unknown vit part type")
 
+
 class BaseMultiModalWeightInfo:
     def __init__(self, config: GptInitModelParameters):
         self.vit_weights: Optional[BaseVitWeights] = config.vit_related_params.vit_weights
@@ -129,6 +69,7 @@ class BaseMultiModalWeightInfo:
                 w_name = ckpt_prefix + w
                 llm_weights.weights.append(WeightInfo(w_name, [CkptWeightInfo(w_name, identity)], identity))
                 llm_weights.tp_strategy[w_name] = sp_id
+
 
 class MultiModalMixin:
     mm_part: MultiModalEmbeddingInterface
@@ -188,7 +129,7 @@ class MultiModalMixin:
         self, weights_info: ModelDeployWeightInfo, ckpt_path: str, vit_params: VitParameters,
         device: Union[str, torch.device], dtype: torch.dtype
     ):
-        # Load weight only for self.visual
+        # Load weight only for self.mm_part
         
         database = CkptDatabase(ckpt_path)
         weight_loader = get_model_weights_loader(weights_info, database, compute_dtype=dtype)
@@ -216,29 +157,27 @@ class MultiModalMixin:
             import tensorrt
         except ImportError:
             raise RuntimeError("tensorrt library not fonnd")
-        
-        # VIT trt engine only support single GPU, for other ranks, they will wait unitl TP0 return embedding in async_input_word_embedding
-        if g_parallel_info.tp_rank > 0:
-            return
 
         try:
-            os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
+            # TRT engine doesn't support TP, here we only transform image in rank 0,
+            # later input embedding result will be broadcast from rank 0 in async_input_word_embedding
+            if g_parallel_info.tp_rank == 0:
+                os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
 
-            visual_trt_engine = MultiModelTRTEngine(
-                model_name, vit_params.config.get("image_size"), device, dtype
-            )
+                visual_trt_engine = MultiModelTRTEngine(
+                    model_name, vit_params.config.get("image_size"), device, dtype
+                )
 
-            if MultiModelTRTEngine.trt_engine_cached(model_name, dtype):
-
+                if MultiModelTRTEngine.trt_engine_cached(model_name, dtype):
                     self._load_mm_weight(weights_info, ckpt_path, vit_params, device, dtype)
-                    
+
                     # create cached dir if not exists
                     output_dir = MultiModelTRTEngine.cache_path(model_name, dtype)
                     if not os.path.exists(output_dir):
                         os.makedirs(output_dir)
-                    
+
                     visual_trt_engine.export_onnx(self.mm_part.vit)
-                    
+
                     # gc VIT network, release GPU memory for generating trt engine
                     del self.mm_part
                     self.mm_part = None
@@ -251,15 +190,26 @@ class MultiModalMixin:
                     # create a completion file to mark that the trt engine has been generated and cached
                     MultiModelTRTEngine.completion_file_path(model_name, dtype).touch()
 
+            # for TP > 1, other tps should wait tp0 to generate trt engine
+            if g_parallel_info.tp_size > 1:
+                self.nccl_op_.barrier(self.device)
+
+            del self.mm_part
+            self.mm_part = None
+            vit_params.vit_weights = None
+            gc.collect()
+            torch.cuda.empty_cache()
             visual_trt_engine.load_trt_engine()
-            self.visual = visual_trt_engine
+            self.mm_part = visual_trt_engine
 
         except Exception as e:
             raise RuntimeError(f"init vit trt error: {e}")
 
     def load_vit_weight(self, ctype: str):
-        if isinstance(self.visual, MultiModelTRTEngine):
-            # No need to load weight for MultiModelTRTEngine, its weight is inside trt engine.
+        # For trt engine, we don't need to load weight since its weight is inside trt engine.
+        # mm_part is none if and only if VIT_TRT is enabled and tp_rank >= 1
+        # embedding will be boardcasted from tp0, here we also don't not need to load vit weight.
+        if not self.mm_part or isinstance(self.mm_part, MultiModelTRTEngine):
             return
 
         vit_weight = self.config.vit_related_params.vit_weights

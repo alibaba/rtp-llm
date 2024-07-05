@@ -12,7 +12,8 @@ from maga_transformer.models.qwen import QWen
 from maga_transformer.models.qwen_vl_weight import QWenVLWeightInfo, QwenVLVitWeight
 from maga_transformer.models.qwen_vl_vit import VisionTransformer as QWen_VL_ViT
 from maga_transformer.models.base_model import BaseModel
-from maga_transformer.models.multimodal_mixin import MultiModalMixin, ImageEmbeddingInterface
+from maga_transformer.models.multimodel.multimodal_mixin import MultiModalMixin
+from maga_transformer.models.multimodel.multimodel_common import ImageEmbeddingInterface
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info

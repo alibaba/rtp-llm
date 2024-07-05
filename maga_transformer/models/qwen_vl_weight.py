@@ -1,11 +1,6 @@
 
-import functools
-import logging
-import torch
-
-from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, concat_1, concat_0, identity, zeros, transpose, sp_id
 from maga_transformer.models.qwen import QWenWeight
-from maga_transformer.models.multimodal_mixin import BaseVitWeights, BaseMultiModalWeightInfo
+from maga_transformer.models.multimodel.multimodal_mixin import BaseVitWeights, BaseMultiModalWeightInfo
 
 class QwenVLVitWeight(BaseVitWeights):
     def _set_weight_prefix(self):

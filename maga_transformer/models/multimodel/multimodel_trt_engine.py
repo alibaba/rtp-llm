@@ -8,15 +8,14 @@ import torch
 from torch import nn
 
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.models.multimodel.multimodel_common import ImageTransform
+from maga_transformer.models.multimodel.multimodel_common import ImageTransform, ImageEmbeddingInterface
 
 try:
     import tensorrt as trt
 except ImportError as e:
     pass
 
-
-def torch_dtype_from_trt(dtype: trt.DataType):
+def torch_dtype_from_trt(dtype):
     # TODO(xyz): support quantization such as int8, int4
     if dtype == trt.bfloat16:
         return torch.bfloat16
@@ -28,7 +27,7 @@ def torch_dtype_from_trt(dtype: trt.DataType):
         raise TypeError(f"unsupported tensorrt data type {dtype}")
 
 
-def torch_device_from_trt(device: trt.TensorLocation):
+def torch_device_from_trt(device):
     if device == trt.TensorLocation.DEVICE:
         return torch.device("cuda")
     elif device == trt.TensorLocation.HOST:
@@ -47,8 +46,8 @@ def torch_type_to_path(dtype: torch.dtype):
     else:
         raise TypeError(f"unknown torch data type {dtype}")
 
-
-class MultiModelTRTEngine(nn.Module):
+# TODO(xyz): make multimodel trt engine more general, not only handle the image case
+class MultiModelTRTEngine(nn.Module, ImageEmbeddingInterface):
     def __init__(
         self,
         model_name: str,
@@ -68,6 +67,7 @@ class MultiModelTRTEngine(nn.Module):
         output_dir = MultiModelTRTEngine.cache_path(model_name, self.dtype)
         self.onnx_file_path = os.path.join(output_dir, "multimodel.onnx")
         self.engine_file_path = os.path.join(output_dir, "multimodel.trt")
+        self.engine = None
 
     @staticmethod
     def trt_engine_cached(model_name: str, dtype: torch.dtype) -> bool:
@@ -165,8 +165,6 @@ class MultiModelTRTEngine(nn.Module):
             f.write(engineString)
 
     def load_trt_engine(self):
-        self.engine = None
-
         logging.info("Start loading TRT engine!")
         G_LOGGER = trt.Logger(trt.Logger.WARNING)
         with open(self.engine_file_path, "rb") as f, trt.Runtime(G_LOGGER) as runtime:
@@ -191,6 +189,8 @@ class MultiModelTRTEngine(nn.Module):
             self.output_device = torch_device_from_trt(
                 self.engine.get_tensor_location(self.output_names[0])
             )
+        else:
+            raise ValueError(f"Failed loading {self.engine_file_path}")
 
 
     def forward(self, *inputs):

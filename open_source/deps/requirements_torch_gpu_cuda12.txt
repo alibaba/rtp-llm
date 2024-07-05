@@ -1,4 +1,4 @@
 https://download.pytorch.org/whl/cu121/torch-2.1.0%2Bcu121-cp310-cp310-linux_x86_64.whl#sha256=0d4e8c52a1fcf5ed6cfc256d9a370fcf4360958fc79d0b08a51d55e70914df46
 torchvision==0.16.0
-tensorrt==8.6.1
+tensorrt==10.1.0
 -r requirements_base.txt

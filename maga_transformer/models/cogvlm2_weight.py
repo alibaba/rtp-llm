@@ -2,7 +2,7 @@ import functools
 from typing import List
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.multimodal_mixin import (
+from maga_transformer.models.multimodel.multimodal_mixin import (
     BaseMultiModalWeightInfo,
     BaseVitWeights,
 )

@@ -1,10 +1,8 @@
 import os
 import torch
 import asyncio
-from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, Future
 from typing import List
-from maga_transformer.models.multimodal_mixin import MultiModalMixin
 
 class MMProcessEngine:
     def __init__(self):
