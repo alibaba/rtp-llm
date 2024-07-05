@@ -135,30 +135,22 @@ py_library(
 )
 
 filegroup(
-    name = "not_experimental_async_model_files",
-    srcs = glob(["async_decoder_engine/**/*.py"], exclude=["async_decoder_engine/rpc_model.py"]),
-)
-
-filegroup(
     name = "async_model_files",
     srcs = glob(["async_decoder_engine/**/*.py"]),
 )
 
 py_library(
     name = "async_model",
-    srcs = select({
-        "//:use_experimental": [":async_model_files"],
-        "//conditions:default": [":not_experimental_async_model_files"],
-    }),
+    srcs = [
+        ":async_model_files"
+    ],
     deps = [
         ":utils",
         ":ops",
         ":config",
         ":structure",
-    ] + select({
-        "//:use_experimental": ["//maga_transformer/cpp:model_rpc_client"],
-        "//conditions:default": [],
-    }),
+        "//maga_transformer/cpp:model_rpc_client",
+    ],
 )
 
 py_library(
@@ -349,7 +341,7 @@ py_wheel(
         "torchvision==0.16.0",
         "einops",
         "prettytable",
-        "pydantic==2.5.3",                
+        "pydantic==2.5.3",
         "sentence-transformers==2.7.0",
         "grpcio==1.62.0",
         "xfastertransformer_devel_icx==1.7.2",

@@ -19,10 +19,6 @@ config_setting(
     values = {"define": "using_rocm=true"},
 )
 
-config_setting(
-    name = "use_experimental",
-    values = {"define": "use_experimental=true"},
-)
 
 cc_library(
     name = "gpt_init_params_hdr",
@@ -59,16 +55,6 @@ cc_library(
 )
 
 filegroup(
-    name = "not_experimental_th_op_hdrs_files",
-    srcs = glob([
-        "src/fastertransformer/th_op/**/*.h",
-    ], exclude=[
-        "src/fastertransformer/th_op/GptInitParameter.h",
-        "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.h",
-    ]),
-)
-
-filegroup(
     name = "th_op_hdrs_files",
     srcs = glob([
         "src/fastertransformer/th_op/**/*.h"],
@@ -79,27 +65,10 @@ filegroup(
 
 cc_library(
     name = "th_op_hdrs",
-    hdrs = select({
-        "//:use_experimental": [
-            ":th_op_hdrs_files"
-        ],
-        "//conditions:default": [
-            ":not_experimental_th_op_hdrs_files"
-        ],
-    }),
+    hdrs = [
+        ":th_op_hdrs_files",
+    ],
     visibility = ["//visibility:public"],
-)
-
-filegroup(
-    name = "not_experimental_th_transformer_lib_files",
-    srcs = glob([
-        "src/fastertransformer/th_op/th_utils.cc",
-        "src/fastertransformer/th_op/common/*.cc",
-        "src/fastertransformer/th_op/multi_gpu_gpt/*.cc",
-        "src/fastertransformer/th_op/GptInitParameter.cc"
-    ], exclude = [
-        "src/fastertransformer/th_op/multi_gpu_gpt/RtpLLMOp.cc"
-    ]),
 )
 
 filegroup(
@@ -128,21 +97,16 @@ filegroup(
 
 cc_library(
     name = "th_transformer_lib",
-    srcs = select({
-        "//:use_experimental": [":th_transformer_lib_files"],
-        "//conditions:default": [":not_experimental_th_transformer_lib_files"],
-    }),
+    srcs = [
+        ":th_transformer_lib_files"
+    ],
     deps = [
         ":gpt_init_params_hdr",
     	":th_op_hdrs",
         "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:model_rpc_server",
+        "@grpc//:grpc++",
     ] + select({
-        "//:use_experimental": [
-            "//maga_transformer/cpp:model_rpc_server",
-            "@grpc//:grpc++",
-        ],
-        "//conditions:default": [],
-    }) + select({
         "//:using_cuda": [
             "//src/fastertransformer/cuda:allocator_torch",
             "//src/fastertransformer/layers:layers",
