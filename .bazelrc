@@ -93,6 +93,7 @@ build:rocm --action_env TF_NEED_ROCM=1
 build:rocm --copt="-DUSING_CUDA=0"
 build:rocm --copt="-DUSING_ROCM=1"
 build:rocm --copt="-D__HIP_PLATFORM_AMD__=1"
+build:rocm --repo_env CK_FMHA_GEN_ARGS="--receipt 2"
 
 build:arm --copt="-DENABLE_BF16=1"
 build:arm --define=using_cuda=false --define=using_cuda_nvcc=false

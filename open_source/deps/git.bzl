@@ -1,5 +1,6 @@
 load('@bazel_tools//tools/build_defs/repo:git.bzl', "git_repository", "new_git_repository")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
+load("//3rdparty/composable_kernel:repo.bzl", "ck_repo")
 
 # Sanitize a dependency so that it works correctly from code that includes
 # TensorFlow as a submodule.
@@ -192,3 +193,13 @@ def git_deps():
         name = "zlib",
         actual = "@zlib_archive//:zlib",
     )
+
+    new_git_repository(
+        name = "composable_kernel_archive",
+        remote = "https://github.com/ROCm/composable_kernel.git",
+        commit = "497ccb872b6a9a921c01df4dca49dac7cb242c72",
+        build_file = "//3rdparty/composable_kernel:ck.BUILD",
+        shallow_since = "1719582646 -0700",
+    )
+
+    ck_repo(name = "composable_kernel")

@@ -28,13 +28,9 @@ cc_library(
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/core:allocator",
         "//src/fastertransformer/core:types",
-        ":ck_mha_lib",
+        "@composable_kernel//:ck_fmha_example"
     ],
-    copts=rocm_copts() + [
-        "-Isrc/fastertransformer/rocm/composable_kernel/include",
-        "-Isrc/fastertransformer/rocm/composable_kernel/library/include",
-        "-Isrc/fastertransformer/rocm/composable_kernel/example/ck_tile/01_fmha",
-    ],
+    copts = rocm_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
@@ -70,34 +66,4 @@ cc_library(
     copts=rocm_copts(),
     include_prefix="src",
     visibility=["//visibility:public"],
-)
-
-cc_library(
-    name="ck_mha_lib",
-    srcs=glob(["ck_bd/fmha_*wd*.cpp"]),
-    hdrs=glob(["composable_kernel/**/*.hpp"]),
-
-    copts=rocm_copts() + [
-        "-Isrc/fastertransformer/rocm/composable_kernel/include",
-        "-Isrc/fastertransformer/rocm/composable_kernel/library/include",
-        "-Isrc/fastertransformer/rocm/composable_kernel/example/ck_tile/01_fmha",
-    ],
-    deps=[
-        "@local_config_rocm//rocm:rocm_headers",
-        "@local_config_rocm//rocm:rocm",
-    ],
-    visibility=["//visibility:public"],
-    linkopts=["-pthread"]
-)
-
-cc_binary(
-    name="ck_mha_test1",
-    srcs=["composable_kernel/example/ck_tile/01_fmha/fmha_fwd.cpp",],
-    deps=[
-        ":ck_mha_lib",
-    ],
-    copts=rocm_copts() + ["-Isrc/fastertransformer/rocm/composable_kernel/include",
-                          "-Isrc/fastertransformer/rocm/composable_kernel/library/include",
-                          "-Isrc/fastertransformer/rocm/composable_kernel/example/ck_tile/01_fmha",
-                          ],
 )
