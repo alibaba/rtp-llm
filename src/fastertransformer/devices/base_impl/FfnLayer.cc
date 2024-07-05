@@ -16,18 +16,21 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
     if (params.weights.moe_gating_weight) {
         output = moeFfnLayer(params).hidden_states;
 
-        // for qwen moe
-        // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
+        // deal with moe layers with parallel dense ffn layer
         if (params.weights.shared_expert) {
             shared_expert_output = ffnLayer({params.input,
                                              params.configs,
                                              *(params.weights.shared_expert),
                                              params.residual}).hidden_states;
 
-            auto shared_gate = gemm({params.input, *(params.weights.shared_expert_gate->kernel)});
-            activation({ActivationType::Sigmoid, *shared_gate});
-            shared_expert_output = multiply({
-                shared_gate->reshape({shared_gate->size()}), *shared_expert_output});
+            // for qwen moe
+            // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
+            if (params.weights.shared_expert_gate) {
+                auto shared_gate = gemm({params.input, *(params.weights.shared_expert_gate->kernel)});
+                activation({ActivationType::Sigmoid, *shared_gate});
+                shared_expert_output = multiply({
+                    shared_gate->reshape({shared_gate->size()}), *shared_expert_output});
+            }
         }
     } else {
         const auto& input = params.input;
