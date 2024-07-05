@@ -306,7 +306,7 @@ py_wheel(
         "timm==0.9.12",
         "sentence-transformers==2.7.0",
         "grpcio==1.62.0",
-        "xfastertransformer_devel_icx==1.6.0.0",
+        "xfastertransformer_devel_icx==1.7.2",
         "decord==0.6.0",
         "accelerate==0.25.0"
     ] + whl_deps(),
@@ -351,7 +351,7 @@ py_wheel(
         "pydantic==2.5.3",                
         "sentence-transformers==2.7.0",
         "grpcio==1.62.0",
-        "xfastertransformer_devel_icx==1.6.0.0",
+        "xfastertransformer_devel_icx==1.7.2",
         "decord==0.6.0",
         "timm==0.9.12",
         "kserve",

@@ -40,9 +40,9 @@ def http_deps():
 
     http_archive(
         name = "xfastertransformer_devel_icx",
-        sha256 = "d61c8351f979037268672c52450fe4d0830414afe5bfba4e52c48f596ef1bdbb",
+        sha256 = "18bb9c0d65f73dde0939ce1024c2717510ff9692a8b88d3d12233b27950da2e7",
         urls = [
-            "https://mirrors.aliyun.com/pypi/packages/b2/d4/04e803482699efde89baa02f5cfbb34aeabaac5e661a57182c19ec93290c/xfastertransformer_devel_icx-1.6.0.0-py3-none-any.whl",
+            "https://files.pythonhosted.org/packages/99/96/ec754dbc62cc0216ac5e95e91f3d9ad43035fbade1d2c35326b7bd267a1d/xfastertransformer_devel_icx-1.7.2-py3-none-any.whl",
         ],
         type = "zip",
         build_file = clean_dep("//3rdparty/xft:BUILD"),
@@ -50,9 +50,9 @@ def http_deps():
 
     http_archive(
         name = "xfastertransformer_devel",
-        sha256 = "a61ae91776299c44c0da399fc844cabc2278697bcad0b233d5879189178b5e77",
+        sha256 = "dab98df9de4802ae5c7b383818dfa8190cd66ce7bc28a190d68e881548c1db6f",
         urls = [
-            "https://mirrors.aliyun.com/pypi/packages/c4/a6/e05e09f31f999619743009a6c21e85350d2969a2e8bc8c60657add275eed/xfastertransformer_devel-1.6.0-py3-none-any.whl",
+            "https://files.pythonhosted.org/packages/70/f9/3d4b31a489c733bbbe37cdc76a4ccf7b71ee0895c038a90d8f722d08247e/xfastertransformer_devel-1.7.2-py3-none-any.whl",
         ],
         type = "zip",
         build_file = clean_dep("//3rdparty/xft:BUILD"),
