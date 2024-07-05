@@ -16,8 +16,13 @@
 
 #pragma once
 
+#if USING_CUDA
 #include <cuda.h>
 #include <cuda_fp16.h>
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/cuda_shims.h"
+#endif
 
 #include "src/fastertransformer/cuda/cuda_bf16_fallbacks.cuh"
 #include "src/fastertransformer/cuda/cuda_fp8_utils.h"

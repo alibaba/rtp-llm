@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts", "cuda_copts", "rocm_copts")
 
 cc_library(
     name = "kernels_cu",
@@ -56,3 +56,23 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "hello_kernel",
+    srcs = [
+        "hello_world.cu",
+    ],
+    hdrs = [
+        "hello_world.h",
+    ],
+    deps = [
+        "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:hip",
+        "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/cuda:cuda_utils_rocm",
+        "//src/fastertransformer/rocm:rocm_types_hdr",
+        "//src/fastertransformer/rocm:rocm_utils",
+    ],
+    copts = rocm_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
