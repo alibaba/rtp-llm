@@ -96,10 +96,10 @@ class ReuseCacheLengthTest(TestCase):
         self.assertEqual(stream5.reuse_length, 4)
 
         # check if free cache can be malloc
-        stream6 = self._init_generate_stream([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+        stream6 = self._init_generate_stream([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
         stream_cache_manager.init_kvcache(stream6)
-        self.assertEqual(len(stream6.block_indice[0]), 8)
-        stream_cache_manager.free_block_cache(stream5)
+        self.assertEqual(len(stream6.block_indice[0]), 9)
+        stream_cache_manager.free_block_cache(stream6)
 
 if __name__ == '__main__':
     main()
