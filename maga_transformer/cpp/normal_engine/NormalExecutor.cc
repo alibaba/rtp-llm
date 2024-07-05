@@ -31,6 +31,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params, const std::shared
     need_attention_mask_ = device_->getDeviceProperties().attention_need_mask;
 }
 
+
 absl::Status
 NormalExecutor::addLoRA(const int64_t                                                           lora_id,
                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
