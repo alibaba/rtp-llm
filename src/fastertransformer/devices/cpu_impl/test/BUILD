@@ -28,6 +28,17 @@ cc_test(
 )
 
 cc_test(
+    name = "cpu_attention_layer_test",
+    srcs = [
+        "ops/CpuAttentionLayerTest.cc",
+    ],
+    data = [],
+    copts = ["-g"] + test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
+
+cc_test(
     name = "cpu_ops_test",
     srcs = [
         "CpuOpsTest.cc",

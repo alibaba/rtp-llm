@@ -3,6 +3,7 @@
 #include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/core/cpu_allocator.h"
 #include "xfastertransformer/include/layers_mlp.h"
+#include "xfastertransformer/include/layers_attention.h"
 #include <cstring>
 #include <cmath>
 #include <immintrin.h>
@@ -70,7 +71,73 @@ AttentionModuleOutput CpuDevice::decoderSelfAttention(const AttentionModuleParam
 }
 
 AttentionLayerOutput CpuDevice::attentionLayer(const AttentionLayerParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    const auto& input = params.input;
+    const auto& input_lengths = params.common.input_lengths;
+    const auto& sequence_lengths = params.common.sequence_lengths; 
+    const auto& qkv_weight = params.weights.qkv_weight->kernel;
+    const auto& output_weight = params.weights.output_weight->kernel;
+    const auto& attention_conf = params.configs;
+    
+    int batch_size = input_lengths.shape()[0];
+    int past_seq_len = 0;
+    int current_seq_len = 0;
+    int next_token_num = 0;
+    int step = sequence_lengths.size(); 
+    int input_seq_len = input_lengths.data<int>()[0];
+
+    if (step == 0) {
+        current_seq_len = input_seq_len; 
+    } else {
+        next_token_num = batch_size;
+        past_seq_len += (step == 1) ? input_seq_len : next_token_num;
+        current_seq_len = next_token_num;
+    }
+
+    int hidden_size = attention_conf.head_num * attention_conf.size_per_head;
+    int head_num = attention_conf.head_num;
+    int kv_head_num = attention_conf.kv_head_num;
+    int head_dim = attention_conf.size_per_head; 
+    int max_pos_embed = attention_conf.rope_config.dynamic_embedding_max_pos;
+    int max_positions = max_pos_embed;
+    int q_size = head_dim * head_num;
+    int kv_size = head_dim * kv_head_num;
+
+    auto qkv_data_ptr = static_cast<float*>(qkv_weight->data());
+
+    float *rms_atten_output = static_cast<float*>(aligned_alloc(64, batch_size * input_seq_len * hidden_size * sizeof(float)));
+    memset(rms_atten_output, 0, batch_size * input_seq_len * hidden_size * sizeof(float));
+
+    invokeAttentionLLaMA(xft::DataType::fp16, batch_size, input_seq_len, head_dim, head_num, kv_head_num,
+                        max_positions, max_pos_embed, past_seq_len, current_seq_len, step, hidden_size, 
+                        rms_atten_output, hidden_size, (const void *) input.data(), hidden_size, 
+                        qkv_data_ptr, qkv_data_ptr + q_size, qkv_data_ptr + q_size + kv_size, output_weight->data());
+    
+    AttentionLayerOutput atten_out;
+    atten_out.hidden_states = allocateBuffer({DataType::TYPE_FP32, {batch_size * input_seq_len, hidden_size},
+                                          AllocationType::HOST}, {});
+    
+    /* If not add rmsnorm then need following extra process */
+    float* input_ptr = static_cast<float*>(input.data());
+    int total_elements = batch_size * input_seq_len * hidden_size;
+    int num_iterations = total_elements / BLOCKSIZE_512b_FP32; // AVX-512 could process 16 * float
+
+#pragma omp parallel for
+    for (int i = 0; i < num_iterations; ++i) {
+        const __m512 rms_vec = _mm512_loadu_ps(&rms_atten_output[i * BLOCKSIZE_512b_FP32]);
+        const __m512 input_vec = _mm512_loadu_ps(&input_ptr[i * BLOCKSIZE_512b_FP32]);
+        const __m512 result = _mm512_sub_ps(rms_vec, input_vec);
+        float* atten_out_data = static_cast<float*>(atten_out.hidden_states->data());
+        _mm512_storeu_ps(&atten_out_data[i * BLOCKSIZE_512b_FP32], result);
+    }
+
+    for (int i = num_iterations * BLOCKSIZE_512b_FP32; i < total_elements; ++i) {
+        atten_out.hidden_states->data<float>()[i] = rms_atten_output[i] - input_ptr[i];
+    }
+
+    /* If not add rmsnorm then need above extra process */
+
+    free(rms_atten_output);
+    return atten_out;
 }
 
 FfnLayerOutput CpuDevice::ffnLayer(const FfnLayerParams& params) {
