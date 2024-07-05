@@ -25,6 +25,7 @@ build:cuda --copt="-DENABLE_BF16=1"
 build:cuda --copt="-DBUILD_CUTLASS_MIXED_GEMM=ON"
 build:cuda --copt="-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE"
 build:cuda --copt="-DUSE_NVTX=ON"
+build:cuda --copt="-DUSING_CUDA=1"
 build:cuda --define=using_cuda=true --define=using_cuda_nvcc=true
 build:cuda --crosstool_top=@local_config_cuda//crosstool:toolchain
 build:cuda --action_env CUDA_TOOLKIT_PATH="/usr/local/cuda/"
