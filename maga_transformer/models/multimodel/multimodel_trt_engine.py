@@ -98,9 +98,10 @@ class MultiModelTRTEngine(nn.Module, ImageEmbeddingInterface):
             .to(self.device)
             .to(self.dtype)
         )
+        jit_network = torch.jit.trace(network, image)
         with torch.inference_mode():
             torch.onnx.export(
-                network,
+                jit_network,
                 image,
                 self.onnx_file_path,
                 opset_version=17,

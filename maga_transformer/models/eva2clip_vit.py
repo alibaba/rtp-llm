@@ -1,4 +1,5 @@
 import math
+import os
 from argparse import Namespace
 from typing import Any, List, Union
 
@@ -59,9 +60,20 @@ class Attention(nn.Module):
         qkv = self.query_key_value(x)
         qkv = qkv.reshape(B, L, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)  # 3, B, H, L, D
         q, k, v = qkv[0], qkv[1], qkv[2]
-        attn_weights = torch.matmul(q / math.sqrt(q.shape[-1]), k.transpose(-1, -2))
-        attn_weights = attn_weights.softmax(dim=-1)
-        attn_out = torch.matmul(attn_weights, v)
+
+        # Due to some reason, trt can not compile scaled_dot_product_attention.
+        # Here we maintain two versions of scaled_dot_product_attention, the original math attention is for tensorrt/
+        # the optimized scaled_dot_product_attention is for users who don't want to use tensorrt, it's much faster and
+        # memory efficient than the original version.
+        if os.environ.get("VIT_TRT", "0") == "1":
+            attn_weights = torch.matmul(q / math.sqrt(q.shape[-1]), k.transpose(-1, -2))
+            attn_weights = attn_weights.softmax(dim=-1)
+            attn_out = torch.matmul(attn_weights, v)
+        else:
+            attn_out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False
+            )
+
         output = self.dense(attn_out.transpose(1, 2).reshape(B, L, -1))
         output = self.output_dropout(output)
         return output
