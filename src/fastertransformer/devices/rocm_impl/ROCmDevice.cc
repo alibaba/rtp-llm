@@ -3,7 +3,7 @@
 #include "src/fastertransformer/core/TrackerAllocator.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 
-#include <hip/hip_runtime.h>
+#include "src/fastertransformer/kernels/hello_world.h"
 
 namespace fastertransformer {
 
@@ -12,7 +12,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     HIP_CHECK(hipInit(0));
     HIP_CHECK(hipSetDevice(params.device_id));  // TODO(rocm): ensure this is setup every op
     HIP_CHECK(hipStreamCreate(&stream_));
-
+    check_hip_error(hipGetDeviceProperties(&rocmDevProp, device_id_));
     allocator_.reset(new Allocator<AllocatorType::ROCM>());
     hostAllocator_.reset(new Allocator<AllocatorType::ROCM_HOST>());
 
@@ -113,6 +113,39 @@ void ROCmDevice::copy(const CopyParams& params) {
 
 void ROCmDevice::syncAndCheck() {
     HIP_CHECK(hipStreamSynchronize(stream_));
+}
+BufferPtr ROCmDevice::gemm(const GemmParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+SelectOutput ROCmDevice::select(const SelectParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+BufferPtr ROCmDevice::embeddingLookup(const EmbeddingLookupParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+void ROCmDevice::activation(const ActivationParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+BufferPtr ROCmDevice::testVecAdd(const BufferPtr a, const BufferPtr b) {
+    BufferPtr           output;
+    DataType            dtype  = a.get()->type();
+    std::vector<size_t> dshape = a.get()->shape();
+
+    output = allocateBuffer({dtype, dshape, AllocationType::DEVICE}, {"vec_add_rslt"});
+    invokeHelloWorld<float>((const float*)(a.get()->data()),
+                            ((const float*)b.get()->data()),
+                            ((float*)output.get()->data()),
+                            output.get()->size(),
+                            stream_);
+
+    return output;
 }
 
 RTP_LLM_REGISTER_DEVICE(ROCm);

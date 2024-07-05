@@ -1,7 +1,7 @@
 #pragma once
 
 #include "src/fastertransformer/core/allocator.h"
-#include "src/fastertransformer/devices/rocm_impl/ROCmUtils.h"
+#include "src/fastertransformer/rocm/hip_utils.h"
 #include <hip/hip_runtime.h>
 
 namespace fastertransformer {

@@ -84,6 +84,8 @@ build:rocm --define=using_cuda=false --define=using_cuda_nvcc=false
 build:rocm --define=using_rocm=true --define=using_rocm_hipcc=true
 build:rocm --action_env TF_NEED_ROCM=1
 build:rocm --copt="-DUSING_CUDA=0"
+build:rocm --copt="-DUSING_ROCM=1"
+build:rocm --copt="-D__HIP_PLATFORM_AMD__=1"
 
 build:debug -c dbg
 build:debug --copt -g --copt -O0

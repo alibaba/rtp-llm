@@ -1,4 +1,4 @@
-load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts",)
+load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts", "rocm_copts")
 
 cc_library(
     name = "cublas",
@@ -284,5 +284,26 @@ cc_library(
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cuda_utils_rocm",
+    srcs = [
+    ],
+    hdrs = [
+        "cuda_utils.h",
+        "Dispatch.h",
+        "memory_utils.h",
+        "cuda_fp8_utils.h",
+        "cuda_type_utils.cuh",
+        "cuda_bf16_fallbacks.cuh",
+    ],
+    deps = [
+        "//src/fastertransformer/rocm:rocm_types_hdr",
+        "//src/fastertransformer/core:tensor_hdr",
+    ],
+    copts = copts(),
+    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
