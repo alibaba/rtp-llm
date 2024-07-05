@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts", "rocm_copts")
+load("//:def.bzl", "rocm_copts")
 
 cc_library(
     name = "rocm_impl",
@@ -15,14 +15,15 @@ cc_library(
         "@local_config_rocm//rocm:hip",
         "@local_config_rocm//rocm:rocblas",
         "@local_config_rocm//rocm:hipblaslt",
+        "@composable_kernel//:ck_fmha_example",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:devices_base_impl",
+        "//src/fastertransformer/devices/base_tests:base_tests",
         "//src/fastertransformer/core:allocator",
         "//src/fastertransformer/rocm:rocm_types_hdr",
         "//src/fastertransformer/rocm:rocm_utils",
         "//src/fastertransformer/kernels:hello_kernel",
         "//src/fastertransformer/kernels:gpt_kernels_rocm",
-        "//src/fastertransformer/devices/base_tests:base_tests",
     ],
     visibility = ["//visibility:public"],
     copts = rocm_copts(),
