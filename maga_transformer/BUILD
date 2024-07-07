@@ -37,9 +37,6 @@ requirement([
     "dashscope",
     "jieba",
     "openai",
-    "pdfplumber",
-    "rank_bm25",
-    "snowballstemmer",
 ])
 
 filegroup(

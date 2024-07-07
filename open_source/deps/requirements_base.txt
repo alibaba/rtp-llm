@@ -38,6 +38,3 @@ json5
 dashscope>=1.11.0
 jieba
 openai
-pdfplumber
-rank_bm25
-snowballstemmer
