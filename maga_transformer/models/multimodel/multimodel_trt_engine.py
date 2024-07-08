@@ -100,7 +100,7 @@ class MultiModelTRTEngine(
     @staticmethod
     def _export_onnx_helper(
         network: torch.nn.Module,
-        image_input: torch.Tensor,
+        dummy_input: torch.Tensor,
         onnx_file_path: str,
         input_names: List[str],
         output_names: List[str],
@@ -108,7 +108,7 @@ class MultiModelTRTEngine(
         with torch.inference_mode():
             torch.onnx.export(
                 network,
-                image_input,
+                dummy_input,
                 onnx_file_path,
                 opset_version=17,
                 input_names=input_names,
@@ -128,6 +128,7 @@ class MultiModelTRTEngine(
     def export_onnx(
         self,
         network: torch.nn.Module,
+        tp_size: int
     ):
         logging.info("Start exporting torch to ONNX model")
         dummy_input = (
@@ -136,9 +137,12 @@ class MultiModelTRTEngine(
             .to(self.dtype)
         )
 
-        # here we need to export onnx in another new thread, otherwise it will
-        # block heartbeat of gang_server when TP > 1
-        asyncio.run(self._export_onnx_async_internal(network, dummy_input))
+        if tp_size <= 1:
+            self._export_onnx_helper(network, dummy_input, self.onnx_file_path, self.input_names, self.output_names)
+        else:
+            # here we need to export onnx in another new thread, otherwise it will
+            # block heartbeat of gang_server when TP > 1
+            asyncio.run(self._export_onnx_async_internal(network, dummy_input))
 
         logging.info("Finish exporting ONNX model")
 

@@ -3,7 +3,6 @@ import torch
 import os
 import json
 from typing import List, Any, Tuple, Dict, Union
-from functools import partial
 from transformers import AutoTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -17,8 +16,6 @@ from maga_transformer.models.multimodel.multimodel_common import ImageEmbeddingI
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.utils.model_weights_loader import get_model_weights_loader
-from maga_transformer.utils.database import CkptDatabase
 from maga_transformer.utils.util import to_torch_dtype
 
 class QwenVLImageEmbedding(ImageEmbeddingInterface):

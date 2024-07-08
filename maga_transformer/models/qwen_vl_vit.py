@@ -376,6 +376,14 @@ class VisionTransformer(nn.Module):
         self.ln_post = norm_layer(output_dim)
         self.proj = nn.Parameter((output_dim** -0.5) * torch.randn(output_dim, output_dim))
 
+    @property
+    def dtype(self):
+        return self.transformer.get_cast_dtype()
+
+    @property
+    def device(self):
+        return self.transformer.get_cast_device()
+
     def forward(self, x: torch.Tensor):
         x = x.to(
             dtype=self.transformer.get_cast_dtype(),

@@ -174,7 +174,7 @@ class MultiModalMixin:
                     if not os.path.exists(output_dir):
                         os.makedirs(output_dir)
 
-                    visual_trt_engine.export_onnx(self.mm_part.vit)
+                    visual_trt_engine.export_onnx(self.mm_part.vit, g_parallel_info.tp_size)
                     # eagerly gc VIT network, release GPU memory for generating trt engine
                     self.gc_mm_part(vit_params)
 
