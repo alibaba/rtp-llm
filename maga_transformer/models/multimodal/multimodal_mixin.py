@@ -10,7 +10,7 @@ from maga_transformer.config.exceptions import (ExceptionType,
                                                 FtRuntimeException)
 from maga_transformer.config.generate_config import RequestFormat
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, VitParameters
-from maga_transformer.distribute.worker_info import ParallelInfo, g_parallel_info
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.base_model import EmbeddingOutput
 from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from maga_transformer.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
@@ -130,7 +130,7 @@ class MultiModalMixin:
         device: Union[str, torch.device], dtype: torch.dtype
     ):
         # Load weight only for self.mm_part
-        
+
         database = CkptDatabase(ckpt_path)
         weight_loader = get_model_weights_loader(weights_info, database, compute_dtype=dtype)
         vit_weight = vit_params.vit_weights
@@ -149,7 +149,7 @@ class MultiModalMixin:
         return weight_loader
 
     def init_mm_trt(
-            self, model_name: str, g_parallel_info: ParallelInfo, weights_info: ModelDeployWeightInfo, ckpt_path: str,
+            self, weights_info: ModelDeployWeightInfo, ckpt_path: str,
             vit_params: VitParameters, device: Union[str, torch.device], dtype: torch.dtype
     ):
         # check whether VIT tensorrt exist
@@ -159,29 +159,35 @@ class MultiModalMixin:
             raise RuntimeError("tensorrt library not fonnd")
 
         try:
+            # TODO(xyz): currently model_name_path is ugly, we should let model_name_path passed by the frontend in
+            # environment variable
+            model_name_path = ckpt_path.replace('/', '_')
+
             visual_trt_engine = MultiModalTRTEngine(
-                model_name, vit_params.config.get("image_size"), device, dtype
+                model_name_path, vit_params.config.get("image_size"), device, dtype
             )
-             # TRT engine doesn't support TP, here we only generate trt engine on rank0
-            if g_parallel_info.tp_rank == 0:
-                os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
 
-                if MultiModalTRTEngine.trt_engine_cached(model_name, dtype):
-                    self._load_mm_weight(weights_info, ckpt_path, vit_params, device, dtype)
+            # TRT engine doesn't support TP, here we only generate trt engine on rank0 if trt engine is not cached
+            if g_parallel_info.tp_rank == 0 and (
+                (not MultiModalTRTEngine.trt_engine_cached(model_name_path, dtype))
+                or os.environ.get("TRT_CACHE_ENABLED", "0") == "0"
+            ):
+                self._load_mm_weight(weights_info, ckpt_path, vit_params, device, dtype)
 
-                    # create cached dir if not exists
-                    output_dir = MultiModalTRTEngine.cache_path(model_name, dtype)
-                    if not os.path.exists(output_dir):
-                        os.makedirs(output_dir)
+                # create cached dir if not exists
+                output_dir = MultiModalTRTEngine.cache_path(model_name_path, dtype)
+                if not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
 
-                    visual_trt_engine.export_onnx(self.mm_part.vit, g_parallel_info.tp_size)
-                    # eagerly gc VIT network, release GPU memory for generating trt engine
-                    self.gc_mm_part(vit_params)
+                visual_trt_engine.export_onnx(self.mm_part.vit, g_parallel_info.tp_size)
 
-                    visual_trt_engine.generate_trt_engine()
+                # eagerly gc VIT network, release GPU memory for generating trt engine
+                self.gc_mm_part(vit_params)
 
-                    # create a completion file to mark that the trt engine has been generated and cached
-                    MultiModalTRTEngine.completion_file_path(model_name, dtype).touch()
+                visual_trt_engine.generate_trt_engine()
+
+                # create a completion file to mark that the trt engine has been generated and cached
+                MultiModalTRTEngine.completion_file_path(model_name_path, dtype).touch()
 
             # for TP > 1, only rank0 will generate trt engine, other ranks will wait rank0 to generate trt engine
             if g_parallel_info.tp_size > 1:
@@ -192,7 +198,7 @@ class MultiModalMixin:
             self.mm_part = visual_trt_engine
 
         except Exception as e:
-            raise RuntimeError(f"init vit trt error: {e}")
+            raise RuntimeError(f"init multimodal trt error: {e}")
         
     def gc_mm_part(self, vit_params: VitParameters):
         del self.mm_part

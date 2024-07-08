@@ -80,7 +80,7 @@ class MultiModalTRTEngine(
 
     @staticmethod
     def trt_engine_cached(model_name: str, dtype: torch.dtype) -> bool:
-        return not MultiModalTRTEngine.completion_file_path(model_name, dtype).exists()
+        return MultiModalTRTEngine.completion_file_path(model_name, dtype).exists()
 
     @staticmethod
     def cache_path(model_name: str, dtype: torch.dtype) -> str:
@@ -93,7 +93,7 @@ class MultiModalTRTEngine(
     def completion_file_path(model_name: str, dtype: torch.dtype) -> Path:
         return Path(
             os.path.join(
-                MultiModalTRTEngine.cache_path(model_name, dtype), "vit_trt.done"
+                MultiModalTRTEngine.cache_path(model_name, dtype), "trt_engine.done"
             )
         )
 
