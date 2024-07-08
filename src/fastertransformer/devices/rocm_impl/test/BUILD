@@ -46,3 +46,15 @@ cc_test(
     deps = test_deps,
     tags = ["rocm"],
 )
+
+cc_test(
+    name = "gemm_op_test",
+    srcs = [
+        "ops/ROCmGemmOpTest.cc",
+    ],
+    data = [],
+    env = device_test_envs(),
+    copts = test_copts + copts(),
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
