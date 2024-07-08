@@ -79,15 +79,7 @@ inline int getComputeCapability() {
 }
 
 /* ***************************** common utils ******************************* */
-inline int div_up(int a, int n) {
-    return (a + n - 1) / n;
-}
 
-template<typename T>
-__device__ inline T __shfl_xor_sync(unsigned mask, T var, int laneMask, int width = 32) {
-    (void)mask;
-    return __shfl_xor(var, laneMask, width);
-}
 
 }  // namespace rocm
 }  // namespace fastertransformer
