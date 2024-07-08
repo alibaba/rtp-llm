@@ -87,6 +87,18 @@ cc_test(
 )
 
 cc_test(
+    name="rocm_attention_op_test",
+    srcs=[
+        "ops/ROCmAttentionOpTest.cc",
+    ],
+    data=[],
+    env=device_test_envs(),
+    copts=test_copts + copts(),
+    linkopts=test_linkopts,
+    deps=test_deps,
+)
+
+cc_test(
     name = "embedding_lookup_test",
     srcs = [
         "ops/EmbeddingLookupTest.cc",

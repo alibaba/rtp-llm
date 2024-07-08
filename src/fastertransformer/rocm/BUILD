@@ -38,6 +38,16 @@ cc_library(
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
+cc_library(
+    name = "rocm",
+    deps = [
+        "//src/fastertransformer/cuda:nvtx",
+        ":rocm_utils",
+    ],
+    copts=rocm_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name="memory_utils",

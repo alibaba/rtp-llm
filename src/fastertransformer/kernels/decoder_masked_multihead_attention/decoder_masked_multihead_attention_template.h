@@ -20,12 +20,10 @@
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "src/fastertransformer/kernels/rotary_position_embedding.h"
+
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/cuda/memory_utils.h"
-#include <assert.h>
-#include <float.h>
-#include <type_traits>
-
 // Multi-block mmha kernel can only be selected when CUDA >= 11.7
 #if (CUDART_VERSION >= 11070)
 #define ENABLE_MULTI_BLOCK_OPTION
@@ -36,6 +34,17 @@
 #include <cuda/atomic>
 #include <cuda/std/bit>
 #endif  // ENABLE_MULTI_BLOCK_OPTION
+#endif
+
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#include "src/fastertransformer/rocm/hip_type_utils.cuh"
+#endif
+
+#include <assert.h>
+#include <float.h>
+#include <type_traits>
+
 
 namespace fastertransformer {
 
@@ -414,6 +423,7 @@ struct Qk_vec_accum_fp32_<__nv_bfloat162> {
     using Type = float2;
 };
 
+#ifdef ENABLE_BF16
 template<>
 struct Qk_vec_accum_fp32_<bf16_4_t> {
     using Type = Float4_;
@@ -423,6 +433,7 @@ template<>
 struct Qk_vec_accum_fp32_<bf16_8_t> {
     using Type = Float8_;
 };
+#endif  // ENABLE_BF16
 
 #ifdef ENABLE_FP8
 // template<>
@@ -490,6 +501,7 @@ struct K_vec_accum_fp32_<__nv_bfloat162> {
     using Type = float2;
 };
 
+#ifdef ENABLE_BF16
 template<>
 struct K_vec_accum_fp32_<bf16_4_t> {
     using Type = Float4_;
@@ -499,6 +511,7 @@ template<>
 struct K_vec_accum_fp32_<bf16_8_t> {
     using Type = Float8_;
 };
+#endif  // ENABLE_BF16
 #ifdef ENABLE_FP8
 template<>
 struct K_vec_accum_fp32_<__nv_fp8_e4m3> {
@@ -772,17 +785,17 @@ inline __device__ void hmma_fp32(float4& c, const K_vec& a, K_vec b)
     assert(false);
 }
 
-template<>
-inline __device__ void hmma_fp32(float4& c, const uint32_t& a, uint32_t b)
-{
-    asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 \n"
-                 "    {%0, %1, %2, %3}, \n"
-                 "    {%4, %5}, \n"
-                 "    {%6}, \n"
-                 "    {%0, %1, %2, %3}; \n"
-                 : "+f"(c.x), "+f"(c.y), "+f"(c.z), "+f"(c.w)
-                 : "r"(a), "r"(a), "r"(b));
-}
+// template<>
+// inline __device__ void hmma_fp32(float4& c, const uint32_t& a, uint32_t b)
+// {
+//     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 \n"
+//                  "    {%0, %1, %2, %3}, \n"
+//                  "    {%4, %5}, \n"
+//                  "    {%6}, \n"
+//                  "    {%0, %1, %2, %3}; \n"
+//                  : "+f"(c.x), "+f"(c.y), "+f"(c.z), "+f"(c.w)
+//                  : "r"(a), "r"(a), "r"(b));
+// }
 
 template<>
 inline __device__ void hmma_fp32(float4& c, const uint2& a, uint2 b)

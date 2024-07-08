@@ -67,7 +67,11 @@ cc_library(
         "layernorm_kernels.cu",
         "activation_kernels.cu",
         "unfused_attention_kernels.cu",
-    ],
+    # ],
+        "decoder_masked_multihead_attention.cu",
+    ]+glob([
+        "decoder_masked_multihead_attention/*.cu",
+    ]),
     hdrs = [
         "hello_world.h",
         "gpt_kernels.h",
@@ -92,17 +96,19 @@ cc_library(
         "_logn_attention.h",
         "_convert_from_fp8.h",
         "_convert_to_fp8.h",
-    ],
-
-    
+        "decoder_masked_multihead_attention.h",
+    ] + glob([
+        "decoder_masked_multihead_attention/*.h",
+    ]),
     deps = [
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
-        "//src/fastertransformer/rocm:memory_utils",
-        "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/cuda:cuda_utils_rocm",
-        "//src/fastertransformer/rocm:rocm_types_hdr",
+        "//src/fastertransformer/rocm:memory_utils",
         "//src/fastertransformer/rocm:rocm_utils",
+        "//src/fastertransformer/rocm:rocm",
+        "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/rocm:rocm_types_hdr",
     ],
     copts = rocm_copts(),
     include_prefix = "src",
