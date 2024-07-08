@@ -187,7 +187,13 @@ py_library(
         ":uvicorn",
         ":fastapi",
         ":psutil",
-        ":orjson"
+        ":orjson",
+        # add qwen agent package
+        ":pydantic",
+        ":json5",
+        ":dashscope",
+        ":jieba",
+        ":openai"
     ],
     imports = ["."],
 )
