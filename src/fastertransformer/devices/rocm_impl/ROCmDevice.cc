@@ -61,7 +61,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
 
     hipblasCreate(&hipblas_handle_);
     hipblasLtCreate(&hipblaslt_handle_);
-
+    
     hipblas_algo_map_.reset(new hipblasAlgoMap(GEMM_CONFIG));
     hipblas_mm_wrapper_.reset(new hipblasMMWrapper(hipblas_handle_,
                                                    hipblaslt_handle_,
@@ -73,6 +73,9 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
                                        hipblasDatatype_t::HIPBLAS_R_16F,
                                        hipblasDatatype_t::HIPBLAS_R_16F,
                                        hipblasDatatype_t::HIPBLAS_R_32F);
+
+    fmha_runner_.reset(new rocmFmhaWrapper());
+    fmha_runner_->init(stream_);
 }
 
 ROCmDevice::~ROCmDevice() {

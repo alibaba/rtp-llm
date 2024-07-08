@@ -19,9 +19,14 @@
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
