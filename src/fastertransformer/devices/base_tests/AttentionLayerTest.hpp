@@ -129,32 +129,3 @@ void AttentionLayerTest<T>::testAttentionLayer(
     auto output_tensor = bufferToTensor(*attn_output.hidden_states);
     assertTensorClose(output_tensor, torch_output, 1e-3, 1);
 }
-
-class AttentionLayerTestFp16 : public AttentionLayerTest<half> {};
-
-TEST_F(AttentionLayerTestFp16, testSimpleContextAttention) {
-    AttentionConfigs attention_conf;
-    attention_conf.head_num = 4;
-    attention_conf.kv_head_num = 4;
-    attention_conf.size_per_head = 8;
-    attention_conf.tokens_per_block = 4;
-
-    attention_conf.rope_config.embedding_style = RopeType::Base;
-    attention_conf.rope_config.embedding_dim = attention_conf.size_per_head;
-    attention_conf.rope_config.embedding_base = 1000000;
-
-    const size_t layer_num = 2;
-    const size_t block_num = 1024;
-    CacheConfig cache_conf(
-        layer_num, block_num, attention_conf.kv_head_num, attention_conf.size_per_head,
-        attention_conf.tokens_per_block, getTensorType<TestType>());
-    testAttentionLayer(cache_conf, attention_conf, {5}, {});
-
-    attention_conf.head_num = 16;
-    attention_conf.kv_head_num = 16;
-    attention_conf.size_per_head = 64;
-    attention_conf.rope_config.embedding_dim = attention_conf.size_per_head;
-    attention_conf.mask_type = AttentionMaskType::causalMask;
-    testAttentionLayer(cache_conf, attention_conf, {3}, {});
-}
-
