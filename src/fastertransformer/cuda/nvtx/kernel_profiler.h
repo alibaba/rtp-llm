@@ -1,10 +1,18 @@
+#pragma once
+#if USING_CUDA
 #include <cuda_runtime.h>
+#endif
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#define cudaStream_t hipStream_t
+#define cudaEvent_t hipEvent_t
+#endif
 #include <fstream>
 #include <iostream>
 #include <string>
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 
-namespace fastertransformer {
+    namespace fastertransformer {
 class KernelProfiler {
 public:
     KernelProfiler(cudaStream_t stream, std::string kernel_name, kmonitor::MetricsReporterPtr metrics_reporter);

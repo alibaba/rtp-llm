@@ -130,13 +130,19 @@ cc_library(
         "nvtx/kernel_profiler.h"
     ],
     deps = [
-        ":cuda_utils",
         "//maga_transformer/cpp:metrics",
-        "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    copts = copts(),
-    include_prefix = "src",
+    ] + select({
+        "//:using_cuda": [":cuda_utils",
+                          "@local_config_cuda//cuda:cuda",
+                          "@local_config_cuda//cuda:cudart",],
+        "//:using_rocm": ["//src/fastertransformer/rocm:rocm_utils"],
+        "//conditions:default": [],
+    }),
+    copts=select({
+        "//:using_cuda": copts(),
+        "//:using_rocm": copts() + ["-x", "rocm"],
+    }),
+    include_prefix="src",
     visibility = ["//visibility:public"],
 )
 

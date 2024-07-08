@@ -56,7 +56,7 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
     auto fmha_traits = fmha_fwd_traits{
         hdim_q,
         hdim_v,
-        dtype_,
+        getDataTypeStr(dtype_),
         mode == mode_enum::group,
         is_v_rowmajor,
         mask.type,
@@ -159,17 +159,20 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
     ck_tile::stream_config stream_config{
         nullptr,  // stream_id_
         false,    // time_kernel_
-        0,        // log_level_
+        1,        // log_level_
         0,        // cold_niters_
-        0,        // nrepeat_
+        1,        // nrepeat_
         // false     // 
     };
 
     float run_time = fmha_fwd(fmha_traits, fmha_args, stream_config);
-    if (run_time > 0) {
-        return true;
-    } else {
+    std::cout << "\nrun_time for ck fmha_fwd: " << run_time << std::endl;
+    if (run_time < 0) {
         return false;
+    } else {
+        return true;
     }
 }
+
+
 }  // namespace fastertransformer

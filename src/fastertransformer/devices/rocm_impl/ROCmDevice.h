@@ -34,6 +34,7 @@ public:
     LayernormOutput layernorm(const LayernormParams& params) override;
     void activation(const ActivationParams& params) override;
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
+    AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
 
 public:
     BufferPtr        testVecAdd(const BufferPtr a, const BufferPtr b);
@@ -58,7 +59,10 @@ private:
 
     std::unique_ptr<rocm::hipblasAlgoMap>   hipblas_algo_map_;
     std::unique_ptr<rocm::hipblasMMWrapper> hipblas_mm_wrapper_;
+
+    // fmha
     std::unique_ptr<rocmFmhaWrapper>      fmha_runner_;
+    bool use_openSource_fmha    = true;
 };
 
 }  // namespace fastertransformer

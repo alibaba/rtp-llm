@@ -4,25 +4,29 @@ namespace fastertransformer {
 class rocmFmhaWrapper {
 private:
     /* data */
-    std::string       dtype_;
+    DataType          dtype_;
     AttentionMaskType mtype_;
 
     size_t head_num_;
     size_t kv_head_num_;
     size_t size_per_head_;
     float  q_scaling_;
+    hipStream_t stream_;
 
 public:
     rocmFmhaWrapper(/* args */) = default;
     ~rocmFmhaWrapper()          = default;
 
+    void init(hipStream_t stream) {
+        stream_ = stream;
+    }
     void setup(DataType          dtype,
                AttentionMaskType mtype,
                size_t            head_num,
                size_t            kv_head_num,
                size_t            size_per_head,
                float             q_scaling) {
-        dtype_         = getDataTypeStr(dtype);
+        dtype_         = dtype;
         mtype_         = mtype;
         head_num_      = head_num;
         kv_head_num_   = kv_head_num;

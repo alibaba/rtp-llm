@@ -44,6 +44,22 @@ __host__ __device__ inline float special_cast<float, __hip_bfloat16>(__hip_bfloa
 #define sync_check_cuda_error sync_check_hip_error
 #define check_cuda_error check_hip_error
 
+#define cudaEvent_t hipEvent_t
+#define cudaGetDevice hipGetDevice
+#define cudaDeviceGetAttribute hipDeviceGetAttribute
+#define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
+#define cudaDevAttrMaxSharedMemoryPerMultiprocessor hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
+#define cudaFuncSetAttribute hipFuncSetAttribute
+#define cudaFuncAttributeMaxDynamicSharedMemorySize hipFuncAttributeMaxDynamicSharedMemorySize
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor hipOccupancyMaxActiveBlocksPerMultiprocessor
+#define cudaEventSynchronize hipEventSynchronize
+#define cudaEventCreate hipEventCreate
+#define cudaEventRecord hipEventRecord
+#define cudaEventDestroy hipEventDestroy
+#define cudaEventElapsedTime hipEventElapsedTime
+#define cudaError_t hipError_t
+#define cudaSuccess hipSuccess
+
 #include "amd_bfloat16.h"
 #define __nv_bfloat16 __hip_bfloat16
 #define __nv_bfloat162 __hip_bfloat162
@@ -54,6 +70,11 @@ template<typename T>
 __device__ inline T __shfl_xor_sync(unsigned mask, T var, int laneMask, int width = 32) {
     (void)mask;
     return __shfl_xor(var, laneMask, width);
+}
+template<typename T>
+__device__ inline T __shfl_sync(unsigned mask, T var, int laneMask, int width = 32) {
+    (void)mask;
+    return __shfl(var, laneMask, width);
 }
 
 static inline __device__ __host__ __nv_bfloat162 __ldg(const __nv_bfloat162* ptr) {

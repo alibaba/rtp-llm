@@ -16,15 +16,20 @@
 #pragma once
 
 #include "decoder_masked_multihead_attention_template.h"
-#include "driver_types.h"
+// #include "driver_types.h"
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include <assert.h>
 
+#if USING_CUDA
 #include <cuda_runtime_api.h>
 #ifdef ENABLE_FP8
 #include <cuda_fp8.h>
+#endif
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
 #endif
 
 #include <type_traits>
@@ -137,7 +142,8 @@ inline void multi_block_grid_setup(dim3&                                        
     std::size_t const dynamic_smem_sz{smem_size_for_threads<T, Dh, DO_MULTI_BLOCK>(params, DYNAMIC_THDS_PER_BLOCK)};   \
     /* Set 46KB threshold here because we have to take static/driver shared memory into consideration. */              \
     if (dynamic_smem_sz >= 46 * 1024) {                                                                                \
-        cudaError_t res = cudaFuncSetAttribute(masked_multihead_attention_kernel<T,                                    \
+        cudaError_t res =                                                                                              \
+            cudaFuncSetAttribute((const void*)&masked_multihead_attention_kernel<T,                                    \
                                                                                  T_cache,                              \
                                                                                  KVCacheBuffer,                        \
                                                                                  Dh,                                   \
@@ -145,8 +151,8 @@ inline void multi_block_grid_setup(dim3&                                        
                                                                                  KernelParamsType::DO_CROSS_ATTENTION, \
                                                                                  HAS_BEAMS,                            \
                                                                                  DO_MULTI_BLOCK>,                      \
-                                               cudaFuncAttributeMaxDynamicSharedMemorySize,                            \
-                                               dynamic_smem_sz);                                                       \
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,                                          \
+                                 dynamic_smem_sz);                                                                     \
         FT_CHECK_WITH_INFO(res == cudaSuccess,                                                                         \
                            "Sequence Length is too long for the MMHA kernel (not enough shared memory).");             \
     }                                                                                                                  \
@@ -167,7 +173,8 @@ inline void multi_block_grid_setup(dim3&                                        
     std::size_t const dynamic_smem_sz{smem_size_in_bytes<T, Dh, ENABLE_MULTI_BLOCK>(params, DYNAMIC_THDS_PER_BLOCK)};                                                                                \
     /* Set 46KB threshold here because we have to take static/driver shared memory into consideration. */                                                                                            \
     if (dynamic_smem_sz >= 46 * 1024) {                                                                                                                                                              \
-        cudaError_t res = cudaFuncSetAttribute(masked_multihead_attention_kernel<T,                                                                                                                  \
+        cudaError_t res =                                                                                                                                                                            \
+            cudaFuncSetAttribute((const void*)&masked_multihead_attention_kernel<T,                                                                                                                  \
                                                                                  T_cache,                                                                                                            \
                                                                                  KVCacheBuffer,                                                                                                      \
                                                                                  Dh,                                                                                                                 \
@@ -175,8 +182,8 @@ inline void multi_block_grid_setup(dim3&                                        
                                                                                  KernelParamsType::DO_CROSS_ATTENTION,                                                                               \
                                                                                  HAS_BEAMS,                                                                                                          \
                                                                                  ENABLE_MULTI_BLOCK>,                                                                                                \
-                                               cudaFuncAttributeMaxDynamicSharedMemorySize,                                                                                                          \
-                                               dynamic_smem_sz);                                                                                                                                     \
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,                                                                                                                        \
+                                 dynamic_smem_sz);                                                                                                                                                   \
         FT_CHECK_WITH_INFO(                                                                                                                                                                          \
             res == cudaSuccess,                                                                                                                                                                      \
             "Sequence Length is too long for the MMHA kernel (not enough shared memory). batch: %d head: %d seq: %d processor_count: %d smem_required: %d max_device_smem: %d multi_block_mode: %d", \
