@@ -81,7 +81,6 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         }).output;
     }
 
-    printBufferData(*output, "ffn_out");
     return FfnLayerOutput({move(output)});
 }
 

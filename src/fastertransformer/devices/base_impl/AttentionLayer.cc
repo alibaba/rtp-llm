@@ -48,8 +48,6 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     // other devices need to be careful about this.
     // maybe add a device property here.
     const auto qkv = gemm({input, *(qkv_weight->kernel)});
-    printBufferData(input, "qkv input");
-    printBufferData(*(qkv_weight->kernel), "qkv kernel");
     printBufferData(*qkv, "qkv");
 
     // attention layer output is preallocated to avoid memory fragmentation
