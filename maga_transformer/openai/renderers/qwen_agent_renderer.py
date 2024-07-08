@@ -1,7 +1,3 @@
-import pathlib
-current_file_path = pathlib.Path(__file__).parent.absolute()
-import sys
-sys.path.insert(0, str(current_file_path))
 import copy
 import json
 import re
@@ -23,6 +19,10 @@ from maga_transformer.openai.renderers.basic_renderer import BasicRenderer
 from maga_transformer.openai.renderer_factory_register import register_renderer
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words
 
+import pathlib
+current_file_path = pathlib.Path(__file__).parent.absolute()
+import sys
+sys.path.insert(0, str(current_file_path))
 from qwen_agent.llm import get_chat_model
 
 QwenTokenizerTypes = Union[QWenTokenizer, Qwen2Tokenizer]
