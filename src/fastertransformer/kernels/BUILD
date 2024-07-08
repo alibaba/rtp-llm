@@ -59,7 +59,6 @@ cc_library(
 cc_library(
     name = "gpt_kernels_rocm",
     srcs = [
-
         "hello_world.cu",
         "gpt_kernels.cu",
         "add_residual_kernels.cu",
@@ -100,6 +99,27 @@ cc_library(
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
         "//src/fastertransformer/rocm:memory_utils",
+        "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/cuda:cuda_utils_rocm",
+        "//src/fastertransformer/rocm:rocm_types_hdr",
+        "//src/fastertransformer/rocm:rocm_utils",
+    ],
+    copts = rocm_copts(),
+    include_prefix = "src",
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "hello_kernel",
+    srcs = [
+        "hello_world.cu",
+    ],
+    hdrs = [
+        "hello_world.h",
+    ],
+    deps = [
+        "@local_config_rocm//rocm:rocm_headers",
+        "@local_config_rocm//rocm:hip",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/cuda:cuda_utils_rocm",
         "//src/fastertransformer/rocm:rocm_types_hdr",

@@ -22,6 +22,9 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/cuda_shims.h"
+#endif
 #include <stdint.h>
 
 namespace fastertransformer {

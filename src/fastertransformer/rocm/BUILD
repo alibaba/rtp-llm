@@ -6,17 +6,6 @@ cc_library(
         "cuda_shims.h",
         "amd_bfloat16.h",        
     ],
-    deps = [
-        "@local_config_rocm//rocm:rocm_headers",
-        "@local_config_rocm//rocm:rocm",
-        "@local_config_rocm//rocm:rocblas",
-        "//src/fastertransformer/utils:logger",
-        "//src/fastertransformer/utils:assert_utils",
-        "//src/fastertransformer/utils:utils",
-        "//src/fastertransformer/core:allocator",
-    ],
-    copts = rocm_copts(),
-    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 
