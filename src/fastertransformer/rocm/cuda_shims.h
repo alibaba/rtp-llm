@@ -37,6 +37,7 @@ __host__ __device__ inline float special_cast<float, __hip_bfloat16>(__hip_bfloa
 #define __nv_bfloat162 __hip_bfloat162
 #endif
 #define cudaStream_t hipStream_t
+#define cudaGetLastError hipGetLastError
 #define cudaDeviceSynchronize hipDeviceSynchronize
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
 #define cudaMemcpy hipMemcpy
