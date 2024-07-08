@@ -10,8 +10,8 @@ from transformers.models.whisper.processing_whisper import WhisperProcessor
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.gpt import GPT
-from maga_transformer.models.multimodel.multimodal_mixin import MultiModalMixin, BaseVitWeights
-from maga_transformer.models.multimodel.multimodel_common import AudioEmbeddingInterface
+from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
+from maga_transformer.models.multimodal.multimodal_common import AudioEmbeddingInterface
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.model_factory_register import register_model

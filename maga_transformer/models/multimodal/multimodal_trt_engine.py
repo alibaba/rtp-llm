@@ -10,7 +10,7 @@ import torch
 from PIL import Image
 from torch import nn
 
-from maga_transformer.models.multimodel.multimodel_common import (
+from maga_transformer.models.multimodal.multimodal_common import (
     AudioEmbeddingInterface,
     ImageEmbeddingInterface,
     ImageTransform,
@@ -54,7 +54,7 @@ def torch_type_to_path(dtype: torch.dtype):
         raise TypeError(f"unknown torch data type {dtype}")
 
 # TODO(xyz): support handle video and audio case, not only image
-class MultiModelTRTEngine(
+class MultiModalTRTEngine(
     nn.Module, ImageEmbeddingInterface, AudioEmbeddingInterface
 ):
     def __init__(
@@ -64,7 +64,7 @@ class MultiModelTRTEngine(
         device: Union[str, torch.device],
         dtype: torch.dtype,
     ):
-        super(MultiModelTRTEngine, self).__init__()
+        super(MultiModalTRTEngine, self).__init__()
         self.image_size = image_size
         self.image_transform = ImageTransform(self.image_size)
         self.device = device
@@ -73,14 +73,14 @@ class MultiModelTRTEngine(
         self.cur_batch_size = 1
         self.input_names = ["input"]
         self.output_names = ["output"]
-        output_dir = MultiModelTRTEngine.cache_path(model_name, self.dtype)
-        self.onnx_file_path = os.path.join(output_dir, "multimodel.onnx")
-        self.engine_file_path = os.path.join(output_dir, "multimodel.trt")
+        output_dir = MultiModalTRTEngine.cache_path(model_name, self.dtype)
+        self.onnx_file_path = os.path.join(output_dir, "multimodal.onnx")
+        self.engine_file_path = os.path.join(output_dir, "multimodal.trt")
         self.engine = None
 
     @staticmethod
     def trt_engine_cached(model_name: str, dtype: torch.dtype) -> bool:
-        return not MultiModelTRTEngine.completion_file_path(model_name, dtype).exists()
+        return not MultiModalTRTEngine.completion_file_path(model_name, dtype).exists()
 
     @staticmethod
     def cache_path(model_name: str, dtype: torch.dtype) -> str:
@@ -93,7 +93,7 @@ class MultiModelTRTEngine(
     def completion_file_path(model_name: str, dtype: torch.dtype) -> Path:
         return Path(
             os.path.join(
-                MultiModelTRTEngine.cache_path(model_name, dtype), "vit_trt.done"
+                MultiModalTRTEngine.cache_path(model_name, dtype), "vit_trt.done"
             )
         )
 

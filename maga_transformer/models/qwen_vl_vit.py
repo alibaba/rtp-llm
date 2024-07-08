@@ -15,7 +15,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.init import trunc_normal_
 
-from maga_transformer.models.multimodel.multimodel_common import ImageTransform
+from maga_transformer.models.multimodal.multimodal_common import ImageTransform
 
 
 def get_abs_pos(abs_pos, tgt_size):

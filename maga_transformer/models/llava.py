@@ -10,7 +10,7 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.models.llava_weight import LlavaWeightInfo
 from maga_transformer.models.llama import Llama
 from maga_transformer.models.base_model import BaseModel
-from maga_transformer.models.multimodel.multimodal_mixin import MultiModalMixin, BaseVitWeights
+from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.llava_vit import LlavaImageEmbedding

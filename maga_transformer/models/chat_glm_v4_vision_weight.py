@@ -1,7 +1,7 @@
 from maga_transformer.config.gpt_init_model_parameters import \
     GptInitModelParameters
 from maga_transformer.models.glm_v2_weight import GlmV2WeightInfo
-from maga_transformer.models.multimodel.multimodal_mixin import (BaseMultiModalWeightInfo,
+from maga_transformer.models.multimodal.multimodal_mixin import (BaseMultiModalWeightInfo,
                                                       BaseVitWeights)
 
 

@@ -1,6 +1,6 @@
 
 from maga_transformer.models.qwen import QWenWeight
-from maga_transformer.models.multimodel.multimodal_mixin import BaseVitWeights, BaseMultiModalWeightInfo
+from maga_transformer.models.multimodal.multimodal_mixin import BaseVitWeights, BaseMultiModalWeightInfo
 
 class QwenVLVitWeight(BaseVitWeights):
     def _set_weight_prefix(self):

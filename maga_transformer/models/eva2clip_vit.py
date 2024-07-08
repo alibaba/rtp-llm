@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from transformers.activations import ACT2FN
 
-from maga_transformer.models.multimodel.multimodel_common import ImageTransform, ImageEmbeddingInterface
+from maga_transformer.models.multimodal.multimodal_common import ImageTransform, ImageEmbeddingInterface
 
 class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config):

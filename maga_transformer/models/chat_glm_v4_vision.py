@@ -12,7 +12,7 @@ from maga_transformer.models.chat_glm_v4 import ChatGlmV4
 from maga_transformer.models.chat_glm_v4_vision_weight import (
     ChatGlmV4VisionVitWeights, ChatGlmV4VisionWeightInfo)
 from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
-from maga_transformer.models.multimodel.multimodal_mixin import MultiModalMixin
+from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.utils.util import get_config_from_path, to_torch_dtype
 

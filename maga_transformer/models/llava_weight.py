@@ -2,7 +2,7 @@
 from maga_transformer.utils.model_weight import W
 from maga_transformer.models.llama_weight import LlamaWeightInfo
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.multimodel.multimodal_mixin import BaseMultiModalWeightInfo
+from maga_transformer.models.multimodal.multimodal_mixin import BaseMultiModalWeightInfo
 
 class LlavaWeightInfo(LlamaWeightInfo, BaseMultiModalWeightInfo):
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
