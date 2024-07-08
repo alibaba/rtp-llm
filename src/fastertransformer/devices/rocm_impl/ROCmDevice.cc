@@ -6,6 +6,7 @@
 #include "src/fastertransformer/kernels/hello_world.h"
 
 namespace fastertransformer {
+using namespace fastertransformer::rocm;
 
 ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     RUNTIME_ASSERT_OP_ARG(params.tp_rank == 0, "rocm device doesn't support nccl");
@@ -42,9 +43,28 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         tracker_params.align_size         = 32;
         hostAllocator_.reset(new TrackerAllocator(tracker_params));
     }
+
+    hipblasCreate(&hipblas_handle_);
+    hipblasLtCreate(&hipblaslt_handle_);
+    hipblas_algo_map_.reset(new hipblasAlgoMap(GEMM_CONFIG));
+    hipblas_mm_wrapper_.reset(new hipblasMMWrapper(hipblas_handle_,
+                                                   hipblaslt_handle_,
+                                                   stream_,
+                                                   hipblas_algo_map_.get(),
+                                                   &hipblas_wrapper_mutex_,
+                                                   allocator_.get()));
+    hipblas_mm_wrapper_->setGemmConfig(hipblasDatatype_t::HIPBLAS_R_16F,
+                                       hipblasDatatype_t::HIPBLAS_R_16F,
+                                       hipblasDatatype_t::HIPBLAS_R_16F,
+                                       hipblasDatatype_t::HIPBLAS_R_32F);
 }
 
 ROCmDevice::~ROCmDevice() {
+    hipblas_mm_wrapper_.reset();
+    hipStreamDestroy(stream_);
+    hipblasDestroy(hipblas_handle_);
+    hipblasLtDestroy(hipblaslt_handle_);
+
     if (stream_ != nullptr) {
         HIP_CHECK(hipStreamDestroy(stream_));
     }
@@ -102,9 +122,6 @@ void ROCmDevice::copy(const CopyParams& params) {
 
 void ROCmDevice::syncAndCheck() {
     HIP_CHECK(hipStreamSynchronize(stream_));
-}
-BufferPtr ROCmDevice::gemm(const GemmParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 SelectOutput ROCmDevice::select(const SelectParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);

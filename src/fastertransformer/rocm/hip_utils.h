@@ -26,67 +26,6 @@ namespace fastertransformer {
 
 namespace rocm {
 
-/* **************************** type definition ***************************** */
-enum HipblasDataType {
-    FLOAT_DATATYPE    = 0,
-    HALF_DATATYPE     = 1,
-    BFLOAT16_DATATYPE = 2,
-    INT8_DATATYPE     = 3,
-    FP8_DATATYPE      = 4
-};
-
-enum FtHipDataType {
-    FP32 = 0,
-    FP16 = 1,
-    BF16 = 2,
-    INT8 = 3,
-    FP8  = 4
-};
-
-enum class OperationType {
-    FP32,
-    FP16,
-    BF16,
-    INT8,
-    FP8
-};
-
-template<typename T>
-HipblasDataType getHipblasDataType() {
-    if (std::is_same<T, half>::value) {
-        return HALF_DATATYPE;
-    }
-#if ENABLE_BF16
-    else if (std::is_same<T, hip_bfloat16>::value) {
-        return BFLOAT16_DATATYPE;
-    }
-#endif
-    else if (std::is_same<T, float>::value) {
-        return FLOAT_DATATYPE;
-    } else {
-        FT_CHECK(false);
-        return FLOAT_DATATYPE;
-    }
-}
-
-template<typename T>
-hipblasDatatype_t getHipDataType() {
-    if (std::is_same<T, half>::value) {
-        return HIPBLAS_R_16F;
-    }
-#if ENABLE_BF16
-    else if (std::is_same<T, hip_bfloat16>::value) {
-        return HIPBLAS_R_16B;
-    }
-#endif
-    else if (std::is_same<T, float>::value) {
-        return HIPBLAS_R_32F;
-    } else {
-        FT_CHECK(false);
-        return HIPBLAS_R_32F;
-    }
-}
-
 /* **************************** debug tools ********************************** */
 static const char* _hipGetErrorEnum(hipError_t error) {
     return hipGetErrorString(error);

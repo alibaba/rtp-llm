@@ -2,6 +2,7 @@
 
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/rocm/hip_utils.h"
+#include "src/fastertransformer/rocm/hipblasMMWrapper.h"
 
 namespace fastertransformer {
 
@@ -17,7 +18,7 @@ public:
     IAllocator* getHostAllocator() override {
         return hostAllocator_.get();
     }
-    
+
     void                  copy(const CopyParams& params) override;
     void                  syncAndCheck() override;
     BufferPtr             gemm(const GemmParams& params) override;
@@ -38,6 +39,17 @@ private:
     std::unique_ptr<IAllocator> allocator_;
     std::unique_ptr<IAllocator> hostAllocator_;
     hipStream_t                 stream_ = nullptr;
+
+    rocm::hipblasMMWrapper* hipblasMMWrapperPtr() const {
+        return hipblas_mm_wrapper_.get();
+    }
+
+    std::mutex        hipblas_wrapper_mutex_;
+    hipblasHandle_t   hipblas_handle_;
+    hipblasLtHandle_t hipblaslt_handle_;
+
+    std::unique_ptr<rocm::hipblasAlgoMap>   hipblas_algo_map_;
+    std::unique_ptr<rocm::hipblasMMWrapper> hipblas_mm_wrapper_;
 };
 
 }  // namespace fastertransformer

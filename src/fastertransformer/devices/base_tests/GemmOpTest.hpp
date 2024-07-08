@@ -191,12 +191,14 @@ public:
                               size_t k1,
                               size_t k2,
                               size_t n2,
-                              DataType dtype)
+                              DataType dtype,
+                              double rtol = 1e-3,
+                              double atol = 1e-3)
     {
         auto input = PrepareGemmOpInput(b, m1, k1, k2, n2, dtype);
         auto result = BatchTransposeGemmOpRun(input, op_a, op_b);
         auto result_ref = BatchTransposeGemmTorchRefRun(input, op_a, op_b);
-        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C);
+        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C, rtol, atol);
 
     }
 
