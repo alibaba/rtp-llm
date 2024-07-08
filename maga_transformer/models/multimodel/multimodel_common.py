@@ -21,7 +21,7 @@ class ImageTransform:
             transforms.Normalize(mean=mean, std=std),
         ])
 
-    def encode(self, images: List[Any], device: Union[str, torch.device], dtype: torch.dtype) -> torch.Tensor:
+    def encode(self, images: List[Image.Image], device: Union[str, torch.device], dtype: torch.dtype) -> torch.Tensor:
         tensor_images = torch.stack(
             [self.image_transform(image) for image in images], dim=0
         ).to(device=device).to(dtype=dtype)

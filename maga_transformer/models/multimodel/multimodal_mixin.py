@@ -159,14 +159,12 @@ class MultiModalMixin:
             raise RuntimeError("tensorrt library not fonnd")
 
         try:
-            # TRT engine doesn't support TP, here we only transform image in rank 0,
-            # later input embedding result will be broadcast from rank 0 in async_input_word_embedding
+            visual_trt_engine = MultiModelTRTEngine(
+                model_name, vit_params.config.get("image_size"), device, dtype
+            )
+             # TRT engine doesn't support TP, here we only generate trt engine on rank0
             if g_parallel_info.tp_rank == 0:
                 os.environ['CUDA_MODULE_LOADING'] = 'LAZY'
-
-                visual_trt_engine = MultiModelTRTEngine(
-                    model_name, vit_params.config.get("image_size"), device, dtype
-                )
 
                 if MultiModelTRTEngine.trt_engine_cached(model_name, dtype):
                     self._load_mm_weight(weights_info, ckpt_path, vit_params, device, dtype)
@@ -177,33 +175,31 @@ class MultiModalMixin:
                         os.makedirs(output_dir)
 
                     visual_trt_engine.export_onnx(self.mm_part.vit)
-
-                    # gc VIT network, release GPU memory for generating trt engine
-                    del self.mm_part
-                    self.mm_part = None
-                    vit_params.vit_weights = None
-                    gc.collect()
-                    torch.cuda.empty_cache()
+                    # eagerly gc VIT network, release GPU memory for generating trt engine
+                    self.gc_mm_part(vit_params)
 
                     visual_trt_engine.generate_trt_engine()
 
                     # create a completion file to mark that the trt engine has been generated and cached
                     MultiModelTRTEngine.completion_file_path(model_name, dtype).touch()
 
-            # for TP > 1, other tps should wait tp0 to generate trt engine
+            # for TP > 1, only rank0 will generate trt engine, other ranks will wait rank0 to generate trt engine
             if g_parallel_info.tp_size > 1:
-                self.nccl_op_.barrier(self.device)
+                self.nccl_op_.barrier(torch.device(device))
 
-            del self.mm_part
-            self.mm_part = None
-            vit_params.vit_weights = None
-            gc.collect()
-            torch.cuda.empty_cache()
+            self.gc_mm_part(vit_params)
             visual_trt_engine.load_trt_engine()
             self.mm_part = visual_trt_engine
 
         except Exception as e:
             raise RuntimeError(f"init vit trt error: {e}")
+        
+    def gc_mm_part(self, vit_params: VitParameters):
+        del self.mm_part
+        self.mm_part = None
+        vit_params.vit_weights = None
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def load_vit_weight(self, ctype: str):
         # For trt engine, we don't need to load weight since its weight is inside trt engine.

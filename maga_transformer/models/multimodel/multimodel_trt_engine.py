@@ -1,19 +1,26 @@
+import asyncio
 import logging
 import os
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import List, Union
+from typing import List, Tuple, Union
 
 import torch
+from PIL import Image
 from torch import nn
 
-from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.models.multimodel.multimodel_common import ImageTransform, ImageEmbeddingInterface
+from maga_transformer.models.multimodel.multimodel_common import (
+    AudioEmbeddingInterface,
+    ImageEmbeddingInterface,
+    ImageTransform,
+)
 
 try:
     import tensorrt as trt
 except ImportError as e:
     pass
+
 
 def torch_dtype_from_trt(dtype):
     # TODO(xyz): support quantization such as int8, int4
@@ -46,8 +53,10 @@ def torch_type_to_path(dtype: torch.dtype):
     else:
         raise TypeError(f"unknown torch data type {dtype}")
 
-# TODO(xyz): make multimodel trt engine more general, not only handle the image case
-class MultiModelTRTEngine(nn.Module, ImageEmbeddingInterface):
+# TODO(xyz): support handle video and audio case, not only image
+class MultiModelTRTEngine(
+    nn.Module, ImageEmbeddingInterface, AudioEmbeddingInterface
+):
     def __init__(
         self,
         model_name: str,
@@ -88,26 +97,49 @@ class MultiModelTRTEngine(nn.Module, ImageEmbeddingInterface):
             )
         )
 
+    @staticmethod
+    def _export_onnx_helper(
+        network: torch.nn.Module,
+        image_input: torch.Tensor,
+        onnx_file_path: str,
+        input_names: List[str],
+        output_names: List[str],
+    ):
+        with torch.inference_mode():
+            torch.onnx.export(
+                network,
+                image_input,
+                onnx_file_path,
+                opset_version=17,
+                input_names=input_names,
+                output_names=output_names,
+            )
+
+    async def _export_onnx_async_internal(self, network: torch.nn.Module, dummy_input: torch.Tensor):
+        loop = asyncio.get_event_loop()
+        with ProcessPoolExecutor() as executor:
+            future = loop.run_in_executor(
+                executor, self._export_onnx_helper,
+                network, dummy_input, self.onnx_file_path, self.input_names,
+                self.output_names,
+            )
+            await asyncio.wait([future])
+
     def export_onnx(
         self,
         network: torch.nn.Module,
     ):
         logging.info("Start exporting torch to ONNX model")
-        image = (
+        dummy_input = (
             torch.randn(self.cur_batch_size, 3, self.image_size, self.image_size)
             .to(self.device)
             .to(self.dtype)
         )
-        jit_network = torch.jit.trace(network, image)
-        with torch.inference_mode():
-            torch.onnx.export(
-                jit_network,
-                image,
-                self.onnx_file_path,
-                opset_version=17,
-                input_names=self.input_names,
-                output_names=self.output_names,
-            )
+
+        # here we need to export onnx in another new thread, otherwise it will
+        # block heartbeat of gang_server when TP > 1
+        asyncio.run(self._export_onnx_async_internal(network, dummy_input))
+
         logging.info("Finish exporting ONNX model")
 
     def generate_trt_engine(self):
@@ -193,7 +225,6 @@ class MultiModelTRTEngine(nn.Module, ImageEmbeddingInterface):
         else:
             raise ValueError(f"Failed loading {self.engine_file_path}")
 
-
     def forward(self, *inputs):
         input = inputs[0]
         batch_size = input.shape[0]
@@ -222,18 +253,18 @@ class MultiModelTRTEngine(nn.Module, ImageEmbeddingInterface):
 
         return output
 
-    def encode(self, image_paths: List[str], device: Union[str, torch.device]):
-        images = self.image_transform.encode(image_paths, device, self.dtype)
+    def encode(self, images: List[Image.Image], device: Union[str, torch.device]):
+        images = self.image_transform.encode(images, device, self.dtype)
         return self(images)
 
     def image_embedding(
-        self, images: List[str], device: Union[str, torch.device]
+        self, images: List[Image.Image], device: Union[str, torch.device]
     ) -> torch.Tensor:
-        # TRT engine doesn't support TP, here we only transform image in rank 0,
-        # later input embedding result will be broadcast from rank 0 in async_input_word_embedding
-        if g_parallel_info.tp_rank == 0:
-            if len(images) != 0:
-                images = self.encode(images, device)
-            return images.to(device=device)
-        else:
-            return torch.zeros((len(images), self.output_shape[1:]), self.dtype).to(device=device)
+        if len(images) != 0:
+            images = self.encode(images, device)
+        return images.to(device=device)
+
+    def audio_embedding(
+        self, audio: Tuple[torch.Tensor, int], device: Union[str, torch.device]
+    ) -> torch.Tensor:
+        raise NotImplementedError()

@@ -144,7 +144,7 @@ class GangServer:
             try:
                 res = http_post_with_retry(url, {"name": "", "ip": ""})
             except:
-                logging.error(f"Gang server {member.ip} heartbeat loss, do abort")
+                logging.error(f"Gang server {member.ip}:{member.server_port} heartbeat loss, do abort")
                 os._exit(-1)
             if res.status_code != 200:
                 logging.error(f"Gang server {member.ip} status code is not 200, do abort")
