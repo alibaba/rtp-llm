@@ -16,7 +16,12 @@
 #pragma once
 
 #include <cstdint>
+#if USING_CUDA
 #include <curand_kernel.h>
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/cuda_shims.h"
+#endif
 
 namespace fastertransformer {
 

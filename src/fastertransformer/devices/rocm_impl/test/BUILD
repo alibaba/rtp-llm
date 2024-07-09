@@ -96,12 +96,26 @@ cc_test(
     copts=test_copts + copts(),
     linkopts=test_linkopts,
     deps=test_deps,
+    tags = ["rocm"],
 )
 
 cc_test(
     name = "embedding_lookup_test",
     srcs = [
         "ops/EmbeddingLookupTest.cc",
+    ],
+    data = [],
+    env = device_test_envs(),
+    copts = test_copts + copts(),
+    linkopts = test_linkopts,
+    deps = test_deps,
+    tags = ["rocm"],
+)
+
+cc_test(
+    name = "rocm_softmax_op_test",
+    srcs = [
+        "ops/RocmSoftmaxOpTest.cc",
     ],
     data = [],
     env = device_test_envs(),

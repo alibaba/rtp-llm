@@ -31,6 +31,9 @@
 namespace cg = cooperative_groups;
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
 
 #include <float.h>
 #include <type_traits>
