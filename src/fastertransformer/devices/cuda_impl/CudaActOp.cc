@@ -43,6 +43,8 @@ namespace fastertransformer {
         ARGS_DISPATCH(SiluActivation, cpp_type, __VA_ARGS__);   \
     } else if (Atype == ActivationType::Gelu) {                 \
         ARGS_DISPATCH(GeluActivation, cpp_type, __VA_ARGS__);   \
+    } else if (Atype == ActivationType::Geglu) {                \
+        ARGS_DISPATCH(GeluActivation, cpp_type, __VA_ARGS__);   \
     } else if (Atype == ActivationType::Swiglu) {               \
         ARGS_DISPATCH(SiluActivation, cpp_type, __VA_ARGS__);   \
     } else {                                                    \

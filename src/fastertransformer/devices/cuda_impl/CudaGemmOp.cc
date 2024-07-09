@@ -26,6 +26,7 @@ cublasOperation_t opConvert(TransposeOperation op) {
 cudaDataType_t dtypeConvert(DataType dtype) {
     switch (dtype) {
         case DataType::TYPE_FP16 : return cudaDataType_t::CUDA_R_16F;
+        case DataType::TYPE_BF16 : return cudaDataType_t::CUDA_R_16BF;
         case DataType::TYPE_FP32 : return cudaDataType_t::CUDA_R_32F;
         default: throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }

@@ -127,7 +127,8 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     );
 
     if (params.common.kv_cache_blocks) {
-        ARG_CASTED_FUNC_CALL(half, writeContextKvCache,
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+            datatype, writeContextKvCache,
             std::cref(params),
             std::cref(*k_output),
             std::cref(*v_output),
