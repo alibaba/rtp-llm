@@ -27,7 +27,10 @@ class CommonInputGenerator(object):
         # do batch encode and split into embedding input per batch
         assert self.tokenizer_ is not None, "tokenizer should not be None"
         # truncate with tokenizer max_seq_len
-        encoded = self.tokenizer_(prompt, max_length=self.config_.max_seq_len, return_attention_mask=False, padding=False, return_length=True, truncation=truncate, return_tensors='np')
+        truncate_length = self.config_.max_seq_len
+        if self.config_.position_ids_style == 1:
+            truncate_length = self.config_.max_seq_len - (self.config_.special_tokens.pad_token_id + 1)
+        encoded = self.tokenizer_(prompt, max_length=truncate_length, return_attention_mask=False, padding=False, return_length=True, truncation=truncate, return_tensors='np')
 
         combo_tokens = torch.from_numpy(np.concatenate(encoded['input_ids'])).to(torch.int32)
         if 'token_type_ids' in encoded:

@@ -261,6 +261,8 @@ class GPT(BaseModel):
             if self.position_encoding is not None:
                 pos_weight = self.weight.steal_pytorch_weight(W.positional_embedding)
                 assert pos_weight is not None, "positional embedding weight not found"
+                if pos_weight.shape[0] < self.config.max_seq_len:
+                    raise Exception(f"positon_weight has shape: {pos_weight.shape}, but max_seq_len is: {self.config.max_seq_len} > {pos_weight.shape[0]}")
                 pos_weight = pos_weight[:self.config.max_seq_len].cuda()
                 self.position_encoding.set_weight(pos_weight)
                 self.weight.append_global_weight(W.positional_embedding, self.position_encoding._emb)
