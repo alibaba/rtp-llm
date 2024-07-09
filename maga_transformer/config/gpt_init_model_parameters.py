@@ -362,9 +362,6 @@ class GptInitModelParameters:
         logging.info(f'pre_allocate_op_mem: {self.pre_allocate_op_mem}')
         self.int8_kv_cache = bool(int(os.environ.get('INT8_KV_CACHE', 0)))
         logging.info(f'int8_kv_cache: {self.int8_kv_cache}')
-        value = os.environ.get('TP_SPLIT_EMB_AND_LMHEAD')
-        if value is not None:
-            self.tp_split_emb_and_lm_head = str_to_bool(value)
         logging.info(f'tp_split_emb_and_lm_head: {self.tp_split_emb_and_lm_head}')
 
         # Update stop_words_str and stop_word_ids from ENV
