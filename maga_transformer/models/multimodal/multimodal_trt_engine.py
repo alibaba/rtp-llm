@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -77,6 +78,7 @@ class MultiModalTRTEngine(
         self.onnx_file_path = os.path.join(output_dir, "multimodal.onnx")
         self.engine_file_path = os.path.join(output_dir, "multimodal.trt")
         self.engine = None
+        self.lock = threading.Lock()
 
     @staticmethod
     def trt_engine_cached(model_name: str, dtype: torch.dtype) -> bool:
@@ -247,13 +249,15 @@ class MultiModalTRTEngine(
             size=self.output_shape, dtype=self.output_dtype, device=self.output_device
         )
 
-        # ensure the input tensor passed into trt engine is continous in memory,
-        # if not, change the input tensor to be continous
-        self.bindings[0] = input.data_ptr()
-        self.bindings[1] = output.data_ptr()
+        # use lock to avoid concurrency conflict issue
+        with self.lock:
+            # ensure the input tensor passed into trt engine is continous in memory,
+            # if not, change the input tensor to be continous
+            self.context.set_tensor_address(self.input_names[0], input.data_ptr())
+            self.context.set_tensor_address(self.output_names[0], output.data_ptr())
 
-        # execute the engine synchronously
-        self.context.execute_v2(self.bindings)
+            # execute the engine synchronously
+            self.context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
 
         return output
 

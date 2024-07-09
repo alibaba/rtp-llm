@@ -146,8 +146,6 @@ class MultiModalMixin:
             param = eval(param_name)
             param.data = tensor.reshape(param.data.shape).to(dtype).to(device)
 
-        return weight_loader
-
     def init_mm_trt(
             self, weights_info: ModelDeployWeightInfo, ckpt_path: str,
             vit_params: VitParameters, device: Union[str, torch.device], dtype: torch.dtype

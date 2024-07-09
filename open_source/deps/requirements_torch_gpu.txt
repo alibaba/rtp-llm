@@ -1,9 +1,9 @@
 https://download.pytorch.org/whl/cu118/torch-2.1.0%2Bcu118-cp310-cp310-linux_x86_64.whl#sha256=a81b554184492005543ddc32e96469f9369d778dedd195d73bda9bed407d6589
 torchvision==0.16.0
-tensorrt==10.1.0
 # currently tensorrt==10.1.0 will automatically install tensorrt-cuda12==10.2.0, there exists some bug for this version
 # we need to downgrade tensorrt-cu12 to 10.1.0 manually, see https://github.com/NVIDIA/TensorRT/issues/3983
 tensorrt-cu12==10.1.0
 tensorrt-cu12-bindings==10.1.0
 tensorrt-cu12-libs==10.1.0
+tensorrt==10.1.0
 -r requirements_base.txt
