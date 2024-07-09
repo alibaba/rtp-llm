@@ -59,6 +59,8 @@ __host__ __device__ inline float special_cast<float, __hip_bfloat16>(__hip_bfloa
 #define cudaEventElapsedTime hipEventElapsedTime
 #define cudaError_t hipError_t
 #define cudaSuccess hipSuccess
+#define curandState_t hiprandState_t
+#define cudaDeviceProp hipDeviceProp_t
 
 #include "amd_bfloat16.h"
 #define __nv_bfloat16 __hip_bfloat16

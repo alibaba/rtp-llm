@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#if USING_CUDA
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
 #elif (CUDART_VERSION >= 11050)
@@ -21,11 +22,18 @@
 #else
 #include "3rdparty/cub/cub.cuh"
 #endif
+#endif
+
+#if USING_ROCM
+#include "3rdparty/cub/cub.cuh"
+#endif
 
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/sampling_topp_kernels.h"
 #include "src/fastertransformer/kernels/sampling_penalty_kernels.h"
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
+#endif
 
 constexpr int   ENABLE_SINGLE_PASS_TOP_P = 0;
 constexpr float SINGLE_PASS_THRESHOLD    = 0.9;

@@ -15,10 +15,18 @@
  */
 #pragma once
 
+#if USING_CUDA
 #include <cuda_fp16.h>
+#endif
+
 
 #include "src/fastertransformer/kernels/penalty_types.h"
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
 
 namespace fastertransformer {
 

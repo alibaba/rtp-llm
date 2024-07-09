@@ -35,6 +35,7 @@ public:
     void activation(const ActivationParams& params) override;
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
+    BufferPtr softmax(const SoftmaxParams& params) override;
 
 public:
     BufferPtr        testVecAdd(const BufferPtr a, const BufferPtr b);

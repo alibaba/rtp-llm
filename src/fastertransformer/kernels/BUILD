@@ -67,6 +67,9 @@ cc_library(
         "layernorm_kernels.cu",
         "activation_kernels.cu",
         "unfused_attention_kernels.cu",
+        #"sampling_topp_kernels.cu",
+        #"sampling_penalty_kernels.cu",
+        #"penalty_types.h",
     # ],
         "decoder_masked_multihead_attention.cu",
     ]+glob([
