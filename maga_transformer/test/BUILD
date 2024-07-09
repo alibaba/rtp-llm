@@ -64,6 +64,11 @@ py_test(
     deps = [
         "//maga_transformer:sdk",
         "//maga_transformer:testlib",
+        "//maga_transformer:pydantic",
+        "//maga_transformer:json5",
+        "//maga_transformer:dashscope",
+        "//maga_transformer:jieba",
+        "//maga_transformer:openai",
     ],
     data = [
         "//maga_transformer/test/model_test/fake_test/testdata:testdata",
