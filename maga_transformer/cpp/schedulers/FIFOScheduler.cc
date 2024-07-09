@@ -147,7 +147,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
                 it = waiting_streams_.erase(it);
             }
         } else if (running_streams_.empty() && new_streams.empty()) {
-            // TODO(xinfei.sxf) At this time, you can also release the blocks held by other waiting streams
+            // TODO(xinfei.sxf) At this time, we can also release the blocks held by other waiting streams
             FT_LOG_DEBUG("stream [%ld] can not add to new queue", (*it)->streamId());
             // TODO(xinfei.sxf) Return some tokens...
             (*it)->setStop("LACK MEM", absl::StatusCode::kResourceExhausted);

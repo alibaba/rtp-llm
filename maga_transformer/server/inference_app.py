@@ -58,7 +58,6 @@ class InferenceApp(object):
         app = self.create_app()
         self.inference_server.wait_all_worker_ready()
 
-        # TODO(xinfei.sxf) 设置大一点
         timeout_keep_alive = int(os.environ.get("TIMEOUT_KEEP_ALIVE", 5))
         config = Config(
             app,
@@ -95,7 +94,6 @@ class InferenceApp(object):
 
         @app.on_event("startup")
         async def startup():
-            #TODO(xinfei.sxf) 是否需要
             RunVar("_default_thread_limiter").set(CapacityLimiter(self.inference_server._controller.max_concurrency * 2))
 
         @app.middleware("http")
@@ -121,7 +119,6 @@ class InferenceApp(object):
             check_shutdown()
             return "ok"
 
-        #TODO(xinfei.sxf) 两个函数名字重名了，是否有问题
         @app.get("/")
         async def health():
             check_shutdown()
