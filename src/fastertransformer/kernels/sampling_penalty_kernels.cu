@@ -17,7 +17,7 @@
 #include <assert.h>
 #include <float.h>
 
-#include "driver_types.h"
+//#include "driver_types.h"
 #include "src/fastertransformer/kernels/sampling_penalty_kernels.h"
 
 namespace fastertransformer {
