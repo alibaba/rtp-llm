@@ -124,3 +124,16 @@ cc_test(
     deps = test_deps,
     tags = ["rocm"],
 )
+
+cc_test(
+    name="layernorm_test",
+    srcs=[
+        "ops/LayernormTest.cc",
+    ],
+    data=[],
+    env=device_test_envs(),
+    copts=test_copts + copts(),
+    linkopts=test_linkopts,
+    deps=test_deps,
+    tags = ["rocm"],
+)

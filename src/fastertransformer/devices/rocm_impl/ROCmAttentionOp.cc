@@ -246,9 +246,12 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
     size_t hidden_units    = head_num * size_per_head;
     size_t hidden_units_kv = kv_head_num * size_per_head;
 
-    if (fmha_runner_->runCKFmha(params.input.data(),
-                                params.input.dataWithOffset(hidden_units),
-                                params.input.dataWithOffset(hidden_units + hidden_units_kv),
+    printBufferData(*q_output, "q_output");
+    printBufferData(*k_output, "k_output");
+    printBufferData(*v_output, "v_output");
+    if (fmha_runner_->runCKFmha(q_output->data(),
+                                k_output->data(),
+                                v_output->data(),
                                 params.output.data(),
                                 softmax_lse_->data(),
                                 batch_size,
