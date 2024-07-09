@@ -127,6 +127,7 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     ffn_weights.moe_down_weight   = mayCreateDenseWeights(map, W::moe_w2, W::moe_b2, W::moe_s2);
 
     ffn_weights.smoother_weight = mayCreateDenseWeights(map, W::ffn_smoother);
+    ffn_weights.act_scale       = mayFindBuffer(map, W::ffn_act_s);
 
     // this is a moe layer
     if (ffn_weights.moe_gating_weight) {

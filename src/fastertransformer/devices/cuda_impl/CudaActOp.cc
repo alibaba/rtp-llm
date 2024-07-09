@@ -20,6 +20,7 @@ namespace fastertransformer {
                       gate_bias,    \
                       m,            \
                       n,            \
+                      act_scale,    \
                       stream) do {  \
     invokeGenericActivation<Atype>( \
         (Dtype*) out,               \
@@ -33,7 +34,7 @@ namespace fastertransformer {
         0,                          \
         (const float*) nullptr,     \
         (const float*) nullptr,     \
-        (const Dtype*) nullptr,     \
+        (const Dtype*) act_scale,   \
         stream);                    \
 } while (0)
 
@@ -66,6 +67,7 @@ void CudaDevice::activation(const ActivationParams& params) {
         RUNTIME_ASSERT_OP_ARG(!params.bias, "Sigmoid does not support bias");
         RUNTIME_ASSERT_OP_ARG(!params.gate, "Sigmoid does not support gate");
         RUNTIME_ASSERT_OP_ARG(!params.gate_bias, "Sigmoid does not support gate_bias");
+        RUNTIME_ASSERT_OP_ARG(!params.act_scale, "Sigmoid does not support act_scale");
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             data_type, invokeSigmoid,
             states.data(), states.size(), 1.0f, stream_
@@ -81,11 +83,14 @@ void CudaDevice::activation(const ActivationParams& params) {
     auto bias = params.bias ? params.bias.value().get().data() : nullptr;
     auto gate = params.gate ? params.gate.value().get().data() : nullptr;
     auto gate_bias = params.gate_bias ? params.gate_bias.value().get().data() : nullptr;
+    auto act_scale = params.act_scale ? params.act_scale.value().get().data() : nullptr;
 
     DTYPE_DISPATCH(
         states.type(), params.atype,
         states.data(), bias,
-        gate, gate_bias, m, n, stream_
+        gate, gate_bias, m, n,
+        act_scale,
+        stream_
     );
 }
 

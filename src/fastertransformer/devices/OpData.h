@@ -443,20 +443,11 @@ struct AllGatherParams {
 struct ActivationParams {
     ActivationType atype;
     Buffer& states;
-    const OptionalConstBufferRef bias;
-    const OptionalConstBufferRef gate;
-    const OptionalConstBufferRef gate_bias;
 
-    ActivationParams(ActivationType atype,
-                     Buffer& states,
-                     OptionalConstBufferRef bias = std::nullopt,
-                     OptionalConstBufferRef gate = std::nullopt,
-                     OptionalConstBufferRef gate_bias = std::nullopt) :
-                     atype(atype),
-                     states(states),
-                     bias(bias),
-                     gate(gate),
-                     gate_bias(gate_bias) {}
+    const OptionalConstBufferRef bias      = std::nullopt;
+    const OptionalConstBufferRef gate      = std::nullopt;
+    const OptionalConstBufferRef gate_bias = std::nullopt;
+    const OptionalConstBufferRef act_scale = std::nullopt;
 };
 
 // softmax op is inplace-update, thus output buffer is same as input

@@ -89,6 +89,7 @@ struct FfnLayerWeights {
     std::shared_ptr<const DenseWeights>     moe_gating_weight;
 
     std::shared_ptr<const DenseWeights>     smoother_weight;
+    ConstBufferPtr                          act_scale;
 
     // these fields are for Qwen Mode model.
     // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803

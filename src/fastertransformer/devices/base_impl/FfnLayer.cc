@@ -53,13 +53,15 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                         *(up_output),
                         mayGetRef(params.weights.up_weight->bias),
                         *(gate_output.output),
-                        std::nullopt});
+                        std::nullopt,
+                        mayGetRef(params.weights.act_scale)});
         } else {
             activation({params.configs.activation_type,
                         *(up_output),
                         mayGetRef(params.weights.up_weight->bias),
                         std::nullopt,
-                        std::nullopt});
+                        std::nullopt,
+                        mayGetRef(params.weights.act_scale)});
         }
 
         if (params.weights.smoother_weight != nullptr) {
