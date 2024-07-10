@@ -16,7 +16,7 @@ class MMProcessEngine:
         return [asyncio.wrap_future(self.executor.submit(model.mm_part.mm_embedding, url, model.device)) for url in urls]
 
     @staticmethod
-    async def get(futures: List[Future[torch.Tensor]], time_out: int = 10) -> List[torch.Tensor]:
+    async def get(futures: List[Future[torch.Tensor]], time_out: int = 100) -> List[torch.Tensor]:
         result = []
 
         for future in futures:

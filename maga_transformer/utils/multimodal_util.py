@@ -4,8 +4,9 @@ import json
 import requests
 import threading
 from io import BytesIO
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 from maga_transformer.utils.lru_dict import LruDict
+from maga_transformer.utils.oss_util import get_bytes_io_from_oss_path
 
 if os.environ.get('DOWNLOAD_HEADERS', '') != '':
     HTTP_HEADS = json.loads(os.environ['DOWNLOAD_HEADERS'])
@@ -18,6 +19,8 @@ else:
 def get_bytes_io_from_url(url: str):    
     if url.startswith("http") or url.startswith("https"):
         return BytesIO(requests.get(url, stream=True, headers=HTTP_HEADS).content)
+    elif url.startswith("oss"):
+        return get_bytes_io_from_oss_path(url)
     else:
         # treat url as local path
         with open(url, "rb") as fh:

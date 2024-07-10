@@ -193,6 +193,7 @@ py_library(
         ":uvicorn",
         ":fastapi",
         ":psutil",
+        ":oss2",
         ":orjson",
         # add qwen agent package
         ":pydantic",
