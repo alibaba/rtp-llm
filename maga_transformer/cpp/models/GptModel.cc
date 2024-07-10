@@ -60,6 +60,7 @@ BufferPtr GptModel::tpSyncEmbeddingOrLogits(const BufferPtr& buffer) {
     auto buffer_view = buffer->reshape({buffer->size()});
     auto all_data_1d = all_data->reshape({all_data->size()});
     device_->copy({all_data_1d.view(local_size * tp_rank, local_size), buffer_view});
+    device_->syncAndCheck();
     device_->allGather({{all_data}});
     auto ret = device_->transpose({all_data->reshape({tp_size, buffer_shape[0], buffer_shape[1]})});
     ret->updateShape({buffer_shape[0], buffer_shape[1] * tp_size});
