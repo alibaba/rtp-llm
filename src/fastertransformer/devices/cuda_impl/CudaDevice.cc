@@ -164,10 +164,6 @@ void CudaDevice::checkUseOpenSourceFMHA() {
         return;
     }
 
-    if(CompileConfig::cudart_version < 12000) {
-        FT_LOG_WARNING("cudart version %d not support need >= 12000!", CompileConfig::cudart_version);
-        return;
-    }
 
     char* fmha_env = std::getenv("ENABLE_OPENSOURCE_FMHA");
     if (fmha_env && std::string(fmha_env) == "OFF") {
@@ -205,6 +201,10 @@ void CudaDevice::checkUseTrtV2FMHA() {
     char* fmha_env = std::getenv("ENABLE_TRT_FMHA");
     if (fmha_env && std::string(fmha_env) == "OFF") {
         FT_LOG_WARNING("TRT FMHA is disabled for by env");
+        return;
+    }
+    if(CompileConfig::cudart_version < 12000) {
+        FT_LOG_WARNING("cudart version %d not support need >= 12000!", CompileConfig::cudart_version);
         return;
     }
     FT_LOG_INFO("use TRTV2 fmha");
