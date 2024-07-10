@@ -120,6 +120,21 @@ Buffer Buffer::view(size_t offset, size_t size) const {
     }
 }
 
+std::shared_ptr<Buffer> Buffer::slice(size_t offset, size_t size) const {
+
+    if (offset == 0 && size == shape_[0]) {
+        return std::make_shared<Buffer>(where_, type_, shape_, data_, getSubBufferDeleter());
+    } else {
+        FT_CHECK_WITH_INFO(offset + size <= this->shape_[0],
+                           "view offset %d + size %d out of range with buffer[%s]",
+                           offset, size, debugString().c_str());
+        auto new_shape = shape_;
+        new_shape[0] = size;
+        const auto offset_size = this->size() / shape_[0] * offset;
+        return std::make_shared<Buffer>(where_, type_, new_shape, dataWithOffset(offset_size), getSubBufferDeleter());
+    }
+}
+
 Buffer Buffer::operator[](size_t offset) const {
     if (shape().size() <= 1) {
         throw std::runtime_error("Buffer::operator[]: shape must be larger than 1");

@@ -47,7 +47,10 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     // NOTE: Cuda implementation fused adding qkv_weight->bias in invokeAddFusedQKVBiasTranspose kernel call.
     // other devices need to be careful about this.
     // maybe add a device property here.
-    const auto qkv = gemm({input, *(qkv_weight->kernel)});
+    auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));
+    const auto qkv = loraLinear(LoraLinearParams(qkv_gemm_params,
+                                                 *(params.weights.qkv_lora_weights),
+                                                 params.common.lora_input)).output;
     printBufferData(*qkv, "qkv");
 
     // attention layer output is preallocated to avoid memory fragmentation
@@ -107,9 +110,15 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                      DataType::TYPE_QINT8,
                                      1});
 
-        gemm({*qkv_output_, *(output_weight->kernel), nullopt, output});
+        auto output_gemm_params = GemmParams(*qkv_output_, *(output_weight->kernel), nullopt, output);
+        loraLinear(LoraLinearParams(output_gemm_params,
+                                    *(params.weights.output_lora_weights),
+                                    params.common.lora_input)).output;
     } else {
-        gemm({*qkv_output, *(output_weight->kernel), nullopt, output});
+        auto output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, output);
+        loraLinear(LoraLinearParams(output_gemm_params,
+                                    *(params.weights.output_lora_weights),
+                                    params.common.lora_input)).output;
     }
 
     return {move(output)};

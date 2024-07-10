@@ -8,8 +8,6 @@
 
 namespace fastertransformer {
 
-// These weights should correspond to `maga_transformer/utils/model_weight.py`
-
 struct LayerNormWeights {
     ConstBufferPtr gamma = nullptr;
     ConstBufferPtr beta = nullptr;
@@ -51,23 +49,51 @@ struct DenseWeights {
 
 typedef std::shared_ptr<const DenseWeights> DenseWeightsPtr;
 
+
 struct LoraWeights {
     ConstBufferPtr A;
     ConstBufferPtr B;
-    ConstBufferPtr A_scale;
-    ConstBufferPtr B_scale;
 };
+typedef std::shared_ptr<const LoraWeights>  LoraWeightsPtr;
 
-typedef std::unordered_map<std::string, LoraWeights> LoraWeightsMap;
+struct LoraWeightsMap {
+    std::unordered_map<int64_t, LoraWeights> lora_map_;
+
+    bool hasLoraWeight(int64_t lora_id) const {
+        auto it = lora_map_.find(lora_id);
+        return it != lora_map_.end();
+    }
+
+    LoraWeights getLoraWeight(int64_t lora_id) const {
+        FT_CHECK(hasLoraWeight(lora_id));
+        auto it = lora_map_.find(lora_id);
+        return it->second;
+    }
+
+
+    void setLoRAWeight(int64_t lora_id,
+                       ConstBufferPtr lora_a,
+                       ConstBufferPtr lora_b)
+    {
+        lora_map_[lora_id] = LoraWeights({lora_a, lora_b});
+    }
+
+    void removeLoRAWeight(int64_t lora_id) {
+        if (lora_map_.find(lora_id) == lora_map_.end()) {
+            return;
+        }
+        lora_map_.erase(lora_id);
+    }
+};
 
 struct AttentionLayerWeights {
     std::shared_ptr<const LayerNormWeights> pre_attention_layernorm;
     std::shared_ptr<const DenseWeights>     qkv_weight;
-    std::shared_ptr<const LoraWeightsMap>   query_lora_weights;
+    std::shared_ptr<LoraWeightsMap>         qkv_lora_weights;
     std::shared_ptr<const LayerNormWeights> attention_layernorm;
 
     std::shared_ptr<const DenseWeights>     output_weight;
-    std::shared_ptr<const LoraWeightsMap>   output_lora_weights;
+    std::shared_ptr<LoraWeightsMap>         output_lora_weights;
 
     std::shared_ptr<const DenseWeights>     smoother_weight;
     std::shared_ptr<const DenseWeights>     shift_weight;
@@ -76,15 +102,15 @@ struct AttentionLayerWeights {
 struct FfnLayerWeights {
     std::shared_ptr<const DenseWeights>     up_weight;
     std::shared_ptr<const DenseWeights>     moe_up_weight;
-    std::shared_ptr<const LoraWeightsMap>   up_lora_weights;
+    std::shared_ptr<LoraWeightsMap>         up_lora_weights;
 
     std::shared_ptr<const DenseWeights>     gate_weight;
     std::shared_ptr<const DenseWeights>     moe_gate_weight;
-    std::shared_ptr<const LoraWeightsMap>   gate_lora_weights;
+    std::shared_ptr<LoraWeightsMap>         gate_lora_weights;
 
     std::shared_ptr<const DenseWeights>     down_weight;
     std::shared_ptr<const DenseWeights>     moe_down_weight;
-    std::shared_ptr<const LoraWeightsMap>   down_lora_weights;
+    std::shared_ptr<LoraWeightsMap>         down_lora_weights;
 
     std::shared_ptr<const DenseWeights>     moe_gating_weight;
 

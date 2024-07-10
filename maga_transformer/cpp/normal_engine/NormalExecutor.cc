@@ -45,17 +45,27 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params, ft::DeviceBase* d
 absl::Status
 NormalExecutor::addLoRA(const int64_t                                                           lora_id,
                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
-                        const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
+                        const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights)
+{
+    if (use_new_device_impl_) {
+        model_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
 #if USING_CUDA
-    model_wrapper_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+    } else {
+        model_wrapper_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
 #endif
+    }
+
     return absl::OkStatus();
 }
 
 absl::Status NormalExecutor::removeLoRA(const int64_t lora_id) {
+    if (use_new_device_impl_) {
+        model_->removeLoRA(lora_id);
 #if USING_CUDA
-    model_wrapper_->removeLoRA(lora_id);
+    } else {
+        model_wrapper_->removeLoRA(lora_id);
 #endif
+    }
     return absl::OkStatus();
 }
 

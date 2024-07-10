@@ -4,6 +4,7 @@
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
+#include "src/fastertransformer/models/W.h"
 #include <memory>
 
 using namespace std;
@@ -157,6 +158,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const BufferPtr combo_position_ids = inputs.combo_position_ids ? device_->clone({*inputs.combo_position_ids}): nullptr;
     const BufferPtr combo_tokens_type_ids = inputs.combo_tokens_type_ids ? device_->clone({*inputs.combo_tokens_type_ids}): nullptr;
 
+    // lora input
+    OptionalLoraInput lora_input = std::nullopt;
+    if (inputs.lora_ids != nullptr && inputs.lora_input_lengths != nullptr) {
+        lora_input = (OptionalLoraInput)LoraInput({inputs.lora_ids, inputs.lora_input_lengths});
+    }
     // word embedding lookup
     auto hidden = device_->embeddingLookup({
             *combo_tokens, *embedding_table, description_.input_embedding_scalar,
@@ -193,6 +199,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     });
 
     prepareAttentionInputs(inputs, attention_common_inputs);
+    attention_common_inputs.lora_input = lora_input;
     BufferPtr input_kv_blocks;
     BufferPtr input_kv_cache_scales;
     if (inputs.kv_cache_blocks) {
@@ -290,7 +297,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             *hidden,
             description_.ffn_conf,
             layer.ffn_weights,
-            device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt
+            device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
+            lora_input
         }));
         hidden = ffn_output.hidden_states;
         if (device_props_.tp_size > 1) {
@@ -355,5 +363,90 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         return {nullptr, nullptr, std::move(hidden)};
     }
 }
+
+
+void GptModel::addLoRA(const int64_t lora_id,
+                       const std::vector<LoraMap>& lora_a,
+                       const std::vector<LoraMap>& lora_b)
+{
+    auto layer_num = weights_.layers.size();
+    FT_CHECK_WITH_INFO(((lora_a.size() == layer_num) && (lora_b.size() == layer_num)),
+        "lora_a/lora b layer num[%d]/[%d] must be equal to layer num[%d]",
+        lora_a.size(), lora_b.size(), layer_num);
+
+    auto helper_func = [&lora_id](std::string& adapter_name,
+                                  std::shared_ptr<LoraWeightsMap> layer_weights,
+                                  ConstBufferPtr lora_a,
+                                  ConstBufferPtr lora_b)
+    {
+        layer_weights->setLoRAWeight(lora_id, lora_a, lora_b);
+    };
+    std::vector<std::string> adapter_set = {W::attn_qkv_w, W::attn_o_w, W::ffn_w1, W::ffn_w2, W::ffn_w3};
+
+    for (int i = 0; i < layer_num; i++) {
+        for (auto adapter_name : adapter_set) {
+            if (lora_a[i].find(adapter_name) == lora_a[i].end()) {
+                continue;
+            }
+
+            if (adapter_name == W::attn_qkv_w) {
+                helper_func(adapter_name,
+                            weights_.layers[i].self_attention_weights.qkv_lora_weights,
+                            lora_a[i].at(adapter_name),
+                            lora_b[i].at(adapter_name));
+            } else if (adapter_name == W::attn_o_w) {
+                helper_func(adapter_name,
+                            weights_.layers[i].self_attention_weights.output_lora_weights,
+                            lora_a[i].at(adapter_name),
+                            lora_b[i].at(adapter_name));
+            } else if (adapter_name == W::ffn_w1) {
+                helper_func(adapter_name,
+                            weights_.layers[i].ffn_weights.gate_lora_weights,
+                            lora_a[i].at(adapter_name),
+                            lora_b[i].at(adapter_name));
+            } else if (adapter_name == W::ffn_w2) {
+                helper_func(adapter_name,
+                            weights_.layers[i].ffn_weights.down_lora_weights,
+                            lora_a[i].at(adapter_name),
+                            lora_b[i].at(adapter_name));
+            } else if (adapter_name == W::ffn_w3) {
+                helper_func(adapter_name,
+                            weights_.layers[i].ffn_weights.up_lora_weights,
+                            lora_a[i].at(adapter_name),
+                            lora_b[i].at(adapter_name));
+            } else {
+                unreachable();
+            }
+        }
+    }
+
+}
+
+void GptModel::removeLoRA(const int64_t lora_id) {
+    size_t layer_num = weights_.layers.size();
+
+    auto helper_func = [&lora_id](std::shared_ptr<LoraWeightsMap> layer_weights) {
+        layer_weights->removeLoRAWeight(lora_id);
+    };
+    std::vector<std::string> adapter_set = {W::attn_qkv_w, W::attn_o_w, W::ffn_w1, W::ffn_w2, W::ffn_w3};
+    for (int i = 0; i < layer_num; i++) {
+        for (auto adapter_name : adapter_set) {
+            if (adapter_name == W::attn_qkv_w) {
+                helper_func(weights_.layers[i].self_attention_weights.qkv_lora_weights);
+            } else if (adapter_name == W::attn_o_w) {
+                helper_func(weights_.layers[i].self_attention_weights.output_lora_weights);
+            } else if (adapter_name == W::ffn_w1) {
+                helper_func(weights_.layers[i].ffn_weights.gate_lora_weights);
+            } else if (adapter_name == W::ffn_w2) {
+                helper_func(weights_.layers[i].ffn_weights.down_lora_weights);
+            } else if (adapter_name == W::ffn_w3) {
+                helper_func(weights_.layers[i].ffn_weights.up_lora_weights);
+            } else {
+                unreachable();
+            }
+        }
+    }
+}
+
 
 } // namespace rtp_llm

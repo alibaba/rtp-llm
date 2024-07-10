@@ -262,6 +262,13 @@ struct EmbeddingLookupParams {
     OptionalConstBufferRef token_type_table;
 };
 
+struct LoraInput {
+    BufferPtr lora_ids;
+    BufferPtr lora_input_lengths;
+};
+
+using OptionalLoraInput = std::optional<LoraInput>;
+
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs
     const Buffer& input_lengths;      // int32_t, [decoder_batch_size + context_batch_size]
@@ -285,9 +292,7 @@ struct AttentionCommonInputs {
     BufferPtr attention_mask;
     BufferPtr linear_bias_slopes;
     BufferPtr prefix_prompt_lengths;
-
-    BufferPtr lora_ids;
-    BufferPtr lora_input_lengths;
+    OptionalLoraInput lora_input = std::nullopt;
 
     AttentionCommonInputs() = default;
 
@@ -360,11 +365,13 @@ struct FfnLayerParams {
     FfnLayerParams(const Buffer& input,
                    const FfnConfigs& configs,
                    const FfnLayerWeights& weights,
-                   const OptionalConstBufferRef residual = std::nullopt) :
+                   const OptionalConstBufferRef residual = std::nullopt,
+                   const OptionalLoraInput lora_input = std::nullopt) :
     input(input),
     configs(configs),
     weights(weights),
-    residual(residual)
+    residual(residual),
+    lora_input(lora_input)
     {}
 
     const Buffer& input;
@@ -374,8 +381,7 @@ struct FfnLayerParams {
 
     const OptionalConstBufferRef residual; // for intel xft
 
-    const OptionalConstBufferRef lora_ids;
-    const OptionalConstBufferRef lora_input_lengths;
+    const OptionalLoraInput lora_input;
 };
 
 struct GreedyParams {
@@ -465,19 +471,16 @@ struct LoraLinearOutput {
 
 struct LoraLinearParams {
 
-    LoraLinearParams(const Buffer&              input,
-                     OptionalConstBufferRef     lora_ids,
-                     const DenseWeights&        weight,
-                     OptionalConstLoraMapRef    lora_map) :
-                     input(input),
-                     lora_ids(lora_ids),
-                     weight(weight),
-                     lora_map(lora_map) {}
+    LoraLinearParams(GemmParams&                gemm_params,
+                     OptionalConstLoraMapRef    lora_map = std::nullopt,
+                     OptionalLoraInput          lora_input = std::nullopt) :
+                     gemm_params(gemm_params),
+                     lora_map(lora_map),
+                     lora_input(lora_input) {}
 
-    const Buffer&                           input;
-    OptionalConstBufferRef                  lora_ids;
-    const DenseWeights&                     weight;
+    GemmParams&                             gemm_params;
     OptionalConstLoraMapRef                 lora_map;
+    OptionalLoraInput                  lora_input;
 };
 
 struct QuantizeParams {

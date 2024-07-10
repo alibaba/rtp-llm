@@ -37,17 +37,17 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         const auto& up_weight = *(params.weights.up_weight->kernel);
         const auto& down_weight = *(params.weights.down_weight->kernel);
 
-        auto up_output = loraLinear({params.input,
-                                    std::nullopt,
-                                    *(params.weights.up_weight),
-                                    std::nullopt}).output;
+        auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
+        auto up_output = loraLinear(LoraLinearParams(up_gemm_params,
+                                                     *(params.weights.up_lora_weights),
+                                                     params.lora_input)).output;
         printBufferData(*up_output, "ffn_up");
 
         if (isGatedActivation(params.configs.activation_type)) {
-            auto gate_output = loraLinear({params.input,
-                                        std::nullopt,
-                                        *(params.weights.gate_weight),
-                                        std::nullopt});
+            auto gate_gemm_params = GemmParams(params.input, *(params.weights.gate_weight->kernel));
+            auto gate_output = loraLinear(LoraLinearParams(gate_gemm_params,
+                                                           *(params.weights.gate_lora_weights),
+                                                           params.lora_input));
 
             activation({params.configs.activation_type,
                         *(up_output),
@@ -71,10 +71,10 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         }
 
         printBufferData(*up_output, "ffn_act");
-        output = loraLinear({*(up_output),
-                            std::nullopt,
-                            *(params.weights.down_weight),
-                            std::nullopt}).output;
+        auto down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel));
+        output = loraLinear(LoraLinearParams(down_gemm_params,
+                                             *(params.weights.down_lora_weights),
+                                             params.lora_input)).output;
     }
 
     if (shared_expert_output) {
