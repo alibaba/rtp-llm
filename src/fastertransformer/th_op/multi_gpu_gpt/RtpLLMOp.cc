@@ -22,7 +22,8 @@ RtpLLMOp::RtpLLMOp() {}
 
 void RtpLLMOp::init(const ft::GptInitParameter& gpt_init_params,
                     py::object                  py_layers_weights,
-                    py::object                  py_global_weights) {
+                    py::object                  py_global_weights,
+                    py::object                  mm_process_engine) {
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -37,7 +38,7 @@ void RtpLLMOp::init(const ft::GptInitParameter& gpt_init_params,
         auto kmon_tags = rtp_llm::getHippoTags();
         params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
     }
-    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, gpt_init_params.model_rpc_port_, std::move(params));
+    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, gpt_init_params.model_rpc_port_, std::move(params), std::move(mm_process_engine));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
@@ -60,9 +61,9 @@ std::tuple<int64_t, int64_t> RtpLLMOp::getKVCacheInfo() {
     return std::make_tuple(info.available_kv_cache, info.total_kv_cache);
 }
 
-void RtpLLMOp::_init(const int64_t model_rpc_port, const rtp_llm::EngineInitParams params) {
+void RtpLLMOp::_init(const int64_t model_rpc_port, const rtp_llm::EngineInitParams params, py::object mm_process_engine) {
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
-    model_rpc_server_.reset(new rtp_llm::ModelRpcServiceImpl(params));
+    model_rpc_server_.reset(new rtp_llm::ModelRpcServiceImpl(params, mm_process_engine));
     if (model_rpc_port < 0) {
         is_server_ready_ = true;
         return;

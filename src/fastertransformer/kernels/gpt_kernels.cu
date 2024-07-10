@@ -31,7 +31,7 @@
 
 namespace fastertransformer {
 
-template<typename T, bool USE_POS_EMB, bool USE_TYPE_ID_EMB>
+template<typename T, bool USE_POS_EMB, bool USE_TYPE_ID_EMB, bool USE_MASK>
 __global__ void embedding_lookup_kernel(T*                    from_tensor,
                                         const T*              embedding_table,
                                         double                input_embedding_scalar,
@@ -40,6 +40,7 @@ __global__ void embedding_lookup_kernel(T*                    from_tensor,
                                         const int*            input_ids,
                                         const int*            input_pos,
                                         const int*            input_type,
+                                        const int*            input_mask,
                                         const int             token_num,
                                         const int64_t         hidden_units)
 {
@@ -51,6 +52,23 @@ __global__ void embedding_lookup_kernel(T*                    from_tensor,
         T         embedding       = (T)0.0f;
         T         pos_embed       = (T)0.0f;
         T         type_embed      = (T)0.0f;
+
+        if constexpr(USE_POS_EMB) {
+            assert(pos_table != nullptr);
+            pos_embed = pos_table[input_pos[token_index] * hidden_units + col_index];
+        }
+        if constexpr(USE_TYPE_ID_EMB) {
+            assert(type_table != nullptr);
+            type_embed = type_table[input_type[token_index] * hidden_units + col_index];
+        }
+        if constexpr(USE_MASK) {
+            assert(input_mask != nullptr);
+            if (input_mask[token_index] == 0) {
+                from_tensor[index] = pos_embed + type_embed;
+                continue;
+            }
+        }
+
         embedding = embedding_table[input_id * hidden_units + col_index];
         
         // embedding *= input_embedding_scalar;
@@ -62,20 +80,12 @@ __global__ void embedding_lookup_kernel(T*                    from_tensor,
             embedding *= input_embedding_scalar;
         }
 
-        if constexpr(USE_POS_EMB) {
-            assert(pos_table != nullptr);
-            pos_embed = pos_table[input_pos[token_index] * hidden_units + col_index];
-        }
-        if constexpr(USE_TYPE_ID_EMB) {
-            assert(type_table != nullptr);
-            type_embed = type_table[input_type[token_index] * hidden_units + col_index];
-        }
         from_tensor[index] = embedding + pos_embed + type_embed;
     }
 }
 
-#define INVOKE_WORD_EMBED_LOOKUP(USE_POS, USE_YPE) \
-        embedding_lookup_kernel<T, USE_POS, USE_YPE><<<grid, block, 0, stream>>>(from_tensor, \
+#define INVOKE_WORD_EMBED_LOOKUP(USE_POS, USE_YPE, USE_MASK) \
+        embedding_lookup_kernel<T, USE_POS, USE_YPE, USE_MASK><<<grid, block, 0, stream>>>(from_tensor, \
                                                         embedding_table, \
                                                         input_embedding_scalar, \
                                                         pos_table, \
@@ -83,6 +93,7 @@ __global__ void embedding_lookup_kernel(T*                    from_tensor,
                                                         input_ids,  \
                                                         input_pos,  \
                                                         input_type, \
+                                                        input_mask, \
                                                         token_num,  \
                                                         hidden_units);
 
@@ -95,6 +106,7 @@ void invokeEmebeddingLookup(T*                    from_tensor,
                             const int*            input_ids,
                             const int*            input_pos,
                             const int*            input_type,
+                            const int*            input_mask,
                             const int             token_num,
                             const int             hidden_units,
                             cudaStream_t          stream)
@@ -103,15 +115,31 @@ void invokeEmebeddingLookup(T*                    from_tensor,
     dim3       block(std::min(hidden_units, 1024));
     if (!pos_table) {
         if (!type_table) {
-            INVOKE_WORD_EMBED_LOOKUP(false, false);
+            if (!input_mask) {
+                INVOKE_WORD_EMBED_LOOKUP(false, false, false);
+            } else {
+                INVOKE_WORD_EMBED_LOOKUP(false, false, true);
+            }
         } else {
-            INVOKE_WORD_EMBED_LOOKUP(false, true);
+            if (!input_mask) {
+                INVOKE_WORD_EMBED_LOOKUP(false, true, false);
+            } else {
+                INVOKE_WORD_EMBED_LOOKUP(false, true, true);
+            }
         }
     } else {
         if (!type_table) {
-            INVOKE_WORD_EMBED_LOOKUP(true, false);
+            if (!input_mask) {
+                INVOKE_WORD_EMBED_LOOKUP(true, false, false);
+            } else {
+                INVOKE_WORD_EMBED_LOOKUP(true, false, true);
+            }
         } else {
-            INVOKE_WORD_EMBED_LOOKUP(true, true);
+            if (!input_mask) {
+                INVOKE_WORD_EMBED_LOOKUP(true, true, false);
+            } else {
+                INVOKE_WORD_EMBED_LOOKUP(true, true, true);
+            }
         }
     }
 }
@@ -300,6 +328,7 @@ template void invokeInputIdsEmbeddingLookupPosEncoding(__nv_bfloat16*           
         const int*            input_ids,                                \
         const int*            input_pos,                                \
         const int*            input_type,                               \
+        const int*            input_mask,                               \
         const int             token_num,                                \
         const int             hidden_units,                             \
         cudaStream_t          stream)

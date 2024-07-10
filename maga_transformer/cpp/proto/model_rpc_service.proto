@@ -54,7 +54,7 @@ message GenerateConfigPB {
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
-    repeated bytes image_embeddings = 3;
+    repeated string multimodal_urls = 3;
     int64 lora_id = 4;
     GenerateConfigPB generate_config = 5;
 }

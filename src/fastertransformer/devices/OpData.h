@@ -15,6 +15,7 @@
 #include <functional>
 #include <sstream>
 #include <memory>
+#include <torch/python.h>
 
 namespace fastertransformer {
 
@@ -294,6 +295,10 @@ struct EmbeddingLookupParams {
     const Buffer& embedding_table;
     double input_embedding_scalar = 1;
 
+    const Buffer& text_token_masks;
+    std::optional<std::vector<torch::Tensor>> multimodal_features;
+    OptionalConstBufferRef mm_features_locs;
+
     OptionalConstBufferRef position_ids;
     OptionalConstBufferRef position_table;
 
@@ -314,6 +319,12 @@ struct KvCacheInfo {
     BufferPtr v_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
     BufferPtr k_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
     BufferPtr v_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
+};
+
+struct MultimodalEmbeddingParams {
+    const BufferPtr& word_embeddings;
+    std::vector<torch::Tensor> multimodal_features;
+    const Buffer& multimodal_locs;
 };
 
 struct AttentionCommonInputs {

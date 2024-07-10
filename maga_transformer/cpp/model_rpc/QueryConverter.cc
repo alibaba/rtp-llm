@@ -49,6 +49,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
 std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB* input) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
     generate_input->request_id = input->request_id();
+    generate_input->begin_time_ms = autil::TimeUtility::currentTimeInMicroSeconds();
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
     }
@@ -57,6 +58,13 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     generate_input->input_ids     = device->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)input->token_ids_size()}, ft::AllocationType::HOST}, {});
     memcpy(generate_input->input_ids->data(), input->token_ids().data(), generate_input->input_ids->sizeBytes());
+    if (input->multimodal_urls_size() > 0) {
+        std::vector<std::string> mm_urls;
+        for (auto i = 0;i < input->multimodal_urls_size();i++) {
+            mm_urls.emplace_back(input->multimodal_urls(i));
+        }
+        generate_input->multimodal_urls = std::move(mm_urls);
+    }
     return generate_input;
 }
 

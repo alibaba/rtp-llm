@@ -339,6 +339,22 @@ cc_library(
 )
 
 cc_library(
+    name = "multimodal_processor",
+    hdrs = glob([
+        "multimodal_processor/*.h",
+    ]),
+    srcs = glob([
+        "multimodal_processor/*.cc",
+    ]),
+    deps = [
+        "//src/fastertransformer/devices:devices_base",
+        "//src/fastertransformer/utils:py_utils",
+        "//src/fastertransformer/cuda:allocator_cuda",
+    ],
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
     name = "model_rpc_server",
     srcs = ["model_rpc/ModelRpcServer.cc", "model_rpc/QueryConverter.cc"],
     hdrs = ["model_rpc/ModelRpcServer.h", "model_rpc/QueryConverter.h"],
@@ -349,6 +365,7 @@ cc_library(
         "//maga_transformer/cpp:embedding_engine",
         # "//maga_transformer/cpp:speculative_engine",
         "//src/fastertransformer/devices:devices_base",
+        "//maga_transformer/cpp:multimodal_processor",
     ],
     visibility = ["//visibility:public"]
 )

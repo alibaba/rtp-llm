@@ -1,5 +1,7 @@
 from typing import Optional, List, Dict, Any, Union, Callable, AsyncGenerator
+import os
 import torch
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from PIL import Image
@@ -114,10 +116,12 @@ class CustomChatRenderer():
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
-        if model.is_multimodal() and len(images) > 0:
-            images = await MMProcessEngine.get(images)
+        if model.is_multimodal() and len(images) > 0 and os.environ.get("USE_RPC_MODEL", "0") != "1":
+            tasks = [asyncio.create_task(MMProcessEngine.get(images))]
+            await asyncio.wait(tasks)
+            images = tasks[0].result()
 
-        if model.is_multimodal():
+        if model.is_multimodal() and os.environ.get("USE_RPC_MODEL", "0") != "1":
             input_ids, images, token_type_ids = model.expand_token_id(input_ids, images)
         
         input_token_length = len(input_ids)

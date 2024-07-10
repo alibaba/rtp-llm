@@ -182,6 +182,7 @@ class Llava(Llama, MultiModalMixin):
                 config.vit_related_params.config["patch_size"] = patch_size
                 config.vit_related_params.config["image_size"] = img_size
             config.vit_related_params.config["vit_tower_path"] = vis_tower_name
+            config.mm_sep_tokens = [-200] # image_token_index
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):

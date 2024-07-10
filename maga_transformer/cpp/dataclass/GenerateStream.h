@@ -46,7 +46,7 @@ public:
     
     std::shared_ptr<GenerateInput> generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig();
-    std::optional<ft::BufferPtr>& imageEmbeddings();
+    std::vector<int> textTokensMask() const;
     bool isStreaming() const;
     int64_t streamId() const;
     int loraId() const;
@@ -90,6 +90,11 @@ public:
     std::vector<int> currentExecuteTokens(int batch_idx) const;
 
     void step();
+
+    std::optional<std::vector<torch::Tensor>>& multimodalFeatures() const;
+    int multimodalFeaturesLength() const;
+    std::optional<ft::BufferPtr>& multimodalLocations() const;
+
     void checkTimeout();
     void setStop(const std::string& err_msg, absl::StatusCode err_code = absl::StatusCode::kInternal);
     void stopAndRelease(const std::string& err_msg, absl::StatusCode err_code = absl::StatusCode::kInternal);

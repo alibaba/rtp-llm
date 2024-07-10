@@ -3,6 +3,7 @@
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/model_rpc/QueryConverter.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
+#include "autil/TimeUtility.h"
 
 #include <chrono>
 #include <cstring>
@@ -31,14 +32,18 @@ int transErrorCode(absl::StatusCode code) {
 }
 
 ModelRpcServiceImpl::ModelRpcServiceImpl(
-    const EngineInitParams& maga_init_params) {
+    const EngineInitParams& maga_init_params, const py::object mm_process_engine) {
     engine_.reset(new NormalEngine(maga_init_params));
+    if (!mm_process_engine.is_none()) {
+        mm_processor_.reset(new MultimodalProcessor(mm_process_engine, maga_init_params.gpt_init_parameter.mm_sep_tokens_));    
+    }
 }
 
 grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*                  context,
                                                   const GenerateInputPB*                request,
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     FT_LOG_DEBUG("receive request %ld", request->request_id());
+    auto begin_time_ms = autil::TimeUtility::currentTimeInMicroSeconds();
     auto input = QueryConverter::transQuery(request);
     std::shared_mutex* inner_mutex = nullptr;
     if (input->lora_id != -1) {
@@ -55,6 +60,16 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
     }
     auto lock_scope = (inner_mutex == nullptr) ?
                       std::shared_lock<std::shared_mutex>() : std::shared_lock<std::shared_mutex>(*inner_mutex);
+
+    // todo: catch python exception, such as download timeout
+    if (mm_processor_ != nullptr && input->multimodal_urls) {
+        input->multimodal_features = mm_processor_->mm_embedding(input->multimodal_urls.value());
+        auto expanded_ids = mm_processor_->expand_token_ids(input->multimodal_features.value(), input->input_ids);
+        input->input_ids = expanded_ids.expanded_ids;
+        input->text_tokens_mask = expanded_ids.text_tokens_mask;
+        input->mm_locs = expanded_ids.locs;
+    }
+
     FT_LOG_DEBUG("request:[%ld] trans to stream success", request->request_id());
     auto stream = engine_->enqueue(input);
     FT_LOG_DEBUG("request:[%ld] enqueue success", request->request_id());

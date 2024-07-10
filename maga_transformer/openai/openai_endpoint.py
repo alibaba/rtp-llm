@@ -28,7 +28,7 @@ class OpenaiEndopoint():
     def __init__(self, model: Union[AsyncModel, BaseModel]):
         self.model = model
         self.max_seq_len = self.model.config.max_seq_len
-        self.vit_engine = MMProcessEngine()
+        self.vit_engine = MMProcessEngine(self.model.model)
 
         tokenizer = self.model.tokenizer
         if (tokenizer == None):
@@ -191,7 +191,10 @@ class OpenaiEndopoint():
         generate_config = self._extract_generation_config(chat_request)
 
         if self.model.is_multimodal():
-            images = self.vit_engine.submit(input_images, self.model.model)
+            if os.environ.get("USE_RPC_MODEL", "0") != "1":
+                images = self.vit_engine.submit(input_images)
+            else:
+                images = input_images
         else:
             images = []
 

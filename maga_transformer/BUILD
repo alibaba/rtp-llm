@@ -51,7 +51,8 @@ requirement([
     "jieba",
     "openai",
     "oss2",
-    "pyOpenSSL"
+    "pyOpenSSL",
+    "nest_asyncio"
 ])
 
 if_cuda(
@@ -148,6 +149,7 @@ py_library(
         ":onnx",
         ":xfastertransformer_devel_icx",
         ":decord",
+        ":nest_asyncio"
     ] + if_cuda([
         ":tensorrt",
         ":tensorrt-cu12",

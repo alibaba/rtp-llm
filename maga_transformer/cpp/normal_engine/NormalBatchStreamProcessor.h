@@ -24,6 +24,8 @@ public:
         num_layers_(params.num_layers_),
         use_int8_kv_cache_(params.int8_kv_cache_),
         has_positional_encoding_(params.has_positional_encoding_),
+        is_multimodal_(params.is_multimodal_),
+        cal_mm_tokens_in_rotary_emb_(params.cal_mm_tokens_in_rotary_emb_),
         device_(ft::DeviceFactory::getDefaultDevice()) {}
     absl::Status                   dispatch(const StreamGroups&                  stream_groups,
                                             const SamplerInputs&                 sampler_inputs,
@@ -39,6 +41,8 @@ private:
     size_t          num_layers_;
     bool            use_int8_kv_cache_;
     bool            has_positional_encoding_;
+    bool            is_multimodal_;
+    bool            cal_mm_tokens_in_rotary_emb_;
     ft::DeviceBase* device_;
 };
 

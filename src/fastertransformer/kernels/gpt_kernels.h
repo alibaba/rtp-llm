@@ -88,6 +88,7 @@ void invokeEmebeddingLookup(T*           from_tensor,
                             const int*   input_ids,
                             const int*   input_pos,
                             const int*   input_type,
+                            const int*   input_mask,
                             const int    token_num,
                             const int    hidden_units,
                             cudaStream_t stream);

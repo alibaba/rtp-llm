@@ -209,6 +209,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(use_cross_attn, use_cross_attn_)                       \
     DEF_PROPERTY(cross_attn_input_len, cross_attn_input_len_)           \
     DEF_PROPERTY(is_multimodal, is_multimodal_)                         \
+    DEF_PROPERTY(mm_sep_tokens, mm_sep_tokens_)                         \
     DEF_PROPERTY(pre_allocate_op_mem, pre_allocate_op_mem_)             \
     DEF_PROPERTY(seq_size_per_block, seq_size_per_block_)               \
     DEF_PROPERTY(block_nums, block_nums_)                               \

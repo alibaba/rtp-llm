@@ -34,6 +34,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     adjusted_common_len_ = tileNum() == 1 ? seq_length_ : seq_length_ / seqSizePerBlock() * seqSizePerBlock();
     max_chunk_len_ = seq_length_;
 
+    
+    begin_time_us_      = input->begin_time_ms;
     device_             = ft::DeviceFactory::getDefaultDevice();
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
@@ -150,9 +152,6 @@ std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
 std::shared_ptr<GenerateConfig>& GenerateStream::generateConfig() {
     return generate_input_->generate_config;
 }
-std::optional<ft::BufferPtr>& GenerateStream::imageEmbeddings() {
-    return generate_input_->image_embeddings;
-}
 bool GenerateStream::isStreaming() const {
     return generate_input_->generate_config->is_streaming;
 }
@@ -244,6 +243,10 @@ int GenerateStream::prefixLength() const {
 }
 
 int GenerateStream::reuseLength() const {
+    if (multimodalFeatures().has_value()) {
+        // prompt with multimodal input cannot use reuse cache for now
+        return 0;
+    }
     return reuse_length_;
 }
 
@@ -292,6 +295,34 @@ int GenerateStream::currentExecuteTokenSize() {
 vector<int> GenerateStream::contextTokens(int batch_idx) const {
     return fastertransformer::buffer2vector<int>(
             (*complete_token_ids_)[batch_idx].view(prefixLength(), contextLength()));
+}
+
+std::optional<std::vector<torch::Tensor>>& GenerateStream::multimodalFeatures() const {
+    return generate_input_->multimodal_features;
+}
+
+int GenerateStream::multimodalFeaturesLength() const {
+    auto& features = multimodalFeatures();
+    if (features) {
+        return features.value().size() * batchSize();
+    }
+    return 0;
+}
+
+std::optional<ft::BufferPtr>& GenerateStream::multimodalLocations() const {
+    return generate_input_->mm_locs;
+}
+
+vector<int> GenerateStream::textTokensMask() const {
+    if (!generate_input_->text_tokens_mask) {
+        return {};
+    }
+    auto token_masks = fastertransformer::buffer2vector<int>(*generate_input_->text_tokens_mask.value());
+    if (reuseLength() > 0) {
+        return vector<int>(token_masks.begin() + reuseLength(), token_masks.end());
+    } else {
+        return token_masks;
+    }
 }
 
 vector<int> GenerateStream::currentExecuteTokens(int batch_idx) const {

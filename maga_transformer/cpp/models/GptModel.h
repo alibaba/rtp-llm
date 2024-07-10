@@ -6,6 +6,7 @@
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/Weights.h"
 #include <string>
+#include <utility>
 
 namespace ft = fastertransformer;
 
@@ -48,13 +49,17 @@ struct GptModelInputs {
     ft::BufferPtr lora_input_lengths; // [batch_size]
 
     ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
-    ft::BufferPtr position_ids;    // [batch_size, seq_len]
+    ft::BufferPtr position_ids;    // [cumulated_seq_len]
 
     ft::BufferPtr kv_cache_offset;   // [batch_size, block_nums], kv cache block offset
     ft::BufferPtr k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
     ft::BufferPtr v_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
     ft::BufferPtr k_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
     ft::BufferPtr v_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
+
+    std::optional<std::vector<torch::Tensor>> multimodal_features; // all features in gathered stream stored here
+    ft::BufferPtr                             text_tokens_mask;    // text part in multimodal input tokens [cumulated_seq_len]
+    std::optional<ft::BufferPtr>              mm_features_locs;    // features index and length
 
 public:
     std::string debugString() const {

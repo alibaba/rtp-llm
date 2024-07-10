@@ -43,6 +43,7 @@ void FusedEmbedding<T>::forward(th::Tensor& embedding_output, const th::Tensor& 
                                token_ids_ptr,
                                position_ids_ptr,
                                token_type_ids_ptr,
+                               nullptr,
                                token_num,
                                hidden_size_,
                                stream_);

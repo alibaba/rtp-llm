@@ -3,6 +3,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <torch/python.h>
 #include "absl/status/status.h"
 #include "maga_transformer/cpp/dataclass/GenerateConfig.h"
 #include "src/fastertransformer/core/Buffer.h"
@@ -43,9 +44,16 @@ public:
     int64_t                         request_id;
     std::shared_ptr<GenerateConfig> generate_config;
     ft::BufferPtr                   input_ids;
-    std::optional<ft::BufferPtr>    image_embeddings;  // For multi-modality models
+
+    // For multi-modality models
+    std::optional<std::vector<torch::Tensor>> multimodal_features;
+    std::optional<std::vector<std::string>>   multimodal_urls;
+    std::optional<ft::BufferPtr>              text_tokens_mask; // text part for 1 and multimodal part for 0
+    std::optional<ft::BufferPtr>              mm_locs; // multimodal input locations
+
     int                             lora_id       = -1;
     int                             prefix_length = 0;
+    int64_t                         begin_time_ms = 0;
 
     // config
     bool                            need_release_resource = true;
