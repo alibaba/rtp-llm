@@ -15,6 +15,7 @@
 #include <chrono>
 
 using namespace std;
+using namespace fastertransformer;
 
 namespace rtp_llm {
 

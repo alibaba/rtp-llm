@@ -267,6 +267,25 @@ void invokeSumLengthDimension(float*       out_buf,
 void invokeMaxLength(
     size_t* h_pinned_max_length, const int* lengths, size_t* max_length, const size_t size, cudaStream_t stream = 0);
 
+void invokeConvertOffsetToAddr(uint64_t*       block_addr, // [l, b, 2, m]
+                               const uint64_t* k_cache_base_addr, // [l]
+                               const uint64_t* v_cache_base_addr,
+                               const int*      offset, // [b, m]
+                               int             layer_num,
+                               int             batch_size,
+                               int             max_block_num,
+                               int             block_size,
+                               cudaStream_t    stream);
+
+void invokeConvertOffsetToAddrOneLayer(uint64_t*      block_addr, // [b, 2, m]
+                                       const uint64_t k_cache_base_addr,
+                                       const uint64_t v_cache_base_addr,
+                                       const int*     offset, // [b, m]
+                                       int            batch_size,
+                                       int            max_block_num,
+                                       int            block_size,
+                                       cudaStream_t   stream);
+
 // void invokeMinLength(size_t*      h_pinned_min_length,
 //                      const int*   lengths,
 //                      size_t*      min_length,

@@ -2,7 +2,6 @@
 #include "gtest/gtest.h"
 
 #define private public
-#include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"

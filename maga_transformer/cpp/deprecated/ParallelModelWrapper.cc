@@ -342,7 +342,7 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
     }
     ft::TensorMap output_tensors({{"decoder_output", all_hidden_states}});
 
-    if (model_request.kv_cache_blocks != nullptr) {
+    if (model_request.kv_cache_blocks) {
         ft::Tensor block_pointers(
             ft::MEMORY_CPU,
             ft::DataType::TYPE_INT64,
@@ -350,13 +350,49 @@ GptModelOutputs ParallelModelWrapperImpl<T>::forward(const ModelRequest& model_r
             model_request.kv_cache_blocks->data());
         output_tensors.insert("block_pointers", block_pointers);
     }
-    if (model_request.kv_cache_scales != nullptr) {
+    if (model_request.kv_cache_scales) {
         ft::Tensor block_scale_pointers(
             ft::MEMORY_CPU,
             ft::DataType::TYPE_INT64,
             model_request.kv_cache_scales->shape(),
             model_request.kv_cache_scales->data());
         output_tensors.insert("block_scale_pointers", block_scale_pointers);
+    }
+
+    if (model_request.kv_cache_offset) {
+        ft::Tensor block_index_map(
+            ft::MEMORY_CPU,
+            model_request.kv_cache_offset->type(),
+            model_request.kv_cache_offset->shape(),
+            model_request.kv_cache_offset->data());
+        ft::Tensor k_cache(
+            ft::MEMORY_CPU,
+            model_request.k_cache_buffer->type(),
+            model_request.k_cache_buffer->shape(),
+            model_request.k_cache_buffer->data());
+        ft::Tensor v_cache(
+            ft::MEMORY_CPU,
+            model_request.v_cache_buffer->type(),
+            model_request.v_cache_buffer->shape(),
+            model_request.v_cache_buffer->data());
+        input_tensors.insert("block_index_map", block_index_map);
+        output_tensors.insert("key_cache", k_cache);
+        output_tensors.insert("value_cache", v_cache);
+    }
+
+    if (model_request.k_scale_buffer) {
+        ft::Tensor k_scale(
+            ft::MEMORY_CPU,
+            model_request.k_scale_buffer->type(),
+            model_request.k_scale_buffer->shape(),
+            model_request.k_scale_buffer->data());
+        ft::Tensor v_scale(
+            ft::MEMORY_CPU,
+            model_request.v_scale_buffer->type(),
+            model_request.v_scale_buffer->shape(),
+            model_request.v_scale_buffer->data());
+        output_tensors.insert("key_cache_scale", k_scale);
+        output_tensors.insert("value_cache_scale", v_scale);
     }
 
     parallel_gpt_decoder_->forward(&output_tensors, &input_tensors, &gpt_layer_weights_);

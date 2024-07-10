@@ -52,8 +52,11 @@ struct GptModelInputs {
     ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
     ft::BufferPtr position_ids;    // [batch_size, seq_len]
 
-    ft::BufferPtr kv_cache_blocks;   // [layer_num, batch_size, 2, block_nums], int64 block pointers
-    ft::BufferPtr kv_cache_scales;   // [layer_num, batch_size, 2, block_nums], int64 block scales
+    ft::BufferPtr kv_cache_offset;   // [batch_size, block_nums], kv cache block offset
+    ft::BufferPtr k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
+    ft::BufferPtr v_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
+    ft::BufferPtr k_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
+    ft::BufferPtr v_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
 
 public:
     std::string debugString() const {
@@ -74,11 +77,8 @@ public:
         if (lora_input_lengths) {
             debug_string << ", lora_input_lengths: " << lora_input_lengths->debugStringWithData<int32_t>();
         }
-        if (kv_cache_blocks) {
-            debug_string << ", kv_cache_blocks: " << kv_cache_blocks->debugString();
-        }
-        if (kv_cache_scales) {
-            debug_string << ", kv_cache_scales: " << kv_cache_scales->debugString();
+        if (kv_cache_offset) {
+            debug_string << ", kv_cache_blocks: " << kv_cache_offset->debugString();
         }
         if (attention_mask) {
             debug_string << ", attention_mask: " << attention_mask->debugString();
@@ -95,15 +95,12 @@ enum GptModelInputIndex : size_t{
     prefixLengths           = 3,
     countLengths            = 4,
     maxPrefixLength         = 5,
-    kvCacheBlocksDim0       = 6,
-    kvCacheBlocksDim1       = 7,
-    kvCacheBlocksDim3       = 8,
-    kvCacheScales           = 9,
-    lmOutputIndexes         = 10,
-    comboPositionIds        = 11,
-    loraIds                 = 12,
-    loraInputLengths        = 13,
-    gptModelInputLength     = 14,
+    maxBlocksPerBatch       = 6,
+    lmOutputIndexes         = 7,
+    comboPositionIds        = 8,
+    loraIds                 = 9,
+    loraInputLengths        = 10,
+    gptModelInputLength     = 11,
 };
 
 inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
@@ -119,10 +116,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::prefixLengths] = inputs.prefix_lengths.get() ? inputs.prefix_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::countLengths] = inputs.count_lengths.get() ? inputs.count_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::maxPrefixLength] = inputs.max_prefix_length.get() ? inputs.max_prefix_length->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::kvCacheBlocksDim0] = inputs.kv_cache_blocks.get() ? inputs.kv_cache_blocks->shape()[0] : 0;
-    shape_hints_ptr[GptModelInputIndex::kvCacheBlocksDim1] = inputs.kv_cache_blocks.get() ? inputs.kv_cache_blocks->shape()[1] : 0;
-    shape_hints_ptr[GptModelInputIndex::kvCacheBlocksDim3] = inputs.kv_cache_blocks.get() ? inputs.kv_cache_blocks->shape()[3] : 0;
-    shape_hints_ptr[GptModelInputIndex::kvCacheScales] = inputs.kv_cache_scales.get() != nullptr;
+    shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] = inputs.kv_cache_offset.get() ? inputs.kv_cache_offset->shape()[1] : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] = inputs.lm_output_indexes.get() ? inputs.lm_output_indexes->size() : 0;
     shape_hints_ptr[GptModelInputIndex::comboPositionIds] = inputs.combo_position_ids.get() ? inputs.combo_position_ids->size() : 0;
     shape_hints_ptr[GptModelInputIndex::loraIds] = inputs.lora_ids.get() ? inputs.lora_ids->size() : 0;
@@ -143,20 +137,10 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::countLengths]}, ft::AllocationType::HOST});
         inputs.max_prefix_length = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::maxPrefixLength]}, ft::AllocationType::HOST});
-        inputs.kv_cache_blocks = device->allocateBuffer(
-            {ft::DataType::TYPE_UINT64, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheBlocksDim0],
-                                         (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheBlocksDim1],
-                                         2,
-                                         (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheBlocksDim3]},
+        inputs.kv_cache_offset = device->allocateBuffer(
+            {ft::DataType::TYPE_UINT64, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths],
+                                         (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]},
                                          ft::AllocationType::HOST});
-        if (shape_hints_ptr[GptModelInputIndex::kvCacheScales]) {
-            inputs.kv_cache_scales = device->allocateBuffer(
-                {ft::DataType::TYPE_UINT64, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheBlocksDim0],
-                                             (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheBlocksDim1],
-                                             2,
-                                             (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheBlocksDim3]},
-                                             ft::AllocationType::HOST});
-        }
         inputs.lm_output_indexes = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]}, ft::AllocationType::HOST});
         if (shape_hints_ptr[GptModelInputIndex::comboPositionIds]) {
@@ -179,10 +163,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     buffers.emplace_back(inputs.prefix_lengths);
     buffers.emplace_back(inputs.count_lengths);
     buffers.emplace_back(inputs.max_prefix_length);
-    buffers.emplace_back(inputs.kv_cache_blocks);
-    if (shape_hints_ptr[GptModelInputIndex::kvCacheScales]) {
-        buffers.emplace_back(inputs.kv_cache_scales);
-    }
+    buffers.emplace_back(inputs.kv_cache_offset);
     buffers.emplace_back(inputs.lm_output_indexes);
     if (shape_hints_ptr[GptModelInputIndex::comboPositionIds]) {
         buffers.emplace_back(inputs.combo_position_ids);

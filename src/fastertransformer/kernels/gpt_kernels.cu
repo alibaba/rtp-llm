@@ -1341,55 +1341,88 @@ void invokeSumLengthDimension(float*       out_buf,
     sum_length_dimension<<<gridSize, blockSize, 0, stream>>>(out_buf, in_buf, batch_size, input_length, hidden_dim);
 }
 
-__global__ void getMaxLenKernel(size_t*      h_pinned_max_length,
-                                const int*   lengths,
-                                const size_t size)
+__global__ void ConvertOffsetToAddr(uint64_t* block_addr, // [l, b, 2, m]
+                                    const uint64_t* k_cache_base_addr, // [l]
+                                    const uint64_t* v_cache_base_addr,
+                                    const int*      offset, // [b, m]
+                                    int             layer_num,
+                                    int             batch_size,
+                                    int             max_block_num,
+                                    int             block_size)
 {
-    int max_length = 0;
-    for (int i = 0; i < size; i++) {
-        if (lengths[i] > max_length) {
-            max_length = lengths[i];
-        }
+    const int layer_stride = batch_size * 2 * max_block_num;
+    const int batch_stride = 2 * max_block_num;
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < layer_num * batch_size * max_block_num;
+         index += blockDim.x * gridDim.x) {
+        const int layer_index     = index / max_block_num / batch_size;
+        const int batch_index     = (index / max_block_num) % batch_size;
+        const int col_index       = index % max_block_num;
+        const size_t block_offset = (size_t)offset[batch_index * max_block_num + col_index] * block_size;
+        const size_t block_addr_index = (size_t)layer_index * layer_stride + batch_index * batch_stride + col_index;
+        block_addr[block_addr_index] = k_cache_base_addr[layer_index] + block_offset;
+        block_addr[block_addr_index + max_block_num] = v_cache_base_addr[layer_index] + block_offset;
     }
-    h_pinned_max_length[0] = (size_t)max_length;
 }
 
-__global__ void getMinLenKernel(size_t*      h_pinned_min_length,
-                                const int*   lengths,
-                                const size_t size)
+void invokeConvertOffsetToAddr(uint64_t* block_addr, // [l, b, 2, m]
+                               const uint64_t* k_cache_base_addr, // [l]
+                               const uint64_t* v_cache_base_addr,
+                               const int*      offset, // [b, m]
+                               int             layer_num,
+                               int             batch_size,
+                               int             max_block_num,
+                               int             block_size,
+                               cudaStream_t    stream) {
+    dim3       grid(min(batch_size * layer_num, 65536));
+    dim3       block(min(max_block_num, 1024));
+    ConvertOffsetToAddr<<<grid, block, 0, stream>>>(block_addr, // [l, b, 2, m]
+                                                    k_cache_base_addr, // [l]
+                                                    v_cache_base_addr,
+                                                    offset, // [b, m]
+                                                    layer_num,
+                                                    batch_size,
+                                                    max_block_num,
+                                                    block_size);
+}
+
+__global__ void ConvertOffsetToAddrOneLayer(uint64_t* block_addr, // [b, 2, m]
+                                            const uint64_t k_cache_base_addr,
+                                            const uint64_t v_cache_base_addr,
+                                            const int*     offset, // [b, m]
+                                            int            batch_size,
+                                            int            max_block_num,
+                                            int            block_size)
 {
-    int min_length = -1;
-    for (int i = 0; i < size; i++) {
-        if (min_length == -1 || lengths[i] < min_length) {
-            min_length = lengths[i];
-        }
+    const int batch_stride = 2 * max_block_num;
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < batch_size * max_block_num;
+         index += blockDim.x * gridDim.x) {
+        const int batch_index     = index / max_block_num;
+        const int col_index       = index % max_block_num;
+        const size_t block_offset = (size_t)offset[batch_index * max_block_num + col_index] * block_size;
+        const size_t block_addr_index = (size_t)batch_index * batch_stride + col_index;
+        block_addr[block_addr_index] = k_cache_base_addr + block_offset;
+        block_addr[block_addr_index + max_block_num] = v_cache_base_addr + block_offset;
     }
-    h_pinned_min_length[0] = (size_t)min_length;
 }
 
-void invokeMaxLength(size_t*      h_pinned_max_length,
-                     const int*   lengths,
-                     size_t*      max_length,
-                     const size_t size,
-                     cudaStream_t stream) {
-    h_pinned_max_length[0] = 0;
-    getMaxLenKernel<<<1, 1, 0, stream>>>(h_pinned_max_length, lengths, size);
-    while (((volatile size_t*)h_pinned_max_length)[0] == 0) {};
-    max_length[0] = h_pinned_max_length[0];
-
+void invokeConvertOffsetToAddrOneLayer(uint64_t*      block_addr, // [b, 2, m]
+                                       const uint64_t k_cache_base_addr,
+                                       const uint64_t v_cache_base_addr,
+                                       const int*     offset, // [b, m]
+                                       int            batch_size,
+                                       int            max_block_num,
+                                       int            block_size,
+                                       cudaStream_t   stream) {
+    dim3       grid(min(batch_size, 65536));
+    dim3       block(min(max_block_num, 1024));
+    ConvertOffsetToAddrOneLayer<<<grid, block, 0, stream>>>(block_addr, // [b, 2, m]
+                                                            k_cache_base_addr,
+                                                            v_cache_base_addr,
+                                                            offset, // [b, m]
+                                                            batch_size,
+                                                            max_block_num,
+                                                            block_size);
 }
-
-// void invokeMinLength(size_t*      h_pinned_min_length,
-//                      const int*   lengths,
-//                      size_t*      min_length,
-//                      const size_t size,
-//                      cudaStream_t stream) {
-//     h_pinned_min_length[0] = -1;
-//     getMinLenKernel<<<1, 1, 0, stream>>>(h_pinned_min_length, lengths, size);
-//     while (((volatile size_t*)h_pinned_min_length)[0] == -1) {};
-//     min_length[0] = h_pinned_min_length[0];
-//     sync_check_cuda_error();
-// }
 
 
 #define INSTANTIATE_INVOKE_SUM_LENGTH_DIMENSION(T)                                                                     \

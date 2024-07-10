@@ -45,7 +45,8 @@
 #include <math.h>
 #include <sstream>
 
-using namespace fastertransformer;
+namespace ft = fastertransformer;
+
 namespace tensorrt_llm
 {
 
@@ -358,7 +359,7 @@ MoeGemmRunner<T, WeightType>::MoeGemmRunner()
 {
     int device{-1};
     check_cuda_error(cudaGetDevice(&device));
-    sm_ = getSMVersion();
+    sm_ = ft::getSMVersion();
     check_cuda_error(
         cudaDeviceGetAttribute(&multi_processor_count_, cudaDevAttrMultiProcessorCount, device));
 }

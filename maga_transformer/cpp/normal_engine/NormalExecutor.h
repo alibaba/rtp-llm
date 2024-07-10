@@ -15,14 +15,13 @@ namespace rtp_llm {
 
 class NormalExecutor: public Executor {
 public:
-    explicit NormalExecutor(const EngineInitParams& params, ft::DeviceBase* device);
+    explicit NormalExecutor(const EngineInitParams& params, const std::shared_ptr<CacheManager>& cache_manager, ft::DeviceBase* device);
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
     absl::Status addLoRA(const int64_t                                                           lora_id,
                          const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                          const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) override;
     absl::Status removeLoRA(const int64_t lora_id) override;
     void         reportMetrics(const StreamGroups& stream_groups);
-
 private:
     // TODO: remove this
     ModelRequest generateOldModelRequest(GptModelInputs& model_input);
@@ -34,6 +33,7 @@ private:
 #if USING_CUDA
     std::unique_ptr<ParallelModelWrapper>       model_wrapper_;
 #endif
+    std::shared_ptr<CacheManager>               cache_manager_;
     kmonitor::MetricsReporterPtr                metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
 

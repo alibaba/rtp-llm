@@ -30,7 +30,7 @@ public:
     bool initKVBlock();
     bool incrKVBlock();
     int  tryReleaseKVBlock(size_t nums);
-    void freeBatchBlocks(size_t batch_id, std::vector<void*>& blocks);
+    void freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void releaseResource();
     int  singleBatchNeedBlocks(int seq_len) const;
     int  maxBlockSize() const;
@@ -47,7 +47,7 @@ public:
     }
 
 private:
-    BatchKVCacheBlockAddr           kv_cache_block_addr_;
+    BatchKVCacheBlockAddr           batch_block_addr_;
     GenerateStream*                 stream_;
     ResourceContext                 resource_context_;
     int                             seq_size_per_block_    = 0;

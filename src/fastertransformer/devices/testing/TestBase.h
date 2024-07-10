@@ -34,15 +34,15 @@ public:
     virtual void initTestDevices() {
         auto device_name = getenv("TEST_USING_DEVICE");
         auto device_params = device_name
-            ? GlobalDeviceParams{{{getDeviceType(device_name), DeviceInitParams{0}}}}
-            : DeviceFactory::getDefaultGlobalDeviceParams();
+            ? ft::GlobalDeviceParams{{{ft::getDeviceType(device_name), ft::DeviceInitParams{0}}}}
+            : ft::DeviceFactory::getDefaultGlobalDeviceParams();
         auto& default_device_params = device_params.device_params[0].second;
         default_device_params.device_reserve_memory_bytes =
             autil::EnvUtil::getEnv("DEVICE_RESERVE_MEMORY_BYTES", device_reserve_memory_size_);
         default_device_params.host_reserve_memory_bytes =
             autil::EnvUtil::getEnv("HOST_RESERVE_MEMORY_BYTES", host_reserve_memory_size_);
-        DeviceFactory::initDevices(device_params);
-        device_ = DeviceFactory::getDefaultDevice();
+        ft::DeviceFactory::initDevices(device_params);
+        device_ = ft::DeviceFactory::getDefaultDevice();
     }
 
     void initTestDataDir() {
@@ -70,7 +70,7 @@ public:
 
 protected:
     template <typename T>
-    void printBuffer(const Buffer& buffer, const std::string& hint = "") {
+    void printBuffer(const ft::Buffer& buffer, const std::string& hint = "") {
         auto values = getBufferValues<T>(buffer);
         for (size_t i = 0; i < values.size(); i++) {
             std::cout << values[i] << " ";
@@ -78,23 +78,23 @@ protected:
         std::cout << " " << hint << std::endl;
     }
 
-    BufferPtr createBuffer(const std::vector<size_t>& shape, DataType type,
-                           AllocationType alloc_type = AllocationType::DEVICE)
+    ft::BufferPtr createBuffer(const std::vector<size_t>& shape, ft::DataType type,
+                               ft::AllocationType alloc_type = ft::AllocationType::DEVICE)
     {
-        if (alloc_type == AllocationType::DEVICE) {
-            return device_->allocateBuffer({type, shape, AllocationType::DEVICE}, {});
+        if (alloc_type == ft::AllocationType::DEVICE) {
+            return device_->allocateBuffer({type, shape, ft::AllocationType::DEVICE}, {});
         } else {
-            return device_->allocateBuffer({type, shape, AllocationType::HOST}, {});
+            return device_->allocateBuffer({type, shape, ft::AllocationType::HOST}, {});
         }
     }
 
     template <typename T>
-    BufferPtr createBuffer(const std::vector<size_t>& shape, const std::vector<T>& data,
-                           AllocationType alloc_type = AllocationType::DEVICE)
+    ft::BufferPtr createBuffer(const std::vector<size_t>& shape, const std::vector<T>& data,
+                               ft::AllocationType alloc_type = ft::AllocationType::DEVICE)
     {
         const auto num_elements = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<size_t>());
         FT_CHECK(num_elements == data.size());
-        if (alloc_type == AllocationType::DEVICE) {
+        if (alloc_type == ft::AllocationType::DEVICE) {
             return createDeviceBuffer<T>(shape, data.data());
         } else {
             return createHostBuffer<T>(shape, data.data());
@@ -102,13 +102,13 @@ protected:
     }
 
     template <typename T>
-    BufferPtr createHostBuffer(const std::vector<size_t>& shape, const T* data) {
+    ft::BufferPtr createHostBuffer(const std::vector<size_t>& shape, const T* data) {
         return createHostBuffer<T>(shape, static_cast<const void*>(data));
     }
 
     template <typename T>
-    BufferPtr createHostBuffer(const std::vector<size_t>& shape, const void* data) {
-        auto buffer = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::HOST}, {});
+    ft::BufferPtr createHostBuffer(const std::vector<size_t>& shape, const void* data) {
+        auto buffer = device_->allocateBuffer({ft::getTensorType<T>(), shape, ft::AllocationType::HOST}, {});
         if (data && (buffer->size() > 0)) {
             memcpy(buffer->data(), data, sizeof(T) * buffer->size());
         }
@@ -117,9 +117,9 @@ protected:
     }
 
     template <typename T>
-    BufferPtr createDeviceBuffer(const std::vector<size_t>& shape, const void* data) {
+    ft::BufferPtr createDeviceBuffer(const std::vector<size_t>& shape, const void* data) {
         auto host_buffer = createHostBuffer<T>(shape, data);
-        auto buffer = device_->allocateBuffer({getTensorType<T>(), shape, AllocationType::DEVICE}, {});
+        auto buffer = device_->allocateBuffer({ft::getTensorType<T>(), shape, ft::AllocationType::DEVICE}, {});
         if (data && (buffer->size() > 0)) {
             device_->copy({*buffer, *host_buffer});
         }
@@ -128,7 +128,7 @@ protected:
     }
 
     template <typename T>
-    BufferPtr createDeviceBuffer(torch::Tensor tensor) {
+    ft::BufferPtr createDeviceBuffer(torch::Tensor tensor) {
         const auto targetType = c10::CppTypeToScalarType<T>::value;
         if (tensor.scalar_type() != targetType) {
             tensor = tensor.to(targetType);
@@ -137,10 +137,10 @@ protected:
     }
 
     template<typename T>
-    void assertBufferValueEqual(const Buffer& buffer, const std::vector<T>& expected) {
+    void assertBufferValueEqual(const ft::Buffer& buffer, const std::vector<T>& expected) {
         ASSERT_EQ(buffer.size(), expected.size());
         auto comp_buffer = device_->allocateBuffer(
-            {buffer.type(), buffer.shape(), AllocationType::HOST}
+            {buffer.type(), buffer.shape(), ft::AllocationType::HOST}
         );
         device_->copy({*comp_buffer, buffer});
         device_->syncAndCheck();
@@ -152,10 +152,10 @@ protected:
     }
 
     template<typename T>
-    std::vector<T> getBufferValues(const Buffer& buffer) {
+    std::vector<T> getBufferValues(const ft::Buffer& buffer) {
         std::vector<T> values(buffer.size());
         device_->syncAndCheck();
-        if (buffer.where() == MemoryType::MEMORY_GPU) {
+        if (buffer.where() == ft::MemoryType::MEMORY_GPU) {
             auto host_buffer = createHostBuffer<T>(buffer.shape(), nullptr);
             device_->copy({*host_buffer, buffer});
             device_->syncAndCheck();
@@ -166,8 +166,8 @@ protected:
         return values;
     }
 
-    BufferPtr tensorToBuffer(const torch::Tensor& tensor,
-                             AllocationType alloc_type = AllocationType::DEVICE)
+    ft::BufferPtr tensorToBuffer(const torch::Tensor& tensor,
+                                 ft::AllocationType alloc_type = ft::AllocationType::DEVICE)
     {
         if (tensor.is_quantized()) {
             return tensorToBuffer(tensor,
@@ -175,10 +175,10 @@ protected:
                                   tensor.q_per_channel_zero_points().to(torch::kHalf));
         }
         FT_CHECK(tensor.is_cpu());
-        auto buffer = torchTensor2Buffer(tensor);
-        if (alloc_type == AllocationType::DEVICE) {
+        auto buffer = ft::torchTensor2Buffer(tensor);
+        if (alloc_type == ft::AllocationType::DEVICE) {
             auto device_buffer = device_->allocateBuffer(
-                {buffer->type(), buffer->shape(), AllocationType::DEVICE}
+                    {buffer->type(), buffer->shape(), ft::AllocationType::DEVICE}
             );
             device_->copy({*device_buffer, *buffer});
             device_->syncAndCheck();
@@ -189,13 +189,13 @@ protected:
         }
     }
 
-    BufferPtr tensorToBuffer(const torch::Tensor& tensor,
-                             const torch::Tensor& scales,
-                             const torch::Tensor& zeros,
-                             AllocationType alloc_type = AllocationType::DEVICE)
+    ft::BufferPtr tensorToBuffer(const torch::Tensor& tensor,
+                                 const torch::Tensor& scales,
+                                 const torch::Tensor& zeros,
+                                 ft::AllocationType alloc_type = ft::AllocationType::DEVICE)
     {
-        auto buffer = torchTensor2Buffer(tensor, scales, zeros);
-        if (alloc_type == AllocationType::DEVICE) {
+        auto buffer = ft::torchTensor2Buffer(tensor, scales, zeros);
+        if (alloc_type == ft::AllocationType::DEVICE) {
             auto device_buffer = device_->allocateBufferLike(*buffer);
             device_->copy({*device_buffer, *buffer});
             device_->syncAndCheck();
@@ -206,12 +206,12 @@ protected:
         }
     }
 
-    torch::Tensor bufferToTensor(const Buffer& buffer, DeviceBase* device = nullptr) {
+    torch::Tensor bufferToTensor(const ft::Buffer& buffer, ft::DeviceBase* device = nullptr) {
         if (!device) {
             device = device_;
         }
         auto host_buffer = device->allocateBuffer(
-            {buffer.type(), buffer.shape(), AllocationType::HOST}
+            {buffer.type(), buffer.shape(), ft::AllocationType::HOST}
         );
         device->copy({*host_buffer, buffer});
         device->syncAndCheck();
@@ -225,22 +225,24 @@ protected:
 
 
 
-    BufferPtr allocateKVBlocks(const rtp_llm::CacheConfig& cache_config,
+    ft::BufferPtr allocateKVBlocks(const rtp_llm::CacheConfig& cache_config,
                                const std::vector<int32_t>& input_lengths,
                                torch::Tensor& kvCache)
     {
         if (!cache_manager_) {
             cache_manager_ = std::make_shared<rtp_llm::CacheManager>(cache_config, device_);
         }
+
         auto max_seq_len = *std::max_element(input_lengths.begin(), input_lengths.end());
         max_seq_len = (max_seq_len == 0) ? 1 : max_seq_len;
         const auto tokensPerBlock = cache_config.seq_size_per_block;
         const auto batch_layer_kv_block_num = ((max_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1);
         const auto batch_size = input_lengths.size();
 
-        auto kv_blocks_buf = device_->allocateBuffer({
-            DataType::TYPE_UINT64, {cache_config.layer_num, batch_size, 2, batch_layer_kv_block_num}, AllocationType::HOST
+        auto kv_cache_offset = device_->allocateBuffer({
+            ft::DataType::TYPE_INT32, {batch_size, batch_layer_kv_block_num}, ft::AllocationType::HOST
         });
+
         rtp_llm::BatchKVCacheBlockAddr batch_kv_cache;
 
         for (auto i = 0; i < batch_size; i++) {
@@ -249,21 +251,14 @@ protected:
             batch_kv_cache.pushBack(kv_cache);
         }
         for (auto i = 0; i < batch_size; i++) {
-            rtp_llm::memcpyKvCache(
-                kv_blocks_buf->data<uint64_t>(),
-                batch_kv_cache.k_ptr[i],
-                batch_kv_cache.v_ptr[i],
-                cache_config.layer_num,
-                kv_blocks_buf->shape().back(),
-                batch_size,
-                i
-            );
+            std::memcpy((*kv_cache_offset)[i].data(),
+                        batch_kv_cache.batch_offset[i].data(),
+                        batch_kv_cache.batch_offset[i].size() * sizeof(int));
             // [batch(i), layer_num(j), ...]
             if (kvCache.dim() == 5) {
                 // [layernum, batch, 2, max_pad_seq, dim]
                 auto max_pad_seq = kvCache.sizes()[3];
-                auto k_indexs = cache_manager_->convertAddrToIndex(batch_kv_cache.k_ptr[i][0]);
-                auto v_indexs = cache_manager_->convertValueAddrToIndex(batch_kv_cache.v_ptr[i][0]);
+                auto k_indexs = batch_kv_cache.batch_offset[i];
                 for (auto k = 0; k < (max_pad_seq / cache_config.seq_size_per_block); k++) {
                     auto block_start = k * cache_config.seq_size_per_block;
                     auto block_end   = block_start + cache_config.seq_size_per_block;
@@ -279,19 +274,19 @@ protected:
                          1,
                          torch::indexing::Slice(block_start, block_end),
                          torch::indexing::Slice()}).contiguous();
-                    auto kblock_buffer = torchTensor2Buffer(kblock);
-                    auto vblock_buffer = torchTensor2Buffer(vblock);
+                    auto kblock_buffer = ft::torchTensor2Buffer(kblock);
+                    auto vblock_buffer = ft::torchTensor2Buffer(vblock);
                     cache_manager_->setKVBlockValue(k_indexs[k],
-                                                    v_indexs[k],
+                                                    k_indexs[k],
                                                     kblock_buffer,
                                                     vblock_buffer);
                 }
             }
 
         }
-        auto kv_blocks_gpu_buf = device_->allocateBuffer({kv_blocks_buf->type(), kv_blocks_buf->shape()});
-        device_->copy({*kv_blocks_gpu_buf, *kv_blocks_buf});
-        return move(kv_blocks_gpu_buf);
+        auto kv_cache_offset_gpu_buf = device_->allocateBuffer({kv_cache_offset->type(), kv_cache_offset->shape()});
+        device_->copy({*kv_cache_offset_gpu_buf, *kv_cache_offset});
+        return move(kv_cache_offset_gpu_buf);
     }
 
     void assertTensorClose(const torch::Tensor& a, const torch::Tensor& b,
@@ -352,7 +347,7 @@ protected:
     }
 
 protected:
-    DeviceBase* device_ = nullptr;
+    ft::DeviceBase* device_ = nullptr;
     std::string test_data_path_;
     double rtol_ = 1e-03;
     double atol_ = 1e-03;

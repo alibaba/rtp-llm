@@ -3,7 +3,6 @@
 
 #define private public
 #include "maga_transformer/cpp/utils/LRUCache.h"
-#include "src/fastertransformer/devices/testing/TestBase.h"
 
 #include <chrono>
 #include <memory>
@@ -13,7 +12,7 @@ using namespace std;
 
 namespace rtp_llm {
 
-class LRUCacheTest: public DeviceTestBase {
+class LRUCacheTest: public ::testing::Test {
 protected:
 
 };

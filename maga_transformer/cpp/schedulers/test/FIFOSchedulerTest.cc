@@ -10,6 +10,7 @@
 #include "src/fastertransformer/devices/testing/TestBase.h"
 
 using namespace std;
+using namespace fastertransformer;
 
 namespace rtp_llm {
 
@@ -24,7 +25,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     ASSERT_EQ(cache_manager->freeBlockNums(), 3);
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
-    
+
     GptInitParameter config;
     config.max_seq_len_ = 8192;
     FIFOScheduler scheduler(config, cache_manager);

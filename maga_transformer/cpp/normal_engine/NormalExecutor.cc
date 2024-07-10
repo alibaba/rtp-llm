@@ -12,8 +12,9 @@ using namespace std;
 
 namespace rtp_llm {
 
-NormalExecutor::NormalExecutor(const EngineInitParams& params, ft::DeviceBase* device):
+NormalExecutor::NormalExecutor(const EngineInitParams& params, const std::shared_ptr<CacheManager>& cache_manager, ft::DeviceBase* device):
     Executor(device),
+    cache_manager_(cache_manager),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)),
     dtype_(ft::getDataType(params.gpt_init_parameter.data_type_)),
@@ -80,8 +81,11 @@ ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input
     model_request.count_lengths       = model_input.count_lengths;
     model_request.max_prefix_length   = model_input.max_prefix_length;
     model_request.combo_position_ids  = model_input.combo_position_ids;
-    model_request.kv_cache_blocks     = model_input.kv_cache_blocks;
-    model_request.kv_cache_scales     = model_input.kv_cache_scales;
+    model_request.kv_cache_offset     = model_input.kv_cache_offset;
+    model_request.k_cache_buffer     = model_input.k_cache_buffer;
+    model_request.v_cache_buffer     = model_input.v_cache_buffer;
+    model_request.k_scale_buffer     = model_input.k_scale_buffer;
+    model_request.v_scale_buffer     = model_input.v_scale_buffer;
     model_request.attention_mask      = model_input.attention_mask;
     model_request.lora_ids            = model_input.lora_ids;
     model_request.lora_input_lengths  = model_input.lora_input_lengths;
@@ -95,6 +99,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     auto& model_input = model_input_status.value();
     tpSyncModelInputs(model_input, device_);
+    auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
+    model_input.k_cache_buffer = kv_cache_buffer.k_blocks;
+    model_input.v_cache_buffer = kv_cache_buffer.v_blocks;
+    model_input.k_scale_buffer = kv_cache_buffer.k_scale;
+    model_input.v_scale_buffer = kv_cache_buffer.v_scale;
     if (need_attention_mask_ && model_input.input_lengths->size() > model_input.sequence_lengths->size()) {
         const auto generate_batch_size = model_input.sequence_lengths->size();
         const auto context_batch_size = model_input.input_lengths->size() - generate_batch_size;

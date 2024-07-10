@@ -50,9 +50,9 @@ private:
     bool isLastLayerParallelId(uint l);
     int  getFirstLayerParallelId();
 
-    void Ffnforward(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util, 
-        T* ffn_input_ptr, T* ffn_output_ptr, const size_t h_token_num, const DataType activation_in_type, const size_t hidden_units, 
-        const TensorMap* input_tensors, uint l, const size_t total_batch_size, const int* lora_input_lengths, const DataType activation_out_type, 
+    void Ffnforward(std::unique_ptr<ExpertAttentionUtil<T>>& expert_attention_util,
+        T* ffn_input_ptr, T* ffn_output_ptr, const size_t h_token_num, const DataType activation_in_type, const size_t hidden_units,
+        const TensorMap* input_tensors, uint l, const size_t total_batch_size, const int* lora_input_lengths, const DataType activation_out_type,
         const int ffn_batch_size_lora, ParallelGptDecoderLayerWeight<T>* layer_weight, const bool use_moe, bool vision);
 
     T*      decoder_normed_input_    = nullptr;
@@ -68,8 +68,14 @@ private:
     int*    context_lengths_         = nullptr;
     int*    sequence_lengths_        = nullptr;
     int*    prefix_lengths_          = nullptr;
-    int64_t* block_pointers_         = nullptr;
-    int64_t* block_scale_pointers_   = nullptr;
+    uint64_t* block_pointers_        = nullptr;
+    uint64_t* block_scale_pointers_  = nullptr;
+
+    int*      block_offset_          = nullptr;
+    uint64_t* k_cache_base_addr_     = nullptr;
+    uint64_t* v_cache_base_addr_     = nullptr;
+    uint64_t* k_scale_base_addr_     = nullptr;
+    uint64_t* v_scale_base_addr_     = nullptr;
 
     // moe
     float*   expert_scales_                        = nullptr;
@@ -77,8 +83,8 @@ private:
     int* expert_for_source_row_                    = nullptr;
     T*   fc2_result_                               = nullptr;
 
-    std::vector<int64_t> block_pointers_vector_;
-    std::vector<int64_t> block_scale_pointers_vector_;
+    std::vector<uint64_t> block_base_addr_vector_;
+
 protected:
 public:
     ParallelGpt(const GptInitParameter&             gpt_init_parameter,

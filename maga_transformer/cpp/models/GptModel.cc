@@ -42,13 +42,13 @@ void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
     cu_seqlens[batch_size] = total_seq_len;
 }
 
-void checkKvBlocksShape(const BufferPtr& input_kv_blocks) {
-    if (!input_kv_blocks) {
+void checkKvBlocksShape(const BufferPtr& input_kv_offset) {
+    if (!input_kv_offset) {
         return;
     }
     RUNTIME_ASSERT_OP_ARG(
-        input_kv_blocks->shape().size() == 4,
-        "kv_cache_blocks shape should be [layer_num, 2, batch_size, block_length].");
+        input_kv_offset->shape().size() == 2,
+        "kv_cache_blocks shape should be [batch_size, block_length].");
 }
 
 BufferPtr GptModel::tpSyncEmbeddingOrLogits(const BufferPtr& buffer) {
@@ -71,8 +71,7 @@ void GptModel::prepareAttentionInputs(
         const GptModelInputs& inputs,
         AttentionCommonInputs& attention_inputs)
 {
-    checkKvBlocksShape(inputs.kv_cache_blocks);
-    checkKvBlocksShape(inputs.kv_cache_scales);
+    checkKvBlocksShape(inputs.kv_cache_offset);
 
     const auto& input_lengths = inputs.input_lengths;
     const auto& sequence_lengths = inputs.sequence_lengths;
@@ -201,17 +200,16 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     prepareAttentionInputs(inputs, attention_common_inputs);
     attention_common_inputs.lora_input = lora_input;
-    BufferPtr input_kv_blocks;
-    BufferPtr input_kv_cache_scales;
-    if (inputs.kv_cache_blocks) {
-        input_kv_blocks = device_->clone({*inputs.kv_cache_blocks, AllocationType::DEVICE, {"kv_block_ptrs"}});
+    BufferPtr kv_cache_offset;
+    if (inputs.kv_cache_offset) {
+        kv_cache_offset = device_->clone({*inputs.kv_cache_offset, AllocationType::DEVICE, {"kv_cache_offset"}});
     }
-    if (inputs.kv_cache_scales) {
-        input_kv_cache_scales = device_->clone({*inputs.kv_cache_scales, AllocationType::DEVICE, {"kv_scales_ptrs"}});
-    }
+    BufferPtr layer_k_cache;
+    BufferPtr layer_v_cache;
+    BufferPtr layer_k_scale;
+    BufferPtr layer_v_scale;
 
     printBufferData(*hidden, "input_hidden");
-
     // layers
     const auto layer_num = weights_.layers.size();
     for (int i = 0; i < layer_num; ++i) {
@@ -241,18 +239,22 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                 *hidden, *(layer.pre_attention_smoother_weight->kernel), std::nullopt, DataType::TYPE_QINT8, 1));
             hidden = move(quantized_output);
         }
-
-        BufferPtr layer_kv_blocks_ptr;
-        if (input_kv_blocks) {
-            auto layer_buffer = (*input_kv_blocks)[i];
-            layer_kv_blocks_ptr = std::make_unique<Buffer>(layer_buffer.where(), layer_buffer.type(), layer_buffer.shape(), layer_buffer.data());
-            attention_common_inputs.kv_cache_blocks = *layer_kv_blocks_ptr;
-        }
-        BufferPtr layer_kv_cache_scales_ptr;
-        if (input_kv_cache_scales) {
-            auto layer_buffer = (*input_kv_cache_scales)[i];
-            layer_kv_cache_scales_ptr = std::make_unique<Buffer>(layer_buffer.where(), layer_buffer.type(), layer_buffer.shape(), layer_buffer.data());
-            attention_common_inputs.kv_cache_scales = *layer_kv_cache_scales_ptr;
+        if (kv_cache_offset) {
+            attention_common_inputs.kv_cache_offset = *kv_cache_offset;
+            const auto k = (*inputs.k_cache_buffer)[i];
+            const auto v = (*inputs.v_cache_buffer)[i];
+            layer_k_cache = std::make_unique<Buffer>(k.where(), k.type(), k.shape(), k.data());
+            layer_v_cache = std::make_unique<Buffer>(v.where(), v.type(), v.shape(), v.data());
+            attention_common_inputs.k_cache_buffer = *layer_k_cache;
+            attention_common_inputs.v_cache_buffer = *layer_v_cache;
+            if (inputs.k_scale_buffer) {
+                const auto k_s = (*inputs.k_scale_buffer)[i];
+                const auto v_s = (*inputs.v_scale_buffer)[i];
+                layer_k_scale = std::make_unique<Buffer>(k_s.where(), k_s.type(), k_s.shape(), k_s.data());
+                layer_v_scale = std::make_unique<Buffer>(v_s.where(), v_s.type(), v_s.shape(), v_s.data());
+                attention_common_inputs.k_scale_buffer = *layer_k_scale;
+                attention_common_inputs.v_scale_buffer = *layer_v_scale;
+            }
         }
 
         auto attn_output = device_->attentionLayer(AttentionLayerParams({

@@ -55,20 +55,15 @@ public:
     std::tuple<bool, KVCacheBlockAddr, int> mallocWithCache(int want_block_nums, const std::vector<int>& token_ids);
     std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     void                                    reserveBlocks(int nums);
-    void                                    incrBlockRefCounter(const std::vector<void*>& pointers);
+    void                                    incrBlockRefCounter(const std::vector<int>& pointers);
 
-    void free(const std::vector<void*>& pointer);
     void free(const std::vector<KVCacheBlockAddr>& resource);
-    void freeWithCache(const std::vector<void *>& pointer, const std::vector<int>& token_ids);
-    void insertResidentCache(const std::vector<void *>& pointer, const std::vector<int>& token_ids);
+    void free(const std::vector<int>& indice);
+    void freeWithCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
     void insertResidentCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
 
     void setKVBlockValue(int kindex, int vindex, ft::BufferPtr& k_value, ft::BufferPtr& v_value);
     void blockCopy(int src_block_index, int dest_block_index);
-
-    KVCacheBlockAddr convertIndexToAddr(const std::vector<int>& block_indices) const;
-    std::vector<int> convertAddrToIndex(const std::vector<void*>& pointers) const;
-    std::vector<int> convertValueAddrToIndex(const std::vector<void*>& pointers) const;
 
     void reportMetricsLoop();
 private:
@@ -78,10 +73,8 @@ private:
     void                                    initKvCache();
     std::tuple<bool, std::vector<int>>      mallocImpl(int nums);
     std::tuple<bool, std::vector<int>, int> mallocWithCacheImpl(int want_block_nums, const std::vector<int>& token_ids);
-    
     void                                    maybeFreeBlockFromCache(int nums);
-    void                                    free(const std::vector<int>& indice);
-    void freeWithCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
+
     void insertIntoCache(const std::vector<int>& block_indices,
                          const std::vector<int>&              token_ids,
                          bool                                 is_resident);

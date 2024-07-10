@@ -9,8 +9,8 @@ using namespace std;
 
 namespace rtp_llm {
 
-void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<void*>& blocks) {
-    if (blocks.size() == kv_cache_block_addr_.k_ptr[batch_id][0].size() && resource_context_.reuse_cache) {
+void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) {
+    if (blocks.size() == batch_block_addr_.batch_offset[batch_id].size() && resource_context_.reuse_cache) {
         auto tokens_id = stream_->completeTokenIdsVec(batch_id);
         resource_context_.cache_manager->freeWithCache(blocks, tokens_id);
     } else {
@@ -23,24 +23,21 @@ void StreamCacheResource::releaseResource() {
         return ;
     }
     tryReleaseKVBlock(maxBlockSize());
-    kv_cache_block_addr_.clear();
+    batch_block_addr_.clear();
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     FT_LOG_DEBUG("stream [%ld] try release [%lu] blocks", stream_->streamId(), nums);
     size_t release_blocks_num = 0;
-    for (size_t batch_id = 0; batch_id < kv_cache_block_addr_.k_ptr.size(); batch_id++) {
-        for (size_t layer_id = 0; layer_id < kv_cache_block_addr_.k_ptr[batch_id].size(); layer_id++) {
-            auto& k_blocks = kv_cache_block_addr_.k_ptr[batch_id][layer_id];
-            size_t reserver_blocks = std::max(0, int(k_blocks.size()) - int(nums));
-            // NOTE: all batch has same number of blocks
-            release_blocks_num = k_blocks.size() - reserver_blocks;
-            if (layer_id == 0) {
-                vector<void*> release_blocks(k_blocks.begin() + reserver_blocks, k_blocks.end());
-                freeBatchBlocks(batch_id, release_blocks);
-            }
-            kv_cache_block_addr_.resize(batch_id, layer_id, reserver_blocks);
-        }
+
+    for (size_t batch_id = 0; batch_id < batch_block_addr_.batch_offset.size(); batch_id++) {
+        auto& blocks = batch_block_addr_.batch_offset[batch_id];
+        size_t reserver_blocks = std::max(0, int(blocks.size()) - int(nums));
+        // NOTE: all batch has same number of blocks
+        release_blocks_num = blocks.size() - reserver_blocks;
+        vector<int> release_blocks(blocks.begin() + reserver_blocks, blocks.end());
+        freeBatchBlocks(batch_id, release_blocks);
+        batch_block_addr_.resize(batch_id, reserver_blocks);
     }
     return release_blocks_num;
 }
@@ -59,14 +56,15 @@ bool StreamCacheResource::initKVBlock() {
     }
 
     if (success) {
+        batch_block_addr_.clear();
         int                   tile_num = stream_->tileNum();
-        BatchKVCacheBlockAddr batch_block;
-        batch_block.pushBack(kv_cache_block_addr);
+        auto kv_cache = resource_context_.cache_manager->kvCacheBuffer();
+        BatchKVCacheBlockAddr batch_blocks;
+        batch_block_addr_.pushBack(kv_cache_block_addr);
         for (uint32_t i = 1; i < tile_num; i++) {
             // clone increased block reference count
-            batch_block.pushBack(kv_cache_block_addr.clone(resource_context_.cache_manager));
+            batch_block_addr_.pushBack(kv_cache_block_addr.clone(resource_context_.cache_manager));
         }
-        setKVCache(batch_block);
         stream_->setReuseLength(reuse_length);
     }
     return success && incrKVBlock();
@@ -100,7 +98,7 @@ bool StreamCacheResource::incrKVBlock() {
 
     int resource_index = 0;
     for (int i = 0; i < batch_size; i++) {
-        kv_cache_block_addr_.append(i, resource[resource_index]);
+        batch_block_addr_.append(i, resource[resource_index]);
         resource_index++;
     }
     return true;
@@ -108,18 +106,18 @@ bool StreamCacheResource::incrKVBlock() {
 
 int StreamCacheResource::maxBlockSize() const {
     size_t max_block_size = 0;
-    for (auto& batch_blocks : kv_cache_block_addr_.k_ptr) {
-        max_block_size = std::max(max_block_size, batch_blocks[0].size());
+    for (auto& blocks : batch_block_addr_.batch_offset) {
+        max_block_size = std::max(max_block_size, blocks.size());
     }
     return max_block_size;
 }
 
 const BatchKVCacheBlockAddr& StreamCacheResource::kvCache() const {
-    return kv_cache_block_addr_;
+    return batch_block_addr_;
 }
 
 void StreamCacheResource::setKVCache(const BatchKVCacheBlockAddr& kv_cache_block_addr) {
-    kv_cache_block_addr_ = kv_cache_block_addr;
+    batch_block_addr_ = kv_cache_block_addr;
 }
 
 }  // namespace rtp_llm

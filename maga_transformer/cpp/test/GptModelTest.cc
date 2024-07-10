@@ -51,7 +51,7 @@ TEST_F(GptModelTest, testSimple) {
     auto input_lengths = createBuffer<int32_t>({1}, input_lengths_vec, AllocationType::HOST);
     auto sequence_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
     auto kv_cache = torch::empty(0);
-    auto kv_cache_blocks = allocateKVBlocks(cache_config, input_lengths_vec, kv_cache);
+    auto kv_cache_offset = allocateKVBlocks(cache_config, input_lengths_vec, kv_cache);
     const auto mask_tensor = create_context_mask(input_lengths_vec).to(torch::kFloat16);
     const auto mask_buf = tensorToBuffer(mask_tensor);
 
@@ -60,7 +60,10 @@ TEST_F(GptModelTest, testSimple) {
     };
     inputs.lm_output_indexes = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
     inputs.attention_mask = mask_buf;
-    inputs.kv_cache_blocks = kv_cache_blocks;
+    inputs.kv_cache_offset = kv_cache_offset;
+    auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
+    inputs.k_cache_buffer = kv_cache_buffer.k_blocks;
+    inputs.v_cache_buffer = kv_cache_buffer.v_blocks;
     device_->syncAndCheck();
 
     // temporarily disable test for cpu device
@@ -118,13 +121,8 @@ TEST_F(GptModelTest, testSimple) {
     inputs.sequence_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
     inputs.lm_output_indexes = createBuffer<int32_t>({2}, {0, 3}, AllocationType::HOST);
 
-    inputs.kv_cache_blocks = allocateKVBlocks(cache_config, {3, 3}, kv_cache);
-    for (auto layer_id = 0; layer_id < inputs.kv_cache_blocks->shape()[0]; layer_id++) {
-        auto layer_src = kv_cache_blocks->view(layer_id, 1);
-        auto layer_dst = inputs.kv_cache_blocks->view(layer_id, 1);
-        auto reshaped_dst = layer_dst.reshape({2, 2, 2}); // [bs, 2, blocks]
-        device_->copy({reshaped_dst.view(0, 1), layer_src.reshape({1, 2, 2})});
-    }
+    inputs.kv_cache_offset = allocateKVBlocks(cache_config, {3, 3}, kv_cache);
+    device_->copy({inputs.kv_cache_offset->view(0, 1), *kv_cache_offset});
 
     device_->syncAndCheck();
     outputs = model->forward(inputs);
@@ -156,7 +154,6 @@ TEST_F(GptModelTest, testAttentionInputs) {
     Weights weights;
     auto model = createGptModel({device_, weights, description});
     GptModelInputs inputs;
-    inputs.kv_cache_blocks = createBuffer<int64_t>({1, 2, 1, 10}, std::vector<int64_t>(20, 0), AllocationType::HOST);
     inputs.input_lengths = createBuffer<int32_t>({4}, {3, 5, 2, 7}, AllocationType::HOST);
     inputs.sequence_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
     inputs.combo_tokens = createBuffer<int32_t>({17}, std::vector<int32_t>(17, 0), AllocationType::HOST);

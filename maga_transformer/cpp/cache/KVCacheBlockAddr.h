@@ -13,12 +13,8 @@ public:
     KVCacheBlockAddr clone(std::shared_ptr<CacheManager>& cache_manager);
 
 public:
-    // [layer_num, max_block_per_seq]
-    std::vector<std::vector<void*>> k_ptr;
-    std::vector<std::vector<void*>> v_ptr;
-
-    std::vector<std::vector<void*>> k_scale_ptr;
-    std::vector<std::vector<void*>> v_scale_ptr;
+    // [max_block_per_seq]
+    std::vector<int> offset;
 };
 
 }  // namespace rtp_llm

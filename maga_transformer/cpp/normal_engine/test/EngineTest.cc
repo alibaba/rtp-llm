@@ -29,11 +29,11 @@ public:
 TEST_F(NormalEngineTest, testInt8KVCache) {
     CustomConfig config;
     config.int8_kv_cache = true;
-    auto gpt_init_params = GptInitParameter();
+    auto gpt_init_params = ft::GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
 
     std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-    query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
+    query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
     query->generate_config                 = make_shared<GenerateConfig>();
     query->generate_config->max_new_tokens = 5;
     query->generate_config->is_streaming   = false;
@@ -54,7 +54,7 @@ TEST_F(NormalEngineTest, testInt8KVCache) {
 
 TEST_F(NormalEngineTest, testSimple) {
     CustomConfig config;
-    auto gpt_init_params = GptInitParameter();
+    auto gpt_init_params = ft::GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
 
     ASSERT_TRUE(engine->resourceContext().cache_manager);
@@ -65,7 +65,7 @@ TEST_F(NormalEngineTest, testSimple) {
     // test streaming query
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
+        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
         query->generate_config                 = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens = 3;
         query->generate_config->is_streaming   = true;
@@ -99,7 +99,7 @@ TEST_F(NormalEngineTest, testSimple) {
     // test non-streaming query
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
+        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
         query->generate_config                 = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens = 5;
         query->generate_config->is_streaming   = false;
@@ -122,7 +122,7 @@ TEST_F(NormalEngineTest, testSimple) {
 TEST_F(NormalEngineTest, testNewDevice) {
     setenv("USE_NEW_DEVICE_IMPL", "1", 1);
     CustomConfig config;
-    auto gpt_init_params = GptInitParameter();
+    auto gpt_init_params = ft::GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
 
     ASSERT_TRUE(engine->resourceContext().cache_manager);
@@ -131,7 +131,7 @@ TEST_F(NormalEngineTest, testNewDevice) {
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
 
     std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-    query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
+    query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
     query->generate_config                 = make_shared<GenerateConfig>();
     query->generate_config->max_new_tokens = 1;
     // query->generate_config->is_streaming   = true;
@@ -157,7 +157,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
     vector<int> prompt_1 = {1, 2, 3};
     vector<int> prompt_2 = {4, 5, 6, 7, 8, 9};
     config.multi_task_prompt_tokens = {{"1", prompt_1}, {"2", prompt_2}};
-    auto gpt_init_params = GptInitParameter();
+    auto gpt_init_params = ft::GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_TRUE(engine->resourceContext().system_prompt);
@@ -166,7 +166,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
 
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
+        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
         query->generate_config                 = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens = 1;
         shared_ptr<GenerateStream> stream      = engine->enqueue(query);
@@ -185,7 +185,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
     }
     {
         std::shared_ptr<GenerateInput> query    = make_shared<GenerateInput>();
-        query->input_ids                        = createBuffer<int32_t>({7}, {10, 20, 30, 40, 50, 60, 70}, AllocationType::HOST);
+        query->input_ids                        = createBuffer<int32_t>({7}, {10, 20, 30, 40, 50, 60, 70}, ft::AllocationType::HOST);
         query->generate_config                  = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens  = 1;
         shared_ptr<GenerateStream> stream       = engine->enqueue(query);
@@ -204,7 +204,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
     }
     {
         std::shared_ptr<GenerateInput> query    = make_shared<GenerateInput>();
-        query->input_ids                        = createBuffer<int32_t>({7}, {10, 20, 30, 40, 50, 60, 70}, AllocationType::HOST);
+        query->input_ids                        = createBuffer<int32_t>({7}, {10, 20, 30, 40, 50, 60, 70}, ft::AllocationType::HOST);
         query->generate_config                  = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens  = 1;
         query->generate_config->task_id         = "2";
@@ -227,13 +227,13 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
 TEST_F(NormalEngineTest, testReuseCacheOption) {
     CustomConfig config;
     config.reuse_cache = true;
-    auto gpt_init_params = GptInitParameter();
+    auto gpt_init_params = ft::GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
 
     config.reuse_cache = false;
-    auto gpt_init_params2 = GptInitParameter();
+    auto gpt_init_params2 = ft::GptInitParameter();
     auto engine2 = createMockEngine(device_, config, gpt_init_params2);
     ASSERT_FALSE(engine2->resourceContext().reuse_cache);
 }
@@ -241,13 +241,13 @@ TEST_F(NormalEngineTest, testReuseCacheOption) {
 TEST_F(NormalEngineTest, testReuseCache) {
     CustomConfig config;
     config.reuse_cache = true;
-    auto gpt_init_params = GptInitParameter();
+    auto gpt_init_params = ft::GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, AllocationType::HOST);
+        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
         query->generate_config                 = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens = 1;
         shared_ptr<GenerateStream> stream      = engine->enqueue(query);
@@ -267,7 +267,7 @@ TEST_F(NormalEngineTest, testReuseCache) {
 
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
-        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 50, 60, 70}, AllocationType::HOST);
+        query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 50, 60, 70}, ft::AllocationType::HOST);
         query->generate_config                 = make_shared<GenerateConfig>();
         query->generate_config->max_new_tokens = 1;
         shared_ptr<GenerateStream> stream      = engine->enqueue(query);

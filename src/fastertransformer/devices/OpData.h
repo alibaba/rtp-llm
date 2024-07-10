@@ -275,9 +275,11 @@ struct AttentionCommonInputs {
     const Buffer& sequence_lengths;   // int32_t, [decoder_batch_size]
 
     // [batch_size, 2, block_length], int64 block pointers
-    OptionalBufferRef kv_cache_blocks;
-
-    OptionalBufferRef kv_cache_scales;
+    OptionalBufferRef kv_cache_offset;  // [batch_size, block_nums], kv cache block offset
+    OptionalBufferRef k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
+    OptionalBufferRef v_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
+    OptionalBufferRef k_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
+    OptionalBufferRef v_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
 
     ConstBufferPtr cu_seqlens;
     ConstBufferPtr padding_offset;
@@ -413,7 +415,6 @@ struct BeamSearchParams {
     const size_t batch_size;
 
     Buffer& token_ids;
-    Buffer& kv_cache_blocks;
     OptionalBufferRef cum_log_probs;
     OptionalBufferRef output_log_probs;
 };

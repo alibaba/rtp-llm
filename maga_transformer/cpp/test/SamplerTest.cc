@@ -5,7 +5,7 @@
 
 using namespace std;
 using namespace rtp_llm;
-
+using namespace fastertransformer;
 // TODO: make this test device-independent
 class SamplerTest : public DeviceTestBase {
 public:
@@ -165,4 +165,3 @@ TEST_F(SamplerTest, testGeneralSampling) {
         }
     }
 }
-

@@ -18,10 +18,10 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
     metrics_reporter_(params.metrics_reporter)
 {
     FT_LOG_INFO(__PRETTY_FUNCTION__);
-    executor_.reset(new NormalExecutor(params, device_));
-    FT_LOG_INFO("create normal executor done");
     initCacheManager();
     FT_LOG_INFO("create cache manager done");
+    executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_));
+    FT_LOG_INFO("create normal executor done");
     scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter_));
     FT_LOG_INFO("create fifo scheduler done");
     (void)startLoop();

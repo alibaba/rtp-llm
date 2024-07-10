@@ -33,7 +33,7 @@ protected:
         ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
-             
+
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->num_beams = 2;
@@ -63,30 +63,22 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
     const BatchKVCacheBlockAddr& blocks = resource.kvCache();
     auto CHECK_FUNC = [](const auto& block_vec, auto outter_size, auto inner_size) {
         ASSERT_EQ(block_vec.size(), outter_size);
-        ASSERT_EQ(block_vec[0][0].size(), inner_size);
+        ASSERT_EQ(block_vec[0].size(), inner_size);
     };
-    CHECK_FUNC(blocks.k_ptr, 2, 3);
-    CHECK_FUNC(blocks.v_ptr, 2, 3);
-    CHECK_FUNC(blocks.k_scale_ptr, 2, 3);
-    CHECK_FUNC(blocks.v_scale_ptr, 2, 3);
+
+    CHECK_FUNC(blocks.batch_offset, 2, 3);
 
     stream_->setSeqLength(7);
     stream_->setIsContextStream(false);
     ASSERT_TRUE(resource.incrKVBlock());
     ASSERT_EQ(cache_manager_->freeBlockNums(), 3);
 
-    CHECK_FUNC(blocks.k_ptr, 2, 4);
-    CHECK_FUNC(blocks.v_ptr, 2, 4);
-    CHECK_FUNC(blocks.k_scale_ptr, 2, 4);
-    CHECK_FUNC(blocks.v_scale_ptr, 2, 4);
+    CHECK_FUNC(blocks.batch_offset, 2, 4);
 
     stream_->releaseResource();
     ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
 
-    ASSERT_EQ(blocks.k_ptr.size(), 0);
-    ASSERT_EQ(blocks.v_ptr.size(), 0);
-    ASSERT_EQ(blocks.k_scale_ptr.size(), 0);
-    ASSERT_EQ(blocks.v_scale_ptr.size(), 0);
+    ASSERT_EQ(blocks.batch_offset.size(), 0);
 }
 
 TEST_F(StreamCacheResourceTest, testReuseCache) {

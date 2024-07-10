@@ -29,13 +29,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     size_t         max_block_size           = stream_groups.maxBlockSize();
     model_input.combo_tokens =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
-    model_input.kv_cache_blocks = device_->allocateBuffer(
-        {ft::DataType::TYPE_UINT64, {num_layers_, total_batch_size, 2, max_block_size}, ft::AllocationType::HOST}, {});
-    if (use_int8_kv_cache_) {
-        model_input.kv_cache_scales = device_->allocateBuffer(
-            {ft::DataType::TYPE_UINT64, {num_layers_, total_batch_size, 2, max_block_size}, ft::AllocationType::HOST},
-            {});
-    }
+    model_input.kv_cache_offset = device_->allocateBuffer(
+            {ft::DataType::TYPE_INT32, {total_batch_size, max_block_size}, ft::AllocationType::HOST}, {});
+    // memset(model_input.kv_cache_offset->data(), 0, model_input.kv_cache_offset->sizeBytes());
     model_input.input_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     model_input.lora_ids =
@@ -67,10 +63,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int*      lm_output_indexes = (int*)model_input.lm_output_indexes->data();
     int*      prefix_lengths   = (int*)model_input.prefix_lengths->data();
     int*      combo_position_ids = has_positional_encoding_ ? (int*)model_input.combo_position_ids->data() : nullptr;
-    uint64_t* kv_cache_blocks  = (uint64_t*)model_input.kv_cache_blocks->data();
-    uint64_t* kv_cache_scales  = use_int8_kv_cache_ ? (uint64_t*)model_input.kv_cache_scales->data() : nullptr;
     int       batch_idx        = 0;
-
     for (const auto& stream : decode_streams) {
         auto current_batch_size = stream->batchSize();
         auto kv_cache = stream->kvCache();
@@ -88,22 +81,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             lora_ids[batch_idx]         = stream->loraId();
             lora_input_lengths[batch_idx] = 1;
             lm_output_indexes[batch_idx] = batch_idx;
-            memcpyKvCache(kv_cache_blocks,
-                          kv_cache.k_ptr[i],
-                          kv_cache.v_ptr[i],
-                          num_layers_,
-                          max_block_size,
-                          total_batch_size,
-                          batch_idx);
-            if (use_int8_kv_cache_) {
-                memcpyKvCache(kv_cache_scales,
-                              kv_cache.k_scale_ptr[i],
-                              kv_cache.v_scale_ptr[i],
-                              num_layers_,
-                              max_block_size,
-                              total_batch_size,
-                              batch_idx);
-            }
+            std::memcpy((*model_input.kv_cache_offset)[batch_idx].data(),
+                        kv_cache.batch_offset[i].data(),
+                        kv_cache.batch_offset[i].size() * sizeof(int));
             batch_idx += 1;
         }
     }
@@ -130,22 +110,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             }
             lora_ids[batch_idx]           = stream->loraId();
             lora_input_lengths[batch_idx] = input_lengths[batch_idx];
-            memcpyKvCache(kv_cache_blocks,
-                          kv_cache.k_ptr[i],
-                          kv_cache.v_ptr[i],
-                          num_layers_,
-                          max_block_size,
-                          total_batch_size,
-                          batch_idx);
-            if (use_int8_kv_cache_) {
-                memcpyKvCache(kv_cache_scales,
-                              kv_cache.k_scale_ptr[i],
-                              kv_cache.v_scale_ptr[i],
-                              num_layers_,
-                              max_block_size,
-                              total_batch_size,
-                              batch_idx);
-            }
+            std::memcpy((*model_input.kv_cache_offset)[batch_idx].data(),
+                        kv_cache.batch_offset[i].data(),
+                        kv_cache.batch_offset[i].size() * sizeof(int));
             batch_idx += 1;
             token_idx += input_tokens.size();
         }

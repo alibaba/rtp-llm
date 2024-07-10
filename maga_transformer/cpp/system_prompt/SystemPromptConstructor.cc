@@ -35,11 +35,10 @@ std::unordered_map<std::string, SystemPromptParams> SystemPromptConstructor::con
             RAISE_FATAL_ERROR(std::string("stream run failed: ") + stream->stopReason());
         }
         const auto& kv_cache = stream->kvCache();
-        FT_CHECK(kv_cache.k_ptr.size() == 1);
-        FT_CHECK(kv_cache.k_ptr[0].size() > 0);
-        auto block_indices = cache_manager->convertAddrToIndex(kv_cache.k_ptr[0][0]);
-        cache_manager->insertResidentCache(block_indices, tokens_id);
-        multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, block_indices);
+        FT_CHECK(kv_cache.batch_offset.size() == 1);
+        FT_CHECK(kv_cache.batch_offset[0].size() > 0);
+        cache_manager->insertResidentCache(kv_cache.batch_offset[0], tokens_id);
+        multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, kv_cache.batch_offset[0]);
     }
     return multi_task_prompt_args;
 }
