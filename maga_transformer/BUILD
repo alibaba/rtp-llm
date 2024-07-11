@@ -40,6 +40,8 @@ requirement([
     "dashscope",
     "jieba",
     "openai",
+    "oss2",
+    "pyOpenSSL"
 ])
 
 filegroup(
@@ -112,6 +114,7 @@ py_library(
         ":Pillow",
         ":torch",
         ":torchvision",
+        ":pyOpenSSL",
         ":einops",
         ":utils",
         ":ops",
@@ -175,6 +178,9 @@ py_library(
         ":ops",
         ":config",
         ":structure",
+    ],
+    data = [
+        "openai/renderers/qwen_agent/utils/qwen.tiktoken"
     ],
 )
 
@@ -318,6 +324,11 @@ py_wheel(
         "grpcio==1.62.0",
         "xfastertransformer_devel_icx==1.7.2",
         "decord==0.6.0",
+        "oss2",
+        "json5",
+        "dashscope>=1.11.0",
+        "jieba",
+        "openai",
     ] + whl_deps(),
 )
 

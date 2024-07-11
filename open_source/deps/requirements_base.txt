@@ -38,3 +38,5 @@ json5
 dashscope>=1.11.0
 jieba
 openai
+oss2
+pyOpenSSL==24.1.0
