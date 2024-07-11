@@ -7,13 +7,8 @@ test_copts = [
 test_linkopts = [
     "-lpython3.10",
     "-ltorch",
-    "-lc10",
     "-ltorch_cpu",
     "-ltorch_python",
-    "-L/usr/local/cuda/lib64",
-    "-lcudart",
-    "-lnccl",
-    "-lnvToolsExt",
 ]
 
 test_deps = [

@@ -246,10 +246,14 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
     rtp_llm::CacheConfig cache_conf(1, block_num, num_heads, head_dim, tokensPerBlock, DataType::TYPE_FP16);
     cache_manager_ = nullptr;
-    auto kv_cache = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
-
+    auto kv_cache_offset = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
+    auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
     auto common_inputs = AttentionCommonInputs(*input_lengths_device, *sequence_lengths_device);
-    common_inputs.kv_cache_blocks = *kv_cache;
+    auto layer_k_cache_buffer = (*kv_cache_buffer.k_blocks)[0];
+    auto layer_v_cache_buffer = (*kv_cache_buffer.v_blocks)[0];
+    common_inputs.kv_cache_offset = *kv_cache_offset;
+    common_inputs.k_cache_buffer = layer_k_cache_buffer;
+    common_inputs.v_cache_buffer = layer_v_cache_buffer;
     common_inputs.context_batch_size = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size = batch_size;
@@ -286,5 +290,3 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto result  = bufferToTensor(*qkv_output);
     assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 1e-2);
 }
-
-

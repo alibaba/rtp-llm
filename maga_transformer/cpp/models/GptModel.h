@@ -138,7 +138,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
         inputs.max_prefix_length = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::maxPrefixLength]}, ft::AllocationType::HOST});
         inputs.kv_cache_offset = device->allocateBuffer(
-            {ft::DataType::TYPE_UINT64, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths],
+            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths],
                                          (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]},
                                          ft::AllocationType::HOST});
         inputs.lm_output_indexes = device->allocateBuffer(

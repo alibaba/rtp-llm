@@ -38,7 +38,6 @@ cc_library(
     ]),
     deps = torch_deps() + [
         "//:gpt_init_params_hdr",
-        "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/utils:py_utils",
     ],
     visibility = ["//visibility:public"],

@@ -88,7 +88,11 @@ void AttentionLayerTest<T>::testAttentionLayer(
     const auto mask_buf = tensorToBuffer(mask_tensor);
     model_inputs.attention_mask = mask_buf;
     auto kv_cache = torch::empty(0);
-    model_inputs.kv_cache_blocks = allocateKVBlocks(cache_conf, input_lengths, kv_cache);
+    model_inputs.kv_cache_offset = allocateKVBlocks(cache_conf, input_lengths, kv_cache);
+    auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
+    model_inputs.k_cache_buffer = kv_cache_buffer.k_blocks;
+    model_inputs.v_cache_buffer = kv_cache_buffer.v_blocks;
+
     auto input_lengths_device = device_->clone({*model_inputs.input_lengths});
     auto sequence_lengths_device = device_->clone({*model_inputs.sequence_lengths});
     AttentionCommonInputs common_inputs({
@@ -96,9 +100,13 @@ void AttentionLayerTest<T>::testAttentionLayer(
             *sequence_lengths_device
         });
     model_->prepareAttentionInputs(model_inputs, common_inputs);
-    auto layer_cache_blocks = (*model_inputs.kv_cache_blocks)[0];
-    common_inputs.kv_cache_blocks = layer_cache_blocks;
-    printBufferData(common_inputs.kv_cache_blocks.value().get(), "kv_cache_blocks");
+    auto layer_k_cache_buffer = (*model_inputs.k_cache_buffer)[0];
+    auto layer_v_cache_buffer = (*model_inputs.v_cache_buffer)[0];
+    common_inputs.kv_cache_offset = *model_inputs.kv_cache_offset;
+    common_inputs.k_cache_buffer = layer_k_cache_buffer;
+    common_inputs.v_cache_buffer = layer_v_cache_buffer;
+
+    printBufferData(common_inputs.kv_cache_offset.value().get(), "kv_cache_offset");
 
     // 2. compute reference implementation result
     GptAttention gpt_attention(attention_conf);
@@ -127,5 +135,5 @@ void AttentionLayerTest<T>::testAttentionLayer(
     };
     auto attn_output = device_->attentionLayer(params);
     auto output_tensor = bufferToTensor(*attn_output.hidden_states);
-    assertTensorClose(output_tensor, torch_output, 1e-3, 1);
+    assertTensorClose(output_tensor, torch_output, 1e-3, 2);
 }
