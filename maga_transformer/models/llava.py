@@ -2,14 +2,12 @@ import os
 import json
 import torch
 import re
-from functools import partial
-from typing import List, Any, Dict, Tuple, Union, Callable
+from typing import List, Any, Dict, Tuple, Union
 from transformers import AutoConfig, CLIPVisionConfig, AutoTokenizer
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.models.llava_weight import LlavaWeightInfo
 from maga_transformer.models.llama import Llama
-from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
@@ -75,16 +73,17 @@ class LlavaTokenizer(object):
 
 class Llava(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        with torch.cuda.device(torch.device('cuda:0')):
-            self.mm_part = LlavaImageEmbedding(config.vit_related_params.config)
         self.nccl_op_ = NcclOp()
-        vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
-        if config.vit_related_params.config["unfreeze_mm_vision_tower"] or \
-            "mm_vision_tower" in config.vit_related_params.config["mm_tunable_parts"]:
-            vit_weight_dict["vision_tower"] = self.mm_part.vision_tower
-        if "unpad" in config.vit_related_params.config.get("mm_patch_merge_type", "flat"):
-            vit_weight_dict["image_newline"] = self.mm_part.image_newline
-        config.vit_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
+        if g_parallel_info.tp_rank == 0:
+            with torch.cuda.device(torch.device('cuda:0')):
+                self.mm_part = LlavaImageEmbedding(config.vit_related_params.config)
+            vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
+            if config.vit_related_params.config["unfreeze_mm_vision_tower"] or \
+                "mm_vision_tower" in config.vit_related_params.config["mm_tunable_parts"]:
+                vit_weight_dict["vision_tower"] = self.mm_part.vision_tower
+            if "unpad" in config.vit_related_params.config.get("mm_patch_merge_type", "flat"):
+                vit_weight_dict["image_newline"] = self.mm_part.image_newline
+            config.vit_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
         Llama.__init__(self, config)
 
     @classmethod

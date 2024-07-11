@@ -1,4 +1,3 @@
-from functools import partial
 import os
 from typing import List, Tuple, Union
 
@@ -19,11 +18,12 @@ from maga_transformer.utils.util import get_config_from_path, to_torch_dtype
 
 class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        self.mm_part = EVA2CLIPImageEmbedding(config)
         self.nccl_op_ = NcclOp()
-        config.vit_related_params.vit_weights = ChatGlmV4VisionVitWeights(
-            {"vit": self.mm_part.vit}
-        )
+        if g_parallel_info.tp_rank == 0:
+            self.mm_part = EVA2CLIPImageEmbedding(config)
+            config.vit_related_params.vit_weights = ChatGlmV4VisionVitWeights(
+                {"vit": self.mm_part.vit}
+            )
         ChatGlmV4.__init__(self, config)
 
     @classmethod

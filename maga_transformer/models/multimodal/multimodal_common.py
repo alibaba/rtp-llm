@@ -1,10 +1,11 @@
-from typing import Any, List, Tuple, Union
+from typing import List, Tuple, Union
 
 import torch
 from decord import VideoReader, cpu
 from PIL import Image
 from torchvision import transforms
 
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.multimodal_util import (data_cache_,
                                                     get_bytes_io_from_url)
 
@@ -29,8 +30,10 @@ class ImageTransform:
 
 
 class MultiModalEmbeddingInterface:
-    @torch.no_grad()
+    @torch.inference_mode()
     def mm_embedding(self, url: str, device):
+        if g_parallel_info.tp_rank > 0:
+            return torch.Tensor([])
         cached_res = data_cache_.check_cache(url)
         if cached_res is None:
             try:
@@ -47,7 +50,7 @@ class MultiModalEmbeddingInterface:
     def _mm_preprocess(self, data):
         raise NotImplementedError
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def mm_process(self, mm_input, device):
         raise NotImplementedError
 
@@ -56,11 +59,11 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
     def _mm_preprocess(self, data):
         return Image.open(data).convert("RGB")
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def mm_process(self, mm_input, device):
         return self.image_embedding([mm_input], device)[0]
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def image_embedding(self, images: List[Image.Image], device):
         raise NotImplementedError()
 
@@ -71,11 +74,11 @@ class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
         import torchaudio
         return torchaudio.load(data)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def mm_process(self, mm_input, device):
         return self.audio_embedding(mm_input, device)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def audio_embedding(self, audio: Tuple[torch.Tensor, int], device):
         raise NotImplementedError()
 
@@ -83,10 +86,10 @@ class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
     def _mm_preprocess(self, data):
         return VideoReader(data, ctx=cpu(0))
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def mm_process(self, mm_input, device):
         return self.video_embedding(mm_input, device)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def video_embedding(self, video: List[Image.Image], device):
         raise NotImplementedError()

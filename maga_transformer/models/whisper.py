@@ -43,11 +43,12 @@ class WhisperAudioEmbedding(AudioEmbeddingInterface):
 
 class Whisper(GPT, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        with torch.cuda.device(torch.device('cuda:0')):
-            ckpt_path = config.ckpt_path
-            self.mm_part = WhisperAudioEmbedding(WhisperProcessor.from_pretrained(ckpt_path), WhisperEncoder.from_pretrained(ckpt_path), config.cross_attn_input_len)
         self.nccl_op_ = NcclOp()
-        config.vit_related_params.vit_weights = BaseVitWeights({}, False)
+        if g_parallel_info.tp_rank == 0:
+            with torch.cuda.device(torch.device('cuda:0')):
+                ckpt_path = config.ckpt_path
+                self.mm_part = WhisperAudioEmbedding(WhisperProcessor.from_pretrained(ckpt_path), WhisperEncoder.from_pretrained(ckpt_path), config.cross_attn_input_len)
+            config.vit_related_params.vit_weights = BaseVitWeights({}, False)
         GPT.__init__(self, config)
 
     @classmethod

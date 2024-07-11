@@ -30,11 +30,11 @@ class QwenVLImageEmbedding(ImageEmbeddingInterface):
 
 class QWen_VL(QWen, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        with torch.cuda.device(torch.device('cuda:0')):
-            self.mm_part = QwenVLImageEmbedding(config.vit_related_params.config)
         self.nccl_op_ = NcclOp()
-        config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})
-        
+        if g_parallel_info.tp_rank == 0:
+            with torch.cuda.device(torch.device('cuda:0')):
+                self.mm_part = QwenVLImageEmbedding(config.vit_related_params.config)
+            config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})
         QWen.__init__(self, config)
 
     @classmethod

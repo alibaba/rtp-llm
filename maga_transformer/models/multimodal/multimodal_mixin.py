@@ -19,6 +19,7 @@ from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeigh
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader
 
 from maga_transformer.ops.comm.nccl_op import NcclOp
+from maga_transformer.utils.util import to_cuda
 
 
 class BaseVitWeights:
@@ -61,7 +62,9 @@ class BaseMultiModalWeightInfo:
         self.vit_weights: Optional[BaseVitWeights] = config.vit_related_params.vit_weights
 
     def _get_vit_info(self, llm_weights: ModelDeployWeightInfo):
-        if self.vit_weights is not None:
+        # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
+        # After supporting TP mm network, we will remove the check here.
+        if self.vit_weights is not None and g_parallel_info.tp_rank == 0:
             weight_names = self.vit_weights.weight_names
             ckpt_prefix = self.vit_weights.ckpt_prefix
 
@@ -192,8 +195,11 @@ class MultiModalMixin:
                 self.nccl_op_.barrier(torch.device(device))
 
             self.gc_mm_part(vit_params)
-            visual_trt_engine.load_trt_engine()
-            self.mm_part = visual_trt_engine
+            # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
+            # After supporting TP mm network, we will remove the check here.
+            if g_parallel_info.tp_rank == 0:
+                visual_trt_engine.load_trt_engine()
+                self.mm_part = visual_trt_engine
 
         except Exception as e:
             raise RuntimeError(f"init multimodal trt error: {e}")
@@ -205,11 +211,17 @@ class MultiModalMixin:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def load_vit_weight(self, ctype: str):
+    def load_mm_weight(self, ctype: str, device: str):
+        # wait rank0 finish loading weight, otherwise gang_server will die
+        if g_parallel_info.tp_size > 1:
+            self.nccl_op_.barrier(torch.device(device))
+        # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
+        # After supporting TP mm network, we will remove the check here.
+        if g_parallel_info.tp_rank >= 1:
+            return
+
         # For trt engine, we don't need to load weight since its weight is inside trt engine.
-        # mm_part is none if and only if VIT_TRT is enabled and tp_rank >= 1
-        # embedding will be boardcasted from tp0, here we also don't not need to load vit weight.
-        if not self.mm_part or isinstance(self.mm_part, MultiModalTRTEngine):
+        if isinstance(self.mm_part, MultiModalTRTEngine):
             return
 
         vit_weight = self.config.vit_related_params.vit_weights
@@ -231,10 +243,24 @@ class MultiModalMixin:
         if g_parallel_info.tp_size <= 1:
             return EmbeddingOutput(self.multimodal_embedding(inputs, images, token_type_ids).squeeze(0), None)
 
+        # for tp_size > 1
+        check_num: int = 998244353
+        check_num2: int = 1000000007
+        shape_hints = torch.IntTensor([
+            check_num,
+            inputs.shape[1],
+            check_num2
+        ])
+        shape_hints = to_cuda(shape_hints)
+        self.nccl_op_.broadcast_tp([shape_hints])
+        torch.cuda.current_stream().synchronize()
+        assert shape_hints[0] == check_num and shape_hints[-1] == check_num2, 'check sum error'
+
         if g_parallel_info.tp_rank == 0:
             embedding_tensor = self.multimodal_embedding(inputs, images, token_type_ids).squeeze(0)
         else:
-            embedding_tensor = torch.zeros((inputs.shape[1], self.config.head_num * self.config.size_per_head), dtype=self.dtype, device=self.device)
+            input_length = shape_hints[1]
+            embedding_tensor = torch.zeros((input_length, self.config.head_num * self.config.size_per_head), dtype=self.dtype, device=self.device)
         self.nccl_op_.broadcast_tp([embedding_tensor])
         torch.cuda.current_stream().synchronize()
         return EmbeddingOutput(embedding_tensor, None)

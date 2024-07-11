@@ -10,7 +10,7 @@ from maga_transformer.utils.util import get_device, to_torch_dtype
 from maga_transformer.models.gpt_util.rms import RMSNorm
 from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader, estimate_load_parallel_num, ModelWeightsLoader
-from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, LoRAModelWeightInfo, LoRAMap
+from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, LoRAMap
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -257,7 +257,7 @@ class GPT(BaseModel):
         # pylint:disable=line-too-long
         if g_parallel_info.is_pp_first:
             if self.is_multimodal():
-                self.load_vit_weight(self.compute_dtype)
+                self.load_mm_weight(self.compute_dtype, self.device)
             if self.position_encoding is not None:
                 pos_weight = self.weight.steal_pytorch_weight(W.positional_embedding)
                 assert pos_weight is not None, "positional embedding weight not found"
