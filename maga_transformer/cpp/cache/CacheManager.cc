@@ -45,8 +45,9 @@ void CacheManager::reportMetricsLoop() {
         if (metrics_reporter_) {
             RtpLLMCacheMetricsCollector collector;
             collector.kv_cache_item_num = block_cache_.size();
-            collector.kv_cache_left_seq = freeBlockNums() * seq_size_per_block_;
-            collector.kv_cache_used_ratio = 100.0 * (config_.block_nums - freeBlockNums()) / config_.block_nums;
+            auto free_blocks = freeBlockNums() + block_cache_.holdBlockNums();
+            collector.kv_cache_left_seq = free_blocks * seq_size_per_block_;
+            collector.kv_cache_used_ratio = 100.0 * (config_.block_nums - free_blocks) / config_.block_nums;
             metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(nullptr, &collector);
             std::this_thread::sleep_for(std::chrono::seconds(1)); // 1s
         }
@@ -61,7 +62,6 @@ void CacheManager::initFreeBlock() {
     }
 
     block_ref_counter_ = BlockRefCounter(config_.block_nums);
-    block_cache_       = BlockCache();
 }
 
 void CacheManager::allocateAndTpSync() {

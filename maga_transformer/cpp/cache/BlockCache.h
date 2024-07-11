@@ -4,9 +4,10 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <mutex>
+#include <unordered_map>
 
 #include "maga_transformer/cpp/utils/LRUCache.h"
-
 #include "src/fastertransformer/utils/assert_utils.h"
 
 namespace rtp_llm {
@@ -40,11 +41,16 @@ public:
 
     bool isResident(const std::vector<int>& token_list) const;
 
+    int holdBlockNums() const;
+
 private:
     bool hasHashKey(size_t cache_key) const;
 
 private:
     mutable LRUCache<size_t, CacheItem> lru_cache_;
+    mutable std::mutex mutex_;
+    mutable std::unordered_map<int, int> hold_blocks_;
+    mutable int total_hold_blocks_ = 0;
 };
 
 }  // namespace rtp_llm

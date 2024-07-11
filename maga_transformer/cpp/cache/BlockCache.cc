@@ -4,10 +4,13 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <set>
 
 #include "maga_transformer/cpp/cache/BlockCache.h"
 #include "maga_transformer/cpp/utils/LRUCache.h"
 #include "maga_transformer/cpp/utils/StringUtil.h"
+
+using namespace std;
 
 namespace rtp_llm {
 
@@ -28,6 +31,8 @@ size_t BlockCache::prefixLength(const std::vector<int>& left, const std::vector<
 }
 
 std::pair<std::vector<int>, size_t> BlockCache::match(const std::vector<int>& token_list) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     CacheItem matched_item;
     size_t    matched_len = 0;
 
@@ -56,6 +61,8 @@ BlockCache::put(const std::vector<int>& token_list, const std::vector<int>& bloc
     size_t    cache_key = hashVector(token_list);
     CacheItem item{token_list, block_indices, cache_key, is_resident};
 
+    std::lock_guard<std::mutex> lock(mutex_);
+
     if (lru_cache_.contains(cache_key)) {
         // Increase matched item's popularity
         lru_cache_.get(cache_key);
@@ -63,6 +70,15 @@ BlockCache::put(const std::vector<int>& token_list, const std::vector<int>& bloc
     }
 
     lru_cache_.put(cache_key, item);
+
+    for (auto block : block_indices) {
+        auto result = ++hold_blocks_[block];
+        // is new block
+        if (result == 1) {
+            total_hold_blocks_++;
+        }
+    }
+
     return {};
 }
 
@@ -70,7 +86,9 @@ std::vector<int> BlockCache::pop() {
     CacheItem              return_cache_item;
     std::vector<CacheItem> resident_list;
 
-    while (!empty()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    while (!lru_cache_.empty()) {
         auto [success, cache_item] = lru_cache_.pop();
         FT_CHECK(success);
         if (cache_item.is_resident) {
@@ -85,18 +103,30 @@ std::vector<int> BlockCache::pop() {
         lru_cache_.put(resident_cache_item.cache_key, resident_cache_item);
     }
 
+    for (auto block : return_cache_item.block_indices) {
+        auto result = --hold_blocks_[block];
+        // is last reference
+        if (result == 0) {
+            total_hold_blocks_--;
+        }
+    }
+
     return return_cache_item.block_indices;
 }
 
 bool BlockCache::empty() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return lru_cache_.empty();
 }
 
 size_t BlockCache::size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return lru_cache_.size();
 }
 
 bool BlockCache::hasKey(const std::vector<int>& token_list) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     size_t cache_key = hashVector(token_list);
     return hasHashKey(cache_key);
 }
@@ -106,6 +136,8 @@ bool BlockCache::hasHashKey(size_t cache_key) const {
 }
 
 bool BlockCache::isResident(const std::vector<int>& token_list) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
     size_t cache_key = hashVector(token_list);
     if (!hasHashKey(cache_key)) {
         return false;
@@ -113,6 +145,11 @@ bool BlockCache::isResident(const std::vector<int>& token_list) const {
     const auto& [success, item] = lru_cache_.get(cache_key);
     FT_CHECK(success);
     return item.is_resident;
+}
+
+int BlockCache::holdBlockNums() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return total_hold_blocks_;
 }
 
 }  // namespace rtp_llm

@@ -422,4 +422,27 @@ TEST_F(CacheManagerTest, testSetBlockValue) {
     testFunc(3, 1);
 }
 
+TEST_F(CacheManagerTest, testBlockCacheHoldBlockNums) {
+    // layer_num, block_nums, local_head_num_kv, size_per_head, seq_size_per_block, dtype
+    CacheConfig cache_config(2, 10, 1, 1, 1, ft::TYPE_INT8);
+    CacheManager cache_manager(cache_config, device_);
+    ASSERT_EQ(cache_manager.block_cache_.holdBlockNums(), 0);
+
+    auto [success1, index1, reuse_len] = cache_manager.mallocWithCacheImpl(3, {1000, 2000, 3000});
+    ASSERT_EQ(index1, std::vector<int>({1, 2, 3}));
+
+    cache_manager.freeWithCache(index1, {1000, 2000, 3000});
+    ASSERT_EQ(cache_manager.block_cache_.holdBlockNums(), 2);
+
+    auto [sucecss2, index2, reuseNum2] = cache_manager.mallocWithCacheImpl(3, {1000, 1002, 1003});
+    ASSERT_EQ(index2, std::vector<int>({1, 3, 4}));
+    ASSERT_EQ(reuseNum2, 1);
+
+    cache_manager.freeWithCache(index2, {1000, 1002, 1003});
+    ASSERT_EQ(cache_manager.block_cache_.holdBlockNums(), 3);
+
+    cache_manager.block_cache_.pop();
+    ASSERT_EQ(cache_manager.block_cache_.holdBlockNums(), 2);
+}
+
 }  // namespace rtp_llm
