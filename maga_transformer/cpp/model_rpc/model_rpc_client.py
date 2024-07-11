@@ -32,6 +32,7 @@ def trans_option_cast(pb_object, py_object, name, func):
 
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
+    # The stream id cannot use the request id because the request may contain prompt batch.
     input_pb.request_id = request_counter.increment()
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.lora_id = input_py.lora_id

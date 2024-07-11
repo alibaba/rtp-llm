@@ -181,7 +181,7 @@ class OpenaiEndopoint():
         )
 
     def chat_completion(
-            self, chat_request: ChatCompletionRequest, raw_request: Request
+            self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
     ) -> CompleteResponseAsyncGenerator:
         renderer = self.template_renderer if chat_request.user_template else self.chat_renderer
         rendered_input = renderer.render_chat(chat_request)
@@ -198,6 +198,7 @@ class OpenaiEndopoint():
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config) \
             if chat_request.debug_info else None
         choice_generator = renderer.generate_choice(
+            request_id,
             input_ids,
             images,
             generate_config,

@@ -105,6 +105,7 @@ class CustomChatRenderer():
 
     async def generate_choice(
             self,
+            request_id: int,
             input_ids: List[int],
             images: List[Future[Image.Image]],
             generate_config: GenerateConfig,
@@ -126,6 +127,7 @@ class CustomChatRenderer():
         generate_config.is_streaming = True
         output_generator: AsyncGenerator[GenerateOutput, None] = model.enqueue(
             GenerateInput(
+                request_id=request_id,
                 token_ids=input_id_tensor,
                 images=images,
                 generate_config=generate_config,

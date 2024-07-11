@@ -1,11 +1,11 @@
 import os
 import logging
-from pydantic import BaseModel
 from typing import Any, Union, Dict
 
 from maga_transformer.access_logger.json_util import dump_json
 from maga_transformer.access_logger.log_utils import get_handler
 from maga_transformer.access_logger.py_access_log import RequestLog, ResponseLog, PyAccessLog
+from maga_transformer.structure.request_extractor import request_id_field_name
 
 ACCESS_LOGGER_NAME = 'access_logger'
 QUERY_ACCESS_LOGGER_NAME = 'query_access_logger'
@@ -40,40 +40,33 @@ class AccessLogger():
         self.query_logger = logging.getLogger(QUERY_ACCESS_LOGGER_NAME)
 
     @staticmethod
-    def is_private_request(request: Union[Dict[str, Any], str]):
-        if isinstance(request, dict):
-            return request.get('private_request', False)
-        else:
-            return 'private_request' in request
+    def is_private_request(request: Dict[str, Any]):
+        return request.get('private_request', False)
 
-    def log_access(self, request: Union[Dict[str, Any], str], response: ResponseLog, id: int) -> None:
+    def log_access(self, request: Dict[str, Any], response: ResponseLog) -> None:
         request_log = RequestLog.from_request(request)
-        access_log = PyAccessLog(request = request_log, response = response, id = id)
+        access_log = PyAccessLog(request = request_log, response = response, id = request[request_id_field_name])
         self.logger.info(dump_json(access_log))
 
-    def log_query_access(self, request: Union[Dict[str, Any], str], id: int) -> None:
+    def log_query_access(self, request: Dict[str, Any]) -> None:
         if not self.is_private_request(request):
             request_log = RequestLog.from_request(request)
             response_log = ResponseLog()
-            access_log = PyAccessLog(request = request_log, response = response_log, id = id)
+            access_log = PyAccessLog(request = request_log, response = response_log, id = request[request_id_field_name])
             self.query_logger.info(dump_json(access_log))
 
-    def log_success_access(self, request: Union[Dict[str, Any], str, BaseModel], response: Any, id: int) -> None:
-        if isinstance(request, BaseModel):
-            request = request.model_dump()
+    def log_success_access(self, request: Dict[str, Any], response: Any) -> None:
         if not self.is_private_request(request):
             response_log = ResponseLog()
             if LOG_RESPONSE:
                 response_log.add_response(response)
-            self.log_access(request, response_log, id)
+            self.log_access(request, response_log)
 
-    def log_exception_access(self, request: Union[Dict[str, Any], str, BaseModel], exception: BaseException, id: int) -> None:
-        if isinstance(request, BaseModel):
-            request = request.model_dump()
+    def log_exception_access(self, request: Dict[str, Any], exception: BaseException) -> None:
         response_log = ResponseLog()
         response_log.add_exception(exception)
         if not self.is_private_request(request):
-            self.log_access(request, response_log, id)
+            self.log_access(request, response_log)
         else:
-            self.log_access({}, response_log, id)
+            self.log_access({}, response_log)
 

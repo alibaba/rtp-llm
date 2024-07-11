@@ -10,7 +10,10 @@ from typing import Any, Dict, List, Tuple, Optional, Union, NamedTuple
 from maga_transformer.config.generate_config import RequestFormat, GenerateConfig
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 
+request_id_field_name = "__request_id__"
+
 class Request(NamedTuple):
+    request_id: int
     batch_infer: bool
     input_texts: Any
     input_images: Any
@@ -115,10 +118,12 @@ class RequestExtractor:
                 input_images = images
         return input_images
 
-    def _is_batch(self, kwargs: Dict[str,Any]):
+    def _get_request_id(self, kwargs: Dict[str,Any]) -> int:
+        return kwargs[request_id_field_name]
+
+    def _is_batch(self, kwargs: Dict[str, Any]) -> bool:
          return "prompt_batch" in kwargs
 
-        
     def _get_adapter(self, generate_config: GenerateConfig, input_len: int) -> List[GenerateConfig]:
         generate_configs: List[GenerateConfig] = [generate_config] * input_len
         adapter_name = generate_config.adapter_name
@@ -143,6 +148,7 @@ class RequestExtractor:
         return input_texts, input_images, generate_configs
 
     def _get_request(self, generate_config: GenerateConfig, kwargs: Dict[str,Any]) -> Request:
+        request_id = self._get_request_id(kwargs)
         batch_infer = self._is_batch(kwargs)
         input_texts = self._get_text(kwargs)
         input_images = self._get_images(len(input_texts), kwargs)
@@ -150,7 +156,7 @@ class RequestExtractor:
         input_texts, input_images, generate_configs = self.extend_sequences(input_texts, input_images, generate_configs)
         is_streaming = RequestExtractor.is_streaming(kwargs)
 
-        return Request(batch_infer, input_texts, input_images, generate_configs, is_streaming)
+        return Request(request_id, batch_infer, input_texts, input_images, generate_configs, is_streaming)
 
     def _format_chat_api_messages(self, generate_config: GenerateConfig, kwargs: Dict[str, Any]) -> Tuple[GenerateConfig, Dict[str, Any]]:
         if 'messages' in kwargs:

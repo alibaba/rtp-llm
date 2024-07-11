@@ -10,6 +10,7 @@ from concurrent.futures import Future
 from torch.nn.utils.rnn import pad_sequence
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+from maga_transformer.utils.util import AtomicCounter
 from maga_transformer.utils.time_util import current_time_ms
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import GenerateConfig
@@ -24,6 +25,8 @@ from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_s
 from maga_transformer.utils.tokenizer_utils import DecodingState
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
+
+request_counter = AtomicCounter()
 
 class Pipeline(object):
     def __init__(self, model: Union[AsyncModel, BaseModel], tokenizer: Optional[PreTrainedTokenizerBase]):
@@ -64,14 +67,16 @@ class Pipeline(object):
 
     def pipeline(self,
                  prompt: str,
+                 request_id: int = None,
                  images: Optional[List[str]] = None,
                  **kwargs: Any) -> Iterator[GenerateResponse]:
+
         q = queue.Queue()
 
         async def generator():
             res = None
             try:
-                res = self.pipeline_async(prompt, images, **kwargs)
+                res = self.pipeline_async(prompt, request_id, images, **kwargs)
                 async for x in res:
                     q.put(x)
                 q.put(None)
@@ -107,10 +112,15 @@ class Pipeline(object):
     def pipeline_async( # type: ignore
         self,
         prompt: str,
+        request_id: int = None,
         images: Optional[List[str]] = None,
         **kwargs: Any
     ) -> AsyncGenerator[GenerateResponse, None]:
         begin_time = current_time_ms()
+
+        if request_id == None:
+            request_id = request_counter.increment()
+
         # align images and prompts
         if images is None or len(images) == 0:
             images = []
@@ -136,7 +146,7 @@ class Pipeline(object):
         kmonitor.report(GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.num_beams)
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
-        return self.generate_stream(token_ids, images, generate_config, **kwargs)
+        return self.generate_stream(request_id, token_ids, images, generate_config, **kwargs)
 
     def process_stop_id(self,
                         generate_config: GenerateConfig,
@@ -240,7 +250,7 @@ class Pipeline(object):
         return texts, output_lens, decoding_states, token_buffers, ouput_tokens_list
 
     @torch.inference_mode()
-    async def generate_stream(self, token_ids: List[int], images: List[Future[torch.Tensor]],
+    async def generate_stream(self, request_id: int, token_ids: List[int], images: List[Future[torch.Tensor]],
                             generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
         if self.model.is_multimodal() and len(images) > 0:
@@ -253,7 +263,8 @@ class Pipeline(object):
 
         token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
 
-        input = GenerateInput(token_ids=token_ids,
+        input = GenerateInput(request_id=request_id,
+                              token_ids=token_ids,
                               images=images,
                               generate_config=generate_config,
                               tokenizer=self.tokenizer,

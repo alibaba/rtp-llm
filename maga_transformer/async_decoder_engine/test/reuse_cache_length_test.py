@@ -43,7 +43,7 @@ class ReuseCacheLengthTest(TestCase):
 
     @staticmethod
     def _init_generate_stream(token_ids: List[int]):
-        generate_input = GenerateInput(token_ids = torch.tensor(token_ids), generate_config=GenerateConfig())
+        generate_input = GenerateInput(request_id = 1, token_ids = torch.tensor(token_ids), generate_config=GenerateConfig())
         return GenerateStream(generate_input)
 
     def test_simple(self):

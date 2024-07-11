@@ -63,10 +63,12 @@ class SchedulerTest(TestCase):
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
         stream1 = GenerateStream(GenerateInput(
+            request_id=1,
             token_ids=torch.tensor([1,2,3,4,5,6,7,8]),
             generate_config=generate_config))
         scheduler.enqueue(stream1)
         stream2 = GenerateStream(GenerateInput(
+            request_id=1,
             token_ids=torch.tensor([4,5]),
             generate_config=generate_config))
         scheduler.enqueue(stream2)
@@ -115,7 +117,7 @@ class SchedulerTest(TestCase):
         inputs = torch.IntTensor([list(range(64))])
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
-        stream = GenerateStream(GenerateInput(token_ids=inputs, generate_config=generate_config))
+        stream = GenerateStream(GenerateInput(request_id=1, token_ids=inputs, generate_config=generate_config))
         scheduler.enqueue(stream)
         scheduler.schedule()
         self.assertEqual(stream.stop_reason, 'failed to malloc 8 blocks, only 7 blocks left')
@@ -137,9 +139,9 @@ class SchedulerTest(TestCase):
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
         streams = [
-            GenerateStream(GenerateInput(token_ids=torch.tensor(list(range(32))), generate_config=generate_config)),
-            GenerateStream(GenerateInput(token_ids=torch.tensor(list(range(4))), generate_config=generate_config)),
-            GenerateStream(GenerateInput(token_ids=torch.tensor(list(range(16))), generate_config=generate_config)),
+            GenerateStream(GenerateInput(request_id=1, token_ids=torch.tensor(list(range(32))), generate_config=generate_config)),
+            GenerateStream(GenerateInput(request_id=1, token_ids=torch.tensor(list(range(4))), generate_config=generate_config)),
+            GenerateStream(GenerateInput(request_id=1, token_ids=torch.tensor(list(range(16))), generate_config=generate_config)),
         ]
         for stream in streams:
             scheduler.enqueue(stream)
@@ -176,7 +178,7 @@ class SchedulerTest(TestCase):
         self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 7)
         self.assertFalse(scheduler.have_streams())
         generate_config: GenerateConfig = GenerateConfig(using_hf_sampling=False, chat_id='aaaa')
-        stream = GenerateStream(GenerateInput(token_ids=torch.tensor(list(range(16))), generate_config=generate_config))
+        stream = GenerateStream(GenerateInput(request_id=1, token_ids=torch.tensor(list(range(16))), generate_config=generate_config))
         scheduler.enqueue(stream)
         batch_query = self._get_batch_query(scheduler)
         self.assertEqual(stream.block_indice, [[1, 2]])
@@ -193,7 +195,7 @@ class SchedulerTest(TestCase):
         self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 5)
         self.assertEqual(len(scheduler.batch_query.streams), 0)
 
-        stream = GenerateStream(GenerateInput(token_ids=torch.tensor(list(range(32))), generate_config=generate_config))
+        stream = GenerateStream(GenerateInput(request_id=1, token_ids=torch.tensor(list(range(32))), generate_config=generate_config))
         scheduler.enqueue(stream)
 
         batch_query = self._get_batch_query(scheduler)
@@ -207,7 +209,7 @@ class SchedulerTest(TestCase):
 
         scheduler.prepare_next_step()
         self.assertEqual(len(scheduler.batch_query.streams), 0)
-        stream = GenerateStream(GenerateInput(token_ids=torch.tensor(list(range(24))), generate_config=generate_config))
+        stream = GenerateStream(GenerateInput(request_id=1, token_ids=torch.tensor(list(range(24))), generate_config=generate_config))
         scheduler.enqueue(stream)
         batch_query = self._get_batch_query(scheduler)
         self.assertEqual(scheduler._stream_cache_manager.cache_manager_.free_block_nums, 2)
@@ -248,7 +250,7 @@ class SchedulerTest(TestCase):
         generate_config: GenerateConfig = GenerateConfig(
             using_hf_sampling=False)
         stream = GenerateStream(GenerateInput(
-            token_ids=inputs, generate_config=generate_config))
+            request_id=1, token_ids=inputs, generate_config=generate_config))
         scheduler.enqueue(stream)
         batch_query = self._get_batch_query(scheduler)
         prefix_lengths, count_length, max_prefix_length = batch_query.get_prefix_args()

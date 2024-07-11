@@ -35,6 +35,7 @@ class EmbeddingOutput:
 
 # single batch prompt input
 class GenerateInput(PyBaseModel):
+    request_id: int
     token_ids: torch.Tensor
     images: Union[torch.Tensor, List[Any]] = []
     generate_config: GenerateConfig

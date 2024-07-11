@@ -13,6 +13,7 @@ from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.server.inference_worker import InferenceWorker, BatchPipelineResponse
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.test.model_test.test_util.fake_model_loader import FakeModelLoader
+from maga_transformer.structure.request_extractor import request_id_field_name
 
 os.environ['KV_CACHE_MEM_MB'] = '100'
 
@@ -47,6 +48,7 @@ class InferenceWorkerTest(TestCase):
 
     async def _run(self, inference_worker, **kwargs):
         count = 0
+        kwargs[request_id_field_name] = 1
         gen = inference_worker.inference(**kwargs)
         result = []
         aux_info = []

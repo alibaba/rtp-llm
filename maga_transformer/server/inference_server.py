@@ -31,6 +31,7 @@ from maga_transformer.server.inference_worker import InferenceWorker, TokenizerE
 from maga_transformer.server.misc import format_exception
 from maga_transformer.config.task_type import TaskType
 from maga_transformer.async_decoder_engine.base_engine import KVCacheInfo
+from maga_transformer.structure.request_extractor import request_id_field_name
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -91,7 +92,7 @@ class InferenceServer(object):
 
     # use asyncio.sleep(0) to correctly exit when client closed https://github.com/tiangolo/fastapi/issues/4146
     async def stream_response(
-            self, request: Dict[str, Any], response: CompleteResponseAsyncGenerator, id: int
+            self, request: Dict[str, Any], response: CompleteResponseAsyncGenerator,
     ):
         is_openai_response = request.get("stream", False)
         response_data_prefix = "data: " if is_openai_response else "data:"
@@ -102,30 +103,31 @@ class InferenceServer(object):
                 await asyncio.sleep(0)
             if not is_openai_response:
                 yield f"data:[done]\r\n\r\n"
-            await self._collect_complete_response_and_record_access_log(request, id, response)
+            await self._collect_complete_response_and_record_access_log(request, response)
         except asyncio.CancelledError as e:
-            self._access_logger.log_exception_access(request, e, id)
+            self._access_logger.log_exception_access(request, e)
             kmonitor.report(AccMetrics.CANCEL_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
         except BaseException as e:
             # 捕获非Cancel以外所有的异常,所以使用BaseException
-            self._access_logger.log_exception_access(request, e, id)
+            self._access_logger.log_exception_access(request, e)
             kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
             yield response_data_prefix + \
                 json.dumps(format_exception(e), ensure_ascii=False) + "\r\n\r\n"
 
     async def update(self, version_info: VersionInfo):
-        id = self._atomic_count.increment()
+        request = version_info.model_dump()
+        request[request_id_field_name] = self._atomic_count.increment()
         try:
             assert self._inference_worker is not None
             with Timer() as t:
                 if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-                    self._gang_server.request_workers(version_info.__dict__, 'update_internal')
+                    self._gang_server.request_workers(request, 'update_internal')
                 ret = self._inference_worker.update(version_info)
             rep = JSONResponse(content=ret)
             kmonitor.report(AccMetrics.UPDATE_QPS_METRIC, 1)
             kmonitor.report(GaugeMetrics.UPDATE_LANTENCY_METRIC, t.cost_ms())
         except Exception as e:
-            self._access_logger.log_exception_access(version_info.__dict__, e, id)
+            self._access_logger.log_exception_access(request, e)
             kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
             error_code = 500
             rep = JSONResponse(format_exception(e), status_code=error_code)
@@ -136,27 +138,31 @@ class InferenceServer(object):
             req = json.loads(req)
         assert isinstance(req, dict)
 
+        req[request_id_field_name] = self._atomic_count.increment()
+
         def generate_call():
             assert self._inference_worker is not None
             return self._inference_worker.inference(**req)
 
         return await self._infer_wrap(req, raw_request, generate_call)
 
-    async def _infer_wrap(self, req: Dict[Any, Any], raw_request: RawRequest, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
-        id = self._atomic_count.increment()
+    async def _infer_wrap(self, req: Dict[str, Any], raw_request: RawRequest, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
         try:
-            rep = await self._infer_impl(req, id, raw_request, generate_call)
+            rep = await self._infer_impl(req, raw_request, generate_call)
         except BaseException as e:
-            rep = self._handle_exception(req, e, id)
+            rep = self._handle_exception(req, e)
         return rep
 
     async def chat_completion(self, request: ChatCompletionRequest, raw_request: Request):
+        request_id = self._atomic_count.increment()
         def generate_call():
             assert (self._openai_endpoint != None)
-            response = self._openai_endpoint.chat_completion(request, raw_request)
+            response = self._openai_endpoint.chat_completion(request_id, request, raw_request)
             assert (isinstance(response, CompleteResponseAsyncGenerator)), f"error type: {type(response)}"
             return response
-        return await self._infer_wrap(request.model_dump(), raw_request, generate_call)
+        request_dict = request.model_dump()
+        request_dict[request_id_field_name] = request_id
+        return await self._infer_wrap(request_dict, raw_request, generate_call)
 
     async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):
         try:
@@ -167,7 +173,7 @@ class InferenceServer(object):
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
-        id = self._atomic_count.increment()
+        request[request_id_field_name] = self._atomic_count.increment()
         kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unkown")})
         with self._controller:
             try:
@@ -175,12 +181,12 @@ class InferenceServer(object):
                 result, logable_result = await self._embedding_endpoint.handle(request)
                 # do not log result since too big
                 if logable_result is not None:
-                    self._access_logger.log_success_access(request, logable_result, id)
+                    self._access_logger.log_success_access(request, logable_result)
                 end_time = time.time()
                 kmonitor.report(GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000)
                 return ORJSONResponse(result)
             except BaseException as e:
-                return self._handle_exception(request, e, id)
+                return self._handle_exception(request, e)
 
     async def similarity(self, request: Dict[str, Any], raw_request: Request):
         return await self.embedding(request, raw_request)
@@ -188,8 +194,8 @@ class InferenceServer(object):
     async def classifier(self, request: Dict[str, Any], raw_request: Request):
         return await self.embedding(request, raw_request)
 
-    def _handle_exception(self, request: Union[Dict[str, Any], str, BaseModel], e: Exception, id: int):
-        self._access_logger.log_exception_access(request, e, id)
+    def _handle_exception(self, request: Dict[str, Any], e: Exception):
+        self._access_logger.log_exception_access(request, e)
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
             error_code = 409
@@ -236,20 +242,17 @@ class InferenceServer(object):
 
         return CompleteResponseAsyncGenerator(__gen_response_with_report(start_time, response_generator), response_generator._collect_complete_response_func)
 
-    async def _collect_complete_response_and_record_access_log(self, req, id, res):
+    async def _collect_complete_response_and_record_access_log(self, req: Dict[Any, Any], res: Any):
         complete_response = await res.gen_complete_response_once()
         complete_response = complete_response.model_dump(exclude_none=True) if isinstance(complete_response, BaseModel) else complete_response
-        self._access_logger.log_success_access(req, complete_response, id)
+        self._access_logger.log_success_access(req, complete_response)
 
         return complete_response
 
-    async def _infer_impl(self, req: Union[str,Dict[Any, Any]], id: int, raw_request: RawRequest, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
+    async def _infer_impl(self, req: Dict[Any, Any], raw_request: RawRequest, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
         assert self._inference_worker is not None
-        if not isinstance(req, dict):
-            raise Exception("request body should be json-format")
-
         kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": req.get("source", "unkown")})
-        self._access_logger.log_query_access(req, id)
+        self._access_logger.log_query_access(req)
         is_streaming = self._inference_worker.is_streaming(req)
         self._controller.increment()
         if await raw_request.is_disconnected():
@@ -257,15 +260,14 @@ class InferenceServer(object):
         res = await self._call_generate_with_report(generate_call)
 
         if is_streaming:
-            return StreamingResponse(self.stream_response(req, res, id), media_type="text/event-stream")
+            return StreamingResponse(self.stream_response(req, res), media_type="text/event-stream")
         async for x in res:
             if await raw_request.is_disconnected():
                 # Abort the request if the client disconnects.
                 await res.aclose()
-                # await self._inference_worker.abort(id)
                 raise asyncio.CancelledError("client disconnects")
 
-        complete_response = await self._collect_complete_response_and_record_access_log(req, id, res)
+        complete_response = await self._collect_complete_response_and_record_access_log(req, res)
         return JSONResponse(content=complete_response)
 
     def tokenizer_encode(self, req: Union[str,Dict[Any, Any]]):
