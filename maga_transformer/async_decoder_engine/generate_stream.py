@@ -46,6 +46,7 @@ class GenerateStream(BaseModel):
         self._input = input
         self._max_seq_len = max_seq_len
         self._seq_length = self.input_length
+        self._last_output_pos = self._seq_length
         self._begin_time = current_time_ms()
         self._resource_dtors = []
 
@@ -88,6 +89,7 @@ class GenerateStream(BaseModel):
         if ptuning_info.prefix_tensors is not None:
             self._input.update_prefix(ptuning_info.prefix_tensors)
             self._seq_length = self.input_length
+            self._last_output_pos = self._seq_length
             self._complete_token_ids[0, :self._seq_length] = self._input.token_ids
 
     @property
@@ -148,6 +150,9 @@ class GenerateStream(BaseModel):
                 output.output_ids = output.output_ids[i:i+1,]
                 outputs.generate_outputs.append(output)
             
+            if self._input.generate_config.num_beams == 1:
+                self._last_output_pos = self._seq_length
+
             return outputs
 
     def set_stop(self, err: str, e: Exception):
@@ -232,7 +237,7 @@ class GenerateStream(BaseModel):
                     break
             if finished:
                 self._set_finished()
-            self._output.output_ids = self._complete_token_ids[:,self.input_length:self._seq_length]
+            self._output.output_ids = self._complete_token_ids[:,self._last_output_pos:self._seq_length]
             self._output.input_ids = self.input_token_ids
             self._output.hidden_states = hidden_states
             if len(self._input.generate_config.select_tokens_id) > 0:
@@ -244,7 +249,7 @@ class GenerateStream(BaseModel):
             self._output.aux_info.cost_time = current_time_ms() - self._begin_time
             self._output.aux_info.input_len = self._input.prompt_length
             self._output.aux_info.prefix_len = self._input.prefix_length
-            self._output.aux_info.output_len = self._output.output_ids.shape[-1]
+            self._output.aux_info.output_len = self._seq_length - self.input_length
             self._output.aux_info.cum_log_probs = cum_log_probs.tolist() if cum_log_probs is not None else None
             self._output.aux_info.iter_count += 1
             self._output.aux_info.reuse_len = self._reuse_length

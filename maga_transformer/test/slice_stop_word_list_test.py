@@ -21,10 +21,10 @@ class SliceStopWordListTest(TestCase):
 
     async def mock_generate(self):
         yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29892]]]), finished=False)])
-        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29892, 825]]]), finished=False)])
-        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29892, 825, 29915]]]), finished=False)])
-        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29892, 825, 29915, 29879]]]), finished=False)])
-        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29892, 825, 29915, 29879, 596]]]), finished=False)])
+        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[825]]]), finished=False)])
+        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29915]]]), finished=False)])
+        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[29879]]]), finished=False)])
+        yield GenerateOutputs(generate_outputs=[GenerateOutput(output_ids=torch.tensor([[[596]]]), finished=False)])
 
     @mock.patch("maga_transformer.async_decoder_engine.async_model.AsyncModel.enqueue")
     def test_slice(self, mock_enqueue):

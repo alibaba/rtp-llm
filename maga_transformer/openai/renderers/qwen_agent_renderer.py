@@ -142,6 +142,7 @@ class QwenAgentRenderer(CustomChatRenderer):
         finish_reason: Optional[FinisheReason] = None
         generating_function_call = False
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
+        output_tokens_list = torch.empty(0, dtype=torch.int32)
 
         async for output in output_generator:
             if output_token_length == 0:
@@ -154,6 +155,10 @@ class QwenAgentRenderer(CustomChatRenderer):
                     )]
                 )
             output = output.generate_outputs[0]
+            # all mode incremental return output_ids
+            output_tokens_list = torch.cat((output_tokens_list, output.output_ids), dim=1)
+            output.output_ids = output_tokens_list
+            
             processed_output = self._process_output_ids_tensor(
                 input_token_length, output.output_ids, output.finished)
             output_string = processed_output.output_str.strip()

@@ -306,8 +306,7 @@ class QwenRenderer(CustomChatRenderer):
             output_generator: AsyncGenerator[GenerateOutputs, None],
             request: ChatCompletionRequest,
             generate_config: GenerateConfig,
-            input_token_length: int,
-            is_rpc: bool
+            input_token_length: int
     ) -> AsyncGenerator[StreamResponseObject, None]:
         index = 0
         output_string = ""
@@ -330,10 +329,9 @@ class QwenRenderer(CustomChatRenderer):
                     )]
                 )
             output = output.generate_outputs[0]
-            if is_rpc:
-                # rpc mode incremental return output_ids
-                output_tokens_list = torch.cat((output_tokens_list, output.output_ids), dim=1)
-                output.output_ids = output_tokens_list
+            # all mode incremental return output_ids
+            output_tokens_list = torch.cat((output_tokens_list, output.output_ids), dim=1)
+            output.output_ids = output_tokens_list
             processed_output = self._process_output_ids_tensor(
                 input_token_length, output.output_ids, output.finished)
             output_string = processed_output.output_str.strip()

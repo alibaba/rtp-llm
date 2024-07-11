@@ -208,7 +208,8 @@ class Pipeline(object):
 
         i = 0
         for generate_output in generate_outputs.generate_outputs:
-            if self.model.config.use_rpc:
+            # all model incremental return output_ids
+            if generate_config.num_beams == 1:
                 ouput_tokens_list[i] = torch.cat((ouput_tokens_list[i], generate_output.output_ids), dim=1)
                 generate_output.output_ids = ouput_tokens_list[i]
             tokens = generate_output.output_ids

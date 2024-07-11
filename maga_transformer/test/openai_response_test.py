@@ -23,7 +23,7 @@ async def fake_output_generator(
     for i in range(0, len(output_ids)):
         output_tensor = torch.full((1, max_seq_len), eos_id, dtype=torch.int)
 
-        output_tensor[0, :len(output_ids[:i + 1])] = torch.tensor(output_ids[:i + 1], dtype=torch.int)
+        output_tensor[0, :len(output_ids[i:i + 1])] = torch.tensor(output_ids[i:i + 1], dtype=torch.int)
         finished = torch.full((1,), (i == (len(output_ids) - 1)), dtype=torch.bool)
         logging.info(f"i={i}, finished={finished}")
         outputs = GenerateOutputs()
@@ -70,7 +70,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
         request = ChatCompletionRequest(messages=[])
         id_generator = fake_output_generator(test_ids, 1024, tokenizer.eos_token_id or 0)
-        stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig(), 314, False)
+        stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig(), 314)
         generate = self.endpoint._complete_stream_response(stream_generator, None)
         response = [x async for x in generate][-1]
         response = await generate.gen_complete_response_once()
@@ -106,7 +106,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         request = ChatCompletionRequest(messages=[])
         id_generator = fake_output_generator(test_ids, MAX_SEQ_LEN, tokenizer.eos_token_id or 0)
         input_length = 1018
-        stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig(), input_length, False)
+        stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig(), input_length)
         generate = self.endpoint._complete_stream_response(stream_generator, None)
         response = [x async for x in generate][-1]
         response = await generate.gen_complete_response_once()
