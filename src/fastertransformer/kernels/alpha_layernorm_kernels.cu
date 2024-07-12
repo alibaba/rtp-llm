@@ -2,8 +2,15 @@
 #include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
+
 // wont't support new features
 namespace fastertransformer{
+#if USING_ROCM
+using namespace rocm;
+#endif
 template<typename T, int N>
 __global__ void alphaAddBiasResidualPostLayerNorm(
     T* out, const T* input, const T* residual1, const T* bias, const T* gamma, const T* beta, T alpha, int m, int n) {

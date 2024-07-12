@@ -112,10 +112,13 @@ cc_library(
         "//:using_rocm": ["//src/fastertransformer/rocm:rocm_utils"],
         "//conditions:default": [],
     }),
-    copts=select({
-        "//:using_cuda": copts(),
-        "//:using_rocm": copts() + ["-x", "rocm"],
-    }),
+    ### dont know why this not work
+    #copts=select({
+    #    "//:using_cuda": copts(),
+    #    "//:using_rocm": copts() + ["-x", "rocm"],
+    #}),
+
+    copts = copts() + ["-x", "rocm"],
     include_prefix="src",
     visibility = ["//visibility:public"],
 )

@@ -20,6 +20,9 @@
 
 namespace fastertransformer
 {
+#if USING_ROCM
+using namespace rocm;
+#endif
 
 template <typename Tf, typename T, bool IS_BETA>
 __inline__ __device__ Tf compute_rmsnorm(Tf val, float s_variance, const T* gamma, const T* beta, int i)

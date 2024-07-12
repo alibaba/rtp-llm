@@ -22,7 +22,6 @@
 #endif
 #if USING_ROCM
 #include "src/fastertransformer/rocm/cuda_shims.h"
-using namespace fastertransformer::rocm;
 #endif
 
 #include "src/fastertransformer/cuda/cuda_bf16_fallbacks.cuh"
