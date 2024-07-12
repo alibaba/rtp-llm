@@ -46,5 +46,6 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     copts = copts(),
+    alwayslink = 1,
 )
 

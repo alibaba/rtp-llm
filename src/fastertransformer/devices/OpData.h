@@ -294,6 +294,9 @@ struct AttentionCommonInputs {
     BufferPtr attention_mask;
     BufferPtr linear_bias_slopes;
     BufferPtr prefix_prompt_lengths;
+    int32_t   count_prefix_lengths;
+    int32_t   max_prefix_length;
+
     OptionalLoraInput lora_input = std::nullopt;
 
     AttentionCommonInputs() = default;

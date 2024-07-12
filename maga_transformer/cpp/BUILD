@@ -229,9 +229,10 @@ cc_library(
         ":system_prompt_constructor",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "//src/fastertransformer/devices:devices_base_impl",
     ] + select({
         "//:using_cuda": [
-            ":model_wrapper",
+            "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         ],
         "//conditions:default": [],
     }),
@@ -257,13 +258,7 @@ cc_library(
         ":system_prompt_constructor",
         ":embedding_handler_base",
         ":embedding_handler",
-    ] + select({
-        "//:using_cuda": [
-            ":model_wrapper",
-            "//src/fastertransformer/cuda:allocator_cuda",
-        ],
-        "//conditions:default": [],
-    }),
+    ],
     visibility = ["//visibility:public"]
 )
 
@@ -338,34 +333,6 @@ cc_library(
         ":utils",
         "@havenask//:kmonitor_client_cpp",
     ],
-    visibility = ["//visibility:public"]
-)
-
-cc_library(
-    name = "model_wrapper",
-    hdrs = glob([
-        "deprecated/*.h",
-    ]),
-    srcs = glob([
-        "deprecated/*.cc",
-    ]),
-    deps = torch_deps() + [
-        ":dataclass",
-        ":models",
-        "//src/fastertransformer/layers:layers",
-        "//src/fastertransformer/models:models",
-        "//:th_utils",
-        "//:th_op_hdrs",
-        "//src/fastertransformer/utils:utils",
-        "//3rdparty:cuda_driver",
-        "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
-        "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",
-        "//src/fastertransformer/cuda:allocator_cuda",
-    ],
-    copts = cuda_copts(),
     visibility = ["//visibility:public"]
 )
 

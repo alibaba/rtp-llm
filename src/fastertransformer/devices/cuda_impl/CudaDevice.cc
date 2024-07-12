@@ -69,10 +69,16 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     cufmha_runner_->init(stream_);
     cuggemm_runner_.reset(new cuggemm());
     cuggemm_runner_->init(stream_);
-    checkUseTrtV1FMHA();
-    checkUseTrtV2FMHA();
-    checkUseOpenSourceFMHA();
-    checkUseMultiBlockMode();
+
+    auto fmha_env = std::getenv("ENABLE_FMHA");
+    if (fmha_env && std::string(fmha_env) == "OFF") {
+        FT_LOG_WARNING("FMHA is not enbaled");
+    } else {
+        checkUseTrtV1FMHA();
+        checkUseTrtV2FMHA();
+        checkUseOpenSourceFMHA();
+        checkUseMultiBlockMode();
+    }
 
     auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
     allocator_ptr->setStream(stream_);
@@ -171,11 +177,6 @@ void CudaDevice::checkUseOpenSourceFMHA() {
         return;
     }
 
-    fmha_env = std::getenv("ENABLE_FMHA");
-    if (fmha_env && std::string(fmha_env) == "OFF") {
-        FT_LOG_WARNING("FMHA is not enbaled");
-        return;
-    }
     FT_LOG_INFO("use opensource fmha");
     use_openSource_fmha = true;
 }

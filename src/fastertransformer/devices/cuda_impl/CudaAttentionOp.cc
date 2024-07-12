@@ -79,13 +79,13 @@ void writeContextKvCache(
         v.data<T>(),
         kv_block_array,
         params.common.context_batch_size,
-        params.common.context_max_seq_len,  // max input length + prefix prompt length
+        params.common.context_max_seq_len + params.common.max_prefix_length,
         params.configs.size_per_head,
         params.configs.kv_head_num,
         params.common.k_scale_buffer.has_value() ? KvCacheDataType::INT8: KvCacheDataType::BASE,
         nullptr,  // kvScaleOrigQuant
         params.common.input_lengths.dataWithOffset<int32_t>(params.common.decoder_batch_size),
-        0, // d_prefix_prompt_lengths,
+        params.common.prefix_prompt_lengths ? params.common.prefix_prompt_lengths->data<int>() : nullptr,
         stream);
 }
 
@@ -94,6 +94,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     auto token_num      = params.input.shape()[0];
     auto batch_size     = params.common.context_batch_size;
     auto seq_len        = params.common.context_max_seq_len;
+    auto seq_len_with_prefix = seq_len + params.common.max_prefix_length;
     auto head_num       = params.configs.head_num;
     auto kv_head_num    = params.configs.kv_head_num;
     auto size_per_head  = params.configs.size_per_head;
@@ -104,16 +105,38 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                     {"q_output"});
 
     auto k_output = allocateBuffer({params.input.type(),
-                                    {batch_size, kv_head_num, seq_len, size_per_head},
+                                    {batch_size, kv_head_num, seq_len_with_prefix, size_per_head},
                                     AllocationType::DEVICE},
                                     {"k_output"});
 
     auto v_output = allocateBuffer({params.input.type(),
-                                    {batch_size, kv_head_num, seq_len, size_per_head},
+                                    {batch_size, kv_head_num, seq_len_with_prefix, size_per_head},
                                     AllocationType::DEVICE},
                                     {"v_output"});
 
+    KVBlockArray kv_block_array;
+    BufferPtr block_pointers, block_scale_pointers;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
+
+    if (params.common.kv_cache_offset) {
+        const auto max_blocks_per_batch = params.common.kv_cache_offset.value().get().shape()[1];
+        block_pointers = allocateBuffer({DataType::TYPE_INT64,
+                                         {batch_size, 1, 2, max_blocks_per_batch},
+                                         AllocationType::DEVICE},
+            {"kv_block_pointers"});
+        block_scale_pointers = allocateBuffer({DataType::TYPE_INT64,
+                                               {batch_size, 1, 2, max_blocks_per_batch},
+                                               AllocationType::DEVICE},
+            {"kv_scale_pointers"});
+        kv_block_array = getKVBlockArray(params, *block_pointers, *block_scale_pointers, batch_size, stream_);
+
+        if (params.common.prefix_prompt_lengths) {
+            prefix_prompt_param.d_prefix_prompt_lengths = params.common.prefix_prompt_lengths->data<int>();
+            prefix_prompt_param.max_prefix_prompt_length = params.common.max_prefix_length;
+            prefix_prompt_param.count_length = params.common.count_prefix_lengths;
+            prefix_prompt_param.kv_block_array = kv_block_array;
+        }
+    }
 
     // int8
     float*  scale_out_ptr    = nullptr;
@@ -162,19 +185,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         stream_
     );
 
-    KVBlockArray kv_block_array;
-    BufferPtr block_pointers, block_scale_pointers;
-    if (params.common.kv_cache_offset.has_value()) {
-        const auto max_blocks_per_batch = params.common.kv_cache_offset.value().get().shape()[1];
-        block_pointers = allocateBuffer({DataType::TYPE_INT64,
-                                         {batch_size, 1, 2, max_blocks_per_batch},
-                                         AllocationType::DEVICE},
-            {"kv_block_pointers"});
-        block_scale_pointers = allocateBuffer({DataType::TYPE_INT64,
-                                               {batch_size, 1, 2, max_blocks_per_batch},
-                                               AllocationType::DEVICE},
-            {"kv_scale_pointers"});
-        kv_block_array = getKVBlockArray(params, *block_pointers, *block_scale_pointers, batch_size, stream_);
+    if (params.common.kv_cache_offset) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                 datatype, writeContextKvCache,
                 std::cref(params),
@@ -219,7 +230,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         return;
     } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport()) {
 
-        auto qkv_buf_temp  = allocateBuffer({DataType::TYPE_FP16,
+        auto qkv_buf_temp  = allocateBuffer({datatype,
                                             {token_num, head_num + 2 * kv_head_num, size_per_head},
                                              AllocationType::DEVICE},
                                             {"qkv_buf_temp"});
@@ -256,7 +267,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                         *params.common.attention_mask,
                                         nullopt,
                                         scale,
-                                        DataType::TYPE_FP16});
+                                        datatype});
         printBufferData(*softmax_qk_output, "softmax_qk_output: ");
 
         auto qkv_output = gemm({*softmax_qk_output, *v_output});
@@ -320,13 +331,9 @@ void selfAttentionwrapper(const AttentionModuleParams params,
 
     // prefix prompt
 
-    int* prefix_prompt_lengths = nullptr;
-    if (params.common.prefix_prompt_lengths) {
-        prefix_prompt_lengths = params.common.prefix_prompt_lengths->data<int>();
-    }
-
-    int max_prefix_prompt_length = 0;
-    bool count_prefix_length = false;
+    auto prefix_lengths = params.common.prefix_prompt_lengths ? params.common.prefix_prompt_lengths->data<int>() : nullptr;
+    auto max_prefix_length = params.common.max_prefix_length;
+    auto count_prefix_lengths = params.common.count_prefix_lengths;
 
     const auto* input_lengths = params.common.input_lengths.data<int>();
     const auto* sequence_lengths = params.common.sequence_lengths.data<int>();
@@ -364,9 +371,9 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         dynamic_embedding_max_pos,
         base_scale,
         step,
-        prefix_prompt_lengths,
-        max_prefix_prompt_length,
-        count_prefix_length,
+        prefix_lengths,
+        max_prefix_length,
+        count_prefix_lengths,
         input_lengths,
         step,
         q_scaling,
@@ -428,9 +435,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     float* partial_max_data = (partial_max == nullptr) ? nullptr : partial_max->data<float>();
     int* block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
 
-    if (!params.common.kv_cache_offset.has_value()) {
-        throw std::runtime_error("kv cache block pointers can not be null");
-    }
+    RUNTIME_ASSERT_OP_ARG(
+        params.common.kv_cache_offset, "kv cache block can not be null for decoder self-attention");
     const auto max_blocks_per_batch = params.common.kv_cache_offset.value().get().shape()[1];
     auto block_pointers = allocateBuffer({DataType::TYPE_INT64,
                                           {batch_size, 1, 2, max_blocks_per_batch},

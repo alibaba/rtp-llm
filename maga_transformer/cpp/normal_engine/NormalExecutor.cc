@@ -26,21 +26,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params, const std::shared
     SamplerInitParams sampler_params{device_, eos_id, 1024}; // set static max batch size to avoid sampler reset memory
     sampler_.reset(new Sampler(sampler_params));
 
-    use_new_device_impl_ = std::getenv("USE_NEW_DEVICE_IMPL");
-    FT_LOG_INFO("model exec use new device impl: %d", (int)use_new_device_impl_);
-    if (use_new_device_impl_) {
-        model_.reset(new GptModel({device_, params.gpt_weights, genModelDescription(params.gpt_init_parameter)}));
-        batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter));
-        need_attention_mask_ = device_->getDeviceProperties().attention_need_mask;
-#if USING_CUDA
-    } else {
-        model_wrapper_.reset(
-            new ParallelModelWrapper(params.gpt_init_parameter, params.global_weights, params.layers_weights, params.linear_bias_slopes));
-        batch_stream_processor_.reset(
-            new NormalBatchStreamProcessor(params.gpt_init_parameter));
-        need_attention_mask_ = !model_wrapper_->useFMHA();
-#endif
-    }
+    model_.reset(new GptModel({device_, params.gpt_weights, genModelDescription(params.gpt_init_parameter)}));
+    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter));
+    need_attention_mask_ = device_->getDeviceProperties().attention_need_mask;
 }
 
 absl::Status
@@ -48,48 +36,13 @@ NormalExecutor::addLoRA(const int64_t                                           
                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights)
 {
-    if (use_new_device_impl_) {
-        model_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
-#if USING_CUDA
-    } else {
-        model_wrapper_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
-#endif
-    }
-
+    model_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
     return absl::OkStatus();
 }
 
 absl::Status NormalExecutor::removeLoRA(const int64_t lora_id) {
-    if (use_new_device_impl_) {
-        model_->removeLoRA(lora_id);
-#if USING_CUDA
-    } else {
-        model_wrapper_->removeLoRA(lora_id);
-#endif
-    }
+    model_->removeLoRA(lora_id);
     return absl::OkStatus();
-}
-
-ModelRequest NormalExecutor::generateOldModelRequest(GptModelInputs& model_input) {
-    ModelRequest model_request;
-    model_request.generate_batch_size = model_input.sequence_lengths->shape()[0];
-    model_request.context_batch_size  = model_input.input_lengths->shape()[0] - model_request.generate_batch_size;
-    model_request.combo_tokens        = model_input.combo_tokens;
-    model_request.input_lengths       = model_input.input_lengths;
-    model_request.sequence_lengths    = model_input.sequence_lengths;
-    model_request.prefix_lengths      = model_input.prefix_lengths;
-    model_request.count_lengths       = model_input.count_lengths;
-    model_request.max_prefix_length   = model_input.max_prefix_length;
-    model_request.combo_position_ids  = model_input.combo_position_ids;
-    model_request.kv_cache_offset     = model_input.kv_cache_offset;
-    model_request.k_cache_buffer     = model_input.k_cache_buffer;
-    model_request.v_cache_buffer     = model_input.v_cache_buffer;
-    model_request.k_scale_buffer     = model_input.k_scale_buffer;
-    model_request.v_scale_buffer     = model_input.v_scale_buffer;
-    model_request.attention_mask      = model_input.attention_mask;
-    model_request.lora_ids            = model_input.lora_ids;
-    model_request.lora_input_lengths  = model_input.lora_input_lengths;
-    return model_request;
 }
 
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
@@ -115,14 +68,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto            merged_output = std::make_unique<MergedOutput>();
     GptModelOutputs model_output;
-    if (use_new_device_impl_) {
-        model_output = std::move(model_->forward(model_input));
-#if USING_CUDA
-    } else {
-        ModelRequest model_request = std::move(generateOldModelRequest(model_input));
-        model_output               = std::move(model_wrapper_->forward(model_request));
-#endif
-    }
+    model_output = std::move(model_->forward(model_input));
     FT_LOG_DEBUG("model forward done");
     if (device_->getDeviceProperties().tp_rank > 0) {
         return absl::OkStatus();

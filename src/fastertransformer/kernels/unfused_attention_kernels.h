@@ -113,7 +113,7 @@ void invokeTransposeAttentionOutRemovePadding(T*           src,
 
 struct PrefixPromptBatchWeightsParam {
     const int*              d_prefix_prompt_lengths  = nullptr;
-    const int               max_prefix_prompt_length = 0;
+    int                     max_prefix_prompt_length = 0;
     bool                    count_length             = false;
     KVBlockArray            kv_block_array           = KVBlockArray(0, 0, 0, 0);
 };

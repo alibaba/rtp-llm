@@ -110,6 +110,14 @@ void GptModel::prepareAttentionInputs(
     attention_inputs.context_token_num = cu_seqlens_data[context_batch_size];
     attention_inputs.position_ids = inputs.position_ids;
     attention_inputs.attention_mask = inputs.attention_mask;
+    attention_inputs.max_prefix_length = 0;
+    attention_inputs.count_prefix_lengths = 1;
+    if (inputs.prefix_lengths) {
+        attention_inputs.prefix_prompt_lengths = device_->clone({*inputs.prefix_lengths});
+        attention_inputs.max_prefix_length = *std::max_element(
+            inputs.prefix_lengths->data<int32_t>(),
+            inputs.prefix_lengths->data<int32_t>() + inputs.prefix_lengths->size());
+    }
 }
 
 

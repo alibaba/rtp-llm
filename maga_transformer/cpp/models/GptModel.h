@@ -40,6 +40,10 @@ struct GptModelInputs {
     ft::BufferPtr sequence_lengths;  // [decoder_batch_size]
     ft::BufferPtr lm_output_indexes; // [context_batch_size]
     ft::BufferPtr prefix_lengths;    // [batch_size, seq_len]
+
+    // NOTE: count_lengths and max_prefix_length were used for p-tuning,
+    // the support of which has been dropped.
+    // TODO(wangyin.yx): remove count_lengths and max_prefix_length after old implementation is dropped.
     ft::BufferPtr count_lengths;     // [1]
     ft::BufferPtr max_prefix_length; // [1]
 

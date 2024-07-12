@@ -142,6 +142,8 @@ void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
     common_inputs.context_max_seq_len = seq_len;
     common_inputs.decoder_batch_size = 0;
     common_inputs.decoder_max_seq_len = 0;
+    common_inputs.max_prefix_length = 0;
+    common_inputs.count_prefix_lengths = 0;
 
     auto buffer_nullptr = BufferPtr(nullptr);
     auto attention_weight   = AttentionLayerWeights();
@@ -258,6 +260,8 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size = batch_size;
     common_inputs.decoder_max_seq_len = step - 1;
+    common_inputs.max_prefix_length = 0;
+    common_inputs.count_prefix_lengths = 0;
 
     auto buffer_nullptr = BufferPtr(nullptr);
     auto attention_weight = AttentionLayerWeights();
