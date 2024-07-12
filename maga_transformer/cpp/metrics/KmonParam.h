@@ -25,8 +25,9 @@ public:
     std::string kmonitorPort;
     std::string kmonitorServiceName;
     std::string kmonitorSinkAddress;
-    bool kmonitorEnableLogFileSink;
-    bool kmonitorManuallyMode;
+    bool kmonitorEnableLogFileSink = false;
+    bool kmonitorEnablePrometheusSink = false;
+    bool kmonitorManuallyMode = false;
     std::string kmonitorTenant;
     std::string kmonitorMetricsPrefix;
     std::string kmonitorGlobalTableMetricsPrefix;

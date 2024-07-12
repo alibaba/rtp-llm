@@ -13,6 +13,7 @@ namespace rtp_llm {
 static const std::string KMONITOR_PORT("kmonitorPort");
 static const std::string KMONITOR_SINK_ADDRESS("kmonitorSinkAddress");
 static const std::string KMONITOR_ENABLE_LOGFILE_SINK("kmonitorEnableLogFileSink");
+static const std::string KMONITOR_ENABLE_PROMETHEUS_SINK("kmonitorEnablePrometheusSink");
 static const std::string KMONITOR_MANUALLY_MODE("kmonitorManuallyMode");
 static const std::string KMONITOR_SERVICE_NAME("kmonitorServiceName");
 static const std::string KMONITOR_TENANT("kmonitorTenant");
@@ -67,6 +68,7 @@ bool KmonParam::init() {
     kmonitorSinkAddress =
         autil::EnvUtil::getEnv(KMONITOR_SINK_ADDRESS, autil::EnvUtil::getEnv(HIPPO_SLAVE_IP, "127.0.0.1"));
     kmonitorEnableLogFileSink = autil::EnvUtil::getEnv(KMONITOR_ENABLE_LOGFILE_SINK, kmonitorEnableLogFileSink);
+    kmonitorEnablePrometheusSink = autil::EnvUtil::getEnv(KMONITOR_ENABLE_PROMETHEUS_SINK, kmonitorEnablePrometheusSink);
     kmonitorManuallyMode = autil::EnvUtil::getEnv(KMONITOR_MANUALLY_MODE, kmonitorManuallyMode);
     kmonitorTenant = autil::EnvUtil::getEnv(KMONITOR_TENANT, "default");
     kmonitorMetricsPrefix = autil::EnvUtil::getEnv(KMONITOR_METRICS_PREFIX, "");
