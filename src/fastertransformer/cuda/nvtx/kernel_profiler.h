@@ -12,7 +12,7 @@
 #include <string>
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 
-    namespace fastertransformer {
+namespace fastertransformer {
 class KernelProfiler {
 public:
     KernelProfiler(cudaStream_t stream, std::string kernel_name, kmonitor::MetricsReporterPtr metrics_reporter);

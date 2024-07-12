@@ -1,7 +1,4 @@
 load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts", "rocm_copts")
-load("@local_config_rocm//rocm:build_defs.bzl",
-    "if_rocm",
-)
 
 cc_library(
     name = "cublas",
@@ -138,11 +135,8 @@ cc_library(
         "//:using_rocm": ["//src/fastertransformer/rocm:rocm_utils"],
         "//conditions:default": [],
     }),
-    copts=select({
-        "//:using_cuda": copts(),
-        "//:using_rocm": copts() + ["-x", "rocm"],
-    }),
-    include_prefix="src",
+    copts = copts(),
+    include_prefix = "src",
     visibility = ["//visibility:public"],
 )
 

@@ -211,8 +211,6 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
     const void* beta  = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<void*>(&f_beta);
 
     int findAlgo = hipblas_algo_map_->isExist(batch_count, m, n, k, Atype_);
-    printf("\n[FEIFEI]: findAlgo = %d\n", findAlgo);
-
     hipblasLtMatmulAlgo_info info = hipblas_algo_map_->getAlgo(batch_count, m, n, k, Atype_);
 
     if (findAlgo) {

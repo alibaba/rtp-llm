@@ -18,8 +18,15 @@
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 
-namespace fastertransformer
-{
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
+
+// wont't support new features
+namespace fastertransformer{
+#if USING_ROCM
+using namespace rocm;
+#endif
 
 __device__ __forceinline__ int64_t loadOffset(int head_num,
                                               int size_per_head)

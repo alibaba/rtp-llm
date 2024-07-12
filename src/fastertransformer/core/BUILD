@@ -22,7 +22,7 @@ cc_library(
                           "//src/fastertransformer/rocm:rocm_types_hdr"],
         "//conditions:default": [],
     }),
-    copts = rocm_copts(),
+    copts = copts(),
     visibility = ["//visibility:public"],
 )
 
@@ -147,6 +147,6 @@ cc_library(
         "//:using_rocm": ["//src/fastertransformer/rocm:rocm_utils"],
         "//conditions:default": [],
     }),
-    copts = rocm_copts(),
+    copts = copts(),
     visibility = ["//visibility:public"],
 )

@@ -4,6 +4,7 @@
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/add_residual_kernels.h"
 #include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
+#include "src/fastertransformer/devices/base_tests/LayerNormTest.hpp"
 
 #include <torch/torch.h>
 #include "src/fastertransformer/devices/testing/TestBase.h"
@@ -12,96 +13,11 @@
 using namespace std;
 using namespace fastertransformer;
 
-class LayerNormTest: public DeviceTestBase {
-public:
-    void SetUp() override {
-        DeviceTestBase::SetUp();
-        rtol_ = 1e-2;
-        atol_ = 1e-2;
-    }
-
-protected:
-    torch::Tensor rmsNorm(const torch::Tensor& input,
-                          const torch::Tensor& gamma, const torch::Tensor& beta)
-    {
-        return input * torch::rsqrt(torch::mean(input * input, -1, true) + 1e-6) * gamma + beta;
-    }
-
-    void testGeneralLayernorm(DataType data_type, NormType norm_type, uint16_t m, uint16_t n) {
-        const auto torch_dtype = dataTypeToTorchType(data_type);
-        auto input_tensor = (torch::arange(m * n, m * n * 2) / (n * n)).reshape({m, n}).to(torch_dtype);
-        auto gamma_tensor = (torch::ones({n}) / 2).to(torch_dtype);
-        auto beta_tensor = (torch::ones({n}) / 3).to(torch_dtype);
-        auto residual_tensor = torch::arange(m * n, - m * n, -2).reshape({m, n}).to(torch_dtype);
-
-        auto input = tensorToBuffer(input_tensor);
-        auto gamma = tensorToBuffer(gamma_tensor);
-        auto beta = tensorToBuffer(beta_tensor);
-        auto weights = LayerNormWeights(gamma, beta);
-        BufferPtr empty;
-        gamma = tensorToBuffer(gamma_tensor);
-        auto gamma_only_weights = LayerNormWeights(gamma, empty);
-        auto residual = tensorToBuffer(residual_tensor);
-        auto output = createBuffer({m, n}, data_type);
-
-        // test case 1: general layer norm without residual
-        device_->layernorm(LayernormParams(
-            *input, *output, nullopt, NormType::layernorm, weights, 1e-6));
-
-        auto expected_output = torch::layer_norm(
-            input_tensor.to(torch::kFloat32), {n},
-            gamma_tensor.to(torch::kFloat32), beta_tensor.to(torch::kFloat32), 1e-6);
-        assertTensorClose(expected_output, bufferToTensor(*output));
-
-        // extra: test case without beta
-        device_->layernorm(LayernormParams(
-            *input, *output, nullopt, NormType::layernorm, gamma_only_weights, 1e-6));
-
-        // test case 2: general layer norm with residual and add_bias output
-        output = createBuffer({m, n}, data_type);
-        auto add_bias_output = createBuffer({m, n}, data_type);
-        device_->layernorm(LayernormParams(
-            *input, *output, *add_bias_output, NormType::layernorm, weights, 1e-6, *residual));
-
-        expected_output = torch::layer_norm(
-            (input_tensor + residual_tensor).to(torch::kFloat32), {n},
-            gamma_tensor.to(torch::kFloat32), beta_tensor.to(torch::kFloat32), 1e-6);
-        auto expected_add_bias_output = input_tensor + residual_tensor;
-        assertTensorClose(expected_output, bufferToTensor(*output));
-        assertTensorClose(expected_add_bias_output, bufferToTensor(*add_bias_output));
-
-        // test case 3: rms norm without residual
-        device_->layernorm(LayernormParams(
-            *input, *output, nullopt, NormType::rmsnorm, weights, 1e-6));
-
-        expected_output = rmsNorm(
-            input_tensor.to(torch::kFloat32),
-            gamma_tensor.to(torch::kFloat32), beta_tensor.to(torch::kFloat32));
-        assertTensorClose(expected_output, bufferToTensor(*output));
-
-        // extra: test case without beta
-        device_->layernorm(LayernormParams(
-            *input, *output, nullopt, NormType::rmsnorm, gamma_only_weights, 1e-6));
-
-        // test case 4: rms norm with residual and add_bias output
-        add_bias_output = createBuffer({m, n}, data_type);
-        device_->layernorm(LayernormParams(
-            *input, *output, *add_bias_output, NormType::rmsnorm, weights, 1e-6, *residual));
-
-        expected_output = rmsNorm(
-            (input_tensor + residual_tensor).to(torch::kFloat32),
-            gamma_tensor.to(torch::kFloat32), beta_tensor.to(torch::kFloat32));
-        assertTensorClose(expected_output, bufferToTensor(*output));
-        assertTensorClose(expected_add_bias_output, bufferToTensor(*add_bias_output));
-    }
-
-};
-
 TEST_F(LayerNormTest, testAddBiasPerformance) {
 
 // This test case is to verify performance diff of fused and seperate layernorm + add bias kernel
 
-    hipStream_t stream;
+    cudaStream_t stream;
     hipStreamCreate(&stream);
     using TestType = float;
     const auto repeat_time = 100;
@@ -132,7 +48,7 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                         stream
                     );
                 }
-                sync_check_hip_error();
+                sync_check_cuda_error();
 
                 const auto end = chrono::high_resolution_clock::now();
                 const auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();
@@ -164,7 +80,7 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                         stream
                     );
                 }
-                sync_check_hip_error();
+                sync_check_cuda_error();
 
                 const auto end = chrono::high_resolution_clock::now();
                 const auto duration = chrono::duration_cast<chrono::microseconds>(end - start).count();
@@ -189,24 +105,7 @@ TEST_F(LayerNormTest, testFp16Conversion) {
 }
 
 TEST_F(LayerNormTest, testAddBiasResidual) {
-    auto input = createBuffer<float>({2, 3}, {0.1, 0.2, 0.3, 0.4, 0.5, 0.6});
-    auto norm_output = createBuffer<float>({2, 3}, {0, 0, 0, 0, 0, 0});
-    const auto bias = createBuffer<float>({3}, {1, 2, 3});
-    const auto residual = createBuffer<float>({2, 3}, {0.01, 0.02, 0.03, 0.04, 0.05, 0.06});
-
-    device_->syncAndCheck();
-    device_->layernorm(LayernormParams(
-        *input, *norm_output, *norm_output, NormType::add_bias, nullopt, nullopt,
-        *residual, nullopt, *bias));
-
-    assertBufferValueEqual(*input, vector<float>({0.1, 0.2, 0.3, 0.4, 0.5, 0.6}));
-    assertBufferValueEqual(*norm_output, vector<float>({1.11, 2.22, 3.33, 1.44, 2.55, 3.66}));
-
-    device_->layernorm(LayernormParams(
-        *input, *input, *input, NormType::add_bias, nullopt, nullopt,
-        *residual, nullopt, *bias));
-
-    assertBufferValueEqual(*input, vector<float>({1.11, 2.22, 3.33, 1.44, 2.55, 3.66}));
+    testAddBiasResidual();
 }
 
 TEST_F(LayerNormTest, testSimpleLayernorm) {
