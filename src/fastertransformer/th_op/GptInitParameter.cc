@@ -66,6 +66,9 @@ void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int6
     } else if (quant_method == "omni_quant") {
         quant_method_ = OmniQuant;
         weight_bits_ = 8;
+    } else if (quant_method == "pertensor_quant"){
+        quant_method_ = PerTensorQuant;
+        weight_bits_ = 8;
     } else {
         throw std::invalid_argument("unknown quant_method: " + quant_method);
     }
@@ -118,6 +121,7 @@ void registerGptInitParameter(py::module m) {
     .def("isAwq", &QuantAlgo::isAwq)
     .def("isSmoothQuant", &QuantAlgo::isSmoothQuant)
     .def("isOmniQuant", &QuantAlgo::isOmniQuant)
+    .def("isPerTensorQuant", &QuantAlgo::isPerTensorQuant)
     .def("isQuant", &QuantAlgo::isQuant)
     .def("isGroupwise", &QuantAlgo::isGroupwise)
     .def("getGroupSize", &QuantAlgo::getGroupSize)

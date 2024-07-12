@@ -102,5 +102,20 @@ static const std::string attn_o_smoother = "self_attention_weights.attention_out
 static const std::string attn_o_shift = "self_attention_weights.attention_output_weight.shift";
 static const std::string ffn_smoother = "ffn_weights.intermediate_weight2.smoother";
 
+// static quant
+static const std::string pre_decoder_ln_s = "pre_decoder_layernorm.static_quant";
+static const std::string pre_decoder_ln_static_sr = "pre_decoder_layernorm.static_quant_reciprocal";
+static const std::string pre_ln_s = "pre_layernorm_weights.static_quant";
+static const std::string pre_ln_sr = "pre_layernorm_weights.static_quant_reciprocal";
+static const std::string attention_output_s = "self_attention_weights.attention_output_weight.static_quant";
+static const std::string attention_output_sr = "self_attention_weights.attention_output_weight.static_quant_reciprocal";
+static const std::string post_ln_s = "post_layernorm_weights.static_quant";
+static const std::string post_ln_sr = "post_layernorm_weights.static_quant_reciprocal";
+static const std::string ffn_intermediate_weight2_s = "ffn_weights.intermediate_weight2.static_quant";
+static const std::string ffn_intermediate_weight2_sr = "ffn_weights.intermediate_weight2.static_quant_reciprocal";
+static const std::string post_ffn_ln_s = "post_ffn_layernorm_weights.static_quant";
+static const std::string post_ffn_ln_sr = "post_ffn_layernorm_weights.static_quant_reciprocal";
+
+// for static quant
 }
 }

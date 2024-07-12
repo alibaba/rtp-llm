@@ -184,6 +184,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         params.common.max_prefix_length && use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport(),
         stream_
     );
+    sync_check_cuda_error();
 
     printBufferData(params.input, "after invoke transpse");
 

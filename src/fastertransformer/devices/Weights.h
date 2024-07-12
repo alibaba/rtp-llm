@@ -13,6 +13,8 @@ namespace fastertransformer {
 struct LayerNormWeights {
     ConstBufferPtr gamma = nullptr;
     ConstBufferPtr beta = nullptr;
+    ConstBufferPtr static_scale = nullptr;
+    ConstBufferPtr static_scale_reciprocal = nullptr;
     LayerNormWeights() = default;
 
     LayerNormWeights(ConstBufferPtr& gamma,
@@ -24,6 +26,12 @@ struct LayerNormWeights {
                      BufferPtr& beta) :
         gamma(std::move(gamma)),
         beta(std::move(beta)) {}
+
+    LayerNormWeights(ConstBufferPtr& gamma, ConstBufferPtr& beta, ConstBufferPtr& static_scale, ConstBufferPtr& static_scale_reciprocal):
+        gamma(std::move(gamma)), beta(std::move(beta)), static_scale(std::move(static_scale)), static_scale_reciprocal(std::move(static_scale_reciprocal)) {}
+
+    LayerNormWeights(BufferPtr& gamma, BufferPtr& beta, BufferPtr& static_scale, BufferPtr& static_scale_reciprocal):
+        gamma(std::move(gamma)), beta(std::move(beta)), static_scale(std::move(static_scale)), static_scale_reciprocal(std::move(static_scale_reciprocal)) {}
 };
 
 typedef std::shared_ptr<const LayerNormWeights> LayerNormWeightsPtr;
@@ -108,6 +116,8 @@ struct AttentionLayerWeights {
     std::shared_ptr<const DenseWeights>     output_weight;
     std::shared_ptr<LoraWeightsMap>         output_lora_weights;
 
+    std::shared_ptr<const DenseWeights>     static_quant_weight;
+    std::shared_ptr<const DenseWeights>     static_scale_reciprocal_weight;
     std::shared_ptr<const DenseWeights>     smoother_weight;
     std::shared_ptr<const DenseWeights>     shift_weight;
 
@@ -131,6 +141,8 @@ struct FfnLayerWeights {
 
     std::shared_ptr<const DenseWeights>     smoother_weight;
     ConstBufferPtr                          act_scale;
+    std::shared_ptr<const DenseWeights>     intermediate_weight2_static_scale_weight;
+    std::shared_ptr<const DenseWeights>     intermediate_weight2_static_scale_reciprocal_weight;
 
     // these fields are for Qwen Mode model.
     // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803

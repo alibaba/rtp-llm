@@ -275,13 +275,19 @@ class GPT(BaseModel):
                 self._safe_load_from_module(self.pre_decoder_layernorm.bias, W.pre_decoder_ln_beta)
                 self.weight.append_global_weight(W.pre_decoder_ln_gamma, self.pre_decoder_layernorm.weight.data)
                 self.weight.append_global_weight(W.pre_decoder_ln_beta, self.pre_decoder_layernorm.bias.data)
+                if self.config.quant_algo.isSmoothQuant() or self.config.quant_algo.isOmniQuant() or self.config.quant_algo.isPerTensorQuant():
+                    static_quant = self.weight.steal_pytorch_weight(W.pre_decoder_ln_static_quant)
+                    static_quant_reciprocal = self.weight.steal_pytorch_weight(W.pre_decoder_ln_static_quant_reciprocal)
+                    assert static_quant is not None and static_quant_reciprocal is not None, "pre decoder static quant should not be None"
+                    self.weight.append_global_weight(W.pre_decoder_ln_static_quant, static_quant)
+                    self.weight.append_global_weight(W.pre_decoder_ln_static_quant_reciprocal, static_quant_reciprocal)
 
         if g_parallel_info.is_pp_last:
             if self.post_decoder_layernorm is not None:
                 self._safe_load_from_module(self.post_decoder_layernorm.weight, W.final_ln_gamma)
                 self._safe_load_from_module(self.post_decoder_layernorm.bias, W.final_ln_beta)
-                self.weight.append_global_weight("final_layernorm.gamma", self.post_decoder_layernorm.weight.data)
-                self.weight.append_global_weight("final_layernorm.beta", self.post_decoder_layernorm.bias.data)
+                self.weight.append_global_weight(W.final_ln_gamma, self.post_decoder_layernorm.weight.data)
+                self.weight.append_global_weight(W.final_ln_beta, self.post_decoder_layernorm.bias.data)
 
     def _initialize_from_weight(self):
         self.init_word_embedding_weight()
@@ -305,6 +311,10 @@ class GPT(BaseModel):
         quant_config_path = os.path.join(ckpt_path, 'smoothquant.ini')
         if os.path.exists(quant_config_path):
             config.quant_algo.setQuantAlgo('smooth_quant', 0, 0)
+        per_tensor_config_path = os.path.join(ckpt_path, "pertensorquant.ini")
+
+        if os.path.exists(per_tensor_config_path):
+            config.quant_algo.setQuantAlgo('pertensor_quant', 0, 0)
 
         quant_config = config_json.get("quantization_config", None)
         if quant_config is not None:

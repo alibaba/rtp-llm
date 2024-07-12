@@ -66,6 +66,9 @@ void invokeQuantization(
     FT_CHECK_WITH_INFO(size % 4 == 0, "[ERROR][invokeQuantization] size should be a multiple of 4.\n");
 
     int numBlocks{static_cast<int>((size + 255) / 256)};
+    if (maxGridSize == -1) {
+        maxGridSize = numBlocks;
+    }
     dim3 grid(std::min(numBlocks, maxGridSize));
     FT_CHECK_WITH_INFO(grid.x <= maxGridSize, "[ERROR][invokeQuantization] grid max size is exceeded\n");
     dim3 block(64);

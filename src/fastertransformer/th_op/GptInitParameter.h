@@ -14,7 +14,8 @@ enum QuantMethod {
     GptQ                = 2,
     Awq                 = 3,
     SmoothQuant         = 4,
-    OmniQuant           = 5
+    OmniQuant           = 5,
+    PerTensorQuant      = 6
 };
 
 struct RoleSpecialTokens {
@@ -33,6 +34,9 @@ public:
     {}
     bool isWeightOnlyPerCol() const {
         return quant_method_ == WeightOnlyPerCol;
+    }
+    bool isPerTensorQuant() const {
+        return quant_method_ == PerTensorQuant;
     }
     bool isGptq() const {
         return quant_method_ == GptQ;

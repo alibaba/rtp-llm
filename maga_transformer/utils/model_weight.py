@@ -408,6 +408,20 @@ class W:
     attn_o_smoother = 'self_attention_weights.attention_output_weight.smoother'
     attn_o_shift = 'self_attention_weights.attention_output_weight.shift'
     ffn_smoother = 'ffn_weights.intermediate_weight2.smoother'
+    
+    #per tensor quant
+    pre_decoder_ln_static_quant = "pre_decoder_layernorm.static_quant"
+    pre_decoder_ln_static_quant_reciprocal = 'pre_decoder_layernorm.static_quant_reciprocal'
+    pre_ln_static_quant = 'pre_layernorm_weights.static_quant'
+    pre_ln_static_quant_reciprocal = 'pre_layernorm_weights.static_quant_reciprocal'
+    attention_output_static_quant = 'self_attention_weights.attention_output_weight.static_quant'
+    attention_output_static_quant_reciprocal = 'self_attention_weights.attention_output_weight.static_quant_reciprocal'
+    post_ln_static_quant = 'post_layernorm_weights.static_quant'
+    post_ln_static_quant_reciprocal = 'post_layernorm_weights.static_quant_reciprocal'
+    ffn_intermediate_weight2_static_quant = 'ffn_weights.intermediate_weight2.static_quant'
+    ffn_intermediate_weight2_static_quant_reciprocal = 'ffn_weights.intermediate_weight2.static_quant_reciprocal'
+    post_ffn_ln_static_quant = "post_ffn_layernorm_weights.static_quant"
+    post_ffn_ln_static_quant_reciprocal = "post_ffn_layernorm_weights.static_quant_reciprocal"
 
     # medusa lm_head
     medusa_head = 'medusa_head'
@@ -489,6 +503,19 @@ class W:
 
     sq_quant_shifts = [
         attn_o_shift
+    ]
+    
+    static_quant_scales = [
+        pre_ln_static_quant,
+        pre_ln_static_quant_reciprocal,
+        attention_output_static_quant,
+        attention_output_static_quant_reciprocal,
+        post_ln_static_quant,
+        post_ln_static_quant_reciprocal,
+        ffn_intermediate_weight2_static_quant,
+        ffn_intermediate_weight2_static_quant_reciprocal,
+        post_ffn_ln_static_quant,
+        post_ffn_ln_static_quant_reciprocal
     ]
 
     int8_attn_weights = [
@@ -725,11 +752,13 @@ class WeightInfo:
     name: str
     weights: List[CkptWeightInfo]
     process_fun: Callable[[List[torch.Tensor]], torch.Tensor]
+    data_type: Optional[torch.dtype] = None
 
-    def __init__(self, name: str, weights: List[CkptWeightInfo], process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity) -> None:
+    def __init__(self, name: str, weights: List[CkptWeightInfo], process_fun: Callable[[List[torch.Tensor]], torch.Tensor] = identity, data_type: Optional[torch.dtype] = None) -> None:
         self.name = name
         self.weights = weights
         self.process_fun = process_fun
+        self.data_type = data_type
 
     def get_ckpt_tensor_names(self) -> List[str]:
         if not bool(self.weights):
@@ -1228,19 +1257,18 @@ class LoraResource():
 
 
 class ModelWeights:
-    def __init__(self, num_layers: int, device: str):
+    def __init__(self, num_layers: int, device: str, dtype: torch.dtype):
         self.device = device
         self.weights: List[Dict[str, torch.Tensor]] = []
         self.global_weights: Dict[str, torch.Tensor] = {}
         self._pytorch_weights: Dict[str, torch.Tensor] = {}
         self.lora_resource: LoraResource = LoraResource()
-        self._dtype = None
+        self._dtype = dtype
 
         for _ in range(num_layers):
             self.weights.append({})
 
     def append_pytorch_weight(self, name: str, tensor: torch.Tensor):
-        self._dtype = tensor.dtype
         self._pytorch_weights[name] = tensor
 
     def steal_pytorch_weight(self, name: str):

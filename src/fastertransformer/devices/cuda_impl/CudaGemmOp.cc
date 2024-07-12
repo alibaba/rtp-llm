@@ -160,10 +160,19 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
     if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm) {
         BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_QINT8});
         BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});
+        bool perToken = true;
+        bool perChannel = true;
+        if (reinterpret_cast<const QBuffer&>(params.B).scales().size() == 1) {
+            perChannel = false;
+        } 
+        if (reinterpret_cast<const QBuffer&>(params.A).scales().size() == 1) {
+            FT_LOG_DEBUG("use static quant");
+            perToken = false;            
+        }
         auto quant_mode = tensorrt_llm::common::QuantMode::fromDescription(true,
                                                                             true,
-                                                                            true,
-                                                                            true,
+                                                                            perToken,
+                                                                            perChannel,
                                                                             false,
                                                                             false,
                                                                             false,

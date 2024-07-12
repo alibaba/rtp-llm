@@ -192,7 +192,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto& embedding_table = weights_.embedding->kernel;
 
     const BufferPtr combo_position_ids = inputs.combo_position_ids ? device_->clone({*inputs.combo_position_ids}): nullptr;
-    const BufferPtr combo_tokens_type_ids = inputs.combo_tokens_type_ids ? device_->clone({*inputs.combo_tokens_type_ids}): nullptr;
+    const BufferPtr combo_tokens_type_ids = inputs.combo_tokens_type_ids ? device_->clone({*inputs.combo_tokens_type_ids}): nullptr;    
 
     // lora input
     OptionalLoraInput lora_input = std::nullopt;
@@ -206,15 +206,28 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             weights_.position_encoding ? (OptionalConstBufferRef)*weights_.position_encoding->kernel: nullopt,
             combo_tokens_type_ids ? (OptionalConstBufferRef)*combo_tokens_type_ids: nullopt,
             weights_.token_type_embedding ? (OptionalConstBufferRef)*weights_.token_type_embedding->kernel: nullopt});
+    const auto dtype = hidden->type();
     if (device_props_.tp_size > 1) {
         hidden = tpSyncEmbeddingOrLogits(hidden);
     }
-    ft::QScheme qscheme = (weights_.layers[0].self_attention_weights.smoother_weight == nullptr) ? QScheme::NoQuantize : QScheme::Qint8PerChannelLastAxis;
 
-    // pre layernorm
-    if (weights_.pre_decoder_layernorm) {
+    // TODO: fix me
+    ft::QScheme qscheme = QScheme::NoQuantize;
+    if (weights_.layers[0].post_layernorm->static_scale != nullptr) {
+        qscheme = QScheme::Qint8PerTensor;
+    } else if (weights_.layers[0].self_attention_weights.smoother_weight != nullptr) {
+        qscheme = QScheme::Qint8PerChannelLastAxis;
+    }
+
+    // pre layernorm    
+    BufferPtr pre_decoder_residual = nullptr;
+    if (qscheme == QScheme::Qint8PerTensor && weights_.pre_decoder_layernorm) {
+        pre_decoder_residual = device_->allocateBufferLike(*hidden);
+    }
+    printBufferData(*hidden, "before decoder layernorm hidden");
+    if (weights_.pre_decoder_layernorm) {    
         auto decoder_input = device_->layernorm(LayernormParams(hidden,
-                                                                nullptr,
+                                                                pre_decoder_residual,
                                                                 *weights_.pre_decoder_layernorm,
                                                                 nullopt,
                                                                 nullopt,
@@ -222,10 +235,10 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                 0.f,
                                                                 norm_eps,
                                                                 true,
-                                                                false,
+                                                                pre_decoder_residual != nullptr,
                                                                 norm_type,
-                                                                QScheme::NoQuantize));
-        hidden = move(decoder_input.output);
+                                                                qscheme));
+        hidden = std::move(decoder_input.output);
     }
 
     // prepare resources for all layers
@@ -244,8 +257,10 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     for (int i = 0; i < layer_num; ++i) {
         const auto& layer = weights_.layers[i];
 
-        auto attn_out_buf = device_->allocateBuffer({hidden->type(), hidden->shape()}, {"attn_out_buf"});
-        auto residual = hidden;
+        // here hidden->dtype maybe int8, so use dytpe of embedding lookup result instead
+        auto attn_out_buf = device_->allocateBuffer({dtype, hidden->shape()}, {"attn_out_buf"});
+        auto residual = pre_decoder_residual ? pre_decoder_residual : hidden;
+        printBufferData(*residual, "in residual");
         BufferPtr residual2 = nullptr;
         if (layer.pre_layernorm) {
             residual = device_->clone({*hidden, AllocationType::DEVICE, {"residual"}});
@@ -261,12 +276,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                             false,
                                                                             norm_type,
                                                                             qscheme));
-            hidden = move(pre_layernorm_output.output);
-        } else if (qscheme == QScheme::Qint8PerChannelLastAxis) {
-            FT_CHECK_WITH_INFO(layer.pre_attention_smoother_weight->kernel != nullptr, "smooth kernel should not be nullptr");
-            auto quantized_output = device_->quantize(QuantizeParams(
-                *hidden, *(layer.pre_attention_smoother_weight->kernel), std::nullopt, DataType::TYPE_QINT8, 1));
-            hidden = move(quantized_output);
+            hidden = std::move(pre_layernorm_output.output);
         }
 
         if (kv_cache_offset) {
@@ -287,9 +297,10 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             layer.self_attention_weights,
             attention_common_inputs,
             device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
-            {description_.layernorm_eps, description_.norm_type}
+            {description_.layernorm_eps, description_.norm_type},
+            qscheme
         }));
-        auto attn_hidden = move(attn_output.hidden_states);
+        auto attn_hidden = std::move(attn_output.hidden_states);
         if (device_props_.tp_size > 1) {
             device_->allReduce({attn_hidden, ReduceOp::Sum});
         }
@@ -298,6 +309,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         if (layer.post_layernorm) {
             // attn_hidden = attn_hidden + residual
             // hidden = layernorm(attn_hidden)
+            printBufferData(*residual, "post layernorm residual");
             auto post_layernorm_params = LayernormParams(attn_hidden,
                                                          attn_hidden,
                                                          ft::mayGetRef(layer.post_layernorm),
@@ -349,7 +361,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             description_.ffn_conf,
             layer.ffn_weights,
             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
-            lora_input
+            lora_input,
+            qscheme
         }));
         hidden = ffn_output.hidden_states;
         if (device_props_.tp_size > 1) {
@@ -359,17 +372,17 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         // TODO: maybe move this layernorm to ffn layer
         auto ffn_layernorm_output = device_->layernorm(LayernormParams(hidden,
-                                                                       nullptr,
+                                                                       pre_decoder_residual,
                                                                        ft::mayGetRef(layer.post_ffn_layernorm),
                                                                        device_props_.ffn_fuse_add_residual ? nullopt : (OptionalConstBufferRef)*residual,
                                                                        (residual2 == nullptr) ? nullopt : (OptionalConstBufferRef)*residual2,
                                                                        ft::mayGetRef(WEIGHT_MAY_GET_BIAS(layer.ffn_weights.down_weight)),
                                                                        1.0f,
                                                                        norm_eps,
-                                                                       true,
+                                                                       true,                                                                       
                                                                        false,
                                                                        norm_type,
-                                                                       QScheme::NoQuantize));
+                                                                       i == layer_num - 1 ? QScheme::NoQuantize: qscheme));
         hidden = std::move(ffn_layernorm_output.output);
         printBufferData(*hidden, "layer_" + to_string(i) + "_final_hidden");
     }

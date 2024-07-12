@@ -103,6 +103,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     // attention layer output is preallocated to avoid memory fragmentation
     // note that this output is returned and further used as residual
     auto dtype = (input.isQBuffer() ? qkv->type() : input.type());
+    auto qscheme = params.qscheme;
     auto output = params.output ? params.output
                 : allocateBuffer({dtype, {h_token_num, output_weight->kernel->shape()[1]}},
                                  {"attn_layer_out"});
@@ -129,17 +130,43 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     printBufferData(*qkv_output, "qkv_output");
 
     if(params.weights.smoother_weight) {
-        OptionalConstBufferRef shift_weight = (params.weights.shift_weight == nullptr) ?
-                                               nullopt :
-                                               (OptionalConstBufferRef)*params.weights.shift_weight->kernel;
+        OptionalConstBufferRef smoother_weight =
+            params.weights.smoother_weight ? (OptionalConstBufferRef) * (params.weights.smoother_weight->kernel) :
+                                             std::nullopt;
 
-        auto qkv_output_ = quantize({*qkv_output,
+        OptionalConstBufferRef shift_weight = (params.weights.shift_weight == nullptr) ?
+                                                  nullopt :
+                                                  (OptionalConstBufferRef)*params.weights.shift_weight->kernel;
+
+        OptionalConstBufferRef static_scale_weight =
+            params.weights.static_quant_weight ?
+                (OptionalConstBufferRef) * (params.weights.static_quant_weight->kernel) :
+                std::nullopt;
+
+        OptionalConstBufferRef static_scale_reciprocal_weight =
+            params.weights.static_scale_reciprocal_weight ?
+                (OptionalConstBufferRef) * (params.weights.static_scale_reciprocal_weight->kernel) :
+                std::nullopt;
+
+        auto quant_params = QuantizeParams(
+            *qkv_output,
+            DataType::TYPE_QINT8,
+            1,
+            params.qscheme,
+            smoother_weight,
+            shift_weight,
+            static_scale_weight,
+            static_scale_reciprocal_weight);
+
+        BufferPtr quantized_attention_output = quantize(quant_params);
+
+        auto quantized_attention_output = quantize({*qkv_output,
                                      *params.weights.smoother_weight->kernel,
                                      shift_weight,
                                      DataType::TYPE_QINT8,
                                      1});
 
-        auto output_gemm_params = GemmParams(*qkv_output_, *(output_weight->kernel), nullopt, output);
+        auto output_gemm_params = GemmParams(*quantized_attention_output, *(output_weight->kernel), nullopt, output);
         loraLinear(LoraLinearParams(output_gemm_params,
                                     *(params.weights.output_lora_weights),
                                     params.common.lora_input)).output;
@@ -149,8 +176,8 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                     *(params.weights.output_lora_weights),
                                     params.common.lora_input)).output;
     }
-
-    return {move(output)};
+    
+    return {std::move(output)};
 }
 
 }; // namespace fastertransformer

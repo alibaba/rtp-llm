@@ -21,7 +21,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             shared_expert_output = ffnLayer({params.input,
                                              params.configs,
                                              *(params.weights.shared_expert),
-                                             params.residual}).hidden_states;
+                                             params.residual, params.qscheme}).hidden_states;
 
             // for qwen moe
             // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
@@ -64,10 +64,23 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                         mayGetRef(params.weights.act_scale)});
         }
 
-        if (params.weights.smoother_weight != nullptr) {
-            up_output = quantize(QuantizeParams(
-                *up_output, *(params.weights.smoother_weight->kernel),
-                std::nullopt, DataType::TYPE_QINT8, 1));
+        if (params.qscheme != QScheme::NoQuantize) {
+            auto quant_params = QuantizeParams(
+                *up_output,
+                DataType::TYPE_QINT8,
+                1,
+                params.qscheme,
+                params.weights.smoother_weight ? (OptionalConstBufferRef) * (params.weights.smoother_weight->kernel) :
+                                                 std::nullopt,
+                std::nullopt,
+                params.weights.intermediate_weight2_static_scale_weight ?
+                    (OptionalConstBufferRef) * (params.weights.intermediate_weight2_static_scale_weight->kernel) :
+                    std::nullopt,
+                params.weights.intermediate_weight2_static_scale_reciprocal_weight ?
+                    (OptionalConstBufferRef)
+                        * (params.weights.intermediate_weight2_static_scale_reciprocal_weight->kernel) :
+                    std::nullopt);
+            up_output = quantize(quant_params);
         }
 
         printBufferData(*up_output, "ffn_act");
@@ -83,7 +96,8 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         }).output;
     }
 
-    return FfnLayerOutput({move(output)});
+    printBufferData(*output, "ffn_out");
+    return FfnLayerOutput({std::move(output)});
 }
 
 }; // namespace fastertransformer

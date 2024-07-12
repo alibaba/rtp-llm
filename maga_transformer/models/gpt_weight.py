@@ -1,3 +1,4 @@
+import functools
 from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, \
     ModelDeployWeightInfo, CkptWeightInfo, \
     identity, transpose, trans_qkv, trans_qkv_b

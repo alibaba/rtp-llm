@@ -115,7 +115,7 @@ class ModelWeightsLoader:
             self._lora_log.dump()
 
     def load_weights_from_scratch(self, device: str, num_process=1):
-        weights = ModelWeights(self._num_layers, device)
+        weights = ModelWeights(self._num_layers, device, self._data_type)
         if num_process > 1:
             ctx = multiprocessing.get_context('spawn')
             with ctx.Pool(num_process) as pool:
@@ -291,6 +291,8 @@ class ModelWeightsLoader:
         load_weight(W.sq_quant_scales, torch.float32)
         if self._weights_info._quant_algo.isOmniQuant():
             load_weight(W.sq_quant_shifts, torch.float32)
+        if self._weights_info._quant_algo.isPerTensorQuant():            
+            load_weight(W.static_quant_scales, torch.float32)
         return results
 
     def _load_layer_weight_and_apply_int8(self, layer_weights, layer_id: int, device: str):
@@ -389,7 +391,7 @@ class ModelWeightsLoader:
         quant_algo = self._weights_info._quant_algo
         if quant_algo.isGroupwise():
             results.extend(self._load_groupwise_layer_weight(layer_weights, layer_id=layer_id, device=device))
-        elif quant_algo.isSmoothQuant() or quant_algo.isOmniQuant():
+        elif quant_algo.isSmoothQuant() or quant_algo.isOmniQuant() or quant_algo.isPerTensorQuant():
             results.extend(self._load_int8_layer_weight(layer_weights, layer_id=layer_id, device=device))
         elif quant_algo.isWeightOnlyPerCol():
             results.extend(self._load_layer_weight_and_apply_int8(layer_weights, layer_id=layer_id, device=device))
@@ -607,17 +609,18 @@ class ModelWeightsLoader:
 
         return after_merge_tensor
 
-    def _load_and_convert_tensor(self, weight_info: WeightInfo, layer_id: Optional[int] = None, datatype: str = torch.float16):
+    def _load_and_convert_tensor(self, weight_info: WeightInfo, layer_id: Optional[int] = None, datatype: torch.dtype = torch.float16):
+        convert_type = datatype if weight_info.data_type is None else weight_info.data_type
         before_merge_tensors = []
         self._weight_log.record_loaded_tensor(weight_info.name)
         for ckpt_weight in weight_info.weights:
             name = ckpt_weight.tensor_name(layer_id)
             try:
-                before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(name, datatype)))
+                before_merge_tensors.append(ckpt_weight.merge_fun(self.load_tensor(name, convert_type)))
             except Exception as e:
                 raise Exception('load %s failed, except: %s' % (name, str(e)))
 
-        after_merge_tensor = weight_info.process_fun(before_merge_tensors).to(datatype)
+        after_merge_tensor = weight_info.process_fun(before_merge_tensors).to(convert_type)
         return after_merge_tensor
 
     def _split_and_sanitize_tensor(self, tensor: torch.Tensor, weight: WeightInfo):
@@ -641,7 +644,7 @@ class ModelWeightsLoader:
 
     # 避免被 storage 影响多用显存
     def _sanitize(self, t):
-        return t.contiguous().clone().to(self._data_type)
+        return t.contiguous().clone()
 
 def estimate_load_parallel_num(config, tp_size):
     parallel_num = os.environ.get('LOAD_CKPT_NUM_PROCESS', None)

@@ -13,7 +13,7 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
     }
 
     if (buffer.isQBuffer()) {
-        printf("skip QBuffer [%s]: %s", hint.c_str(), buffer.debugString().c_str());
+        printf("skip QBuffer [%s]: %s \n", hint.c_str(), buffer.debugString().c_str());
         return;
     }
 

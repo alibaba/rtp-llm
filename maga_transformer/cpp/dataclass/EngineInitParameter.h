@@ -96,7 +96,9 @@ private:
     ft::LayerNormWeightsPtr
     mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
                               const std::string& gamma_key,
-                              const std::string& beta_key = "");
+                              const std::string& beta_key = "",
+                              const std::string& scale_key = "",
+                              const std::string& scale_reciprocal_key = "");
 
     ft::FfnLayerWeights
     createFfnWeights(const ConstBufferPtrMap& map);

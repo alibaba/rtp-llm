@@ -7,6 +7,7 @@ namespace fastertransformer {
 enum QScheme : size_t {
     NoQuantize = 0,
     Qint8PerChannelLastAxis,
+    Qint8PerTensor
 };
 
 class QBuffer final : public Buffer {

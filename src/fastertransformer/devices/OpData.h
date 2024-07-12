@@ -144,7 +144,7 @@ struct LayernormParams {
                     double eps = 1e-5,
                     bool is_inplace = true,
                     bool return_normed_output = false,
-                    NormType norm_type = NormType::layernorm,
+                    NormType norm_type = NormType::layernorm,                    
                     QScheme qscheme = QScheme::NoQuantize) :
                     input(std::move(input)),
                     before_norm_output(std::move(before_norm_output)),
@@ -386,6 +386,7 @@ struct AttentionLayerParams {
     AttentionCommonInputs&          common;
     const OptionalConstBufferRef    residual; // for intel xft
     const LayerNormConfig           ln_params;
+    const QScheme                   qscheme;
 };
 
 struct MoeConfigs {
@@ -407,17 +408,13 @@ struct FfnLayerOutput {
 };
 
 struct FfnLayerParams {
-    FfnLayerParams(const Buffer& input,
-                   const FfnConfigs& configs,
-                   const FfnLayerWeights& weights,
+    FfnLayerParams(const Buffer&                input,
+                   const FfnConfigs&            configs,
+                   const FfnLayerWeights&       weights,
                    const OptionalConstBufferRef residual = std::nullopt,
-                   const OptionalLoraInput lora_input = std::nullopt) :
-    input(input),
-    configs(configs),
-    weights(weights),
-    residual(residual),
-    lora_input(lora_input)
-    {}
+                   const OptionalLoraInput lora_input = std::nullopt,
+                   const QScheme                qscheme  = QScheme::NoQuantize):
+        input(input), configs(configs), weights(weights), residual(residual), lora_input(lora_input), qscheme(qscheme) {}
 
     const Buffer& input;
 
@@ -427,6 +424,8 @@ struct FfnLayerParams {
     const OptionalConstBufferRef residual; // for intel xft
 
     const OptionalLoraInput lora_input;
+
+    const QScheme qscheme;
 };
 
 struct GreedyParams {
@@ -532,31 +531,51 @@ struct QuantizeParams {
     const Buffer&           input;
     DataType                qtype;
     size_t                  axis;
-    OptionalConstBufferRef  scales;
-    OptionalConstBufferRef  zeros;
-
+    QScheme                 qscheme;
 
     // for soomth quantize
     OptionalConstBufferRef  smoother;
     OptionalConstBufferRef  shift;
 
-    QuantizeParams(const Buffer& input,
-                   DataType qtype,
-                   size_t axis) :
-                   input(input),
-                   qtype(qtype),
-                   axis(axis) {}
+    // for static quantize
+    OptionalConstBufferRef  static_scale;
+    OptionalConstBufferRef  static_scale_reciprocal;
 
-    QuantizeParams(const Buffer& input,
+    QuantizeParams(const Buffer&          input,
+                   DataType               qtype,
+                   size_t                 axis,
+                   QScheme                qscheme,
                    OptionalConstBufferRef smoother,
                    OptionalConstBufferRef shift,
-                   DataType qtype,
-                   size_t axis) :
-                   input(input),
-                   qtype(qtype),
-                   axis(axis),
-                   smoother(smoother),
-                   shift(shift) {}
+                   OptionalConstBufferRef static_scale,
+                   OptionalConstBufferRef static_scale_reciprocal):
+        input(input),
+        qtype(qtype),
+        axis(axis),
+        qscheme(qscheme),
+        smoother(smoother),
+        shift(shift),
+        static_scale(static_scale),
+        static_scale_reciprocal(static_scale_reciprocal) {}
+
+    QuantizeParams(const Buffer& input, DataType qtype, size_t axis): input(input), qtype(qtype), axis(axis) {}
+
+    // static QuantizeParams createQuantParams(const Buffer& input, OptionalConstBufferRef smoother, OptionalConstBufferRef shift, OptionalConstBufferRef static_quant, QScheme qscheme, DataType qtype, size_t axis) {
+    //     if (qscheme == QScheme::NoQuantize) {
+    //         FT_CHECK_WITH_INFO(shift == std::nullopt && smoother == std::nullopt && static_quant == std::nullopt, "check NoQuantize buffer error");
+    //         return QuantizeParams(input, qtype, axis, QScheme::NoQuantize, std::nullopt, std::nullopt, std::nullopt);
+    //     } else if (qscheme ==QScheme::Qint8PerChannelLastAxis) {
+    //         FT_CHECK_WITH_INFO(static_quant == std::nullopt && smoother != std::nullopt, "check Qint8PerChannelLastAxis buffer error");
+    //         return QuantizeParams(input, qtype, axis, QScheme::Qint8PerChannelLastAxis, smoother, shift, std::nullopt);
+    //     } else if (qscheme == QScheme::Qint8PerTensor) {
+    //         FT_CHECK_WITH_INFO(static_quant != std::nullopt && smoother == std::nullopt && shift == std::nullopt, "check Qint8PerChannelLastAxis buffer error");
+    //         return QuantizeParams(input, qtype, axis, QScheme::Qint8PerChannelLastAxis, smoother, shift, std::nullopt);
+    //     }        
+    // }
+
+    // static QuantizeParams createStaticQuantParams(const Buffer& input, OptionalConstBufferRef static_quant, DataType qtype, size_t axis) {
+    //     return QuantizeParams(input, qtype, axis, QScheme::Qint8PerTensor, std::nullopt, std::nullopt, static_quant);
+    // }
 
 };
 

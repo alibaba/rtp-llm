@@ -311,7 +311,7 @@ __global__ void generalLayerNorm(T* output, T* normed_output, const T* input, co
     {
         // const T val = input[bidx * n_elems + i];
         const int index = bidx * n_elems + i;
-        T val = cuda_cast<T>(0.0f);
+        T val = input[index];
         // const T val = input[index];
         if (IS_BIAS)
         {
@@ -321,22 +321,9 @@ __global__ void generalLayerNorm(T* output, T* normed_output, const T* input, co
         {
             val = add(val, ldg(&residual[index]));
         }
-        if (IS_OUTPUT)
+        if (IS_OUTPUT && !RETURN_NORMED_OUTPUT)
         {
-            T in_val;
-            if (with_per_tensor_scaling)
-            {
-                in_val = cuda_cast<T>(cuda_cast<float_packed_t>(reinterpret_cast<const Int32_Packed_T*>(input)[index])
-                    * scale_orig_quant);
-            }
-            else
-            {
-                in_val = input[index];
-            }
-            val = add(val, in_val);
-            if (!RETURN_NORMED_OUTPUT) {
-                output[index] = val;
-            }
+            output[index] = val;
         }
         shmem[i] = val;
 
@@ -398,6 +385,7 @@ __global__ void generalLayerNorm(T* output, T* normed_output, const T* input, co
         if (RETURN_NORMED_OUTPUT && IS_OUTPUT) {
             output[index] = val;
         }
+
         if (with_per_token_scaling)
         {
             amax = cuda_max(cuda_max<T_scalar, T>(cuda_abs(val)), amax);
@@ -573,7 +561,7 @@ void dispatch_layernorm_output(T* output, T* normed_output, const T* input, cons
 }
 
 template <typename T>
-void invokeGeneralLayerNorm(T* out, const T* input, const T* gamma, const T* beta, const float eps, const int tokens,
+void invokeGeneralLayerNorm(T* out, T* normed_output, const T* input, const T* gamma, const T* beta, const float eps, const int tokens,
     const int hidden_dim, cudaStream_t stream, bool use_diff_of_squares, const float* scale, float* dynamic_scale,
     int8_t* out_quant, bool return_normed_output)
 {
@@ -594,15 +582,15 @@ void invokeGeneralLayerNorm(T* out, const T* input, const T* gamma, const T* bet
     if (use_vec_type)
     {
         using Tp = typename packed_as<T, vec_size>::type;
-        dispatch_layernorm_output(reinterpret_cast<Tp*>(out), reinterpret_cast<Tp*>(out),
-            reinterpret_cast<const Tp*>(out), (const Tp*) nullptr, reinterpret_cast<const Tp*>(input),
+        dispatch_layernorm_output(reinterpret_cast<Tp*>(out), reinterpret_cast<Tp*>(normed_output),
+            reinterpret_cast<const Tp*>(input), (const Tp*) nullptr, (const Tp*) nullptr,
             reinterpret_cast<const Tp*>(gamma), reinterpret_cast<const Tp*>(beta), eps, tokens, hidden_dim, scale,
-            dynamic_scale, out_quant, grid, block, shmem_size, stream, use_diff_of_squares, false, return_normed_output);
+            dynamic_scale, out_quant, grid, block, shmem_size, stream, use_diff_of_squares, out != nullptr, return_normed_output);
     }
     else
     {
-        dispatch_layernorm_output(out, out, (const T*) out, (const T*) nullptr, input, gamma, beta, eps, tokens,
-            hidden_dim, scale, dynamic_scale, out_quant, grid, block, shmem_size, stream, use_diff_of_squares, false, return_normed_output);
+        dispatch_layernorm_output(out, normed_output, (const T*) input, (const T*) nullptr, (const T*) nullptr, gamma, beta, eps, tokens,
+            hidden_dim, scale, dynamic_scale, out_quant, grid, block, shmem_size, stream, use_diff_of_squares, out != nullptr, return_normed_output);
     }
 }
 
@@ -641,9 +629,9 @@ void invokeGeneralAddBiasResidualLayerNorm(T* out, T* norm_output, const T* inpu
     }
 }
 
-#define INSTANTIATE_GENERAL_LAYERNORM(T)                                                                               \
-    template void invokeGeneralLayerNorm(T* out, const T* input, const T* gamma, const T* beta, const float eps,       \
-        const int tokens, const int hidden_dim, cudaStream_t stream, bool use_diff_of_squares, const float* scale,     \
+#define INSTANTIATE_GENERAL_LAYERNORM(T)                                                                                                 \
+    template void invokeGeneralLayerNorm(T* out, T* normed_output, const T* input, const T* gamma, const T* beta, const float eps,       \
+        const int tokens, const int hidden_dim, cudaStream_t stream, bool use_diff_of_squares, const float* scale,                       \
         float* dynamic_scale, int8_t* out_quant, bool return_normed_output);
 
 INSTANTIATE_GENERAL_LAYERNORM(float);

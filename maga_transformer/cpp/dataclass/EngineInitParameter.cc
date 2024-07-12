@@ -38,12 +38,16 @@ WeightsConverter::mayFindBuffer(const ConstBufferPtrMap& map,
 ft::LayerNormWeightsPtr
 WeightsConverter::mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
                                             const std::string& gamma_key,
-                                            const std::string& beta_key)
+                                            const std::string& beta_key, 
+                                            const std::string& scale_key,
+                                            const std::string& scale_reciprocal_key)
 {
     if (map.count(gamma_key) > 0) {
         const auto layer_norm_weights = new LayerNormWeights();
         layer_norm_weights->gamma     = mayFindBuffer(map, gamma_key);
         layer_norm_weights->beta      = mayFindBuffer(map, beta_key);
+        layer_norm_weights->static_scale = mayFindBuffer(map, scale_key);
+        layer_norm_weights->static_scale_reciprocal = mayFindBuffer(map, scale_reciprocal_key);
         return unique_ptr<const LayerNormWeights>(layer_norm_weights);
     }
     return nullptr;
@@ -129,7 +133,10 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
     ffn_weights.smoother_weight = mayCreateDenseWeights(map, W::ffn_smoother);
     ffn_weights.act_scale       = mayFindBuffer(map, W::ffn_act_s);
 
-    // this is a moe layer
+    ffn_weights.intermediate_weight2_static_scale_weight = mayCreateDenseWeights(map, W::ffn_intermediate_weight2_s);
+    ffn_weights.intermediate_weight2_static_scale_reciprocal_weight = mayCreateDenseWeights(map, W::ffn_intermediate_weight2_sr);
+
+    // for qwen moe
     if (ffn_weights.moe_gating_weight) {
         // this moe layer has a parallel dense ffn layer as shared expert.
         if (ffn_weights.up_weight) {
@@ -185,6 +192,8 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
 
     attention_weights.qkv_lora_weights = std::make_shared<LoraWeightsMap>();
     attention_weights.output_lora_weights = std::make_shared<LoraWeightsMap>();
+    attention_weights.static_quant_weight = mayCreateDenseWeights(map, W::attention_output_s);
+    attention_weights.static_scale_reciprocal_weight = mayCreateDenseWeights(map, W::attention_output_sr);
 
     return attention_weights;
 }
@@ -264,7 +273,9 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
                                                                   W::prefix_w);
     gpt_weights.pre_decoder_layernorm = mayCreateLayerNormWeights(*global_weight,
                                                                    W::pre_decoder_ln_gamma,
-                                                                   W::pre_decoder_ln_beta);
+                                                                   W::pre_decoder_ln_beta,
+                                                                   W::pre_decoder_ln_s,
+                                                                   W::pre_decoder_ln_static_sr);
     gpt_weights.position_encoding = mayCreateDenseWeights(*global_weight,
                                                            W::wpe);
     gpt_weights.token_type_embedding = mayCreateDenseWeights(*global_weight,
@@ -282,15 +293,21 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
         layer_ws.pre_attention_smoother_weight = mayCreateDenseWeights(layer_weights, W::attn_i_smoother);
         layer_ws.pre_layernorm = mayCreateLayerNormWeights(layer_weights,
                                                                W::pre_ln_gamma,
-                                                               W::pre_ln_beta);
+                                                               W::pre_ln_beta,
+                                                               W::pre_ln_s,
+                                                               W::pre_ln_sr);
 
         layer_ws.post_ffn_layernorm = mayCreateLayerNormWeights(layer_weights,
                                                                     W::post_ffn_ln_gamma,
-                                                                    W::post_ffn_ln_beta);
+                                                                    W::post_ffn_ln_beta,
+                                                                    W::post_ffn_ln_s,
+                                                                    W::post_ffn_ln_sr);
 
         layer_ws.post_layernorm = mayCreateLayerNormWeights(layer_weights,
                                                                 W::post_ln_gamma,
-                                                                W::post_ln_beta);
+                                                                W::post_ln_beta,
+                                                                W::post_ln_s,
+                                                                W::post_ln_sr);
 
         layer_ws.post_layernorm_2 = mayCreateLayerNormWeights(layer_weights, W::post_ln_2_gamma, W::post_ln_2_beta);
 

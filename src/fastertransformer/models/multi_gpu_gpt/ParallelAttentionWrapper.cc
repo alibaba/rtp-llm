@@ -279,6 +279,7 @@ T* ParallelAttentionWrapper<T>::prepareDenseGemmInput(const int         h_token_
     T* qkv_buf_3_input = nullptr;
     if (attention_weights->attention_layernorm.gamma && attention_weights->attention_layernorm.beta) {
         invokeGeneralLayerNorm(qkv_buf_,
+                                (T*)nullptr,
                                qkv_buf_2_,
                                attention_weights->attention_layernorm.gamma,
                                attention_weights->attention_layernorm.beta,

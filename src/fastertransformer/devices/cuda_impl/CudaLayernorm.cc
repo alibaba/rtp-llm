@@ -1,6 +1,7 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
+#include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/kernels/rmsnormKernels.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/add_residual_kernels.h"
@@ -21,20 +22,41 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     auto norm_weight = params.norm_weight;
     const auto& gamma = norm_weight ? norm_weight->get().gamma.get()->data() : nullptr;
     const auto& beta = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
+    const auto& static_scale = (norm_weight && norm_weight->get().static_scale) ? norm_weight->get().static_scale.get()->data() : nullptr;        
     const auto norm_type = params.norm_type;
     const auto eps = params.eps;
+    printBufferData(*(norm_weight->get().gamma.get()), "gamma");
+    printBufferData(*(norm_weight->get().beta.get()), "beta");
+    if (norm_weight->get().static_scale.get() != nullptr) {
+        printBufferData(*(norm_weight->get().static_scale.get()), "static_scale");        
+    }    
 
     if (!params.is_inplace && params.qscheme == QScheme::NoQuantize) {
         norm_output = allocateBufferLike(*params.input);
-    } else if (params.qscheme == Qint8PerChannelLastAxis) {
+    } else if (params.qscheme != QScheme::NoQuantize) {
         auto kernel = allocateBuffer({DataType::TYPE_INT8,
                                             {input->shape()},
                                             AllocationType::DEVICE},
                                             {"kernel"});
-        auto scales = allocateBuffer({DataType::TYPE_FP32,
-                                        {input->shape()[1]},
-                                        AllocationType::DEVICE},
-                                        {"scales"});
+        BufferPtr scales;
+        // when QScheme::Qint8PerChannelLastAxis the scale is created by layernorm kernel
+        if (params.qscheme == QScheme::Qint8PerChannelLastAxis) {
+            scales = allocateBuffer({DataType::TYPE_FP32,
+                                            {input->shape()[1]},
+                                            AllocationType::DEVICE},
+                                            {"scales"});
+        // when QScheme::Qint8PerTensor, the scale is from ckpt
+        } else if (params.qscheme == QScheme::Qint8PerTensor){
+            FT_CHECK_WITH_INFO(norm_weight && norm_weight->get().static_scale_reciprocal, "static_scale_reciprocal should not be None");
+            scales = BufferPtr(new Buffer(
+                norm_weight->get().static_scale_reciprocal->where(),
+                norm_weight->get().static_scale_reciprocal->type(),
+                norm_weight->get().static_scale_reciprocal->shape(),
+                norm_weight->get().static_scale_reciprocal->data()
+            ));
+        } else {
+            FT_CHECK_WITH_INFO(false, "unknown qscheme type : %d", int(params.qscheme));
+        }
         norm_output = BufferPtr(new QBuffer(std::move(kernel),
                                             std::move(scales),
                                             std::move(BufferPtr(
@@ -43,7 +65,9 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                                                 {0},
                                                 nullptr)))));
         quant_output = std::dynamic_pointer_cast<QBuffer>(norm_output)->kernel().data<int8_t>();
-        scales_ptr = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
+        if (params.qscheme == QScheme::Qint8PerChannelLastAxis) {
+            scales_ptr = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();   
+        }        
     }
 
     if (params.stride != 0) {
@@ -64,7 +88,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     }
 
     if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {
-        // TODO(lidongjin) 
+        // TODO(lidongjin)
         // we can merge invokeAddBiasResidual and invokeAlphaAddBiasResidual into a singel func.
         if (params.alpha == 0.f || params.bias.has_value() || params.residual1.has_value() || params.residual2.has_value()) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeAddBiasResidual,
@@ -111,15 +135,20 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 n,
                 stream_,
                 true, // use_diff_of_squares
-                nullptr, // scale
+                (float*)static_scale,
                 scales_ptr, // dynamic_scale
                 quant_output, // out_quant
                 params.return_normed_output
             );
             sync_check_cuda_error();
+            if (quant_output != nullptr) {
+                // print_bsd(-1, "layernorm kernel", quant_output, 1, m, n, 0, n);
+                // print_bsd(-1, "layernorm scale", static_scale, 1, 1, 1, 0, 1);
+            }
             return LayernormOutput({norm_output, params.before_norm_output});
         } else {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeGeneralLayerNorm,
+                params.before_norm_output == nullptr ? nullptr: params.before_norm_output->data(),
                 norm_output->data(),
                 input->data(),
                 gamma,
@@ -129,7 +158,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 n,
                 stream_,
                 true, // use_diff_of_squares
-                nullptr, // scale
+                (float*)static_scale,
                 scales_ptr, // dynamic_scale
                 quant_output, // out_quant
                 params.return_normed_output
@@ -153,7 +182,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                                             m,
                                             n,
                                             stream_,
-                                            nullptr, // scale
+                                            (float*)static_scale, // scale
                                             scales_ptr, // dynamic_scale
                                             quant_output // out_quant
                                         );
@@ -169,7 +198,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 m,
                 n,
                 stream_,
-                nullptr, // scale
+                (float*)static_scale, // scale
                 scales_ptr, // dynamic_scale
                 quant_output // out_quant
             );
@@ -177,7 +206,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
             return LayernormOutput({norm_output, params.before_norm_output});
         }
     }
-    
+
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
