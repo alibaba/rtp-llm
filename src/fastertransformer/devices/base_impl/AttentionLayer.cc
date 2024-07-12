@@ -27,7 +27,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         const auto &shape = kv_cache_offset.value().get().shape();
         RUNTIME_ASSERT_OP_ARG(
             ((shape.size() == 2) && (shape[0] == input_lengths.shape()[0])),
-            "kv_cache_offset shape in attention layer should be [batch_size, 2, block_length]"
+            "kv_cache_offset shape in attention layer should be [batch_size, block_length]"
             ", but got %s", kv_cache_offset.value().get().debugString().c_str());
         RUNTIME_ASSERT_OP_ARG(
                 params.common.k_cache_buffer.has_value() && params.common.v_cache_buffer.has_value(),

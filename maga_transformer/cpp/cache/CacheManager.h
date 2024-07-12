@@ -55,7 +55,7 @@ public:
     std::tuple<bool, KVCacheBlockAddr, int> mallocWithCache(int want_block_nums, const std::vector<int>& token_ids);
     std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     void                                    reserveBlocks(int nums);
-    void                                    incrBlockRefCounter(const std::vector<int>& pointers);
+    void                                    incrBlockRefCounter(const std::vector<int>& indices);
 
     void free(const std::vector<KVCacheBlockAddr>& resource);
     void free(const std::vector<int>& indice);

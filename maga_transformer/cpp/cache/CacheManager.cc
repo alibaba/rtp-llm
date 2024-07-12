@@ -283,8 +283,8 @@ void CacheManager::insertIntoCache(const std::vector<int>& block_indices,
     }
 }
 
-void CacheManager::incrBlockRefCounter(const std::vector<int>& pointers) {
-    block_ref_counter_.incrementRefCounter(pointers);
+void CacheManager::incrBlockRefCounter(const std::vector<int>& indices) {
+    block_ref_counter_.incrementRefCounter(indices);
 }
 
 void CacheManager::setKVBlockValue(int kindex, int vindex, ft::BufferPtr& k_value, ft::BufferPtr& v_value) {
