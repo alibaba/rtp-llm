@@ -31,12 +31,13 @@ std::vector<float> get_slopes(int n) {
     } else {
         int closest_power_of_2 = std::pow(2, std::floor(std::log2(n)));
         auto slopes = get_slopes_power_of_2(closest_power_of_2);
-        auto extra_slopes = get_slopes(2 * closest_power_of_2);
+        auto extra_slopes = get_slopes_power_of_2(2 * closest_power_of_2);
         
         for (size_t i = 0; i < extra_slopes.size(); i += 2) {
-            if (slopes.size() < static_cast<size_t>(n)) {
-                slopes.push_back(extra_slopes[i]);
+            if (slopes.size() >= static_cast<size_t>(n)) {
+                break;
             }
+            slopes.push_back(extra_slopes[i]);
         }
         return slopes;
     }
