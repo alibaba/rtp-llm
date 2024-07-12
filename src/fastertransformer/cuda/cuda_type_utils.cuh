@@ -22,7 +22,6 @@
 #endif
 #if USING_ROCM
 #include "src/fastertransformer/rocm/cuda_shims.h"
-using namespace fastertransformer::rocm;
 #endif
 
 #include "src/fastertransformer/cuda/cuda_bf16_fallbacks.cuh"
@@ -289,8 +288,8 @@ template<> __device__ inline float2 cuda_cast<float2, int16_t>(int16_t val) {
 }
 
 #ifdef ENABLE_BF16
-template<> __device__ inline __nv_bfloat16 cuda_cast(int32_t val) { return (__nv_bfloat16)static_cast<float>(val); }
-template<> __device__ inline __nv_bfloat16 cuda_cast(int8_t val) { return (__nv_bfloat16)static_cast<float>(val); }
+template<> __device__ inline __nv_bfloat16 cuda_cast(int32_t val) { return static_cast<float>(val); }
+template<> __device__ inline __nv_bfloat16 cuda_cast(int8_t val) { return static_cast<float>(val); }
 template<> __device__ inline int8_t cuda_cast(__nv_bfloat16 val) { return static_cast<float>(val); }
 
 template<>
@@ -312,7 +311,10 @@ template<> __device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, float2>(fl
 template<> __device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, int16_t>(int16_t val) {
     union { int8_t int8[2]; int16_t int16; };
     int16 = val;
-    return float22bf162({int8[0], int8[1]});
+    __nv_bfloat162 res;
+    res.x = cuda_cast<__nv_bfloat16>(int8[0]);
+    res.y = cuda_cast<__nv_bfloat16>(int8[1]);
+    return res;
 }
 
 template<> __device__ inline __nv_bfloat162 cuda_cast<__nv_bfloat162, half2>(half2 val) { return float22bf162(__half22float2(val)); }

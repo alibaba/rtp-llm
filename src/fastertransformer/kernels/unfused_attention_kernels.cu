@@ -662,7 +662,6 @@ __global__ void softmax_kernel_h2_v2(T*        attn_score,
     }
 }
 
-#if 1 //no need for softmax, amd using Flash Attention
 #define LAUNCH_MAKSED_SOFTMAX_(T_, ITEMS_PER_THREAD)                                                                   \
     block.x /= ITEMS_PER_THREAD;                                                                                       \
     block.x = (block.x + 31) / 32 * 32;                                                                                \
@@ -821,7 +820,6 @@ void invokeMaskedSoftmax(MaskedSoftmaxParam<__nv_bfloat16, __nv_bfloat16>& param
 
 #undef LAUNCH_MAKSED_SOFTMAX
 #undef LAUNCH_MAKSED_SOFTMAX_
-#endif
 
 template<typename T>
 __global__ void transpose(const T*     src,
@@ -2465,7 +2463,7 @@ INSTANTIATEADDHEAD3SIZEQKVBIAS(__nv_bfloat16);
 #endif
 #undef INSTANTIATEADDHEAD3SIZEQKVBIAS
 
-#if 0 //no need for softmax, amd using Flash Attention
+#if USING_CUDA
 /*******************  invokeMaskedSoftMaxWithRelPosBias  ***********************/
 
 // grid = (window_len/word_per_thread, window_num*num_head, batch_size)

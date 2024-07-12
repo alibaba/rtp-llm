@@ -18,7 +18,15 @@
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/utils/assert_utils.h"
 
-namespace fastertransformer {
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
+
+// wont't support new features
+namespace fastertransformer{
+#if USING_ROCM
+using namespace rocm;
+#endif
 
 template<typename T, int RESIDUAL_NUM, typename T2 = T>
 __global__ void addBiasResidual(T*           output,

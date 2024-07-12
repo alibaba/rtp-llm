@@ -33,7 +33,7 @@ namespace fastertransformer {
     F(DataType::TYPE_BYTES, char); \
     F(DataType::TYPE_STR, std::string);
 
-#if 1
+#if USING_CUDA || USING_ROCM
 #define FT_FOREACH_DEVICE_TYPE(F) \
     F(DataType::TYPE_FP16, half); \
     F(DataType::TYPE_BF16, __nv_bfloat16);

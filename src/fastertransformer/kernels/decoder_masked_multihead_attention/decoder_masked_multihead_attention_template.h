@@ -784,19 +784,19 @@ inline __device__ void hmma_fp32(float4& c, const K_vec& a, K_vec b)
     // Not supported.
     assert(false);
 }
-
-// template<>
-// inline __device__ void hmma_fp32(float4& c, const uint32_t& a, uint32_t b)
-// {
-//     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 \n"
-//                  "    {%0, %1, %2, %3}, \n"
-//                  "    {%4, %5}, \n"
-//                  "    {%6}, \n"
-//                  "    {%0, %1, %2, %3}; \n"
-//                  : "+f"(c.x), "+f"(c.y), "+f"(c.z), "+f"(c.w)
-//                  : "r"(a), "r"(a), "r"(b));
-// }
-
+#if USING_CUDA
+template<>
+inline __device__ void hmma_fp32(float4& c, const uint32_t& a, uint32_t b)
+{
+    asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 \n"
+                 "    {%0, %1, %2, %3}, \n"
+                 "    {%4, %5}, \n"
+                 "    {%6}, \n"
+                 "    {%0, %1, %2, %3}; \n"
+                 : "+f"(c.x), "+f"(c.y), "+f"(c.z), "+f"(c.w)
+                 : "r"(a), "r"(a), "r"(b));
+}
+#endif
 template<>
 inline __device__ void hmma_fp32(float4& c, const uint2& a, uint2 b)
 {

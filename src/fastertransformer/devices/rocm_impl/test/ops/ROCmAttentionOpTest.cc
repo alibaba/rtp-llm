@@ -135,17 +135,29 @@ void ROCmAttentionOpTest::contextAttentionOpTest(
     common_inputs.decoder_max_seq_len = 0;
 
     auto buffer_nullptr = BufferPtr(nullptr);
-    auto attention_weight =
-        AttentionLayerWeights(std::make_unique<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device)));
+    auto attention_weight   = AttentionLayerWeights();
+    attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
-    auto attention_config = AttentionConfigs({num_heads, num_key_value_heads, head_dim, rope_config});
+    auto attention_config   = AttentionConfigs({num_heads,
+                                                num_key_value_heads,
+                                                head_dim,
+                                                rope_config});
 
-    auto qkv_output = device_->allocateBuffer({qkv_input_device->type(), {batch_size, seq_len, num_heads, head_dim}});
-    device_->contextAttention({*qkv_input_device, *qkv_output, common_inputs, attention_weight, attention_config});
+    auto qkv_output = device_->allocateBuffer(
+        {qkv_input_device->type(), {batch_size, seq_len, num_heads, head_dim}}
+    );
+    device_->contextAttention({*qkv_input_device,
+                               *qkv_output,
+                                common_inputs,
+                                attention_weight,
+                                attention_config});
 
-    auto result_ref = attention->forward(query_states_host, key_states_host, value_states_host, attention_mask_host);
+    auto result_ref = attention->forward(query_states_host,
+                                         key_states_host,
+                                         value_states_host,
+                                         attention_mask_host);
 
-    auto result = bufferToTensor(*qkv_output);
+    auto result  = bufferToTensor(*qkv_output);
     assertTensorClose(result_ref[6], result.to(result_ref[6].dtype()));
 }
 
@@ -240,20 +252,34 @@ void ROCmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     common_inputs.decoder_max_seq_len = step - 1;
 
     auto buffer_nullptr = BufferPtr(nullptr);
-    auto attention_weight =
-        AttentionLayerWeights(std::make_unique<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device)));
+    auto attention_weight = AttentionLayerWeights();
+    attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
     auto token_num = batch_size * seq_len;
 
-    auto attention_config = AttentionConfigs({num_heads, num_key_value_heads, head_dim, rope_config, tokensPerBlock});
+    auto attention_config   = AttentionConfigs({num_heads,
+                                                num_key_value_heads,
+                                                head_dim,
+                                                rope_config,
+                                                tokensPerBlock});
 
-    auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {token_num, num_heads, head_dim}});
-    device_->decoderSelfAttention({*qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config});
+    auto qkv_output = device_->allocateBuffer(
+        {qkv_states_device->type(), {token_num, num_heads, head_dim}}
+    );
+    device_->decoderSelfAttention({*qkv_states_device,
+                                    *qkv_output,
+                                    common_inputs,
+                                    attention_weight,
+                                    attention_config});
 
-    auto result_ref = attention->forward(
-        query_states_host, key_states_host, value_states_host, attention_mask_host, k_cache_host, v_cache_host);
+    auto result_ref = attention->forward(query_states_host,
+                                         key_states_host,
+                                         value_states_host,
+                                         attention_mask_host,
+                                         k_cache_host,
+                                         v_cache_host);
 
-    auto result = bufferToTensor(*qkv_output);
+    auto result  = bufferToTensor(*qkv_output);
     assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 1e-2);
 }
 

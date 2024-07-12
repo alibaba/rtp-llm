@@ -226,6 +226,7 @@ BufferPtr ROCmDevice::embeddingLookup(const EmbeddingLookupParams& params) {
 LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
     BufferPtr input = params.input;
     BufferPtr norm_output = input;
+    BufferPtr output = params.before_norm_output;
     float* scales_ptr = nullptr;
     int8_t* quant_output = nullptr;
     const auto data_type = input->type();
@@ -235,29 +236,51 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
     const auto& gamma = norm_weight ? norm_weight->get().gamma.get()->data() : nullptr;
     const auto& beta = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
     const auto norm_type = params.norm_type;
-    const auto data_type = input.type();
-    const auto m         = input.shape()[0];
-    const auto n         = input.shape()[1];
     const auto eps       = params.eps;
+    const auto& weights  = params.norm_weight;
+
+    if (!params.is_inplace && params.qscheme == QScheme::NoQuantize) {
+        norm_output = allocateBufferLike(*params.input);
+    } else if (params.qscheme == Qint8PerChannelLastAxis) {
+        auto kernel = allocateBuffer({DataType::TYPE_INT8,
+                                            {input->shape()},
+                                            AllocationType::DEVICE},
+                                            {"kernel"});
+        auto scales = allocateBuffer({DataType::TYPE_FP32,
+                                        {input->shape()[1]},
+                                        AllocationType::DEVICE},
+                                        {"scales"});
+        norm_output = BufferPtr(new QBuffer(std::move(kernel),
+                                            std::move(scales),
+                                            std::move(BufferPtr(
+                                                new Buffer(MemoryType::MEMORY_GPU,
+                                                DataType::TYPE_INVALID,
+                                                {0},
+                                                nullptr)))));
+        quant_output = std::dynamic_pointer_cast<QBuffer>(norm_output)->kernel().data<int8_t>();
+        scales_ptr = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
+    }
 
     if (!weights.has_value()) {
-        if (params.alpha.has_value() || (norm_type == NormType::alphanorm)) {
-            const auto alpha = params.alpha.value_or(1.0f);
+        if (params.alpha != 0 || (norm_type == NormType::alphanorm)) {
+            const auto alpha = params.alpha;
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
                                              invokeAlphaAddBiasResidual,
-                                             output.data(),
-                                             input.data(),
+                                             norm_output->data(),
+                                             input->data(),
                                              params.residual1 ? params.residual1.value().get().data() : nullptr,
                                              params.bias ? params.bias.value().get().data() : nullptr,
-                                             alpha,
+                                             params.alpha,
                                              m,
                                              n,
                                              stream_);
+            sync_check_cuda_error();
+            return LayernormOutput({std::move(norm_output), nullptr});
         } else if (params.bias.has_value() || params.residual1.has_value() || params.residual2.has_value()) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
                                              invokeAddBiasResidual,
-                                             output.data(),
-                                             input.data(),
+                                             output->data(),
+                                             input->data(),
                                              params.residual1 ? params.residual1.value().get().data() : nullptr,
                                              params.residual2 ? params.residual2.value().get().data() : nullptr,
                                              params.bias.has_value() ? params.bias.value().get().data() : nullptr,
@@ -266,6 +289,8 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                              m,
                                              n,
                                              stream_);
+            sync_check_cuda_error();
+            return LayernormOutput({std::move(norm_output), nullptr});
         } else {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
@@ -274,14 +299,16 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
     if (!(norm_type == NormType::layernorm || norm_type == NormType::rmsnorm)) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
+
     if (params.residual1.has_value() || params.bias.has_value()) {
-        const auto& add_bias_output = params.add_bias_output ? params.add_bias_output.value().get() : output;
+        //const auto& add_bias_output = params.bias ? params.bias.value() : output;
         if (params.norm_type == NormType::layernorm) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
                                              invokeGeneralAddBiasResidualLayerNorm,
-                                             add_bias_output.data(),
-                                             output.data(),
-                                             input.data(),
+                                             //add_bias_output.data(),
+                                             (params.before_norm_output == nullptr) ? input->data() : params.before_norm_output->data(),
+                                             norm_output->data(),
+                                             input->data(),
                                              params.bias ? params.bias.value().get().data() : nullptr,
                                              params.residual1 ? params.residual1.value().get().data() : nullptr,
                                              gamma,
@@ -292,15 +319,19 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                              stream_,
                                              true,     // use_diff_of_squares
                                              nullptr,  // scale
-                                             nullptr,  // dynamic_scale
-                                             nullptr   // out_quant
+                                             scales_ptr,  // dynamic_scale
+                                             quant_output,   // out_quant
+                                             params.return_normed_output
             );
+            sync_check_cuda_error();
+            return LayernormOutput({norm_output, params.before_norm_output});
         } else if (params.norm_type == NormType::rmsnorm) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
                                              invokeAddBiasResidualRmsNorm,
-                                             add_bias_output.data(),
-                                             output.data(),
-                                             input.data(),
+                                             //add_bias_output.data(),
+                                             (params.before_norm_output == nullptr) ? input->data() : params.before_norm_output->data(), // or null
+                                             norm_output->data(),
+                                             input->data(),
                                              params.bias ? params.bias.value().get().data() : nullptr,
                                              params.residual1 ? params.residual1.value().get().data() : nullptr,
                                              gamma,
@@ -310,34 +341,20 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                              n,
                                              stream_,
                                              nullptr,  // scale
-                                             nullptr,  // dynamic_scale
-                                             nullptr   // out_quant
-            );
-        } else {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeGeneralLayerNorm,
-                norm_output->data(),
-                input->data(),
-                gamma,
-                beta,
-                eps,
-                m,
-                n,
-                stream_,
-                true, // use_diff_of_squares
-                nullptr, // scale
-                scales_ptr, // dynamic_scale
-                quant_output, // out_quant
-                params.return_normed_output
+                                             scales_ptr,  // dynamic_scale
+                                             quant_output   // out_quant
             );
             sync_check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
+        } else {
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
     } else {
         if (params.norm_type == NormType::layernorm) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
                                              invokeGeneralLayerNorm,
-                                             output.data(),
-                                             input.data(),
+                                             norm_output->data(),
+                                             input->data(),
                                              gamma,
                                              beta,
                                              eps,
@@ -346,14 +363,17 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                              stream_,
                                              true,     // use_diff_of_squares
                                              nullptr,  // scale
-                                             nullptr,  // dynamic_scale
-                                             nullptr   // out_quant
+                                             scales_ptr,  // dynamic_scale
+                                             quant_output,   // out_quant
+                                             params.return_normed_output
             );
+            sync_check_cuda_error();
+            return LayernormOutput({norm_output, params.before_norm_output});
         } else if (params.norm_type == NormType::rmsnorm) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
                                              invokeGeneralRmsNorm,
-                                             output.data(),
-                                             input.data(),
+                                             norm_output->data(),
+                                             input->data(),
                                              gamma,
                                              beta,
                                              eps,
@@ -361,28 +381,15 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
                                              n,
                                              stream_,
                                              nullptr,  // scale
-                                             nullptr,  // dynamic_scale
-                                             nullptr   // out_quant
-            );
-        } else {
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeGeneralRmsNorm,
-                norm_output->data(),
-                input->data(),
-                gamma,
-                beta,
-                eps,
-                m,
-                n,
-                stream_,
-                nullptr, // scale
-                scales_ptr, // dynamic_scale
-                quant_output // out_quant
+                                             scales_ptr,  // dynamic_scale
+                                             quant_output   // out_quant
             );
             sync_check_cuda_error();
             return LayernormOutput({norm_output, params.before_norm_output});
+        } else {
+            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
         }
     }
-    
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
