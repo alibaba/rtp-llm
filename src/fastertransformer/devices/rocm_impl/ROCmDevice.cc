@@ -63,6 +63,8 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         hostAllocator_.reset(new TrackerAllocator(tracker_params));
     }
 
+    check_hip_error(hipGetDeviceProperties(&device_prop_, device_id_));
+
     hipblasCreate(&hipblas_handle_);
     hipblasLtCreate(&hipblaslt_handle_);
     
@@ -87,10 +89,18 @@ ROCmDevice::~ROCmDevice() {
     hipStreamDestroy(stream_);
     hipblasDestroy(hipblas_handle_);
     hipblasLtDestroy(hipblaslt_handle_);
+    curandstate_buf_.reset();
 
     if (stream_ != nullptr) {
         HIP_CHECK(hipStreamDestroy(stream_));
     }
+}
+
+void ROCmDevice::init() {
+    DeviceBase::init();
+    FT_LOG_INFO("max batch size: %d\n", init_params_.max_batch_size);
+    curandstate_buf_ = allocateBuffer(
+        {init_params_.max_batch_size * sizeof(curandState_t)}, {"curandstate"});
 }
 
 DeviceProperties ROCmDevice::getDeviceProperties() {

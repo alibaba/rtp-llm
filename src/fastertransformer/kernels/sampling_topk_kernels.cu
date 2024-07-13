@@ -16,6 +16,7 @@
  */
 
 #include <stdexcept>
+#if USING_CUDA
 #ifndef CUDART_VERSION
 #error CUDART_VERSION Undefined!
 #elif (CUDART_VERSION >= 11050)
@@ -23,12 +24,19 @@
 #else
 #include "3rdparty/cub/cub.cuh"
 #endif
+#include "src/fastertransformer/cuda/cuda_utils.h"
+#endif
+
+#if USING_ROCM
+#include <hipcub/hipcub.hpp>
+#include "src/fastertransformer/rocm/hip_utils.h"
+using namespace fastertransformer::rocm;
+#endif
 
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/sampling_topk_kernels.h"
-#include "src/fastertransformer/cuda/cuda_utils.h"
 
-namespace fastertransformer {
+    namespace fastertransformer {
 
 __global__ void curandInitialize(curandState_t* state, const int size, const unsigned long long random_seed)
 {

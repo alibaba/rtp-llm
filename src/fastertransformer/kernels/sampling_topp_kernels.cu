@@ -22,18 +22,18 @@
 #else
 #include "3rdparty/cub/cub.cuh"
 #endif
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #endif
 
 #if USING_ROCM
-#include "3rdparty/cub/cub.cuh"
+#include <hipcub/hipcub.hpp>
+#include "src/fastertransformer/rocm/hip_utils.h"
+using namespace fastertransformer::rocm;
 #endif
 
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/sampling_topp_kernels.h"
 #include "src/fastertransformer/kernels/sampling_penalty_kernels.h"
-#if USING_CUDA
-#include "src/fastertransformer/cuda/cuda_utils.h"
-#endif
 
 constexpr int   ENABLE_SINGLE_PASS_TOP_P = 0;
 constexpr float SINGLE_PASS_THRESHOLD    = 0.9;
@@ -598,7 +598,7 @@ void segmentedTopPSinglePass_dispatch(const TopKPerSegmentParams&  params,
     {                                                                                                                  \
         if (smem_size > 0)                                                                                             \
             check_cuda_error(                                                                                          \
-                cudaFuncSetAttribute(segmented_top_p_single_pass<Kernel_params, ITEMS_INCREMENT*(INDEX + 1)>,          \
+                cudaFuncSetAttribute((const void*)segmented_top_p_single_pass<Kernel_params, ITEMS_INCREMENT*(INDEX + 1)>,          \
                                      cudaFuncAttributeMaxDynamicSharedMemorySize,                                      \
                                      smem_size));                                                                      \
         segmented_top_p_single_pass<Kernel_params, ITEMS_INCREMENT*(INDEX + 1)>                                        \

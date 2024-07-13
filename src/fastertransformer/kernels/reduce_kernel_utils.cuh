@@ -29,8 +29,9 @@
 #include <curand_kernel.h>
 
 namespace cg = cooperative_groups;
-#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #endif
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+
 #if USING_ROCM
 #include "src/fastertransformer/rocm/hip_utils.h"
 #endif

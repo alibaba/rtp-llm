@@ -20,12 +20,11 @@
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/rotary_position_embedding.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
-#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #endif
 #if USING_ROCM
-#include "src/fastertransformer/rocm/hip_type_utils.cuh"
 #include "src/fastertransformer/rocm/hip_utils.h"
 #endif
 #include <cstdlib>

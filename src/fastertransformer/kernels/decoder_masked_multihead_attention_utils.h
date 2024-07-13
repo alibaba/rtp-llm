@@ -3258,15 +3258,12 @@ __device__ __host__ constexpr inline T const& const_max(T const& a, T const& b) 
 #pragma once
 
 #include <stdint.h>
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #if USING_CUDA
-#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
-#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
-#include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #endif
 
 #if USING_ROCM
-#include "src/fastertransformer/rocm/hip_type_utils.cuh"
 #include "src/fastertransformer/rocm/hip_utils.h"
 using namespace fastertransformer::rocm;
 #endif
