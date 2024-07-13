@@ -35,34 +35,53 @@ __device__ inline T __shfl_sync(unsigned mask, T var, int laneMask, int width = 
     return __shfl(var, laneMask, width);
 }
 
+__device__ inline unsigned __ballot_sync(unsigned mask, int predicate) {
+    (void)mask;
+    return __ballot(predicate);
+}
+
 template<typename T_OUT, typename T_IN> __host__ __device__ inline T_OUT special_cast(T_IN val) { return val; }
 #ifdef ENABLE_BF16
 template<> __host__ __device__ inline amd_bfloat16 special_cast<amd_bfloat16, float>(float val) { return __float2bfloat16(val); };
 template<> __host__ __device__ inline float special_cast<float, amd_bfloat16>(amd_bfloat16 val) { return __bfloat162float(val); };
 #endif
 
+#define curand_uniform hiprand_uniform
+#define curand_init hiprand_init
+#define curandState_t hiprandState_t
+
+#define cub hipcub
 #define check_cuda_error check_hip_error
+
 #define cudaStream_t hipStream_t
+#define cudaStreamSynchronize hipStreamSynchronize
+
 #define cudaEvent_t hipEvent_t
+
 #define cudaGetDevice hipGetDevice
 #define cudaDeviceGetAttribute hipDeviceGetAttribute
 #define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
 #define cudaDevAttrMaxSharedMemoryPerMultiprocessor hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
+
 #define cudaFuncSetAttribute hipFuncSetAttribute
 #define cudaFuncAttributeMaxDynamicSharedMemorySize hipFuncAttributeMaxDynamicSharedMemorySize
 #define cudaOccupancyMaxActiveBlocksPerMultiprocessor hipOccupancyMaxActiveBlocksPerMultiprocessor
 #define cudaDeviceSynchronize hipDeviceSynchronize
+
+#define cudaMemcpy hipMemcpy
+#define cudaMemsetAsync hipMemsetAsync
+#define cudaMemcpyAsync hipMemcpyAsync
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
+
 #define cudaEventSynchronize hipEventSynchronize
 #define cudaEventCreate hipEventCreate
 #define cudaEventRecord hipEventRecord
 #define cudaEventDestroy hipEventDestroy
 #define cudaEventElapsedTime hipEventElapsedTime
-#define cudaMemcpy hipMemcpy
+
 #define cudaError_t hipError_t
 #define cudaSuccess hipSuccess
 #define sync_check_cuda_error() rocm::syncAndCheck(__FILE__, __LINE__)
-#define curandState_t hiprandState_t
 #define cudaDeviceProp hipDeviceProp_t
 
     // Taken from cuda_utils.h

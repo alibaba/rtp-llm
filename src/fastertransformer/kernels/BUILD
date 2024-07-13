@@ -80,9 +80,9 @@ cc_library(
         "layernorm_kernels.cu",
         "activation_kernels.cu",
         "unfused_attention_kernels.cu",
-        #"sampling_topp_kernels.cu",
-        #"sampling_penalty_kernels.cu",
-        #"penalty_types.h",
+        "sampling_topk_kernels.cu",
+        "sampling_topp_kernels.cu",
+        "sampling_penalty_kernels.cu",
     # ],
         "decoder_masked_multihead_attention.cu",
     ]+glob([
@@ -112,6 +112,10 @@ cc_library(
         "_logn_attention.h",
         "_convert_from_fp8.h",
         "_convert_to_fp8.h",
+        "sampling_topk_kernels.h",
+        "sampling_topp_kernels.h",
+        "sampling_penalty_kernels.h",
+        "penalty_types.h",
         "decoder_masked_multihead_attention.h",
     ] + glob([
         "decoder_masked_multihead_attention/*.h",

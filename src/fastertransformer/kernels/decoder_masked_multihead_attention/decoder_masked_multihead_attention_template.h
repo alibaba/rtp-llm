@@ -21,8 +21,8 @@
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "src/fastertransformer/kernels/rotary_position_embedding.h"
 
-#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#if USING_CUDA
 #include "src/fastertransformer/cuda/memory_utils.h"
 // Multi-block mmha kernel can only be selected when CUDA >= 11.7
 #if (CUDART_VERSION >= 11070)
@@ -38,7 +38,6 @@
 
 #if USING_ROCM
 #include "src/fastertransformer/rocm/hip_utils.h"
-#include "src/fastertransformer/rocm/hip_type_utils.cuh"
 #endif
 
 #include <assert.h>

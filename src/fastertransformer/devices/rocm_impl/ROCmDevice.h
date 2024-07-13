@@ -22,6 +22,7 @@ public:
     ROCmDevice(const DeviceInitParams& params);
     ~ROCmDevice();
 
+    void init() override;
     DeviceProperties getDeviceProperties() override;
     IAllocator* getAllocator() override { return allocator_.get(); }
     IAllocator* getHostAllocator() override { return hostAllocator_.get(); }
@@ -36,6 +37,7 @@ public:
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
     BufferPtr softmax(const SoftmaxParams& params) override;
+    void sampleGreedy(const GreedyParams& params);
 
 public:
     BufferPtr        testVecAdd(const BufferPtr a, const BufferPtr b);
@@ -49,6 +51,9 @@ private:
     std::unique_ptr<IAllocator> hostAllocator_;
     
     hipStream_t                 stream_ = nullptr;
+    hipDeviceProp_t device_prop_;
+
+    BufferPtr curandstate_buf_; // for sampler use.
 
     rocm::hipblasMMWrapper* hipblasMMWrapperPtr() const {
         return hipblas_mm_wrapper_.get();

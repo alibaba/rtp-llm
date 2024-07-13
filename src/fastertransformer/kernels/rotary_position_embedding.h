@@ -1,12 +1,11 @@
 #include "decoder_masked_multihead_attention_utils.h"
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h"
-#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #endif
 
 #if USING_ROCM
-#include "src/fastertransformer/rocm/hip_type_utils.cuh"
 #include "src/fastertransformer/rocm/hip_utils.h"
 #endif
 #include <type_traits>
