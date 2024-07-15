@@ -6,10 +6,7 @@ from maga_transformer.utils.time_util import Timer
 from maga_transformer.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from maga_transformer.models.base_model import BaseModel, GenerateInput, GenerateOutputs
 from maga_transformer.async_decoder_engine.base_engine import BaseEngine, KVCacheInfo
-try:
-    from maga_transformer.cpp.model_rpc.model_rpc_client import ModelRpcClient
-except:
-    pass
+from maga_transformer.cpp.model_rpc.model_rpc_client import ModelRpcClient
 
 class RPCEngine(BaseEngine):
     def __init__(self,
