@@ -198,6 +198,7 @@ def git_deps():
         name = "composable_kernel_archive",
         remote = "https://github.com/ROCm/composable_kernel.git",
         commit = "497ccb872b6a9a921c01df4dca49dac7cb242c72",
+        patches = ["//3rdparty/composable_kernel:ck.patch"],
         build_file = "//3rdparty/composable_kernel:ck.BUILD",
         shallow_since = "1719582646 -0700",
     )
