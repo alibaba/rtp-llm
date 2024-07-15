@@ -212,9 +212,9 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                      token_num);
         return;
     } else if (use_openSource_fmha && cufmha_runner_->openSourceFmhaSupport()) {
-
+        auto seq_len_round_32 = (seq_len + 31) / 32 * 32;
         auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32,
-                                            {batch_size, head_num, seq_len},
+                                            {batch_size, head_num, seq_len_round_32},
                                             AllocationType::DEVICE},
                                             {"softmax_lse"});
         size_t hidden_units = head_num * size_per_head;
