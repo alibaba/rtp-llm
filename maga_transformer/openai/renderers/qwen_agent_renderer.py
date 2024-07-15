@@ -38,7 +38,6 @@ class QwenAgentRenderer(CustomChatRenderer):
     def __init__(self, tokenizer: QwenTokenizerTypes, renderer_params: RendererParams):
         super().__init__(tokenizer, renderer_params)
         self.add_extra_stop_words(["✿RESULT✿","✿RETURN✿"])
-        self.stop_words_list.extend(self.extra_stop_words)
 
         self.template_chat_renderer: Optional[BasicRenderer] = None
         try:
@@ -115,6 +114,13 @@ class QwenAgentRenderer(CustomChatRenderer):
         output_length = len(output_ids)
         output_ids = self._remove_stop_word_ids(output_ids)
         output_str = self.tokenizer.decode(output_ids)
+
+        # following qwen agent function_calling.py process
+        if output_str.startswith(': '):
+            output_str = output_str[2:]
+        elif output_str.startswith(':'):
+            output_str = output_str[1:]
+
         output_str = output_str.strip(u'\uFFFD')
         for stop_word in self.stop_words_list:
             output_str = output_str.replace(stop_word, "")

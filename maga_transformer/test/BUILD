@@ -64,6 +64,7 @@ py_test(
     deps = [
         "//maga_transformer:sdk",
         "//maga_transformer:testlib",
+        # qwen agent 
         "//maga_transformer:pydantic",
         "//maga_transformer:json5",
         "//maga_transformer:dashscope",

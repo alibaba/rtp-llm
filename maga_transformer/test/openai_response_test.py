@@ -119,8 +119,10 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         tokenizer = QWenTokenizer(f"{self.test_data_path}/qwen_7b/tokenizer/qwen.tiktoken")
         self.model.tokenizer = tokenizer
         self.endpoint = OpenaiEndopoint(self.model)
-        test_ids = [35946, 85106, 47872, 11622, 455, 11080, 69364, 5333, 36407, 45912, 104307, 144575, 18149, 144575, 25, 633, 11080, 69364, 198, 144575, 47483, 144575, 25, 5212, 2527, 788, 330, 113074, 11, 10236, 122, 236, 28404, 497, 330, 3843, 788, 330, 69, 47910, 16707, 144575, 14098, 144575]
+        test_ids = [25, 220, 35946, 85106, 47872, 11622, 455, 11080, 69364, 5333, 36407, 45912, 104307, 144575, 18149, 144575, 25, 633, 11080, 69364, 198, 144575, 47483, 144575, 25, 5212, 2527, 788, 330, 113074, 11, 10236, 122, 236, 28404, 497, 330, 3843, 788, 330, 69, 47910, 16707, 144575, 14098, 144575]
         # print(f"===test ids decode {tokenizer.decode(test_ids)}")
+        # print(tokenizer.encode("你好啊✿FUNCTION✿: get_current_weather\n✿ARGS✿: {\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}\n✿RESULT✿"))
+
         render_params = RendererParams(
             model_type="qwen_agent",
             max_seq_len=1024,

@@ -107,7 +107,7 @@ class OpenaiEndopoint():
                             index=0,
                             message=ChatMessage(
                                 role=choice.delta.role or RoleEnum.assistant,
-                                content=choice.delta.content or "",
+                                content=choice.delta.content or None,
                                 function_call=choice.delta.function_call or None,
                             ),
                             finish_reason=choice.finish_reason
@@ -118,7 +118,10 @@ class OpenaiEndopoint():
                                      f"[{response.choices}] vs [{all_choices}].")
             else:
                 for i in range(len(all_choices)):
-                    all_choices[i].message.content += (response.choices[i].delta.content or "")
+                    if all_choices[i].message.content == None:
+                        all_choices[i].message.content = (response.choices[i].delta.content or None)
+                    else: 
+                        all_choices[i].message.content += (response.choices[i].delta.content or "")
                     all_choices[i].message.role = response.choices[i].delta.role or all_choices[i].message.role
                     all_choices[i].message.function_call = response.choices[i].delta.function_call or all_choices[i].message.function_call
                     all_choices[i].finish_reason = response.choices[i].finish_reason or all_choices[i].finish_reason

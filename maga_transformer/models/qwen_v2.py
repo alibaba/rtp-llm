@@ -151,4 +151,5 @@ class QWenV2Embedding(QWenV2):
 
 
 register_model('qwen_2', QWenV2, ["Qwen2ForCausalLM"])
+register_model('qwen_agent', QWenV2)
 register_model('qwen_2_embedding', QWenV2Embedding)

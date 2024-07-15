@@ -232,7 +232,7 @@ get_current_weather: Get the current weather in a given location. 输入参数�
         messages.append(
             ChatMessage(**{
                 "role": RoleEnum.assistant,
-                "content": "我需要调用get_current_weather API来获取天气",
+                "content": None,
                 "function_call": {
                     "name": "get_current_weather",
                     "arguments": '{"location": "Boston, MA"}',
@@ -273,7 +273,7 @@ get_current_weather: Get the current weather in a given location. 输入参数�
 <|im_start|>user
 波士顿天气如何？<|im_end|>
 <|im_start|>assistant
-我需要调用get_current_weather API来获取天气✿FUNCTION✿: get_current_weather
+✿FUNCTION✿: get_current_weather
 ✿ARGS✿: {"location": "Boston, MA"}
 ✿RESULT✿: {"temperature": "22", "unit": "celsius", "description": "Sunny"}
 ✿RETURN✿"""

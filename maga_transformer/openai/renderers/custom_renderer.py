@@ -232,18 +232,23 @@ class CustomChatRenderer():
         )
 
     def _check_finish_reason(self, token_ids: List[int], input_token_length: int) -> Optional[FinisheReason]:
+        stop_word_ids_list_all = self.get_all_extra_stop_word_ids_list() + self.stop_word_ids_list
         if len(token_ids) + input_token_length >= self.max_seq_len:
             return FinisheReason.length
         if token_ids and token_ids[-1] == self.eos_token_id:
             return FinisheReason.stop
-        for stop_word_ids in self.stop_word_ids_list:
+        for stop_word_ids in stop_word_ids_list_all:
             if (len(token_ids) >= len(stop_word_ids)) and (token_ids[-len(stop_word_ids):] == stop_word_ids):
                 return FinisheReason.stop
         return None
 
     def _remove_stop_word_ids(self, output_ids: List[int]) -> List[int]:
-        for stop_word_ids in self.stop_word_ids_list:
-            for i in range(1, len(stop_word_ids) + 1):
+        stop_word_ids_list_all = self.get_all_extra_stop_word_ids_list() + self.stop_word_ids_list
+        for stop_word_ids in stop_word_ids_list_all:
+            #  此处应该从最大的范围开始判断
+            # 有可能会有stopword_ids 重复的情况，比如[144575, 14098, 144575]
+            # 若从1开始判断会导致 去除了最后一个 144575 就退出了
+            for i in range(len(stop_word_ids) + 1, 1, -1):
                 if output_ids[-i:] == stop_word_ids[:i]:
                     output_ids = output_ids[:-i]
                     break
