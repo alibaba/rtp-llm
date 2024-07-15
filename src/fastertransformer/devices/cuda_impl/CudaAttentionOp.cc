@@ -19,7 +19,8 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
                              const Buffer& block_pointers,
                              const Buffer& block_scale_pointers,
                              int batch_size, cudaStream_t stream) {
-    const auto& kv_blocks_offset = params.common.kv_cache_offset.value().get();
+    const auto& kv_cache = params.common.kv_cache;
+    const auto& kv_blocks_offset = *(kv_cache->kv_cache_offset);
     RUNTIME_ASSERT_OP_ARG(
         kv_blocks_offset.shape()[0] == batch_size,
         "context attention kv blocks batch size expected [%d] but buffer[%s]",
@@ -28,10 +29,10 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
     KVBlockArray kv_block_array(
         batch_size, max_blocks_per_batch, params.configs.tokens_per_block, 0);
     RUNTIME_ASSERT_OP_ARG(
-            params.common.k_cache_buffer.has_value() && params.common.v_cache_buffer.has_value(),
+            kv_cache->k_cache_buffer && kv_cache->v_cache_buffer,
             "kv cache buffer should has value when use kv_cache_offset");
-    const auto& k_cache = params.common.k_cache_buffer.value().get();
-    const auto& v_cache = params.common.v_cache_buffer.value().get();
+    const auto& k_cache = *(kv_cache->k_cache_buffer);
+    const auto& v_cache = *(kv_cache->v_cache_buffer);
 
     invokeConvertOffsetToAddrOneLayer(
             (uint64_t *)block_pointers.data(),
@@ -44,12 +45,12 @@ KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
             stream);
 
     kv_block_array.data        = (int64_t *)block_pointers.data();
-    if (params.common.k_scale_buffer.has_value()) {
+    if (kv_cache->k_scale_buffer) {
         RUNTIME_ASSERT_OP_ARG(
-                params.common.v_scale_buffer.has_value(),
+                kv_cache->v_scale_buffer,
                 "v scale buffer should has value when use k scale buffer has value");
-        const auto& k_scale = params.common.k_scale_buffer.value().get();
-        const auto& v_scale = params.common.v_scale_buffer.value().get();
+        const auto& k_scale = *(kv_cache->k_scale_buffer);
+        const auto& v_scale = *(kv_cache->v_scale_buffer);
 
         invokeConvertOffsetToAddrOneLayer(
                 (uint64_t*)block_scale_pointers.data(),
@@ -82,7 +83,7 @@ void writeContextKvCache(
         params.common.context_max_seq_len + params.common.max_prefix_length,
         params.configs.size_per_head,
         params.configs.kv_head_num,
-        params.common.k_scale_buffer.has_value() ? KvCacheDataType::INT8: KvCacheDataType::BASE,
+        params.common.kv_cache->k_scale_buffer ? KvCacheDataType::INT8: KvCacheDataType::BASE,
         nullptr,  // kvScaleOrigQuant
         params.common.input_lengths.dataWithOffset<int32_t>(params.common.decoder_batch_size),
         params.common.prefix_prompt_lengths ? params.common.prefix_prompt_lengths->data<int>() : nullptr,
@@ -118,8 +119,8 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     BufferPtr block_pointers, block_scale_pointers;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
 
-    if (params.common.kv_cache_offset) {
-        const auto max_blocks_per_batch = params.common.kv_cache_offset.value().get().shape()[1];
+    if (params.common.kv_cache) {
+        const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
         block_pointers = allocateBuffer({DataType::TYPE_INT64,
                                          {batch_size, 1, 2, max_blocks_per_batch},
                                          AllocationType::DEVICE},
@@ -133,7 +134,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         if (params.common.prefix_prompt_lengths) {
             prefix_prompt_param.d_prefix_prompt_lengths = params.common.prefix_prompt_lengths->data<int>();
             prefix_prompt_param.max_prefix_prompt_length = params.common.max_prefix_length;
-            prefix_prompt_param.count_length = params.common.count_prefix_lengths;
+            prefix_prompt_param.count_length = 1;
             prefix_prompt_param.kv_block_array = kv_block_array;
         }
     }
@@ -185,7 +186,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         stream_
     );
 
-    if (params.common.kv_cache_offset) {
+    if (params.common.kv_cache) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                 datatype, writeContextKvCache,
                 std::cref(params),
@@ -333,7 +334,6 @@ void selfAttentionwrapper(const AttentionModuleParams params,
 
     auto prefix_lengths = params.common.prefix_prompt_lengths ? params.common.prefix_prompt_lengths->data<int>() : nullptr;
     auto max_prefix_length = params.common.max_prefix_length;
-    auto count_prefix_lengths = params.common.count_prefix_lengths;
 
     const auto* input_lengths = params.common.input_lengths.data<int>();
     const auto* sequence_lengths = params.common.sequence_lengths.data<int>();
@@ -373,7 +373,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         step,
         prefix_lengths,
         max_prefix_length,
-        count_prefix_lengths,
+        1, //count_prefix_lengths,
         input_lengths,
         step,
         q_scaling,
@@ -436,8 +436,8 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     int* block_counter_data = (block_counter == nullptr) ? nullptr : block_counter->data<int>();
 
     RUNTIME_ASSERT_OP_ARG(
-        params.common.kv_cache_offset, "kv cache block can not be null for decoder self-attention");
-    const auto max_blocks_per_batch = params.common.kv_cache_offset.value().get().shape()[1];
+        params.common.kv_cache, "kv cache can not be null for decoder self-attention");
+    const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
     auto block_pointers = allocateBuffer({DataType::TYPE_INT64,
                                           {batch_size, 1, 2, max_blocks_per_batch},
                                           AllocationType::DEVICE},

@@ -22,8 +22,6 @@ cc_library(
         "cutlass_kernels_interface",
         "@havenask//aios/autil:string_helper",
         "//src/fastertransformer/trt_plugins:trt_plugins",
-        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
     ],
     visibility = ["//visibility:public"],
     copts = cuda_copts(),

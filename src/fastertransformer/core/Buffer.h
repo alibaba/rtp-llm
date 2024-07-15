@@ -99,6 +99,7 @@ public:
     // only from 0-d
     std::shared_ptr<Buffer> slice(size_t offset, size_t size) const;
     Buffer operator[](size_t offset) const;
+    std::shared_ptr<Buffer> index(size_t id) const;
 
     std::string debugString() const {
         return debugStringMeta();

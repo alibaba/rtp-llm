@@ -44,7 +44,6 @@ struct GptModelInputs {
     // NOTE: count_lengths and max_prefix_length were used for p-tuning,
     // the support of which has been dropped.
     // TODO(wangyin.yx): remove count_lengths and max_prefix_length after old implementation is dropped.
-    ft::BufferPtr count_lengths;     // [1]
     ft::BufferPtr max_prefix_length; // [1]
 
     ft::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
@@ -70,7 +69,6 @@ public:
                      << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
                      << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
                      << ", prefix_lengths: " << prefix_lengths->debugStringWithData<int32_t>()
-                     << ", count_lengths: " << count_lengths->debugStringWithData<int32_t>()
                      << ", max_prefix_length: " << max_prefix_length->debugStringWithData<int32_t>();
         if (combo_position_ids) {
             debug_string << ", combo_position_ids: " << combo_position_ids->debugStringWithData<int32_t>();
@@ -93,18 +91,17 @@ public:
 };
 
 enum GptModelInputIndex : size_t{
-    comboTokens             = 0,
-    inputLengths            = 1,
-    sequenceLengths         = 2,
-    prefixLengths           = 3,
-    countLengths            = 4,
-    maxPrefixLength         = 5,
-    maxBlocksPerBatch       = 6,
-    lmOutputIndexes         = 7,
-    comboPositionIds        = 8,
-    loraIds                 = 9,
-    loraInputLengths        = 10,
-    gptModelInputLength     = 11,
+    comboTokens,
+    inputLengths,
+    sequenceLengths,
+    prefixLengths,
+    maxPrefixLength,
+    maxBlocksPerBatch,
+    lmOutputIndexes,
+    comboPositionIds,
+    loraIds,
+    loraInputLengths,
+    gptModelInputLength,
 };
 
 inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
@@ -118,7 +115,6 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::inputLengths] = inputs.input_lengths.get() ? inputs.input_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::sequenceLengths] = inputs.sequence_lengths.get() ? inputs.sequence_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::prefixLengths] = inputs.prefix_lengths.get() ? inputs.prefix_lengths->size() : 0;
-    shape_hints_ptr[GptModelInputIndex::countLengths] = inputs.count_lengths.get() ? inputs.count_lengths->size() : 0;
     shape_hints_ptr[GptModelInputIndex::maxPrefixLength] = inputs.max_prefix_length.get() ? inputs.max_prefix_length->size() : 0;
     shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] = inputs.kv_cache_offset.get() ? inputs.kv_cache_offset->shape()[1] : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] = inputs.lm_output_indexes.get() ? inputs.lm_output_indexes->size() : 0;
@@ -137,8 +133,6 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]}, ft::AllocationType::HOST});
         inputs.prefix_lengths = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths]}, ft::AllocationType::HOST});
-        inputs.count_lengths = device->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::countLengths]}, ft::AllocationType::HOST});
         inputs.max_prefix_length = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::maxPrefixLength]}, ft::AllocationType::HOST});
         inputs.kv_cache_offset = device->allocateBuffer(
@@ -165,7 +159,6 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     buffers.emplace_back(inputs.input_lengths);
     buffers.emplace_back(inputs.sequence_lengths);
     buffers.emplace_back(inputs.prefix_lengths);
-    buffers.emplace_back(inputs.count_lengths);
     buffers.emplace_back(inputs.max_prefix_length);
     buffers.emplace_back(inputs.kv_cache_offset);
     buffers.emplace_back(inputs.lm_output_indexes);

@@ -269,18 +269,20 @@ struct LoraInput {
 
 using OptionalLoraInput = std::optional<LoraInput>;
 
+struct KvCacheInfo {
+    BufferPtr kv_cache_offset;  // [batch_size, block_nums], kv cache block offset
+    BufferPtr k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
+    BufferPtr v_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
+    BufferPtr k_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
+    BufferPtr v_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
+};
+
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs
     const Buffer& input_lengths;      // int32_t, [decoder_batch_size + context_batch_size]
     const Buffer& sequence_lengths;   // int32_t, [decoder_batch_size]
 
-    // [batch_size, 2, block_length], int64 block pointers
-    OptionalBufferRef kv_cache_offset;  // [batch_size, block_nums], kv cache block offset
-    OptionalBufferRef k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
-    OptionalBufferRef v_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
-    OptionalBufferRef k_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
-    OptionalBufferRef v_scale_buffer;   // [layer_num, block_nums, head, seq_size_per_block]
-
+    std::optional<KvCacheInfo> kv_cache;
     ConstBufferPtr cu_seqlens;
     ConstBufferPtr padding_offset;
 
@@ -294,19 +296,10 @@ struct AttentionCommonInputs {
     BufferPtr attention_mask;
     BufferPtr linear_bias_slopes;
     BufferPtr prefix_prompt_lengths;
-    int32_t   count_prefix_lengths;
     int32_t   max_prefix_length;
 
     OptionalLoraInput lora_input = std::nullopt;
-
-    AttentionCommonInputs() = default;
-
-    AttentionCommonInputs(const Buffer& input_lengths,
-                          const Buffer& sequence_lengths) :
-                          input_lengths(input_lengths),
-                          sequence_lengths(sequence_lengths) {}
 };
-
 
 struct AttentionConfigs {
     size_t      head_num;

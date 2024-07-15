@@ -61,7 +61,6 @@ public:
     ft::BufferPtr input_lengths;               // [batch_size]
     ft::BufferPtr sequence_lengths;            // [decoder_batch_size]
     ft::BufferPtr prefix_lengths;              // [batch_size]
-    ft::BufferPtr count_lengths;               // [1]
     ft::BufferPtr max_prefix_length;           // [1]
     ft::BufferPtr kv_cache_blocks;             // [layer_id, batch_size, 2, block_num_per_seq]
     ft::BufferPtr kv_cache_scales;             // [layer_id, batch_size, 2, block_num_per_seq]

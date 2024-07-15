@@ -77,8 +77,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         checkUseTrtV1FMHA();
         checkUseTrtV2FMHA();
         checkUseOpenSourceFMHA();
-        checkUseMultiBlockMode();
     }
+    checkUseMultiBlockMode();
 
     auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
     allocator_ptr->setStream(stream_);

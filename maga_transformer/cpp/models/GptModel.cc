@@ -71,7 +71,12 @@ void GptModel::prepareAttentionInputs(
         const GptModelInputs& inputs,
         AttentionCommonInputs& attention_inputs)
 {
-    checkKvBlocksShape(inputs.kv_cache_offset);
+    if (inputs.kv_cache_offset) {
+        checkKvBlocksShape(inputs.kv_cache_offset);
+        KvCacheInfo kv_cache;
+        kv_cache.kv_cache_offset = device_->clone({*inputs.kv_cache_offset, AllocationType::DEVICE, {"kv_cache_offset"}});
+        attention_inputs.kv_cache = kv_cache;
+    }
 
     const auto& input_lengths = inputs.input_lengths;
     const auto& sequence_lengths = inputs.sequence_lengths;
@@ -111,9 +116,8 @@ void GptModel::prepareAttentionInputs(
     attention_inputs.position_ids = inputs.position_ids;
     attention_inputs.attention_mask = inputs.attention_mask;
     attention_inputs.max_prefix_length = 0;
-    attention_inputs.count_prefix_lengths = 1;
     if (inputs.prefix_lengths) {
-        attention_inputs.prefix_prompt_lengths = device_->clone({*inputs.prefix_lengths});
+        attention_inputs.prefix_prompt_lengths = inputs.prefix_lengths;
         attention_inputs.max_prefix_length = *std::max_element(
             inputs.prefix_lengths->data<int32_t>(),
             inputs.prefix_lengths->data<int32_t>() + inputs.prefix_lengths->size());
@@ -201,6 +205,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     }
 
     // prepare resources for all layers
+    auto kv_cache_offset = inputs.kv_cache_offset;
     AttentionCommonInputs attention_common_inputs({
         *input_lengths,
         *sequence_lengths
@@ -208,14 +213,6 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     prepareAttentionInputs(inputs, attention_common_inputs);
     attention_common_inputs.lora_input = lora_input;
-    BufferPtr kv_cache_offset;
-    if (inputs.kv_cache_offset) {
-        kv_cache_offset = device_->clone({*inputs.kv_cache_offset, AllocationType::DEVICE, {"kv_cache_offset"}});
-    }
-    BufferPtr layer_k_cache;
-    BufferPtr layer_v_cache;
-    BufferPtr layer_k_scale;
-    BufferPtr layer_v_scale;
 
     printBufferData(*hidden, "input_hidden");
     // layers
@@ -247,21 +244,15 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                 *hidden, *(layer.pre_attention_smoother_weight->kernel), std::nullopt, DataType::TYPE_QINT8, 1));
             hidden = move(quantized_output);
         }
+
         if (kv_cache_offset) {
-            attention_common_inputs.kv_cache_offset = *kv_cache_offset;
-            const auto k = (*inputs.k_cache_buffer)[i];
-            const auto v = (*inputs.v_cache_buffer)[i];
-            layer_k_cache = std::make_unique<Buffer>(k.where(), k.type(), k.shape(), k.data());
-            layer_v_cache = std::make_unique<Buffer>(v.where(), v.type(), v.shape(), v.data());
-            attention_common_inputs.k_cache_buffer = *layer_k_cache;
-            attention_common_inputs.v_cache_buffer = *layer_v_cache;
+            // NOTE: these values in each layer are overwritten.
+            attention_common_inputs.kv_cache->kv_cache_offset = kv_cache_offset;
+            attention_common_inputs.kv_cache->k_cache_buffer = inputs.k_cache_buffer->index(i);
+            attention_common_inputs.kv_cache->v_cache_buffer = inputs.v_cache_buffer->index(i);
             if (inputs.k_scale_buffer) {
-                const auto k_s = (*inputs.k_scale_buffer)[i];
-                const auto v_s = (*inputs.v_scale_buffer)[i];
-                layer_k_scale = std::make_unique<Buffer>(k_s.where(), k_s.type(), k_s.shape(), k_s.data());
-                layer_v_scale = std::make_unique<Buffer>(v_s.where(), v_s.type(), v_s.shape(), v_s.data());
-                attention_common_inputs.k_scale_buffer = *layer_k_scale;
-                attention_common_inputs.v_scale_buffer = *layer_v_scale;
+                attention_common_inputs.kv_cache->k_scale_buffer = inputs.k_scale_buffer->index(i);
+                attention_common_inputs.kv_cache->v_scale_buffer = inputs.v_scale_buffer->index(i);
             }
         }
 

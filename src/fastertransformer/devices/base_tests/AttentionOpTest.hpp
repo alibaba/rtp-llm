@@ -143,7 +143,6 @@ void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
     common_inputs.decoder_batch_size = 0;
     common_inputs.decoder_max_seq_len = 0;
     common_inputs.max_prefix_length = 0;
-    common_inputs.count_prefix_lengths = 0;
 
     auto buffer_nullptr = BufferPtr(nullptr);
     auto attention_weight   = AttentionLayerWeights();
@@ -250,18 +249,15 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     cache_manager_ = nullptr;
     auto kv_cache_offset = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
     auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
-    auto common_inputs = AttentionCommonInputs(*input_lengths_device, *sequence_lengths_device);
-    auto layer_k_cache_buffer = (*kv_cache_buffer.k_blocks)[0];
-    auto layer_v_cache_buffer = (*kv_cache_buffer.v_blocks)[0];
-    common_inputs.kv_cache_offset = *kv_cache_offset;
-    common_inputs.k_cache_buffer = layer_k_cache_buffer;
-    common_inputs.v_cache_buffer = layer_v_cache_buffer;
+    auto common_inputs = AttentionCommonInputs({*input_lengths_device, *sequence_lengths_device});
+    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
+    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
+    common_inputs.kv_cache = KvCacheInfo({kv_cache_offset, layer_k_cache_buffer, layer_v_cache_buffer});
     common_inputs.context_batch_size = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size = batch_size;
     common_inputs.decoder_max_seq_len = step - 1;
     common_inputs.max_prefix_length = 0;
-    common_inputs.count_prefix_lengths = 0;
 
     auto buffer_nullptr = BufferPtr(nullptr);
     auto attention_weight = AttentionLayerWeights();

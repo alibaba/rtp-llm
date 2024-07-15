@@ -44,9 +44,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     model_input.prefix_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    model_input.count_lengths =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {1}, ft::AllocationType::HOST}, {});
-    *model_input.count_lengths->data<int32_t>() = 1;
     model_input.max_prefix_length =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {1}, ft::AllocationType::HOST}, {});
     *model_input.max_prefix_length->data<int32_t>() = 0;
