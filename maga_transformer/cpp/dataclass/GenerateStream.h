@@ -149,7 +149,6 @@ protected:
     int                                 fallback_blocks_        = 0;
     int                                 fallback_times_         = 0;
     int                                 fallback_prefix_length_ = 0;
-    int                                 max_fallback_times_     = 0;
     bool                                done_                   = false;
     bool                                cancelled_              = false;
     bool                                released_               = false;

@@ -22,8 +22,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     stream_cache_resource_(this, resource_context, input->need_release_resource),
     need_release_resource_(input->need_release_resource),
     metrics_reporter_(metrics_reporter),
-    special_tokens_(params.special_tokens_),
-    max_fallback_times_(params.max_fallback_times_) {
+    special_tokens_(params.special_tokens_) {
 
     begin_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
 
@@ -95,9 +94,6 @@ bool GenerateStream::incrKVBlock() {
 }
 
 int GenerateStream::tryReleaseKVBlock(int nums) {
-    if (fallback_times_ >= max_fallback_times_) {
-        return 0;
-    }
     auto release_blocks = stream_cache_resource_.tryReleaseKVBlock(nums);
     incrFallbackBlock(release_blocks);
     return release_blocks;

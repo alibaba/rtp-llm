@@ -181,7 +181,6 @@ public:
     int64_t  kv_cache_mem_mb_                  = 0;
     bool     reuse_cache_                      = false;
     bool     enable_partial_fallback_          = false;
-    int      max_fallback_times_               = 1 << 30;
 
     bool use_medusa_ = false;
     bool use_expert_attention_ = false; // true for CogVLM2, false for other models
