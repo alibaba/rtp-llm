@@ -105,7 +105,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             if (has_positional_encoding_) {
                 // TODO(xinfei.sxf) optimize this, reduce cost
                 for (uint32_t i = stream->reuseLength(); i < stream->reuseLength() + stream->contextLength(); i++) {
-                    combo_position_ids[token_idx + i] = i;
+                    combo_position_ids[token_idx + i - stream->reuseLength()] = i;
                 }
             }
             lora_ids[batch_idx]           = stream->loraId();
@@ -119,6 +119,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
         stream->step();
     }
+
     return model_input;
 }
 
