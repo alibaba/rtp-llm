@@ -9,7 +9,7 @@ from transformers import PreTrainedTokenizerBase
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.models.downstream_modules.embedding.api_datatype import EmbeddingResponseFormat, EmbeddingResponseType
+from maga_transformer.models.downstream_modules.embedding.api_datatype import EmbeddingResponseFormat, EmbeddingResponseType, SparseEmbeddingRequest, SimilarityRequest
 from maga_transformer.models.downstream_modules.embedding.misc import EmbeddingRendererBase, hidden_combo_to_batch
 
 class SparseEmbeddingModule(CustomModule):
@@ -28,7 +28,13 @@ class SparseEmbeddingRenderer(EmbeddingRendererBase):
                                   self.tokenizer_.pad_token_id,
                                   self.tokenizer_.unk_token_id])
         
-    def embedding_func(self, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> Dict[str, float]:
+    async def render_request(self, request_json: Dict[str, Any]):
+        if 'left' in request_json:
+            return SimilarityRequest(**request_json)
+        else:
+            return SparseEmbeddingRequest(**request_json)
+        
+    def embedding_func(self, request: Union[SparseEmbeddingRequest, SimilarityRequest], res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> Union[Dict[str, float]]:
         if len(res.shape) != 1:
             raise Exception("sparse hidden should be 1-dim")
         sparse_emb: Dict[int, float] = defaultdict(float)        
@@ -39,7 +45,10 @@ class SparseEmbeddingRenderer(EmbeddingRendererBase):
                 continue
             if score > 0 and sparse_emb[id] < score:
                 sparse_emb[id] = score
-        return {self.tokenizer_.decode(key): value for key,value in sparse_emb.items()}
+        if isinstance(request, SparseEmbeddingRequest) and request.return_decoded:
+            return {self.tokenizer_.decode(key): value for key,value in sparse_emb.items()}
+        else:
+            return {str(k): v for k, v in sparse_emb.items()}
 
     def similar_func(self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat) -> float:
         if not isinstance(left.embedding, dict) or not isinstance(right.embedding, dict):

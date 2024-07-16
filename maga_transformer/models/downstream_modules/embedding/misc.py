@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+from pydantic import BaseModel
 from torch.nn.utils.rnn import pad_sequence
 from typing import List, Tuple, Dict, Any, Union
 from transformers import PreTrainedTokenizerBase
@@ -65,13 +66,13 @@ class EmbeddingRendererBase(CustomRenderer):
             engine_inputs = await self.generator.generate(request.left + request.right)
         return engine_inputs
 
-    def embedding_func(self, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> Union[List[float], Dict[str, float]]:
+    def embedding_func(self, request: BaseModel, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> Union[List[float], Dict[str, float], Dict[int, float]]:
         raise NotImplementedError
 
     def similar_func(self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat) -> float:
         raise NotImplementedError
 
-    async def _render_embedding_output(self, inputs: EngineInputs, outputs: EngineOutputs) -> List[EmbeddingResponseFormat]:
+    async def _render_embedding_output(self, request: BaseModel, inputs: EngineInputs, outputs: EngineOutputs) -> List[EmbeddingResponseFormat]:
         data: List[EmbeddingResponseFormat] = []
         bias = 0
         for i, out in enumerate(outputs.outputs):
@@ -79,14 +80,14 @@ class EmbeddingRendererBase(CustomRenderer):
             token_ids = inputs.token_ids[bias: bias + input_length]
             data.append(EmbeddingResponseFormat(
                 object=self.embedding_type,
-                embedding=self.embedding_func(out, input_length, token_ids),
+                embedding=self.embedding_func(request, out, input_length, token_ids),
                 index=i)
             )
             bias += input_length
         return data
 
     async def _render_similarity_output(self, request: SimilarityRequest, inputs: EngineInputs, outputs: EngineOutputs) -> List[List[float]]:
-        embedding_outputs = await self._render_embedding_output(inputs, outputs)
+        embedding_outputs = await self._render_embedding_output(request, inputs, outputs)
         left = embedding_outputs[:len(request.left)]
         right = embedding_outputs[len(request.left): ]
         batch_results: List[List[float]] = []
@@ -100,7 +101,7 @@ class EmbeddingRendererBase(CustomRenderer):
     async def render_response(self, request: Union[OpenAIEmbeddingRequest, SimilarityRequest], inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
         usage = Usage(prompt_tokens=outputs.input_length, total_tokens=outputs.input_length)
         if isinstance(request, OpenAIEmbeddingRequest):
-            data = await self._render_embedding_output(inputs, outputs)
+            data = await self._render_embedding_output(request, inputs, outputs)
             return OpenAIEmbeddingResponse(data=data, usage=usage).model_dump()
         else:
             batch_results = await self._render_similarity_output(request, inputs, outputs)

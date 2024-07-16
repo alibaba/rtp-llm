@@ -34,7 +34,7 @@ class DenseEmbeddingRenderer(EmbeddingRendererBase):
     def similar_func(self, left: EmbeddingResponseFormat, right: EmbeddingResponseFormat) -> float:
         return float(torch.tensor(left.embedding) @ torch.tensor(right.embedding).T)
 
-    def embedding_func(self, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> List[float]:
+    def embedding_func(self, request: Any, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> List[float]:
         assert isinstance(res, torch.Tensor)
         return res.tolist()
 

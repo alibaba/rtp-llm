@@ -57,3 +57,6 @@ class SimilarityResponse(PyDanticModelBase):
     similarity: List[List[float]]
     left_response: Optional[OpenAIEmbeddingResponse] = None
     right_response: Optional[OpenAIEmbeddingResponse] = None
+
+class SparseEmbeddingRequest(OpenAIEmbeddingRequest):
+    return_decoded: bool = True

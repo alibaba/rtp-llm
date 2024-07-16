@@ -23,7 +23,7 @@ class ColbertEmbeddingRenderer(EmbeddingRendererBase):
         super().__init__(config, tokenizer)
         self.embedding_type = EmbeddingResponseType.COLBERT
         
-    def embedding_func(self, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> List[float]:    
+    def embedding_func(self, request: Any, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> List[float]:    
         assert isinstance(res, torch.Tensor)
         return res[:input_length - 1].tolist()
     
