@@ -13,6 +13,10 @@ test_envs = {
     "TEST_USING_DEVICE": "ARM",
 }
 
+test_tags = [
+    "arm",
+]
+
 cc_library(
     name = "arm_test_util",
     hdrs = [
@@ -36,6 +40,7 @@ test_deps = [
 cc_test(
     name = "arm_cpu_basic_tests",
     env = test_envs,
+    tags = test_tags,
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps + [
@@ -53,6 +58,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
+    tags = test_tags,
 )
 
 cc_test(
@@ -65,6 +71,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
+    tags = test_tags,
 )
 
 cc_test(
@@ -77,6 +84,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
+    tags = test_tags,
 )
 
 cc_test(
@@ -89,6 +97,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
+    tags = test_tags,
 )
 
 cc_test(
@@ -101,6 +110,7 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
+    tags = test_tags,
 )
 
 cc_test(
@@ -113,4 +123,5 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
     env = test_envs,
+    tags = test_tags,
 )

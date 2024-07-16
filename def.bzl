@@ -135,7 +135,8 @@ def rpm_library(
 def torch_deps():
     torch_version = "2.1_py310"
     deps = select({
-        "//:using_arm": ["@torch_2.3_py310_cpu_aarch64//:torch_api",
+        "//:using_arm": [
+            "@torch_2.3_py310_cpu_aarch64//:torch_api",
             "@torch_2.3_py310_cpu_aarch64//:torch",
             "@torch_2.3_py310_cpu_aarch64//:torch_libs",],
         "//conditions:default": [
