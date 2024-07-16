@@ -258,15 +258,11 @@ void CudaDevice::allReduce(const AllReduceParams& params) {
 
     RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps,
                           "Invalid reduce op: %d", params.op);
-    NCCLCHECK(ncclGroupStart());
-    for (auto i = 0; i < params.buffers.size(); ++i) {
-        auto& buffer = params.buffers[i];
-        const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
-        const auto nccl_data_type = getNcclDataType(buffer->type());
-        NCCLCHECK(ncclAllReduce(buffer->data(), buffer->data(), buffer->size(), nccl_data_type,
-                                nccl_op, nccl_param_.nccl_comm_, stream_));
-    }
-    NCCLCHECK(ncclGroupEnd());
+    auto& buffer = params.buffer;
+    const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
+    const auto nccl_data_type = getNcclDataType(buffer->type());
+    NCCLCHECK(ncclAllReduce(buffer->data(), buffer->data(), buffer->size(), nccl_data_type,
+                            nccl_op, nccl_param_.nccl_comm_, stream_));
 }
 
 void CudaDevice::allGather(const AllGatherParams& params) {

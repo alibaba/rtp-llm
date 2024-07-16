@@ -434,7 +434,7 @@ enum class ReduceOp {
 };
 
 struct AllReduceParams {
-    const std::vector<BufferPtr>& buffers;
+    const BufferPtr& buffer;
     const ReduceOp op;
 };
 

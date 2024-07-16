@@ -266,7 +266,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         }));
         auto attn_hidden = move(attn_output.hidden_states);
         if (device_props_.tp_size > 1) {
-            device_->allReduce({{attn_hidden}, ReduceOp::Sum});
+            device_->allReduce({attn_hidden, ReduceOp::Sum});
         }
         printBufferData(*attn_hidden, "layer_" + to_string(i) + "_attn_output");
 
@@ -304,7 +304,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         }));
         hidden = ffn_output.hidden_states;
         if (device_props_.tp_size > 1) {
-            device_->allReduce({{hidden}, ReduceOp::Sum});
+            device_->allReduce({hidden, ReduceOp::Sum});
         }
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_output");
 

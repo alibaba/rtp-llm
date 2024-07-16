@@ -73,7 +73,7 @@ public:
         copy_tensor_to_buffer(t3, buf3);
         copy_tensor_to_buffer(t4, buf4);
         device->broadcast({{buf1, buf2}, 0});
-        device->allReduce({{buf3}, ReduceOp::Sum});
+        device->allReduce({buf3, ReduceOp::Sum});
         device->allGather({{buf4}});
         device->syncAndCheck();
         auto out1 = bufferToTensor(*buf1, device);
