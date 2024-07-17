@@ -3,8 +3,9 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/cublas/cublas.h"
-#include "src/fastertransformer/cuda/cuggemm/cuggemm.h"
 #include "src/fastertransformer/cuda/cufmha/cufmha.h"
+#include "src/fastertransformer/cuda/cuggemm/cuggemm.h"
+#include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 #include "src/fastertransformer/trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
@@ -93,6 +94,8 @@ private:
     NcclParam nccl_param_;
 
     BufferPtr curandstate_buf_; // for sampler use.
+
+    std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr; // for custom allreduce use
 
     std::unique_ptr<cufmha> cufmha_runner_;
     std::unique_ptr<cuggemm> cuggemm_runner_;

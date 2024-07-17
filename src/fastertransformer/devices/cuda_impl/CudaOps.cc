@@ -255,12 +255,20 @@ void CudaDevice::allReduce(const AllReduceParams& params) {
     if (nccl_param_.world_size_ < 2) {
         return;
     }
-
-    RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps,
-                          "Invalid reduce op: %d", params.op);
     auto& buffer = params.buffer;
     const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
     const auto nccl_data_type = getNcclDataType(buffer->type());
+
+    // if custom allreduce fails, fallback to the default ncclAllReduce
+    if (custom_allreduce_comm_ && nccl_op == ncclSum && 
+        custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type())) {
+        custom_allreduce_comm_->allReduce(buffer->data(), buffer->data(), buffer->size(), buffer->type(), stream_);
+        return;
+    }
+
+    RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps,
+                          "Invalid reduce op: %d", params.op);
+ 
     NCCLCHECK(ncclAllReduce(buffer->data(), buffer->data(), buffer->size(), nccl_data_type,
                             nccl_op, nccl_param_.nccl_comm_, stream_));
 }

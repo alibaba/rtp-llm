@@ -16,6 +16,7 @@
 
 #include "custom_ar_kernels.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#include <cstddef>
 
 namespace fastertransformer {
 
@@ -68,19 +69,17 @@ struct ARTypeConverter {
     using Type = uint4;
 };
 
-#ifdef ENABLE_BF16
 template<>
 struct ARTypeConverter<__nv_bfloat16> {
     using Type = bf168;
 };
-#endif
 
 // add two 128b data
 template<typename T_IN, typename T_COMP>
 inline __device__ T_IN add128b(T_IN a, T_IN b);
 
 template<>
-inline __device__ uint4 add128b<uint4, uint16_t>(uint4 a, uint4 b)
+inline __device__ uint4 add128b<uint4, half>(uint4 a, uint4 b)
 {
     uint4 c;
     c.x = hadd2(a.x, b.x);
@@ -91,7 +90,7 @@ inline __device__ uint4 add128b<uint4, uint16_t>(uint4 a, uint4 b)
 }
 
 template<>
-inline __device__ uint4 add128b<uint4, uint32_t>(uint4 a, uint4 b)
+inline __device__ uint4 add128b<uint4, float>(uint4 a, uint4 b)
 {
     uint4 c;
     c.x = fadd(a.x, b.x);
@@ -101,7 +100,6 @@ inline __device__ uint4 add128b<uint4, uint32_t>(uint4 a, uint4 b)
     return c;
 }
 
-#ifdef ENABLE_BF16
 template<>
 inline __device__ bf168 add128b<bf168, __nv_bfloat16>(bf168 a, bf168 b)
 {
@@ -112,7 +110,6 @@ inline __device__ bf168 add128b<bf168, __nv_bfloat16>(bf168 a, bf168 b)
     c.w = bf16hadd2(a.w, b.w);
     return c;
 }
-#endif
 
 // init 128bits data with 0
 template<typename T>
@@ -124,7 +121,6 @@ inline __device__ uint4 init_packed_type()
     return make_uint4(0u, 0u, 0u, 0u);
 }
 
-#ifdef ENABLE_BF16
 template<>
 inline __device__ bf168 init_packed_type()
 {
@@ -133,10 +129,9 @@ inline __device__ bf168 init_packed_type()
     val_u        = make_uint4(0u, 0u, 0u, 0u);
     return val;
 }
-#endif
 
-template<typename T>
-static __global__ void oneShotAllReduceKernel(AllReduceParameters<T> params)
+template<typename T, int RANKS_PER_NODE>
+static __global__ void oneShotAllReduceKernel(CustomAllReduceParameters params)
 {
     // The block index.
     const int bidx = blockIdx.x;
@@ -144,7 +139,7 @@ static __global__ void oneShotAllReduceKernel(AllReduceParameters<T> params)
     const int tidx = threadIdx.x;
 
     // The number of elements packed into one for comms
-    static constexpr int NUM_ELTS = std::is_same<T, uint32_t>::value ? 4 : 8;
+    static constexpr int NUM_ELTS = std::is_same<T, float>::value ? 4 : 8;
 
     // Packed data type for comms
     using PackedType = typename ARTypeConverter<T>::Type;
@@ -174,7 +169,7 @@ static __global__ void oneShotAllReduceKernel(AllReduceParameters<T> params)
 #pragma unroll
     for (int ii = 0; ii < RANKS_PER_NODE; ++ii) {
         int rank  = (params.local_rank + ii) % RANKS_PER_NODE;
-        src_d[ii] = params.peer_comm_buffer_ptrs[rank];
+        src_d[ii] = (T*)(params.peer_comm_buffer_ptrs[rank]);
     }
 
     // Each block accumulates the values from the different GPUs on the same node.
@@ -194,12 +189,12 @@ static __global__ void oneShotAllReduceKernel(AllReduceParameters<T> params)
         }
 
         // Store to the destination buffer.
-        reinterpret_cast<PackedType*>(&params.local_output_buffer_ptr[iter_offset])[0] = sums;
+        reinterpret_cast<PackedType*>(&((T*)params.local_output_buffer_ptr)[iter_offset])[0] = sums;
     }
 }
 
-template<typename T>
-static __global__ void twoShotAllReduceKernel(AllReduceParameters<T> params)
+template<typename T, int RANKS_PER_NODE>
+static __global__ void twoShotAllReduceKernel(CustomAllReduceParameters params)
 {
 
     // The block index.
@@ -208,7 +203,7 @@ static __global__ void twoShotAllReduceKernel(AllReduceParameters<T> params)
     const int tidx = threadIdx.x;
 
     // The number of elements packed into one for comms
-    static constexpr int NUM_ELTS = std::is_same<T, uint32_t>::value ? 4 : 8;
+    static constexpr int NUM_ELTS = std::is_same<T, float>::value ? 4 : 8;
 
     // Packed data type for comms
     using PackedType = typename ARTypeConverter<T>::Type;
@@ -240,7 +235,7 @@ static __global__ void twoShotAllReduceKernel(AllReduceParameters<T> params)
 #pragma unroll
     for (int ii = 0; ii < RANKS_PER_NODE; ++ii) {
         int rank     = (params.local_rank + ii) % RANKS_PER_NODE;
-        src_d[ii]    = params.peer_comm_buffer_ptrs[rank];
+        src_d[ii]    = (T*)(params.peer_comm_buffer_ptrs[rank]);
         dst_rank[ii] = rank;
     }
 
@@ -291,7 +286,7 @@ static __global__ void twoShotAllReduceKernel(AllReduceParameters<T> params)
         for (int ii = 0; ii < RANKS_PER_NODE; ++ii) {
             // use round-robin gathering from other ranks
             int offset_rank = local_offset + (dst_rank[ii] - params.local_rank) * params.elts_per_rank;
-            reinterpret_cast<PackedType*>(&params.local_output_buffer_ptr[offset_rank])[0] =
+            reinterpret_cast<PackedType*>(&((T*)params.local_output_buffer_ptr)[offset_rank])[0] =
                 reinterpret_cast<PackedType*>(&src_d[dst_rank[ii]][offset_rank])[0];
         }
     }
@@ -300,7 +295,8 @@ static __global__ void twoShotAllReduceKernel(AllReduceParameters<T> params)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void kernelLaunchConfig(
-    int& blocks_per_grid, int& threads_per_block, size_t elts, int kernel_algo, size_t data_type_bytes)
+        int& blocks_per_grid, int& threads_per_block, size_t elts, int kernel_algo, size_t data_type_bytes,
+        int ranks_per_node)
 {
     assert(data_type_bytes == 2 || data_type_bytes == 4);
     // NOTE: need to support FP16 and FP32
@@ -308,6 +304,8 @@ void kernelLaunchConfig(
     size_t elts_per_warp   = (16 * WARP_SIZE) / data_type_bytes;
     switch (kernel_algo) {
         case 0: {  // one stage all reduce algo
+
+            // TODO(xyz): sometimes elts is less than elts_per_warp, this will make this assert fail, fix it
             assert(elts % elts_per_warp == 0);
             if (elts < (elts_per_thread * DEFAULT_BLOCK_SIZE)) {  // local reduce
                 threads_per_block = ((elts + elts_per_warp - 1) / elts_per_warp) * WARP_SIZE;
@@ -339,8 +337,8 @@ void kernelLaunchConfig(
             break;
         }
         case 1: {  // two stage all reduce algo
-            int total_threads = elts / RANKS_PER_NODE / RANKS_PER_NODE;
-            assert(elts / RANKS_PER_NODE % RANKS_PER_NODE == 0 && total_threads % WARP_SIZE == 0);
+            int total_threads = elts / ranks_per_node / ranks_per_node;
+            assert(elts / ranks_per_node % ranks_per_node == 0 && total_threads % WARP_SIZE == 0);
 
             while (total_threads % blocks_per_grid != 0 || total_threads / blocks_per_grid > DEFAULT_BLOCK_SIZE) {
                 blocks_per_grid += 1;
@@ -363,36 +361,59 @@ void kernelLaunchConfig(
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-template<typename T>
-void invokeOneOrTwoShotAllReduceKernel(AllReduceParameters<T>& param, cudaStream_t stream)
+template<typename T, int RANKS_PER_NODE>
+void invokeCustomAllReduceKernel(CustomAllReduceParameters* param, cudaStream_t stream)
 {
-    size_t elts_total      = param.elts_total;
+    size_t elts_total      = param->elts_total;
     int    blocks_per_grid = 1, threads_per_block = DEFAULT_BLOCK_SIZE;
     int    kernel_algo = 1;
     if (elts_total * sizeof(T) <= DEFALUT_ALGO_AR_SIZE_THRESHOLD) {
         kernel_algo = 0;
     }
 
-    kernelLaunchConfig(blocks_per_grid, threads_per_block, elts_total, kernel_algo, sizeof(T));
+    kernelLaunchConfig(blocks_per_grid, threads_per_block, elts_total, kernel_algo, sizeof(T), RANKS_PER_NODE);
 
     if (kernel_algo == 0) {
-        param.elts_per_rank  = elts_total;
-        param.elts_per_block = param.elts_per_rank / blocks_per_grid;
-        oneShotAllReduceKernel<<<blocks_per_grid, threads_per_block, 0, stream>>>(param);
+        param->elts_per_rank  = elts_total;
+        param->elts_per_block = param->elts_per_rank / blocks_per_grid;
+        oneShotAllReduceKernel<T, RANKS_PER_NODE><<<blocks_per_grid, threads_per_block, 0, stream>>>(*param);
     }
     else {
-        param.elts_per_rank  = param.elts_total / RANKS_PER_NODE;
-        param.elts_per_block = param.elts_per_rank / blocks_per_grid;
-        param.rank_offset    = param.rank * param.elts_per_rank;
-        twoShotAllReduceKernel<<<blocks_per_grid, threads_per_block, 0, stream>>>(param);
+        param->elts_per_rank  = param->elts_total / RANKS_PER_NODE;
+        param->elts_per_block = param->elts_per_rank / blocks_per_grid;
+        param->rank_offset    = param->rank * param->elts_per_rank;
+        twoShotAllReduceKernel<T, RANKS_PER_NODE><<<blocks_per_grid, threads_per_block, 0, stream>>>(*param);
     }
 }
 
+template<typename T>
+void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, cudaStream_t stream, size_t world_size) {
+    switch (world_size) {
+        case 2: invokeCustomAllReduceKernel<T, 2>(param, stream); break;
+        case 4: invokeCustomAllReduceKernel<T, 4>(param, stream); break;
+        case 8: invokeCustomAllReduceKernel<T, 8>(param, stream); break;
+        default: break;
+    }
+}
+
+#define INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_DISPATCH(T)                                                 \
+    template void invokeCustomAllReduceDispatch<T>(CustomAllReduceParameters* param, cudaStream_t stream, size_t world_size);
+
+
+#define INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_KERNEL(T)                                                 \
+    template void invokeCustomAllReduceKernel<T, 2>(CustomAllReduceParameters* param, cudaStream_t stream);    \
+    template void invokeCustomAllReduceKernel<T, 4>(CustomAllReduceParameters* param, cudaStream_t stream);    \
+    template void invokeCustomAllReduceKernel<T, 8>(CustomAllReduceParameters* param, cudaStream_t stream);    
+
 // Template instantiation
-template void invokeOneOrTwoShotAllReduceKernel<uint16_t>(AllReduceParameters<uint16_t>& param, cudaStream_t stream);
-#ifdef ENABLE_BF16
-template void invokeOneOrTwoShotAllReduceKernel<__nv_bfloat16>(AllReduceParameters<__nv_bfloat16>& param,
-                                                               cudaStream_t                    stream);
-#endif
-template void invokeOneOrTwoShotAllReduceKernel<uint32_t>(AllReduceParameters<uint32_t>& param, cudaStream_t stream);
+
+INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_DISPATCH(__nv_bfloat16)
+INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_DISPATCH(float)
+INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_DISPATCH(half)
+
+INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_KERNEL(__nv_bfloat16)
+INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_KERNEL(float)
+INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_KERNEL(half)
+
+
 }  // namespace fastertransformer

@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/cuda/allocator_cuda.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils_torch.h"
@@ -21,7 +22,8 @@ static const size_t DEFAULT_MAX_BATCH_SIZE = 256;
 
 CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     FT_LOG_INFO("Initialize CudaDevice. %d", device_id_);
-    check_cuda_error(cudaSetDevice(device_id_));
+    auto err = cudaSetDevice(device_id_);
+    std::cout << cudaGetErrorString(err) << std::endl;
     check_cuda_error(cudaStreamCreate(&stream_));
 
     check_cuda_error(cublasCreate(&cublas_handle_));
@@ -79,6 +81,12 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         checkUseOpenSourceFMHA();
     }
     checkUseMultiBlockMode();
+
+    // Initialize custom all reduce communicator
+    if (nccl_param_.world_size_ > 1 && CustomAllReduceComm::shouldCustomAR(nccl_param_.world_size_, nccl_param_.rank_)) {
+        FT_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param_.rank_, nccl_param_.world_size_);
+        custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, stream_);
+    }
 
     auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);
     allocator_ptr->setStream(stream_);

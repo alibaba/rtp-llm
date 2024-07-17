@@ -2,37 +2,11 @@
 #include <torch/torch.h>
 #include <future>
 
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-
 #define private public
 #include "src/fastertransformer/devices/testing/TestBase.h"
 
 using namespace std;
 using namespace fastertransformer;
-
-size_t getFreePort() {
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    EXPECT_TRUE(sockfd >= 0);
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = 0;
-
-    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        EXPECT_TRUE(false);
-    }
-
-    socklen_t addr_len = sizeof(addr);
-    if (getsockname(sockfd, (struct sockaddr*)&addr, &addr_len) < 0) {
-        EXPECT_TRUE(false);
-    }
-    close(sockfd);
-    return ntohs(addr.sin_port);
-}
 
 class DistributedTest : public DeviceTestBase {
 public:

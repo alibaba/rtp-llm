@@ -170,6 +170,13 @@ template void ftNcclAllGather(const half*  send_buf,
                               NcclParam    nccl_param,
                               cudaStream_t stream);
 
+template void ftNcclAllGather(const char*  send_buf,
+                              char*        recv_buf,
+                              const int    data_size,
+                              const int    rank,
+                              NcclParam    nccl_param,
+                              cudaStream_t stream);
+
 #ifdef ENABLE_BF16
 template void ftNcclAllGather(const __nv_bfloat16* send_buf,
                               __nv_bfloat16*       recv_buf,

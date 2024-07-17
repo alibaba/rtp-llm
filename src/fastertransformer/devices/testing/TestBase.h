@@ -1,6 +1,11 @@
 #pragma once
 
+#include <arpa/inet.h>
 #include <gtest/gtest.h>
+#include <netinet/in.h>
+#include <numeric>
+#include <stdlib.h>
+#include <sys/socket.h>
 #include <torch/torch.h>
 
 #include "src/fastertransformer/devices/DeviceFactory.h"
@@ -12,8 +17,6 @@
 #include "maga_transformer/cpp/utils/KvCacheUtils.h"
 #include "autil/EnvUtil.h"
 
-#include <numeric>
-#include <stdlib.h>
 
 using namespace fastertransformer;
 
@@ -317,6 +320,62 @@ protected:
             std::cout << "rel diff: " << torch::abs(a_cmp - b_cmp) / torch::abs(a_cmp) << std::endl;
             ASSERT_TRUE(false);
         }
+    }
+
+
+    bool checkTensorClose(const torch::Tensor& a, const torch::Tensor& b,
+                           double rtol = 0, double atol = 0) {
+        auto a_cmp = a;
+        auto b_cmp = b;
+        rtol = rtol ? rtol : rtol_;
+        atol = atol ? atol : rtol_;
+        if (a.is_floating_point() != b.is_floating_point()) {
+            return false;
+        }
+
+        if (a_cmp.dtype() != b_cmp.dtype()) {
+            auto cmp_type = (a_cmp.dtype().itemsize() > b_cmp.dtype().itemsize()) ?
+                            a_cmp.dtype() : b_cmp.dtype();
+            a_cmp = a_cmp.to(cmp_type);
+            b_cmp = b_cmp.to(cmp_type);
+        }
+        a_cmp = a_cmp.squeeze();
+        b_cmp = b_cmp.squeeze();
+
+        const auto close = torch::allclose(a_cmp, b_cmp, rtol, atol);
+        if (!close) {
+            std::cout << "assert tensor close failed!" << std::endl;
+            std::cout << "rtol: " << rtol << std::endl;
+            std::cout << "atol: " << atol << std::endl;
+            std::cout << "a: " << a << std::endl;
+            std::cout << "b: " << b << std::endl;
+            std::cout << "abs diff: " << torch::abs(a_cmp - b_cmp) << std::endl;
+            std::cout << "rel diff: " << torch::abs(a_cmp - b_cmp) / torch::abs(a_cmp) << std::endl;
+            return false;
+        }
+        return true;
+    }
+
+    size_t getFreePort() {
+        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        EXPECT_TRUE(sockfd >= 0);
+
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin_port = 0;
+
+        if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            EXPECT_TRUE(false);
+        }
+
+        socklen_t addr_len = sizeof(addr);
+        if (getsockname(sockfd, (struct sockaddr*)&addr, &addr_len) < 0) {
+            EXPECT_TRUE(false);
+        }
+        close(sockfd);
+        return ntohs(addr.sin_port);
     }
 
     const std::string &getTestDataPath() const {

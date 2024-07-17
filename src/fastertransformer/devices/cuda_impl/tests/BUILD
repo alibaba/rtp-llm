@@ -63,6 +63,20 @@ cc_test(
 )
 
 cc_test(
+    name = "cuda_custom_all_reduce_test",
+    srcs = [],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "FT_ENABLE_CUSTOM_AR": "1"
+    },
+    copts = cuda_copts() + copts() + torch_deps(),
+    linkopts = test_linkopts,
+    deps = test_deps + [
+        "//src/fastertransformer/devices/base_tests:custom_all_reduce_test"
+    ]
+)
+
+cc_test(
     name = "cuda_general_ops_test",
     srcs = [
         "CudaGeneralOpsTest.cc",
@@ -181,5 +195,3 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
 )
-
-
