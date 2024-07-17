@@ -43,7 +43,6 @@ private:
     size_t                              max_seq_len_        = 0;
     size_t                              max_context_batch_size_ = 1;
     int                                 reserve_block_num_  = 0;
-    // TODO(xinfei.sxf) add smoke for all fallback
     bool                                enable_partial_fallback_ = false;
     bool                                enable_fast_gen_    = false;
     int                                 max_context_len_    = 0;
