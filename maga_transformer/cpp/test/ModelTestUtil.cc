@@ -69,7 +69,6 @@ bool hasNpyFile(std::string dir_path) {
 }
 
 unique_ptr<const Weights> loadWeightsFromDirViaTorchScript(std::string dir_path) {
-    PyModelWeights py_weights;
     TensorMap model_global_weights_;
     TensorMaps layer_weights_;
     auto py_tensors_container = torch::jit::load(dir_path + "/pytorch_tensors.pt");

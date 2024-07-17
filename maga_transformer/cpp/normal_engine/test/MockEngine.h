@@ -113,11 +113,8 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
     }
     auto convert = rtp_llm::WeightsConverter(false);
     rtp_llm::EngineInitParams rtp_llm_params(params,
-                                             layer_weights,
-                                             global_weights,
                                              std::move(*convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
-                                                                                 std::make_unique<ConstBufferPtrMap>(global_weights))),
-                                                                                 nullptr);
+                                                                                 std::make_unique<ConstBufferPtrMap>(global_weights))));
     std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params);
     return engine;
 }

@@ -13,13 +13,6 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-class PyModelWeights: public th::jit::CustomClassHolder {
-public:
-    std::unordered_map<std::string, th::Tensor>              model_global_weights_;
-    std::vector<std::unordered_map<std::string, th::Tensor>> layer_weights_;
-    std::vector<std::unordered_map<std::string, th::Tensor>> layer_int8_weights_;
-    std::vector<std::unordered_map<std::string, th::Tensor>> layer_int8_scales_;
-};
 using TensorMap  = std::unordered_map<std::string, th::Tensor>;
 using TensorMaps = std::vector<TensorMap>;
 using ConstBufferPtrMap  = std::unordered_map<std::string, ft::ConstBufferPtr>;
@@ -29,15 +22,9 @@ class EngineInitParams: public th::jit::CustomClassHolder {
 public:
    // This class is the only one that holds gpt_weights object globally.
     EngineInitParams(const ft::GptInitParameter&    gpt_init_parameter,
-                     ConstBufferPtrMaps             layers_weights,
-                     ConstBufferPtrMap              global_weights,
-                     ft::Weights&&                  gpt_weights,
-                     const ft::ConstBufferPtr&      linear_bias_slopes) :
+                     ft::Weights&&                  gpt_weights) :
                      gpt_init_parameter(gpt_init_parameter),
-                     layers_weights(layers_weights),
-                     global_weights(global_weights),
-                     gpt_weights(std::move(gpt_weights)),
-                     linear_bias_slopes(linear_bias_slopes) {}
+                     gpt_weights(std::move(gpt_weights)) {}
 
 
 public:
@@ -45,11 +32,6 @@ public:
     ft::Weights                  gpt_weights;
 
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
-
-    // TODO(): rm old impl init
-    ConstBufferPtrMaps layers_weights;
-    ConstBufferPtrMap global_weights;
-    ft::ConstBufferPtr linear_bias_slopes;
 };
 
 class WeightsConverter {
