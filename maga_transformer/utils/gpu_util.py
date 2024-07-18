@@ -5,7 +5,7 @@ from typing import NamedTuple, Optional, List, Dict, Any
 
 class GpuInfo(NamedTuple):
     tag: Dict[str, Any]
-    util_nvml: float
+    # util_nvml: float
     memory_used: int
     # pcie_tx_bytes: int
     # pcie_rx_byets: int
@@ -44,13 +44,13 @@ class GpuUtil(object):
         try:
             gpu_info_list = []
             for i in range(self.device_count):
-                nvml_util_rate = nvmlDeviceGetUtilizationRates(self.nvml_handles[i])
+                # nvml_util_rate = nvmlDeviceGetUtilizationRates(self.nvml_handles[i])
                 nvml_mem_info = nvmlDeviceGetMemoryInfo(self.nvml_handles[i])
                 # pcie_tx_bytes = nvmlDeviceGetPcieThroughput(self.nvml_handles[i], NVML_PCIE_UTIL_TX_BYTES)
                 # pcie_rx_bytes = nvmlDeviceGetPcieThroughput(self.nvml_handles[i], NVML_PCIE_UTIL_RX_BYTES)
                 # decoder_util = nvmlDeviceGetDecoderUtilization(self.nvml_handles[i])[0]
                 gpu_info_list.append(
-                    GpuInfo(self.gpu_tags[i], nvml_util_rate.gpu, nvml_mem_info.used,
+                    GpuInfo(self.gpu_tags[i], nvml_mem_info.used,
                             # pcie_tx_bytes, pcie_rx_bytes, decoder_util
                     )
                 )

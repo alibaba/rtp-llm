@@ -26,7 +26,7 @@ class SystemReporter(object):
 
         self.gpu_util = GpuUtil()
         if self.gpu_util.has_gpu:
-            self.gpu_util_metric = self._kmon.register_gauge_metric('py_rtp_gpu_util_nvml')
+            # self.gpu_util_metric = self._kmon.register_gauge_metric('py_rtp_gpu_util_nvml')
             self.gpu_memory_used_metric = self._kmon.register_gauge_metric('py_rtp_gpu_mem_used')
             # self.gpu_pcie_tx_metric = kmon_metrics.register_gauge_metric('py_rtp_gpu_tx', gpu_tags)
             # self.gpu_pcie_rx_metric = kmon_metrics.register_gauge_metric('py_rtp_gpu_rx', gpu_tags)
@@ -51,7 +51,7 @@ class SystemReporter(object):
         gpu_info_list: Optional[List[GpuInfo]] = self.gpu_util.get_gpu_info()
         if gpu_info_list != None:
             for gpu_info in gpu_info_list:
-                self.gpu_util_metric.report(gpu_info.util_nvml, gpu_info.tag)
+                # self.gpu_util_metric.report(gpu_info.util_nvml, gpu_info.tag)
                 self.gpu_memory_used_metric.report(gpu_info.memory_used, gpu_info.tag)
                 # self.gpu_pcie_tx_metric.report(gpu_info.pcie_tx_bytes)
                 # self.gpu_pcie_rx_metric.report(gpu_info.pcie_rx_byets)
