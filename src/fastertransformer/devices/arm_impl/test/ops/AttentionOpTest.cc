@@ -40,8 +40,8 @@ struct AttentionImpl: torch::nn::Module {
         auto v = value_states.transpose(1, 2);
 
         if (k_cache.has_value() && v_cache.has_value()) {
-            k = torch::cat({k, *k_cache}, 2);
-            v = torch::cat({v, *v_cache}, 2);
+            k = torch::cat({*k_cache, k}, 2);
+            v = torch::cat({*v_cache, v}, 2);
         }
 
         auto kv_seq_len = k.size(2);
@@ -113,7 +113,7 @@ void ArmAttentionOpTest::contextAttentionOpTest(
     auto attention_mask_device = createDeviceBuffer<float>(attention_mask_);
     auto rope_config           = RopeConfig({RopeType::NOROPE, head_dim, 10000, 1, 2048, 1, 1});
 
-    auto common_inputs                = AttentionCommonInputs({*input_lengths, *sequence_lengths});
+    AttentionCommonInputs common_inputs({*input_lengths, *sequence_lengths});
     common_inputs.cu_seqlens          = move(cu_seqlens_device);
     common_inputs.padding_offset      = move(padding_offset_device);
     common_inputs.position_ids        = position_ids_device;
@@ -161,12 +161,6 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto value_states_host =
         torch::rand({(int)batch_size, (int)seq_len, (int)num_key_value_heads, (int)head_dim}, tensor_options);
 
-    auto k_cache_host =
-        torch::zeros({(int)batch_size, (int)num_key_value_heads, (int)kv_seq_len, (int)head_dim}, tensor_options);
-
-    auto v_cache_host =
-        torch::zeros({(int)batch_size, (int)num_key_value_heads, (int)kv_seq_len, (int)head_dim}, tensor_options);
-
     auto qkv_states_host =
         torch::cat({query_states_host.view({(int)batch_size * (int)seq_len, (int)num_heads, (int)head_dim}),
                     key_states_host.view({(int)batch_size * (int)seq_len, (int)num_key_value_heads, (int)head_dim}),
@@ -184,6 +178,22 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
         torch::from_blob((void*)sequence_lengths.data(), {(int)batch_size}, int_tensor_options);
     auto input_lengths_host = torch::from_blob((void*)input_lengths.data(), {(int)batch_size}, int_tensor_options);
 
+    size_t tokensPerBlock = 8;
+
+    size_t padding_kv_seq_len = ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) * tokensPerBlock;
+    padding_kv_seq_len = (kv_seq_len == 0) ? 2 * tokensPerBlock : padding_kv_seq_len;
+    auto kvcache_pad = torch::zeros(
+        {1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim},
+        tensor_options);
+
+    auto k_cache_host = kvcache_pad.index(
+        {0, torch::indexing::Slice(), 0, torch::indexing::Slice(0, kv_seq_len), torch::indexing::Slice()}
+    ).reshape({(int)batch_size, (int)kv_seq_len, (int)num_key_value_heads, (int)head_dim}).transpose(1, 2).contiguous().clone();
+
+    auto v_cache_host = kvcache_pad.index(
+        {0, torch::indexing::Slice(), 1, torch::indexing::Slice(0, kv_seq_len), torch::indexing::Slice()}
+    ).reshape({(int)batch_size, (int)kv_seq_len, (int)num_key_value_heads, (int)head_dim}).transpose(1, 2).contiguous().clone();
+
     /* Torch and device use different mask notations */
     auto attention_mask_host =
         torch::zeros({(int)batch_size, (int)seq_len, (int)kv_seq_len + (int)seq_len}, tensor_options);
@@ -199,77 +209,21 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
 
     auto rope_config = RopeConfig({RopeType::NOROPE, head_dim, 10000, 1, 2048, 1, 1});
 
-    size_t tokensPerBlock  = 4;
-    size_t maxBlocksPerSeq = ((kv_seq_len + seq_len + 1) % tokensPerBlock == 0) ?
-                                 ((kv_seq_len + seq_len + 1) / tokensPerBlock) :
-                                 ((kv_seq_len + seq_len + 1) / tokensPerBlock) + 1;
-
-    // k, v tensor shape is [batch_size, head_kv_size, kv_seq_len, head_dim].
-    // split tensor to small tensor which shape is [head_size, tokensPerBlock, head_dim].
-    // and the tensor map is [block_size, 2, block_num]
-
-    EXPECT_GE(maxBlocksPerSeq * tokensPerBlock, kv_seq_len + seq_len);
-    EXPECT_EQ(kv_seq_len % tokensPerBlock, 0);
-    auto k_tensor = k_cache_host.view({(int)batch_size,
-                                       (int)num_key_value_heads,
-                                       (int)(kv_seq_len / tokensPerBlock),
-                                       (int)tokensPerBlock,
-                                       (int)head_dim});
-    k_tensor      = k_tensor.transpose(1, 2);
-
-    auto v_tensor = v_cache_host.view({(int)batch_size,
-                                       (int)num_key_value_heads,
-                                       (int)(kv_seq_len / tokensPerBlock),
-                                       (int)tokensPerBlock,
-                                       (int)head_dim});
-    v_tensor      = v_tensor.transpose(1, 2);
-
-    std::vector<void*> block_pointers(batch_size * 2 * maxBlocksPerSeq, nullptr);
-
-    std::vector<BufferPtr> k_buffers(batch_size * 2 * maxBlocksPerSeq, nullptr);
-    std::vector<BufferPtr> v_buffers(batch_size * 2 * maxBlocksPerSeq, nullptr);
-    for (int i = 0; i < batch_size; i++) {
-        for (int j = 0; j < maxBlocksPerSeq; j++) {
-            if (j < (int)(kv_seq_len / tokensPerBlock)) {
-                auto k_tmp                                               = k_tensor.index({i, j, "..."});
-                auto v_tmp                                               = v_tensor.index({i, j, "..."});
-                k_buffers[i * maxBlocksPerSeq * 2 + j]                   = createDeviceBuffer<float>(k_tmp);
-                v_buffers[i * maxBlocksPerSeq * 2 + maxBlocksPerSeq + j] = createDeviceBuffer<float>(v_tmp);
-                block_pointers[i * maxBlocksPerSeq * 2 + j] = k_buffers[i * maxBlocksPerSeq * 2 + j]->data();
-                block_pointers[i * maxBlocksPerSeq * 2 + maxBlocksPerSeq + j] =
-                    v_buffers[i * maxBlocksPerSeq * 2 + maxBlocksPerSeq + j]->data();
-            } else {
-                auto k_tmp = torch::zeros({1, 1, (int)num_key_value_heads, (int)tokensPerBlock, (int)head_dim});
-                auto v_tmp = torch::zeros({1, 1, (int)num_key_value_heads, (int)tokensPerBlock, (int)head_dim});
-                k_buffers[i * maxBlocksPerSeq * 2 + j]                   = createDeviceBuffer<float>(k_tmp);
-                v_buffers[i * maxBlocksPerSeq * 2 + maxBlocksPerSeq + j] = createDeviceBuffer<float>(v_tmp);
-                block_pointers[i * maxBlocksPerSeq * 2 + j] = k_buffers[i * maxBlocksPerSeq * 2 + j]->data();
-                block_pointers[i * maxBlocksPerSeq * 2 + maxBlocksPerSeq + j] =
-                    v_buffers[i * maxBlocksPerSeq * 2 + maxBlocksPerSeq + j]->data();
-            }
-        }
-    }
-    for (auto ptr : block_pointers) {
-        EXPECT_NE(ptr, nullptr);
-    }
-
-    auto kv_cache = device_->allocateBuffer(
-        {DataType::TYPE_UINT64, {(size_t)batch_size, 2, maxBlocksPerSeq}, AllocationType::HOST}, {});
-    printf("kv_cache batch_size %d maxBlocksPerSeq %d src_size %d block_pointers.size() * sizeof(void*) %d\n",
-           batch_size,
-           maxBlocksPerSeq,
-           batch_size * 2 * maxBlocksPerSeq * sizeof(long),
-           block_pointers.size() * sizeof(void*));
-    printf("kv_cache size %d %d", kv_cache->size(), kv_cache->sizeBytes());
-    std::memcpy(kv_cache->data(), block_pointers.data(), block_pointers.size() * sizeof(void*));
-
-    auto common_inputs                = AttentionCommonInputs(*input_lengths_device, *sequence_lengths_device);
-    common_inputs.kv_cache_blocks     = *kv_cache;
-    common_inputs.context_batch_size  = 0;
+    // cache manager need one block for preserve and every seq need one block for preserve.
+    auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
+    rtp_llm::CacheConfig cache_conf(1, block_num, num_heads, head_dim, tokensPerBlock, DataType::TYPE_FP32);
+    cache_manager_ = nullptr;
+    auto kv_cache_offset = allocateKVBlocks(cache_conf, input_lengths, kvcache_pad);
+    auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
+    auto common_inputs = AttentionCommonInputs({*input_lengths_device, *sequence_lengths_device});
+    auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
+    auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
+    common_inputs.kv_cache = KvCacheInfo({kv_cache_offset, layer_k_cache_buffer, layer_v_cache_buffer});
+    common_inputs.context_batch_size = 0;
     common_inputs.context_max_seq_len = 0;
-    common_inputs.attention_mask      = attention_mask_device;
-    common_inputs.decoder_batch_size  = batch_size;
+    common_inputs.decoder_batch_size = batch_size;
     common_inputs.decoder_max_seq_len = step;
+    common_inputs.max_prefix_length = 0;
 
     auto buffer_nullptr         = BufferPtr(nullptr);
     auto attention_weight       = AttentionLayerWeights();
@@ -290,7 +244,7 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
 }
 
 TEST_F(ArmAttentionOpTest, SelfAttentionOpTest) {
-    std::vector<size_t> batch  = {1};  //, 2};
+    std::vector<size_t> batch  = {1, 2};
     std::vector<size_t> seq    = {1};
     std::vector<size_t> kv_seq = {16};
     for (auto batch_size : batch) {

@@ -23,22 +23,40 @@ void transposeDim12(BufferPtr input, Buffer& output) {
     }
 }
 
-void assemCache(Buffer& block_pointers, BufferPtr output, size_t tokens_per_block) {
-    auto   elem_sz          = output->typeSize();
-    auto   batch_size       = output->shape()[0];
-    auto   head_num         = output->shape()[1];
-    auto   kv_seq_len       = output->shape()[2];
-    auto   head_dim         = output->shape()[3];
+void getCacheAddrFromIndex(const KvCacheInfo& kv_cache, size_t batch, size_t block_idx, void **k_addr, void **v_addr) {
+    const auto& kv_blocks_offset = *(kv_cache.kv_cache_offset);
+    const auto& k_cache = *(kv_cache.k_cache_buffer);
+    const auto& v_cache = *(kv_cache.v_cache_buffer);
+    const auto  max_blocks_per_batch = kv_blocks_offset.shape()[1];
+    size_t block_size = k_cache[0].sizeBytes();
+    int    *index = (int *)kv_blocks_offset.data();
+
+    *k_addr = k_cache.data() + index[batch * max_blocks_per_batch + block_idx] * block_size;
+    *v_addr = v_cache.data() + index[batch * max_blocks_per_batch + block_idx] * block_size;
+}
+
+void assemCache(const AttentionModuleParams& params, BufferPtr k_out, BufferPtr v_out, size_t tokens_per_block) {
+    auto   elem_sz          = k_out->typeSize();
+    auto   batch_size       = k_out->shape()[0];
+    auto   head_num         = k_out->shape()[1];
+    auto   kv_seq_len       = k_out->shape()[2];
+    auto   head_dim         = k_out->shape()[3];
     size_t blocks_per_batch = (kv_seq_len + tokens_per_block - 1) / tokens_per_block;
     size_t copied_len;
 
-    for (int j = 0; j < batch_size; j++) {
+    void *k_block_addr;
+    void *v_block_addr;
+    for (int batch = 0; batch < batch_size; batch++) {
         copied_len = 0;
         for (int i = 0; i < blocks_per_batch; i++) {
             size_t len = std::min(tokens_per_block, kv_seq_len - copied_len);
+            getCacheAddrFromIndex(params.common.kv_cache.value(), batch, i, &k_block_addr, &v_block_addr);
 
-            memcpy(output->dataWithOffset((j * kv_seq_len + i * tokens_per_block) * head_num * head_dim),
-                   (void*)*(uint64_t*)(block_pointers.dataWithOffset(j * blocks_per_batch + i)),
+            memcpy(k_out->dataWithOffset((batch * kv_seq_len + i * tokens_per_block) * head_num * head_dim),
+                   k_block_addr,
+                   elem_sz * len * head_num * head_dim);
+            memcpy(v_out->dataWithOffset((batch * kv_seq_len + i * tokens_per_block) * head_num * head_dim),
+                   v_block_addr,
                    elem_sz * len * head_num * head_dim);
             copied_len += len;
         }
@@ -65,32 +83,29 @@ void addQKVBias(Buffer& input, void* bias) {
 }
 
 void writeContextKVCache(const AttentionModuleParams& params, BufferPtr k, BufferPtr v) {
-    const auto& kv_blocks            = params.common.kv_cache_blocks.value().get();
     const auto  batch_size           = params.common.context_batch_size;
-    const auto  max_blocks_per_batch = kv_blocks.shape().back();
     const auto  seq_len              = params.common.context_max_seq_len;
 
     auto kv_head_num   = params.configs.kv_head_num;
     auto size_per_head = params.configs.size_per_head;
     auto block_tokens  = params.configs.tokens_per_block;
 
-    // auto token_num = params.input.shape()[0];
     size_t block_num = (seq_len + block_tokens - 1) / block_tokens;
     auto   elem_sz   = params.input.typeSize();
     size_t copied_len;
 
+    void *k_block_addr;
+    void *v_block_addr;
     for (int batch = 0; batch < batch_size; batch++) {
         copied_len = 0;
         for (int i = 0; i < block_num; i++) {
             size_t   len          = std::min(block_tokens, seq_len - copied_len);
-            uint64_t k_block_addr = *(uint64_t*)kv_blocks.dataWithOffset(batch * 2 * max_blocks_per_batch + i);
-            uint64_t v_block_addr =
-                *(uint64_t*)kv_blocks.dataWithOffset(batch * 2 * max_blocks_per_batch + max_blocks_per_batch + i);
+            getCacheAddrFromIndex(params.common.kv_cache.value(), batch, i, &k_block_addr, &v_block_addr);
 
-            memcpy((void*)k_block_addr,
+            memcpy(k_block_addr,
                    k->dataWithOffset((batch * seq_len + i * block_tokens) * kv_head_num * size_per_head),
                    elem_sz * len * kv_head_num * size_per_head);
-            memcpy((void*)v_block_addr,
+            memcpy(v_block_addr,
                    v->dataWithOffset((batch * seq_len + i * block_tokens) * kv_head_num * size_per_head),
                    elem_sz * len * kv_head_num * size_per_head);
 
@@ -101,12 +116,7 @@ void writeContextKVCache(const AttentionModuleParams& params, BufferPtr k, Buffe
 
 /* In decoding phase, 1 token for auto-regression each time. */
 void updateKVCache(const AttentionModuleParams& params, BufferPtr k, BufferPtr v) {
-    const auto& kv_blocks            = params.common.kv_cache_blocks.value().get();
     const auto  batch_size           = params.common.decoder_batch_size;
-    const auto  max_blocks_per_batch = kv_blocks.shape().back();
-    const auto  seq_len =
-        params.common.context_max_seq_len; /* TODO: this value is compatible with writeContextKVCache. Will update both
-                                              as max{max_context_len, max_decoder_len} */
     int* decoder_len = static_cast<int*>(params.common.sequence_lengths.dataWithOffset(0));
 
     auto kv_head_num   = params.configs.kv_head_num;
@@ -115,12 +125,12 @@ void updateKVCache(const AttentionModuleParams& params, BufferPtr k, BufferPtr v
 
     auto elem_sz = params.input.typeSize();
 
+    void *k_block_addr;
+    void *v_block_addr;
     for (int batch = 0; batch < batch_size; batch++) {
         int      step         = *static_cast<int*>(params.common.sequence_lengths.dataWithOffset(batch));
         size_t   block_offset = step / block_tokens;
-        uint64_t k_block_addr = *(uint64_t*)kv_blocks.dataWithOffset(batch * 2 * max_blocks_per_batch + block_offset);
-        uint64_t v_block_addr = *(uint64_t*)kv_blocks.dataWithOffset(batch * 2 * max_blocks_per_batch
-                                                                     + max_blocks_per_batch + block_offset);
+        getCacheAddrFromIndex(params.common.kv_cache.value(), batch, block_offset, &k_block_addr, &v_block_addr);
 
         memcpy((uint8_t*)k_block_addr + (decoder_len[batch] % block_tokens) * kv_head_num * size_per_head * elem_sz,
                k->dataWithOffset(batch * kv_head_num * size_per_head),
@@ -321,7 +331,7 @@ AttentionModuleOutput ArmCpuDevice::contextAttention(const AttentionModuleParams
     printBufferData(*k_output, "k_output");
     printBufferData(*v_output, "v_output");
 
-    if (params.common.kv_cache_blocks) {
+    if (params.common.kv_cache) {
         writeContextKVCache(params, k_output, v_output);
     }
 
@@ -365,10 +375,9 @@ AttentionModuleOutput ArmCpuDevice::decoderSelfAttention(const AttentionModulePa
     auto   size_per_head = params.configs.size_per_head;
     auto   block_tokens  = params.configs.tokens_per_block;
 
-    if (!params.common.kv_cache_blocks.has_value()) {
+    if (!params.common.kv_cache.has_value()) {
         throw std::runtime_error("kv cache block pointers can not be null");
     }
-    const auto& kv_cache_blocks = params.common.kv_cache_blocks->get();
 
     // qkv to q_output, k_output, v_output
     auto qkv = params.input.data();
@@ -492,40 +501,12 @@ AttentionModuleOutput ArmCpuDevice::decoderSelfAttention(const AttentionModulePa
 
     updateKVCache(params, k_output, v_output);
 
-    /* Retrieve k/v cache info and attach it to k/v tensor. */
-    src_info = arm_compute::TensorInfo(
-        arm_compute::TensorShape(kv_cache_blocks.size(), batch_size), 1, getAclDataType(DataType::TYPE_UINT64));
-    ;
-    src.allocator()->init(src_info);
-    src.allocator()->import_memory(kv_cache_blocks.data());
-    kv_info = arm_compute::TensorInfo(
-        arm_compute::TensorShape(kv_cache_blocks.size() / 2, batch_size), 1, getAclDataType(DataType::TYPE_UINT64));
-    auto k_cache_ptrs =
-        allocateBuffer({DataType::TYPE_UINT64, {batch_size, kv_cache_blocks.size() / 2}, AllocationType::HOST}, {});
-    auto v_cache_ptrs =
-        allocateBuffer({DataType::TYPE_UINT64, {batch_size, kv_cache_blocks.size() / 2}, AllocationType::HOST}, {});
-    k.allocator()->init(kv_info);
-    v.allocator()->init(kv_info);
-    dsts.clear();
-    k.allocator()->import_memory(k_cache_ptrs->data());
-    dsts.push_back(std::move(k));
-
-    v.allocator()->import_memory(v_cache_ptrs->data());
-    dsts.push_back(std::move(v));
-
-    dsts_ptr.clear();
-    for (auto& dst : dsts) {
-        dsts_ptr.emplace_back(&dst);
-    }
-    split.configure(&src, dsts_ptr, 0);
-    split.run();
-
+    /* Retrieve k/v cache data and attach it to k/v tensor. */
     auto k_cache =
         allocateBuffer({datatype, {batch_size, kv_head_num, kv_seq_len, size_per_head}, AllocationType::HOST}, {});
     auto v_cache =
         allocateBuffer({datatype, {batch_size, kv_head_num, kv_seq_len, size_per_head}, AllocationType::HOST}, {});
-    assemCache(*k_cache_ptrs, k_cache, block_tokens);
-    assemCache(*v_cache_ptrs, v_cache, block_tokens);
+    assemCache(params, k_cache, v_cache, block_tokens);
 
     printBufferData(*k_cache, "k_cache");
     printBufferData(*v_cache, "v_cache");
