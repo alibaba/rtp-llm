@@ -25,7 +25,8 @@ public:
                size_t head_num,
                size_t kv_head_num,
                size_t size_per_head,
-               float q_scaling)
+               float q_scaling,
+               bool  use_linear_bias_slopes)
     {
         dtype_ = dtype;
         mtype_ = mtype;
@@ -33,6 +34,7 @@ public:
         kv_head_num_ = kv_head_num;
         size_per_head_ = size_per_head;
         q_scaling_ = q_scaling;
+        use_linear_bias_slopes_ = use_linear_bias_slopes;
     }
 
 
@@ -85,6 +87,7 @@ private:
     size_t kv_head_num_;
     size_t size_per_head_;
     float q_scaling_;
+    bool use_linear_bias_slopes_;
 
     cudaStream_t stream_;
 };

@@ -46,6 +46,11 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
         scales_ptr = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
     }
 
+    if (params.stride != 0) {
+        FT_CHECK_WITH_INFO(params.bias == std::nullopt && params.residual1 == std::nullopt && params.residual2 == std::nullopt && params.is_inplace == true, "check error with stride");
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeLayerNormWithStride, input->data(), gamma, beta, eps, m, n, params.stride);
+    }
+
     if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {
         // TODO(lidongjin) 
         // we can merge invokeAddBiasResidual and invokeAlphaAddBiasResidual into a singel func.

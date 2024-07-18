@@ -354,7 +354,7 @@ __global__ void softmax_kernel(T*          attn_score,
                 // We don't handle the upper diagonal (ki > qi) separately, whose values
                 // are negligible due to the negative infinity mask. And it matches with
                 // the HF's implementation.
-                qk_bias += static_cast<float>(linear_bias_slope * (ki - qi));
+                qk_bias -= static_cast<float>(abs(linear_bias_slope * (ki - qi)));
             }
 
             int   mask_offset = (bi * q_length + qi) * k_length + ki;
@@ -454,7 +454,7 @@ __global__ void softmax_kernel_h2(T*        attn_score,
                 // zero due to slope * (qi - 2*ki+1) = 0. Thus, we don't handle the upper diagonal
                 // separately, whose values are negligible due to the negative infinity mask.
                 T2 dist(2.0f * ki - qi, 2.0f * ki + 1 - qi);
-                qk_bias = hadd2<T2>(qk_bias, hmul2<T2>(linear_bias_slope, dist));
+                qk_bias = hadd2<T2>(qk_bias, -cuda_abs(hmul2<T2>(linear_bias_slope, dist)));
             }
 
             T2 mask_val = ldg(&attn_mask_h2[mask_offset]);
@@ -579,7 +579,7 @@ __global__ void softmax_kernel_h2_v2(T*        attn_score,
                     // separately, whose values are negligible due to the negative infinity mask.
                     int qidx = qi + j * gridDim.x;
                     T2  dist(2.0f * ki - qidx, 2.0f * ki + 1 - qidx);
-                    pos_bias[j] = hmul2<T2>(linear_bias_slope, dist);
+                    pos_bias[j] = -cuda_abs(hmul2<T2>(linear_bias_slope, dist));
                 }
             }
 #pragma unroll

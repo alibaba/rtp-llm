@@ -314,6 +314,11 @@ class W:
     attn_o_b = 'self_attention_weights.attention_output_weight.bias'
     post_ln_gamma = 'post_layernorm_weights.gamma'
     post_ln_beta = 'post_layernorm_weights.beta'
+    linear_bias_slopes = "linear_bias_slopes"
+
+    #jina_bert
+    post_ln_2_gamma = 'post_layernorm_weights_2.gamma'
+    post_ln_2_beta = 'post_layernorm_weights_2.beta'
 
     # ffn
     ffn_w1 = 'ffn_weights.intermediate_weight.kernel'

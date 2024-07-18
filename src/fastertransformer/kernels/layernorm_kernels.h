@@ -59,4 +59,14 @@ void invokeQkLayerNorm(T* __restrict qkv,
                        const int size_per_head,
                        cudaStream_t stream = 0);
 
+template<typename T>
+void invokeLayerNormWithStride(T* __restrict data,
+                               const T* __restrict gamma,
+                               const T* __restrict beta,
+                               const float  layernorm_eps,
+                               const int    tokens,
+                               const int    hidden_size,
+                               const int    stride,
+                               cudaStream_t stream = 0);
+
 }  // namespace fastertransformer

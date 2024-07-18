@@ -110,6 +110,7 @@ private:
     bool            need_copy_;
     ft::QuantAlgo   quant_algo_;
     ft::DeviceBase* device_;
+    bool use_linear_bias_slopes_;
 };
 
 }  // namespace rtp_llm

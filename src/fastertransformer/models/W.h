@@ -15,6 +15,7 @@ static const std::string pre_decoder_ln_gamma = "pre_decoder_layernorm.gamma";
 static const std::string wpe                  = "position_encoding.weight";
 static const std::string final_ln_gamma       = "final_layernorm.gamma";
 static const std::string final_ln_beta        = "final_layernorm.beta";
+static const std::string linear_bias_slopes   = "linear_bias_slopes";
 
 // layer
 static const std::string pre_ln_gamma      = "pre_layernorm_weights.gamma";

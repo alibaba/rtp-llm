@@ -114,6 +114,9 @@ void GptModel::prepareAttentionInputs(
     attention_inputs.decoder_max_seq_len = max_decoder_seq_len;
     attention_inputs.context_token_num = cu_seqlens_data[context_batch_size];
     attention_inputs.position_ids = inputs.position_ids;
+    if (weights_.linear_bias_slopes) {
+        attention_inputs.linear_bias_slopes = weights_.linear_bias_slopes->kernel;        
+    }
     attention_inputs.attention_mask = inputs.attention_mask;
     attention_inputs.max_prefix_length = 0;
     if (inputs.prefix_lengths) {
@@ -262,7 +265,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             description_.attention_conf,
             layer.self_attention_weights,
             attention_common_inputs,
-            device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt
+            device_props_.attn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
+            {description_.layernorm_eps, description_.norm_type}
         }));
         auto attn_hidden = move(attn_output.hidden_states);
         if (device_props_.tp_size > 1) {
@@ -293,6 +297,28 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         } else {
             residual2 = attn_hidden;
         }
+
+        if (layer.post_layernorm_1) {
+            // attn_hidden = attn_hidden + residual
+            // hidden = layernorm(attn_hidden)
+            auto post_layernorm_params = LayernormParams(attn_hidden,
+                                                         attn_hidden,
+                                                         ft::mayGetRef(layer.post_layernorm_1),
+                                                         nullopt,
+                                                         nullopt,
+                                                         nullopt,
+                                                         0.f,
+                                                         norm_eps,
+                                                         false,
+                                                         description_.post_layernorm,
+                                                         norm_type,
+                                                         qscheme);
+
+            auto post_layernorm_output = device_->layernorm(post_layernorm_params);
+            hidden = std::move(post_layernorm_output.output);
+            attn_hidden = std::move(post_layernorm_output.before_norm_output);
+            residual = attn_hidden;
+        }        
 
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_input");
         auto ffn_output = device_->ffnLayer(FfnLayerParams({

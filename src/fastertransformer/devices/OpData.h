@@ -153,8 +153,32 @@ struct LayernormParams {
                     return_normed_output(return_normed_output),
                     is_inplace(is_inplace),
                     norm_type(norm_type),
-                    qscheme(qscheme) {};
+                    qscheme(qscheme),
+                    offset(0),
+                    stride(0) {};
 
+    // for qk norm
+    LayernormParams(BufferPtr input,
+                    const std::optional<std::reference_wrapper<const LayerNormWeights>> norm_weight,
+                    double eps,
+                    NormType norm_type,
+                    size_t offset,
+                    size_t stride
+                ):
+                    input(std::move(input)),
+                    before_norm_output(nullptr),
+                    norm_weight(norm_weight),
+                    residual1(std::nullopt),
+                    residual2(std::nullopt),
+                    bias(std::nullopt),
+                    alpha(0.0),
+                    eps(eps),
+                    return_normed_output(false),
+                    is_inplace(true),
+                    norm_type(norm_type),
+                    qscheme(QScheme::NoQuantize),
+                    offset(offset),
+                    stride(stride) {};
 
 
     BufferPtr input;
@@ -174,6 +198,9 @@ struct LayernormParams {
     const bool is_inplace;
     const bool return_normed_output;
     const QScheme qscheme;
+
+    const int offset;
+    const int stride;
 };
 
 enum GemmType : size_t {
@@ -334,6 +361,11 @@ struct AttentionLayerOutput {
     BufferPtr hidden_states;
 };
 
+struct LayerNormConfig {
+    double eps;
+    NormType norm_type;
+};
+
 struct AttentionLayerParams {
     const Buffer&                   input;
     BufferPtr                       output;
@@ -341,6 +373,7 @@ struct AttentionLayerParams {
     const AttentionLayerWeights&    weights;
     AttentionCommonInputs&          common;
     const OptionalConstBufferRef    residual; // for intel xft
+    const LayerNormConfig           ln_params;
 };
 
 struct MoeConfigs {

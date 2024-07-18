@@ -272,6 +272,8 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
     gpt_weights.lm_head = mayCreateDenseWeights(*global_weight,
                                                  W::lm_head);
 
+    gpt_weights.linear_bias_slopes = mayCreateDenseWeights(*global_weight, W::linear_bias_slopes);
+
     for (auto& layer_weights : layers_weights) {
         ft::LayerWeights layer_ws;
         layer_ws.pre_attention_smoother_weight = mayCreateDenseWeights(layer_weights, W::attn_i_smoother);

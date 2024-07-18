@@ -38,6 +38,11 @@ __device__ __forceinline__ int64_t loadOffset(int head_num,
     return offset;
 }
 
+__device__ __forceinline__ int64_t loadOffsetStrided(int stride)
+{        
+    return blockIdx.x * stride;    
+}
+
 template<typename T>
 __global__ void qkLayerNorm(T* __restrict qkv,
                             const T* __restrict gamma,
@@ -96,6 +101,64 @@ __global__ void qkLayerNorm(T* __restrict qkv,
 }
 
 template<typename T>
+__global__ void layerNormWithStride(T* __restrict data,
+                            const T* __restrict gamma,
+                            const T* __restrict beta,
+                            const float layernorm_eps,
+                            int n,
+                            int stride)
+{
+    constexpr auto num_elems_T = num_elems<T>::value;
+    constexpr size_t warp_size = 32;
+    const int n_elems = n / num_elems_T / warp_size;
+    using float_packed_t = typename packed_as<float, num_elems_T>::type;
+
+    const int tid = threadIdx.x;
+
+    __shared__ float s_mean;
+    __shared__ float s_variance;
+    float            mean     = 0.0f;
+    float            variance = 0.0f;
+
+    float local_sum = 0.0f;
+    for (int i = 0; i < n_elems; i++) {
+        auto index = loadOffsetStrided(stride) + tid * n_elems + i;
+        auto val_f = cuda_cast<float_packed_t>(ldg(&data[index]));
+	local_sum += cuda_sum<float>(val_f);
+    }
+
+    mean = warpReduceSum(local_sum);
+
+    if (threadIdx.x == 0) {
+        s_mean = mean / n;
+    }
+    __syncthreads();
+
+    float local_var_sum = 0.0f;
+    for (int i = 0; i < n_elems; i++) {
+        auto index = loadOffsetStrided(stride) + tid * n_elems + i;
+        auto val_f = cuda_cast<float_packed_t>(ldg(&data[index]));
+        auto diff = val_f - s_mean;
+        local_var_sum += cuda_sum<float>(diff * diff);
+    }
+    variance = warpReduceSum(local_var_sum);
+
+    if (threadIdx.x == 0) {
+        s_variance = rsqrtf(variance / n + layernorm_eps);
+    }
+    __syncthreads();
+
+    for (int i = 0; i < n_elems; i++) {
+        auto index = loadOffsetStrided(stride) + tid * n_elems + i;
+	auto gamma_index = tid * n_elems + i;
+    auto val_f = cuda_cast<float_packed_t>(ldg(&data[index]));
+	auto val_gamma = cuda_cast<float_packed_t>(gamma[gamma_index]);
+    auto val_beta = cuda_cast<float_packed_t>(beta[gamma_index]);
+        data[index] = cuda_cast<T>((val_f - s_mean) * s_variance * val_gamma + val_beta);
+    }
+}
+
+template<typename T>
 void invokeQkLayerNorm(T* __restrict qkv,
 		       const T* __restrict gamma,
 		       const float layernorm_eps,
@@ -120,6 +183,30 @@ void invokeQkLayerNorm(T* __restrict qkv,
 						layernorm_eps, total_head_num, size_per_head);
 }
 
+template<typename T>
+void invokeLayerNormWithStride(T* __restrict data,
+                               const T* __restrict gamma,
+                               const T* __restrict beta,
+                               const float  layernorm_eps,
+                               const int    m,
+                               const int    n,
+                               const int    stride,
+                               cudaStream_t stream)
+{
+    constexpr size_t vec_size = 2;
+    constexpr size_t warp_size = 32;
+
+    if (n % (warp_size * vec_size) != 0) {
+        throw std::invalid_argument("not supported size_per_head: " + std::to_string(n));
+    }
+    dim3 grid(m);
+    dim3 block(32);
+
+    using Tp = typename packed_as<T, vec_size>::type;
+    layerNormWithStride<Tp><<<grid, block, 0, stream>>>(reinterpret_cast<Tp*>(data), reinterpret_cast<const Tp*>(gamma),
+						layernorm_eps, n, stride);
+}
+
 #define INSTANTIATE_QK_LAYERNORM(T)				\
   template void invokeQkLayerNorm(T* __restrict qkv,		\
 				  const T* __restrict gamma,	\
@@ -134,7 +221,23 @@ INSTANTIATE_QK_LAYERNORM(half);
 #ifdef ENABLE_BF16
 INSTANTIATE_QK_LAYERNORM(__nv_bfloat16);
 #endif
+#undef INSTANTIATE_QK_LAYERNORM
 
+#define INSTANTIATE_STRIDED_LAYERNORM(T)                                                                               \
+    template void invokeLayerNormWithStride(T* __restrict data,                                                        \
+                                            const T* __restrict gamma,                                                 \
+                                            const T* __restrict beta,                                                  \
+                                            const float  layernorm_eps,                                                \
+                                            const int    m,                                                            \
+                                            const int    n,                                                            \
+                                            const int    stride,                                                       \
+                                            cudaStream_t stream);
+INSTANTIATE_STRIDED_LAYERNORM(float);
+INSTANTIATE_STRIDED_LAYERNORM(half);
+#ifdef ENABLE_BF16
+INSTANTIATE_STRIDED_LAYERNORM(__nv_bfloat16);
+#endif
+#undef INSTANTIATE_STRIDED_LAYERNORM
 
 template <typename Tf, typename T, bool IS_BETA>
 __inline__ __device__ Tf compute_layernorm(Tf val, float s_mean, float s_variance, const T* gamma, const T* beta, int i)

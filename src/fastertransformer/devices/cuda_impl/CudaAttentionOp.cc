@@ -202,14 +202,19 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                           head_num,
                           kv_head_num,
                           size_per_head,
-                          params.configs.q_scaling);
+                          params.configs.q_scaling,
+                          params.common.linear_bias_slopes != nullptr);
     if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
         cufmha_runner_->runTrtV2Fmha(params.input.data(),
                                      params.common.cu_seqlens->data(),
                                      params.output.data(),
                                      batch_size,
                                      seq_len,
-                                     token_num);
+                                     token_num,
+                                     false,
+                                     false,
+                                     params.common.linear_bias_slopes != nullptr,
+                                     false);
         return;
     } else if (use_openSource_fmha && cufmha_runner_->openSourceFmhaSupport()) {
         auto seq_len_round_32 = (seq_len + 31) / 32 * 32;
@@ -227,7 +232,8 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                           softmax_lse_->data(),
                                           token_num,
                                           batch_size,
-                                          seq_len);
+                                          seq_len,
+                                          params.common.linear_bias_slopes ? params.common.linear_bias_slopes.get()->data(): nullptr);
         return;
     } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport()) {
 
@@ -264,11 +270,14 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         RUNTIME_ASSERT_OP_ARG(
             params.common.attention_mask,
             "attention_mask must be provided for default context attention implementation");
-        auto softmax_qk_output = softmax({std::move(qk_output),
-                                        *params.common.attention_mask,
-                                        nullopt,
-                                        scale,
-                                        datatype});
+        auto softmax_qk_output =
+            softmax({std::move(qk_output),
+                     *params.common.attention_mask,
+                     std::nullopt,
+                     scale,
+                     datatype,
+                     params.common.linear_bias_slopes ? (OptionalConstBufferRef)*params.common.linear_bias_slopes :
+                                                        std::nullopt});
         printBufferData(*softmax_qk_output, "softmax_qk_output: ");
 
         auto qkv_output = gemm({*softmax_qk_output, *v_output});

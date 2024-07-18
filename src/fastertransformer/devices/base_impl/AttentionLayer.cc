@@ -75,6 +75,26 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                                                  params.common.lora_input)).output;
     printBufferData(*qkv, "qkv");
 
+    if (params.weights.q_norm_weight) {
+        auto after_q_norm = layernorm(LayernormParams(qkv,
+                                                      *params.weights.q_norm_weight,
+                                                      params.ln_params.eps,
+                                                      params.ln_params.norm_type,
+                                                      params.configs.size_per_head * params.configs.head_num,
+                                                      qkv_hidden_size)
+        );
+    }
+
+    if (params.weights.k_norm_weight) {
+        auto after_k_norm = layernorm(LayernormParams(qkv,
+                                                      *params.weights.k_norm_weight,
+                                                      params.ln_params.eps,
+                                                      params.ln_params.norm_type,
+                                                      params.configs.size_per_head * (params.configs.head_num + params.configs.kv_head_num),
+                                                      qkv_hidden_size)
+        );
+    }
+
     // attention layer output is preallocated to avoid memory fragmentation
     // note that this output is returned and further used as residual
     auto dtype = (input.isQBuffer() ? qkv->type() : input.type());

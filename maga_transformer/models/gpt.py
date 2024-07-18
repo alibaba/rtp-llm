@@ -45,11 +45,11 @@ class GPT(BaseModel):
         self.config = config
         self.load_tokenizer()
         self.init_misc()
-        self.init_linear_bias()
         self.init_prefix_encoder()
         self.init_medusa()
         self.init_pipeline_param()
         self.load()
+        self.init_linear_bias()
     
     def init_misc(self):
         self.task_type = self.config.task_type
@@ -65,7 +65,8 @@ class GPT(BaseModel):
         if self.config.use_attention_linear_bias:
             slopes = torch.Tensor(get_slopes(self.config.head_num))
             slopes = self.split_slopes_tp(slopes)
-            self.linear_bias_slopes = slopes.to(self.compute_dtype).cuda()
+            self.linear_bias_slopes = slopes.to(self.compute_dtype).cuda()            
+            self.weight.append_global_weight(W.linear_bias_slopes, self.linear_bias_slopes)
 
     def init_prefix_encoder(self):
         self.prefix_encoder = None
