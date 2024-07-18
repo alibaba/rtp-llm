@@ -9,6 +9,12 @@
 #include <string>
 
 namespace rtp_llm {
+
+struct LoraMutex {
+    bool alive_;
+    std::unique_ptr<std::shared_mutex> mutex_;
+};
+
 class ModelRpcServiceImpl: public ModelRpcService::Service {
 public:
     explicit ModelRpcServiceImpl(const EngineInitParams& maga_init_params);
@@ -23,6 +29,8 @@ public:
     KVCacheInfo getKVCacheInfo() const;
 private:
     std::unique_ptr<NormalEngine> engine_ = nullptr;
+    std::mutex global_mutex_;
+    mutable std::map<int64_t,  std::unique_ptr<LoraMutex>> lora_map_mutex_;
 };
 
 }  // namespace rtp_llm

@@ -1,4 +1,6 @@
 load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
+load("//src/fastertransformer/devices:device_defs.bzl",
+    "device_impl_target", "device_test_envs", "device_linkopts")
 test_linkopts = [
     "-lpython3.10",
     "-ltorch",
@@ -26,6 +28,14 @@ test_copts = [
 #         "//maga_transformer/test/model_test/test_util:test_util"
 #     ],
 # )
+
+test_deps = [
+    "//src/fastertransformer/devices/testing:device_test_utils",
+    "//maga_transformer/cpp:models",
+    "//:gpt_init_params",
+    "@com_google_googletest//:gtest",
+    "@com_google_googletest//:gtest_main",
+] + device_impl_target()
 
 # cc_test(
 #     name = "model_rpc_server_test",
@@ -69,4 +79,21 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+)
+
+cc_test(
+    name = "dynamic_lora_model_rpc_server_test",
+    srcs = [
+        "DynamicLoraModelRpcServerTest.cc",
+        "MockModelRpcServer.h"
+    ],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = [
+        "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
+        "//maga_transformer/cpp:components",
+        "//maga_transformer/cpp:model_rpc_server",
+        "//maga_transformer/cpp:utils",
+    ] + test_deps,
+    visibility = ["//visibility:public"]
 )

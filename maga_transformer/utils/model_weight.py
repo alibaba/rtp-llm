@@ -2,6 +2,7 @@ import logging
 import math
 import os
 from functools import reduce
+import threading
 import torch
 import torch.serialization
 import functools
@@ -1138,10 +1139,10 @@ class LoraResource():
         self.lora_map = lora_map
 
         self.max_lora_model_size = int(os.environ.get("MAX_LORA_MODEL_SIZE", "-1"))
-        self.rlock_map: Dict[str, RWLock] = {}
         self.to_add_lora_id = list()
         self.to_remove_lora_id = list()
         self.stream = torch.cuda.Stream()
+        self.global_lock_ = RWlock()
 
     @property
     def is_merge_lora(self):
@@ -1151,13 +1152,8 @@ class LoraResource():
         self.to_add_lora_id.clear()
         self.to_remove_lora_id.clear()
 
-    def delete_rlock(self, name: str) -> None:
-        if name in self.rlock_map:
-            del self.rlock_map[name]
-
     def add_lora_name(self, name: str, weights: LoRAWeights) -> int:
         id = self.lora_map.add_lora_name(name, weights)
-        self.rlock_map[name] = RWlock()
         self.to_add_lora_id.append(id)
         return id
 
@@ -1177,20 +1173,11 @@ class LoraResource():
             if lora_name not in lora_infos:
                 self.database.remove_lora(lora_name)
                 remove_lora_names.append(lora_name)
-
-        for lora_name in remove_lora_names:
-            self.write_acquire(lora_name)
-        try:
             self.clear_for_update()
             for lora_name in remove_lora_names:
                 self.remove_lora_name(lora_name)
             for op in self.ft_op:
                 op.update_lora()
-        finally:
-            for lora_name in remove_lora_names:
-                self.write_release(lora_name)
-        for lora_name in remove_lora_names:
-            self.delete_rlock(lora_name)
 
     def add_new_lora(self, lora_infos: Dict[str, str]):
         for lora_name, lora_path in lora_infos.items():
@@ -1210,12 +1197,17 @@ class LoraResource():
     def update(self, lora_infos: Dict[str, str]):
         if self.max_lora_model_size != -1 and len(lora_infos) > self.max_lora_model_size:
             raise LoraCountException(f'lora_infos[{lora_infos}]\'s size exceed MAX_LORA_MODEL_SIZE[{self.max_lora_model_size}]')
-        with torch.cuda.stream(self.stream):
-            self.check_remaining_lora(lora_infos)
-            self.remove_old_lora(lora_infos)
-            self.add_new_lora(lora_infos)
-        self.lora_infos = lora_infos
-        self.database.dump_lora_info()
+        self.global_lock_.write_acquire()
+        try:
+            with torch.cuda.stream(self.stream):
+                self.check_remaining_lora(lora_infos)
+                self.remove_old_lora(lora_infos)
+                self.add_new_lora(lora_infos)
+
+            self.lora_infos = lora_infos
+            self.database.dump_lora_info()
+        finally:
+            self.global_lock_.write_release()
 
     def get_id(self, name: str) -> int:
         if self.is_merge_lora:
@@ -1227,20 +1219,11 @@ class LoraResource():
             return self.lora_map.get_id(name)
 
     def read_acquire(self, lora_name: str):
-        if lora_name in self.rlock_map:
-            self.rlock_map[lora_name].read_acquire()
+        self.global_lock_.read_acquire()
 
     def read_release(self, lora_name: str):
-        if lora_name in self.rlock_map:
-            self.rlock_map[lora_name].read_release()
+        self.global_lock_.read_release()
 
-    def write_acquire(self, lora_name: str):
-        if lora_name in self.rlock_map:
-            self.rlock_map[lora_name].write_acquire()
-
-    def write_release(self, lora_name: str):
-        if lora_name in self.rlock_map:
-            self.rlock_map[lora_name].write_release()
 
 class ModelWeights:
     def __init__(self, num_layers: int):

@@ -5,6 +5,8 @@
 #include <optional>
 #include <memory>
 #include <unordered_map>
+#include <thread>
+#include <shared_mutex>
 
 namespace fastertransformer {
 
@@ -56,15 +58,20 @@ struct LoraWeights {
 };
 typedef std::shared_ptr<const LoraWeights>  LoraWeightsPtr;
 
+
+// thread safe map
 struct LoraWeightsMap {
     std::unordered_map<int64_t, LoraWeights> lora_map_;
+    std::shared_mutex mutex_;
 
     bool hasLoraWeight(int64_t lora_id) const {
+        std::shared_lock<std::shared_mutex>(mutex_);
         auto it = lora_map_.find(lora_id);
         return it != lora_map_.end();
     }
 
     LoraWeights getLoraWeight(int64_t lora_id) const {
+        std::shared_lock<std::shared_mutex>(mutex_);
         FT_CHECK(hasLoraWeight(lora_id));
         auto it = lora_map_.find(lora_id);
         return it->second;
@@ -75,15 +82,18 @@ struct LoraWeightsMap {
                        ConstBufferPtr lora_a,
                        ConstBufferPtr lora_b)
     {
+        std::unique_lock<std::shared_mutex>(mutex_);
         lora_map_[lora_id] = LoraWeights({lora_a, lora_b});
     }
 
     void removeLoRAWeight(int64_t lora_id) {
+        std::unique_lock<std::shared_mutex>(mutex_);
         if (lora_map_.find(lora_id) == lora_map_.end()) {
             return;
         }
         lora_map_.erase(lora_id);
     }
+
 };
 
 struct AttentionLayerWeights {

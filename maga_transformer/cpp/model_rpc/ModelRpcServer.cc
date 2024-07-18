@@ -40,6 +40,21 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     FT_LOG_DEBUG("receive request %ld", request->request_id());
     auto input = QueryConverter::transQuery(request);
+    std::shared_mutex* inner_mutex = nullptr;
+    if (input->lora_id != -1) {
+        std::lock_guard<std::mutex> g_lk(global_mutex_);
+
+        auto it = lora_map_mutex_.find(input->lora_id);
+        if (it != lora_map_mutex_.end() && it->second->alive_) {
+            inner_mutex = it->second->mutex_.get();
+        } else {
+            FT_LOG_INFO("request:[%ld] error lora id[%ld] is not alive", request->request_id(), input->lora_id);
+            return grpc::Status::CANCELLED;
+
+        }
+    }
+    auto lock_scope = (inner_mutex == nullptr) ?
+                      std::shared_lock<std::shared_mutex>() : std::shared_lock<std::shared_mutex>(*inner_mutex);
     FT_LOG_DEBUG("request:[%ld] trans to stream success", request->request_id());
     auto stream = engine_->enqueue(input);
     FT_LOG_DEBUG("request:[%ld] enqueue success", request->request_id());
@@ -90,11 +105,45 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
 void ModelRpcServiceImpl::addLoRA(const int64_t                                                   lora_id,
                        const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
                        const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
-    (void)engine_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+    std::shared_mutex* inner_mutex = nullptr;
+    {
+        std::lock_guard<std::mutex> g_lk(global_mutex_);
+
+        auto it = lora_map_mutex_.find(lora_id);
+        if (it == lora_map_mutex_.end()) {
+            auto lora_mutex_ptr = std::make_unique<LoraMutex>(
+                LoraMutex({false, std::make_unique<std::shared_mutex>()}));
+            it = lora_map_mutex_.emplace(lora_id, std::move(lora_mutex_ptr)).first;
+        }
+        inner_mutex = it->second->mutex_.get();
+    }
+    {
+        std::unique_lock<std::shared_mutex> c_lk(*inner_mutex);
+        (void)engine_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
+    }
+    {
+        std::lock_guard<std::mutex> g_lk(global_mutex_);
+        auto it = lora_map_mutex_.find(lora_id);
+        it->second->alive_ = true;
+    }
 }
 
 void ModelRpcServiceImpl::removeLoRA(const int64_t lora_id) {
-    (void)engine_->removeLoRA(lora_id);
+    std::shared_mutex* inner_mutex = nullptr;
+    {
+        std::lock_guard<std::mutex> g_lk(global_mutex_);
+
+        auto it = lora_map_mutex_.find(lora_id);
+        if (it == lora_map_mutex_.end() || it->second->alive_ == false) {
+            return;
+        }
+        inner_mutex = it->second->mutex_.get();
+        it->second->alive_ = false;
+    }
+    {
+        std::unique_lock<std::shared_mutex> c_lk(*inner_mutex);
+        (void)engine_->removeLoRA(lora_id);
+    }
 }
 
 KVCacheInfo ModelRpcServiceImpl::getKVCacheInfo() const {
