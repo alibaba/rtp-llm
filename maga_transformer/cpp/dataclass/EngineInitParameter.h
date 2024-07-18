@@ -1,4 +1,4 @@
-<#pragma once
+#pragma once
 
 #include "maga_transformer/cpp/common/torch_bind.h"
 #include "src/fastertransformer/core/Buffer.h"
