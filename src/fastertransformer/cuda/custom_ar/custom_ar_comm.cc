@@ -31,7 +31,7 @@ using namespace std;
 
 namespace fastertransformer {
 
-CustomAllReduceComm::CustomAllReduceComm(size_t world_size, size_t rank): world_size_(world_size), rank_(rank) {
+CustomAllReduceComm::CustomAllReduceComm(const std::vector<int>& tp_ranks, size_t rank): tp_ranks_(std::move(tp_ranks)), rank_(rank) {
     param_.barrier_flag = 0;
     param_.rank         = rank_;
     param_.local_rank   = rank_;
@@ -41,7 +41,7 @@ CustomAllReduceComm::~CustomAllReduceComm() {
     // Note: no need to check errors during clean up resource
 
     // close cudaIPCMemhandle
-    for (size_t i = 0; i < world_size_; i++) {
+    for (auto i : tp_ranks_) {
         if (i == rank_) {
             check_cuda_error(cudaFree(param_.peer_comm_buffer_ptrs[i]));
             check_cuda_error(cudaFree(param_.peer_barrier_ptrs[i]));
@@ -51,7 +51,7 @@ CustomAllReduceComm::~CustomAllReduceComm() {
         }
     }
     // disable P2P access
-    for (size_t i = 0; i < world_size_; i++) {
+    for (auto i : tp_ranks_) {
         if (i == rank_) {
             continue;
         } else {
@@ -76,18 +76,15 @@ void CustomAllReduceComm::allReduce(
         param_.peer_comm_buffer_ptrs[rank_], input_ptr, elts * getTypeSize(data_type), cudaMemcpyDeviceToDevice));
 
     param_.local_output_buffer_ptr = output_ptr;
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeCustomAllReduceDispatch, &param_, stream, world_size_);
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeCustomAllReduceDispatch, &param_, stream, tp_ranks_.size());
 }
 
 void CustomAllReduceComm::init(const NcclParam& nccl_para, cudaStream_t stream) {
     // enable P2P access
-    for (int i = 0; i < world_size_; i++) {
+    for (auto i: tp_ranks_) {
         if (i == rank_) {
             continue;
         }
-        int peer_access_available = 0;
-        check_cuda_error(cudaDeviceCanAccessPeer(&peer_access_available, rank_, i));
-        FT_CHECK_WITH_INFO(peer_access_available == 1, "not peer_access_available");
         auto err = cudaDeviceEnablePeerAccess(i, 0);
         if (err == cudaErrorPeerAccessAlreadyEnabled) {
             continue;
@@ -97,7 +94,7 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, cudaStream_t stream) 
 
     // prepare share buffer
     const size_t                    local_comm_buffer_size    = comm_buffer_size();
-    const size_t                    local_barrier_buffer_size = barrier_buffer_size(world_size_);
+    const size_t                    local_barrier_buffer_size = barrier_buffer_size(tp_ranks_.size());
     void*                           local_comm_buffer_ptr     = nullptr;
     void*                           local_barrier_buffer_ptr  = nullptr;
     std::vector<cudaIpcMemHandle_t> comm_buffer_handles =
@@ -106,7 +103,7 @@ void CustomAllReduceComm::init(const NcclParam& nccl_para, cudaStream_t stream) 
         prepareP2PBuffer_(nccl_para, local_barrier_buffer_size, local_barrier_buffer_ptr, stream);
 
     // open other rank's cuda IPCMemHandle
-    for (size_t i = 0; i < world_size_; i++) {
+    for (auto i : tp_ranks_) {
         if (i == rank_) {
             param_.peer_comm_buffer_ptrs[i] = local_comm_buffer_ptr;
             param_.peer_barrier_ptrs[i]     = reinterpret_cast<uint32_t*>(local_barrier_buffer_ptr);
@@ -142,7 +139,7 @@ std::vector<cudaIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Ncc
 
     // malloc serial handle buffer
     char* serial_handle_buffer_ptr;
-    check_cuda_error(cudaMalloc(&serial_handle_buffer_ptr, ipc_handle_buffer_size(world_size_)));
+    check_cuda_error(cudaMalloc(&serial_handle_buffer_ptr, ipc_handle_buffer_size(tp_ranks_.size())));
 
     // open local cudaIpcMemHandle
     cudaIpcMemHandle_t local_buffer_handle;
@@ -160,7 +157,7 @@ std::vector<cudaIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Ncc
     check_cuda_error(cudaStreamSynchronize(stream));
 
     // deserialize all ranks' cudaIpcMemHandle
-    std::vector<cudaIpcMemHandle_t> handles(world_size_);
+    std::vector<cudaIpcMemHandle_t> handles(tp_ranks_.size());
     for (size_t i = 0; i < handles.size(); ++i) {
         check_cuda_error(cudaMemcpyAsync(handles[i].reserved,
                                          serial_handle_buffer_ptr + CUDA_IPC_HANDLE_SIZE * i,
@@ -173,10 +170,12 @@ std::vector<cudaIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Ncc
     return handles;
 }
 
-bool CustomAllReduceComm::shouldCustomAR(size_t world_size, size_t rank) {
-    char* enable_custom_ar_str = std::getenv("FT_ENABLE_CUSTOM_AR");
-    bool  enable_custom_ar     = enable_custom_ar_str != nullptr && std::atoi(enable_custom_ar_str) != 0;
-    if (!enable_custom_ar) {
+bool CustomAllReduceComm::shouldCustomAR(const std::vector<int>& tp_ranks, int rank) {
+    size_t world_size = tp_ranks.size();
+    char* disable_custom_ar_str = std::getenv("FT_DISABLE_CUSTOM_AR");
+    bool  disable_custom_ar = disable_custom_ar_str != nullptr;
+    if (disable_custom_ar) {
+        FT_LOG_INFO("Disable custom ar since FT_DISABLE_CUSTOM_AR is set");
         return false;
     }
 
@@ -185,12 +184,12 @@ bool CustomAllReduceComm::shouldCustomAR(size_t world_size, size_t rank) {
     // check whether world size is valid
     std::unordered_set<int> available_world_sizes = {2, 4, 8};
     if (available_world_sizes.find(world_size) == available_world_sizes.end()) {
-        FT_LOG_INFO("Invalid custom ar world size %d, disable custom ar", world_size);
+        FT_LOG_INFO("Disable custom ar for invalid world size %d", world_size);
         return false;
     }
 
     // check P2P access
-    for (int i = 0; i < world_size; i++) {
+    for (auto i : tp_ranks) {
         if (i == rank) {
             continue;
         }
@@ -205,9 +204,13 @@ bool CustomAllReduceComm::shouldCustomAR(size_t world_size, size_t rank) {
     return true;
 }
 
-std::unique_ptr<CustomAllReduceComm> initCustomAllReduceComm(const NcclParam& nccl_para, cudaStream_t stream) {
-    auto comm = std::make_unique<CustomAllReduceComm>(nccl_para.world_size_, nccl_para.rank_);
+std::unique_ptr<CustomAllReduceComm> initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<int>& tp_ranks, cudaStream_t stream) {
+    if (!CustomAllReduceComm::shouldCustomAR(tp_ranks, nccl_para.rank_)) {
+        return nullptr;
+    }
+    auto comm = std::make_unique<CustomAllReduceComm>(tp_ranks, nccl_para.rank_);
     comm->init(nccl_para, stream);
+    FT_LOG_INFO("Custom all reduce is enabled on rank %d of %d", nccl_para.rank_, tp_ranks.size());
     return comm;
 }
 

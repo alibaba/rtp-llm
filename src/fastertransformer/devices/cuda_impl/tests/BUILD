@@ -53,7 +53,10 @@ cc_test(
 cc_test(
     name = "cuda_dist_test",
     srcs = [],
-    env = test_envs,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+        "FT_DISABLE_CUSTOM_AR": "1"
+    },
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
     deps = test_deps + [
@@ -64,16 +67,15 @@ cc_test(
 
 cc_test(
     name = "cuda_custom_all_reduce_test",
-    srcs = [],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-        "FT_ENABLE_CUSTOM_AR": "1"
-    },
+    srcs = [
+        "CudaCustomAllReduceTest.cc"
+    ],
+    data = [],
+    env = test_envs,
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
-    deps = test_deps + [
-        "//src/fastertransformer/devices/base_tests:custom_all_reduce_test"
-    ]
+    deps = test_deps,
+    tags = ["multi_device"],
 )
 
 cc_test(

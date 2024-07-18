@@ -32,7 +32,7 @@ namespace fastertransformer {
 
 class CustomAllReduceComm {
 public:
-    CustomAllReduceComm(size_t world_size, size_t rank);
+    CustomAllReduceComm(const std::vector<int>& tp_ranks, size_t rank);
 
     ~CustomAllReduceComm();
 
@@ -54,7 +54,7 @@ public:
         return CUDA_IPC_HANDLE_SIZE * world_size;
     }
 
-    static bool shouldCustomAR(size_t world_size, size_t rank);
+    static bool shouldCustomAR(const std::vector<int>& tp_ranks, int rank);
 
 private:
     std::vector<cudaIpcMemHandle_t> prepareP2PBuffer_(const NcclParam& nccl_para,
@@ -64,11 +64,11 @@ private:
 
     CustomAllReduceParameters       param_;
     Tensor*                         output_tensor_ = nullptr;
-    const size_t                    world_size_;
-    const size_t                    rank_;
+    const int                       rank_;
+    std::vector<int>                tp_ranks_;
     std::vector<cudaIpcMemHandle_t> peer_comm_buffer_handles_;
 };
 
-std::unique_ptr<CustomAllReduceComm> initCustomAllReduceComm(const NcclParam& nccl_para, cudaStream_t stream);
+std::unique_ptr<CustomAllReduceComm> initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<int>& tp_ranks, cudaStream_t stream);
 
 }  // namespace fastertransformer

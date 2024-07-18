@@ -379,4 +379,20 @@ std::vector<int64_t> getLocalParameter(std::vector<int64_t> layer_para, int tens
     return local_para;
 }
 
+std::vector<int> fcNcclGatherRanks(NcclParam& para, cudaStream_t stream) {
+    std::vector<int> ranks(para.world_size_);
+    int* d_sendbuf;
+    int* d_recvbuf;
+    check_cuda_error(cudaMallocAsync(&d_sendbuf, sizeof(int), stream));
+    check_cuda_error(cudaMallocAsync(&d_recvbuf, sizeof(int) * para.world_size_, stream));
+    check_cuda_error(cudaMemcpyAsync(d_sendbuf, &para.rank_, sizeof(int), cudaMemcpyHostToDevice, stream));
+    NCCLCHECK(ncclAllGather((const void*)d_sendbuf, (void*)d_recvbuf, 1, ncclInt, para.nccl_comm_, stream));
+    check_cuda_error(cudaStreamSynchronize(stream));
+    check_cuda_error(cudaMemcpyAsync(ranks.data(), d_recvbuf, sizeof(int) * para.world_size_, cudaMemcpyDeviceToHost, stream));
+    check_cuda_error(cudaFreeAsync(d_sendbuf, stream));
+    check_cuda_error(cudaFreeAsync(d_recvbuf, stream));
+    check_cuda_error(cudaStreamSynchronize(stream));
+    return ranks;
+}
+
 }  // namespace fastertransformer

@@ -322,7 +322,7 @@ protected:
         }
     }
 
-
+    // Note: used for catching error code for multiprocess test, do not remove
     bool checkTensorClose(const torch::Tensor& a, const torch::Tensor& b,
                            double rtol = 0, double atol = 0) {
         auto a_cmp = a;

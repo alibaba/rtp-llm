@@ -25,19 +25,6 @@ cc_library(
 )
 
 cc_library(
-    name = "custom_all_reduce_test",
-    srcs = glob([
-        "CustomAllReduceTest.cc",
-    ]),
-    deps = [
-        "//src/fastertransformer/devices/testing:device_test_utils",
-    ],
-    visibility = ["//visibility:public"],
-    copts = copts(),
-)
-
-
-cc_library(
     name = "base_tests",
     hdrs = glob([
         "*.hpp",

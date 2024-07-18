@@ -22,8 +22,7 @@ static const size_t DEFAULT_MAX_BATCH_SIZE = 256;
 
 CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     FT_LOG_INFO("Initialize CudaDevice. %d", device_id_);
-    auto err = cudaSetDevice(device_id_);
-    std::cout << cudaGetErrorString(err) << std::endl;
+    check_cuda_error(cudaSetDevice(device_id_));
     check_cuda_error(cudaStreamCreate(&stream_));
 
     check_cuda_error(cublasCreate(&cublas_handle_));
@@ -83,9 +82,11 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     checkUseMultiBlockMode();
 
     // Initialize custom all reduce communicator
-    if (nccl_param_.world_size_ > 1 && CustomAllReduceComm::shouldCustomAR(nccl_param_.world_size_, nccl_param_.rank_)) {
+    // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before allocator init
+    if (nccl_param_.world_size_ > 1) {
         FT_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param_.rank_, nccl_param_.world_size_);
-        custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, stream_);
+        std::vector<int> tp_ranks = fcNcclGatherRanks(nccl_param_, stream_);
+        custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, tp_ranks, stream_);
     }
 
     auto allocator_ptr = new Allocator<AllocatorType::CUDA>(device_id_);

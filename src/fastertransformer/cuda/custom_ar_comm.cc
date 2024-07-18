@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// TODO(xyz) deprecated, please remove it
+// TODO(xyz) deprecated class, please remove it
 
 #include "custom_ar_comm.h"
 
