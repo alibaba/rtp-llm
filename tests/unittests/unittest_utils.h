@@ -34,7 +34,7 @@
 #define EPSILON (1e-20)
 #define EPSILON_FP16 (1e-10)
 
-using namespace fastertransformer;
+namespace ft = fastertransformer;
 
 class TestFailureError : public std::exception {
 private:
@@ -42,7 +42,7 @@ private:
 public:
     explicit TestFailureError() = default;
     explicit TestFailureError(std::string name, std::string msg = "") {
-        msg_ = fmtstr("TEST FAIL [%s] %s", name.c_str(), msg.c_str());
+        msg_ = ft::fmtstr("TEST FAIL [%s] %s", name.c_str(), msg.c_str());
     }
     const char* what () const throw () {
         return msg_.c_str();

@@ -132,7 +132,7 @@ cc_binary(
     ] + select({
         "//:using_cuda": [
             "cutlass_kernels_interface",
-            "//3rdparty/flash_attention2:flash_attention2_impl",
+            "@flash_attention//:flash_attention2_impl",
             "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
             "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
         ],

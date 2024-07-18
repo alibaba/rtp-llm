@@ -323,6 +323,7 @@ struct AttentionCommonInputs {
 
     std::optional<KvCacheInfo> kv_cache;
     ConstBufferPtr cu_seqlens;
+    ConstBufferPtr cu_kv_seqlens;
     ConstBufferPtr padding_offset;
 
     size_t context_batch_size;

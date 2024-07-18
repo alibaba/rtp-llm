@@ -1,9 +1,9 @@
 #pragma once
 
+#include "src/fastertransformer/cuda/cufmha/cufmha.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/cublas/cublas.h"
-#include "src/fastertransformer/cuda/cufmha/cufmha.h"
 #include "src/fastertransformer/cuda/cuggemm/cuggemm.h"
 #include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
@@ -109,4 +109,3 @@ private:
 };
 
 } // namespace fastertransformer
-

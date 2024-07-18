@@ -151,7 +151,7 @@ struct Multihead_attention_params_base {
     int      max_distance                   = 0;
 
     // The slope per head of linear position bias to attention score (H).
-    const T* linear_bias_slopes = nullptr;
+    const float* linear_bias_slopes = nullptr;
 
     const T*   ia3_key_weights   = nullptr;
     const T*   ia3_value_weights = nullptr;
@@ -293,7 +293,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         const int     step,
                                         const float   q_scaling,
                                         const int     relative_attention_bias_stride,
-                                        const T*      linear_bias_slopes,
+                                        const float*  linear_bias_slopes,
                                         const bool*   masked_tokens,
                                         const float*  qkv_scale_out,
                                         const float*  attention_out_scale,

@@ -1,5 +1,5 @@
-#include "src/fastertransformer/devices/base_tests/GroupGemmOpTest.hpp"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/base_tests/GroupGemmOpTest.hpp"
 
 using namespace std;
 using namespace fastertransformer;

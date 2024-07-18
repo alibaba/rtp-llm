@@ -29,7 +29,7 @@ cc_library(
     deps = [
         ":weights_define",
         "//:gpt_init_params_hdr",
-        "//3rdparty/flash_attention2:flash_attention2_header",
+        "@flash_attention//:flash_attention2_header",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_header",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_header",
         "//src/fastertransformer/layers:layers",

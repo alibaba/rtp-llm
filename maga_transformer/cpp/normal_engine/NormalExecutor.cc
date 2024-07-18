@@ -63,7 +63,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         const auto context_batch_size = model_input.input_lengths->size() - generate_batch_size;
         model_input.attention_mask = NormalBatchStreamProcessor::createAttentionMask({
                 model_input.input_lengths->view(generate_batch_size, context_batch_size),
-                model_input.prefix_lengths->view(generate_batch_size, context_batch_size),
+                *model_input.prefix_lengths,
                 dtype_, is_causal_, device_});
     }
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());

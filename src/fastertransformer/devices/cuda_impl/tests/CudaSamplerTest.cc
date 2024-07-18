@@ -1,5 +1,5 @@
-#include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
 
 using namespace std;
 using namespace fastertransformer;

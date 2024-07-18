@@ -2,7 +2,7 @@
 
 #include "3rdparty/contextFusedMultiHeadAttention/fmhaRunner.h"
 #include "3rdparty/contextFusedMultiHeadAttention/fused_multihead_attention_common.h"
-#include "3rdparty/flash_attention2/flash.h"
+#include "3rdparty/flash_attention/flash_api.h"
 #include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/cuda/ExpertAttentionUtil.h"
 #include "src/fastertransformer/layers/GemmRunner.h"
@@ -203,7 +203,7 @@ public:
                         const int    head_size,
                         const int    max_seqlen,
                         const float  softmax_scale,
-                        T*           linear_bias_slopes,
+                        float*       linear_bias_slopes,
                         T*           out,
                         cudaStream_t stream);
 

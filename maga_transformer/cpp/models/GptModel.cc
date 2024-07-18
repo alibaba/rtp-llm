@@ -5,6 +5,7 @@
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/models/W.h"
+#include "src/fastertransformer/utils/assert_utils.h"
 #include <memory>
 
 using namespace std;
@@ -22,6 +23,7 @@ GptModel::GptModel(const GptModelInitParams& params)
 void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
                                   int32_t*       cu_seqlens,
                                   const int32_t* sequence_length,
+                                  const int32_t* prefix_length,
                                   const int32_t  batch_size,
                                   const int32_t  max_seq_len)
 {
@@ -30,11 +32,16 @@ void getPaddingOffsetAndCuSeqLens(int32_t*       padding_offset,
     int32_t        cum_offset           = 0;
     int32_t        index                = 0;
     for (int32_t i = 0; i < batch_size; i++) {
-        const int32_t seq_len = sequence_length[i];
+        int32_t seq_len = sequence_length[i];
+        if (prefix_length) {
+            seq_len += prefix_length[i];
+        }
         cu_seqlens[i] = total_seq_len;
-        for (int32_t j = 0; j < seq_len; j++) {
-            padding_offset[index] = cum_offset;
-            index++;
+        if (padding_offset) {
+            for (int32_t j = 0; j < seq_len; j++) {
+                padding_offset[index] = cum_offset;
+                index++;
+            }
         }
         cum_offset += max_seq_len - seq_len;
         total_seq_len += seq_len;
@@ -80,11 +87,16 @@ void GptModel::prepareAttentionInputs(
 
     const auto& input_lengths = inputs.input_lengths;
     const auto& sequence_lengths = inputs.sequence_lengths;
+    const auto& prefix_lengths = inputs.prefix_lengths;
     const auto decoder_batch_size = sequence_lengths->shape()[0];
     const auto context_batch_size = input_lengths->shape()[0] - decoder_batch_size;
     const auto max_context_seq_len = context_batch_size ? *std::max_element(
         input_lengths->data<int32_t>() + decoder_batch_size,
         input_lengths->data<int32_t>() + decoder_batch_size + context_batch_size) : 0;
+    FT_CHECK_WITH_INFO(!prefix_lengths || prefix_lengths->size() == context_batch_size, "prefix_lengths size %d is not equal to context batch size %d.", prefix_lengths->size(), context_batch_size);
+    attention_inputs.max_prefix_length = context_batch_size && prefix_lengths ? *std::max_element(
+        prefix_lengths->data<int32_t>(),
+        prefix_lengths->data<int32_t>() + prefix_lengths->size()) : 0;
     const auto max_decoder_seq_len = decoder_batch_size ? *std::max_element(
         sequence_lengths->data<int32_t>(),
         sequence_lengths->data<int32_t>() + decoder_batch_size) : 0;
@@ -95,6 +107,7 @@ void GptModel::prepareAttentionInputs(
         padding_offset_data.data(),
         cu_seqlens_data.data(),
         input_lengths->dataWithOffset<int32_t>(decoder_batch_size),
+        nullptr,
         context_batch_size,
         max_context_seq_len);
 
@@ -106,6 +119,21 @@ void GptModel::prepareAttentionInputs(
 
     attention_inputs.cu_seqlens = device_->clone(
         {*vector2Buffer(cu_seqlens_data), AllocationType::DEVICE, {"cu_seqlens"}});
+    if (attention_inputs.max_prefix_length) {
+        attention_inputs.prefix_prompt_lengths = device_->clone(*prefix_lengths);
+        std::vector<int32_t> cu_kv_seqlens_data(context_batch_size + 1);
+        getPaddingOffsetAndCuSeqLens(
+                nullptr,
+                cu_kv_seqlens_data.data(),
+                input_lengths->dataWithOffset<int32_t>(decoder_batch_size),
+                prefix_lengths->data<int32_t>(),
+                context_batch_size,
+                max_context_seq_len);
+        attention_inputs.cu_kv_seqlens = device_->clone(
+            {*vector2Buffer(cu_kv_seqlens_data), AllocationType::DEVICE, {"cu_kv_seqlens"}});
+    } else {
+        attention_inputs.cu_kv_seqlens = attention_inputs.cu_seqlens;
+    }
     attention_inputs.padding_offset = device_->clone(
         {*vector2Buffer(padding_offset_data), AllocationType::DEVICE, {"padding_offset"}});
     attention_inputs.decoder_batch_size = decoder_batch_size;
@@ -118,13 +146,6 @@ void GptModel::prepareAttentionInputs(
         attention_inputs.linear_bias_slopes = weights_.linear_bias_slopes->kernel;        
     }
     attention_inputs.attention_mask = inputs.attention_mask;
-    attention_inputs.max_prefix_length = 0;
-    if (inputs.prefix_lengths) {
-        attention_inputs.prefix_prompt_lengths = inputs.prefix_lengths;
-        attention_inputs.max_prefix_length = *std::max_element(
-            inputs.prefix_lengths->data<int32_t>(),
-            inputs.prefix_lengths->data<int32_t>() + inputs.prefix_lengths->size());
-    }
 }
 
 

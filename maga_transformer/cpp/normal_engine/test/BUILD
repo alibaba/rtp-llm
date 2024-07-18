@@ -27,7 +27,7 @@ cc_library(
     deps =  [
         "//src/fastertransformer/devices/testing:device_test_utils",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-        "//3rdparty/flash_attention2:flash_attention2_impl",
+        "@flash_attention//:flash_attention2_impl",
         "//maga_transformer/cpp:normal_engine",
         "//:gpt_init_params",
         "@com_google_googletest//:gtest",
@@ -50,7 +50,7 @@ cc_test(
     deps = [
         "//src/fastertransformer/devices/testing:device_test_utils",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-        "//3rdparty/flash_attention2:flash_attention2_impl",
+        "@flash_attention//:flash_attention2_impl",
         "//maga_transformer/cpp:normal_engine",
         "//:gpt_init_params",
         "@com_google_googletest//:gtest",

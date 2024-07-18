@@ -316,7 +316,7 @@ template<typename T, typename T_IN, int ITEMS_PER_THREAD>
 __global__ void softmax_kernel(T*          attn_score,
                                const T_IN* qk,
                                const T*    attn_mask,
-                               const T*    linear_bias_slopes,
+                               const float* linear_bias_slopes,
                                const int   batch_size,
                                const int   head_num,
                                const int   q_length,
@@ -395,7 +395,7 @@ template<typename T, int ITEMS_PER_THREAD>
 __global__ void softmax_kernel_h2(T*        attn_score,
                                   const T*  qk_buf,
                                   const T*  attn_mask,
-                                  const T*  linear_bias_slopes,
+                                  const float* linear_bias_slopes,
                                   const int batch_size,
                                   const int head_num,
                                   const int q_length,
@@ -495,7 +495,7 @@ template<typename T, int K_ITEMS_PER_THREAD, int Q_ITEMS_PER_THREAD>
 __global__ void softmax_kernel_h2_v2(T*        attn_score,
                                      const T*  qk_buf,
                                      const T*  attn_mask,
-                                     const T*  linear_bias_slopes,
+                                     const float* linear_bias_slopes,
                                      const int batch_size,
                                      const int head_num,
                                      const int q_length,
@@ -672,7 +672,7 @@ __global__ void softmax_kernel_h2_v2(T*        attn_score,
                 <<<grid, block, 0, stream>>>((T_*)param.attention_score,                                               \
                                              (const T_*)param.qk,                                                      \
                                              (const T_*)param.attention_mask,                                          \
-                                             (const T_*)param.linear_bias_slopes,                                      \
+                                             (const float*)param.linear_bias_slopes,                                      \
                                              param.batch_size,                                                         \
                                              param.num_heads,                                                          \
                                              param.q_length,                                                           \
@@ -683,7 +683,7 @@ __global__ void softmax_kernel_h2_v2(T*        attn_score,
             softmax_kernel_h2<T_, ITEMS_PER_THREAD><<<grid, block, 0, stream>>>((T_*)param.attention_score,            \
                                                                                 (const T_*)param.qk,                   \
                                                                                 (const T_*)param.attention_mask,       \
-                                                                                (const T_*)param.linear_bias_slopes,   \
+                                                                                (const float*)param.linear_bias_slopes,   \
                                                                                 param.batch_size,                      \
                                                                                 param.num_heads,                       \
                                                                                 param.q_length,                        \
@@ -1598,7 +1598,7 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
         }
     }
 
-    const int position_id = position_ids == nullptr ? -1 : position_ids[token_idx];    
+    const int position_id = position_ids == nullptr ? -1 : position_ids[token_idx];
     const int pre_len = cu_seqlens[batch_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope(rotary_embedding_style,

@@ -142,7 +142,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         const int     step,
                                         const float   q_scaling,
                                         const int     relative_attention_bias_stride,
-                                        const T*      linear_bias_slopes,
+                                        const float*  linear_bias_slopes,
                                         const bool*   masked_tokens,
                                         const float*  qkv_scale_out,
                                         const float*  attention_out_scale,
@@ -233,7 +233,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
     params.base_scale                     = base_scale;
     // The slope of linear position bias per head, e.g., ALiBi.
     if (linear_bias_slopes != nullptr) {
-        params.linear_bias_slopes = reinterpret_cast<const DataType*>(linear_bias_slopes);
+        params.linear_bias_slopes = linear_bias_slopes;
     }
 
     params.input_lengths = input_lengths;
@@ -288,7 +288,7 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                                      const int     step,                                               \
                                                      const float   q_scaling,                                          \
                                                      const int     relative_attention_bias_stride,                     \
-                                                     const T*      linear_bias_slopes,                                 \
+                                                     const float*  linear_bias_slopes,                                 \
                                                      const bool*   masked_tokens,                                      \
                                                      const float*  qkv_scale_out,                                      \
                                                      const float*  attention_out_scale,                                \

@@ -54,7 +54,7 @@ struct MaskedSoftmaxParam {
 
     // Optional parameters that depend on the type of attention.
     // The slopes of the linear position bias of ALiBi.
-    const T* linear_bias_slopes = nullptr;  // (head_num,), optional
+    const float* linear_bias_slopes = nullptr;  // (head_num,), optional
 };
 
 enum class KvCacheDataType : int8_t {

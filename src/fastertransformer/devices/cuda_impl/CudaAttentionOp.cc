@@ -118,7 +118,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     KVBlockArray kv_block_array;
     BufferPtr block_pointers, block_scale_pointers;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
-
     if (params.common.kv_cache) {
         const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
         block_pointers = allocateBuffer({DataType::TYPE_INT64,
@@ -182,7 +181,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         use_logn_attn,
         scale_out_ptr,
         int8_mode,
-        false,
+        params.common.max_prefix_length && use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport(),
         stream_
     );
 
@@ -207,37 +206,75 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                           params.configs.q_scaling,
                           params.common.linear_bias_slopes != nullptr);
     if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
-        cufmha_runner_->runTrtV2Fmha(params.input.data(),
-                                     params.common.cu_seqlens->data(),
-                                     params.output.data(),
-                                     batch_size,
-                                     seq_len,
-                                     token_num,
-                                     false,
-                                     false,
-                                     params.common.linear_bias_slopes != nullptr,
-                                     false);
+        if (params.common.max_prefix_length) {
+            cufmha_runner_->runTrtV2FmhaPaged(q_output->data(),
+                                              params.common.cu_seqlens->data(),
+                                              params.common.cu_kv_seqlens->data(),
+                                              params.output.data(),
+                                              batch_size,
+                                              seq_len,
+                                              seq_len_with_prefix,
+                                              token_num,
+                                              kv_block_array,
+                                              false,
+                                              false,
+                                              params.common.linear_bias_slopes != nullptr,
+                                              false);
+        } else {
+            cufmha_runner_->runTrtV2Fmha(params.input.data(),
+                                         params.common.cu_seqlens->data(),
+                                         params.output.data(),
+                                         batch_size,
+                                         seq_len,
+                                         token_num,
+                                         false,
+                                         false,
+                                         params.common.linear_bias_slopes != nullptr,
+                                         false);
+        }
         return;
     } else if (use_openSource_fmha && cufmha_runner_->openSourceFmhaSupport()) {
-        auto seq_len_round_32 = (seq_len + 31) / 32 * 32;
-        auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32,
-                                            {batch_size, head_num, seq_len_round_32},
-                                            AllocationType::DEVICE},
-                                            {"softmax_lse"});
-        size_t hidden_units = head_num * size_per_head;
-        size_t hidden_units_kv = kv_head_num * size_per_head;
-        cufmha_runner_->runOpenSourceFmha(params.input.data(),
-                                          params.input.dataWithOffset(hidden_units),
-                                          params.input.dataWithOffset(hidden_units + hidden_units_kv),
-                                          params.output.data(),
-                                          params.common.cu_seqlens->data<int>(),
-                                          softmax_lse_->data(),
-                                          token_num,
-                                          batch_size,
-                                          seq_len,
-                                          params.common.linear_bias_slopes ? params.common.linear_bias_slopes.get()->data(): nullptr);
+        if (params.common.max_prefix_length) {
+            const size_t max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
+            const auto ws_size = cufmha_runner_->getOpenSourceWorkSpaceSize(
+                    batch_size, seq_len, max_blocks_per_batch * params.configs.tokens_per_block, true);
+            auto ws = allocateBuffer({DataType::TYPE_INT8,
+                                      {ws_size},
+                                      AllocationType::DEVICE},
+                {"open_source_paged_fmha_ws"});
+            cufmha_runner_->runOpenSourceFmhaPaged(params.input.data(),
+                                                   params.common.kv_cache->k_cache_buffer->data(),
+                                                   params.common.kv_cache->v_cache_buffer->data(),
+                                                   params.output.data(),
+                                                   params.common.cu_seqlens->data<int>(),
+                                                   params.common.cu_kv_seqlens->data<int>(),
+                                                   params.common.kv_cache->kv_cache_offset->data<int>(),
+                                                   batch_size,
+                                                   max_blocks_per_batch,
+                                                   params.configs.tokens_per_block,
+                                                   seq_len,
+                                                   ws->data(),
+                                                   params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>(): nullptr);
+        } else {
+            const auto ws_size = cufmha_runner_->getOpenSourceWorkSpaceSize(batch_size, seq_len);
+            auto ws = allocateBuffer({DataType::TYPE_INT8,
+                                      {ws_size},
+                                      AllocationType::DEVICE},
+                {"open_source_fmha_ws"});
+            const size_t hidden_units = head_num * size_per_head;
+            const size_t hidden_units_kv = kv_head_num * size_per_head;
+            cufmha_runner_->runOpenSourceFmha(params.input.data(),
+                                              params.input.dataWithOffset(hidden_units),
+                                              params.input.dataWithOffset(hidden_units + hidden_units_kv),
+                                              params.output.data(),
+                                              params.common.cu_seqlens->data<int>(),
+                                              batch_size,
+                                              seq_len,
+                                              ws->data(),
+                                              params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>(): nullptr);
+        }
         return;
-    } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport()) {
+    } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport() && params.common.max_prefix_length == 0) {
 
         auto qkv_buf_temp  = allocateBuffer({datatype,
                                             {token_num, head_num + 2 * kv_head_num, size_per_head},
@@ -351,7 +388,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
 
     float q_scaling = params.configs.q_scaling;
     int relative_attention_bias_stride = 0;
-    const T* linear_bias_slopes = nullptr;
+    const float* linear_bias_slopes = nullptr;
     const bool* masked_tokens = nullptr;
 
     // TODO(lidongjin) support int8
@@ -382,9 +419,9 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         dynamic_embedding_max_pos,
         base_scale,
         step,
-        prefix_lengths,
-        max_prefix_length,
-        1, //count_prefix_lengths,
+        nullptr, // prefix_prompt_lengths
+        0, // max_prefix_prompt_length
+        true, // count_prefix_length
         input_lengths,
         step,
         q_scaling,

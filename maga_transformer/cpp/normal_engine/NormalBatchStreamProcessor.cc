@@ -26,6 +26,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     size_t         current_tokens_size      = stream_groups.modelExecuteTokenSize();
     size_t         total_batch_size         = stream_groups.totalModelBatchSize();
     size_t         total_decode_batch_size  = stream_groups.totalDecodeBatchSize();
+    size_t         total_context_batch_size  = stream_groups.totalContextBatchSize();
     size_t         max_block_size           = stream_groups.maxBlockSize();
     model_input.combo_tokens =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
@@ -43,10 +44,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     model_input.lm_output_indexes =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     model_input.prefix_lengths =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
-    model_input.max_prefix_length =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {1}, ft::AllocationType::HOST}, {});
-    *model_input.max_prefix_length->data<int32_t>() = 0;
+        device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_context_batch_size}, ft::AllocationType::HOST}, {});
     if (has_positional_encoding_) {
         model_input.combo_position_ids =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
@@ -71,7 +69,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             merged_tokens[batch_idx] = currentTokens[0];
             input_lengths[batch_idx]    = stream->inputLength();
             sequence_lengths[batch_idx] = stream->seqLength() - 1; // need remove
-            prefix_lengths[batch_idx]   = 0;
             if (has_positional_encoding_) {
                 combo_position_ids[batch_idx] = stream->seqLength() - 1;
             }
@@ -100,7 +97,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
             cum_output_seq_len += stream->contextLength();
             input_lengths[batch_idx]  = stream->contextLength();
-            prefix_lengths[batch_idx] = stream->prefixLength();
+            prefix_lengths[batch_idx - total_decode_batch_size] = stream->prefixLength();
             lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
             if (has_positional_encoding_) {
                 // TODO(xinfei.sxf) optimize this, reduce cost

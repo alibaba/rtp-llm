@@ -63,7 +63,7 @@ cc_test(
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
-        "//3rdparty/flash_attention2:flash_attention2_impl",
+        "@flash_attention//:flash_attention2_impl",
         "//src/fastertransformer/devices/testing:device_test_utils"
     ] + torch_deps(),
     env = {

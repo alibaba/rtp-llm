@@ -1689,8 +1689,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     // The slope for ALiBi.
     float linear_bias_slope = 0.f;
     if (params.linear_bias_slopes != nullptr) {
-        // TODO: Use a cleaner code to convert from T to float.
-        linear_bias_slope = mul<float>(params.linear_bias_slopes[hi], 1.f);
+        linear_bias_slope = params.linear_bias_slopes[hi];
     }
 
     // Handle only context key cache with beam searching.
@@ -1725,7 +1724,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
         for (int k_loop = 0; k_loop < K_LOOP_UNROLL; ++k_loop) {
             const int local_time_now = time_now + k_loop * K_PER_ITER;
             const int local_ti       = ti + k_loop * K_PER_ITER;
-             
+
             float k_scale = 1.f;
 
             if constexpr (ENABLE_8BITS_CACHE) {

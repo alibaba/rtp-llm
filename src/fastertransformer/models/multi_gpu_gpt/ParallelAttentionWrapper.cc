@@ -130,7 +130,7 @@ void ParallelAttentionWrapper<T>::OpenSourceFMHA(
     const int    head_size,
     const int    max_seqlen,
     const float  softmax_scale,
-    T*           linear_bias_slopes,
+    float*       linear_bias_slopes,
     T*           out,
     cudaStream_t stream)
 {
@@ -206,10 +206,8 @@ void ParallelAttentionWrapper<T>::OpenSourceFMHA(
     FT_CHECK(p_dropout < 1.f);
 
     flash_fwd_params_.is_causal = params_.is_causal_;
-    flash_fwd_params_.is_alibi  = false;
     if (linear_bias_slopes) {
-        flash_fwd_params_.is_alibi           = true;
-        flash_fwd_params_.linear_bias_slopes = linear_bias_slopes;
+        flash_fwd_params_.alibi_slopes_ptr = linear_bias_slopes;
     }
     flash_fwd_params_.is_seqlens_k_cumulative = true;
 
@@ -574,7 +572,7 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
         input_tensors->getVal<int>("step"),
         q_scaling_,
         relative_attention_bias_stride,
-        input_tensors->getPtr<T>("linear_bias_slopes", nullptr),
+        input_tensors->getPtr<float>("linear_bias_slopes", nullptr),
         input_tensors->getPtr<bool>("masked_tokens", nullptr),
         nullptr,
         nullptr,
@@ -612,7 +610,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
         input_tensors->getPtr<int>("position_ids", nullptr) + generate_batch_size : nullptr;
     int*       cu_seqlens         = input_tensors->getPtr<int>("cu_seqlens", nullptr);
     int*       cu_kv_seqlens         = input_tensors->getPtr<int>("cu_kv_seqlens", nullptr);
-    T*         linear_bias_slopes = input_tensors->getPtr<T>("linear_bias_slopes", nullptr);
+    float*     linear_bias_slopes = input_tensors->getPtr<float>("linear_bias_slopes", nullptr);
     // const int* block_index_map_     = input_tensors->getPtr<int>("block_index_map", nullptr);
     int64_t* block_pointers_       = input_tensors->getPtr<int64_t>("block_pointers", nullptr);
     int64_t* host_block_pointers_  = input_tensors->getPtr<int64_t>("host_block_pointers", nullptr);
@@ -845,7 +843,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
             param.k_length           = attention_seq_len_2;
             param.num_heads          = local_head_num;
             param.qk_scale           = qk_scale;
-            param.linear_bias_slopes = const_cast<T*>(linear_bias_slopes);  // (head_num,), optional
+            param.linear_bias_slopes = linear_bias_slopes;  // (head_num,), optional
             invokeMaskedSoftmax(param, stream_);
             print_bhss(layer_id,
                        "softmax",
@@ -890,7 +888,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
             param.k_length           = attention_seq_len_2;
             param.num_heads          = local_head_num;
             param.qk_scale           = qk_scale;
-            param.linear_bias_slopes = const_cast<T*>(linear_bias_slopes);  // (head_num,), optional
+            param.linear_bias_slopes = linear_bias_slopes;  // (head_num,), optional
             invokeMaskedSoftmax(param, stream_);
             print_bhss(layer_id,
                        "softmax",

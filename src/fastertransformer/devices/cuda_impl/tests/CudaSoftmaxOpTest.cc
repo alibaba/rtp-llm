@@ -1,7 +1,6 @@
+#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
 #include "src/fastertransformer/devices/base_tests/SoftmaxOpTest.hpp"
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
-
 
 using namespace std;
 using namespace fastertransformer;
@@ -16,4 +15,3 @@ TEST_F(CudaSoftmaxOpTest, MixtureSoftmaxOpTest) {
     MixtureSofmaxTest(16, 32, 128, 128, 1.0f, DataType::TYPE_BF16, DataType::TYPE_BF16);
     MixtureSofmaxTest(16, 32, 128, 128, 2.0f, DataType::TYPE_BF16, DataType::TYPE_BF16);
 }
-

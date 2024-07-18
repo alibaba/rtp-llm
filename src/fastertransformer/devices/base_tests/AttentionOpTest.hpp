@@ -80,10 +80,10 @@ public:
 };
 
 void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
-                                                 size_t seq_len,
-                                                 size_t num_heads,
-                                                 size_t num_key_value_heads,
-                                                 size_t head_dim) {
+                                             size_t seq_len,
+                                             size_t num_heads,
+                                             size_t num_key_value_heads,
+                                             size_t head_dim) {
     Attention attention = Attention();
     attention.ptr()->to(torch::Device(torch::kCPU));
     auto state_dict = attention.ptr()->named_parameters();
@@ -135,6 +135,7 @@ void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
 
     auto common_inputs      = AttentionCommonInputs({*input_lengths, *sequence_lengths});
     common_inputs.cu_seqlens = move(cu_seqlens_device);
+    common_inputs.cu_kv_seqlens = common_inputs.cu_seqlens;
     common_inputs.padding_offset = move(padding_offset_device);
     common_inputs.position_ids = position_ids_device;
     common_inputs.attention_mask = attention_mask_device;
@@ -172,17 +173,18 @@ void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
 }
 
 void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
-                                              size_t seq_len,
-                                              size_t kv_seq_len,
-                                              size_t num_heads,
-                                              size_t num_key_value_heads,
-                                              size_t head_dim) {
+                                          size_t seq_len,
+                                          size_t kv_seq_len,
+                                          size_t num_heads,
+                                          size_t num_key_value_heads,
+                                          size_t head_dim) {
     Attention attention = Attention();
     attention.ptr()->to(torch::Device(torch::kCPU));
     auto state_dict = attention.ptr()->named_parameters();
     torch::NoGradGuard no_grad;
 
     auto tensor_options = torch::TensorOptions(torch::kFloat).device(torch::Device(torch::kCPU));
+    auto half_tensor_options = torch::TensorOptions(torch::kHalf).device(torch::Device(torch::kCPU));
     auto int_tensor_options = torch::TensorOptions(torch::kInt).device(torch::Device(torch::kCPU));
 
     auto query_states_host = torch::rand(
@@ -218,7 +220,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     padding_kv_seq_len = (kv_seq_len == 0) ? 2 * tokensPerBlock : padding_kv_seq_len;
     auto kvcache_pad = torch::zeros(
         {1, (int)batch_size, 2, (int)padding_kv_seq_len, (int)num_key_value_heads * (int)head_dim},
-        tensor_options);
+        half_tensor_options);
 
     auto k_cache_host = kvcache_pad.index(
         {0, torch::indexing::Slice(), 0, torch::indexing::Slice(0, kv_seq_len), torch::indexing::Slice()}
