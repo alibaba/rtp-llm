@@ -16,14 +16,17 @@
 
 #pragma once
 
-#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+
 #include <assert.h>
+
 #if USING_ROCM
+#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/rocm/cuda_shims.h"
 #endif
 #if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include "src/fastertransformer/cuda/cuda_utils.h"
 #endif
 
 namespace fastertransformer
