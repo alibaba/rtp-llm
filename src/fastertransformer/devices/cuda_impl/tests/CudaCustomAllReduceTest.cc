@@ -1,9 +1,10 @@
 #include <gtest/gtest.h>
 
 #define private public
+#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
 #include "src/fastertransformer/devices/base_tests/CustomAllReduceTest.hpp"
-#include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+
 using namespace std;
 using namespace fastertransformer;
 

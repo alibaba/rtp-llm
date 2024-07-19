@@ -343,7 +343,7 @@ public:
         Tensor qk           = createTensor(MEMORY_GPU, dtype, qk_shape);
         Tensor qk_fp32      = use_fp32_qk ? createTensor(MEMORY_GPU, TYPE_FP32, qk_shape) : Tensor();
         Tensor attn_mask    = randomAttentionMask({param.batch_size, 1, param.q_length, param.k_length});
-        Tensor alibi_slopes = createTensor(MEMORY_GPU, dtype, {param.head_num});
+        Tensor alibi_slopes = createTensor(MEMORY_GPU, TYPE_FP32, {param.head_num});
 
         // Input random initialization
         if (param.use_fp32_qk_buf && dtype != TYPE_FP32) {
@@ -352,21 +352,21 @@ public:
         else {
             utils::normal<T>(curng, qk);
         }
-        invokeBuildAlibiSlopes(alibi_slopes.getPtr<T>(), param.head_num, stream);
+        invokeBuildAlibiSlopes(alibi_slopes.getPtr<float>(), param.head_num, stream);
         sync_check_cuda_error();
 
-        Tensor h_alibi_slopes = createTensor(MEMORY_CPU, dtype, {param.head_num});
+        Tensor h_alibi_slopes = createTensor(MEMORY_CPU, TYPE_FP32, {param.head_num});
         Tensor h_alibi_bias   = is_benchmark ? Tensor() :
             createTensor(MEMORY_CPU, dtype, {param.head_num, param.q_length, param.k_length});
         // The nearest power of 2 equal to / smaller than num_heads followed by HF's implementation.
-        T* alibi_slope_ptr = h_alibi_slopes.getPtr<T>();
+        float* alibi_slope_ptr = h_alibi_slopes.getPtr<float>();
         int num_heads_pow2 = utils::pow2_rounddown(param.head_num);
         for (size_t h = 0; h < param.head_num; ++h) {
             // The slope of linear bias of the attention head
             if (h < num_heads_pow2) {
-                alibi_slope_ptr[h] = static_cast<T>(powf(powf(0.5f, powf(0.5f, log2f(num_heads_pow2) - 3.f)), h + 1));
+                alibi_slope_ptr[h] = static_cast<float>(powf(powf(0.5f, powf(0.5f, log2f(num_heads_pow2) - 3.f)), h + 1));
             } else {
-                alibi_slope_ptr[h] = static_cast<T>(
+                alibi_slope_ptr[h] = static_cast<float>(
                     powf(powf(0.5f, powf(0.5f, log2f(num_heads_pow2 << 1) - 3.f)), (h - num_heads_pow2) * 2 + 1));
             }
             if (h_alibi_bias.size() > 0) {
@@ -374,13 +374,13 @@ public:
                 for (size_t qi = 0; qi < param.q_length; ++qi) {
                     for (size_t ki = 0; ki < param.k_length; ++ki) {
                         size_t hqk_idx = (h * param.q_length + qi) * param.k_length + ki;
-                        alibi_bias_ptr[hqk_idx] = ::math::mul(alibi_slope_ptr[h], T(0.0f + ki - qi));
+                        alibi_bias_ptr[hqk_idx] = ::math::mul(T(alibi_slope_ptr[h]), T(0.0f + ki - qi));
                     }
                 }
             }
         }
         EXPECT_TRUE(
-            checkResult("CheckAlibiSlopes", alibi_slopes.getPtr<T>(), h_alibi_slopes.getPtr<T>(), param.head_num));
+            checkResult("CheckAlibiSlopes", alibi_slopes.getPtr<float>(), h_alibi_slopes.getPtr<float>(), param.head_num));
 
         // Clone to host for reference computation if needed.
         Tensor h_qk        = is_benchmark ? Tensor() : toHost<T>(qk);
@@ -394,7 +394,7 @@ public:
             softmax_param.attention_score    = qk.getPtr<T>();
             softmax_param.qk                 = qk_fp32.getPtr<float>();
             softmax_param.attention_mask     = attn_mask.getPtr<T>();
-            softmax_param.linear_bias_slopes = alibi_slopes.getPtr<T>();
+            softmax_param.linear_bias_slopes = alibi_slopes.getPtr<float>();
             softmax_param.batch_size         = param.batch_size;
             softmax_param.num_heads          = param.head_num;
             softmax_param.q_length           = param.q_length;
@@ -408,7 +408,7 @@ public:
             softmax_param.attention_score    = qk.getPtr<T>();
             softmax_param.qk                 = qk.getPtr<T>();
             softmax_param.attention_mask     = attn_mask.getPtr<T>();
-            softmax_param.linear_bias_slopes = alibi_slopes.getPtr<T>();
+            softmax_param.linear_bias_slopes = alibi_slopes.getPtr<float>();
             softmax_param.batch_size         = param.batch_size;
             softmax_param.num_heads          = param.head_num;
             softmax_param.q_length           = param.q_length;
