@@ -31,7 +31,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     size_t         max_block_size           = stream_groups.maxBlockSize();
     size_t         multimodal_features_len  = stream_groups.mmFeaturesLen();
 
-    const bool has_multimodal_input = is_multimodal_ && multimodal_features_len > 0;
+    const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
 
     model_input.combo_tokens =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
@@ -96,10 +96,10 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             if (has_multimodal_input && !cal_mm_tokens_in_rotary_emb_) {
                 int feature_len = 0;
                 for (auto& feature: stream->multimodalFeatures().value()) {
-                    feature_len += feature.sizes()[0] - 1;
+                    // used in chatglm4v: image position id => [x, x + 1 , x + 1, ..., x + 1, x + 2]
+                    feature_len += feature.sizes()[0] - 3;
                 }
                 position_ids[batch_idx] = stream->seqLength() - feature_len - 1;
-                std::cout << stream->seqLength() - feature_len - 1 << std::endl;
             }
             lora_ids[batch_idx]         = stream->loraId();
             lora_input_lengths[batch_idx] = 1;
@@ -146,9 +146,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                     int mm_left = *mm_locs->dataWithOffset<int>(mm_index);
                     int mm_right = *mm_locs->dataWithOffset<int>(mm_index) + mm_features[mm_index].sizes()[0];
                     for (uint32_t idx = stream->reuseLength(); idx < stream->reuseLength() + stream->contextLength(); idx++) {
-                        if (idx < mm_left || idx > mm_right) {
+                        if (idx <= mm_left || idx >= mm_right) {
                             position_ids[token_idx + idx] = position_index++;
-                        } else if (idx == mm_right) {
+                        } else if (idx == mm_right - 1) {
                             position_ids[token_idx + idx] = ++position_index;
                             if (mm_index + 1 < mm_features.size()) {
                                 mm_index++;

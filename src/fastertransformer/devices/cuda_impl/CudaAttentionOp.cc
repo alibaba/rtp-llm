@@ -94,6 +94,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     auto datatype       = params.input.type();
     auto token_num      = params.input.shape()[0];
     auto batch_size     = params.common.context_batch_size;
+    auto decoder_batch_size = params.common.decoder_batch_size;
     auto seq_len        = params.common.context_max_seq_len;
     auto seq_len_with_prefix = seq_len + params.common.max_prefix_length;
     auto head_num       = params.configs.head_num;
@@ -160,7 +161,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         v_output->data(),
         &prefix_prompt_param,
         params.input.data(),
-        params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
+        params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size): nullptr,
         params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
         params.common.padding_offset->data<int>(),
         params.common.cu_seqlens->data<int>(),
@@ -414,7 +415,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
         rotary_embedding_dim,
         rotary_embedding_style,
         rotary_embedding_base,
-        nullptr,
+        params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
         logn_seq_len,
         use_logn_attn,
         rotary_embedding_scale,

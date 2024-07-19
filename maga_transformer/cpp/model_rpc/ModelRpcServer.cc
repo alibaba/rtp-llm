@@ -35,7 +35,9 @@ ModelRpcServiceImpl::ModelRpcServiceImpl(
     const EngineInitParams& maga_init_params, const py::object mm_process_engine) {
     engine_.reset(new NormalEngine(maga_init_params));
     if (!mm_process_engine.is_none()) {
-        mm_processor_.reset(new MultimodalProcessor(mm_process_engine, maga_init_params.gpt_init_parameter.mm_sep_tokens_));    
+        mm_processor_.reset(new MultimodalProcessor(mm_process_engine, 
+            maga_init_params.gpt_init_parameter.mm_sep_tokens_,
+            maga_init_params.gpt_init_parameter.include_sep_tokens_));    
     }
 }
 

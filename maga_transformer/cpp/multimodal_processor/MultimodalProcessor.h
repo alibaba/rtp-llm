@@ -23,8 +23,8 @@ struct ExpandedOutput {
 
 class MultimodalProcessor {
 public:
-    MultimodalProcessor(py::object mm_proces_engine, std::vector<int64_t> sep_token_ids):
-        mm_process_engine_(mm_proces_engine), sep_token_ids_(sep_token_ids)
+    MultimodalProcessor(py::object mm_proces_engine, std::vector<int64_t> sep_token_ids, bool include_sep_tokens):
+        mm_process_engine_(mm_proces_engine), sep_token_ids_(sep_token_ids), include_sep_tokens_(include_sep_tokens)
         {}
 
     std::vector<torch::Tensor> mm_embedding(const std::vector<std::string>& urls) {
@@ -104,6 +104,7 @@ public:
 private:
     py::object mm_process_engine_;
     std::vector<int64_t> sep_token_ids_;
+    bool include_sep_tokens_;
 
     std::vector<std::pair<int32_t, int32_t>> get_mm_tags(ft::BufferPtr token_ids) {
         // sep_tokens will split input tokens to text part and multimodal part
@@ -129,9 +130,17 @@ private:
                     if (right.size() != left.size()) {
                         throw std::runtime_error("unmatched multimodal tag pairs");
                     }
-                    left.emplace_back(i + 1);
+                    if (!include_sep_tokens_){
+                        left.emplace_back(i + 1);
+                    } else {
+                        left.emplace_back(i);
+                    }
                 } else if (now_id == sep_token_ids_[1]) {
-                    right.emplace_back(i);
+                    if (!include_sep_tokens_){
+                        right.emplace_back(i);
+                    } else {
+                        right.emplace_back(i + 1);
+                    }
                     if (right.size() != left.size()) {
                         throw std::runtime_error("unmatched multimodal tag pairs");
                     }
