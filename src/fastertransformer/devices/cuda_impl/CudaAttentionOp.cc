@@ -162,7 +162,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         &prefix_prompt_param,
         params.input.data(),
         params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
-        params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
+        params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
         params.common.padding_offset->data<int>(),
         params.common.cu_seqlens->data<int>(),
         batch_size,
@@ -185,6 +185,8 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         false,
         stream_
     );
+
+    printBufferData(params.input, "after invoke transpse");
 
     if (params.common.kv_cache) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -320,7 +322,7 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     const T* qkv_buf_ptr = params.input.data<T>();
     T* qkv_buf_2_ = output.data<T>();
 
-    const T* bias_ptr = (params.weights.qkv_weight->bias == nullptr) ?
+    const T* bias_ptr = (params.weights.qkv_weight->bias == nullptr || !params.configs.fuse_qkv_add_bias) ?
                          nullptr :
                          params.weights.qkv_weight->bias->data<T>();
 

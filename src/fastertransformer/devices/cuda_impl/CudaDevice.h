@@ -48,6 +48,7 @@ public:
 public:
     void copy(const CopyParams& params);
     TransposeOutput transpose(const TransposeParams& params);
+    AddBiasOutput addbias(const AddBiasParams& params);
     ConvertOutput convert(const ConvertParams& params);
     SelectOutput select(const SelectParams& params);
     LayernormOutput layernorm(const LayernormParams& params);

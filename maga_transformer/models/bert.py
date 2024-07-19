@@ -53,9 +53,6 @@ class Bert(GPT):
     @classmethod
     def from_huggingface(cls, config: GptInitModelParameters, config_json: Dict[str, Any]):
         # check position_embedding_type == absolute
-        position_embedding_type = config_json.get('position_embedding_type', 'absolute')
-        if position_embedding_type != 'absolute':
-            raise Exception(f"bert model not support position_embedding_type=={position_embedding_type}")
         config.head_num = config_json['num_attention_heads']
         # bert has no group attention
         config.head_num_kv = config.head_num

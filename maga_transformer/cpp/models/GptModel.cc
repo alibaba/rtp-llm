@@ -292,19 +292,21 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
             auto post_layernorm_output = device_->layernorm(post_layernorm_params);
             hidden = std::move(post_layernorm_output.output);
-            attn_hidden = std::move(post_layernorm_output.before_norm_output);
-            residual = attn_hidden;
+            if (!layer.post_layernorm_2) {
+                attn_hidden = std::move(post_layernorm_output.before_norm_output);
+                residual = attn_hidden;
+            }
         } else {
             residual2 = attn_hidden;
         }
 
-        if (layer.post_layernorm_1) {
+        if (layer.post_layernorm_2) {
             // attn_hidden = attn_hidden + residual
             // hidden = layernorm(attn_hidden)
-            auto post_layernorm_params = LayernormParams(attn_hidden,
-                                                         attn_hidden,
-                                                         ft::mayGetRef(layer.post_layernorm_1),
-                                                         nullopt,
+            auto post_layernorm_params = LayernormParams(hidden,
+                                                         hidden,
+                                                         ft::mayGetRef(layer.post_layernorm_2),
+                                                         *residual,
                                                          nullopt,
                                                          nullopt,
                                                          0.f,

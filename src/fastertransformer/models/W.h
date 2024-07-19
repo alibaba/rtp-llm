@@ -35,6 +35,14 @@ static const std::string vision_attn_qkv_w = "self_attention_weights.vision_quer
 static const std::string vision_attn_qkv_b = "self_attention_weights.vision_query_weight.bias";
 static const std::string vision_attn_o_w   = "self_attention_weights.vision_attention_output_weight.kernel";
 
+// attention layer for bert jina
+static const std::string post_ln_2_gamma = "post_layernorm_weights_2.gamma";
+static const std::string post_ln_2_beta  = "post_layernorm_weights_2.beta";
+static const std::string q_ln_gamma      = "self_attention_weights.q_layernorm.gamma";
+static const std::string q_ln_beta       = "self_attention_weights.q_layernorm.beta";
+static const std::string k_ln_gamma      = "self_attention_weights.k_layernorm.gamma";
+static const std::string k_ln_beta       = "self_attention_weights.k_layernorm.beta";
+
 static const std::string ffn_w1       = "ffn_weights.intermediate_weight.kernel";
 static const std::string ffn_b1       = "ffn_weights.intermediate_weight.bias";
 static const std::string ffn_w3       = "ffn_weights.intermediate_weight3.kernel";

@@ -133,7 +133,7 @@ struct LayerWeights {
     AttentionLayerWeights                   self_attention_weights;
     std::shared_ptr<const DenseWeights>     pre_attention_smoother_weight;
     std::shared_ptr<const LayerNormWeights> post_layernorm;
-    std::shared_ptr<const LayerNormWeights> post_layernorm_1;
+    std::shared_ptr<const LayerNormWeights> post_layernorm_2;
     FfnLayerWeights                         ffn_weights;
     std::shared_ptr<const LayerNormWeights> post_ffn_layernorm;
 };
@@ -148,6 +148,7 @@ struct Weights {
     std::shared_ptr<const DenseWeights>     token_type_embedding;
     std::vector<LayerWeights>               layers;
     std::shared_ptr<const LayerNormWeights> final_layernorm;
+    std::shared_ptr<const DenseWeights>     linear_bias_slopes;
     std::shared_ptr<const DenseWeights>     lm_head;
     std::shared_ptr<const DenseWeights>     medusa_head;
 };

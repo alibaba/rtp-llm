@@ -3,7 +3,7 @@ import functools
 from typing import List, Any, Union
 from pydantic import BaseModel
 
-from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, concat_0, transpose
+from maga_transformer.utils.model_weight import W, WeightInfo, ModelWeightInfo, ModelDeployWeightInfo, CkptWeightInfo, concat_0, transpose, zeros
 
 def merge_qkv_hf(ts: List[torch.Tensor]):
     q, k, v = ts
@@ -16,13 +16,9 @@ def merge_qkv_transpose_concat0(ts: List[torch.Tensor]):
     qkv_weight = torch.concat([q.T, k.T, v.T], dim=0).contiguous()
     return qkv_weight
 
-def slice_index(ts: List[torch.Tensor], index: int, inter_size: int):
-    t = ts[0]
-    return t[index * inter_size, (index + 1) * inter_size]
-
 def slice_index_transepose(ts: List[torch.Tensor], index: int, inter_size: int):
     t = ts[0]
-    return t[index * inter_size, (index + 1) * inter_size, :].transpose(0, 1).contiguous()
+    return t[index * inter_size: (index + 1) * inter_size, :].transpose(0, 1).contiguous()
 
 # from [torch.Size(1), torch.Size(1), torch.Size(1)] to torch.Size(3 * hidden_size)
 def expand_scale(ts: List[torch.Tensor], hidden_size:int):
@@ -61,13 +57,10 @@ class QKNormHfWeightNames(BaseWeightNames):
     POST_LN_2_B: str = "encoder.layer.{i}.layer_norm_1.bias"
     
     FFN_GATE_W: str = 'encoder.layer.{i}.mlp.up_gated_layer.weight'
-    FFN_GATE_B: str = 'encoder.layer.{i}.mlp.up_gated_layer.bias'
-    FFN_UP_W: str = 'encoder.layer.{i}.mlp.up_gated_layer.weight'
-    FFN_UP_B: str = 'encoder.layer.{i}.mlp.up_gated_layer.bias'
     FFN_DOWN_W: str = 'encoder.layer.{i}.mlp.down_layer.weight'
     FFN_DOWN_B: str = 'encoder.layer.{i}.mlp.down_layer.bias'
-    FFN_OUTPUT_LAYERNORM_W: str = "encoder.layer.{i}.layer_norm_1.weight"
-    FFN_OUTPUT_LAYERNORM_B: str = "encoder.layer.{i}.layer_norm_1.bias"
+    FFN_OUTPUT_LAYERNORM_W: str = "encoder.layer.{i}.layer_norm_2.weight"
+    FFN_OUTPUT_LAYERNORM_B: str = "encoder.layer.{i}.layer_norm_2.bias"
 
 class JinaBertWeightInfo(ModelDeployWeightInfo):
     def __init__(self, *args: Any, **kwargs: Any):
@@ -102,16 +95,12 @@ class JinaBertWeightInfo(ModelDeployWeightInfo):
     def _get_base_weight_info(self) -> List[WeightInfo]:
         return [
             WeightInfo(W.embedding, [CkptWeightInfo(self._names.TOKEN_EMBEDDING)]),
-            WeightInfo(W.positional_embedding, [CkptWeightInfo(self._names.POSITION_EMBEDDING)]),
             WeightInfo(W.token_type_embedding, [CkptWeightInfo(self._names.TOKEN_TYPE_EMBEDDING)]),
             WeightInfo(W.pre_decoder_ln_beta, [CkptWeightInfo(self._names.EMB_NORM_B)]),
             WeightInfo(W.pre_decoder_ln_gamma, [CkptWeightInfo(self._names.EMB_NORM_W)]),
         ]
-        
-    def _get_weight_info(self):
-            return self._get_hf_weight_info()
 
-    def _get_hf_weight_info(self):
+    def _get_weight_info(self):
         weights = self._get_base_weight_info()
         layer_weights = [
             WeightInfo(W.attn_qkv_w, [
@@ -124,22 +113,25 @@ class JinaBertWeightInfo(ModelDeployWeightInfo):
                 CkptWeightInfo(self._names.K_B),
                 CkptWeightInfo(self._names.V_B)], concat_0),
 
+            WeightInfo(W.q_ln_gamma, [CkptWeightInfo(self._names.Q_LN_W)]),
+            WeightInfo(W.q_ln_beta, [CkptWeightInfo(self._names.Q_LN_B)]),
+            WeightInfo(W.k_ln_gamma, [CkptWeightInfo(self._names.K_LN_W)]),
+            WeightInfo(W.k_ln_beta, [CkptWeightInfo(self._names.K_LN_B)]),
+
             WeightInfo(W.attn_o_w, [CkptWeightInfo(self._names.O_W)], transpose),
             WeightInfo(W.attn_o_b, [CkptWeightInfo(self._names.O_B)]),
 
             WeightInfo(W.post_ln_beta, [CkptWeightInfo(self._names.POST_LN_B)]),
             WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self._names.POST_LN_W)]),
 
-            WeightInfo(W.post_ln_2_beta, [CkptWeightInfo(self._names.POST_LN_2_W)]),
-            WeightInfo(W.post_ln_2_gamma, [CkptWeightInfo(self._names.POST_LN_2_B)]),
+            WeightInfo(W.post_ln_2_gamma, [CkptWeightInfo(self._names.POST_LN_2_W)]),
+            WeightInfo(W.post_ln_2_beta, [CkptWeightInfo(self._names.POST_LN_2_B)]),
 
             # gate
-            WeightInfo(W.ffn_w3, [CkptWeightInfo(self._names.FFN_GATE_W)], functools.partial(slice_index_transepose, index=1, inter_size=self._inter_size)),
-            WeightInfo(W.ffn_b3, [CkptWeightInfo(self._names.FFN_GATE_B)], functools.partial(slice_index, index=1, inter_size=self._inter_size)),
+            WeightInfo(W.ffn_w1, [CkptWeightInfo(self._names.FFN_GATE_W)], functools.partial(slice_index_transepose, index=1, inter_size=self._inter_size)),
             
             # up
-            WeightInfo(W.ffn_w1, [CkptWeightInfo(self._names.FFN_GATE_W)], functools.partial(slice_index_transepose, index=0, inter_size=self._inter_size)),
-            WeightInfo(W.ffn_b1, [CkptWeightInfo(self._names.FFN_GATE_B)], functools.partial(slice_index, index=0, inter_size=self._inter_size)),
+            WeightInfo(W.ffn_w3, [CkptWeightInfo(self._names.FFN_GATE_W)], functools.partial(slice_index_transepose, index=0, inter_size=self._inter_size)),
 
             # down
             WeightInfo(W.ffn_w2, [CkptWeightInfo(self._names.FFN_DOWN_W)], transpose),

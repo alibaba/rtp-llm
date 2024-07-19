@@ -20,6 +20,7 @@ public:
 
     // basic compuation ops
     virtual LayernormOutput layernorm(const LayernormParams& params);
+    virtual AddBiasOutput addbias(const AddBiasParams& params);
     virtual BufferPtr gemm(const GemmParams& params);
     virtual GroupedGemmOutput groupedGemm(const GroupedGemmParams& params);
     virtual MultiplyOutput multiply(const MultiplyParams& params);

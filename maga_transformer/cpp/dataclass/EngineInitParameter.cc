@@ -163,6 +163,9 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
                                                          W::attn_qkv_s,
                                                          W::attn_qkv_z);
 
+    attention_weights.q_norm_weight = mayCreateLayerNormWeights(map, W::q_ln_gamma, W::q_ln_beta);
+    attention_weights.k_norm_weight = mayCreateLayerNormWeights(map, W::k_ln_gamma, W::k_ln_beta);
+
     attention_weights.attention_layernorm = mayCreateLayerNormWeights(map,
                                                                       W::attn_ln_gamma,
                                                                       W::attn_ln_beta);
@@ -288,6 +291,8 @@ WeightsConverter::createGptWeights(std::unique_ptr<ConstBufferPtrMaps> layer_wei
         layer_ws.post_layernorm = mayCreateLayerNormWeights(layer_weights,
                                                                 W::post_ln_gamma,
                                                                 W::post_ln_beta);
+
+        layer_ws.post_layernorm_2 = mayCreateLayerNormWeights(layer_weights, W::post_ln_2_gamma, W::post_ln_2_beta);
 
         layer_ws.self_attention_weights = createAttentionWeights(layer_weights);
         layer_ws.ffn_weights = createFfnWeights(layer_weights);

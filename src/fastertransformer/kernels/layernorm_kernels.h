@@ -67,6 +67,7 @@ void invokeLayerNormWithStride(T* __restrict data,
                                const int    tokens,
                                const int    hidden_size,
                                const int    stride,
-                               cudaStream_t stream = 0);
+                               const int    offset,
+                               cudaStream_t stream);
 
 }  // namespace fastertransformer

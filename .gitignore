@@ -41,3 +41,6 @@ logs/
 package/requirements*.txt
 package/maga_transformer*.whl
 package/maga_start.sh
+
+model_rpc_service_pb2.py
+model_rpc_service_pb2_grpc.py

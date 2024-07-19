@@ -48,7 +48,19 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
 
     if (params.stride != 0) {
         FT_CHECK_WITH_INFO(params.bias == std::nullopt && params.residual1 == std::nullopt && params.residual2 == std::nullopt && params.is_inplace == true, "check error with stride");
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeLayerNormWithStride, input->data(), gamma, beta, eps, m, n, params.stride);
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
+                                         invokeLayerNormWithStride,
+                                         input->data(),
+                                         gamma,
+                                         beta,
+                                         eps,
+                                         m,
+                                         norm_weight->get().gamma.get()->shape()[0],
+                                         params.stride,
+                                         params.offset,
+                                         stream_);
+        sync_check_cuda_error();
+        return LayernormOutput({norm_output, nullptr});
     }
 
     if (params.norm_type == NormType::alphanorm || !norm_weight.has_value()) {

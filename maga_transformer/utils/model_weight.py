@@ -317,6 +317,11 @@ class W:
     linear_bias_slopes = "linear_bias_slopes"
 
     #jina_bert
+    q_ln_gamma      = "self_attention_weights.q_layernorm.gamma"
+    q_ln_beta       = "self_attention_weights.q_layernorm.beta"
+    k_ln_gamma      = "self_attention_weights.k_layernorm.gamma"
+    k_ln_beta       = "self_attention_weights.k_layernorm.beta"
+
     post_ln_2_gamma = 'post_layernorm_weights_2.gamma'
     post_ln_2_beta = 'post_layernorm_weights_2.beta'
 

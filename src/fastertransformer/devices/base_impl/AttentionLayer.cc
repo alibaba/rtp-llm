@@ -70,29 +70,34 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     // other devices need to be careful about this.
     // maybe add a device property here.
     auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));
-    const auto qkv = loraLinear(LoraLinearParams(qkv_gemm_params,
+    auto qkv = loraLinear(LoraLinearParams(qkv_gemm_params,
                                                  *(params.weights.qkv_lora_weights),
                                                  params.common.lora_input)).output;
     printBufferData(*qkv, "qkv");
 
+    if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight) {
+        const auto bias_add_output = addbias({qkv, *(params.weights.qkv_weight->bias)});
+        qkv = std::move(bias_add_output.output);
+        printBufferData(*qkv, "qkv_after_bias_add");
+    }
+
     if (params.weights.q_norm_weight) {
-        auto after_q_norm = layernorm(LayernormParams(qkv,
-                                                      *params.weights.q_norm_weight,
-                                                      params.ln_params.eps,
-                                                      params.ln_params.norm_type,
-                                                      params.configs.size_per_head * params.configs.head_num,
-                                                      qkv_hidden_size)
-        );
+        auto after_q_norm = layernorm(LayernormParams(
+            qkv, *params.weights.q_norm_weight, params.ln_params.eps, params.ln_params.norm_type, 0, qkv_merged_size));
+        qkv = std::move(after_q_norm.output);
+        printBufferData(*qkv, "qkv_after_q_norm");
     }
 
     if (params.weights.k_norm_weight) {
-        auto after_k_norm = layernorm(LayernormParams(qkv,
-                                                      *params.weights.k_norm_weight,
-                                                      params.ln_params.eps,
-                                                      params.ln_params.norm_type,
-                                                      params.configs.size_per_head * (params.configs.head_num + params.configs.kv_head_num),
-                                                      qkv_hidden_size)
-        );
+        auto after_k_norm = layernorm(
+            LayernormParams(qkv,
+                            *params.weights.k_norm_weight,
+                            params.ln_params.eps,
+                            params.ln_params.norm_type,
+                            params.configs.size_per_head * params.configs.head_num,
+                            qkv_merged_size));
+        qkv = std::move(after_k_norm.output);
+        printBufferData(*qkv, "qkv_after_k_norm");
     }
 
     // attention layer output is preallocated to avoid memory fragmentation

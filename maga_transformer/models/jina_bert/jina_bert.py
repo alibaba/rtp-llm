@@ -4,7 +4,7 @@ from maga_transformer.models.bert import Bert
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
 from maga_transformer.models.downstream_modules.classifier.roberta_classifier import RobertaClassifierModule
 from maga_transformer.models.downstream_modules import RobertaRerankerModule
-from maga_transformer.models.jina_bert.jina_bert_weight import jin
+from maga_transformer.models.jina_bert.jina_bert_weight import JinaBertWeightInfo
 from maga_transformer.model_factory_register import register_model
 from transformers import AutoTokenizer
 
@@ -21,9 +21,11 @@ class JinaBert(Bert):
         config.activation_type = 'gated-gelu'
         config.use_attention_linear_bias = True
         config.has_positional_encoding = False
+        config.qk_norm = True
+        return config
 
     @staticmethod
     def get_weight_cls():
-        return BertWeightInfo
+        return JinaBertWeightInfo
     
-    
+register_model('jina_bert_code', JinaBert, [], ["jinaai/jina-bert-v2-qk-post-norm"])    

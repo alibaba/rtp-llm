@@ -38,7 +38,9 @@ public:
             rope_config,
             (size_t)params.seq_size_per_block_,
             params.is_causal_ ? fastertransformer::AttentionMaskType::causalMask :
-                                fastertransformer::AttentionMaskType::noMask};
+                                fastertransformer::AttentionMaskType::noMask,
+            1.0,
+            params.qk_norm_ ? false: true};
         auto moe_configs = params.moe_style_ ?
             (std::optional<ft::MoeConfigs>)ft::MoeConfigs({
                 (size_t)params.expert_num_,

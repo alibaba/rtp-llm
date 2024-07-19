@@ -129,6 +129,10 @@ struct LayernormOutput {
     BufferPtr before_norm_output;
 };
 
+struct AddBiasOutput {
+    BufferPtr output;
+};
+
 struct LayernormParams {
     LayernormParams(BufferPtr input,
                     BufferPtr before_norm_output,
@@ -212,6 +216,12 @@ enum GemmType : size_t {
     QBufferA_BufferB_BufferC_2DGemm,
     BufferA_QBufferB_BufferC_2DGemm,
     QBufferA_QBufferB_BufferC_2DGemm,
+};
+
+struct AddBiasParams {
+    BufferPtr     input;
+    const Buffer& bias;
+    bool          inplace;
 };
 
 // D = alpha * op(A) * op(B) + beta * C
@@ -323,7 +333,7 @@ struct AttentionCommonInputs {
 
     BufferPtr position_ids;
     BufferPtr attention_mask;
-    BufferPtr linear_bias_slopes;
+    ConstBufferPtr linear_bias_slopes;
     BufferPtr prefix_prompt_lengths;
     int32_t   max_prefix_length;
 
@@ -343,6 +353,7 @@ struct AttentionConfigs {
 
     AttentionMaskType mask_type = noMask;
     float q_scaling = 1.0f;
+    bool  fuse_qkv_add_bias = true;
 };
 
 using AttentionModuleOutput = void;
@@ -495,6 +506,7 @@ struct SoftmaxParams{
     const OptionalConstBufferRef bias = std::nullopt;
     float scale = 1.0f;
     const DataType output_t = DataType::TYPE_INVALID;
+    const OptionalConstBufferRef linear_bias_slopes = std::nullopt;
 };
 
 struct LoraLinearOutput {
