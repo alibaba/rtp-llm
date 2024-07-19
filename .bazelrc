@@ -60,6 +60,7 @@ build:cuda12 --host_action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --define=use_cuda12=true
 build:cuda12 --copt="-DUSE_CUDA12=1"
 build:cuda12 --copt="-DUSE_OLD_TRT_FMHA=1"
+build:cuda12 --copt="-DFMHA_SUPPORT_SPLIT=1"
 # custom all reduce currently has bug , disable it by default
 build:cuda12 --copt="-FT_DISABLE_CUSTOM_AR=1"
 
@@ -71,6 +72,7 @@ build:cuda12_2 --host_action_env TF_CUDA_VERSION="12.2"
 build:cuda12_2 --define=use_cuda12=true
 build:cuda12_2 --copt="-DUSE_CUDA12=1"
 build:cuda12_2 --copt="-DUSE_OLD_TRT_FMHA=1"
+build:cuda12_2 --copt="-DFMHA_SUPPORT_SPLIT=1"
 # custom all reduce currently has bug , disable it by default
 build:cuda12_2 --copt="-FT_DISABLE_CUSTOM_AR=1"
 

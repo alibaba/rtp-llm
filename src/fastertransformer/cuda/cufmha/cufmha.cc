@@ -182,6 +182,7 @@ void cufmha::runOpenSourceFmhaPaged(void*  q,
                                     float* linear_bias_slopes)
 {
    FT_CHECK_WITH_INFO(head_num_ % kv_head_num_ == 0, "Number of heads in key/value must divide number of heads in query");
+   FT_CHECK_WITH_INFO(seq_size_per_block % 256 == 0, "open source fmha paged seq_size_per_block must be divided by 256");
     const auto seq_len_round = roundMultiple(seq_len, 32);
     const auto head_size_rounded = roundMultiple(size_per_head_, 32);
 

@@ -86,7 +86,7 @@ inline void run_mha_fwd(Flash_fwd_params& params, cudaStream_t stream, bool forc
             if (params.num_splits <= 1 && !force_split_kernel) {  // If we don't set it num_splits == 0
                 run_mha_fwd_<elem_type, kHeadDim>(params, stream);
             } else {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800) && (__CUDA_ARCH__ < 900)
+#ifdef FMHA_SUPPORT_SPLIT
                 run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim>(params, stream);
 #endif
             }
