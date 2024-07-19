@@ -171,6 +171,9 @@ std::vector<cudaIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Ncc
 }
 
 bool CustomAllReduceComm::shouldCustomAR(const std::vector<int>& tp_ranks, int rank) {
+    // temporary force disable custom ar
+    return false;
+
     size_t world_size = tp_ranks.size();
     char* disable_custom_ar_str = std::getenv("FT_DISABLE_CUSTOM_AR");
     bool  disable_custom_ar = disable_custom_ar_str != nullptr;
