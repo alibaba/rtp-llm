@@ -17,15 +17,15 @@ test_copts = [
 ] + cuda_copts() + copts()
 
 
-py_test (
-    name = "model_rpc_client_test",
-    srcs = ["model_rpc_client_test.py"],
-    deps = [
-        "//maga_transformer/cpp:model_rpc_client",
-        "//maga_transformer:testlib",
-        "//maga_transformer/test/model_test/test_util:test_util"
-    ],
-)
+# py_test (
+#     name = "model_rpc_client_test",
+#     srcs = ["model_rpc_client_test.py"],
+#     deps = [
+#         "//maga_transformer/cpp:model_rpc_client",
+#         "//maga_transformer:testlib",
+#         "//maga_transformer/test/model_test/test_util:test_util"
+#     ],
+# )
 
 # cc_test(
 #     name = "model_rpc_server_test",

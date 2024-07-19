@@ -233,7 +233,8 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                          false);
         }
         return;
-    } else if (use_openSource_fmha && cufmha_runner_->openSourceFmhaSupport()) {
+    } else if (use_openSource_fmha && cufmha_runner_->openSourceFmhaSupport()
+               && (params.common.max_prefix_length ==0 || params.configs.tokens_per_block % 256 == 0)) {
         if (params.common.max_prefix_length) {
             const size_t max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
             const auto ws_size = cufmha_runner_->getOpenSourceWorkSpaceSize(

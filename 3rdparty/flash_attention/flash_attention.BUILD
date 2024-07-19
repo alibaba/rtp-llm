@@ -1,6 +1,11 @@
 load("@//:def.bzl", "cuda_copts", "torch_deps", "copts")
 package(default_visibility = ["//visibility:public"])
 
+config_setting(
+    name = "using_arm",
+    values = {"define": "using_arm=true"},
+)
+
 cc_library(
     name = "flash_attention2_header",
     hdrs = [
