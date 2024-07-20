@@ -7,9 +7,7 @@ cc_library(
     ]),
     srcs = glob([
         "*.cc",
-    ], 
-    # exclude=["ROCmAttentionOp.cc"]
-    ),
+    ]),
     deps = [
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:hip",
@@ -18,7 +16,6 @@ cc_library(
         "@composable_kernel//:ck_fmha_example",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:devices_base_impl",
-        "//src/fastertransformer/devices/base_tests:base_tests",
         "//src/fastertransformer/core:allocator",
         "//src/fastertransformer/rocm:rocm_types_hdr",
         "//src/fastertransformer/rocm:rocm_utils",
@@ -27,4 +24,5 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     copts = rocm_copts(),
+    alwayslink = True,
 )

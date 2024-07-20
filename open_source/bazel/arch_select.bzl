@@ -1,6 +1,7 @@
 # to wrapper target relate with different system config
 load("@pip_gpu_torch//:requirements.bzl", requirement_gpu="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
+load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 
 def requirement(names):
     for name in names:
@@ -8,6 +9,7 @@ def requirement(names):
             name = name,
             deps = select({
                 "//:use_cuda12": [requirement_gpu_cuda12(name)],
+                "//:using_rocm": [requirement_gpu_rocm(name)],
                 "//conditions:default": [requirement_gpu(name)],
             }),
             visibility = ["//visibility:public"],
@@ -34,6 +36,7 @@ def th_transformer_so():
 def whl_deps():
     return select({
         "//:use_cuda12": ["torch==2.1.0+cu121"],
+        "//:using_rocm": ["torch==2.1.2"],
         "//conditions:default": ["torch==2.1.0+cu118"],
     })
 

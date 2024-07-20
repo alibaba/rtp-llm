@@ -1,5 +1,6 @@
 load("@pip_gpu_torch//:requirements.bzl", requirement_gpu="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
+load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 
 def copy_target_to(name, to_copy, copy_name, dests = [], **kwargs):
     if dests:
