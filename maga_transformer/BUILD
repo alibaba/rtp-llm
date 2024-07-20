@@ -4,6 +4,20 @@ load("@rules_python//experimental/python:wheel.bzl", "py_package", "py_wheel")
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel")
 load("//bazel:arch_select.bzl", "requirement", "whl_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
+load(
+    "@local_config_cuda//cuda:build_defs.bzl",
+    "cuda_default_copts",
+    _if_cuda = "if_cuda",
+)
+
+load(
+    "@local_config_rocm//rocm:build_defs.bzl",
+    "rocm_default_copts",
+    _if_rocm = "if_rocm",
+)
+
+if_rocm = _if_rocm
+if_cuda = _if_cuda
 
 requirement([
     "sentencepiece",
@@ -25,10 +39,6 @@ requirement([
     "prettytable",
     "timm",
     "aiohttp",
-    "tensorrt",
-    "tensorrt-cu12",
-    "tensorrt-cu12-bindings",
-    "tensorrt-cu12-libs",
     "onnx",
     "sentence-transformers",
     "orjson",
@@ -43,6 +53,15 @@ requirement([
     "oss2",
     "pyOpenSSL"
 ])
+
+if_cuda(
+    requirement([
+        "tensorrt",
+        "tensorrt-cu12",
+        "tensorrt-cu12-bindings",
+        "tensorrt-cu12-libs",
+    ])
+)
 
 filegroup(
     name = "cutlass_config",
@@ -119,14 +138,15 @@ py_library(
         ":utils",
         ":ops",
         ":timm",
+        ":onnx",
+        ":xfastertransformer_devel_icx",
+        ":decord",
+    ] + if_cuda([
         ":tensorrt",
         ":tensorrt-cu12",
         ":tensorrt-cu12-bindings",
         ":tensorrt-cu12-libs",
-        ":onnx",
-        ":xfastertransformer_devel_icx",
-        ":decord",
-    ],
+    ]),
 )
 
 py_library(

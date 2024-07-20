@@ -75,7 +75,8 @@ cc_test(
     deps = test_deps + [
         ":test_utils",
     ],
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
+    env = select({
+        "//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
+    }),
 )

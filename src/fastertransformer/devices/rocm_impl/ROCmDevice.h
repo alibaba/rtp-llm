@@ -38,6 +38,7 @@ public:
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
     BufferPtr softmax(const SoftmaxParams& params) override;
     void sampleGreedy(const GreedyParams& params);
+    DeviceStatus getDeviceStatus() override;
 
 public:
     BufferPtr        testVecAdd(const BufferPtr a, const BufferPtr b);
