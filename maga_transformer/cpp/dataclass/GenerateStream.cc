@@ -25,8 +25,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , metrics_reporter_(metrics_reporter)
     , special_tokens_(params.special_tokens_)
 {
-    begin_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
-
     updatePrefix(resource_context.system_prompt);
     seq_length_ = generate_input_->inputLength();
     last_output_pos_ = seq_length_;
@@ -34,7 +32,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     adjusted_common_len_ = tileNum() == 1 ? seq_length_ : seq_length_ / seqSizePerBlock() * seqSizePerBlock();
     max_chunk_len_ = seq_length_;
 
-    
     begin_time_us_      = input->begin_time_ms;
     device_             = ft::DeviceFactory::getDefaultDevice();
     complete_token_ids_ = device_->allocateBuffer(

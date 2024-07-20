@@ -18,7 +18,8 @@ struct LoraMutex {
 
 class ModelRpcServiceImpl: public ModelRpcService::Service {
 public:
-    explicit ModelRpcServiceImpl(const EngineInitParams& maga_init_params, const py::object mm_process_engine);
+    explicit ModelRpcServiceImpl(const EngineInitParams& maga_init_params);
+    explicit ModelRpcServiceImpl(const EngineInitParams& maga_init_params, py::object mm_process_engine);
     grpc::Status generate_stream(grpc::ServerContext*                   context,
                                  const GenerateInputPB*                 request,
                                  grpc::ServerWriter<GenerateOutputsPB>* writer) override;

@@ -36,7 +36,11 @@ class Pipeline(object):
         self._special_tokens: int = self.model.config.special_tokens
         self._img_token: str = self.model.config.vit_related_params.vit_special_tokens.get('default_image_token', '')
         self.piple_funcs: PipelineCustomFunc = get_piple_custom_func(self.model)
-        self.vit_engine: MMProcessEngine = MMProcessEngine(self.model.model)
+        if self.model.is_multimodal():
+            if isinstance(self.model, AsyncModel):
+                self.vit_engine = MMProcessEngine(self.model.model)
+            else:
+                self.vit_engine = MMProcessEngine(self.model)
 
     def stop(self):
         if isinstance(self.model, AsyncModel):

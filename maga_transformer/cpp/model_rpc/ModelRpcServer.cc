@@ -32,7 +32,12 @@ int transErrorCode(absl::StatusCode code) {
 }
 
 ModelRpcServiceImpl::ModelRpcServiceImpl(
-    const EngineInitParams& maga_init_params, const py::object mm_process_engine) {
+    const EngineInitParams& maga_init_params) {
+    engine_.reset(new NormalEngine(maga_init_params));
+}
+
+ModelRpcServiceImpl::ModelRpcServiceImpl(
+    const EngineInitParams& maga_init_params, py::object mm_process_engine) {
     engine_.reset(new NormalEngine(maga_init_params));
     if (!mm_process_engine.is_none()) {
         mm_processor_.reset(new MultimodalProcessor(mm_process_engine, 
@@ -45,7 +50,6 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
                                                   const GenerateInputPB*                request,
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     FT_LOG_DEBUG("receive request %ld", request->request_id());
-    auto begin_time_ms = autil::TimeUtility::currentTimeInMicroSeconds();
     auto input = QueryConverter::transQuery(request);
     std::shared_mutex* inner_mutex = nullptr;
     if (input->lora_id != -1) {

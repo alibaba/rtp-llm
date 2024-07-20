@@ -70,6 +70,7 @@ private:
 
 using OptionalConstBufferRef    = std::optional<std::reference_wrapper<const Buffer>>;
 using OptionalBufferRef         = std::optional<std::reference_wrapper<Buffer>>;
+using OptionalConstVecBufferPtrRef = std::optional<std::reference_wrapper<const std::vector<BufferPtr>>>;
 
 using OptionalConstLoraMapRef    = std::optional<std::reference_wrapper<const LoraWeightsMap>>;
 
@@ -295,8 +296,8 @@ struct EmbeddingLookupParams {
     const Buffer& embedding_table;
     double input_embedding_scalar = 1;
 
-    const Buffer& text_token_masks;
-    std::optional<std::vector<torch::Tensor>> multimodal_features;
+    OptionalConstBufferRef text_tokens_mask;
+    OptionalConstVecBufferPtrRef multimodal_features;
     OptionalConstBufferRef mm_features_locs;
 
     OptionalConstBufferRef position_ids;
@@ -323,7 +324,7 @@ struct KvCacheInfo {
 
 struct MultimodalEmbeddingParams {
     const BufferPtr& word_embeddings;
-    std::vector<torch::Tensor> multimodal_features;
+    const std::vector<BufferPtr>& multimodal_features;
     const Buffer& multimodal_locs;
 };
 

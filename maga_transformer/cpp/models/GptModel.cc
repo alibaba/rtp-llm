@@ -185,8 +185,6 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     const auto combo_tokens = device_->clone(
         {*inputs.combo_tokens, AllocationType::DEVICE, {"combo_tokens"}});
-    const auto text_tokens_mask = device_->clone(
-        {*inputs.text_tokens_mask, AllocationType::DEVICE, {"text_tokens_mask"}});
     const auto input_lengths = device_->clone({*inputs.input_lengths});
     const auto sequence_lengths = device_->clone({*inputs.sequence_lengths});
 
@@ -195,17 +193,21 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const BufferPtr combo_position_ids = inputs.combo_position_ids ? device_->clone({*inputs.combo_position_ids}): nullptr;
     const BufferPtr combo_tokens_type_ids = inputs.combo_tokens_type_ids ? device_->clone({*inputs.combo_tokens_type_ids}): nullptr;    
 
+    const BufferPtr text_tokens_mask = inputs.multimodal_features ? 
+        device_->clone({*inputs.text_tokens_mask, AllocationType::DEVICE, {"text_tokens_mask"}}) : nullptr;
+    const BufferPtr mm_feature_locs = inputs.mm_features_locs ? inputs.mm_features_locs: nullptr;
+
     // lora input
     OptionalLoraInput lora_input = std::nullopt;
     if (inputs.lora_ids != nullptr && inputs.lora_input_lengths != nullptr) {
         lora_input = (OptionalLoraInput)LoraInput({inputs.lora_ids, inputs.lora_input_lengths});
     }
-    const BufferPtr& mm_feature_locs = inputs.mm_features_locs ? inputs.mm_features_locs.value(): nullptr;
 
     // word embedding lookup
     auto hidden = device_->embeddingLookup({
             *combo_tokens, *embedding_table, description_.input_embedding_scalar,
-            *text_tokens_mask, inputs.multimodal_features, 
+            text_tokens_mask ? (OptionalConstBufferRef)*text_tokens_mask : nullopt,
+            inputs.multimodal_features ? (OptionalConstVecBufferPtrRef)inputs.multimodal_features : nullopt, 
             mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs: nullopt,
             combo_position_ids ? (OptionalConstBufferRef)*combo_position_ids: nullopt,
             weights_.position_encoding ? (OptionalConstBufferRef)*weights_.position_encoding->kernel: nullopt,

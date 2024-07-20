@@ -349,7 +349,6 @@ cc_library(
     deps = [
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/utils:py_utils",
-        "//src/fastertransformer/cuda:allocator_cuda",
     ],
     visibility = ["//visibility:public"]
 )

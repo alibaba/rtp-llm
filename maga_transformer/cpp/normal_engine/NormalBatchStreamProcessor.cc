@@ -74,7 +74,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     int*      lm_output_indexes = (int*)model_input.lm_output_indexes->data();
     int*      prefix_lengths   = (int*)model_input.prefix_lengths->data();
     int*      combo_position_ids = has_positional_encoding_ ? (int*)model_input.combo_position_ids->data() : nullptr;
-    int*      mm_features_locs = has_multimodal_input ? (int*)model_input.mm_features_locs.value()->data() : nullptr;
+    int*      mm_features_locs = has_multimodal_input ? (int*)model_input.mm_features_locs->data() : nullptr;
     int*      position_ids     = (has_multimodal_input && !cal_mm_tokens_in_rotary_emb_) ? (int*)model_input.position_ids->data() : nullptr;
     int       batch_idx        = 0;
 
@@ -113,7 +113,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         stream->step();
     }
 
-    std::vector<torch::Tensor> gathered_mm_features;
+    std::vector<ft::BufferPtr> gathered_mm_features;
     int token_idx = batch_idx;
     int cum_output_seq_len = batch_idx;
     int mm_feature_index = 0;
@@ -134,7 +134,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             if (has_multimodal_input) {
                 auto& mm_features = stream->multimodalFeatures().value();
                 auto& mm_locs = stream->multimodalLocations().value();
-                std::copy(mm_features.begin(), mm_features.end(), std::back_inserter(gathered_mm_features));
+                for (auto& mm_feature: mm_features) {
+                    gathered_mm_features.emplace_back(torchTensor2Buffer(mm_feature));
+                }
                 auto text_token_mask = stream->textTokensMask();
                 memcpy(merged_text_mask + token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
                 for (int i = 0;i < mm_locs->size(); ++i) {

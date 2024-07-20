@@ -11,7 +11,7 @@ namespace fastertransformer {
 BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     const auto& tokens = params.combo_tokens;
     const auto& embedding_table = params.embedding_table;
-    const auto& mask = params.text_token_masks;
+    const auto& mask = params.text_tokens_mask;
     const auto& position_ids = params.position_ids;
     const auto& postition_table = params.position_table;
     const auto& token_types = params.token_types;
@@ -35,7 +35,7 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
         tokens.data<int>(),
         position_ids.has_value() ? position_ids.value().get().data<int>() : nullptr,
         token_types.has_value() ? token_types.value().get().data<int>() : nullptr,
-        multimodal_features ? mask.data<int>() : nullptr,
+        mask.has_value() ? mask.value().get().data<int>() : nullptr,
         token_num,
         hidden_size,
         stream_
@@ -44,7 +44,7 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     if (multimodal_features) {
         RUNTIME_ASSERT_OP_ARG(multimodal_locs, "no multimodal input location found");
         return move(multimodalEmbedding({
-            embeddings, multimodal_features.value(), multimodal_locs.value().get()
+            embeddings, multimodal_features.value().get(), multimodal_locs.value().get()
         }));
     }
 
@@ -60,19 +60,13 @@ BufferPtr CudaDevice::multimodalEmbedding(const MultimodalEmbeddingParams& param
 
     // not deal with bf16
     RUNTIME_ASSERT_OP_ARG(
-        embeddings->typeSize() == features[0].element_size(),
+        embeddings->typeSize() == features[0]->typeSize(),
         "type size of embeddings and multimodal features should be equal.");
 
     for (int i = 0; i < mm_num; ++i) {
         auto& feature = features[i];
         auto loc = multimodal_locs.dataWithOffset<int>(i);
-        check_cuda_error(
-            cudaMemcpy(
-                embeddings->dataWithOffset((*loc) * hidden_size), 
-                feature.data_ptr(), 
-                feature.sizes()[0] * embeddings->typeSize() * hidden_size, 
-                cudaMemcpyDeviceToDevice
-            ));
+        copy({embeddings->view(*loc, feature->shape()[0]), *feature});
     }
 
     return move(embeddings);

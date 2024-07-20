@@ -28,7 +28,11 @@ class OpenaiEndopoint():
     def __init__(self, model: Union[AsyncModel, BaseModel]):
         self.model = model
         self.max_seq_len = self.model.config.max_seq_len
-        self.vit_engine = MMProcessEngine(self.model.model)
+        if self.model.is_multimodal():
+            if isinstance(self.model, AsyncModel):
+                self.vit_engine = MMProcessEngine(self.model.model)
+            else:
+                self.vit_engine = MMProcessEngine(self.model)
 
         tokenizer = self.model.tokenizer
         if (tokenizer == None):
