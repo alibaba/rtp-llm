@@ -145,6 +145,11 @@ inline T add(T a, T b)
 }
 
 template<typename T>
+inline T abs(T a) {
+    return (float)a > 0 ? a : -a;
+}
+
+template<typename T>
 inline T mul(T a, T b)
 {
     return static_cast<T>((float)a * (float)b);

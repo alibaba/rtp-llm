@@ -127,7 +127,7 @@ __host__ uint32_t pow2_rounddown(uint32_t x)
 template<typename T>
 inline T safe_add_bias(const T v, const T* bias, const size_t bias_idx)
 {
-    return bias == nullptr ? v : ::math::add(v, bias[bias_idx]);
+    return bias == nullptr ? v : ::math::add(v, -::math::abs(bias[bias_idx]));
 }
 
 template<typename T>
