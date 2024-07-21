@@ -1,7 +1,8 @@
 def gemm_test(max_m,
               model_size,
               kn_list,
-              prec):
+              prec,
+              upload_to_oss='True'):
     test_name = 'gemm_test_' + max_m + '_' + model_size + '_' + prec
     k = ','.join([str(x[0]) for x in kn_list])
     n = ','.join([str(x[1]) for x in kn_list])
@@ -27,6 +28,7 @@ def gemm_test(max_m,
             "--k", k,
             "--n", n,
             "--model_size", model_size,
+            "--upload_to_oss", upload_to_oss
         ],
         env = {
         },
