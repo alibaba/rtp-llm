@@ -317,30 +317,6 @@ cc_library(
 )
 
 cc_library(
-    name = "gemm_test_utils",
-    srcs = [
-        "gemm_test/encoder_igemm_func.cc",
-        "gemm_test/encoder_gemm_func.cc",
-        "gemm_test/gpt_gemm_func.cc",
-        "gemm_test/gemm_func.cc",
-    ],
-    hdrs = [
-        "gemm_test/encoder_igemm_func.h",
-        "gemm_test/encoder_gemm_func.h",
-        "gemm_test/gpt_gemm_func.h",
-        "gemm_test/gemm_func.h",
-    ],
-    deps = [
-        ":cuda_utils",
-        ":cublas",
-        "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
     name = "cuda_utils_rocm",
     srcs = [
     ],

@@ -42,17 +42,3 @@ cc_library(
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
-
-cc_binary(
-    name = "gpt_gemm",
-    srcs = [
-        "multi_gpu_gpt/gpt_gemm.cc",
-    ],
-    deps = [
-        "//src/fastertransformer/kernels:kernels",
-        "//src/fastertransformer/cuda:gemm_test_utils",
-    ],
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts + ["-ldl"],
-    visibility = ["//visibility:public"],
-)
