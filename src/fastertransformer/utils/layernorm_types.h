@@ -25,7 +25,7 @@ inline LayerNormType getLayerNormType(std::string layernorm_type_str) {
     } else if (layernorm_type_str == "post_layernorm") {
         return LayerNormType::post_layernorm;
     } else {
-        FT_CHECK_WITH_INFO(false, "Layernorm Type: " + layernorm_type_str + " not supported !");
+        FT_FAIL("Layernorm Type: " + layernorm_type_str + " not supported !");
     }
     return LayerNormType::invalid_type;
 }
@@ -38,7 +38,7 @@ inline NormType getNormType(std::string norm_type_str) {
     } else if (norm_type_str == "alphanorm") {
         return NormType::alphanorm;
     } else {
-        FT_CHECK_WITH_INFO(false, "Norm Type: " + norm_type_str + " not supported !");
+        FT_FAIL("Norm Type: " + norm_type_str + " not supported !");
     }
     return NormType::invalid_type;
 }

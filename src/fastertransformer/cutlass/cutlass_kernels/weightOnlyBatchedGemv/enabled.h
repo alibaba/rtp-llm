@@ -69,7 +69,7 @@ bool isEnabledForArch(int arch)
     }
     else
     {
-        FT_CHECK_WITH_INFO(false, "Unsupported Arch");
+        FT_FAIL("Unsupported Arch");
         return false;
     }
 }

@@ -51,7 +51,7 @@ inline ActivationType getActivationType(std::string activation_type_str) {
     } else if (activation_type_str == "GeGluNoneApproximate" || activation_type_str == "geglu-none-approximate") {
         return ActivationType::GeGluNoneApproximate;
     } else {
-        FT_CHECK_WITH_INFO(false, "Activation Type: " + activation_type_str + " not supported !");
+        FT_FAIL("Activation Type: " + activation_type_str + " not supported !");
     }
     return ActivationType::InvalidType;
 }

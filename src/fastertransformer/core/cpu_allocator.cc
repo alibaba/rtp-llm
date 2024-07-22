@@ -13,7 +13,8 @@ void  Allocator<AllocatorType::CPU>::free(void** ptr) {
 
 // these two methods are not expected to be called
 void* Allocator<AllocatorType::CPU>::reMalloc(void* ptr, size_t size) {
-    unreachable();
+    FT_FAIL("cpu reMalloc not implemented");
+    return nullptr;
 }
 
 

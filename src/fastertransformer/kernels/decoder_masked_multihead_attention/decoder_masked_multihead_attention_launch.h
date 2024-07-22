@@ -306,7 +306,7 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
             min_seq_len_tile = dsmem_smem_sz_for_kernel / max_dsmem_sz_on_device + 1;
         }
         else {
-            FT_CHECK_WITH_INFO(false, "Sequence Length is too long for the MMHA kernel (not enough shared memory): %d", tlength);
+            FT_FAIL("Sequence Length is too long for the MMHA kernel (not enough shared memory): %d", tlength);
         }
     }
 

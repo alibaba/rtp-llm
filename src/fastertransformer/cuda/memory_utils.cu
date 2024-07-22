@@ -517,7 +517,7 @@ int loadWeightFromBinAndQuantizeForWeightOnly(int8_t*             quantized_weig
                                               std::string         filename,
                                               FtCudaDataType      model_file_type)
 {
-    FT_CHECK_WITH_INFO(false, "Weight only quant not supported with FP32 compute.");
+    FT_FAIL("Weight only quant not supported with FP32 compute.");
     return 0;
 }
 

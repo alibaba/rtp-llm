@@ -657,7 +657,7 @@ void invokeTopkBeamSearch(void*           workspace,
                 CASE_K_DIV(32, 256, 64);
                 CASE_K_DIV(64, 256, 64);
                 default:
-                    FT_CHECK_WITH_INFO(false, fmtstr("Topk kernel does not support beamwidth = %d \n", beam_width));
+                    FT_FAIL(fmtstr("Topk kernel does not support beamwidth = %d \n", beam_width));
                     break;
             }
         }

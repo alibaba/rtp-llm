@@ -559,7 +559,7 @@ void FfnLayer<T>::genericActivation(int          layer_id,
             INVOKE_GENERIC_ACT(GeluActivationNoneApproximate);
             break;
         default:
-            FT_CHECK_WITH_INFO(false, "not support activation type");
+            FT_FAIL("not support activation type");
             break;
     }
 }

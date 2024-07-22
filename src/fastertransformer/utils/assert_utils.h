@@ -23,31 +23,27 @@ namespace fastertransformer {
     throw NEW_FT_EXCEPTION(error_msg);
 }
 
-inline void myAssert(bool result, const char* const file, int const line, std::string const& info = "") {
-    if (!result) {
-        if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
-            fflush(stdout);
-            fflush(stderr);
-            abort();
-        }
-        throwRuntimeError(file, line, info);
+[[noreturn]] inline void myAssert(const char* const file, int const line, std::string const& info = "") {
+    if (std::getenv("FT_CORE_DUMP_ON_EXCEPTION")) {
+        fflush(stdout);
+        fflush(stderr);
+        abort();
     }
+    throwRuntimeError(file, line, info);
 }
 
-#define FT_CHECK(val) fastertransformer::myAssert(val, __FILE__, __LINE__)
 #define FT_CHECK_WITH_INFO(val, info, ...)                              \
     do {                                                                \
         bool is_valid_val = (val);                                      \
 	if (!is_valid_val) {						\
   	    fastertransformer::myAssert(					\
-                is_valid_val, __FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__)); \
+                __FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__)); \
 	}								\
     } while (0)
 
-#define FT_THROW(info) throwRuntimeError(__FILE__, __LINE__, info)
+#define FT_CHECK(val) FT_CHECK_WITH_INFO(val, "")
 
-[[noreturn]] inline void unreachable() {
-    throw NEW_FT_EXCEPTION("unreachable error");
-}
+#define FT_FAIL(info, ...) fastertransformer::myAssert(__FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__))
+
 
 }  // namespace fastertransformer

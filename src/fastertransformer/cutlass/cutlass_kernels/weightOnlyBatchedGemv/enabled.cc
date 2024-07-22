@@ -15,7 +15,7 @@ bool isWeightOnlyBatchedGemvEnabled(WeightOnlyQuantType qtype)
     }
     else
     {
-        FT_CHECK_WITH_INFO(false, "Unsupported WeightOnlyQuantType");
+        FT_FAIL("Unsupported WeightOnlyQuantType");
         return false;
     }
 }

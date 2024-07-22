@@ -27,7 +27,7 @@ inline at::ScalarType getScalarType(const std::string& data_type) {
         scalar_type = at::ScalarType::Float;
 
     } else {
-        FT_CHECK_WITH_INFO(false, "datatype not implemented " + data_type);
+        FT_FAIL("datatype not implemented " + data_type);
     }
     return scalar_type;
 }

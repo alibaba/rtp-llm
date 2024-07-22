@@ -18,7 +18,7 @@ void ParallelGptDecoderLoRALayerWeight<T>::setLoRAWeight(
     } else if (name == W::ffn_w3) {
         ffn_intermediate_weights2.setLoRAWeight(lora_id, lora_a, lora_b, lora_rank);
     } else {
-        FT_CHECK_WITH_INFO(false, "error lora weight name");
+        FT_FAIL("error lora weight name");
     }
 }
 template<typename T>

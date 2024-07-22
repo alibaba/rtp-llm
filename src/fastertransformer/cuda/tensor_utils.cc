@@ -206,7 +206,7 @@ TensorMap fromNpyFolder(const std::string& base_folder) {
         } else if (filename.compare(0, pos, "CPU_PINNED") == 0) {
             where = MEMORY_CPU_PINNED;
         } else {
-            FT_CHECK_WITH_INFO(false, fmtstr("Invalid filename: %s\n", filename.c_str()));
+            FT_FAIL(fmtstr("Invalid filename: %s\n", filename.c_str()));
         }
         std::string key = filename.substr(pos + 1, len - pos - 5);
 

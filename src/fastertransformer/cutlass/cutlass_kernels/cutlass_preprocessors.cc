@@ -36,7 +36,7 @@ int get_bits_in_quant_type(QuantType quant_type)
     {
     case QuantType::INT8_WEIGHT_ONLY: return 8;
     case QuantType::PACKED_INT4_WEIGHT_ONLY: return 4;
-    default: FT_CHECK_WITH_INFO(false, "Invalid quant_type"); return -1;
+    default: FT_FAIL("Invalid quant_type"); return -1;
     }
 }
 
@@ -122,7 +122,7 @@ LayoutDetails getLayoutDetailsForArch(QuantType quant_type)
     }
     else
     {
-        FT_CHECK_WITH_INFO(false, "Unsupported quantization type");
+        FT_FAIL("Unsupported quantization type");
     }
     return details;
 }
@@ -143,7 +143,7 @@ LayoutDetails getLayoutDetailsForTransform(QuantType quant_type)
         return getLayoutDetailsForArch<cutlass::arch::Sm80>(quant_type);
     }
     else {
-        FT_CHECK_WITH_INFO(false, "Unsupported Arch: %d", arch);
+        FT_FAIL("Unsupported Arch: %d", arch);
         return LayoutDetails();
     }
 }
@@ -323,7 +323,7 @@ void subbyte_transpose_impl(
                 }
                 else
                 {
-                    FT_CHECK_WITH_INFO(false, "Unsupported quantization type.");
+                    FT_FAIL("Unsupported quantization type.");
                 }
 
                 const size_t row_tile_start_trans = col_tile_start_byte * ELTS_PER_BYTE;
@@ -370,7 +370,7 @@ void subbyte_transpose(int8_t* transposed_quantized_tensor, const int8_t* quanti
     }
     else
     {
-        FT_CHECK_WITH_INFO(false, "Invalid quant_tye");
+        FT_FAIL("Invalid quant_tye");
     }
 }
 
@@ -465,7 +465,7 @@ void add_bias_and_interleave_quantized_tensor_inplace(int8_t* tensor, const size
     }
     else
     {
-        FT_CHECK_WITH_INFO(false, "Invalid quantization type for interleaving.");
+        FT_FAIL("Invalid quantization type for interleaving.");
     }
 }
 
@@ -700,7 +700,7 @@ void symmetric_quantize(int8_t* processed_quantized_weight, int8_t* unprocessed_
                 }
                 else
                 {
-                    FT_CHECK_WITH_INFO(false, "Unsupported quantization type");
+                    FT_FAIL("Unsupported quantization type");
                 }
             }
         }

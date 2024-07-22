@@ -15,7 +15,7 @@ void cuggemm::groupGemm(void**        A,
     if (dtype_ == DataType::TYPE_FP16) {
         half_runner_->gemm((half**)A, (half**)B, (half**)C, m, n, k, alpha, beta, count, stream_);
     } else {
-        unreachable();
+        FT_FAIL("other dtype group gemm not support");
     }
 
 }

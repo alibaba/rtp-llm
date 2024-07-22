@@ -480,7 +480,7 @@ bool DynamicDecodeLayer<T>::hasDiffRuntimeArgs(TensorMap* input_tensors) {
                         }
                         break;
                     default:
-                        FT_CHECK_WITH_INFO(false, runtime_arg_names_[i] + ": " + tensor.toString() + " is invalid.");
+                        FT_FAIL(runtime_arg_names_[i] + ": " + tensor.toString() + " is invalid.");
                         break;
                 }
             }

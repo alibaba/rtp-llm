@@ -479,7 +479,7 @@ void GptModel::addLoRA(const int64_t lora_id,
                             lora_a[i].at(adapter_name),
                             lora_b[i].at(adapter_name));
             } else {
-                unreachable();
+ 	        FT_FAIL("unknown lora W %s", adapter_name.c_str());
             }
         }
     }
@@ -506,7 +506,7 @@ void GptModel::removeLoRA(const int64_t lora_id) {
             } else if (adapter_name == W::ffn_w3) {
                 helper_func(weights_.layers[i].ffn_weights.up_lora_weights);
             } else {
-                unreachable();
+                FT_FAIL("unknown lora W %s", adapter_name.c_str());
             }
         }
     }

@@ -495,7 +495,7 @@ void beam_online_softmax_topk_stage2_kernelLauncher(const float* temp_storage,
                 temp_storage, cum_log_probs, ids, vals, beam_width, parts_per_beam);
         return;
     }
-    unreachable();
+    FT_FAIL("parts_per_beam > 128 not implemented");
 }
 
 template<typename T, int MAX_K>

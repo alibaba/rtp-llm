@@ -37,7 +37,7 @@ CutlassGemmConfig getConfigFromStr(std::string tile_config, int split_k, int sta
 
     CONVERT(CutlassTileConfig::CtaShape256x128x64_WarpShape64x64x64)
     CONVERT(CutlassTileConfig::CtaShape256x128x128_WarpShape64x64x128)
-    FT_CHECK_WITH_INFO(false, "undefined gemm config %s", tile_config.c_str());
+    FT_FAIL("undefined gemm config %s", tile_config.c_str());
 }
 
 #undef CONVERT

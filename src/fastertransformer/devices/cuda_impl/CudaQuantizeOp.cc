@@ -14,7 +14,7 @@ inline trt::QuantType trtQuantTypeConvert(DataType dtype) {
             return trt::QuantType::INT8_WEIGHT_ONLY;
         }
         default: {
-            FT_CHECK_WITH_INFO(false, "Invalid quant type");
+            FT_FAIL("Invalid quant type");
         }
     }
 }
@@ -142,8 +142,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
             std::move(BufferPtr(new Buffer(MemoryType::MEMORY_GPU, DataType::TYPE_INVALID, {0}, nullptr)))));
 
     } else {
-        unreachable();
-        return nullptr;
+        FT_FAIL("other device not implemented");
     }
 }
 
