@@ -33,7 +33,7 @@ void mixedTypeSoftmaxWrapper(const SoftmaxParams& params,
     param.q_length           = input->shape()[2];
     param.k_length           = input->shape()[3];
     param.qk_scale           = Out(params.scale);
-    param.linear_bias_slopes = params.linear_bias_slopes.has_value() ? params.linear_bias_slopes.value().get().data<Out>(): nullptr;
+    param.linear_bias_slopes = params.linear_bias_slopes.has_value() ? params.linear_bias_slopes.value().get().data<float>(): nullptr;
     invokeMaskedSoftmax(param, stream);
     return;
 }
