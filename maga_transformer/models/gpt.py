@@ -275,7 +275,7 @@ class GPT(BaseModel):
                 self._safe_load_from_module(self.pre_decoder_layernorm.bias, W.pre_decoder_ln_beta)
                 self.weight.append_global_weight(W.pre_decoder_ln_gamma, self.pre_decoder_layernorm.weight.data)
                 self.weight.append_global_weight(W.pre_decoder_ln_beta, self.pre_decoder_layernorm.bias.data)
-                if self.config.quant_algo.isSmoothQuant() or self.config.quant_algo.isOmniQuant() or self.config.quant_algo.isPerTensorQuant():
+                if self.config.quant_algo.isPerTensorQuant():
                     static_quant = self.weight.steal_pytorch_weight(W.pre_decoder_ln_static_quant)
                     static_quant_reciprocal = self.weight.steal_pytorch_weight(W.pre_decoder_ln_static_quant_reciprocal)
                     assert static_quant is not None and static_quant_reciprocal is not None, "pre decoder static quant should not be None"

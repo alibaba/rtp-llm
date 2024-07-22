@@ -64,8 +64,7 @@ th::Tensor LinearSoftmaxHandlerImpl::forward(th::Tensor hidden_states, th::Tenso
 
     const auto output_hidden_size = 2;
     auto gemm_output = device_->gemm({*sliced_hidden_buffer, *weight_, std::nullopt, nullptr, DataType::TYPE_FP32});
-    auto gemm_output_typed = device_->convert({gemm_output, torchDTypeToDataType(hidden_states.dtype())});
-    auto decoder_output = device_->softmax({gemm_output_typed, std::nullopt, *bias_});
+    auto decoder_output = device_->softmax({gemm_output, std::nullopt, *bias_});
     auto output_cpu = device_->clone({*decoder_output, AllocationType::HOST});
     return Buffer2torchTensor(output_cpu);
 }

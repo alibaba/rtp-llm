@@ -213,7 +213,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     // TODO: fix me
     ft::QScheme qscheme = QScheme::NoQuantize;
-    if (weights_.layers[0].post_layernorm->static_scale != nullptr) {
+    if (weights_.layers[0].post_layernorm && weights_.layers[0].post_layernorm->static_scale != nullptr) {
         qscheme = QScheme::Qint8PerTensor;
     } else if (weights_.layers[0].self_attention_weights.smoother_weight != nullptr) {
         qscheme = QScheme::Qint8PerChannelLastAxis;
@@ -221,7 +221,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     // pre layernorm    
     BufferPtr pre_decoder_residual = nullptr;
-    if (qscheme == QScheme::Qint8PerTensor && weights_.pre_decoder_layernorm) {
+    if (qscheme != QScheme::NoQuantize && weights_.pre_decoder_layernorm) {
         pre_decoder_residual = device_->allocateBufferLike(*hidden);
     }
     printBufferData(*hidden, "before decoder layernorm hidden");
@@ -329,6 +329,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                 attn_hidden = std::move(post_layernorm_output.before_norm_output);
                 residual = attn_hidden;
             }
+            printBufferData(*residual, "post_layernorm_residual");    
         } else {
             residual2 = attn_hidden;
         }
@@ -380,9 +381,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                        1.0f,
                                                                        norm_eps,
                                                                        true,                                                                       
-                                                                       false,
+                                                                       description_.post_layernorm,
                                                                        norm_type,
-                                                                       i == layer_num - 1 ? QScheme::NoQuantize: qscheme));
+                                                                       ((i == layer_num - 1) || (!layer.post_ffn_layernorm)) ? QScheme::NoQuantize: qscheme));
         hidden = std::move(ffn_layernorm_output.output);
         printBufferData(*hidden, "layer_" + to_string(i) + "_final_hidden");
     }

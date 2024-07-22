@@ -208,11 +208,11 @@ class BertWeightInfo(ModelDeployWeightInfo):
                     WeightInfo(W.ffn_intermediate_weight2_static_quant, [CkptWeightInfo(self._pertensor_quant_names.FFN_INTER_INPUT_S)], get_tensor_reciprocal, torch.float32),
                     WeightInfo(W.ffn_intermediate_weight2_static_quant_reciprocal, [CkptWeightInfo(self._pertensor_quant_names.FFN_INTER_INPUT_S)], get_tensor_from_scalar, torch.float32),
                 ])
-            if layer_id != self._num_layers - 1:
-                layer.extend([
-                    WeightInfo(W.post_ffn_ln_static_quant, [CkptWeightInfo(self._pertensor_quant_names.FFN_OUTPUT_LAYERNORM_S)], get_tensor_reciprocal, torch.float32),
-                    WeightInfo(W.post_ffn_ln_static_quant_reciprocal, [CkptWeightInfo(self._pertensor_quant_names.FFN_OUTPUT_LAYERNORM_S)], get_tensor_from_scalar, torch.float32),
-                ])
+                if layer_id != self._num_layers - 1:
+                    layer.extend([
+                        WeightInfo(W.post_ffn_ln_static_quant, [CkptWeightInfo(self._pertensor_quant_names.FFN_OUTPUT_LAYERNORM_S)], get_tensor_reciprocal, torch.float32),
+                        WeightInfo(W.post_ffn_ln_static_quant_reciprocal, [CkptWeightInfo(self._pertensor_quant_names.FFN_OUTPUT_LAYERNORM_S)], get_tensor_from_scalar, torch.float32),
+                    ])
             layer_weights.append(layer)
         return layer_weights
 

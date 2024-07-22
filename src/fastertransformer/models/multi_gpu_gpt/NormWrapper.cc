@@ -20,7 +20,7 @@ void NormWrapper<T>::initDecoderLayerNorm(T* output,
         if (norm_type_ == NormType::rmsnorm) {
             invokeGeneralRmsNorm(output, input, gamma, beta, eps, m, n, stream, scale, dynamic_scale, norm_output_quant);
         } else {
-            invokeGeneralLayerNorm(output, (T*)nullptr, input, gamma, beta, eps, m, n, stream, true, scale, dynamic_scale, norm_output_quant);
+            invokeGeneralLayerNorm((T*)nullptr, output, input, gamma, beta, eps, m, n, stream, true, scale, dynamic_scale, norm_output_quant);
         }
     }
 }
@@ -38,7 +38,7 @@ void NormWrapper<T>::generalLayerNorm(T* output,
                                       int8_t*      norm_output_quant,
                                       cudaStream_t stream) 
 {
-    invokeGeneralLayerNorm(output, (T*)nullptr, input, gamma, beta, eps, m, n, stream, true, scale, dynamic_scale, norm_output_quant);
+    invokeGeneralLayerNorm((T*)nullptr, output, input, gamma, beta, eps, m, n, stream, true, scale, dynamic_scale, norm_output_quant);
 }
 
 template<typename T>
@@ -54,7 +54,7 @@ void NormWrapper<T>::preAttentionLayerNorm(T*           output,
                                            int8_t*      norm_output_quant,
                                            cudaStream_t stream) {
     if (layernorm_type_ == LayerNormType::pre_layernorm) {
-        invokeGeneralLayerNorm(output, (T*)nullptr, input, gamma, beta, eps, m, n, stream, true, scale, dynamic_scale, norm_output_quant);
+        invokeGeneralLayerNorm((T*)nullptr, output, input, gamma, beta, eps, m, n, stream, true, scale, dynamic_scale, norm_output_quant);
     }
 }
 

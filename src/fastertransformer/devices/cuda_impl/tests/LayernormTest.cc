@@ -72,6 +72,7 @@ TEST_F(LayerNormTest, testAddBiasPerformance) {
                     invokeGeneralLayerNorm(
                         (TestType*)input->data(),
                         (TestType*)input->data(),
+                        (TestType*)input->data(),
                         (TestType*)gamma->data(),
                         (TestType*)beta->data(),
                         1e-6,

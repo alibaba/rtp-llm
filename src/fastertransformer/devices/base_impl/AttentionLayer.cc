@@ -129,7 +129,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     }
     printBufferData(*qkv_output, "qkv_output");
 
-    if(params.weights.smoother_weight) {
+    if(params.qscheme != QScheme::NoQuantize) {
         OptionalConstBufferRef smoother_weight =
             params.weights.smoother_weight ? (OptionalConstBufferRef) * (params.weights.smoother_weight->kernel) :
                                              std::nullopt;
@@ -159,12 +159,6 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
             static_scale_reciprocal_weight);
 
         BufferPtr quantized_attention_output = quantize(quant_params);
-
-        auto quantized_attention_output = quantize({*qkv_output,
-                                     *params.weights.smoother_weight->kernel,
-                                     shift_weight,
-                                     DataType::TYPE_QINT8,
-                                     1});
 
         auto output_gemm_params = GemmParams(*quantized_attention_output, *(output_weight->kernel), nullopt, output);
         loraLinear(LoraLinearParams(output_gemm_params,

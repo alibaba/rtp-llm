@@ -21,7 +21,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             shared_expert_output = ffnLayer({params.input,
                                              params.configs,
                                              *(params.weights.shared_expert),
-                                             params.residual, params.qscheme}).hidden_states;
+                                             params.residual, std::nullopt, params.qscheme}).hidden_states;
 
             // for qwen moe
             // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803

@@ -558,25 +558,7 @@ struct QuantizeParams {
         static_scale(static_scale),
         static_scale_reciprocal(static_scale_reciprocal) {}
 
-    QuantizeParams(const Buffer& input, DataType qtype, size_t axis): input(input), qtype(qtype), axis(axis) {}
-
-    // static QuantizeParams createQuantParams(const Buffer& input, OptionalConstBufferRef smoother, OptionalConstBufferRef shift, OptionalConstBufferRef static_quant, QScheme qscheme, DataType qtype, size_t axis) {
-    //     if (qscheme == QScheme::NoQuantize) {
-    //         FT_CHECK_WITH_INFO(shift == std::nullopt && smoother == std::nullopt && static_quant == std::nullopt, "check NoQuantize buffer error");
-    //         return QuantizeParams(input, qtype, axis, QScheme::NoQuantize, std::nullopt, std::nullopt, std::nullopt);
-    //     } else if (qscheme ==QScheme::Qint8PerChannelLastAxis) {
-    //         FT_CHECK_WITH_INFO(static_quant == std::nullopt && smoother != std::nullopt, "check Qint8PerChannelLastAxis buffer error");
-    //         return QuantizeParams(input, qtype, axis, QScheme::Qint8PerChannelLastAxis, smoother, shift, std::nullopt);
-    //     } else if (qscheme == QScheme::Qint8PerTensor) {
-    //         FT_CHECK_WITH_INFO(static_quant != std::nullopt && smoother == std::nullopt && shift == std::nullopt, "check Qint8PerChannelLastAxis buffer error");
-    //         return QuantizeParams(input, qtype, axis, QScheme::Qint8PerChannelLastAxis, smoother, shift, std::nullopt);
-    //     }        
-    // }
-
-    // static QuantizeParams createStaticQuantParams(const Buffer& input, OptionalConstBufferRef static_quant, DataType qtype, size_t axis) {
-    //     return QuantizeParams(input, qtype, axis, QScheme::Qint8PerTensor, std::nullopt, std::nullopt, static_quant);
-    // }
-
+    QuantizeParams(const Buffer& input, DataType qtype, size_t axis): input(input), qtype(qtype), axis(axis), qscheme(QScheme::Qint8PerChannelLastAxis) {}
 };
 
 }  // namespace fastertransformer

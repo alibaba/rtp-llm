@@ -27,6 +27,9 @@ class CustomHandler(object):
     
     def tensor_info(self) -> List[str]:
         return []
+    
+    def init_cpp_handler(self) -> None:
+        pass
 
     def init(self, tensor_map: Dict[str, torch.Tensor]) -> None:
         pass

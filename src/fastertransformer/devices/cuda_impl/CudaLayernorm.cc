@@ -22,14 +22,9 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     auto norm_weight = params.norm_weight;
     const auto& gamma = norm_weight ? norm_weight->get().gamma.get()->data() : nullptr;
     const auto& beta = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
-    const auto& static_scale = (norm_weight && norm_weight->get().static_scale) ? norm_weight->get().static_scale.get()->data() : nullptr;        
+    const auto& static_scale = (norm_weight && norm_weight->get().static_scale) ? norm_weight->get().static_scale.get()->data<float>() : nullptr;        
     const auto norm_type = params.norm_type;
     const auto eps = params.eps;
-    printBufferData(*(norm_weight->get().gamma.get()), "gamma");
-    printBufferData(*(norm_weight->get().beta.get()), "beta");
-    if (norm_weight->get().static_scale.get() != nullptr) {
-        printBufferData(*(norm_weight->get().static_scale.get()), "static_scale");        
-    }    
 
     if (!params.is_inplace && params.qscheme == QScheme::NoQuantize) {
         norm_output = allocateBufferLike(*params.input);
@@ -135,16 +130,12 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 n,
                 stream_,
                 true, // use_diff_of_squares
-                (float*)static_scale,
+                static_scale,
                 scales_ptr, // dynamic_scale
                 quant_output, // out_quant
                 params.return_normed_output
             );
             sync_check_cuda_error();
-            if (quant_output != nullptr) {
-                // print_bsd(-1, "layernorm kernel", quant_output, 1, m, n, 0, n);
-                // print_bsd(-1, "layernorm scale", static_scale, 1, 1, 1, 0, 1);
-            }
             return LayernormOutput({norm_output, params.before_norm_output});
         } else {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeGeneralLayerNorm,
@@ -158,7 +149,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                 n,
                 stream_,
                 true, // use_diff_of_squares
-                (float*)static_scale,
+                static_scale,
                 scales_ptr, // dynamic_scale
                 quant_output, // out_quant
                 params.return_normed_output
@@ -182,7 +173,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                                             m,
                                             n,
                                             stream_,
-                                            (float*)static_scale, // scale
+                                            static_scale, // scale
                                             scales_ptr, // dynamic_scale
                                             quant_output // out_quant
                                         );
