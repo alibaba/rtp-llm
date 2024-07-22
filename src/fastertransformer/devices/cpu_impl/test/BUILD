@@ -15,7 +15,6 @@ test_deps = [
     "//src/fastertransformer/devices/base_tests:base_tests",
 ] + torch_deps()
 
-
 cc_test(
     name = "cpu_ffn_op_test",
     srcs = [
@@ -33,7 +32,18 @@ cc_test(
         "ops/CpuAttentionLayerTest.cc",
     ],
     data = [],
-    copts = ["-g"] + test_copts,
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
+
+cc_test(
+    name = "cpu_layernorm_test",
+    srcs = [
+        "ops/CpuLayerNormTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps,
 )
