@@ -4,6 +4,7 @@ from typing import List, Dict, Any
 from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
@@ -43,6 +44,7 @@ class ColBertEmbeddingHandler(CustomHandler):
         if not os.path.exists(self.colbert_linear_path_):
             raise Exception('failed to find colbert_linear.pt from ckpt_path')
         self.dtype_ = to_torch_dtype(self.config_.data_type)
+        self.device = g_parallel_info.device
 
     def init(self, tensor_map: Dict[str, torch.Tensor]) -> None:
         sparse_linear_dict = torch.load(self.colbert_linear_path_, map_location='cpu')
@@ -51,7 +53,7 @@ class ColBertEmbeddingHandler(CustomHandler):
         self.colbert_linear = self.colbert_linear.to(self.dtype_).cuda()
 
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor):
-        batch_input_ids, batch_hidden_states, batch_attention_mask = combo_to_batch(hidden_states, input_ids, input_lengths)
+        batch_input_ids, batch_hidden_states, batch_attention_mask = combo_to_batch(hidden_states, input_ids, input_lengths, self.device)
         colbert_vecs = self.colbert_linear(batch_hidden_states[:, 1:])
         colbert_vecs = colbert_vecs * batch_attention_mask[:, 1:][:, :, None].float()
         colbert_vecs = torch.nn.functional.normalize(colbert_vecs, dim=-1)

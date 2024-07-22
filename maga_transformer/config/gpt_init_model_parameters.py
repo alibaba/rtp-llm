@@ -163,6 +163,11 @@ class GptInitModelParameters:
         self.add_special_tokens = True
         self.template_type = TemplateType.chat
         self.build_position_ids = False
+        use_rpc_model = bool(int(os.environ.get("USE_RPC_MODEL", 0)))
+        if use_rpc_model:
+            self.local_rank = g_parallel_info.local_rank
+        else:
+            self.local_rank = 0
 
         for k, v in kwargs.items():
             setattr(self, k, v)

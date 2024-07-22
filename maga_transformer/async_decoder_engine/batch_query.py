@@ -125,19 +125,19 @@ class BatchQuery:
             self.generate_batch_size = int(shape_hints[1])
             self.context_batch_size = int(shape_hints[2])
             self.num_beams = int(shape_hints[3])
-            output_token_ids = torch.zeros((self.decoder_batch_size, int(shape_hints[4])), dtype=torch.int32, device="cuda:0")
+            output_token_ids = torch.zeros((self.decoder_batch_size, int(shape_hints[4])), dtype=torch.int32, device="cuda")
             cache_block_indice = torch.zeros(
-                (self.decoder_batch_size, int(shape_hints[5])), dtype=torch.int32, device="cuda:0")
+                (self.decoder_batch_size, int(shape_hints[5])), dtype=torch.int32, device="cuda")
             self._ptuning_info.ptuning = bool(shape_hints[6])
             self._ptuning_info.count_length = bool(shape_hints[7])
             self._ptuning_info.count_prefix_length = bool(shape_hints[8])
-            seq_lengths_tensor = torch.zeros((self.generate_batch_size * self.num_beams), dtype=torch.int32, device="cuda:0")
-            reuse_lengths_tensor = torch.zeros((self.decoder_batch_size), dtype=torch.int32, device="cuda:0")
-            context_lengths_tensor = torch.zeros((self.decoder_batch_size), dtype=torch.int32, device="cuda:0")
-            lora_ids_tensor = torch.zeros((max(1, self.total_batch_size)), dtype=torch.int32, device="cuda:0")
-            calculate_loss_tensor = torch.zeros((self.context_batch_size), dtype=torch.int32, device="cuda:0")
-            token_type_ids = torch.zeros((int(shape_hints[9]), int(shape_hints[10])), dtype=torch.int32, device="cuda:0")
-            vision_token_length_tensor = torch.zeros((int(shape_hints[11])), dtype=torch.int32, device="cuda:0")
+            seq_lengths_tensor = torch.zeros((self.generate_batch_size * self.num_beams), dtype=torch.int32, device="cuda")
+            reuse_lengths_tensor = torch.zeros((self.decoder_batch_size), dtype=torch.int32, device="cuda")
+            context_lengths_tensor = torch.zeros((self.decoder_batch_size), dtype=torch.int32, device="cuda")
+            lora_ids_tensor = torch.zeros((max(1, self.total_batch_size)), dtype=torch.int32, device="cuda")
+            calculate_loss_tensor = torch.zeros((self.context_batch_size), dtype=torch.int32, device="cuda")
+            token_type_ids = torch.zeros((int(shape_hints[9]), int(shape_hints[10])), dtype=torch.int32, device="cuda")
+            vision_token_length_tensor = torch.zeros((int(shape_hints[11])), dtype=torch.int32, device="cuda")
         self.nccl_op_.broadcast_tp([
             cache_block_indice, output_token_ids, seq_lengths_tensor,
             reuse_lengths_tensor, context_lengths_tensor, lora_ids_tensor,

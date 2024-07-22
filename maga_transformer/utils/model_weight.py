@@ -10,6 +10,7 @@ import copy
 from typing import Any, NamedTuple, Callable, List, Dict, Set, Tuple, Optional, Union
 from maga_transformer.utils.database import FinetuneType, TrainType, CkptFileInfo, LoraConfig
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.database import BaseDatabase
 from maga_transformer.utils.RWLock import RWlock
 
@@ -31,10 +32,10 @@ def pad(ts: List[torch.Tensor], inter_padding_size: int, dim: int):
         pad_shape = [ts[0].shape[0], inter_padding_size - ts[0].shape[1]]
     else:
         raise Exception('unknown padding dim: ' + str(dim))
-    if pad_shape[0] == 0 or pad_shape[1] ==0:
-        return ts[0].cpu().contiguous()
-    z = torch.zeros(pad_shape).cpu().to(ts[0].dtype)
-    return torch.cat((ts[0].cpu(), z), dim).to('cpu').contiguous()
+    if pad_shape[0] == 0 or pad_shape[1] == 0:
+        return ts[0].contiguous()
+    z = torch.zeros(pad_shape, device=ts[0].device).to(ts[0].dtype)
+    return torch.cat((ts[0], z), dim).to(ts[0].device).contiguous()
 
 def transpose_pad(ts: List[torch.Tensor], inter_padding_size: int, dim: int):
     if dim == 0:
@@ -43,8 +44,8 @@ def transpose_pad(ts: List[torch.Tensor], inter_padding_size: int, dim: int):
         pad_shape = [ts[0].shape[0], inter_padding_size - ts[0].shape[1]]
     else:
         raise Exception('unknown padding dim: ' + str(dim))
-    z = torch.zeros(pad_shape, device='cuda:0').half()
-    return torch.cat((ts[0].cuda(), z), dim).T.to('cuda:0').contiguous()
+    z = torch.zeros(pad_shape, device=ts[0].device).half()
+    return torch.cat((ts[0], z), dim).T.to(ts[0].device).contiguous()
 
 def b_half_merge(ts: List[torch.Tensor]):
     n_ts_1 = []
@@ -1131,6 +1132,7 @@ class LoraResource():
     def __init__(self, lora_infos: Dict[str, str] = dict(), database: Optional[BaseDatabase] = None,
                  weights_info: Optional[WeightInfo] = None,
                  lora_map: Optional[LoRAMap] = None):
+        self.device = g_parallel_info.device
         self.lora_infos = lora_infos
         self.database = database
         self.model_weights_loader = None
@@ -1188,7 +1190,7 @@ class LoraResource():
             lora_name = lora_config.name
             if self.lora_map.has_id(lora_name):
                 continue
-            lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name, 'cuda:0')
+            lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name, self.device)
             self.model_weights_loader.show_warns(lora_name=lora_name, only_dump_lora=True)
             _ = self.add_lora_name(lora_name, lora_weights)
         for op in self.ft_op:
@@ -1226,14 +1228,15 @@ class LoraResource():
 
 
 class ModelWeights:
-    def __init__(self, num_layers: int):
+    def __init__(self, num_layers: int, device: str):
+        self.device = device
         self.weights: List[Dict[str, torch.Tensor]] = []
         self.global_weights: Dict[str, torch.Tensor] = {}
         self._pytorch_weights: Dict[str, torch.Tensor] = {}
-        self.lora_resource: LoraResource = LoraResource()
+        self.lora_resource: LoraResource = LoraResource(device)
         self._dtype = None
 
-        for i in range(num_layers):
+        for _ in range(num_layers):
             self.weights.append({})
 
     def append_pytorch_weight(self, name: str, tensor: torch.Tensor):
@@ -1255,10 +1258,6 @@ class ModelWeights:
 
     def append_global_weight(self, name: str, tensor: torch.Tensor):
         self.global_weights[name] = tensor
-
-    @property
-    def device(self):
-        return 'cuda:0'
 
     @property
     def dtype(self):

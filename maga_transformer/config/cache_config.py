@@ -13,6 +13,7 @@ class CacheConfig(NamedTuple):
     size_per_head: int
     seq_size_per_block: int
     dtype: torch.dtype
+    device: str
 
 class CacheConfigGenerator(object):
     @staticmethod
@@ -31,8 +32,7 @@ class CacheConfigGenerator(object):
         logging.info(f'kv_cache dtype: {dtype}')
         dtype_size = get_dtype_size(dtype)
         block_size = (config.layer_num * local_head_num_kv * (config.size_per_head + scale_size) * dtype_size * seq_size_per_block)
-        
-        return CacheConfig(config.layer_num, 0, block_size, local_head_num_kv, config.size_per_head, seq_size_per_block, dtype)
+        return CacheConfig(config.layer_num, 0, block_size, local_head_num_kv, config.size_per_head, seq_size_per_block, dtype, g_parallel_info.device)
 
     @staticmethod
     def get_free_memory_size(config: GptInitModelParameters) -> int:

@@ -278,7 +278,6 @@ py_library(
         ":openai_api",
         ":embedding",
         ":sdk",
-        "//maga_transformer/tools:save_ft_module",
         "//maga_transformer/tools:model_assistant",
         "//maga_transformer/distribute:distribute",
         ":tokenizer",

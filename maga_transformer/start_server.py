@@ -47,9 +47,13 @@ def multi_rank_start():
     cuda_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
     cuda_device_list = cuda_devices.split(',') if cuda_devices is not None else \
             [str(i) for i in range(torch.cuda.device_count())]
+    use_rpc_model = bool(int(os.environ.get("USE_RPC_MODEL", 0)))
     for idx, world_rank in enumerate(range(g_parallel_info.world_rank,
                                             g_parallel_info.world_rank + local_world_size)):
-        os.environ['CUDA_VISIBLE_DEVICES'] = cuda_device_list[idx]
+        if use_rpc_model:
+            os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(cuda_device_list)
+        else:
+            os.environ['CUDA_VISIBLE_DEVICES'] = cuda_device_list[idx]
         os.environ['WORLD_RANK'] = str(world_rank)
         proc = multiprocessing.Process(target=local_rank_start)
         proc.start()

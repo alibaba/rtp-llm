@@ -11,6 +11,10 @@ public:
     DeviceBase(const DeviceInitParams& params);
 
     virtual void init();
+    // Init and preRun(NormalEngine::loop()) are executed in two different threads, some environments 
+    // needs to be reset again in a new thread(such as cudaSetDevice, 
+    // otherwise it will be executed in default cudaDevice 0) so we provide a preRun() to do this.
+    virtual void preRun() {}
     virtual DeviceProperties getDeviceProperties() = 0;
     virtual DeviceStatus getDeviceStatus();
     void traceMemoryUsage();

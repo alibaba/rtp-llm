@@ -75,8 +75,8 @@ class Llava(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         self.nccl_op_ = NcclOp()
         if g_parallel_info.tp_rank == 0:
-            with torch.cuda.device(torch.device('cuda:0')):
-                self.mm_part = LlavaImageEmbedding(config.vit_related_params.config)
+            with torch.cuda.device(torch.device(g_parallel_info.device)):
+                self.mm_part = LlavaImageEmbedding(config.vit_related_params.config, g_parallel_info.device)
             vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
             if config.vit_related_params.config["unfreeze_mm_vision_tower"] or \
                 "mm_vision_tower" in config.vit_related_params.config["mm_tunable_parts"]:

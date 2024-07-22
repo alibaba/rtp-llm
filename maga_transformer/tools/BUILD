@@ -20,14 +20,6 @@ py_library(
 )
 
 py_library(
-    name = "save_ft_module",
-    srcs = ["save_ft_module.py"],
-    deps = [
-        "//maga_transformer:models",
-    ]
-)
-
-py_library(
     name = "model_assistant_api",
     srcs = glob([
         "api/*.py",

@@ -11,6 +11,7 @@ from sentence_transformers.models import Transformer, Normalize
 from transformers import PreTrainedTokenizerBase
 from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.downstream_modules.custom_module import CustomModule, CustomHandler
 from maga_transformer.utils.tensor_utils import get_last_token_from_combo_tokens, get_first_token_from_combo_tokens
 from maga_transformer.models.downstream_modules.embedding.misc import combo_to_batch, EmbeddingRendererBase
@@ -82,9 +83,10 @@ class SentenceTransformerHandler(CustomHandler):
                 module = module_class.load(module_path)
                 modules[module_config["name"]] = module
         self.model = nn.Sequential(modules).cuda().to(dtype)
+        self.device = g_parallel_info.device
 
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> List[Any]:
-        batch_input_ids, batch_hidden_states, batch_attention_mask = combo_to_batch(hidden_states, input_ids, input_lengths)
+        batch_input_ids, batch_hidden_states, batch_attention_mask = combo_to_batch(hidden_states, input_ids, input_lengths, self.device)
         input =  {
             "token_embeddings": batch_hidden_states,
             "attention_mask": batch_attention_mask

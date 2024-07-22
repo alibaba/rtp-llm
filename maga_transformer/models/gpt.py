@@ -6,7 +6,7 @@ import logging
 from typing import Optional, Union, List, Dict, Any
 import torch.nn.functional as F
 
-from maga_transformer.utils.util import get_device, to_torch_dtype
+from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.models.gpt_util.rms import RMSNorm
 from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader, estimate_load_parallel_num, ModelWeightsLoader
@@ -92,19 +92,19 @@ class GPT(BaseModel):
 
             if self.config.has_pre_decoder_layernorm:
                 if self.config.norm_type == 'layernorm' or self.config.norm_type == 'alphanorm':
-                    self.pre_decoder_layernorm = torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=self.compute_dtype).to('cuda:0')
+                    self.pre_decoder_layernorm = torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=self.compute_dtype).to(self.device)
                 elif self.config.norm_type == 'rmsnorm':
 
-                    self.pre_decoder_layernorm = RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0')
+                    self.pre_decoder_layernorm = RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to(self.device)
             else:
                 self.pre_decoder_layernorm = None
 
         if g_parallel_info.is_pp_last:
             if self.config.has_post_decoder_layernorm:
                 if self.config.norm_type == 'layernorm' or self.config.norm_type == 'alphanorm':
-                    self.post_decoder_layernorm = torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=self.compute_dtype).to('cuda:0')
+                    self.post_decoder_layernorm = torch.nn.LayerNorm(hidden_dim, eps=self.config.layernorm_eps, dtype=self.compute_dtype).to(self.device)
                 elif self.config.norm_type == 'rmsnorm':
-                    self.post_decoder_layernorm = RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to('cuda:0')
+                    self.post_decoder_layernorm = RMSNorm(hidden_dim, eps=self.config.layernorm_eps, use_bias=True).to(self.device)
             else:
                 self.post_decoder_layernorm = None
             if self.task_type == TaskType.LANGUAGE_MODEL:
@@ -135,9 +135,9 @@ class GPT(BaseModel):
             self.weight.lora_resource.update(lora_infos)
         logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
-    def load(self, device: Union[str, torch.device] = 'cuda:0'):
-        self._load_weights(device)
-        self._initialize_from_weight(device)
+    def load(self):
+        self._load_weights()
+        self._initialize_from_weight()
 
     def load_custom_module(self) -> Optional[CustomModule]:
         return create_custom_module(self.task_type, self.config, self.tokenizer)
@@ -176,7 +176,7 @@ class GPT(BaseModel):
             self.config, g_parallel_info.tp_size)
         weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
         model_weights_loader = get_model_weights_loader(weights_info, self.database, compute_dtype=self.compute_dtype)
-        self.weight = model_weights_loader.load_weights_from_scratch(num_process=load_parallel_num)
+        self.weight = model_weights_loader.load_weights_from_scratch(num_process=load_parallel_num, device=self.device)
         self._load_custom_module_weights(model_weights_loader)
         if self.static_lora:
             lora_name = list(self.config.lora_infos.keys())[0]
@@ -190,9 +190,7 @@ class GPT(BaseModel):
             self.update(self.config.lora_infos)
 
     def _load_weights(self,
-                      ref_dict: Dict[str, torch.Tensor] = {},
-                      device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
-        device = device or get_device()
+                      ref_dict: Dict[str, torch.Tensor] = {}):
         with Timer() as timer:
             self.init_database()
             self.load_static_lora()
@@ -227,16 +225,16 @@ class GPT(BaseModel):
     def _safe_load_from_module(self, param: torch.nn.Parameter, fname: str):
         # np_w is 1-D array since a bin file doesn't have shape info.
         print(f"load {fname} to {param.data.shape}")
-        param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to('cuda:0')
+        param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(self.device)
 
     def _safe_load_prefix_encoder_weight_from_module(self, param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
         # np_w is 1-D array since a bin file doesn't have shape info.
-        param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(ctype).to('cuda:0')
+        param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(ctype).to(self.device)
 
     def _safe_load_medusa_head_weight_from_module(self, module: torch.nn.Module, ctype: torch.dtype):
         named_parameters = {k: v for k,v in module.named_parameters()}
         for key in named_parameters.keys():
-            named_parameters[key].data = self.weight.steal_pytorch_weight(key).reshape(named_parameters[key].data.shape).to(ctype).to('cuda:0')
+            named_parameters[key].data = self.weight.steal_pytorch_weight(key).reshape(named_parameters[key].data.shape).to(ctype).to(self.device)
 
     def init_prefix_encoder_weight(self):
         #TODO@miji check tp
@@ -244,7 +242,8 @@ class GPT(BaseModel):
             self._safe_load_prefix_encoder_weight_from_module(
                 self.prefix_encoder.embedding.weight,
                 W.prefix_w,
-                self.compute_dtype)
+                self.compute_dtype,
+                self.device)
             if self.prefix_encoder.prefix_projection:
                 raise Exception("not implement prefix_projection yet")
 
@@ -252,7 +251,8 @@ class GPT(BaseModel):
         if self.medusa_head is not None:
             self._safe_load_medusa_head_weight_from_module(
                 self.medusa_head,
-                self.compute_dtype)
+                self.compute_dtype,
+                self.device)
 
     def init_pipeline_weight(self):
         # pylint:disable=line-too-long
@@ -285,7 +285,7 @@ class GPT(BaseModel):
                 self.weight.append_global_weight("final_layernorm.gamma", self.post_decoder_layernorm.weight.data)
                 self.weight.append_global_weight("final_layernorm.beta", self.post_decoder_layernorm.bias.data)
 
-    def _initialize_from_weight(self, device: Optional[Union[str, int, torch.device]] = 'cuda:0'):
+    def _initialize_from_weight(self):
         self.init_word_embedding_weight()
         self.init_lm_head_weight()
         self.init_prefix_encoder_weight()

@@ -67,6 +67,7 @@ public:
     void allGather(const AllGatherParams& params);
 
     BufferPtr quantize(const QuantizeParams& params);
+    void preRun() override { check_cuda_error(cudaSetDevice(device_id_)); }
 
 // TODO: @xinglai delelte this
 public:

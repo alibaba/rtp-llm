@@ -230,7 +230,7 @@ class MultiModalMixin:
         weight_names = vit_weight.weight_names
 
         def _safe_load_from_module(param: torch.nn.Parameter, fname: str, ctype: torch.dtype):
-            param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(ctype).to('cuda:0')
+            param.data = self.weight.steal_pytorch_weight(fname).reshape(param.data.shape).to(ctype).to(device)
 
         for w in weight_names:
             w_name = ft_prefix + w

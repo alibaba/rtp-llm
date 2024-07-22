@@ -15,7 +15,6 @@ from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.models.multimodal.multimodal_common import ImageEmbeddingInterface
 from maga_transformer.model_factory_register import register_model
 from maga_transformer.ops.comm.nccl_op import NcclOp
-from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.util import to_torch_dtype
 
 class QwenVLImageEmbedding(ImageEmbeddingInterface):
@@ -32,7 +31,7 @@ class QWen_VL(QWen, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         self.nccl_op_ = NcclOp()
         if g_parallel_info.tp_rank == 0:
-            with torch.cuda.device(torch.device('cuda:0')):
+            with torch.cuda.device(torch.device(g_parallel_info.device)):
                 self.mm_part = QwenVLImageEmbedding(config.vit_related_params.config)
             config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})
         QWen.__init__(self, config)
@@ -41,7 +40,7 @@ class QWen_VL(QWen, MultiModalMixin):
     def is_multimodal(cls) -> bool:
         return True
     
-    def load(self, device: Union[str, torch.device] = 'cuda:0'):
+    def load(self, device: str):
         if os.environ.get("VIT_TRT", "0") == "1":
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
             self.init_mm_trt(

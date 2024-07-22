@@ -8,6 +8,7 @@ from transformers.generation.stopping_criteria import StoppingCriteriaList, Stop
 from transformers.generation.logits_process import LogitsProcessorList
 
 from maga_transformer.config.generate_config import GenerateConfig
+from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.ops.comm.dynamic_decode_op import DynamicDecodeOp, SampleConfig
 
 FT_DEFAULT_MAX_NEW_TOKENS = 2048
@@ -88,14 +89,15 @@ class FtSampler(BaseSampler):
     def __init__(self, config: GenerateConfig, dynamic_decoder: DynamicDecodeOp):
         self.config = config
         self.dynamic_decoder = dynamic_decoder
+        self.device = g_parallel_info.device
 
     def setup(self, params: SamplerSetupParams) -> None:
-        sample_config = SampleConfig(params.max_batch_size, self.config)
+        sample_config = SampleConfig(params.max_batch_size, self.config, self.device)
         self.dynamic_decoder.set_up(params.max_batch_size, 1, sample_config)
         self.sample_config = sample_config
         self.eos_token_id = params.eos_token_id
         self.eos_token_ids = torch.tensor(
-            [params.eos_token_id] * params.max_batch_size, dtype=torch.int32, device='cuda'
+            [params.eos_token_id] * params.max_batch_size, dtype=torch.int32, device=self.device
         )
 
     def do_sampling(self, params: SamplingParams) -> None:
@@ -130,7 +132,7 @@ class BeamSearchSampler(FtSampler):
         self.beam_width = self.config.num_beams
         self.batch_size = params.max_batch_size
         self.scores = torch.zeros((self.batch_size, self.beam_width),
-                                  dtype=torch.float32, device='cuda')
+                                  dtype=torch.float32, device=self.device)
         self.first_token_generated = False
 
     def do_beam_search(self,

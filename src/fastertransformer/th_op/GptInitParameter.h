@@ -133,6 +133,7 @@ public:
     bool use_norm_attn_out_residual_ = false;
 
     std::string data_type_         = "fp16";
+    int64_t     local_rank_        = 0;
 
     int64_t              max_seq_len_                = 0;
     int64_t              vocab_size_                 = 0;

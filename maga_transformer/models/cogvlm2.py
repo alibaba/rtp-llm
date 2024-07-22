@@ -33,7 +33,7 @@ class CogVLM2(Llama, MultiModalMixin):
             )
         Llama.__init__(self, config)
 
-    def load(self, device: Union[str, torch.device] = 'cuda:0'):
+    def load(self, device: str):
         if os.environ.get("VIT_TRT", "0") == "1":
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
             self.init_mm_trt(

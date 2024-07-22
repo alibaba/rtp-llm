@@ -46,7 +46,7 @@ bad_words_list IntTensor, (batch_size, 2, bad_words_length)
 sequence_limit_lengths: IntTensor, (batch_size,), The maximum length of a generated sequence.
 '''
 class SampleConfig(object):
-    def __init__(self, batch_size: int, generate_config: GenerateConfig):
+    def __init__(self, batch_size: int, generate_config: GenerateConfig, device: str):
         self.batch_size = batch_size
         self.top_k = self.convert_to_tensor(generate_config.top_k, torch.IntTensor)
         self.top_p = self.convert_to_tensor(generate_config.top_p, torch.FloatTensor)
@@ -64,9 +64,9 @@ class SampleConfig(object):
             self.random_seed = self.convert_to_tensor([random.randint(0, sys.maxsize) for i in range(batch_size)], torch.LongTensor)
         else:
             self.random_seed = self.convert_to_tensor(generate_config.random_seed, torch.LongTensor)
-        self.top_p_decay = self.convert_to_tensor(generate_config.top_p_decay, torch.FloatTensor, 'cuda')
-        self.top_p_min = self.convert_to_tensor(generate_config.top_p_min, torch.FloatTensor, 'cuda')
-        self.top_p_reset_ids = self.convert_to_tensor(generate_config.top_p_reset_ids, torch.IntTensor, 'cuda')
+        self.top_p_decay = self.convert_to_tensor(generate_config.top_p_decay, torch.FloatTensor, device)
+        self.top_p_min = self.convert_to_tensor(generate_config.top_p_min, torch.FloatTensor, device)
+        self.top_p_reset_ids = self.convert_to_tensor(generate_config.top_p_reset_ids, torch.IntTensor, device)
         # self.stop_words_list = self.convert_stop_list(batch_size, generate_config.stop_words_list)
         # self.bad_words_list = self.convert_stop_list(batch_size, generate_config.bad_words_list)
 
@@ -161,7 +161,7 @@ class DynamicDecodeOp(FTOPBase):
                 output_log_probs: Optional[torch.Tensor] = None,
                 index_log_probs: Optional[torch.Tensor] = None,
                 output_logit_index: Optional[torch.Tensor] = None,
-                config: SampleConfig = SampleConfig(0, GenerateConfig())):
+                config: SampleConfig = SampleConfig(0, GenerateConfig(), g_parallel_info.device)):
         # outputs: output hidden states
         assert self.ft_op is not None
         assert output_token_ids is not None

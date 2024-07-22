@@ -12,7 +12,7 @@ from maga_transformer.models.downstream_modules.common_input_generator import Co
 from maga_transformer.models.downstream_modules.embedding.api_datatype import SimilarityRequest, SimilarityResponse, OpenAIEmbeddingRequest, \
     Usage, EmbeddingResponseFormat, EmbeddingResponseType, OpenAIEmbeddingResponse
 
-def combo_to_batch(hidde_states: torch.Tensor, input_ids: torch.Tensor, input_lengths: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def combo_to_batch(hidde_states: torch.Tensor, input_ids: torch.Tensor, input_lengths: torch.Tensor, device: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     sliced_hidden_states: List[torch.Tensor] = []
     sliced_input_ids: List[torch.Tensor] = []
     hidden_bias = 0
@@ -25,7 +25,7 @@ def combo_to_batch(hidde_states: torch.Tensor, input_ids: torch.Tensor, input_le
     # create attention mask from input_length
     max_input_length: int = max(input_lengths)
     batch_size = len(input_lengths)
-    batched_attention_mask = torch.ones((batch_size, max_input_length), dtype=torch.bool, device="cuda:0")
+    batched_attention_mask = torch.ones((batch_size, max_input_length), dtype=torch.bool, device=device)
     for b, input_length in enumerate(input_lengths):
         batched_attention_mask[b, input_length:] = 0
     return batched_input_ids, batched_hidden_states, batched_attention_mask

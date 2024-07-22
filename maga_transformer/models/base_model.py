@@ -165,6 +165,7 @@ class BaseModel(object):
 
     config: GptInitModelParameters
     vocab_size_padded: int
+    device: str
 
     @classmethod
     def create_config(cls, model_config: ModelConfig) -> GptInitModelParameters:
@@ -231,16 +232,12 @@ class BaseModel(object):
         self.custom_module: Optional[CustomModule] = None
 
         self.default_generate_config: GenerateConfig = GenerateConfig()
+        self.device = g_parallel_info.device
 
     @property
     def dtype(self) -> Union[str, torch.dtype]:
         assert self.weight is not None
         return self.weight.dtype
-
-    @property
-    def device(self) -> Union[str, torch.device]:
-        assert self.weight is not None
-        return 'cuda:0'
 
     def dup_dim0_for_beam_search(self, t: torch.Tensor, beam_width: int) -> torch.Tensor:
         shape = list(t.shape)
@@ -291,6 +288,7 @@ class BaseModel(object):
     @staticmethod
     def eval_model_param_count(config: GptInitModelParameters):
         return config.model_param_count
+
     def _create_hf_sampler(self, generate_config: GenerateConfig) -> HuggingfaceSampler:
         return HuggingfaceSampler(generate_config)
 

@@ -90,6 +90,7 @@ absl::Status NormalEngine::stop() {
 
 void NormalEngine::loop() {
     FT_LOG_INFO("loop begin");
+    device_->preRun();
     while (running_) {
         int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         auto status = step();

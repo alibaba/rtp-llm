@@ -241,7 +241,7 @@ void CudaDevice::broadcast(const BroadcastParams& params) {
     if (nccl_param_.world_size_ < 2) {
         return;
     }
-
+    NCCLCHECK(ncclGroupStart());
     for (auto i = 0; i < params.buffers.size(); ++i) {
         auto& buffer = params.buffers[i];
         auto root = params.root;
@@ -249,6 +249,7 @@ void CudaDevice::broadcast(const BroadcastParams& params) {
         NCCLCHECK(ncclBcast(buffer->data(), buffer->size(), nccl_data_type, root,
                             nccl_param_.nccl_comm_, stream_));
     }
+    NCCLCHECK(ncclGroupEnd());
 }
 
 void CudaDevice::allReduce(const AllReduceParams& params) {
