@@ -115,8 +115,6 @@ void FtGpt<T>::forward(th::Tensor&              decoder_output,
                        th::optional<th::Tensor> value_cache_scale,
                        th::optional<th::Tensor> token_type_ids)
 {
-    auto stream        = at::cuda::getCurrentCUDAStream().stream();
-
     auto lora_input_lengths = input_lengths.clone().cpu().to(torch::kInt);
     int batch_size =  sequence_lengths.size(0);
     if (batch_size > 0 && lora_input_lengths.size(0) >= batch_size) {

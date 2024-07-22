@@ -36,23 +36,15 @@ template<typename T>
 void ParallelAttentionWrapper<T>::TRTFMHA(int layer_id, const ContextAttentionParams& params, cudaStream_t stream)
 {
 #if (CUDART_VERSION >= 12000)
-    const int num_heads = params_.head_num_;
-    const int num_kv_heads = params_.head_num_kv_;
-    const int head_size = params_.size_per_head_;
     const int mTokensPerBlock = params_.seq_size_per_block_;
 
-    KVBlockArray kv_cache_buffer;
-    using BufferDataType = int64_t;
-    int64_t*   host_kv_cache_block_ptrs = nullptr;
-    kv_cache_buffer          = KVBlockArray(params.batch_size, params.max_blocks_per_sequence, mTokensPerBlock, 0);
-    kv_cache_buffer.data     = reinterpret_cast<BufferDataType*>(params.block_pointers);
-    host_kv_cache_block_ptrs = reinterpret_cast<int64_t*>(params.host_block_pointers);
+    KVBlockArray kv_cache_buffer = KVBlockArray(params.batch_size, params.max_blocks_per_sequence, mTokensPerBlock, 0);
+    kv_cache_buffer.data = reinterpret_cast<int64_t*>(params.block_pointers);
+    int64_t* host_kv_cache_block_ptrs = reinterpret_cast<int64_t*>(params.host_block_pointers);
 
     const bool mPagedContextFMHA = use_paged_fmha_;
     // It is assumed that the number of tokens per paged kv block should be >= 128.
     const size_t blocks_per_context_sequence = params.max_blocks_per_sequence;
-    const size_t paged_kv_tma_desc_size =
-        mPagedContextFMHA ? params.batch_size * 2 * tensorrt_llm::kernels::TMA_DESC_SIZE_IN_BYTE * blocks_per_context_sequence : 0;
 
     int* cu_q_seqlens = params.cu_seqlens;
     int* cu_kv_seqlens = params.cu_kv_seqlens;
@@ -274,8 +266,6 @@ T* ParallelAttentionWrapper<T>::prepareDenseGemmInput(const int         h_token_
 {
     const int local_hidden_units_rt =
         (params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_) * params_.size_per_head_;
-    const int local_hidden_units_kv_rt =
-        (params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_) * params_.size_per_head_;
     T* qkv_buf_3_input = nullptr;
     if (attention_weights->attention_layernorm.gamma && attention_weights->attention_layernorm.beta) {
         invokeGeneralLayerNorm(qkv_buf_,
@@ -326,13 +316,6 @@ void ParallelAttentionWrapper<T>::DenseGemm(const int                 h_token_nu
         (params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_) * params_.size_per_head_;
 
     PUSH_RANGE(stream_, "proj_gemm");
-#ifdef SPARSITY_ENABLED
-    const int m_padded   = 8 * div_up(m, 8);
-    bool      use_sparse = sparse_ && cublas_wrapper_->isUseSparse(1, hidden_units_, m_padded, local_hidden_units_rt);
-#else
-    constexpr bool use_sparse = false;
-    const int      m_padded   = 0;
-#endif
 
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
     gemm_runner_->Gemm(h_token_num,
@@ -412,18 +395,7 @@ void ParallelAttentionWrapper<T>::QKVGemm(const int                 h_token_num,
     const int local_hidden_units_kv_rt = local_head_num_kv * params_.size_per_head_;
     PUSH_RANGE(stream_, "qkv_gemm");
 
-#ifdef SPARSITY_ENABLED
-    const int m_padded   = 8 * div_up(m, 8);
-    bool      use_sparse = sparse_
-                      && cublas_wrapper_->isUseSparse(
-                          1, local_hidden_units_rt + 2 * local_hidden_units_kv_rt, m_padded, hidden_units_);
-#else
-    constexpr bool use_sparse = false;
-    const int      m_padded   = 0;
-#endif
-
     // QKV gemm: [m, hidden_dim] * [hidden_dim, qkv_dim] = [m, qkv_dim]
-
     if (!use_kvcache && params_.rotary_embedding_style_ == 0 && UseFMHA()) {
         gemm_runner_->GemmWithBias(h_token_num,
                     local_hidden_units_rt + 2 * local_hidden_units_kv_rt,
@@ -475,8 +447,6 @@ void ParallelAttentionWrapper<T>::expertQKVGemm(std::unique_ptr<ExpertAttentionU
 {
     const int32_t local_head_num        = params_.is_sparse_head_ ? local_layer_head_num_[layer_id] : local_head_num_;
     const int32_t local_head_num_kv     = params_.is_sparse_head_ ? local_layer_head_num_kv_[layer_id] : local_head_num_kv_;
-    const int32_t local_hidden_units_rt = local_head_num * params_.size_per_head_;
-    const int32_t local_hidden_units_kv_rt = local_head_num_kv * params_.size_per_head_;
     const int32_t qkv_hidden_size = local_head_num_ * params_.size_per_head_;
     const int32_t qkv_merged_size = qkv_hidden_size + 2 * local_head_num_kv_ * params_.size_per_head_;
 
@@ -1054,8 +1024,8 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
     local_hidden_units_(gpt_init_parameter.hidden_size_ / tensor_para.world_size_),
     is_qk_buf_float_(is_qk_buf_float),
     lora_gemm_(std::make_shared<LoraGemm<T>>(stream, allocator, cublas_wrapper)),
-    quant_algo_(quant_algo),
     gemm_runner_(std::make_shared<GemmRunner<T>>(stream, allocator, cublas_wrapper, quant_algo)),
+    quant_algo_(quant_algo),
     local_layer_head_num_(getLocalParameter(gpt_init_parameter.layer_head_num_, tensor_para.world_size_)),
     local_layer_head_num_kv_(getLocalParameter(gpt_init_parameter.layer_head_num_kv_, tensor_para.world_size_)),
     q_scaling_(gpt_init_parameter.q_scaling_),
@@ -1064,7 +1034,7 @@ ParallelAttentionWrapper<T>::ParallelAttentionWrapper(const GptInitParameter& gp
 
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
-    tensorrt_llm::kernels::Data_type data_type;
+    tensorrt_llm::kernels::Data_type data_type = tensorrt_llm::kernels::DATA_TYPE_FP16;
     if constexpr (std::is_same<T, half>::value) {
         data_type = tensorrt_llm::kernels::DATA_TYPE_FP16;
     }

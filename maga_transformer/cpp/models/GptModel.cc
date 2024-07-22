@@ -114,7 +114,7 @@ void GptModel::prepareAttentionInputs(
     RUNTIME_ASSERT_OP_ARG(
         (cu_seqlens_data[context_batch_size] + decoder_batch_size == inputs.combo_tokens->shape()[0]),
         "combo_tokens is not consistent with input lengths, "
-        "there are %d tokens in context plus %d tokens in decoder batch, but got %d input tokens.",
+        "there are %d tokens in context plus %ld tokens in decoder batch, but got %ld input tokens.",
         cu_seqlens_data[context_batch_size], decoder_batch_size, inputs.combo_tokens->shape()[0]);
 
     attention_inputs.cu_seqlens = device_->clone(
@@ -183,7 +183,6 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto norm_type = description_.norm_type;
     const auto norm_eps = description_.layernorm_eps;
 
-    const auto batch_size = inputs.input_lengths->shape()[0];
     const auto combo_tokens = device_->clone(
         {*inputs.combo_tokens, AllocationType::DEVICE, {"combo_tokens"}});
     const auto input_lengths = device_->clone({*inputs.input_lengths});
@@ -253,7 +252,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     printBufferData(*hidden, "input_hidden");
     // layers
-    const auto layer_num = weights_.layers.size();
+    const int layer_num = weights_.layers.size();
     for (int i = 0; i < layer_num; ++i) {
         const auto& layer = weights_.layers[i];
 
@@ -448,7 +447,7 @@ void GptModel::addLoRA(const int64_t lora_id,
     };
     std::vector<std::string> adapter_set = {W::attn_qkv_w, W::attn_o_w, W::ffn_w1, W::ffn_w2, W::ffn_w3};
 
-    for (int i = 0; i < layer_num; i++) {
+    for (int i = 0; i < int(layer_num); i++) {
         for (auto adapter_name : adapter_set) {
             if (lora_a[i].find(adapter_name) == lora_a[i].end()) {
                 continue;
@@ -488,7 +487,7 @@ void GptModel::addLoRA(const int64_t lora_id,
 }
 
 void GptModel::removeLoRA(const int64_t lora_id) {
-    size_t layer_num = weights_.layers.size();
+    int layer_num = weights_.layers.size();
 
     auto helper_func = [&lora_id](std::shared_ptr<LoraWeightsMap> layer_weights) {
         layer_weights->removeLoRAWeight(lora_id);

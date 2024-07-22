@@ -1,5 +1,3 @@
-#pragma once
-
 #include <unordered_map>
 #include <vector>
 #include "src/fastertransformer/core/allocator.h"

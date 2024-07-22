@@ -46,8 +46,8 @@ void ArmGemmOpTest::BasicGemmOP(size_t m, size_t n, size_t k) {
     auto A_host = torch::rand({(int)m, (int)k}, torch::Device(torch::kCPU)).to(torch::kFloat);
     auto B_host = torch::rand({(int)k, (int)n}, torch::Device(torch::kCPU)).to(torch::kFloat);
 
-    auto A_device = createHostBuffer<float>({(int)m, (int)k}, tensorToBuffer(A_host, AllocationType::HOST)->data());
-    auto B_device = createHostBuffer<float>({(int)k, (int)n}, tensorToBuffer(B_host, AllocationType::HOST)->data());
+    auto A_device = createHostBuffer<float>({m, k}, tensorToBuffer(A_host, AllocationType::HOST)->data());
+    auto B_device = createHostBuffer<float>({k, n}, tensorToBuffer(B_host, AllocationType::HOST)->data());
 
     GemmParams params{*A_device, *B_device};
     auto       C_device = device_->gemm(params);

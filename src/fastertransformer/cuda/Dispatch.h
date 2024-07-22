@@ -84,6 +84,7 @@ void castTuple(std::tuple<DstTs...> &dst, const std::tuple<SrcTs...> &src, std::
         using DstT = std::tuple_element_t<Idx, std::tuple<DstTs...>>;
         std::get<Idx>(dst) = cast<SrcT, DstT, WorkT>(std::get<Idx>(src));
     }(), 0) ... };
+    (void)unused_expander;
 }
 
 template<typename CastedTuple, typename WorkT, typename ...Args,

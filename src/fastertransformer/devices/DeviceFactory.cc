@@ -79,7 +79,7 @@ DeviceBase* DeviceFactory::getDevice(DeviceType type, int device_id) {
     }
     for (const auto device: getCurrentDevices()) {
         const auto& props = device->getDeviceProperties();
-        if (props.type == type && props.id == device_id) {
+        if (props.type == type && int(props.id) == device_id) {
             return device;
         }
     }

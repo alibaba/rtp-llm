@@ -50,7 +50,7 @@ LayernormOutput CpuDevice::layernorm(const LayernormParams& params) {
     const auto  eps       = params.eps;
 
     LayernormOutput layernorm_out;
-    layernorm_out.output = allocateBuffer({data_type, {rows, cols}, AllocationType::HOST}, {});
+    layernorm_out.output = allocateBuffer({data_type, {size_t(rows), size_t(cols)}, AllocationType::HOST}, {});
 
     xft::DataType xft_dt;
     if (data_type == TYPE_FP32) {
@@ -175,7 +175,7 @@ AttentionLayerOutput CpuDevice::attentionLayer(const AttentionLayerParams& param
 
     AttentionLayerOutput atten_out;
     atten_out.hidden_states =
-        allocateBuffer({DataType::TYPE_FP32, {batch_size * input_seq_len, hidden_size}, AllocationType::HOST}, {});
+        allocateBuffer({DataType::TYPE_FP32, {size_t(batch_size * input_seq_len), size_t(hidden_size)}, AllocationType::HOST}, {});
 
     /* If not add rmsnorm then need following extra process */
     float* input_ptr      = static_cast<float*>(input.data());
@@ -238,7 +238,7 @@ FfnLayerOutput CpuDevice::ffnLayer(const FfnLayerParams& params) {
                         down_weight.data());
 
     FfnLayerOutput ffnout;
-    ffnout.hidden_states = allocateBuffer({DataType::TYPE_FP32, {token_num, hidden_size}, AllocationType::HOST}, {});
+    ffnout.hidden_states = allocateBuffer({DataType::TYPE_FP32, {size_t(token_num), size_t(hidden_size)}, AllocationType::HOST}, {});
 
     /* If not add rmsnorm then need following extra process */
     float*    input_ptr      = static_cast<float*>(input.data());

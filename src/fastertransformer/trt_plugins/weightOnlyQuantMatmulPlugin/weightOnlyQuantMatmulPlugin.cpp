@@ -97,17 +97,8 @@ int WeightOnlyQuantMatmulPlugin::enqueue(const void*  inputs,
                                          cudaStream_t stream) noexcept
 {
     const bool use_cuda_kernel = m < SMALL_M_FAST_PATH && mCudaKernelEnabled;
-#if defined(ENABLE_BF16)
-    TLLM_CHECK_WITH_INFO(mType == nvinfer1::DataType::kHALF || mType == nvinfer1::DataType::kBF16,
-        "No valid weightOnlyQuantMatmul configuration");
-#else
-    TLLM_CHECK_WITH_INFO(mType == nvinfer1::DataType::kHALF, "No valid weightOnlyQuantMatmul configuration");
-#endif
-
-    int real_n;
 
     fastertransformer::kernels::WeightOnlyActivationType weight_only_act_type;
-
     if (mType == nvinfer1::DataType::kHALF)
     {
         weight_only_act_type = fastertransformer::kernels::WeightOnlyActivationType::FP16;
@@ -119,19 +110,21 @@ int WeightOnlyQuantMatmulPlugin::enqueue(const void*  inputs,
     }
 # endif
     else {
-        FT_LOG_ERROR("weight only batched gemv only support half and bf16");
+        TLLM_CHECK_WITH_INFO(false, "weight only batched gemv only support half and bf16");
     }
 
-    fastertransformer::kernels::WeightOnlyQuantType weight_only_quant_type;
+    int real_n;
     if (mWeightTypeId == WeightTypeId::INT8)
     {
-        weight_only_quant_type = fastertransformer::kernels::WeightOnlyQuantType::Int8b;
         real_n = n;
     }
     else if (mWeightTypeId == WeightTypeId::INT4)
     {
-        weight_only_quant_type = fastertransformer::kernels::WeightOnlyQuantType::Int4b;
         real_n = n * INT8_INT4_RATIO;
+    }
+    else
+    {
+        TLLM_CHECK_WITH_INFO(false, "weight only batched gemv only support int8/int4");
     }
 
     if (use_cuda_kernel) {

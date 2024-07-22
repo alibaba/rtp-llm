@@ -96,9 +96,9 @@ struct CutlassGemmConfig
     CutlassGemmConfig(
         CutlassTileConfig tile_config, int split_k_factor, int stages):
         tile_config(tile_config),
+        split_k_style(split_k_factor > 1 ? SplitKStyle::SPLIT_K_SERIAL : SplitKStyle::NO_SPLIT_K),
         split_k_factor(split_k_factor),
-        stages(stages), 
-        split_k_style(split_k_factor > 1 ? SplitKStyle::SPLIT_K_SERIAL : SplitKStyle::NO_SPLIT_K){}
+        stages(stages) {}
 
     bool operator==(CutlassGemmConfig const& r) const {
         return tile_config == r.tile_config && split_k_style == r.split_k_style && split_k_factor == r.split_k_factor && stages == r.stages;

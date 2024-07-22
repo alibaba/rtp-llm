@@ -382,8 +382,6 @@ void cublasMMWrapper::Gemm(cublasOperation_t transa,
     cudaDataType_t      scaleType;
     float               alpha_float = 1.0f;
     float               beta_float  = 0.0f;
-    half                alpha_half  = half(1.0f);
-    half                beta_half   = half(0.0f);
     void *              alpha, *beta;
 
     // int is_fp16_computeType = computeType_ == CUDA_R_16F ? 1 : 0;

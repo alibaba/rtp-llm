@@ -1,5 +1,3 @@
-#pragma once
-
 #include "maga_transformer/cpp/dataclass/BatchKVCacheBlockAddr.h"
 #include <memory>
 #include <sstream>
@@ -20,7 +18,7 @@ void BatchKVCacheBlockAddr::resize(size_t batch_size) {
 }
 
 void BatchKVCacheBlockAddr::resize(size_t batch_id, int reserver_blocks) {
-    FT_CHECK(batch_offset.size() > batch_id && batch_offset[batch_id].size() >= reserver_blocks);
+    FT_CHECK(batch_offset.size() > batch_id && batch_offset[batch_id].size() >= size_t(reserver_blocks));
     batch_offset[batch_id].resize(reserver_blocks);
 }
 
@@ -66,7 +64,7 @@ void BatchKVCacheBlockAddr::clear() {
 
 std::string BatchKVCacheBlockAddr::debugString() const {
     std::stringstream debug_string, batch_offset_string;
-    for (int i = 0; i < batch_offset.size(); i++) {
+    for (size_t i = 0; i < batch_offset.size(); i++) {
         batch_offset_string << "batch: " << i << " , block_id: ";
         for (auto &v: batch_offset[i]) {
             batch_offset_string << v << ", ";

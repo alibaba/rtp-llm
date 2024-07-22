@@ -542,7 +542,6 @@ __global__ void ApplyCopyLogits(
     const int local_batch_size,
     const int vocab_size_padded_) {
     int bid = blockIdx.x;
-    int tid = threadIdx.x;
     if (skip_decode_buf_[bid]) {
         return;
     }

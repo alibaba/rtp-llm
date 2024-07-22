@@ -103,7 +103,6 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     // attention layer output is preallocated to avoid memory fragmentation
     // note that this output is returned and further used as residual
     auto dtype = (input.isQBuffer() ? qkv->type() : input.type());
-    auto qscheme = params.qscheme;
     auto output = params.output ? params.output
                 : allocateBuffer({dtype, {h_token_num, output_weight->kernel->shape()[1]}},
                                  {"attn_layer_out"});

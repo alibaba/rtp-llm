@@ -43,7 +43,6 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
     params.seq_size_per_block_ = 2;
     params.reserve_runtime_mem_mb_ = 1024;
     typedef half         T;
-    const at::ScalarType scalar_type  = at::ScalarType::Half;
     const ft::DataType   data_type    = getTensorType<T>();
     auto                 mem_type     = ft::MemoryType::MEMORY_GPU;
     const size_t         hidden_units = 128;

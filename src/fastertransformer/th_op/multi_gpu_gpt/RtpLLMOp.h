@@ -8,6 +8,7 @@ namespace ft = fastertransformer;
 namespace th = torch;
 
 namespace torch_ext {
+
 class RtpLLMOp: public th::jit::CustomClassHolder {
 public:
     RtpLLMOp();

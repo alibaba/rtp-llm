@@ -16,15 +16,15 @@ namespace rtp_llm {
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ft::GptInitParameter&      params,
                                const ResourceContext&           resource_context,
-                               kmonitor::MetricsReporterPtr     metrics_reporter):
-    generate_input_(input),
-    max_seq_len_(params.max_seq_len_),
-    stream_cache_resource_(this, resource_context, input->need_release_resource),
-    need_release_resource_(input->need_release_resource),
-    metrics_reporter_(metrics_reporter),
-    special_tokens_(params.special_tokens_),
-    enable_fast_gen_(params.enable_fast_gen_) {
-
+                               kmonitor::MetricsReporterPtr     metrics_reporter)
+    : generate_input_(input)
+    , max_seq_len_(params.max_seq_len_)
+    , stream_cache_resource_(this, resource_context, input->need_release_resource)
+    , need_release_resource_(input->need_release_resource)
+    , enable_fast_gen_(params.enable_fast_gen_)
+    , metrics_reporter_(metrics_reporter)
+    , special_tokens_(params.special_tokens_)
+{
     begin_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
 
     updatePrefix(resource_context.system_prompt);
@@ -489,11 +489,6 @@ void GenerateStream::update(ft::BufferPtr&    new_tokens,
     // # This differs from new_tokens.shape[-1] under beam search case,
     // # which needs to update all the generated tokens each update.
     FT_CHECK(new_tokens->dim() == 2);
-    auto update_length   = new_tokens->shape()[1];
-    auto update_to_pos   = seq_length_ + num_new_tokens;
-    auto update_from_pos = update_to_pos - update_length;
-    // ft::bufferSliceCopy(complete_token_ids_, new_tokens, 1, update_from_pos, update_to_pos);
-    int* token_ids_ = (int*)complete_token_ids_->data();
     for (int i = 0; i < tileNum(); ++i) {
         *(*complete_token_ids_)[i].dataWithOffset<int>(seq_length_) = ((int*)new_tokens->data())[i];
     }
@@ -519,7 +514,7 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     size_t output_len = seq_length_ - last_output_pos_;
     generate_outputs_->generate_outputs.clear();
-    for (size_t i = 0; i < tileNum(); i++) {
+    for (int i = 0; i < tileNum(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count = iter_count_;
         generate_output.aux_info.fallback_tokens = fallback_blocks_ * seqSizePerBlock();

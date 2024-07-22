@@ -27,15 +27,15 @@ private:
     static std::vector<DeviceBase *>& getCurrentDevices();
 };
 
-#define RTP_LLM_REGISTER_DEVICE(type)                           \
-    static DeviceBase* type##_device = nullptr;                 \
-    static auto type##_device_reg_creator = []() {              \
-        DeviceFactory::registerDevice(DeviceType::type, [](const DeviceInitParams& params) {  \
-            auto device = new type##Device(params);             \
-            device->init();                                     \
-            return device;                                      \
-        });                                                     \
-        return true;                                            \
+#define RTP_LLM_REGISTER_DEVICE(type)                                   \
+    static DeviceBase* type##_device __attribute__((used)) = nullptr;   \
+    static auto type##_device_reg_creator = []() {                      \
+        DeviceFactory::registerDevice(DeviceType::type, [](const DeviceInitParams& params) { \
+            auto device = new type##Device(params);                     \
+            device->init();                                             \
+            return device;                                              \
+        });                                                             \
+        return true;                                                    \
     }();
 
 } // namespace fastertransformer

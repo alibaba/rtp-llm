@@ -1,5 +1,3 @@
-#pragma once
-
 #include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/utils/ShapeCheck.h"
 
@@ -117,7 +115,7 @@ void GroupedGemmParams::check() const {
     FT_CHECK_WITH_INFO((a_size == b_size && b_size == c_size),
         "group gemm needs all arguments to have same size.");
 
-    for (int i = 0; i < a_size; i++) {
+    for (int i = 0; i < int(a_size); i++) {
         auto a_dim = A[i]->dim();
         auto b_dim = B[i]->dim();
         auto c_dim = (C.has_value()) ? C.value()[i]->dim() : a_dim;

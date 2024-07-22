@@ -116,7 +116,7 @@ bool is_valid_split_k_factor(const int64_t m, const int64_t n, const int64_t k, 
     const int ctas_in_n_dim = (n + tile_config.block_n - 1) / tile_config.block_n;
     const int required_ws_bytes = split_k_factor == 1 ? 0 : sizeof(int) * ctas_in_m_dim * ctas_in_n_dim;
 
-    if (required_ws_bytes > workspace_bytes)
+    if (required_ws_bytes > int(workspace_bytes))
     {
         return false;
     }
@@ -225,7 +225,7 @@ std::vector<CutlassGemmConfig> get_valid_config_from_occupancies(
 
     std::vector<CutlassGemmConfig> valid_configs;
 
-    for (int ii = 0; ii < candidate_configs.size(); ++ii)
+    for (int ii = 0; ii < int(candidate_configs.size()); ++ii)
     {
         CutlassGemmConfig candidate_config = candidate_configs[ii];
         int occupancy = occupancies[ii];
@@ -259,7 +259,7 @@ CutlassGemmConfig estimate_best_config_from_occupancies(const std::vector<Cutlas
     int config_waves = INT_MAX;
     int current_m_tile = 0;
 
-    for (int ii = 0; ii < candidate_configs.size(); ++ii)
+    for (int ii = 0; ii < int(candidate_configs.size()); ++ii)
     {
         CutlassGemmConfig candidate_config = candidate_configs[ii];
         TileConfig tile_config = get_tile_config_from_config(candidate_config.tile_config);

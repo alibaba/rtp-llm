@@ -16,9 +16,10 @@ GptInitParameter::GptInitParameter(int64_t head_num,
     head_num_(head_num),
     size_per_head_(size_per_head),
     num_layers_(num_layers),
+    hidden_size_(hidden_size),
     max_seq_len_(max_seq_len),
-    vocab_size_(vocab_size),
-    hidden_size_(hidden_size) {
+    vocab_size_(vocab_size)
+{
 }
 
 void GptInitParameter::insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id) {
@@ -81,6 +82,7 @@ void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int6
 }
 
 void registerGptInitParameter(py::module m) {
+
 #define DEF_PROPERTY(name) .def_readwrite(#name, &SpecialTokens::name##_)
 
 #define REGISTER_PROPERTYS                      \
@@ -243,6 +245,7 @@ void registerGptInitParameter(py::module m) {
     .def("setNormType", &GptInitParameter::setNormType)
     .def("setActivationType", &GptInitParameter::setActivationType)
     .def("isGatedActivation", &GptInitParameter::isGatedActivation)  REGISTER_PROPERTYS;
+
 }
 
 }

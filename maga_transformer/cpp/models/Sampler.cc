@@ -10,7 +10,7 @@ namespace rtp_llm {
 Sampler::Sampler(const SamplerInitParams& params)
     : device_(params.device)
     {
-        printf("eos max_batch_size: %d\n", params.max_batch_size);
+        printf("eos max_batch_size: %ld\n", params.max_batch_size);
         const auto max_batch_size = params.max_batch_size;
         auto eos_ids_host = device_->allocateBuffer(
             {DataType::TYPE_INT32, {max_batch_size}, AllocationType::HOST});

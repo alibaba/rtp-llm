@@ -127,7 +127,7 @@ protected:
             device_->copy({*buffer, *host_buffer});
         }
         device_->syncAndCheck();
-        return move(buffer);
+        return buffer;
     }
 
     template <typename T>
@@ -149,7 +149,7 @@ protected:
         device_->syncAndCheck();
         for (size_t i = 0; i < buffer.size(); i++) {
             printf("i=%ld, buffer[i] = %f, expected[i] = %f\n", i,
-                    (comp_buffer->data<T>())[i], expected[i]);
+                   float((comp_buffer->data<T>())[i]), float(expected[i]));
             ASSERT_EQ((comp_buffer->data<T>())[i], expected[i]);
         }
     }
@@ -186,9 +186,9 @@ protected:
             device_->copy({*device_buffer, *buffer});
             device_->syncAndCheck();
             printf("created device buffer from tensor at %p with data=%p\n", device_buffer.get(), device_buffer->data());
-            return std::move(device_buffer);
+            return device_buffer;
         } else {
-            return std::move(buffer);
+            return buffer;
         }
     }
 
@@ -203,9 +203,9 @@ protected:
             device_->copy({*device_buffer, *buffer});
             device_->syncAndCheck();
             printf("created device buffer from tensor at %p with data=%p\n", device_buffer.get(), device_buffer->data());
-            return std::move(device_buffer);
+            return device_buffer;
         } else {
-            return std::move(buffer);
+            return buffer;
         }
     }
 
@@ -289,7 +289,7 @@ protected:
         }
         auto kv_cache_offset_gpu_buf = device_->allocateBuffer({kv_cache_offset->type(), kv_cache_offset->shape()});
         device_->copy({*kv_cache_offset_gpu_buf, *kv_cache_offset});
-        return move(kv_cache_offset_gpu_buf);
+        return kv_cache_offset_gpu_buf;
     }
 
     void assertTensorClose(const torch::Tensor& a, const torch::Tensor& b,

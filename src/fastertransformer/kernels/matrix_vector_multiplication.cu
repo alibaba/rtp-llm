@@ -136,7 +136,10 @@ __global__ void int8WeightPerChannelLdkMultiplication(
         half2 input_val_1[m];
 #pragma unroll
         for (int m_i = 0; m_i < m; m_i++) {
+#pragma push
+#pragma nv_diag_suppress 177
             const half4 input_val = input[k_idx + m_i * k_4];
+#pragma pop
             input_val_0[m_i]      = {input_val.x, input_val.y};
             input_val_1[m_i]      = {input_val.z, input_val.w};
         }
@@ -199,7 +202,10 @@ __global__ void int8WeightPerChannelLdkMultiplication(
         __nv_bfloat162 input_val_1[m];
 #pragma unroll
         for (int m_i = 0; m_i < m; m_i++) {
+#pragma push
+#pragma nv_diag_suppress 177
             const bf164 input_val = input[k_idx + m_i * k_4];
+#pragma pop
             input_val_0[m_i]      = {input_val.x, input_val.y};
             input_val_1[m_i]      = {input_val.z, input_val.w};
         }

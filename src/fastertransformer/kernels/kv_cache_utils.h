@@ -55,13 +55,13 @@ struct KVBlockArray {
     // W is beam width
     // M is Max number of blocks per sequence
     // int64_t reinterpred to void* pointing to the KV cache data
-    int64_t* data;
-    int64_t* scale;
+    int64_t* data = nullptr;
+    int64_t* scale = nullptr;
 
     KVBlockArray() {}
 
     KVBlockArray(int32_t batchSize, int32_t maxBlocksPerSeq, int32_t tokensPerBlock, int32_t sizePerToken):
-        mMaxSeqs(batchSize), mMaxBlocksPerSeq(maxBlocksPerSeq), mTokensPerBlock(tokensPerBlock) {
+        mMaxBlocksPerSeq(maxBlocksPerSeq), mMaxSeqs(batchSize), mTokensPerBlock(tokensPerBlock) {
         const float tokensPerBlockSeqLog2 = std::log2(mTokensPerBlock);
         FT_CHECK(ceil(tokensPerBlockSeqLog2) == floor(tokensPerBlockSeqLog2) && "tokensPerBlock must be power of 2");
         mTokensPerBlockLog2 = static_cast<int>(tokensPerBlockSeqLog2);
@@ -168,7 +168,7 @@ struct KVBlockArrayForContextFMHA {
                                int32_t maxBlocksPerSeq,
                                int32_t tokensPerBlock,
                                int32_t sizePerToken):
-        mMaxSeqs(batchSize), mMaxBlocksPerSeq(maxBlocksPerSeq), mTokensPerBlock(tokensPerBlock), data(nullptr) {
+        mMaxBlocksPerSeq(maxBlocksPerSeq), mMaxSeqs(batchSize), mTokensPerBlock(tokensPerBlock), data(nullptr) {
         const float tokensPerBlockSeqLog2 = log2(mTokensPerBlock);
         FT_CHECK_WITH_INFO(ceil(tokensPerBlockSeqLog2) == floor(tokensPerBlockSeqLog2),
                            "tokensPerBlock must be power of 2");

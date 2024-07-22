@@ -35,18 +35,18 @@ inline void myAssert(bool result, const char* const file, int const line, std::s
 }
 
 #define FT_CHECK(val) fastertransformer::myAssert(val, __FILE__, __LINE__)
-#define FT_CHECK_WITH_INFO(val, info, ...)                                                                             \
-    do {                                                                                                               \
-        bool is_valid_val = (val);                                                                                     \
-        if (!is_valid_val) {                                                                                           \
-            fastertransformer::myAssert(                                                                               \
-                is_valid_val, __FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__));                     \
-        }                                                                                                              \
+#define FT_CHECK_WITH_INFO(val, info, ...)                              \
+    do {                                                                \
+        bool is_valid_val = (val);                                      \
+	if (!is_valid_val) {						\
+  	    fastertransformer::myAssert(					\
+                is_valid_val, __FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__)); \
+	}								\
     } while (0)
 
 #define FT_THROW(info) throwRuntimeError(__FILE__, __LINE__, info)
 
-inline void unreachable() {
+[[noreturn]] inline void unreachable() {
     throw NEW_FT_EXCEPTION("unreachable error");
 }
 

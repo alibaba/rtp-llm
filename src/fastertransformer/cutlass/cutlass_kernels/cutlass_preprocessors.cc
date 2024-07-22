@@ -162,13 +162,12 @@ void permute_B_rows_for_mixed_gemm(int8_t* permuted_quantized_tensor, const int8
     FT_CHECK(quant_type == QuantType::PACKED_INT4_WEIGHT_ONLY || quant_type == QuantType::INT8_WEIGHT_ONLY);
 
     FT_CHECK_WITH_INFO(shape.size() == 2 || shape.size() == 3, "Shape must be 2-D or 3-D");
-    const size_t num_experts = shape.size() == 2 ? 1 : shape[0];
-    const size_t num_rows = shape.size() == 2 ? shape[0] : shape[1];
+    const int num_experts = shape.size() == 2 ? 1 : shape[0];
+    const int num_rows = shape.size() == 2 ? shape[0] : shape[1];
     const size_t num_cols = shape.size() == 2 ? shape[1] : shape[2];
 
     const int BITS_PER_ELT = get_bits_in_quant_type(quant_type);
     const int K = 16 / BITS_PER_ELT;
-    const int ELTS_PER_BYTE = 8 / BITS_PER_ELT;
     const int ELTS_PER_REG = 32 / BITS_PER_ELT;
 
     const uint32_t* input_byte_ptr = reinterpret_cast<const uint32_t*>(quantized_tensor);
@@ -234,7 +233,6 @@ void subbyte_transpose_impl(
 
     const size_t col_bytes = num_cols * bits_per_elt / 8;
     const size_t col_bytes_trans = num_rows * bits_per_elt / 8;
-    const size_t num_bytes = size_t(num_experts) * num_rows * col_bytes;
 
     const uint8_t* input_byte_ptr = reinterpret_cast<const uint8_t*>(quantized_tensor);
     uint8_t* output_byte_ptr = reinterpret_cast<uint8_t*>(transposed_quantized_tensor);
@@ -255,9 +253,6 @@ void subbyte_transpose_impl(
         fmtstr("Number of bytes for rows and cols must be a multiple of %d. However, num_rows_bytes = %ld and "
                "num_col_bytes = %ld.",
             VECTOR_WIDTH, col_bytes_trans, col_bytes));
-
-    const int num_m_tiles = (num_rows + M_TILE_L1 - 1) / M_TILE_L1;
-    const int num_n_tiles = (col_bytes + N_TILE_L1 - 1) / N_TILE_L1;
 
     for (size_t expert = 0; expert < num_experts; ++expert)
     {
@@ -381,7 +376,7 @@ void subbyte_transpose(int8_t* transposed_quantized_tensor, const int8_t* quanti
 
 void add_bias_and_interleave_int8s_inplace(int8_t* int8_tensor, const size_t num_elts)
 {
-    for (int ii = 0; ii < num_elts; ++ii)
+    for (size_t ii = 0; ii < num_elts; ++ii)
     {
         int8_tensor[ii] = int8_t(int(int8_tensor[ii]) + 128);
     }
@@ -409,7 +404,7 @@ void add_bias_and_interleave_int4s_inplace(int8_t* packed_int4_tensor, const siz
 
     // Step 1 will be to transform all the int4s to unsigned in order to make the dequantize take as little
     // instructions as possible in the CUDA code.
-    for (size_t ii = 0; ii < num_bytes; ++ii)
+    for (int ii = 0; ii < num_bytes; ++ii)
     {
         int8_t transformed_packed_int4s = 0;
         int8_t transformed_first_elt
@@ -482,9 +477,9 @@ void interleave_column_major_tensor(int8_t* interleaved_quantized_tensor, const 
     FT_CHECK(quant_type == QuantType::PACKED_INT4_WEIGHT_ONLY || quant_type == QuantType::INT8_WEIGHT_ONLY);
 
     FT_CHECK_WITH_INFO(shape.size() == 2 || shape.size() == 3, "Shape must be 2-D or 3-D");
-    const size_t num_experts = shape.size() == 2 ? 1 : shape[0];
-    const size_t num_rows = shape.size() == 2 ? shape[0] : shape[1];
-    const size_t num_cols = shape.size() == 2 ? shape[1] : shape[2];
+    const int num_experts = shape.size() == 2 ? 1 : shape[0];
+    const int num_rows = shape.size() == 2 ? shape[0] : shape[1];
+    const int num_cols = shape.size() == 2 ? shape[1] : shape[2];
 
     const int BITS_PER_ELT = get_bits_in_quant_type(quant_type);
     const int elts_in_int32 = 32 / BITS_PER_ELT;
@@ -616,9 +611,9 @@ void symmetric_quantize(int8_t* processed_quantized_weight, int8_t* unprocessed_
     FT_CHECK_WITH_INFO(input_weight_ptr, "Input weight pointer is NULL");
 
     FT_CHECK_WITH_INFO(shape.size() == 2 || shape.size() == 3, "Shape must be 2-D or 3-D");
-    const size_t num_experts = shape.size() == 2 ? 1 : shape[0];
-    const size_t num_rows = shape.size() == 2 ? shape[0] : shape[1];
-    const size_t num_cols = shape.size() == 2 ? shape[1] : shape[2];
+    const int num_experts = shape.size() == 2 ? 1 : shape[0];
+    const int num_rows = shape.size() == 2 ? shape[0] : shape[1];
+    const int num_cols = shape.size() == 2 ? shape[1] : shape[2];
 
     const int bits_in_type = get_bits_in_quant_type(quant_type);
     const int bytes_per_out_col = num_cols * bits_in_type / 8;

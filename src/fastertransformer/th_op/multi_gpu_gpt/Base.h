@@ -27,7 +27,7 @@ inline at::ScalarType getScalarType(const std::string& data_type) {
         scalar_type = at::ScalarType::Float;
 
     } else {
-        FT_LOG_ERROR("datatype not implemented %s", data_type.c_str());
+        FT_CHECK_WITH_INFO(false, "datatype not implemented " + data_type);
     }
     return scalar_type;
 }
@@ -214,7 +214,7 @@ void loadLoRAWeights(int                                                        
     };
     constexpr int lora_num = 5;
     std::string lora_name_list[5] = {W::attn_qkv_w, W::attn_o_w, W::ffn_w1, W::ffn_w2, W::ffn_w3};
-    for (size_t i = 0; i < num_layers; i++) {
+    for (int i = 0; i < num_layers; i++) {
         T *lora_a, *lora_b;
         int lora_rank = 0;
         for (int j = 0; j < lora_num; j++)

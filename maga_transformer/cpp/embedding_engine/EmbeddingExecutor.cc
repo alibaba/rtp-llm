@@ -55,7 +55,6 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     memset(model_input.prefix_lengths->data(), 0, model_input.prefix_lengths->sizeBytes());
     int*      merged_tokens    = model_input.combo_tokens->data<int>();
     int*      input_lengths    = model_input.input_lengths->data<int>();
-    int*      prefix_lengths   = model_input.prefix_lengths->data<int>();
     int*      merged_positon_ids = model_input.combo_position_ids->data<int>();
     int*      merged_token_type_ids = model_input.combo_tokens_type_ids->data<int>();
     int token_idx = 0;
@@ -74,7 +73,7 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         int length_idx = 0;
         for (int i = 0; i < batchSize; i++) {
             int seqLen = stream->embeddingInput()->input_lengths->data<int32_t>()[i];
-            FT_CHECK_WITH_INFO(seqLen + position_bias <= max_position_ids_buf_->shape()[0], "position index exceed max_position_length");
+            FT_CHECK_WITH_INFO(seqLen + position_bias <= int(max_position_ids_buf_->shape()[0]), "position index exceed max_position_length");
             memcpy(merged_positon_ids + token_idx + length_idx, max_position_ids_buf_->data<int32_t>() + position_bias, seqLen * sizeof(int32_t));
             length_idx += seqLen;
         }

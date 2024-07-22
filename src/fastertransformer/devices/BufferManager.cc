@@ -32,7 +32,7 @@ BufferManager::~BufferManager() {}
 BufferPtr BufferManager::allocate(const BufferParams& params, const BufferHints& hints) {
     auto buffer = doAllocate(params, hints);
     recordAllcation(params, hints, buffer);
-    return move(buffer);
+    return buffer;
 }
 
 void BufferManager::recycle(Buffer* buffer, IAllocator* allocator) {
@@ -105,7 +105,7 @@ BufferStatus BufferManager::queryStatus() {
         status.device_preserved_bytes = tracker_status.available_size;
         status.device_fragmented_bytes = tracker_status.fragmented_size;
     }
-    return move(status);
+    return status;
 }
 
 string BufferManager::printAllocationRecords(IAllocator* allocator) {

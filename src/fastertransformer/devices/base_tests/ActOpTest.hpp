@@ -65,7 +65,7 @@ public:
         } else if (atype == ActivationType::Gelu) {
             return ActOpTestOutput({torch::gelu(input)});
         } else {
-            std::runtime_error("invalid activation Type.");
+            throw std::runtime_error("invalid activation Type.");
         }
 
     }
@@ -78,9 +78,8 @@ public:
         } else if (atype == ActivationType::Gelu) {
             return ActOpTestOutput({torch::gelu(params.gate) * params.input});
         } else {
-            std::runtime_error("invalid activation Type.");
+            throw std::runtime_error("invalid activation Type.");
         }
-
     }
 
     void BasicActOpTest(ActivationType atype,

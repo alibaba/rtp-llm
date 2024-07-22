@@ -10,9 +10,6 @@
 #include <hipblas/hipblas.h>
 #include <hipblaslt/hipblaslt.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
-#ifdef SPARSITY_ENABLED
-// #include <cusparseLt.h>
-#endif
 
 
 #include <fstream>

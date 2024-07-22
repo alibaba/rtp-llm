@@ -288,7 +288,7 @@ void CudaDevice::allGather(const AllGatherParams& params) {
             "Buffer size %d must be divisible by world size %d",
             buffer->size(), nccl_param_.world_size_);
         const auto data_size = data_num * buffer->typeSize();
-        NCCLCHECK(ncclAllGather(buffer->data() + nccl_param_.rank_ * data_size, buffer->data(),
+        NCCLCHECK(ncclAllGather((char*)(buffer->data()) + nccl_param_.rank_ * data_size, buffer->data(),
                                 data_num, nccl_data_type, nccl_param_.nccl_comm_, stream_));
     }
     NCCLCHECK(ncclGroupEnd());

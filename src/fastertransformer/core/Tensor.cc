@@ -87,7 +87,7 @@ void** Tensor::dataPtr() {
 
 // TODO(wangyin): move this implementation to DeviceOps.
 template<typename T>
-inline T Tensor::getVal(size_t index) const {
+T Tensor::getVal(size_t index) const {
     FT_LOG_DEBUG("%s start", __PRETTY_FUNCTION__);
     FT_CHECK(data_ != nullptr);
     FT_CHECK_WITH_INFO(index < size(), "index is larger than buffer size");

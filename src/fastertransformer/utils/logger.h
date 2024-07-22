@@ -103,7 +103,6 @@ private:
     inline const std::string getTimeStr() {
         time_t            now = time(0);
         struct tm*        t   = localtime(&now);
-        char              buffer[80];
         std::stringstream ss;
         ss << std::put_time(t, "%y-%m-%d %H:%M:%S");
         return ss.str();

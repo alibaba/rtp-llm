@@ -55,7 +55,7 @@ AttentionLayerWeights AttentionLayerTest<T>::getAttentionWeights(const GptAttent
     auto o_buf = tensorToBuffer(gpt_attention->o_proj->weight.transpose(0, 1).contiguous().to(
         dataTypeToTorchType(getTensorType<TestType>())));
     attention_weights.output_weight.reset(new DenseWeights(o_buf));
-    return move(attention_weights);
+    return attention_weights;
 }
 
 template <typename T>

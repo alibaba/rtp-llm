@@ -258,7 +258,6 @@ void ParallelGpt<T>::convert_to_block_pointers(TensorMap* output_tensors,
     Tensor block_index_map      = input_tensors->at("block_index_map");
     uint   max_blocks_per_batch = (uint)(input_tensors->at("block_index_map").shape()[1]);
     assert(max_blocks_per_batch <= params_.max_seq_len_ / params_.seq_size_per_block_);
-    int*   block_index          = block_index_map.getPtr<int>();
     block_base_addr_vector_.resize(params_.num_layers_ * 4, 0);
     Tensor k_cache         = output_tensors->at("key_cache");
     Tensor v_cache         = output_tensors->at("value_cache");
@@ -389,7 +388,7 @@ void ParallelGpt<T>::forward(TensorMap*                                         
     if (params_.use_kvcache_) {
         if (output_tensors->isExist("block_pointers")) {
             Tensor block_pointers = output_tensors->at("block_pointers");
-            FT_CHECK(block_pointers.shape()[0] == params_.num_layers_);
+            FT_CHECK(int(block_pointers.shape()[0]) == params_.num_layers_);
             FT_CHECK(block_pointers.shape()[1] == total_batch_size);
             FT_CHECK(block_pointers.shape()[2] == 2);
             max_blocks_per_batch = block_pointers.shape()[3];

@@ -31,7 +31,10 @@ using namespace std;
 
 namespace fastertransformer {
 
-CustomAllReduceComm::CustomAllReduceComm(const std::vector<int>& tp_ranks, size_t rank): tp_ranks_(std::move(tp_ranks)), rank_(rank) {
+CustomAllReduceComm::CustomAllReduceComm(const std::vector<int>& tp_ranks, size_t rank)
+    : rank_(rank) 
+    , tp_ranks_(std::move(tp_ranks))
+{
     param_.barrier_flag = 0;
     param_.rank         = rank_;
     param_.local_rank   = rank_;

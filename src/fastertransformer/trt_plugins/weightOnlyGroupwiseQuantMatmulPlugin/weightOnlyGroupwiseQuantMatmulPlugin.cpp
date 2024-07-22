@@ -72,9 +72,6 @@ int WeightOnlyGroupwiseQuantMatmulPlugin::enqueue(const void*  inputs,
     // outputs
     //   mat                [M, N]
 
-    // bool use_cuda_kernel = m < SMALL_M_FAST_PATH && mCudaKernelEnabled;
-    bool use_cuda_kernel = false;
-
     const void* act_ptr = reinterpret_cast<const void*>(inputs);
 
 #if defined(ENABLE_BF16)

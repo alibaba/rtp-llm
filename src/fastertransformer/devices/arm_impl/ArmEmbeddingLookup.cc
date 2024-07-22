@@ -5,7 +5,6 @@ namespace fastertransformer {
 BufferPtr ArmCpuDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     const auto& tokens          = params.combo_tokens;
     const auto& embedding_table = params.embedding_table;
-    const auto& position_ids    = params.position_ids;
     const auto& position_table  = params.position_table;
 
     const auto token_num      = tokens.size();
@@ -23,7 +22,7 @@ BufferPtr ArmCpuDevice::embeddingLookup(const EmbeddingLookupParams& params) {
         int src_offset = row_index * copy_size;
         int dst_offset = index * copy_size;
 
-        std::memcpy(embeddings->data() + dst_offset, embedding_table.data() + src_offset, copy_size);
+        std::memcpy((char*)(embeddings->data()) + dst_offset, embedding_table.data() + src_offset, copy_size);
     }
 
     return move(embeddings);

@@ -20,8 +20,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params, const std::shared
     dtype_(ft::getDataType(params.gpt_init_parameter.data_type_)),
     is_causal_(params.gpt_init_parameter.is_causal_)
 {
-    size_t max_batch_size =
-        params.gpt_init_parameter.max_context_batch_size_ + params.gpt_init_parameter.max_generate_batch_size_;
     int eos_id = params.gpt_init_parameter.special_tokens_.eos_token_id_;
     SamplerInitParams sampler_params{device_, eos_id, 1024}; // set static max batch size to avoid sampler reset memory
     sampler_.reset(new Sampler(sampler_params));

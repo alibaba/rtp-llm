@@ -15,7 +15,7 @@ public:
         }
     }
 
-    const int getRefCounter(int block_index) const {
+    int getRefCounter(int block_index) const {
         // assert(block_index < block_nums);
         return ref_counter.at(block_index);
     }

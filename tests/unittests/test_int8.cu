@@ -65,7 +65,6 @@ void Int8TestSuite::testTransposition()
 {
     const int m = 32;
     const int k = 2048;
-    const int n = 2048;
 
     int8_t *a_data, *a_t_data;
 

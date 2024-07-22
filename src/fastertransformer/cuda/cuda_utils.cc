@@ -566,15 +566,15 @@ void print_kv_cache(const int   layer_id,
 
     printf("layer_id: %d %s [%d %d %d %d %d %d]\n", layer_id, name, dim1, dim2, dim3, dim4, dim5, dim6);
     fflush(stdout);
-    for (uint64_t i = 0; i < dim1; i++) {
-        for (uint64_t j = 0; j < dim2; j++) {
-            for (uint64_t k = 0; k < dim3; k++) {
-                for (uint64_t x = 0; x < dim4; x++) {
-                    for (uint64_t y = 0; y < dim5; y++) {
+    for (int i = 0; i < dim1; i++) {
+        for (int j = 0; j < dim2; j++) {
+            for (int k = 0; k < dim3; k++) {
+                for (int x = 0; x < dim4; x++) {
+                    for (int y = 0; y < dim5; y++) {
                         printf("i = %d, j = %d, k = %d, x = %d, y = %d\n", i, j, k, x, y);
                         fflush(stdout);
                         if (print_all) {
-                            for (uint64_t z = 0; z < dim6; z++) {
+                            for (int z = 0; z < dim6; z++) {
                                 std::cout << float(*(cpu_ptr + i * dim2 * dim3 * dim4 * dim5 * dim6
                                                      + j * dim3 * dim4 * dim5 * dim6 + k * dim4 * dim5 * dim6
                                                      + x * dim5 * dim6 + y * dim6 + z))

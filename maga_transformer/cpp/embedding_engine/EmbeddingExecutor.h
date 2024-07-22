@@ -8,7 +8,7 @@
 
 namespace rtp_llm {
 
-class EmbeddingExecutor{
+class EmbeddingExecutor {
 public:
     explicit EmbeddingExecutor(const EngineInitParams& params, ft::DeviceBase* device, py::object handler);
 
@@ -33,4 +33,5 @@ private:
     void                             init_position_ids(int max_seq_len);
     void reportMetrics(size_t context_batch_size, size_t combo_token_num, size_t max_seq_len) const;
 };
+
 }  // namespace rtp_llm

@@ -152,11 +152,11 @@ struct LayernormParams {
                     residual1(residual1),
                     residual2(residual2),
                     bias(bias),
+                    norm_type(norm_type),
                     alpha(alpha),
                     eps(eps),
                     return_normed_output(return_normed_output),
                     is_inplace(is_inplace),
-                    norm_type(norm_type),
                     qscheme(qscheme),
                     offset(0),
                     stride(0) {};
@@ -175,11 +175,11 @@ struct LayernormParams {
                     residual1(std::nullopt),
                     residual2(std::nullopt),
                     bias(std::nullopt),
+                    norm_type(norm_type),
                     alpha(0.0),
                     eps(eps),
                     return_normed_output(false),
                     is_inplace(true),
-                    norm_type(norm_type),
                     qscheme(QScheme::NoQuantize),
                     offset(offset),
                     stride(stride) {};
@@ -199,8 +199,8 @@ struct LayernormParams {
     const double alpha;
     const double eps;
 
-    const bool is_inplace;
     const bool return_normed_output;
+    const bool is_inplace;
     const QScheme qscheme;
 
     const int offset;

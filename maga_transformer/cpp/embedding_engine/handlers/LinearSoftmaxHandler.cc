@@ -49,7 +49,6 @@ th::Tensor LinearSoftmaxHandlerImpl::forward(th::Tensor hidden_states, th::Tenso
         throw std::runtime_error("mainse handler not initalized!");
     }
 
-    const size_t hidden_units = params_.head_num_ * params_.size_per_head_;
     const size_t batch_size = input_lengths.size(0);
 
     auto indexes_cpu = device_->allocateBuffer(
@@ -62,7 +61,6 @@ th::Tensor LinearSoftmaxHandlerImpl::forward(th::Tensor hidden_states, th::Tenso
     printBufferData(*input_buf, "input_buf");
     printBufferData(*sliced_hidden_buffer, "sliced_hidden_buffer");
 
-    const auto output_hidden_size = 2;
     auto gemm_output = device_->gemm({*sliced_hidden_buffer, *weight_, std::nullopt, nullptr, DataType::TYPE_FP32});
     auto decoder_output = device_->softmax({gemm_output, std::nullopt, *bias_});
     auto output_cpu = device_->clone({*decoder_output, AllocationType::HOST});

@@ -133,7 +133,7 @@ public:
         auto input = PrepareFfnLayerInput(token_num, hidden_size, inter_size, type);
         auto result = FfnOpRun(input, act);
         auto result_ref = FfnTorchRefRun(input, act);
-        assertTensorClose(result.out.to(result_ref.out.type()), result_ref.out);
+        assertTensorClose(result.out.to(result_ref.out.scalar_type()), result_ref.out);
     }
     
     

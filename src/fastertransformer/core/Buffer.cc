@@ -21,9 +21,7 @@ Buffer::Buffer(const MemoryType where,
     {}
 
 Buffer::~Buffer() {
-    if (view_count_ > 0) {
-        throw std::runtime_error("Buffer::~Buffer: view_count_ > 0: " + std::to_string(view_count_));
-    }
+    FT_CHECK_WITH_INFO(view_count_ == 0, "Buffer::~Buffer: view_count_ != 0: " + std::to_string(view_count_));
     if (deleter_) {
         deleter_(this);
     }
@@ -131,7 +129,7 @@ Buffer Buffer::operator[](size_t offset) const {
     }
     if (offset >= shape()[0]) {
         char msg[4096];
-        sprintf(msg, "Buffer::operator[]: offset [%d] out of range with buffer[%s]",
+        sprintf(msg, "Buffer::operator[]: offset [%lu] out of range with buffer[%s]",
                 offset, debugString().c_str());
         throw std::runtime_error(msg);
     }

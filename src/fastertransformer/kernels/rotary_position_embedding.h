@@ -1013,8 +1013,6 @@ __device__ inline void attention_rope(int       RopeStyle,
     if (count_prefix_length) {
         prefix_prompt_length = 0;
     }
-    int gen_len = tlength - input_len;
-
     if (position_id > 0) {
         tlength = position_id;
     }

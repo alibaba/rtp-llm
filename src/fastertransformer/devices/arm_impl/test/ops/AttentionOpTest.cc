@@ -32,7 +32,6 @@ struct AttentionImpl: torch::nn::Module {
         auto batch_size  = query_states.size(0);
         auto seq_len     = query_states.size(1);
         auto head_num    = query_states.size(2);
-        auto head_kv_num = key_states.size(2);
         auto head_dim    = query_states.size(3);
 
         auto q = query_states.transpose(1, 2);
@@ -229,8 +228,6 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
-    auto token_num = batch_size * seq_len;
-
     auto attention_config = AttentionConfigs({num_heads, num_key_value_heads, head_dim, rope_config, tokensPerBlock});
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {batch_size, seq_len, num_heads, head_dim}});
@@ -267,7 +264,6 @@ TEST_F(ArmAttentionOpTest, ContextAttentionOpTest) {
             size_t num_heads           = 4;
             size_t num_key_value_heads = num_heads;
             size_t head_dim            = 4;
-            size_t dim                 = head_dim;
             contextAttentionOpTest(batch_size, seq_len, num_heads, num_key_value_heads, head_dim);
         }
     }

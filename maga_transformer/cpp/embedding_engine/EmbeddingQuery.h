@@ -25,8 +25,8 @@ public:
     std::shared_ptr<ft::Buffer>         token_ids;
     std::shared_ptr<ft::Buffer>         token_type_ids;
     std::shared_ptr<ft::Buffer>         input_lengths;
-    int64_t                             request_id;    
     int64_t                             total_length;
+    int64_t                             request_id;
 
     void checkVaild();
     std::string debugString() const {

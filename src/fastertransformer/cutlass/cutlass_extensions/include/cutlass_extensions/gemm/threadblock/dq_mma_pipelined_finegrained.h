@@ -298,7 +298,6 @@ public:
         WarpFragmentScale warp_frag_scales;
         WarpFragmentZero warp_frag_zeros;
         typename IteratorScale::AccessType scale_frag, zero_frag;
-        typename IteratorScale::AccessType *smem_scale_ptr = nullptr, *smem_zero_ptr = nullptr;
 
         tb_frag_A.clear();
         tb_frag_B.clear();

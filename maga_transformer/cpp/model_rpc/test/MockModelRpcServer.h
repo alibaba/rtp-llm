@@ -34,7 +34,6 @@ EngineInitParams createMockEngineInitParams(DeviceBase* device) {
     params.seq_size_per_block_ = 2;
     params.reserve_runtime_mem_mb_ = 1024;
     typedef half         T;
-    const at::ScalarType scalar_type  = at::ScalarType::Half;
     const ft::DataType   data_type    = getTensorType<T>();
     auto                 mem_type     = ft::MemoryType::MEMORY_GPU;
     const size_t         hidden_units = 128;
@@ -112,19 +111,9 @@ using loraLayerMap = std::vector<std::unordered_map<std::string, ft::ConstBuffer
 
 std::array<loraLayerMap, 2> createMockLoraWeights(DeviceBase* device) {
     size_t rank = 8;
-    size_t head_num_ = 2;
-    size_t size_per_head_ = 64;
     size_t num_layers_ = 2;
-    size_t max_seq_len_ = 20;
-    size_t vocab_size_ = 20;
-    size_t hidden_size_ = 128;
-    size_t head_num_kv_ = 2;
-    size_t block_nums_  = 100;
     const size_t inter_size    = 512;
-    size_t inter_size_         = inter_size;
-    size_t inter_padding_size_ = inter_size;
     typedef half         T;
-    const at::ScalarType scalar_type  = at::ScalarType::Half;
     const ft::DataType   data_type    = getTensorType<T>();
     auto                 mem_type     = ft::MemoryType::MEMORY_GPU;
     const size_t         hidden_units = 128;

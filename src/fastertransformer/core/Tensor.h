@@ -65,7 +65,7 @@ public:
     std::string getNumpyTypeDesc(DataType type) const;
 
     template<typename T>
-    inline T getVal(size_t index) const;
+    T getVal(size_t index) const;
 
     template<typename T>
     inline T getVal() const {

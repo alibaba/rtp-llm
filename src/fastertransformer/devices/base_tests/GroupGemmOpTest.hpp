@@ -93,7 +93,7 @@ public:
         auto result = deviceGroupGemmOpRun(input, bias);
         auto result_ref = torchGroupGemmOpRun(input);
         for (int i = 0; i < result.Cs.size(); i++) {
-            assertTensorClose(result.Cs[i].to(result_ref.Cs[i].type()), result_ref.Cs[i]);
+            assertTensorClose(result.Cs[i].to(result_ref.Cs[i].scalar_type()), result_ref.Cs[i]);
         }
 
     }

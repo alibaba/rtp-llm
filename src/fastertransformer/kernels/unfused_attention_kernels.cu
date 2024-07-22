@@ -1515,7 +1515,6 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     const int     head_idx      = blockIdx.y;
     const int     tidx          = threadIdx.x;
     const int     total_seq_len = param.max_prefix_prompt_length + seq_len;
-    constexpr int X_ELEMS       = (sizeof(T) == 4) ? 4 : 8;
 
     const bool is_masked = tidx * vec_size >= size_per_head;
     // NOTE: blockIdx.x < batch_size * param.max_prefix_prompt_length really handles prefix prompts
@@ -1529,10 +1528,6 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                 const int dest_kv_idx = prompt_batch_idx * size_per_head * total_seq_len * head_num_kv
                                         + head_idx * size_per_head * total_seq_len + prompt_seq_idx * size_per_head
                                         + tidx * vec_size;
-                const T* prefix_prompt_k = nullptr;
-                const T* prefix_prompt_v = nullptr;
-                int      prefix_k_idx    = 0;
-                int      prefix_v_idx    = 0;
                 if (param.kv_block_array.mMaxSeqs > 0) {
                     if (!is_masked) {
                         Tcache* k_cache = reinterpret_cast<Tcache*>(param.kv_block_array.getKBlockPtr(prompt_batch_idx, prompt_seq_idx));

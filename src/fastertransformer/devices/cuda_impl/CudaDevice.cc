@@ -18,8 +18,6 @@ using namespace tensorrt_llm::kernels;
 
 namespace fastertransformer {
 
-static const size_t DEFAULT_MAX_BATCH_SIZE = 256;
-
 CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     FT_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_error(cudaSetDevice(device_id_));

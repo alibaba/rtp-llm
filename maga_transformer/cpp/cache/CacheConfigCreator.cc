@@ -1,5 +1,3 @@
-#pragma once
-
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "maga_transformer/cpp/common/status_util.h"

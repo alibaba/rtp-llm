@@ -751,7 +751,7 @@ static inline bool shared_mem_sufficient(int smem_size) {
         throw std::runtime_error("cudaGetDeviceProperties() failed");
     }
 
-    if (properties.sharedMemPerMultiprocessor < smem_size) {
+    if (int(properties.sharedMemPerMultiprocessor) < smem_size) {
         return false;
     }
 

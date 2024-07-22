@@ -21,7 +21,7 @@ namespace fastertransformer {
 struct SpanItem {
 public:
     SpanItem(size_t origin_index, size_t offset):
-        origin_index(origin_index), offset(offset), target_index(origin_index) {}
+        origin_index(origin_index), target_index(origin_index) , offset(offset) {}
 
     size_t origin_index       = 0;
     size_t target_index       = 0;
@@ -242,6 +242,7 @@ public:
 
 
 private:
+    cudaStream_t*       stream_;
     IAllocator*         allocator_;
     size_t              m_                = 0;
     size_t              k_                = 0;
@@ -249,10 +250,9 @@ private:
     T*                  intermediate_buf_ = nullptr;
     T*                  vision_split_buf_ = nullptr;
     T*                  text_split_buf_   = nullptr;
+    ExpertAttentionSpan spans_;
     const T*                  input_buf_        = nullptr;
     T*                  output_buf_       = nullptr;
-    ExpertAttentionSpan spans_;
-    cudaStream_t*       stream_;
 };
 
 template class ExpertAttentionUtil<float>;

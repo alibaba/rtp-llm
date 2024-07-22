@@ -33,10 +33,6 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             }
         }
     } else {
-        const auto& input = params.input;
-        const auto& up_weight = *(params.weights.up_weight->kernel);
-        const auto& down_weight = *(params.weights.down_weight->kernel);
-
         auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
         auto up_output = loraLinear(LoraLinearParams(up_gemm_params,
                                                      *(params.weights.up_lora_weights),

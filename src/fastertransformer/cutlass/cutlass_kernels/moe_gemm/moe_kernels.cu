@@ -1014,7 +1014,6 @@ void CutlassMoeFCRunner<T, WeightType, QuantOp, Enable>::runMoe(const void*     
     auto* fc3_expert_weights = static_cast<const WeightType*>(fc3_expert_weights_void);
     auto* fc3_scales         = static_cast<const T*>(fc3_scales_void);
     auto* fc3_zeros          = static_cast<const T*>(fc3_zeros_void);
-    auto* fc3_expert_biases  = static_cast<const T*>(fc3_expert_biases_void);
     auto* final_output       = static_cast<T*>(final_output_void);
     auto* fc2_result         = static_cast<T*>(fc2_result_void);
     auto* expert_scales      = static_cast<float*>(expert_scales_void);

@@ -67,7 +67,6 @@ int FIFOScheduler::runningNextBlockNum() const {
 
 // TODO(xinfei.sxf) Is there any situation where the request cannot be ended?
 void FIFOScheduler::evaluateRunningNext() {
-    int running_next_block_num = runningNextBlockNum();
     // Only in the case of partial fallback, the stream in the waiting queue may hold blocks resources.
     if (enable_partial_fallback_) {
         for (auto& stream : waiting_streams_) {
@@ -128,7 +127,7 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
         for (auto& stream : streams) {
             total_token_size += stream->contextLength();
         }
-        return total_token_size < max_seq_len_ * max_context_batch_size_;
+        return total_token_size < int(max_seq_len_ * max_context_batch_size_);
     } else {
         return true;
     }

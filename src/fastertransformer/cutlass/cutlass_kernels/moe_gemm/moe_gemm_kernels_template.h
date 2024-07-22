@@ -425,7 +425,6 @@ void MoeGemmRunner<T, WeightType, QuantOp>::runGemm<EpilogueTag>(T const* A, Wei
     if (!chosen_conf)
     {
         static constexpr int workspace_bytes = 0; // No workspace for MoE GEMMs.
-        static constexpr int split_k_limit = 1;   // MoE GEMM does not support split-k.
         static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
 
         auto candidate_configs = getConfigs();

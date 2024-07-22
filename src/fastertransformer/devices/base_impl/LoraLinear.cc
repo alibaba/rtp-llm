@@ -20,7 +20,7 @@ LoraLinearOutput DeviceBase::loraLinear(const LoraLinearParams& params) {
         std::vector<BufferPtr> lora_as;
         std::vector<BufferPtr> lora_bs;
         size_t start = 0;
-        for (int i = 0; i < lora_ids.shape()[0]; i++) {
+        for (int i = 0; i < int(lora_ids.shape()[0]); i++) {
             if (lora_ids_ptr[i] >= 0 && params.lora_map.value().get().hasLoraWeight(lora_ids_ptr[i])) {
                 auto input_tmp = params.gemm_params.A.slice(start, lora_input_lengths_ptr[i]);
                 auto output_tmp = output->slice(start, lora_input_lengths_ptr[i]);

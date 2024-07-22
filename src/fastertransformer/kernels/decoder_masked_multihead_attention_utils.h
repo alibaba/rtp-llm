@@ -2314,9 +2314,9 @@ inline __device__ void convert_from_float(int32_t* dst, float2 src) {
 }
 
 inline __device__ void convert_from_float(int64_t* dst, float4 src) {
-    uint2* tmp;
-    convert_from_float(tmp, src);
-    dst = reinterpret_cast<int64_t*>(tmp);
+    uint2 tmp;
+    convert_from_float(&tmp, src);
+    *dst = *(reinterpret_cast<int64_t*>(&tmp));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

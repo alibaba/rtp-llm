@@ -184,7 +184,6 @@ void cufmha::runOpenSourceFmhaPaged(void*  q,
    FT_CHECK_WITH_INFO(head_num_ % kv_head_num_ == 0, "Number of heads in key/value must divide number of heads in query");
    FT_CHECK_WITH_INFO(seq_size_per_block % 256 == 0, "open source fmha paged seq_size_per_block must be divided by 256");
     const auto seq_len_round = roundMultiple(seq_len, 32);
-    const auto head_size_rounded = roundMultiple(size_per_head_, 32);
 
     FT_CHECK_WITH_INFO(block_table, "open source paged must have block_table");
     Flash_fwd_params flash_fwd_params = genFlashFwdParams(q, k, v, output, cu_seqlens, cu_kv_seqlens, workspace, batch_size, seq_len, seq_size_per_block * block_table_batch_stride, linear_bias_slopes);
@@ -211,8 +210,8 @@ void cufmha::runOpenSourceFmhaPaged(void*  q,
 
     FT_CHECK_WITH_INFO(flash_fwd_params.num_splits <= 128, "open source not support split head 128");
     if (flash_fwd_params.num_splits > 1) {
-        flash_fwd_params.softmax_lseaccum_ptr = workspace + sizeof(float) * batch_size * head_num_ * seq_len_round;
-        flash_fwd_params.oaccum_ptr = flash_fwd_params.softmax_lseaccum_ptr + sizeof(float) * flash_fwd_params.num_splits * batch_size * head_num_ * seq_len_round;
+        flash_fwd_params.softmax_lseaccum_ptr = (char*)workspace + sizeof(float) * batch_size * head_num_ * seq_len_round;
+        flash_fwd_params.oaccum_ptr = (char*)(flash_fwd_params.softmax_lseaccum_ptr) + sizeof(float) * flash_fwd_params.num_splits * batch_size * head_num_ * seq_len_round;
     }
     run_mha_fwd(flash_fwd_params, stream_, block_table);
     sync_check_cuda_error();

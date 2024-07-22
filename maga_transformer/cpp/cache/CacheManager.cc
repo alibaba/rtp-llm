@@ -58,7 +58,7 @@ void CacheManager::reportMetricsLoop() {
 void CacheManager::initFreeBlock() {
     free_blocks_index_ = std::set<int>();
     // block 0 is reserved for tmp or padding use
-    for (int i = 1; i < config_.block_nums; ++i) {
+    for (int i = 1; i < int(config_.block_nums); ++i) {
         free_blocks_index_.insert(i);
     }
 
@@ -168,7 +168,6 @@ CacheManager::MatchInfo CacheManager::matchImpl(const std::vector<int>& token_id
 
     int cache_block_num  = cache_blocks.size();
     int reuse_length     = std::min(common_length, static_cast<size_t>(token_ids.size()) - 1);
-    int old_reuse_length = reuse_length;
     int reuse_block_num  = reuse_length / config_.seq_size_per_block;
     reuse_length         = reuse_block_num * config_.seq_size_per_block;
 
@@ -251,7 +250,7 @@ void CacheManager::free(const std::vector<int>& block_indices) {
 }
 
 void CacheManager::maybeFreeBlockFromCache(int nums) {
-    while (freeBlockNums() < nums && !block_cache_.empty()) {
+    while (int(freeBlockNums()) < nums && !block_cache_.empty()) {
         std::vector<int> indices = block_cache_.pop();
         if (indices.empty()) {
             // Avoid infinite loop
@@ -303,8 +302,8 @@ void CacheManager::setKVBlockValue(int kindex, int vindex, ft::BufferPtr& k_valu
     for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
 
         auto copyFunc = [&](ft::BufferPtr& src_value, ft::BufferPtr& dst_blocks){
-            auto dst_data = dst_blocks->data() + layer_num * layer_stride + kindex * config_.kv_block_stride;
-            auto src_data = src_value->data() + layer_num * config_.kv_block_stride;
+            auto dst_data = (char*)(dst_blocks->data()) + layer_num * layer_stride + kindex * config_.kv_block_stride;
+            auto src_data = (char*)(src_value->data()) + layer_num * config_.kv_block_stride;
             auto dst_buffer = Buffer(
                 dst_blocks->where(), src_value->type(), {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, dst_data);
             auto src_buffer = Buffer(
@@ -326,7 +325,7 @@ std::tuple<ft::BufferPtr, ft::BufferPtr> CacheManager::getKVBlockValue(int block
     for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
 
         auto copyFunc = [&](ft::BufferPtr& src_blocks, ft::BufferPtr& dst_buffer){
-            auto src_data = src_blocks->data() + layer_num * layer_stride + block_index * config_.kv_block_stride;
+            auto src_data = (char*)(src_blocks->data()) + layer_num * layer_stride + block_index * config_.kv_block_stride;
             auto src_buffer = Buffer(
                 src_blocks->where(), config_.dtype, {config_.kv_block_stride / ft::getTypeSize(config_.dtype)}, src_data);
             device_->copy({dst_buffer->view(layer_num, 1)[0], src_buffer});
@@ -342,8 +341,8 @@ void CacheManager::blockCopy(int src_block_index, int dest_block_index) {
     auto layer_stride = config_.block_nums * config_.kv_block_stride;
     for (uint32_t layer_num = 0; layer_num < config_.layer_num; layer_num++) {
         auto copyFunc = [&](ft::BufferPtr& buffer_blocks){
-            auto dst_data = buffer_blocks->data() + layer_num * layer_stride + dest_block_index * config_.kv_block_stride;
-            auto src_data = buffer_blocks->data() + layer_num * layer_stride + src_block_index * config_.kv_block_stride;
+            auto dst_data = (char*)(buffer_blocks->data()) + layer_num * layer_stride + dest_block_index * config_.kv_block_stride;
+            auto src_data = (char*)(buffer_blocks->data()) + layer_num * layer_stride + src_block_index * config_.kv_block_stride;
             auto dst_buffer = Buffer(
                 buffer_blocks->where(), config_.dtype, {config_.kv_block_stride/ft::getTypeSize(config_.dtype)}, dst_data);
             auto src_buffer = Buffer(

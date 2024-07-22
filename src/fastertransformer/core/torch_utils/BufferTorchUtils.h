@@ -35,7 +35,7 @@ using BufferShapeType = std::remove_cv<std::remove_reference<
 
 inline BufferShapeType torchShapeToBufferShape(const c10::IntArrayRef& sizes) {
     BufferShapeType shape;
-    for (int i = 0; i < sizes.size(); i++) {
+    for (int i = 0; i < int(sizes.size()); i++) {
         shape.push_back(sizes[i]);
     }
     return shape;

@@ -34,7 +34,6 @@ protected:
 
 TEST_F(CacheManagerTest, testSimple) {
     auto            cache_config = init_config();
-    ft::DeviceBase* device;
     CacheManager    cache_manager(cache_config, device_);
 
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);
@@ -62,7 +61,6 @@ TEST_F(CacheManagerTest, testSimple) {
 
 TEST_F(CacheManagerTest, testAllocateWithFreeCache) {
     auto            cache_config = init_config();
-    ft::DeviceBase* device;
     CacheManager    cache_manager(cache_config, device_);
 
     auto [success1, index1, reuse_len] = cache_manager.mallocWithCacheImpl(3, {1000, 2000, 3000});
@@ -90,7 +88,6 @@ TEST_F(CacheManagerTest, testAllocateWithFreeCache) {
 
 TEST_F(CacheManagerTest, testAllocateWithReuse) {
     auto            cache_config = init_config();
-    ft::DeviceBase* device;
     CacheManager    cache_manager(cache_config, device_);
 
     ASSERT_EQ(cache_manager.freeBlockNums(), 3);

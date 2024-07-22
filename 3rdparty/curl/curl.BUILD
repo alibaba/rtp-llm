@@ -257,6 +257,8 @@ cc_library(
             "-DHAVE_LIBZ",
             "-DHAVE_ZLIB_H",
             "-Wno-string-plus-int",
+            "-Wno-maybe-uninitialized",
+            "-Wno-stringop-overflow",
             "-DCURL_MAX_WRITE_SIZE=65536",
     ],
     defines = ["CURL_STATICLIB"],

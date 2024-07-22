@@ -70,12 +70,12 @@ CloneOutput DeviceBase::clone(const CloneParams& params) {
     const auto& src = params.input;
     auto dst = allocateBufferLike(src, params.alloc_type, params.hints);
     copy({*dst, src});
-    return move(dst);
+    return dst;
 }
 
 SelectOutput DeviceBase::select(const SelectParams& params) {
     RUNTIME_ASSERT_OP_ARG(params.dim < params.input.shape().size(),
-                          "Select dim %d out of range with input shape %s.",
+                          "Select dim %ld out of range with input shape %s.",
                           params.dim, params.input.debugString().c_str());
     RUNTIME_ASSERT_OP_ARG(params.index.shape().size() == 1, "Select index must be 1D.");
     RUNTIME_ASSERT_OP_ARG(params.index.type() == DataType::TYPE_INT32, "Select index must be int32.");
@@ -88,7 +88,7 @@ SelectOutput DeviceBase::select(const SelectParams& params) {
     selected_shape[dim] = idx_buf.shape()[0];
     auto selected = allocateBuffer({src.type(), selected_shape, getMemAllocationType(src.where())});
 
-    const auto pre_select_size = std::accumulate(
+    const int pre_select_size = std::accumulate(
         selected_shape.begin(), selected_shape.begin() + dim, 1UL, std::multiplies<size_t>());
     const auto post_select_stride = (int32_t)std::accumulate(
         selected_shape.begin() + dim + 1, selected_shape.end(), 1UL, std::multiplies<size_t>());
@@ -97,7 +97,7 @@ SelectOutput DeviceBase::select(const SelectParams& params) {
     auto src_view = src.reshape({src.size()});
     auto dst_view = selected->reshape({selected->size()});
 
-    for (auto i = 0; i < idx_buf.shape()[0]; i++) {
+    for (auto i = 0; i < int(idx_buf.shape()[0]); i++) {
         const auto idx = idx_buf.data<int32_t>()[i];
         for (auto j = 0; j < pre_select_size; j++) {
             const auto src_offset = j * src.shape()[dim] * post_select_stride + idx * post_select_stride;
@@ -106,11 +106,11 @@ SelectOutput DeviceBase::select(const SelectParams& params) {
         }
     }
 
-    return move(selected);
+    return selected;
 }
 
 ConcatOutput DeviceBase::concat(const ConcatParams& params) {
-    RUNTIME_ASSERT_OP_ARG(params.dim == 0, "Concat only support dim 0, but got %d.", params.dim);
+    RUNTIME_ASSERT_OP_ARG(params.dim == 0, "Concat only support dim 0, but got %lu.", params.dim);
     RUNTIME_ASSERT_OP_ARG(params.inputs.size() > 0, "Concat requires at least 1 input.");
     if (params.inputs.size() == 1) {
         return params.inputs[0];
@@ -128,17 +128,17 @@ ConcatOutput DeviceBase::concat(const ConcatParams& params) {
         type, concated_shape, getMemAllocationType(params.inputs[0]->where())});
 
     size_t offset = 0;
-    for (auto i = 0; i < params.inputs.size(); i++) {
+    for (int i = 0; i < int(params.inputs.size()); i++) {
         const auto& input = params.inputs[i];
         const auto& shape = input->shape();
         RUNTIME_ASSERT_OP_ARG(
             shape.size() == concated_shape.size(),
-            "Concat input [%d] shape size %d does not match concated shape size %d.",
+            "Concat input [%d] shape size %ld does not match concated shape size %lu.",
             i, shape.size(), concated_shape.size());
-        for (auto j = 1; j < concated_shape.size(); j++) {
+        for (int j = 1; j < int(concated_shape.size()); j++) {
             RUNTIME_ASSERT_OP_ARG(
                 shape[j] == concated_shape[j],
-                "Concat input [%d] shape[%d] %d does not match concated shape[%d] %d.",
+                "Concat input [%d] shape[%d] %ld does not match concated shape[%d] %ld.",
                 i, j, shape[j], j, concated_shape[j]);
         }
         RUNTIME_ASSERT_OP_ARG(
@@ -149,7 +149,7 @@ ConcatOutput DeviceBase::concat(const ConcatParams& params) {
         copy({concated->view(offset, (int64_t)shape[0]), *input});
         offset += shape[0];
     }
-    return move(concated);
+    return concated;
 }
 
 }; // namespace fastertransformer

@@ -18,10 +18,10 @@ TEST_F(MemoryTest, testAlloc) {
     auto ptr = tracker.allocate(1 << 10);
     EXPECT_EQ(ptr, base_ptr);
     auto ptr1 = tracker.allocate(1 << 10);
-    EXPECT_EQ(ptr1, base_ptr + (1 << 10));
+    EXPECT_EQ(ptr1, (char*)base_ptr + (1 << 10));
     tracker.deallocate(ptr);
     auto ptr2 = tracker.allocate(1 << 12);
-    EXPECT_EQ(ptr2, base_ptr + (1 << 11));
+    EXPECT_EQ(ptr2, (char*)base_ptr + (1 << 11));
     auto ptr3 = tracker.allocate(1 << 8);
     EXPECT_EQ(ptr3, base_ptr);
     auto status = tracker.getStatus();
@@ -65,7 +65,6 @@ TEST_F(MemoryTest, testRandomAlloc) {
                 ptr_map[ptr] = alloc_size;
             }
         } else {
-            auto idx = hash_val % ptr_map.size();
             auto ptr = ptr_map.begin()->first;
             tracker.deallocate(ptr);
             ptr_map.erase(ptr);

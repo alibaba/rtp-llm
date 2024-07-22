@@ -6,13 +6,15 @@ build --cxxopt="-std=c++17" --copt="-DGTEST_USE_OWN_TR1_TUPLE=0" --copt="-DEIGEN
 build -c opt
 build --copt -O2
 build --copt -g --strip=never
-build --copt -w
-build --copt -Werror=unused-variable
-build --copt -Werror=unused
-build --copt -Werror=sign-compare
-build --copt -Werror=reorder
-build --copt -Werror=narrowing
-build --copt -Werror=return-type
+build --copt -Wall
+build --copt -Werror
+build --copt -Wno-unknown-pragmas # omp
+build --copt -Wno-sign-compare # alog
+build --copt -Wno-attributes # pybind11
+build --copt -Wno-stringop-truncation # grpc
+build --copt -Wno-stringop-overflow # grpc
+build --copt -Wno-maybe-uninitialized # protobuf
+build --cxxopt -Wno-class-memaccess # grpc
 build --experimental_cc_implementation_deps
 build --deleted_packages @havenask//aios/kmonitor
 build --copt -DOPENSSL_IS_BORINGSSL

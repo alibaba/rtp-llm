@@ -8,7 +8,13 @@ EmbeddingInput::EmbeddingInput(const std::shared_ptr<ft::Buffer>& token_ids,
                                const std::shared_ptr<ft::Buffer>& token_type_ids,
                                const std::shared_ptr<ft::Buffer>& input_lengths,
                                const int64_t                      total_length,
-                               int64_t request_id) : token_ids(token_ids), token_type_ids(token_type_ids), total_length(total_length), request_id(request_id), input_lengths(input_lengths) {
+                               int64_t request_id)
+    : token_ids(token_ids)
+    , token_type_ids(token_type_ids)
+    , input_lengths(input_lengths)
+    , total_length(total_length)
+    , request_id(request_id)
+{
     checkVaild();
 }
 
@@ -22,7 +28,7 @@ void EmbeddingInput::checkVaild() {
     if (token_ids->shape()[0] != token_type_ids->shape()[0]) {
         throw std::runtime_error("token length should equal to token type length");
     }
-    if (total_length != token_ids->shape()[0]) {
+    if (total_length != int64_t(token_ids->shape()[0])) {
         throw std::runtime_error("sum of token length don't equal to total_length");
     }
 }
