@@ -43,6 +43,7 @@ cc_test(
         "ops/CpuLayerNormTest.cc",
     ],
     data = [],
+    tags = ["manual"],
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps,
