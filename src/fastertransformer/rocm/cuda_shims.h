@@ -59,6 +59,11 @@ template<> __host__ __device__ inline float special_cast<float, amd_bfloat16>(am
 #define cudaEvent_t hipEvent_t
 
 #define cudaGetDevice hipGetDevice
+#define cudaSetDevice hipSetDevice
+#define cudaGetDeviceCount hipGetDeviceCount
+#define cudaDeviceEnablePeerAccess hipDeviceEnablePeerAccess
+#define cudaDeviceDisablePeerAccess hipDeviceDisablePeerAccess
+#define cudaDeviceCanAccessPeer hipDeviceCanAccessPeer
 #define cudaDeviceGetAttribute hipDeviceGetAttribute
 #define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
 #define cudaDevAttrMaxSharedMemoryPerMultiprocessor hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
@@ -69,9 +74,17 @@ template<> __host__ __device__ inline float special_cast<float, amd_bfloat16>(am
 #define cudaDeviceSynchronize hipDeviceSynchronize
 
 #define cudaMemcpy hipMemcpy
+#define cudaMemset hipMemset
 #define cudaMemsetAsync hipMemsetAsync
 #define cudaMemcpyAsync hipMemcpyAsync
 #define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
+#define cudaMemcpyHostToDevice hipMemcpyHostToDevice
+#define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
+#define cudaMalloc hipMalloc
+#define cudaMallocAsync hipMallocAsync
+#define cudaFree hipFree
+#define cudaFreeAsync hipFreeAsync
+
 
 #define cudaEventSynchronize hipEventSynchronize
 #define cudaEventCreate hipEventCreate
@@ -83,5 +96,20 @@ template<> __host__ __device__ inline float special_cast<float, amd_bfloat16>(am
 #define cudaSuccess hipSuccess
 #define sync_check_cuda_error() rocm::syncAndCheck(__FILE__, __LINE__)
 #define cudaDeviceProp hipDeviceProp_t
+
+#define cudaErrorNotReady hipErrorNotReady
+#define cudaErrorPeerAccessAlreadyEnabled hipErrorPeerAccessAlreadyEnabled
+
+#define cudaStreamQuery hipStreamQuery
+#define cudaStreamCreate hipStreamCreate
+#define cudaStreamDestroy hipStreamDestroy
+
+#define CUDA_IPC_HANDLE_SIZE HIP_IPC_HANDLE_SIZE
+#define cudaIpcGetMemHandle hipIpcGetMemHandle
+#define cudaIpcOpenMemHandle hipIpcOpenMemHandle
+#define cudaIpcCloseMemHandle hipIpcCloseMemHandle
+#define cudaIpcMemHandle_t hipIpcMemHandle_t
+#define cudaIpcOpenMemHandle hipIpcOpenMemHandle
+#define cudaIpcMemLazyEnablePeerAccess hipIpcMemLazyEnablePeerAccess
 
     // Taken from cuda_utils.h

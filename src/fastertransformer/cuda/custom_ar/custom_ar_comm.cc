@@ -17,7 +17,13 @@
 #include "custom_ar_comm.h"
 
 #include "src/fastertransformer/core/Types.h"
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#include "src/fastertransformer/rocm/cuda_shims.h"
+#endif
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/utils/logger.h"

@@ -83,14 +83,19 @@ cc_library(
         "custom_ar/custom_ar_comm.h"
     ],
     deps = [
-        ":cuda_utils",
         ":nccl",
-        ":memory_utils",
-        "//src/fastertransformer/core:types",
-        "//src/fastertransformer/kernels:kernels_cu",
-        "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart"
-    ],
+    ] + select({
+        "//:using_cuda": [  ":cuda_utils",
+                            ":memory_utils",
+                            "//src/fastertransformer/core:types",
+                            "//src/fastertransformer/kernels:kernels_cu",
+                            "@local_config_cuda//cuda:cuda",
+                            "@local_config_cuda//cuda:cudart",],
+        "//:using_rocm": [  "//src/fastertransformer/rocm:memory_utils",
+                            "//src/fastertransformer/rocm:rocm_utils",
+                            "//src/fastertransformer/kernels:gpt_kernels_rocm",]}),
+
+                            
     copts = copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -106,11 +111,13 @@ cc_library(
         "nccl/nccl_utils_torch.h",
         "nccl/nccl_utils.h",
     ],
-    deps = torch_deps() + [
-        ":cuda_utils",
-        "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",
-    ],
+    deps = torch_deps() + select({
+        "//:using_cuda": [":cuda_utils",
+                          "@local_config_cuda//cuda:cuda",
+                          "@local_config_cuda//cuda:cudart",],
+        "//:using_rocm": ["//src/fastertransformer/rocm:rocm_utils"],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],

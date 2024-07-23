@@ -17,11 +17,17 @@
 #pragma once
 
 #include <assert.h>
+
+#if USING_CUDA
 #include <cuda_fp16.h>
+#include "src/fastertransformer/cuda/cuda_utils.h"
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
 
 #include <iostream>
 
-#include "src/fastertransformer/cuda/cuda_utils.h"
 
 #define CUSTOM_AR_SIZE_THRESHOLD 50331648
 #define MAX_ALL_REDUCE_BLOCKS 24
