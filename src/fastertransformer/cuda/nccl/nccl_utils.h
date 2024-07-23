@@ -16,11 +16,20 @@
 
 #pragma once
 
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
-#include "src/fastertransformer/utils/logger.h"
 
 #include <cuda_runtime.h>
 #include <nccl.h>
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+
+#include "src/fastertransformer/rocm/cuda_shims.h"
+#include <rccl/rccl.h>
+#endif
+
+#include "src/fastertransformer/utils/logger.h"
 
 #include <stdio.h>
 #include <string>

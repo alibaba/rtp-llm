@@ -19,6 +19,9 @@
 #include "src/fastertransformer/kernels/alpha_layernorm_kernels.h"
 #include "src/fastertransformer/kernels/rmsnormKernels.h"
 
+#include "src/fastertransformer/cuda/nccl/nccl_utils_torch.h"
+#include "src/fastertransformer/cuda/nccl/nccl_utils.h"
+
 // TODO(rocm): Idealy we just link compiler_rt for this symbol.
 extern "C" half __truncdfhf2(double a) {
     return (half)(float)a;
@@ -33,9 +36,43 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     HIP_CHECK(hipSetDevice(params.device_id));  // TODO(rocm): ensure this is setup every op
     HIP_CHECK(hipStreamCreate(&stream_));
     check_hip_error(hipGetDeviceProperties(&rocmDevProp, device_id_));
+
+    if (params.tp_size > 1) {
+        const auto rank = params.tp_rank;
+        const auto world_size = params.tp_size;
+
+        nccl_param_.rank_ = rank;
+        nccl_param_.world_size_ = world_size;
+        auto tcpStore = createTcpStore(
+            params.master_ip, params.master_port, world_size, rank);
+        const auto nccl_id = &(nccl_param_.nccl_uid_);
+
+        const std::string tp_group_name = "RTP_LLM_TP_GROUP_";
+        if (rank == 0) {
+            FT_LOG_INFO("rank %d creates nccl uid in group %s.", rank, tp_group_name.c_str());
+            NCCLCHECK(ncclGetUniqueId(nccl_id));
+            setUniqueId(nccl_id, tp_group_name, tcpStore);
+        } else {
+            FT_LOG_INFO("rank %d get nccl uid in group %s.", rank, tp_group_name.c_str());
+            getUniqueId(nccl_id, tp_group_name, tcpStore);
+        }
+
+        FT_LOG_INFO("Initialize NCCL communicators rank %d of %d.", rank, world_size);
+        NCCLCHECK(ncclGroupStart());
+        NCCLCHECK(ncclCommInitRank(&nccl_param_.nccl_comm_, world_size, *nccl_id, rank));
+        NCCLCHECK(ncclGroupEnd());
+    }    
+    
+    // Initialize custom all reduce communicator
+    // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before allocator init
+    if (nccl_param_.world_size_ > 1) {
+        FT_LOG_INFO("Initialize custom all reduce communicator rank %d of %d", nccl_param_.rank_, nccl_param_.world_size_);
+        std::vector<int> tp_ranks = fcNcclGatherRanks(nccl_param_, stream_);
+        custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, tp_ranks, stream_);
+    }
+
     allocator_.reset(new Allocator<AllocatorType::ROCM>());
     hostAllocator_.reset(new Allocator<AllocatorType::ROCM_HOST>());
-
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
         HIP_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
@@ -94,6 +131,10 @@ ROCmDevice::~ROCmDevice() {
     if (stream_ != nullptr) {
         HIP_CHECK(hipStreamDestroy(stream_));
     }
+
+    if (nccl_param_.nccl_comm_) {
+        ncclCommDestroy(nccl_param_.nccl_comm_);
+    }
 }
 
 void ROCmDevice::init() {
@@ -107,6 +148,8 @@ DeviceProperties ROCmDevice::getDeviceProperties() {
     DeviceProperties props;
     props.type = DeviceType::ROCm;
     props.id   = device_id_;
+    props.tp_rank = nccl_param_.rank_;
+    props.tp_size = nccl_param_.world_size_;
     return props;
 }
 
@@ -175,6 +218,13 @@ TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
 
 void ROCmDevice::syncAndCheck() {
     (void)hipDeviceSynchronize();
+}
+
+void ROCmDevice::syncCommunication(bool timeout) {
+    if (nccl_param_.world_size_ > 1) {
+        FT_LOG_DEBUG("Synchronize NCCL communicators rank %d of %d.", nccl_param_.rank_, nccl_param_.world_size_);
+        ftNcclStreamSynchronize(nccl_param_, stream_, timeout);
+    }
 }
 
 SelectOutput ROCmDevice::select(const SelectParams& params) {

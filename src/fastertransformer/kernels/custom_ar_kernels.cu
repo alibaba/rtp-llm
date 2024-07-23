@@ -16,6 +16,9 @@
 
 #include "custom_ar_kernels.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
+#if USING_ROCM
+#include "src/fastertransformer/rocm/cuda_shims.h"
+#endif
 #include <cstddef>
 
 namespace fastertransformer {
@@ -24,9 +27,14 @@ namespace fastertransformer {
 
 static inline __device__ uint32_t hadd2(const uint32_t& a, const uint32_t& b)
 {
+    #if USING_ROCM
+    __half2 out = __hadd2(*reinterpret_cast<const __half2_raw*>(&a), *reinterpret_cast<const __half2_raw*>(&b));
+    return *reinterpret_cast<uint32_t*>(&(out.data));
+    #else
     uint32_t c;
     asm volatile("add.f16x2 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
     return c;
+    #endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -34,7 +42,11 @@ static inline __device__ uint32_t hadd2(const uint32_t& a, const uint32_t& b)
 static inline __device__ uint32_t fadd(const uint32_t& a, const uint32_t& b)
 {
     uint32_t c;
+    #if USING_ROCM
+    c = __float_as_uint ( __uint_as_float(a) + __uint_as_float(b) );
+    #else
     asm volatile("add.f32 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
+    #endif
     return c;
 }
 
@@ -42,23 +54,31 @@ static inline __device__ uint32_t fadd(const uint32_t& a, const uint32_t& b)
 
 static inline __device__ void st_flag_release(uint32_t& flag, uint32_t* flag_addr)
 {
-#if __CUDA_ARCH__ >= 700
-    asm volatile("st.global.release.sys.b32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
-#else
-    __threadfence_system();
-    asm volatile("st.global.volatile.b32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
-#endif
+    #if USING_ROCM 
+    __atomic_store((__attribute__((address_space(1))) uint32_t*)flag_addr, (__attribute__((address_space(1))) uint32_t*)&flag, __ATOMIC_RELEASE);
+    #else
+    #if __CUDA_ARCH__ >= 700
+        asm volatile("st.global.release.sys.b32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
+    #else
+        __threadfence_system();
+        asm volatile("st.global.volatile.b32 [%1], %0;" ::"r"(flag), "l"(flag_addr));
+    #endif
+    #endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static inline __device__ void ld_flag_acquire(uint32_t& flag, uint32_t* flag_addr)
 {
-#if __CUDA_ARCH__ >= 700
-    asm volatile("ld.global.acquire.sys.b32 %0, [%1];" : "=r"(flag) : "l"(flag_addr));
-#else
-    asm volatile("ld.global.volatile.b32 %0, [%1];" : "=r"(flag) : "l"(flag_addr));
-#endif
+    #if USING_ROCM 
+    __atomic_load((__attribute__((address_space(1))) uint32_t*)flag_addr, &flag, __ATOMIC_ACQUIRE);
+    #else
+    #if __CUDA_ARCH__ >= 700
+        asm volatile("ld.global.acquire.sys.b32 %0, [%1];" : "=r"(flag) : "l"(flag_addr));
+    #else
+        asm volatile("ld.global.volatile.b32 %0, [%1];" : "=r"(flag) : "l"(flag_addr));
+    #endif
+    #endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -100,6 +120,7 @@ inline __device__ uint4 add128b<uint4, float>(uint4 a, uint4 b)
     return c;
 }
 
+#ifdef ENABLE_BF16
 template<>
 inline __device__ bf168 add128b<bf168, __nv_bfloat16>(bf168 a, bf168 b)
 {
@@ -110,6 +131,7 @@ inline __device__ bf168 add128b<bf168, __nv_bfloat16>(bf168 a, bf168 b)
     c.w = bf16hadd2(a.w, b.w);
     return c;
 }
+#endif
 
 // init 128bits data with 0
 template<typename T>
@@ -415,11 +437,15 @@ void invokeCustomAllReduceDispatch(CustomAllReduceParameters* param, cudaStream_
 
 // Template instantiation
 
+#ifdef ENABLE_BF16
 INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_DISPATCH(__nv_bfloat16)
+#endif
 INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_DISPATCH(float)
 INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_DISPATCH(half)
 
+#ifdef ENABLE_BF16
 INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_KERNEL(__nv_bfloat16)
+#endif
 INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_KERNEL(float)
 INSTANTIATE_GENERAL_CUSTOM_ALL_REDUCE_KERNEL(half)
 

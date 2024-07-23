@@ -83,6 +83,7 @@ cc_library(
         "sampling_topk_kernels.cu",
         "sampling_topp_kernels.cu",
         "sampling_penalty_kernels.cu",
+        "custom_ar_kernels.cu",
     # ],
         "decoder_masked_multihead_attention.cu",
     ]+glob([
@@ -117,6 +118,7 @@ cc_library(
         "sampling_penalty_kernels.h",
         "penalty_types.h",
         "decoder_masked_multihead_attention.h",
+        "custom_ar_kernels.h",
     ] + glob([
         "decoder_masked_multihead_attention/*.h",
     ]),
