@@ -39,6 +39,7 @@ class CacheManager:
     v_blocks: torch.Tensor
     def __init__(self, config: CacheConfig, nccl_op: Any) -> None:
         self.config = config
+        self.device = g_parallel_info.device
         self.seq_size_per_block = config.seq_size_per_block
         self.__init_free_block(config, nccl_op)
         self.__init_kv_cache(config)
@@ -49,7 +50,7 @@ class CacheManager:
         block_nums = config.block_nums
         
         if g_parallel_info.tp_size > 1:
-            block_nums_t = torch.tensor([block_nums], dtype=torch.int32, device=config.device)
+            block_nums_t = torch.tensor([block_nums], dtype=torch.int32, device=self.device)
             nccl_op.broadcast_tp([block_nums_t])
             block_nums = int(block_nums_t[0])
         logging.info(f"block num: {block_nums}")
@@ -66,12 +67,12 @@ class CacheManager:
         # block num not use config when tp, use sync block num
         # block_nums = config.block_nums
         self.k_blocks = torch.zeros((config.layer_num, self.block_nums, config.local_head_num_kv,
-                                config.seq_size_per_block, config.size_per_head), dtype=config.dtype, device=config.device)
-        self.v_blocks = torch.zeros((config.layer_num, self.block_nums, config.local_head_num_kv, config.seq_size_per_block, config.size_per_head), dtype=config.dtype, device=config.device)
+                                config.seq_size_per_block, config.size_per_head), dtype=config.dtype, device=self.device)
+        self.v_blocks = torch.zeros((config.layer_num, self.block_nums, config.local_head_num_kv, config.seq_size_per_block, config.size_per_head), dtype=config.dtype, device=self.device)
         if config.dtype is torch.int8:
             self.k_scale = torch.zeros((config.layer_num, self.block_nums, config.local_head_num_kv,
-                                config.seq_size_per_block), dtype=torch.float32, device=config.device)
-            self.v_scale = torch.zeros((config.layer_num, self.block_nums, config.local_head_num_kv, config.seq_size_per_block), dtype=torch.float32, device=config.device)
+                                config.seq_size_per_block), dtype=torch.float32, device=self.device)
+            self.v_scale = torch.zeros((config.layer_num, self.block_nums, config.local_head_num_kv, config.seq_size_per_block), dtype=torch.float32, device=self.device)
         else:
             self.k_scale = None
             self.v_scale = None

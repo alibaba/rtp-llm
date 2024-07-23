@@ -48,7 +48,7 @@ class GPT(BaseModel):
         self.init_prefix_encoder()
         self.init_medusa()
         self.init_pipeline_param()
-        self.load()
+        self.load(self.device)
         self.init_linear_bias()
 
     def init_misc(self):
@@ -135,7 +135,7 @@ class GPT(BaseModel):
             self.weight.lora_resource.update(lora_infos)
         logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
-    def load(self):
+    def load(self, device: str):
         self._load_weights()
         self._initialize_from_weight()
 
@@ -148,7 +148,7 @@ class GPT(BaseModel):
             tensor_map: Dict[str, torch.Tensor] = {}
             for name in tensor_names:
                 tensors = model_weights_loader.load_tensor(name)
-                if len(tensors) !=1 :
+                if len(tensors) != 1:
                     raise Exception(f"load tensor {name} failed, get len=={len(tensors)}")
                 loaded_tensor = tensors[0].cuda()
                 tensor_map[name] = loaded_tensor
@@ -242,8 +242,7 @@ class GPT(BaseModel):
             self._safe_load_prefix_encoder_weight_from_module(
                 self.prefix_encoder.embedding.weight,
                 W.prefix_w,
-                self.compute_dtype,
-                self.device)
+                self.compute_dtype)
             if self.prefix_encoder.prefix_projection:
                 raise Exception("not implement prefix_projection yet")
 
@@ -251,8 +250,7 @@ class GPT(BaseModel):
         if self.medusa_head is not None:
             self._safe_load_medusa_head_weight_from_module(
                 self.medusa_head,
-                self.compute_dtype,
-                self.device)
+                self.compute_dtype)
 
     def init_pipeline_weight(self):
         # pylint:disable=line-too-long

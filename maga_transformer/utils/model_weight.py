@@ -1233,7 +1233,7 @@ class ModelWeights:
         self.weights: List[Dict[str, torch.Tensor]] = []
         self.global_weights: Dict[str, torch.Tensor] = {}
         self._pytorch_weights: Dict[str, torch.Tensor] = {}
-        self.lora_resource: LoraResource = LoraResource(device)
+        self.lora_resource: LoraResource = LoraResource()
         self._dtype = None
 
         for _ in range(num_layers):
