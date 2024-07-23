@@ -138,8 +138,9 @@ TEST_F(CudaSamplerTest, testRandom) {
     auto top_p = createBuffer<float>({1}, {0.5f}, AllocationType::HOST);
     auto temperture = createBuffer<float>({1}, {0.2}, AllocationType::HOST);
 
+    auto logits_input = device_->clone({*logits});
     GreedyParams params({
-        *logits, *sequence_lengths, *input_lengths, *output_token_ids, step,
+        *logits_input, *sequence_lengths, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
         nullopt, nullopt, nullopt,
         *cum_log_probs, nullopt, nullopt
@@ -153,6 +154,7 @@ TEST_F(CudaSamplerTest, testRandom) {
     std::vector<size_t> counts(vocab_size, 0);
     for (int i = 0; i < 10000; i++) {
         rand_seed->data<uint64_t>()[0] = i * 100;
+        device_->copy({*logits_input, *logits});
         device_->sampleGreedy(params);
         printBuffer<int32_t>(*output_token_ids, "output_token_ids");
         output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
@@ -161,23 +163,29 @@ TEST_F(CudaSamplerTest, testRandom) {
     for (int i = 0; i < vocab_size; i++) {
         cout << i << ": " << counts[i] << endl;
     }
-    EXPECT_GE(counts[0], 1000);
-    EXPECT_GE(counts[1], 1000);
-    EXPECT_GE(counts[2], 1000);
-    EXPECT_GE(counts[8], 1000);
-    EXPECT_GE(counts[9], 1000);
+    std::unordered_set<size_t> expected = {2, 8, 9};
+    for (int i = 0; i < vocab_size; i++) {
+        cout << i << ": " << counts[i] << endl;
+        if (expected.find(i) != expected.end()) {
+            EXPECT_GE(counts[i], 1000);
+        } else {
+            EXPECT_EQ(counts[i], 0);
+        }
+    }
 
     top_k->data<uint32_t>()[0] = 4;
     top_p->data<float>()[0] = 0.0f;
     counts = std::vector<size_t>(vocab_size, 0);
     for (int i = 0; i < 10000; i++) {
         rand_seed->data<uint64_t>()[0] += i * 100;
+        device_->copy({*logits_input, *logits});
         device_->sampleGreedy(params);
         printBuffer<int32_t>(*output_token_ids, "output_token_ids");
         output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
         counts[output_token_ids_host[5]]++;
     }
-    std::unordered_set<size_t> expected = {1, 2, 8, 9};
+
+    expected = {0, 2, 8, 9};
     for (int i = 0; i < vocab_size; i++) {
         cout << i << ": " << counts[i] << endl;
         if (expected.find(i) != expected.end()) {

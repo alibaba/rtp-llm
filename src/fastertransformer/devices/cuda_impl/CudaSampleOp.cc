@@ -55,54 +55,6 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     auto max_top_p = *max_element(top_p.data<SamplerT>(), top_p.dataWithOffset<SamplerT>(top_p.size()));
     FT_LOG_DEBUG("max_top_k: %d, max_top_p: %f", max_top_k, max_top_p);
 
-    size_t topk_ws_size;
-    size_t topp_ws_size;
-    size_t cub_temp_storage_size; // useless variable
-
-    // these two kernel calls are only for querying workspace size,
-    // all the args are ignored.
-    invokeTopKSampling<SamplerT>(nullptr,
-                                topk_ws_size,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                max_top_k,
-                                max_top_p,
-                                vocab_size_padded,
-                                nullptr,
-                                stream_,
-                                batch_size,
-                                nullptr);
-
-    invokeTopPSampling<SamplerT>(nullptr,  // workspace
-                                topp_ws_size,
-                                cub_temp_storage_size,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                nullptr,
-                                batch_size,
-                                vocab_size_padded,
-                                nullptr,
-                                max_top_p,
-                                stream_,
-                                &device_prop_,
-                                nullptr);
-
-    FT_LOG_DEBUG("topk_ws_size: %d, topp_ws_size: %d", topk_ws_size, topp_ws_size);
-
     // see BaseSamplingLayer<T>::allocateBuffer ------------------
     auto skip_top_k_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
     auto skip_top_p_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
@@ -111,9 +63,6 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     auto topp_offset_buf = allocateBuffer({DataType::TYPE_INT32, {batch_size + 1}});
     auto begin_topp_offset_buf = allocateBuffer({DataType::TYPE_INT32, {batch_size + 1}});
 
-    // TopKSamplingLayer<T>::allocateBuffer
-    auto top_k_workspace = allocateBuffer({topk_ws_size});
-    auto top_p_workspace = allocateBuffer({topp_ws_size});
     auto runtime_top_k_buf = allocateBuffer({DataType::TYPE_UINT32, {batch_size}});
     copy({*runtime_top_k_buf, top_k});
     auto runtime_top_p_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
@@ -221,27 +170,54 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                                skip_top_k_decode_buf->data<bool>(),
                                stream_);
 
-    invokeBatchTopKSampling(
-        top_k_workspace->data(),
-        topk_ws_size,
-        logits.data<float>(),
-        transposed_tokens->dataWithOffset<int32_t>(step * batch_size),
-        nullptr, // sequence_length
-        nullptr, // finished
-        cum_log_probs,
-        output_log_probs,
-        nullptr, // output_index_logits
-        nullptr, // token_id_for_index_prob,
-        (curandState_t *)curandstate_buf_->data(),
-        max_top_k,  // useless because runtime_top_k_buf_ is never nullptr. Keep for legacy.
-        (int32_t*)runtime_top_k_buf->data<uint32_t>(),
-        1.0f,  // useless because runtime_top_p_buf_ is never nullptr. Keep for legacy.
-        runtime_top_p_buf->data<float>(),
-        vocab_size_padded,
-        nullptr, // end_id
-        stream_,
-        batch_size,
-        skip_top_k_decode_buf->data<bool>());
+    auto skip_top_k = clone({*skip_top_k_decode_buf, AllocationType::HOST});
+    if (std::any_of(skip_top_k->data<bool>(),
+                    skip_top_k->dataWithOffset<bool>(batch_size),
+                    [](auto s) { return !s; }))
+    {
+        size_t topk_ws_size;
+        invokeTopKSampling<SamplerT>(nullptr,
+                                    topk_ws_size,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    max_top_k,
+                                    max_top_p,
+                                    vocab_size_padded,
+                                    nullptr,
+                                    stream_,
+                                    batch_size,
+                                    nullptr);
+        auto top_k_workspace = allocateBuffer({topk_ws_size});
+
+        invokeBatchTopKSampling(
+            top_k_workspace->data(),
+            topk_ws_size,
+            logits.data<float>(),
+            transposed_tokens->dataWithOffset<int32_t>(step * batch_size),
+            nullptr, // sequence_length
+            nullptr, // finished
+            cum_log_probs,
+            output_log_probs,
+            nullptr, // output_index_logits
+            nullptr, // token_id_for_index_prob,
+            (curandState_t *)curandstate_buf_->data(),
+            max_top_k,  // useless because runtime_top_k_buf_ is never nullptr. Keep for legacy.
+            (int32_t*)runtime_top_k_buf->data<uint32_t>(),
+            1.0f,  // useless because runtime_top_p_buf_ is never nullptr. Keep for legacy.
+            runtime_top_p_buf->data<float>(),
+            vocab_size_padded,
+            nullptr, // end_id
+            stream_,
+            batch_size,
+            skip_top_k_decode_buf->data<bool>());
+    }
 
     // 4.2. run top_p
     // NOTE: running top_k could write values to runtime bufs, so need to copy again.
@@ -265,46 +241,76 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                                nullptr,
                                stream_);
 
-    invokeTopPInitialize(
-        topp_id_vals_buf->data<int32_t>(),
-        topp_offset_buf->data<int32_t>(),
-        begin_topp_offset_buf->data<int32_t>(),
-        batch_size,
-        vocab_size_padded,
-        stream_);
+    auto skip_top_p = clone({*skip_top_p_decode_buf, AllocationType::HOST});
+    if (std::any_of(skip_top_p->data<bool>(),
+                    skip_top_p->dataWithOffset<bool>(batch_size),
+                    [](auto s) { return !s; }))
+    {
+        invokeTopPInitialize(
+            topp_id_vals_buf->data<int32_t>(),
+            topp_offset_buf->data<int32_t>(),
+            begin_topp_offset_buf->data<int32_t>(),
+            batch_size,
+            vocab_size_padded,
+            stream_);
 
-    invokeAddBiasSoftMax(
-        logits.data<SamplerT>(),
-        (SamplerT *)nullptr, // bias
-        nullptr, // end_id
-        nullptr, // finished
-        batch_size,
-        vocab_size_padded,
-        vocab_size_padded,
-        stream_);
+        invokeAddBiasSoftMax(
+            logits.data<SamplerT>(),
+            (SamplerT *)nullptr, // bias
+            nullptr, // end_id
+            nullptr, // finished
+            batch_size,
+            vocab_size_padded,
+            vocab_size_padded,
+            stream_);
 
-    invokeBatchTopPSampling(
-        top_p_workspace->data(),
-        topp_ws_size,
-        cub_temp_storage_size,
-        transposed_tokens->dataWithOffset<int32_t>(step * batch_size),
-        nullptr, // sequence_length
-        nullptr, // finished
-        cum_log_probs,
-        output_log_probs,
-        logits.data<float>(),
-        topp_id_vals_buf->data<int32_t>(),
-        topp_offset_buf->data<int32_t>(),
-        begin_topp_offset_buf->data<int32_t>(),
-        (curandState_t *)curandstate_buf_->data(),
-        batch_size,
-        vocab_size_padded,
-        nullptr, // end_id
-        max_top_p,
-        runtime_top_p_buf->data<float>(),
-        stream_,
-        &device_prop_,
-        skip_top_p_decode_buf->data<bool>());
+        size_t topp_ws_size;
+        size_t cub_temp_storage_size;
+        invokeTopPSampling<SamplerT>(nullptr,
+                                    topp_ws_size,
+                                    cub_temp_storage_size,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    nullptr,
+                                    batch_size,
+                                    vocab_size_padded,
+                                    nullptr,
+                                    max_top_p,
+                                    stream_,
+                                    &device_prop_,
+                                    nullptr);
+        auto top_p_workspace = allocateBuffer({topp_ws_size});
+
+        invokeBatchTopPSampling(
+            top_p_workspace->data(),
+            topp_ws_size,
+            cub_temp_storage_size,
+            transposed_tokens->dataWithOffset<int32_t>(step * batch_size),
+            nullptr, // sequence_length
+            nullptr, // finished
+            cum_log_probs,
+            output_log_probs,
+            logits.data<float>(),
+            topp_id_vals_buf->data<int32_t>(),
+            topp_offset_buf->data<int32_t>(),
+            begin_topp_offset_buf->data<int32_t>(),
+            (curandState_t *)curandstate_buf_->data(),
+            batch_size,
+            vocab_size_padded,
+            nullptr, // end_id
+            max_top_p,
+            runtime_top_p_buf->data<float>(),
+            stream_,
+            &device_prop_,
+            skip_top_p_decode_buf->data<bool>());
+    }
 
     auto output_tokens = transpose({*transposed_tokens});
     copy({params.token_ids, *output_tokens});
