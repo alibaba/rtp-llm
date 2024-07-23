@@ -11,6 +11,8 @@ import os
 
 async def main():
     update_master_info('127.0.0.1', 42345)
+    os.environ["MODEL_TYPE"] = os.environ.get("MODEL_TYPE", "qwen2")
+    os.environ["CHECKPOINT_PATH"] = os.environ.get("CHECKPOINT_PATH", "Qwen/Qwen-1_8B-Chat")
 
     model_config = ModelFactory.create_normal_model_config()
     model_config.use_rpc = True
