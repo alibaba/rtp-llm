@@ -153,13 +153,13 @@ def copts():
         "-DTHRUST_IGNORE_CUB_VERSION_CHECK",
         "-DUSE_C10D_NCCL",
         "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE",
-    ])+ if_rocm([
+    ]) + if_rocm([
         "-x", "rocm",
     ])
 
 def cuda_copts():
     # add --objdir-as-tempdir to rm tmp file after build
-    return copts() + cuda_default_copts() + ["-nvcc_options=objdir-as-tempdir"]
+    return copts() + cuda_default_copts() + if_cuda(["-nvcc_options=objdir-as-tempdir"])
 
 def rocm_copts():
     return copts() + rocm_default_copts() + [

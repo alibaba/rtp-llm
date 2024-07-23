@@ -21,7 +21,6 @@ class AsyncModel:
 
         assert self.config.max_seq_len > 0
         self.tokenizer = model.tokenizer
-        logging.info(f'first mem info: used:{get_mem_info().used} free: {get_mem_info().free}')
         self.decoder_engine_ = create_engine(self.model, self.config, self.sp_model, self.sp_model.config if self.sp_model else None, use_rpc)
         self.decoder_engine_.start()
 

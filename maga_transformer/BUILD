@@ -117,6 +117,13 @@ py_library(
 )
 
 py_library(
+    name = "device",
+    srcs = glob([
+        "device/**/*.py",
+    ]),
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "models/*.py",
@@ -270,6 +277,7 @@ py_library(
         ":ops",
         ":pipeline",
         ":models",
+        ":device",
         ":config",
         ":structure",
         "//maga_transformer/server:server",
