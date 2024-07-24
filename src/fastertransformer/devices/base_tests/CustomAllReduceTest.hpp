@@ -44,19 +44,23 @@ public:
         return device_creator(params);
     }
 
-    void baseTest(const size_t rank, const size_t world_size, const size_t port) {
+    void baseTest(const size_t rank, const size_t world_size, const size_t port, const size_t m) {
         auto device = initTestDevices(rank, world_size, port);
 
         // test castom all reduce
-        const auto tensor = torch::arange(0, -1, -0.01, torch::kFloat32) * ((int32_t)rank + 1);
-        auto       buf    = device->allocateBuffer({DataType::TYPE_FP32, {100}});
+        const float begin = 0.0;
+        const float end = 1.0;
+        const float step = (end - begin) / m;
+
+        const auto tensor = torch::arange(begin, end, step, torch::kFloat32) * ((int32_t)rank + 1);
+        auto       buf    = device->allocateBuffer({DataType::TYPE_FP32, {static_cast<unsigned long>(tensor.size(0))}});
         copy_tensor_to_buffer(tensor, buf);
         device->allReduce({buf, ReduceOp::Sum});
         device->syncAndCheck();
         auto out = bufferToTensor(*buf, device);
         device->syncAndCheck();
 
-        auto expected = torch::arange(0, -1, -0.01, torch::kFloat32)
+        auto expected = torch::arange(begin, end, step, torch::kFloat32)
                         * (((int32_t)world_size * ((int32_t)world_size - 1) / 2) + (int32_t)world_size);
         CHECK_TRUE(checkTensorClose(expected, out, 1e-6, 1e-6));
 
@@ -170,7 +174,8 @@ public:
 
             if (pids[i] == 0) {
                 if (!run_benchmark) {
-                    baseTest(i, world_size, port);
+                    baseTest(i, world_size, port, 100);
+                    baseTest(i, world_size, port2, 500000);
                 } else {
                     benchmark(i, world_size, port, port2);
                 }
