@@ -227,8 +227,8 @@ class Llava(Llama, MultiModalMixin):
 
         new_input_embeds = []
 
-        tune_mm_mlp_adapter = self.config.vit_related_params.config["tune_mm_mlp_adapter"]
-        mm_use_im_start_end = self.config.vit_related_params.config["mm_use_im_start_end"]
+        tune_mm_mlp_adapter = self.config.vit_related_params.config.get("tune_mm_mlp_adapter", False)
+        mm_use_im_start_end = self.config.vit_related_params.config.get("mm_use_im_start_end", False)
         append_extra_tokens = tune_mm_mlp_adapter and mm_use_im_start_end
 
         cur_input_ids = input_ids

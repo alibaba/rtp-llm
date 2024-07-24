@@ -31,7 +31,7 @@ class ImageTransform:
 
 class MultiModalEmbeddingInterface:
     @torch.inference_mode()
-    def mm_embedding(self, url: str, device, dtype):
+    def mm_embedding(self, url: str, device, dtype, **kwargs):
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
         cached_res = data_cache_.check_cache(url)
@@ -41,7 +41,7 @@ class MultiModalEmbeddingInterface:
                 mm_input = self._mm_preprocess(bytes_io)
             except Exception as e:
                 raise Exception(f"cannot download image from {url}, exception {e}")
-            features = self.mm_process(mm_input, device).to(dtype).contiguous()
+            features = self.mm_process(mm_input, device, **kwargs).to(dtype).contiguous()
             data_cache_.insert_cache(url, features)
             return features
         else:
@@ -51,7 +51,7 @@ class MultiModalEmbeddingInterface:
         raise NotImplementedError
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, device):
+    def mm_process(self, mm_input, device, **kwargs):
         raise NotImplementedError
 
 
@@ -60,7 +60,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
         return Image.open(data).convert("RGB")
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, device):
+    def mm_process(self, mm_input, device, **kwargs):
         return self.image_embedding([mm_input], device)[0]
 
     @torch.inference_mode()
@@ -75,7 +75,7 @@ class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
         return torchaudio.load(data)
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, device):
+    def mm_process(self, mm_input, device, **kwargs):
         return self.audio_embedding(mm_input, device)
 
     @torch.inference_mode()
@@ -87,7 +87,7 @@ class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
         return VideoReader(data, ctx=cpu(0))
 
     @torch.inference_mode()
-    def mm_process(self, mm_input, device):
+    def mm_process(self, mm_input, device, **kwargs):
         return self.video_embedding(mm_input, device)
 
     @torch.inference_mode()
