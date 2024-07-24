@@ -236,7 +236,7 @@ void CudaDevice::checkUseMultiBlockMode() {
     }
     if (get_sm() == 80 || get_sm() >= 89) {
         FT_LOG_INFO("MMHA multi_block_mode is enabled");
-        use_multi_block_mode = false;
+        use_multi_block_mode = true;
         return;
     }
     use_multi_block_mode = true;
