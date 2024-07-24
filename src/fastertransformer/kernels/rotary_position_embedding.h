@@ -879,6 +879,57 @@ public:
     }
 };
 
+template<typename scalar_t, typename vector_t>
+__device__ inline void apply_rope(int       RopeStyle,
+                                  vector_t& x,
+                                  scalar_t* smem,
+                                  int       tidx,
+                                  int       seqidx,
+                                  int       dim,
+                                  int       seq_len,
+                                  float     base,
+                                  float     scaling_factor,
+                                  int       dynamic_embedding_max_pos,
+                                  int       org_embedding_pos,
+                                  int       base_scale,
+                                  int       logn_length = 0) {
+    switch (RopeStyle) {
+        case 0:
+            // NoRope
+            break;
+
+        case 1:
+            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar>::impl(
+                x, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, dynamic_embedding_max_pos);
+            break;
+
+        case 3:
+            // glm2 rotary embedding
+            // only do rotary embedding for [..., d / 2]
+            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM2>::impl(
+                x, tidx, seqidx, dim / 2, base, scaling_factor, base_scale);
+            break;
+
+        case 4:
+            // qwen rorary embedding
+            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::QWenNTKScalar>::impl(
+                x, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, logn_length);
+            break;
+
+        case 5:
+            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::LinearScalar>::impl(
+                x, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, dynamic_embedding_max_pos);
+            break;
+
+        case 6:
+            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>::impl(
+                x, smem, tidx, seqidx, dim, base, scaling_factor, org_embedding_pos);
+            break;
+
+        default:
+            break;
+    }
+}
 
 template<typename scalar_t, typename vector_t>
 __device__ inline void context_rope(int       RopeStyle,
@@ -908,54 +959,33 @@ __device__ inline void context_rope(int       RopeStyle,
         seqidx = position_id;
     }
 
-    switch (RopeStyle) {
-        case 0:
+    apply_rope(RopeStyle,
+               q,
+               smem,
+               tidx,
+               seqidx,
+               dim,
+               seq_len,
+               base,
+               scaling_factor,
+               dynamic_embedding_max_pos,
+               org_embedding_pos,
+               base_scale,
+               logn_length);
 
-            // NoRope
-            break;
-
-        case 1:
-
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar>::impl(
-                q, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, dynamic_embedding_max_pos);
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar>::impl(
-                k, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, dynamic_embedding_max_pos);
-            break;
-        case 3:
-            // glm2 rotary embedding
-            // only do rotary embedding for [..., d / 2]
-
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM2>::impl(
-                q, tidx, seqidx, dim / 2, base, scaling_factor, base_scale);
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM2>::impl(
-                k, tidx, seqidx, dim / 2, base, scaling_factor, base_scale);
-            break;
-
-        case 4:
-            // qwen rorary embedding
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::QWenNTKScalar>::impl(
-                q, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, logn_length);
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::QWenNTKScalar>::impl(
-                k, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, logn_length);
-            break;
-        
-        case 5:
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::LinearScalar>::impl(
-                q, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, dynamic_embedding_max_pos);
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::LinearScalar>::impl(
-                k, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, dynamic_embedding_max_pos);
-            break;
-        
-        case 6:
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>::impl(
-                q, smem, tidx, seqidx, dim, base, scaling_factor, org_embedding_pos);
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>::impl(
-                k, smem, tidx, seqidx, dim, base, scaling_factor, org_embedding_pos);
-            break;
-
-        default:
-            break;
-    }
+    apply_rope(RopeStyle,
+               k,
+               smem,
+               tidx,
+               seqidx,
+               dim,
+               seq_len,
+               base,
+               scaling_factor,
+               dynamic_embedding_max_pos,
+               org_embedding_pos,
+               base_scale,
+               logn_length);
 }
 
 template<typename scalar_t, typename vector_t>
@@ -970,14 +1000,14 @@ __device__ inline void attention_rope(int       RopeStyle,
                                       int       seq_len,
                                       float     base,
                                       float     scaling_factor,
-                                      int       max_pos,
+                                      int       dynamic_embedding_max_pos,
                                       int       org_embedding_pos,
                                       int       base_scale,
                                       int       position_id,
                                       int       input_len,
                                       int       prefix_prompt_length,
                                       int       count_prefix_length,
-                                      int       logn_seq_len,
+                                      int       logn_length,
                                       bool      handle_kv) {
 
     if (count_prefix_length) {
@@ -989,61 +1019,39 @@ __device__ inline void attention_rope(int       RopeStyle,
         tlength = position_id;
     }
 
-    switch (RopeStyle) {
-        case 0:
+    if (RopeStyle == 3) {
+        // glm2
+        tlength = tlength - prefix_prompt_length;
+    }
 
-            // NoRope
-            break;
+    apply_rope(RopeStyle,
+               q,
+               smem,
+               tidx,
+               tlength,
+               dim,
+               seq_len,
+               base,
+               scaling_factor,
+               dynamic_embedding_max_pos,
+               org_embedding_pos,
+               base_scale,
+               logn_length);
 
-        case 1:
-
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar>::impl(
-                q, smem, tidx, tlength, dim, base, scaling_factor, seq_len, max_pos);
-            if (handle_kv) {
-                Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar>::impl(
-                    k, smem, tidx, tlength, dim, base, scaling_factor, seq_len, max_pos);
-            }
-            break;
-
-        case 3:
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM2>::impl(
-                q, tidx, tlength - prefix_prompt_length, dim / 2, base, scaling_factor, base_scale);
-            if (handle_kv) {
-                Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM2>::impl(
-                    k, tidx, tlength - prefix_prompt_length, dim / 2, base, scaling_factor, base_scale);
-            }
-            break;
-
-        case 4:
-            // qwen rorary embedding
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::QWenNTKScalar>::impl(
-                q, smem, tidx, tlength, dim, base, scaling_factor, seq_len, logn_seq_len);
-            if (handle_kv) {
-                Rope<scalar_t, vector_t, RotaryEmbeddingStyle::QWenNTKScalar>::impl(
-                    k, smem, tidx, tlength, dim, base, scaling_factor, seq_len, logn_seq_len);
-            }
-            break;
-        
-        case 5:
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::LinearScalar>::impl(
-                q, smem, tidx, tlength, dim, base, scaling_factor, seq_len, max_pos);
-            if (handle_kv) {
-                Rope<scalar_t, vector_t, RotaryEmbeddingStyle::LinearScalar>::impl(
-                    k, smem, tidx, tlength, dim, base, scaling_factor, seq_len, max_pos);
-            }
-            break;
-        
-        case 6:
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>::impl(
-                q, smem, tidx, tlength, dim, base, scaling_factor, org_embedding_pos);
-            if (handle_kv) {
-                Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>::impl(
-                    k, smem, tidx, tlength, dim, base, scaling_factor, org_embedding_pos);
-            }
-            break;
-
-        default:
-            break;
+    if (handle_kv) {
+        apply_rope(RopeStyle,
+                   k,
+                   smem,
+                   tidx,
+                   tlength,
+                   dim,
+                   seq_len,
+                   base,
+                   scaling_factor,
+                   dynamic_embedding_max_pos,
+                   org_embedding_pos,
+                   base_scale,
+                   logn_length);
     }
 }
 
