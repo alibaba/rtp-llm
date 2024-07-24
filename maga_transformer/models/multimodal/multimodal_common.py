@@ -31,7 +31,7 @@ class ImageTransform:
 
 class MultiModalEmbeddingInterface:
     @torch.inference_mode()
-    def mm_embedding(self, url: str, device):
+    def mm_embedding(self, url: str, device, dtype):
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
         cached_res = data_cache_.check_cache(url)
@@ -41,7 +41,7 @@ class MultiModalEmbeddingInterface:
                 mm_input = self._mm_preprocess(bytes_io)
             except Exception as e:
                 raise Exception(f"cannot download image from {url}, exception {e}")
-            features = self.mm_process(mm_input, device)
+            features = self.mm_process(mm_input, device).to(dtype).contiguous()
             data_cache_.insert_cache(url, features)
             return features
         else:
