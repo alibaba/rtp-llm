@@ -150,15 +150,17 @@ static __global__ void oneShotAllReduceKernel(CustomAllReduceParameters params)
     size_t max_offset = std::min((bidx + 1) * params.elts_per_block, params.elts_per_rank);
 
     // Synchronize the ranks.
-    volatile uint32_t* barrier_d = params.peer_barrier_ptrs[params.local_rank];
     if (tidx < RANKS_PER_NODE) {
         // The 1st block notifies the other ranks.
         if (bidx == 0) {
-            params.peer_barrier_ptrs[tidx][params.local_rank] = params.barrier_flag;
+            st_flag_release(params.barrier_flag, params.peer_barrier_ptrs[tidx] + params.local_rank);
         }
-
+        uint32_t* peer_barrier_d = params.peer_barrier_ptrs[params.local_rank] + tidx;
+        uint32_t  rank_barrier   = 0;
         // Busy-wait until all ranks are ready.
-        while (barrier_d[tidx] < params.barrier_flag) {}
+        do {
+            ld_flag_acquire(rank_barrier, peer_barrier_d);
+        } while (rank_barrier != params.barrier_flag);
     }
 
     // Make sure we can move on...
@@ -214,15 +216,18 @@ static __global__ void twoShotAllReduceKernel(CustomAllReduceParameters params)
     size_t max_offset = min(offset + params.elts_per_block, params.elts_total);
 
     // Synchronize the ranks.
-    volatile uint32_t* barrier_d = params.peer_barrier_ptrs[params.local_rank];
+
     if (tidx < RANKS_PER_NODE) {
         // The 1st block notifies the other ranks.
-        if (bidx == 0) {
-            params.peer_barrier_ptrs[tidx][params.local_rank] = params.barrier_flag;
+            if (bidx == 0) {
+            st_flag_release(params.barrier_flag, params.peer_barrier_ptrs[tidx] + params.local_rank);
         }
-
+        uint32_t* peer_barrier_d = params.peer_barrier_ptrs[params.local_rank] + tidx;
+        uint32_t  rank_barrier   = 0;
         // Busy-wait until all ranks are ready.
-        while (barrier_d[tidx] < params.barrier_flag) {}
+        do {
+            ld_flag_acquire(rank_barrier, peer_barrier_d);
+        } while (rank_barrier != params.barrier_flag);
     }
 
     // Make sure we can move on...

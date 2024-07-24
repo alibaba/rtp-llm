@@ -73,7 +73,7 @@ void CustomAllReduceComm::allReduce(
     param_.elts_total   = elts;
     param_.barrier_flag = FLAG(param_.barrier_flag + 1);
     check_cuda_error(cudaMemcpyAsync(
-        param_.peer_comm_buffer_ptrs[rank_], input_ptr, elts * getTypeSize(data_type), cudaMemcpyDeviceToDevice));
+        param_.peer_comm_buffer_ptrs[rank_], input_ptr, elts * getTypeSize(data_type), cudaMemcpyDeviceToDevice, stream));
 
     param_.local_output_buffer_ptr = output_ptr;
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeCustomAllReduceDispatch, &param_, stream, tp_ranks_.size());
@@ -171,8 +171,6 @@ std::vector<cudaIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Ncc
 }
 
 bool CustomAllReduceComm::shouldCustomAR(const std::vector<int>& tp_ranks, int rank) {
-    // temporary force disable custom ar
-    return false;
 
     size_t world_size = tp_ranks.size();
     char* disable_custom_ar_str = std::getenv("FT_DISABLE_CUSTOM_AR");
