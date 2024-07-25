@@ -26,8 +26,12 @@ FfnLayerOutput CudaDevice::moeFfnLayer(const FfnLayerParams& params) {
         }
     }
 
-
-    const auto output = allocateBuffer({type, {token_num, hidden_dim}});
+    BufferPtr output = nullptr;
+    if (params.output) {
+        output = params.output;
+    } else {
+        output = allocateBuffer({type, {token_num, hidden_dim}});
+    }
 
     const auto gate = gemm({hidden, *params.weights.moe_gating_weight->kernel,
                             nullopt, nullptr, DataType::TYPE_FP32});

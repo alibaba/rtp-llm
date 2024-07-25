@@ -423,11 +423,11 @@ struct FfnLayerParams {
                    const FfnLayerWeights&       weights,
                    const OptionalConstBufferRef residual = std::nullopt,
                    const OptionalLoraInput lora_input = std::nullopt,
-                   const QScheme                qscheme  = QScheme::NoQuantize):
-        input(input), configs(configs), weights(weights), residual(residual), lora_input(lora_input), qscheme(qscheme) {}
+                   const QScheme                qscheme  = QScheme::NoQuantize,
+                   BufferPtr                    output = nullptr):
+        input(input), configs(configs), weights(weights), residual(residual), lora_input(lora_input), qscheme(qscheme), output(std::move(output)){}
 
     const Buffer& input;
-
     const FfnConfigs&            configs;
     const FfnLayerWeights&       weights;
 
@@ -436,6 +436,7 @@ struct FfnLayerParams {
     const OptionalLoraInput lora_input;
 
     const QScheme qscheme;
+    BufferPtr                    output;
 };
 
 struct GreedyParams {
@@ -487,6 +488,12 @@ enum class ReduceOp {
     Max = 2,
     Min = 3,
     Avg = 4,
+};
+
+
+struct PrepareAllReduceParams {
+    const BufferPtr buffer;
+    const ReduceOp op;
 };
 
 struct AllReduceParams {

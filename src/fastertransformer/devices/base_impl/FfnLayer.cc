@@ -80,7 +80,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         }
 
         printBufferData(*up_output, "ffn_act");
-        auto down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel));
+        auto down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, output);
         output = loraLinear(LoraLinearParams(down_gemm_params,
                                              *(params.weights.down_lora_weights),
                                              params.lora_input)).output;

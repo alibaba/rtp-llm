@@ -371,13 +371,15 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         }        
 
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_input");
+        auto ffn_output_buf = device_->allocateBuffer({dtype, hidden->shape()}, {"ffn_out_buf"});
         auto ffn_output = device_->ffnLayer(FfnLayerParams({
             *hidden,
             description_.ffn_conf,
             layer.ffn_weights,
             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
             lora_input,
-            qscheme
+            qscheme,
+            move(ffn_output_buf),
         }));
         hidden = ffn_output.hidden_states;
         if (device_props_.tp_size > 1) {
