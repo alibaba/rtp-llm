@@ -637,9 +637,13 @@ class ModelWeightsLoader:
         split_fun = self._model_weights_info.tp_strategy.get(name)
         if not split_fun:
             raise Exception('this model not support TP: ' + name)
-        kv_broadcast = self._weights_info._head_num_kv == 1
-        qkv_hidden_size = self._weights_info._size_per_head *(self._weights_info._head_num + self._weights_info._head_num_kv * 2)
-        ts = split_fun(tensor, self._tp_size, tp_rank=self._tp_rank, hidden_size=self._weights_info._hidden_size, qkv_hidden_size=qkv_hidden_size, kv_broadcast=kv_broadcast)
+        ts = split_fun(t=tensor,
+                       tp=self._tp_size,
+                       tp_rank=self._tp_rank,
+                       hidden_size=self._weights_info._hidden_size,
+                       head_num=self._weights_info._head_num,
+                       head_num_kv=self._weights_info._head_num_kv,
+                       size_per_head=self._weights_info._size_per_head)
         return ts
 
     # 避免被 storage 影响多用显存

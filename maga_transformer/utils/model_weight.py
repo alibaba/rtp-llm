@@ -105,105 +105,66 @@ def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor
 def stack_(ts: List[torch.Tensor]):
     return torch.stack(ts, dim=0)
 
-def get_sp_tensor(t: torch.Tensor, qkv_hidden_size: int, hidden_size: int, tp: int, tp_rank: int, kv_broadcast: bool):
-    kv_hidden_size = (qkv_hidden_size - hidden_size) // 2
+def get_sp_tensor(t: torch.Tensor, head_num: int, head_num_kv: int, size_per_head: int,
+                  tp: int, tp_rank: int, **kwargs):
+    t = t.reshape([-1, (head_num + head_num_kv * 2) * size_per_head])
+    q_hidden = head_num * size_per_head
+    kv_hidden = head_num_kv * size_per_head
     if len(t.shape) == 1:
         t = t.unsqueeze(0)
-    qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
-    if kv_broadcast:
-        ks = t[:,hidden_size:hidden_size + kv_hidden_size]
-        vs = t[:,hidden_size + kv_hidden_size:]
+    qs = sp_neg1(t[:,:q_hidden], tp, tp_rank)
+    if head_num_kv == 1:
+        ks = t[:,q_hidden:q_hidden + kv_hidden]
+        vs = t[:,q_hidden + kv_hidden:]
     else:
-        ks = sp_neg1(t[:,hidden_size:hidden_size + kv_hidden_size], tp, tp_rank)
-        vs = sp_neg1(t[:,hidden_size + kv_hidden_size:], tp, tp_rank)
+        ks = sp_neg1(t[:,q_hidden:q_hidden + kv_hidden], tp, tp_rank)
+        vs = sp_neg1(t[:,q_hidden + kv_hidden:], tp, tp_rank)
     return torch.concat([qs, ks, vs], dim=1).contiguous()
 
 # MHA layout: [D, head*size_per_head, head*size_per_head, head*size_per_head] == [D, 3, D] (sp_neg)
 # MQA layout: [D, head*size_per_head, kv_head*size_per_head, kv_head*size_per_head] (sp_head)
-def sp_head(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
+def sp_head(t: torch.Tensor, hidden_size: int, head_num: int, head_num_kv: int, size_per_head: int,
+            **kwargs: Any) -> torch.Tensor:
     # int4
-    if len(t.shape) ==2 and t.dtype == torch.int32:
+    if len(t.shape) == 2 and t.dtype == torch.int32:
         # awq
-        if t.shape[0] == hidden_size and t.shape[1] == qkv_hidden_size // 8:
-            qkv_hidden_size = qkv_hidden_size // 8
-            hidden_size = hidden_size // 8
-    if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
-        return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
-    else:
-        splitted = sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
-        splitted = splitted.reshape(splitted.shape[0], -1)
-        return splitted
+        if t.shape[0] == hidden_size and t.shape[1] == ((head_num + head_num_kv * 2) * size_per_head) // 8:
+            size_per_head = size_per_head // 8
+    return get_sp_tensor(t,
+                         head_num=head_num,
+                         head_num_kv=head_num_kv,
+                         size_per_head=size_per_head,
+                         **kwargs)
 
-def sp_head_s(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
-    qkv_hidden_size = t.shape[1]
-    if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
-        return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
-    else:
-        return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
+def sp_head_s(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    return get_sp_tensor(t, **kwargs)
 
-def get_sp_tensor_gemm8(t: torch.Tensor, qkv_hidden_size: int, hidden_size: int, tp: int, tp_rank: int, kv_broadcast: bool):
-    kv_hidden_size = (qkv_hidden_size - hidden_size) // 2
-    if len(t.shape) == 1:
-        t = t.unsqueeze(0)
-    qs = sp_0(t[:hidden_size, :], tp, tp_rank)
-    if kv_broadcast:
-        ks = t[hidden_size:hidden_size + kv_hidden_size, :]
-        vs = t[hidden_size + kv_hidden_size:, :]
-    else:
-        ks = sp_0(t[hidden_size:hidden_size + kv_hidden_size, :], tp, tp_rank)
-        vs = sp_0(t[hidden_size + kv_hidden_size:, :], tp, tp_rank)
-    return torch.concat([qs, ks, vs], dim=0).contiguous()
+def sp_head_z(t: torch.Tensor, size_per_head: int, **kwargs: Any) -> torch.Tensor:
+    size_per_head = size_per_head // 8
+    return get_sp_tensor(t, size_per_head=size_per_head, **kwargs)
 
-def sp_head_gemm_a8(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
-    if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
-        return get_sp_tensor_gemm8(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
-    else:
-        return sp_0(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
+def sp_head_b(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    return get_sp_tensor(t, **kwargs)
 
-def sp_head_s_gemm_a8(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
-    qkv_hidden_size = t.shape[0]
-    if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
-        return get_sp_tensor_gemm8(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
-    else:
-        return sp_0(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
-
-def sp_head_z(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, qkv_hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
-    qkv_hidden_size = qkv_hidden_size // 8
-    hidden_size = hidden_size // 8
-    if len(t.shape) == 2 and qkv_hidden_size != hidden_size * 3:
-        return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
-    else:
-        return sp_neg1(t.reshape(t.shape[0], 3, t.shape[1] // 3), tp, tp_rank)
-
-def sp_head_b(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
-    t = t.reshape(-1)
-    qkv_hidden_size = t.shape[0]
-    return get_sp_tensor(t, qkv_hidden_size, hidden_size, tp, tp_rank, kv_broadcast)
-
-def sp_head_qk_norm(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
+def sp_head_qk_norm(t: torch.Tensor, tp, tp_rank, head_num, head_num_kv, size_per_head, **kwargs: Any) -> torch.Tensor:
+    q_hidden = head_num * size_per_head
     t = t.reshape(1, -1)
-    qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
-    if kv_broadcast:
-        ks = t[:,hidden_size:]
+    qs = sp_neg1(t[:,:q_hidden], tp, tp_rank)
+    if head_num_kv == 1:
+        ks = t[:,q_hidden:]
     else:
-        ks = sp_neg1(t[:,hidden_size:], tp, tp_rank)
+        ks = sp_neg1(t[:,q_hidden:], tp, tp_rank)
     return torch.concat([qs, ks], dim=1).contiguous()
 
-def sp_head_lora(t: torch.Tensor, tp: int, tp_rank: int, hidden_size: int, kv_broadcast: bool, **kwargs: Any) -> torch.Tensor:
-    # lora_b[dim0, 3*hidden_size]
-    dim0 = t.shape[0]
-    if len(t.shape) == 2 and t.shape[1] != hidden_size * 3:
-        qk_hidden_size = (t.shape[1] - hidden_size) // 2
-        qs = sp_neg1(t[:,:hidden_size], tp, tp_rank)
-        if kv_broadcast:
-            ks = t[:,hidden_size:hidden_size + qk_hidden_size]
-            vs = t[:,hidden_size + qk_hidden_size:]
-        else:
-            ks = sp_neg1(t[:,hidden_size:hidden_size + qk_hidden_size], tp, tp_rank)
-            vs = sp_neg1(t[:,hidden_size + qk_hidden_size:], tp, tp_rank)
-        return torch.concat([qs, ks, vs], dim=1).contiguous()
-    else:
-        return sp_neg1(t.reshape(dim0, 3, hidden_size), tp, tp_rank)
+def sp_head_lora(t: torch.Tensor, hidden_size, **kwargs: Any) -> torch.Tensor:
+    hidden_size = t.shape[0]
+    return get_sp_tensor(t, hidden_size=hidden_size, **kwargs)
+
+def sp_head_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    return get_sp_tensor(t.reshape([t.shape[0], -1]).T, **kwargs).T
+
+def sp_head_s_gemm_a8(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
+    return sp_head_s(t, **kwargs)
 
 def trans_qkv(ts: List[torch.Tensor], hidden_size: int, head_num: int, size_per_head: int = -1) -> torch.Tensor:
     if size_per_head == -1:
@@ -408,7 +369,7 @@ class W:
     attn_o_smoother = 'self_attention_weights.attention_output_weight.smoother'
     attn_o_shift = 'self_attention_weights.attention_output_weight.shift'
     ffn_smoother = 'ffn_weights.intermediate_weight2.smoother'
-    
+
     #per tensor quant
     pre_decoder_ln_static_quant = "pre_decoder_layernorm.static_quant"
     pre_decoder_ln_static_quant_reciprocal = 'pre_decoder_layernorm.static_quant_reciprocal'
@@ -504,7 +465,7 @@ class W:
     sq_quant_shifts = [
         attn_o_shift
     ]
-    
+
     static_quant_scales = [
         pre_ln_static_quant,
         pre_ln_static_quant_reciprocal,
