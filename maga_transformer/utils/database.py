@@ -17,7 +17,7 @@ class BaseDatabase:
 
     def get_lora_tensor_names(self, name: str) -> List[str]:
         raise NotImplementedError
-    
+
     def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
         raise NotImplementedError
 
@@ -34,16 +34,16 @@ class ModuleDatabase(BaseDatabase):
             return [eval('self.ref_module.' + weight_name).to(dtype = datatype)]
         except AttributeError:
             raise Exception(f'No weight named {weight_name} in reference module')
-    
+
     def get_pretrain_tensor_names(self) -> List[str]:
         return list(self.ref_module.state_dict().keys())
-        
+
 class DictDatabase(BaseDatabase):
     ref_dict: Dict[str, torch.Tensor] = {}
 
     def __init__(self, ref_dict: Dict[str, torch.Tensor]):
         self.ref_dict = ref_dict
-    
+
     def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
         try:
             return [self.ref_dict[name].to(dtype = datatype)]
@@ -51,7 +51,7 @@ class DictDatabase(BaseDatabase):
             raise Exception(f'No weight named {name} in dict')
 
     def get_pretrain_tensor_names(self) -> List[str]:
-        return list(self.ref_dict.keys())    
+        return list(self.ref_dict.keys())
 
 class CkptDatabase(BaseDatabase):
 
@@ -66,11 +66,11 @@ class CkptDatabase(BaseDatabase):
 
         if path is None:
             return
-        
+
         self.PretrainFileList = []
         self.FinetuneFileList = []
         self.LoraCkpt = LoraCkpt()
-        
+
         if os.path.isfile(path):
             raise Exception(f"CkptDatabase needs directory contains checkpoint files")
 
@@ -99,6 +99,15 @@ class CkptDatabase(BaseDatabase):
         return ckpt_files
 
     def load_hf_meta(self, path: str):
+        # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
+        index = os.path.join(path, 'model.safetensors.index.json')
+        if os.path.exists(index):
+            files = set(json.load(open(index))['weight_map'].values())
+            for f in files:
+                ckpt = CkptFileInfo(file_name=os.path.join(path, f))
+                self.PretrainFileList.append(ckpt)
+            return
+
         # standard HF
         patterns = ["*.safetensors", "*.bin", "*.pth", "*.pt"]
         glob_files = {}
@@ -114,15 +123,15 @@ class CkptDatabase(BaseDatabase):
                         ckpt = CkptFileInfo(file_name=str(f))
                         self.PretrainFileList.append(ckpt)
                 break
-            
+
     def load_ptuning_meta(self, ptuning_path: Optional[str]):
         if ptuning_path is None or not os.path.exists(ptuning_path):
             return
-        for f in Path(ptuning_path).glob("pytorch_model.bin"):            
+        for f in Path(ptuning_path).glob("pytorch_model.bin"):
             if not self._contains(f):
                 ckpt = CkptFileInfo(file_name=str(f), finetune_type=FinetuneType.ptuning)
                 self.FinetuneFileList.append(ckpt)
-            
+
     def _contains(self, path: Path):
         for info in self.PretrainFileList + self.FinetuneFileList:
             if Path(info.file_name).resolve() == path.resolve():
@@ -133,10 +142,10 @@ class CkptDatabase(BaseDatabase):
         tensor_names = []
         for ckptfile in self.PretrainFileList:
             tensor_names.extend(ckptfile.get_tensor_names())
-        
+
         for ckptfile in self.FinetuneFileList:
             tensor_names.extend(ckptfile.get_tensor_names())
-            
+
         return tensor_names
 
     def load_tensor(self, name: str, datatype: torch.dtype = torch.float16) -> List[torch.Tensor]:
@@ -157,27 +166,27 @@ class CkptDatabase(BaseDatabase):
             if pretrainfile.finetune_type == FinetuneType.pretrain:
                 return (pretrainfile.pp_size, pretrainfile.tp_size)
         return (1,1)
-    
+
     def get_lora_tensor_names(self, config_name: str) -> List[str]:
         return self.LoraCkpt.get_lora_tensor_names(config_name)
-    
+
     def load_lora_tensor(self, lora_name: str, tensor_name: str) -> List[torch.Tensor]:
         return self.LoraCkpt.load_lora_tensor(lora_name, tensor_name)
 
     def load_lora(self, config_name: str, lora_path: str):
         self.LoraCkpt.load_lora(config_name, lora_path)
-                
+
     def remove_lora(self, name: str):
         return self.LoraCkpt.remove_lora(name)
-    
+
     def get_lora_config(self, config_name: str):
         return self.LoraCkpt.get_lora_config(config_name)
-    
+
     def has_lora(self):
         return self.LoraCkpt.has_lora()
-    
+
     def get_first_lora_name(self):
         return self.LoraCkpt.get_first_lora_name()
-    
+
     def dump_lora_info(self) -> None:
         self.LoraCkpt.dump_lora_info()
