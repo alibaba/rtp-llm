@@ -98,6 +98,10 @@ BufferPtr CpuDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+BufferPtr CpuDevice::multimodalEmbedding(const MultimodalEmbeddingParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 void CpuDevice::activation(const ActivationParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

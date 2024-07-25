@@ -32,10 +32,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     size_t         multimodal_features_len  = stream_groups.mmFeaturesLen();
 
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
-
+    const bool need_cal_position_id = (has_multimodal_input && !cal_mm_tokens_in_rotary_emb_) || has_positional_encoding_;
+    
     model_input.combo_tokens =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
-    model_input.text_tokens_mask = 
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
     model_input.kv_cache_offset = device_->allocateBuffer(
             {ft::DataType::TYPE_INT32, {total_batch_size, max_block_size}, ft::AllocationType::HOST}, {});
@@ -52,33 +51,32 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_batch_size}, ft::AllocationType::HOST}, {});
     model_input.prefix_lengths =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {total_context_batch_size}, ft::AllocationType::HOST}, {});
-    if (has_positional_encoding_) {
+    if (need_cal_position_id) {
         model_input.combo_position_ids =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
     }
     if (has_multimodal_input) {
+        model_input.text_tokens_mask = 
+            device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
         model_input.mm_features_locs = 
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {multimodal_features_len}, ft::AllocationType::HOST}, {});
-        if (!cal_mm_tokens_in_rotary_emb_) {
-            model_input.position_ids = 
-                device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
-        }
     }
 
     int*      merged_tokens    = (int*)model_input.combo_tokens->data();
-    int*      merged_text_mask = (int*)model_input.text_tokens_mask->data();
     int*      input_lengths    = (int*)model_input.input_lengths->data();
     int*      lora_ids         = (int*)model_input.lora_ids->data();
     int*      lora_input_lengths = (int*)model_input.lora_input_lengths->data();
     int*      sequence_lengths = (int*)model_input.sequence_lengths->data();
     int*      lm_output_indexes = (int*)model_input.lm_output_indexes->data();
     int*      prefix_lengths   = (int*)model_input.prefix_lengths->data();
-    int*      combo_position_ids = has_positional_encoding_ ? (int*)model_input.combo_position_ids->data() : nullptr;
+    int*      combo_position_ids = need_cal_position_id ? (int*)model_input.combo_position_ids->data() : nullptr;
+    int*      merged_text_mask = has_multimodal_input ? (int*)model_input.text_tokens_mask->data() : nullptr;
     int*      mm_features_locs = has_multimodal_input ? (int*)model_input.mm_features_locs->data() : nullptr;
-    int*      position_ids     = (has_multimodal_input && !cal_mm_tokens_in_rotary_emb_) ? (int*)model_input.position_ids->data() : nullptr;
     int       batch_idx        = 0;
 
-    std::fill(merged_text_mask, merged_text_mask + current_tokens_size, 1);
+    if (merged_text_mask) {
+        std::fill(merged_text_mask, merged_text_mask + current_tokens_size, 1);
+    }
 
     for (const auto& stream : decode_streams) {
         auto current_batch_size = stream->batchSize();
@@ -90,16 +88,17 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             merged_tokens[batch_idx] = currentTokens[0];
             input_lengths[batch_idx]    = stream->inputLength();
             sequence_lengths[batch_idx] = stream->seqLength() - 1; // need remove
-            if (has_positional_encoding_) {
-                combo_position_ids[batch_idx] = stream->seqLength() - 1;
-            }
-            if (has_multimodal_input && !cal_mm_tokens_in_rotary_emb_) {
-                int feature_len = 0;
-                for (auto& feature: stream->multimodalFeatures().value()) {
-                    // used in chatglm4v: image position id => [x, x + 1 , x + 1, ..., x + 1, x + 2]
-                    feature_len += feature.sizes()[0] - 3;
+            if (need_cal_position_id) {
+                if (has_multimodal_input && !cal_mm_tokens_in_rotary_emb_) {
+                    int feature_len = 0;
+                    for (auto& feature: stream->multimodalFeatures().value()) {
+                        // used in chatglm4v: image position id => [x, x + 1 , x + 1, ..., x + 1, x + 2]
+                        feature_len += feature.sizes()[0] - 3;
+                    }
+                    combo_position_ids[batch_idx] = stream->seqLength() - feature_len - 1;
+                } else {
+                    combo_position_ids[batch_idx] = stream->seqLength() - 1;
                 }
-                position_ids[batch_idx] = stream->seqLength() - feature_len - 1;
             }
             lora_ids[batch_idx]         = stream->loraId();
             lora_input_lengths[batch_idx] = 1;
@@ -131,6 +130,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             memcpy(merged_tokens + token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
             cum_output_seq_len += input_tokens.size();
             input_lengths[batch_idx] = input_tokens.size();
+            prefix_lengths[batch_idx - total_decode_batch_size] = stream->prefixLength();
+            lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
+
             if (has_multimodal_input) {
                 auto& mm_features = stream->multimodalFeatures().value();
                 auto& mm_locs = stream->multimodalLocations().value();
@@ -143,15 +145,16 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                     *(mm_features_locs + mm_feature_index) = *mm_locs->dataWithOffset<int>(i) + token_idx;
                     mm_feature_index++;
                 }
+                
                 if (!cal_mm_tokens_in_rotary_emb_) {
                     int position_index = 0, mm_index = 0;
                     int mm_left = *mm_locs->dataWithOffset<int>(mm_index);
                     int mm_right = *mm_locs->dataWithOffset<int>(mm_index) + mm_features[mm_index].sizes()[0];
                     for (uint32_t idx = stream->reuseLength(); idx < stream->reuseLength() + stream->contextLength(); idx++) {
                         if (idx <= mm_left || idx >= mm_right) {
-                            position_ids[token_idx + idx] = position_index++;
+                            combo_position_ids[token_idx + idx] = position_index++;
                         } else if (idx == mm_right - 1) {
-                            position_ids[token_idx + idx] = ++position_index;
+                            combo_position_ids[token_idx + idx] = ++position_index;
                             if (mm_index + 1 < mm_features.size()) {
                                 mm_index++;
                                 mm_left = *mm_locs->dataWithOffset<int>(mm_index);
@@ -159,14 +162,11 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                             }
                             position_index++;
                         } else {
-                            position_ids[token_idx + idx] = position_index;
+                            combo_position_ids[token_idx + idx] = position_index;
                         }
                     }
                 }
-            }
-            prefix_lengths[batch_idx - total_decode_batch_size] = stream->prefixLength();
-            lm_output_indexes[batch_idx] = cum_output_seq_len - 1;
-            if (has_positional_encoding_) {
+            } else if (need_cal_position_id) {
                 // TODO(xinfei.sxf) optimize this, reduce cost
                 for (uint32_t i = stream->reuseLength(); i < stream->reuseLength() + input_tokens.size(); i++) {
                     combo_position_ids[token_idx + i - stream->reuseLength()] = i;

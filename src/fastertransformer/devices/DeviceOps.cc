@@ -54,6 +54,10 @@ BufferPtr DeviceOps::embeddingLookup(const EmbeddingLookupParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+BufferPtr DeviceOps::multimodalEmbedding(const MultimodalEmbeddingParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 void DeviceOps::activation(const ActivationParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

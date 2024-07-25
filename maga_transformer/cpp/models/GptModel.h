@@ -49,7 +49,6 @@ struct GptModelInputs {
     ft::BufferPtr lora_input_lengths; // [batch_size]
 
     ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
-    ft::BufferPtr position_ids;    // [cumulated_seq_len]
 
     ft::BufferPtr kv_cache_offset;   // [batch_size, block_nums], kv cache block offset
     ft::BufferPtr k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
@@ -59,7 +58,7 @@ struct GptModelInputs {
 
     std::optional<std::vector<ft::BufferPtr>> multimodal_features; // all features in gathered stream stored here
     ft::BufferPtr                             text_tokens_mask;    // text part in multimodal input tokens [cumulated_seq_len]
-    ft::BufferPtr                             mm_features_locs;    // features index and length
+    ft::BufferPtr                             mm_features_locs;    // features index
 
 public:
     std::string debugString() const {

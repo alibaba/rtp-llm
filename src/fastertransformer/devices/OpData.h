@@ -297,8 +297,6 @@ struct EmbeddingLookupParams {
     double input_embedding_scalar = 1;
 
     OptionalConstBufferRef text_tokens_mask;
-    OptionalConstVecBufferPtrRef multimodal_features;
-    OptionalConstBufferRef mm_features_locs;
 
     OptionalConstBufferRef position_ids;
     OptionalConstBufferRef position_table;
@@ -324,8 +322,8 @@ struct KvCacheInfo {
 
 struct MultimodalEmbeddingParams {
     const BufferPtr& word_embeddings;
-    const std::vector<BufferPtr>& multimodal_features;
-    const Buffer& multimodal_locs;
+    OptionalConstVecBufferPtrRef multimodal_features;
+    OptionalConstBufferRef multimodal_locs;
 };
 
 struct AttentionCommonInputs {

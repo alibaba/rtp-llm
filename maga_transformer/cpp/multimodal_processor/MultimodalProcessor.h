@@ -45,7 +45,7 @@ public:
             for (auto& emb: mm_embedding_vec) {
                 embedding_res.emplace_back(ft::convertPyObjectToTensor(emb));
             }
-            return std::move(embedding_res);
+            return embedding_res;
         } else {
             throw std::runtime_error("Multimodal model but multimodal process engine is None");
         }
@@ -67,7 +67,6 @@ public:
         }
 
         for (int i = 0;i < mm_num;i++) {
-            auto& emb = mm_embedding[i];
             // mm embedding is supposed to be a tensor of [expand_len, hidden_dim]
             expanded_len += mm_embedding[i].sizes()[0] - locs[i].second + locs[i].first;
         }
@@ -155,6 +154,6 @@ private:
         } else {
             throw std::runtime_error("more than 2 sep tokens or no sep tokens for multimodal model is not supported");
         }
-        return std::move(locs);
+        return locs;
     }
 };

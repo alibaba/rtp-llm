@@ -141,7 +141,6 @@ void GptModel::prepareAttentionInputs(
     attention_inputs.context_max_seq_len = max_context_seq_len;
     attention_inputs.decoder_max_seq_len = max_decoder_seq_len;
     attention_inputs.context_token_num = cu_seqlens_data[context_batch_size];
-    attention_inputs.position_ids = inputs.position_ids;
     if (weights_.linear_bias_slopes) {
         attention_inputs.linear_bias_slopes = weights_.linear_bias_slopes->kernel;        
     }
@@ -207,8 +206,6 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     auto hidden = device_->embeddingLookup({
             *combo_tokens, *embedding_table, description_.input_embedding_scalar,
             text_tokens_mask ? (OptionalConstBufferRef)*text_tokens_mask : nullopt,
-            inputs.multimodal_features ? (OptionalConstVecBufferPtrRef)inputs.multimodal_features : nullopt, 
-            mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs: nullopt,
             combo_position_ids ? (OptionalConstBufferRef)*combo_position_ids: nullopt,
             weights_.position_encoding ? (OptionalConstBufferRef)*weights_.position_encoding->kernel: nullopt,
             combo_tokens_type_ids ? (OptionalConstBufferRef)*combo_tokens_type_ids: nullopt,
@@ -217,6 +214,12 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     if (device_props_.tp_size > 1) {
         hidden = tpSyncEmbeddingOrLogits(hidden);
     }
+
+    hidden = device_->multimodalEmbedding({
+        hidden,
+        inputs.multimodal_features ? (OptionalConstVecBufferPtrRef)inputs.multimodal_features : nullopt, 
+        mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs: nullopt
+    });
 
     // TODO: fix me
     ft::QScheme qscheme = QScheme::NoQuantize;
@@ -257,6 +260,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
     prepareAttentionInputs(inputs, attention_common_inputs);
     attention_common_inputs.lora_input = lora_input;
+    attention_common_inputs.position_ids = combo_position_ids;
 
     printBufferData(*hidden, "input_hidden");
     // layers

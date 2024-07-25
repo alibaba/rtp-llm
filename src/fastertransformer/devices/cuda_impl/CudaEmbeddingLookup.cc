@@ -17,9 +17,6 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
     const auto& token_types = params.token_types;
     const auto& token_type_table = params.token_type_table;
 
-    const auto& multimodal_features = params.multimodal_features;
-    const auto& multimodal_locs = params.mm_features_locs;
-
     const auto token_num = tokens.size();
     const auto hidden_size = embedding_table.shape()[1];
     const auto data_type = embedding_table.type();
@@ -41,35 +38,35 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
         stream_
     );
 
-    if (multimodal_features) {
-        RUNTIME_ASSERT_OP_ARG(multimodal_locs, "no multimodal input location found");
-        return move(multimodalEmbedding({
-            embeddings, multimodal_features.value().get(), multimodal_locs.value().get()
-        }));
-    }
-
     return move(embeddings);
 }
 
 BufferPtr CudaDevice::multimodalEmbedding(const MultimodalEmbeddingParams& params) {
-    const auto& embeddings = params.word_embeddings;
-    const auto& features = params.multimodal_features;
-    const auto& multimodal_locs = params.multimodal_locs;
-    const auto mm_num = features.size();
-    const auto hidden_size = embeddings->shape()[1];
-
-    // not deal with bf16
-    RUNTIME_ASSERT_OP_ARG(
-        embeddings->typeSize() == features[0]->typeSize(),
-        "type size of embeddings and multimodal features should be equal.");
-
-    for (int i = 0; i < mm_num; ++i) {
-        auto& feature = features[i];
-        auto loc = multimodal_locs.dataWithOffset<int>(i);
-        copy({embeddings->view(*loc, feature->shape()[0]), *feature});
+    if (!params.multimodal_features.has_value()) {
+        return params.word_embeddings;
     }
+    else {
+        RUNTIME_ASSERT_OP_ARG(params.multimodal_locs, "no multimodal input location found");
+        const auto& embeddings = params.word_embeddings;
+        const auto& features = params.multimodal_features.value().get();
+        const auto& multimodal_locs = params.multimodal_locs.value().get();
+        const auto mm_num = features.size();
+        const auto hidden_size = embeddings->shape()[1];
 
-    return move(embeddings);
+        // not deal with bf16
+        RUNTIME_ASSERT_OP_ARG(
+            embeddings->typeSize() == features[0]->typeSize(),
+            "type size of embeddings and multimodal features should be equal.");
+
+        for (int i = 0; i < mm_num; ++i) {
+            auto& feature = features[i];
+            auto loc = multimodal_locs.dataWithOffset<int>(i);
+            auto x = embeddings->view(*loc, feature->shape()[0]);
+            copy({x, *feature});
+        }
+
+        return move(embeddings);
+    }
 }
 
 } // namespace fastertransformer
