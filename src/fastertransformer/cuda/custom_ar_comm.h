@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+// TODO(xyz) deprecated class, please remove it
+
 #pragma once
 
 #include <memory>

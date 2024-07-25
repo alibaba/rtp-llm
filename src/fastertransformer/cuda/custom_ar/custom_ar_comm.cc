@@ -64,7 +64,8 @@ CustomAllReduceComm::~CustomAllReduceComm() {
 }
 
 bool CustomAllReduceComm::checkAllReduceAvailable(size_t elts, DataType data_type) {
-    if (elts * getTypeSize(data_type) > CUSTOM_AR_SIZE_THRESHOLD) {
+    if (elts * getTypeSize(data_type) > CUSTOM_AR_SIZE_THRESHOLD || 
+        elts % (MAX_RANKS_PER_NODE * MAX_RANKS_PER_NODE) != 0) {
         return false;
     }
     return true;

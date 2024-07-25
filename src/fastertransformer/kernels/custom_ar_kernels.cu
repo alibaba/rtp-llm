@@ -292,7 +292,7 @@ static __global__ void twoShotAllReduceKernel(CustomAllReduceParameters params)
             // use round-robin gathering from other ranks
             int offset_rank = local_offset + (dst_rank[ii] - params.local_rank) * params.elts_per_rank;
             reinterpret_cast<PackedType*>(&((T*)params.local_output_buffer_ptr)[offset_rank])[0] =
-                reinterpret_cast<PackedType*>(&src_d[dst_rank[ii]][offset_rank])[0];
+                reinterpret_cast<PackedType*>(&src_d[ii][offset_rank])[0];
         }
     }
 }
@@ -342,8 +342,11 @@ void kernelLaunchConfig(
             break;
         }
         case 1: {  // two stage all reduce algo
+
+            // TODO(xyz): when elts / MAX_RANKS_PER_NODE % MAX_RANKS_PER_NODE != 0(for example, 100000), 
+            // there exist some bug in custom ar kernel, fix it
             int total_threads = elts / ranks_per_node / ranks_per_node;
-            assert(elts / ranks_per_node % ranks_per_node == 0 && total_threads % WARP_SIZE == 0);
+            assert(elts / MAX_RANKS_PER_NODE % MAX_RANKS_PER_NODE == 0 && total_threads % WARP_SIZE == 0);
 
             while (total_threads % blocks_per_grid != 0 || total_threads / blocks_per_grid > DEFAULT_BLOCK_SIZE) {
                 blocks_per_grid += 1;

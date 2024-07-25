@@ -174,8 +174,8 @@ public:
 
             if (pids[i] == 0) {
                 if (!run_benchmark) {
-                    baseTest(i, world_size, port, 100);
-                    baseTest(i, world_size, port2, 500000);
+                    baseTest(i, world_size, port, 128);
+                    baseTest(i, world_size, port2, 1048576);
                 } else {
                     benchmark(i, world_size, port, port2);
                 }
