@@ -45,8 +45,11 @@ public:
 
     // for device communication
     virtual void broadcast(const BroadcastParams& params);
-    virtual void allReduce(const AllReduceParams& params);
+    virtual AllReduceOutput allReduce(const AllReduceParams& params);
     virtual void allGather(const AllGatherParams& params);
+    virtual PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) {
+        return PrepareAllReduceOutput{params.buffer};
+    };
 
     virtual BufferPtr quantize(const QuantizeParams& params);
 };

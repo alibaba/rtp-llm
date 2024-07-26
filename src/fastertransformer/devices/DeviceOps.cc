@@ -102,7 +102,7 @@ void DeviceOps::broadcast(const BroadcastParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void DeviceOps::allReduce(const AllReduceParams& params) {
+AllReduceOutput DeviceOps::allReduce(const AllReduceParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

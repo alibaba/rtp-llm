@@ -252,9 +252,9 @@ void CudaDevice::broadcast(const BroadcastParams& params) {
     NCCLCHECK(ncclGroupEnd());
 }
 
-void CudaDevice::allReduce(const AllReduceParams& params) {
+AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
     if (nccl_param_.world_size_ < 2) {
-        return;
+        return AllReduceOutput{params.buffer};
     }
     auto& buffer = params.buffer;
     const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
@@ -263,8 +263,9 @@ void CudaDevice::allReduce(const AllReduceParams& params) {
     // if custom allreduce fails, fallback to the default ncclAllReduce
     if (custom_allreduce_comm_ && nccl_op == ncclSum && 
         custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type())) {
-        custom_allreduce_comm_->allReduce(buffer->data(), buffer->data(), buffer->size(), buffer->type(), stream_);
-        return;
+        auto custom_ar_res_buf = allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"custom_ar_buf"});
+        custom_allreduce_comm_->allReduce(custom_ar_res_buf->data(), buffer->size(), buffer->type(), stream_);
+        return AllReduceOutput{custom_ar_res_buf};
     }
 
     RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps,
@@ -272,6 +273,26 @@ void CudaDevice::allReduce(const AllReduceParams& params) {
  
     NCCLCHECK(ncclAllReduce(buffer->data(), buffer->data(), buffer->size(), nccl_data_type,
                             nccl_op, nccl_param_.nccl_comm_, stream_));
+    return AllReduceOutput{params.buffer};
+}
+
+PrepareAllReduceOutput CudaDevice::prepareAllReduce(const PrepareAllReduceParams& params) {
+    if (nccl_param_.world_size_ < 2) {
+        return PrepareAllReduceOutput{params.buffer};
+    }
+
+    auto& buffer = params.buffer;
+    if (custom_allreduce_comm_ && static_cast<ncclRedOp_t>(params.op) == ncclSum &&
+        custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type())) {
+        void* custom_ar_buf_ptr = custom_allreduce_comm_->peer_comm_buffer_ptr();
+        return PrepareAllReduceOutput{
+            BufferPtr(new Buffer(MemoryType::MEMORY_GPU,
+                buffer->type(),
+                buffer->shape(),
+                custom_ar_buf_ptr))
+        };
+    }
+    return PrepareAllReduceOutput{params.buffer};
 }
 
 void CudaDevice::allGather(const AllGatherParams& params) {

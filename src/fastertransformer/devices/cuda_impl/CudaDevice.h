@@ -64,8 +64,9 @@ public:
     FfnLayerOutput moeFfnLayer(const FfnLayerParams& params);
     void sampleGreedy(const GreedyParams& params);
     void broadcast(const BroadcastParams& params);
-    void allReduce(const AllReduceParams& params);
+    AllReduceOutput allReduce(const AllReduceParams& params);
     void allGather(const AllGatherParams& params);
+    PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params);
 
     BufferPtr quantize(const QuantizeParams& params);
     void preRun() override { check_cuda_error(cudaSetDevice(device_id_)); }

@@ -496,9 +496,17 @@ struct PrepareAllReduceParams {
     const ReduceOp op;
 };
 
+struct PrepareAllReduceOutput {
+    const BufferPtr buffer;
+};
+
 struct AllReduceParams {
     const BufferPtr buffer;
     const ReduceOp op;
+};
+
+struct AllReduceOutput {
+    const BufferPtr buffer;
 };
 
 struct AllGatherParams {

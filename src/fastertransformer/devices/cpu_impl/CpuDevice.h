@@ -30,7 +30,7 @@ public:
     void sampleGreedy(const GreedyParams& params);
     void sampleBeamSearch(const BeamSearchParams& params);
     void broadcast(const BroadcastParams& params);
-    void allReduce(const AllReduceParams& params);
+    AllReduceOutput allReduce(const AllReduceParams& params);
 
 private:
     std::unique_ptr<IAllocator> allocator_;

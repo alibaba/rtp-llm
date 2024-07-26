@@ -273,6 +273,10 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         // here hidden->dtype maybe int8, so use dytpe of embedding lookup result instead
         auto attn_out_buf = device_->allocateBuffer({dtype, hidden->shape()}, {"attn_out_buf"});
+        // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with 
+        // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by 
+        // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
+        attn_out_buf = device_->prepareAllReduce({std::move(attn_out_buf), ReduceOp::Sum}).buffer;
         auto residual = pre_decoder_residual ? pre_decoder_residual : hidden;
         printBufferData(*residual, "in residual");
         BufferPtr residual2 = nullptr;
@@ -316,7 +320,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         }));
         auto attn_hidden = std::move(attn_output.hidden_states);
         if (device_props_.tp_size > 1) {
-            device_->allReduce({attn_hidden, ReduceOp::Sum});
+            // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
+            attn_hidden = device_->allReduce({std::move(attn_hidden), ReduceOp::Sum}).buffer;
         }
         printBufferData(*attn_hidden, "layer_" + to_string(i) + "_attn_output");
 
@@ -372,6 +377,10 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_input");
         auto ffn_output_buf = device_->allocateBuffer({dtype, hidden->shape()}, {"ffn_out_buf"});
+        // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with 
+        // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by 
+        // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
+        ffn_output_buf = device_->prepareAllReduce({std::move(ffn_output_buf), ReduceOp::Sum}).buffer;
         auto ffn_output = device_->ffnLayer(FfnLayerParams({
             *hidden,
             description_.ffn_conf,
@@ -379,11 +388,12 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
             lora_input,
             qscheme,
-            move(ffn_output_buf),
+            ffn_output_buf,
         }));
         hidden = ffn_output.hidden_states;
         if (device_props_.tp_size > 1) {
-            device_->allReduce({hidden, ReduceOp::Sum});
+            // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it
+            hidden = device_->allReduce({std::move(hidden), ReduceOp::Sum}).buffer;
         }
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_output");
 

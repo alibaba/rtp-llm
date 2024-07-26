@@ -24,7 +24,7 @@
 | `REUSE_CACHE` | `str`, optional | query之间复用kvcache |
 | `EXTRA_DATA_PATH` | `str`, optional | 除了ckpt/tokenizer,额外需要的数据,比如LLAVA的 VIT数据 |
 | `VIT_TRT` | `int`, optional | 是否使用TRT来加速VIT模型(1:打开，0:关闭) |
-| `FT_DISABLE_CUSTOM_AR` | `int`, optional | 是否关闭Custom All Reduce(1:关闭，0:打开) |
+| `FT_DISABLE_CUSTOM_AR` | `int`, optional | 是否关闭Custom All Reduce(1:关闭，其他打开) |
 
 ## 注意事项
 1. 默认模型运行时的 log_level=WARNING，可以添加环境变量`PY_LOG_LEVEL=INFO` 显示更多日志

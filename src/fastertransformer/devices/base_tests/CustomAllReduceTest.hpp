@@ -54,6 +54,7 @@ public:
 
         const auto tensor = torch::arange(begin, end, step, torch::kFloat32) * ((int32_t)rank + 1);
         auto       buf    = device->allocateBuffer({DataType::TYPE_FP32, {static_cast<unsigned long>(tensor.size(0))}});
+        buf = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
         copy_tensor_to_buffer(tensor, buf);
         device->allReduce({buf, ReduceOp::Sum});
         device->syncAndCheck();
@@ -78,17 +79,20 @@ public:
                              bool         log       = true) {
 
         const auto tensor = torch::ones({int(m)}, torch::kFloat32) * 0.01 * ((int32_t)rank + 1);
-        auto       buf    = device->allocateBuffer({DataType::TYPE_FP32, {m}});
-        copy_tensor_to_buffer(tensor, buf);
+        auto       buf    = device->allocateBuffer({DataType::TYPE_FP32, {m}});        
         device->syncAndCheck();
 
         for (size_t i = 0; i < warm_iter; ++i) {
+            buf = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
+            copy_tensor_to_buffer(tensor, buf);
             device->allReduce({buf, ReduceOp::Sum});
         }
         device->syncAndCheck();
 
         auto start_time = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < iter_num; ++i) {
+            buf = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
+            copy_tensor_to_buffer(tensor, buf);
             device->allReduce({buf, ReduceOp::Sum});
         }
         device->syncAndCheck();

@@ -77,14 +77,10 @@ bool CustomAllReduceComm::checkAllReduceAvailable(size_t elts, DataType data_typ
     return true;
 }
 
-void CustomAllReduceComm::allReduce(
-    void* input_ptr, void* output_ptr, size_t elts, DataType data_type, cudaStream_t stream) {
+void CustomAllReduceComm::allReduce(void* output_ptr, size_t elts, DataType data_type, cudaStream_t stream) {
 
     param_.elts_total   = elts;
     param_.barrier_flag = FLAG(param_.barrier_flag + 1);
-    check_cuda_error(cudaMemcpyAsync(
-        param_.peer_comm_buffer_ptrs[rank_], input_ptr, elts * getTypeSize(data_type), cudaMemcpyDeviceToDevice, stream));
-
     param_.local_output_buffer_ptr = output_ptr;
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeCustomAllReduceDispatch, &param_, stream, tp_ranks_.size());
 }
@@ -184,7 +180,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<int>& tp_ranks, int r
 
     size_t world_size = tp_ranks.size();
     char* disable_custom_ar_str = std::getenv("FT_DISABLE_CUSTOM_AR");
-    bool disable_custom_ar = disable_custom_ar_str != nullptr && std::string(disable_custom_ar_str) != "0";
+    bool disable_custom_ar = disable_custom_ar_str != nullptr && std::string(disable_custom_ar_str) == "1";
     if (disable_custom_ar) {
         FT_LOG_INFO("Disable custom ar since FT_DISABLE_CUSTOM_AR is set");
         return false;
