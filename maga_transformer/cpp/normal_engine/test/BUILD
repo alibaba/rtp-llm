@@ -9,6 +9,8 @@ test_linkopts = [
     "-ltorch",
     "-lc10",
     "-ltorch_cpu",
+    "-lc10_cuda",
+    "-ltorch_cuda",
     "-ltorch_python",
     "-L/usr/local/cuda/lib64",
     "-lcudart",

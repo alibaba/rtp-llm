@@ -28,6 +28,7 @@ public:
     virtual BufferPtr multimodalEmbedding(const MultimodalEmbeddingParams& params);
     virtual void activation(const ActivationParams& params);
     virtual BufferPtr softmax(const SoftmaxParams& params);
+    virtual LossOutput loss(const LossParams& params);
 
     // dedicated attention ops
     virtual AttentionModuleOutput contextAttention(const AttentionModuleParams& params);

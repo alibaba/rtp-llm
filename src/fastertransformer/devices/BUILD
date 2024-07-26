@@ -11,6 +11,7 @@ cc_library(
     deps = [
         "//src/fastertransformer/core:allocator",
         "//src/fastertransformer/core:memory_tracker",
+        "//src/fastertransformer/core:buffer_torch",
         "//src/fastertransformer/core:buffer",
         "//src/fastertransformer/utils:utils",
         "//:gpt_init_params_hdr",
@@ -48,4 +49,3 @@ cc_library(
     copts = copts(),
     alwayslink = 1,
 )
-

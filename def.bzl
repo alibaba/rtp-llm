@@ -140,9 +140,9 @@ def torch_deps():
             "@torch_2.3_py310_cpu_aarch64//:torch",
             "@torch_2.3_py310_cpu_aarch64//:torch_libs",],
         "//conditions:default": [
-            "@torch_" + torch_version + "_cpu//:torch_api",
-            "@torch_" + torch_version + "_cpu//:torch",
-            "@torch_" + torch_version + "_cpu//:torch_libs",]
+            "@torch_" + torch_version + "//:torch_api",
+            "@torch_" + torch_version + "//:torch",
+            "@torch_" + torch_version + "//:torch_libs",]
         })
     return deps
 

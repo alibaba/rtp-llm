@@ -60,6 +60,7 @@ struct GptModelInputs {
     ft::BufferPtr                             text_tokens_mask;    // text part in multimodal input tokens [cumulated_seq_len]
     ft::BufferPtr                             mm_features_locs;    // features index
 
+    bool need_all_logits = false;
 public:
     std::string debugString() const {
         std::stringstream debug_string;
@@ -168,6 +169,7 @@ struct GptModelOutputs {
     ft::BufferPtr logits;
     ft::BufferPtr hidden_states;
     ft::BufferPtr all_hidden_states;
+    ft::BufferPtr all_logits;
 
     mutable ft::BufferPtr scatter_logits;
     mutable ft::BufferPtr scatter_hidden_states;

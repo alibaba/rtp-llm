@@ -142,7 +142,7 @@ void GptModel::prepareAttentionInputs(
     attention_inputs.decoder_max_seq_len = max_decoder_seq_len;
     attention_inputs.context_token_num = cu_seqlens_data[context_batch_size];
     if (weights_.linear_bias_slopes) {
-        attention_inputs.linear_bias_slopes = weights_.linear_bias_slopes->kernel;        
+        attention_inputs.linear_bias_slopes = weights_.linear_bias_slopes->kernel;
     }
     attention_inputs.attention_mask = inputs.attention_mask;
 }
@@ -373,7 +373,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             hidden = std::move(post_layernorm_output.output);
             attn_hidden = std::move(post_layernorm_output.before_norm_output);
             residual = attn_hidden;
-        }        
+        }
 
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_input");
         auto ffn_output_buf = device_->allocateBuffer({dtype, hidden->shape()}, {"ffn_out_buf"});
@@ -435,7 +435,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto& lm_head = weights_.lm_head;
     if (lm_head) {
         // gen last token hidden
-        auto last_hidden = attention_common_inputs.context_batch_size
+        auto last_hidden = attention_common_inputs.context_batch_size && !inputs.need_all_logits
                          ? device_->select({*hidden, *device_->clone({*inputs.lm_output_indexes})})
                          : hidden;
 
@@ -449,7 +449,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         }
         // logits is too big, tmp not print default
         // printBufferData(*logits, "logits");
-        return {std::move(logits), std::move(last_hidden), std::move(hidden)};
+        if (inputs.need_all_logits) {
+            auto last_logits = device_->select({*logits, *device_->clone({*inputs.lm_output_indexes})});
+            return {std::move(last_logits), std::move(last_hidden), std::move(hidden), std::move(logits)};
+        }
+        return {std::move(logits), std::move(last_hidden), std::move(hidden), nullptr};
     } else {
         return {nullptr, nullptr, std::move(hidden)};
     }

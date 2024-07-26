@@ -4,8 +4,10 @@ cc_library(
         "torch/lib/libtorch.so",
         "torch/lib/libtorch_python.so",
         "torch/lib/libtorch_cpu.so",
+        "torch/lib/libtorch_cuda.so",
         "torch/lib/libshm.so",
         "torch/lib/libc10.so",
+        "torch/lib/libc10_cuda.so",
     ] + glob([
          "torch/lib/libgomp*.so*",
          "torch/lib/libcudart*.so*",

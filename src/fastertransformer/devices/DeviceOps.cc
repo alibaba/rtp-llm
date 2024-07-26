@@ -35,7 +35,7 @@ LayernormOutput DeviceOps::layernorm(const LayernormParams& params) {
 }
 
 AddBiasOutput DeviceOps::addbias(const AddBiasParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);    
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
 BufferPtr DeviceOps::gemm(const GemmParams& params) {
@@ -63,6 +63,10 @@ void DeviceOps::activation(const ActivationParams& params) {
 }
 
 BufferPtr DeviceOps::softmax(const SoftmaxParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+LossOutput DeviceOps::loss(const LossParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
@@ -115,4 +119,3 @@ BufferPtr DeviceOps::quantize(const QuantizeParams& params) {
 }
 
 } // namespace fastertransformer
-

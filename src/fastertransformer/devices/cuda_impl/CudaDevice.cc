@@ -7,7 +7,7 @@
 #include "src/fastertransformer/core/TrackerAllocator.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/utils/compiler_config.h"
-
+#include "src/fastertransformer/cuda/torch_cuda_allocator.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
 #include <unistd.h>
@@ -21,8 +21,7 @@ namespace fastertransformer {
 CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     FT_LOG_INFO("Initialize CudaDevice. %d", device_id_);
     check_cuda_error(cudaSetDevice(device_id_));
-    check_cuda_error(cudaStreamCreate(&stream_));
-
+    stream_ = at::cuda::getCurrentCUDAStream().stream();
     check_cuda_error(cublasCreate(&cublas_handle_));
     check_cuda_error(cublasLtCreate(&cublaslt_handle_));
     check_cuda_error(cublasSetStream(cublas_handle_, stream_));
@@ -109,6 +108,10 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         allocator_.reset(allocator_ptr);
     }
 
+    origin_torch_cuda_allocator_ = at::cuda::CUDACachingAllocator::allocator;
+    initTorchCUDAAllocator(allocator_.get());
+    at::cuda::CUDACachingAllocator::allocator.store(getTorchCUDAAllocator());
+
     if (params.host_reserve_memory_bytes) {
         RUNTIME_ASSERT_OP_ARG(params.host_reserve_memory_bytes > 0,
             "cuda host memory can not reserve as much as possible (%lu), must specify concrete size.",
@@ -128,6 +131,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
 }
 
 CudaDevice::~CudaDevice() {
+    at::cuda::CUDACachingAllocator::allocator.store(origin_torch_cuda_allocator_);
     curandstate_buf_.reset();
     cublas_mm_wrapper_.reset();
     check_cuda_error(cudaStreamDestroy(stream_));

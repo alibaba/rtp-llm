@@ -178,6 +178,14 @@ int GenerateStream::numReturnSequences() const {
     return generate_input_->generate_config->num_return_sequences;
 }
 
+int GenerateStream::calculateLoss() const {
+    return inputLength() > 1 ? generate_input_->generate_config->calculate_loss: 0;
+}
+
+bool GenerateStream::hasLoss() const {
+    return calculateLoss() && loss_.get();
+}
+
 void GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {
     if (system_prompt) {
         prompt_param_ = system_prompt->getPromptParams(*generate_input_->generate_config);
@@ -577,11 +585,8 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
                 generate_output.hidden_states = device_->clone({hidden_states.view(i, 1), ft::AllocationType::HOST});
             }
         }
-        if (generate_input_->generate_config->calculate_loss == 1) {
-            auto x = device_->allocateBuffer({ft::DataType::TYPE_FP32, {1}, ft::AllocationType::HOST}, {});
-            // TODO(xinfei.sxf) fix this loss
-            // *((float*)x->data()) = 1.0f;
-            generate_output.loss = std::move(x);
+        if (hasLoss()) {
+            generate_output.loss = loss_;
         }
 
         generate_output.finished              = sub_generate_status_[i].status == GenerateState::FINISHED;
@@ -601,7 +606,7 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
         generate_outputs_->generate_outputs.push_back(generate_output);
     }
     if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
-        /* No matter if the queue is full for any reason, 
+        /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
         setStop("queue is full");
         return;
@@ -609,6 +614,14 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
         generate_outputs_queue_.push(*generate_outputs_);
     }
     last_output_pos_ = seq_length_;
+}
+
+void GenerateStream::setLoss(const ft::Buffer& loss) {
+    loss_ = device_->clone({loss, ft::AllocationType::HOST});
+}
+
+ft::BufferPtr GenerateStream::getLoss() {
+    return loss_;
 }
 
 void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter) {

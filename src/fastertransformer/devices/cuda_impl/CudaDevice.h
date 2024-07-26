@@ -71,14 +71,10 @@ public:
     BufferPtr quantize(const QuantizeParams& params);
     void preRun() override { check_cuda_error(cudaSetDevice(device_id_)); }
 
-// TODO: @xinglai delelte this
-public:
-    cudaStream_t stream() const {return stream_;}
-    cublasMMWrapper* cublasMMWrapperPtr() const {return cublas_mm_wrapper_.get();}
-
 private:
     std::unique_ptr<IAllocator> allocator_;
     std::unique_ptr<IAllocator> host_allocator_;
+    c10::cuda::CUDACachingAllocator::CUDAAllocator *origin_torch_cuda_allocator_;
 
     cudaStream_t stream_;
     cublasHandle_t cublas_handle_;

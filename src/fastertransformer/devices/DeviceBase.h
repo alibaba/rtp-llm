@@ -11,8 +11,8 @@ public:
     DeviceBase(const DeviceInitParams& params);
 
     virtual void init();
-    // Init and preRun(NormalEngine::loop()) are executed in two different threads, some environments 
-    // needs to be reset again in a new thread(such as cudaSetDevice, 
+    // Init and preRun(NormalEngine::loop()) are executed in two different threads, some environments
+    // needs to be reset again in a new thread(such as cudaSetDevice,
     // otherwise it will be executed in default cudaDevice 0) so we provide a preRun() to do this.
     virtual void preRun() {}
     virtual DeviceProperties getDeviceProperties() = 0;
@@ -33,6 +33,7 @@ public:
     AttentionLayerOutput attentionLayer(const AttentionLayerParams& params) override;
     FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
     LoraLinearOutput loraLinear(const LoraLinearParams& params) override;
+    LossOutput loss(const LossParams& params) override;
 
 protected:
     BufferStatus queryBufferStatus();

@@ -4,8 +4,9 @@
 #include <limits>
 #include <utility>
 #include "ATen/ops/ones.h"
+#include "c10/core/DeviceType.h"
 #include "c10/core/ScalarType.h"
-// #include "src/fastertransformer/th_op/multi_gpu_gpt/Base.h"
+#include "c10/core/TensorOptions.h"
 #include "src/fastertransformer/utils/assert_utils.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
@@ -33,7 +34,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     const bool has_multimodal_input = is_multimodal_ && stream_groups.has_multimodal_input();
     const bool need_cal_position_id = (has_multimodal_input && !cal_mm_tokens_in_rotary_emb_) || has_positional_encoding_;
-    
+
     model_input.combo_tokens =
         device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
     model_input.kv_cache_offset = device_->allocateBuffer(
@@ -56,9 +57,9 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
     }
     if (has_multimodal_input) {
-        model_input.text_tokens_mask = 
+        model_input.text_tokens_mask =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {current_tokens_size}, ft::AllocationType::HOST}, {});
-        model_input.mm_features_locs = 
+        model_input.mm_features_locs =
             device_->allocateBuffer({ft::DataType::TYPE_INT32, {multimodal_features_len}, ft::AllocationType::HOST}, {});
     }
 
@@ -79,6 +80,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
     }
 
     for (const auto& stream : decode_streams) {
+        model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
         auto current_batch_size = stream->batchSize();
         auto kv_cache = stream->kvCache();
         FT_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
@@ -108,7 +110,6 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                         kv_cache.batch_offset[i].size() * sizeof(int));
             batch_idx += 1;
         }
-
         stream->step();
     }
 
@@ -119,6 +120,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
     for (const auto& stream : context_streams) {
         // context stream也需要batch运行是为了fallback的场景和perf test的场景
+        model_input.need_all_logits = model_input.need_all_logits || stream->calculateLoss();
         auto current_batch_size = stream->batchSize();
         auto kv_cache                 = stream->kvCache();
         FT_LOG_DEBUG("context kv_cache: %s", kv_cache.debugString().c_str());
@@ -145,7 +147,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
                     *(mm_features_locs + mm_feature_index) = *mm_locs->dataWithOffset<int>(i) + token_idx;
                     mm_feature_index++;
                 }
-                
+
                 if (!cal_mm_tokens_in_rotary_emb_) {
                     int position_index = 0, mm_index = 0;
                     int mm_left = *mm_locs->dataWithOffset<int>(mm_index);
@@ -183,7 +185,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
         stream->step();
     }
-    
+
     if (is_multimodal_ && gathered_mm_features.size() > 0) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
@@ -196,12 +198,14 @@ ft::BufferPtr NormalBatchStreamProcessor::createAttentionMask(const MaskParams& 
     const int *input_lengths = params.input_lengths.data<int32_t>();
     const int batch_size = params.input_lengths.size();
     const int max_input_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
-    auto attention_mask = torch::ones({(int)max_input_seq_len, (int)max_input_seq_len});
+    const auto torch_type = ft::dataTypeToTorchType(params.dtype);
+    auto tensor_options = torch::TensorOptions(torch_type).device(torch::Device(torch::kCUDA));
+    auto attention_mask = torch::ones({(int)max_input_seq_len, (int)max_input_seq_len}, tensor_options);
     if (params.is_causal) {
         attention_mask = attention_mask.tril();
     }
-    const auto torch_type = ft::dataTypeToTorchType(params.dtype);
-    attention_mask = attention_mask.unsqueeze_(0).tile({(int)batch_size, 1, 1}).to(torch_type);
+    attention_mask = attention_mask.unsqueeze_(0).tile({(int)batch_size, 1, 1});
+
     for (int i = 0; i < batch_size; ++i) {
         attention_mask[i].slice(0, input_lengths[i], max_input_seq_len) = 0;
         if (!params.is_causal) {
@@ -212,7 +216,7 @@ ft::BufferPtr NormalBatchStreamProcessor::createAttentionMask(const MaskParams& 
         FT_CHECK(int(params.prefix_lengths.size()) == batch_size);
         const int *prefix_lengths = params.prefix_lengths.data<int32_t>();
         auto max_reuse_length = *std::max_element(prefix_lengths, prefix_lengths + batch_size);
-        attention_mask = torch::cat({attention_mask, torch::zeros({(int)batch_size, max_input_seq_len, max_reuse_length}).to(torch_type)}, -1);
+        attention_mask = torch::cat({attention_mask, torch::zeros({(int)batch_size, max_input_seq_len, max_reuse_length}, tensor_options)}, -1);
         if (max_reuse_length) {
             for (int i = 0; i < batch_size; ++i) {
                 attention_mask[i] = attention_mask[i].roll({prefix_lengths[i]}, {-1});
@@ -220,7 +224,8 @@ ft::BufferPtr NormalBatchStreamProcessor::createAttentionMask(const MaskParams& 
             }
         }
     }
-    return params.device->clone(*ft::torchTensor2Buffer(attention_mask));
+    // tmp clone to insure mask liftcycle, maybe can remove
+    return params.device->clone({*ft::torchTensor2Buffer(attention_mask)});
 }
 
 absl::StatusOr<SamplerInputs>
@@ -331,20 +336,26 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
     const size_t step = new_all_token_ids->shape()[1];
     size_t total_batch_size  = stream_groups.totalSamplerBatchSize();
     FT_CHECK(total_batch_size == new_all_token_ids->shape()[0]);
-    auto token_ids_cpu =
-        device_->allocateBuffer({ft::DataType::TYPE_INT32, new_all_token_ids->shape(), ft::AllocationType::HOST}, {});
     int batch_idx = 0;
     int offset = 0;
+    int token_offset = 0;
     for (auto& stream : stream_groups.allStreams()) {
         if (stream->isChunkStream()) {
             continue;
         }
         auto current_batch_size = stream->tileNum();
+        auto token_size = stream->currentExecuteTokenSize();
         auto batch = stream->isContextStream() ? 1 : current_batch_size;
         auto batch_logits = model_output.logits->view(offset, batch);
         auto batch_hidden_states = model_output.hidden_states->view(offset, batch);
         auto batch_cum_log_probs = sampler_output.cum_log_probs->view(batch_idx, current_batch_size);
-        offset += batch;
+        if (stream->calculateLoss() && !stream->hasLoss() && model_output.all_logits) {
+            auto all_logits = model_output.all_logits->view(token_offset, token_size - 1);
+            auto tokens = stream->currentExecuteTokens(0);
+            ft::BufferPtr label = device_->clone({{ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, {tokens.size() - 1}, tokens.data() + 1}});
+            ft::BufferPtr loss = device_->loss({all_logits, *label, stream->calculateLoss()});
+            stream->setLoss(*loss);
+        }
         ft::BufferPtr new_tokens = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)current_batch_size, (size_t)1}, ft::AllocationType::HOST}, {});
         for (int i = 0; i < current_batch_size; ++i) {
             memcpy(new_tokens->dataWithOffset<int32_t>(i), new_all_token_ids->dataWithOffset<int32_t>(batch_idx * step + step - 1), sizeof(int32_t));
@@ -352,6 +363,8 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         }
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
         stream->update(new_tokens, 1, batch_hidden_states, batch_logits, batch_cum_log_probs);
+        offset += batch;
+        token_offset += token_size;
     }
     FT_LOG_DEBUG("dispatch done");
     return absl::OkStatus();

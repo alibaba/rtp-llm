@@ -43,7 +43,7 @@ public:
     virtual void releaseResource();
     int nextNeedBlockNums() const;
     void incrFallbackBlock(int fallback_blocks);
-    
+
     std::shared_ptr<GenerateInput> generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig();
     std::vector<int> textTokensMask() const;
@@ -51,11 +51,13 @@ public:
     int64_t streamId() const;
     int loraId() const;
     ft::SpecialTokens specialTokens() const;
-    
+
     int tileNum() const;
     int batchSize() const;
     int numBeams() const;
     int numReturnSequences() const;
+    int calculateLoss() const;
+    bool hasLoss() const;
 
     void updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
     size_t maxSeqLen() const;
@@ -111,6 +113,7 @@ public:
 
     const ResourceContext& resourceContext() const;
     void setKVCache(const BatchKVCacheBlockAddr &kv_cache_block_addr);
+    void setLoss(const ft::Buffer& loss);
     const BatchKVCacheBlockAddr& kvCache() const;
     size_t maxBlockSize() const;
 
@@ -137,6 +140,7 @@ public:
 
     // for test
     void setIsContextStream(bool is_context_stream);
+    ft::BufferPtr getLoss();
     StreamCacheResource& streamCacheResource();
 
 protected:
@@ -180,6 +184,7 @@ protected:
     kmonitor::MetricsReporterPtr        metrics_reporter_       = nullptr;
     ft::SpecialTokens                   special_tokens_;
     ft::BufferPtr                       cum_log_probs_;
+    ft::BufferPtr                       loss_;
     autil::SynchronizedQueue<GenerateOutputs>  generate_outputs_queue_;
 
     // just for bool test

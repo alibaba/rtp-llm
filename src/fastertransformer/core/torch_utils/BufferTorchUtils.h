@@ -38,6 +38,10 @@ inline BufferShapeType torchShapeToBufferShape(const c10::IntArrayRef& sizes) {
     for (int i = 0; i < int(sizes.size()); i++) {
         shape.push_back(sizes[i]);
     }
+    // when tensor only one element, sizes will be empty
+    if (shape.empty()) {
+        shape.push_back(1);
+    }
     return shape;
 }
 
@@ -121,22 +125,26 @@ inline BufferPtr torchTensor2Buffer(const torch::Tensor& tensor,
 }
 
 
-inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf, bool copyData = true) {
-    if (buf->isQBuffer()) {
+inline torch::Tensor Buffer2torchTensor(const Buffer& buf, bool copyData = true) {
+    if (buf.isQBuffer()) {
         throw std::runtime_error("not support qbuffer!");
     }
-    auto option = torch::dtype(dataTypeToTorchType(buf->type())).device(memoryTypeToTorchDevice(buf->where())).requires_grad(false);
+    auto option = torch::dtype(dataTypeToTorchType(buf.type())).device(memoryTypeToTorchDevice(buf.where())).requires_grad(false);
     if (copyData) {
-        torch::Tensor out = torch::zeros(bufferShapeToTorchShape(*buf), option);
-        if (buf->where() == MemoryType::MEMORY_CPU || buf->where() == MemoryType::MEMORY_CPU_PINNED) {
-            memcpy(out.data_ptr(), buf->data(), buf->sizeBytes());
+        torch::Tensor out = torch::zeros(bufferShapeToTorchShape(buf), option);
+        if (buf.where() == MemoryType::MEMORY_CPU || buf.where() == MemoryType::MEMORY_CPU_PINNED) {
+            memcpy(out.data_ptr(), buf.data(), buf.sizeBytes());
         } else {
             throw std::runtime_error("not implemented");
         }
         return out;
     } else {
-        return torch::from_blob(buf->data(), bufferShapeToTorchShape(*buf), option);
+        return torch::from_blob(buf.data(), bufferShapeToTorchShape(buf), option);
     }
+}
+
+inline torch::Tensor Buffer2torchTensor(const ConstBufferPtr& buf, bool copyData = true) {
+    return Buffer2torchTensor(*buf, copyData);
 }
 
 inline std::array<torch::Tensor, 3> QBuffer2torchTensor(const ConstQBufferPtr& buf, bool copyData = true) {

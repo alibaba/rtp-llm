@@ -525,7 +525,7 @@ struct ActivationParams {
 };
 
 // softmax op is inplace-update, thus output buffer is same as input
-struct SoftmaxParams{
+struct SoftmaxParams {
     const BufferPtr input;
     const OptionalConstBufferRef mask = std::nullopt;
     const OptionalConstBufferRef bias = std::nullopt;
@@ -533,6 +533,14 @@ struct SoftmaxParams{
     const DataType output_t = DataType::TYPE_INVALID;
     const OptionalConstBufferRef linear_bias_slopes = std::nullopt;
 };
+
+struct LossParams {
+    const Buffer& logits;
+    const Buffer& labels;
+    int calculate_loss = 0;
+};
+
+using LossOutput = BufferPtr;
 
 struct LoraLinearOutput {
     BufferPtr output;

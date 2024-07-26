@@ -1,6 +1,10 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
+#include "ATen/ops/cross_entropy_loss.h"
+#include "c10/util/Optional.h"
 #include "src/fastertransformer/core/TrackerAllocator.h"
-
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "torch/extension.h"
+#include "torch/types.h"
 #include <numeric>
 
 using namespace std;
@@ -152,5 +156,24 @@ ConcatOutput DeviceBase::concat(const ConcatParams& params) {
     return concated;
 }
 
-}; // namespace fastertransformer
+LossOutput DeviceBase::loss(const LossParams& params) {
+    RUNTIME_ASSERT_OP_ARG(params.logits.where() == params.labels.where(), "logits and labels must be same device, but got %d and %d.", (int)params.logits.where(), (int)params.labels.where());
+    RUNTIME_ASSERT_OP_ARG(params.logits.shape()[0] == params.labels.shape()[0], "logits and labels must be same dim0, but got %d and %d.", (int)params.logits.shape()[0], (int)params.labels.shape()[0]);
+    torch::Tensor logits = Buffer2torchTensor(params.logits, false);
+    torch::Tensor labels = Buffer2torchTensor(params.labels, false).toType(torch::kInt64);
+    torch::Tensor output;
+    switch (params.calculate_loss) {
+    case 1:
+        output = torch::cross_entropy_loss(logits, labels, torch::nullopt, at::Reduction::Mean);
+        output = output.exp();
+        break;
+    case 2:
+        output = torch::cross_entropy_loss(logits, labels, torch::nullopt, at::Reduction::None);
+        break;
+    default:
+        RUNTIME_ASSERT_OP_ARG(false, "calculate_loss not support %d.", params.calculate_loss);
+    }
+    return clone({*torchTensor2Buffer(output)});
+}
 
+} // namespace fastertransformer

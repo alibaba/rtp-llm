@@ -44,7 +44,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.num_return_sequences = input_py.generate_config.num_return_sequences
     generate_config_pb.min_new_tokens = input_py.generate_config.min_new_tokens
     generate_config_pb.top_k = input_py.generate_config.top_k
-    generate_config_pb.top_p = input_py.generate_config.top_p 
+    generate_config_pb.top_p = input_py.generate_config.top_p
     generate_config_pb.temperature = input_py.generate_config.temperature
     generate_config_pb.repetition_penalty = input_py.generate_config.repetition_penalty
     trans_option(generate_config_pb, input_py.generate_config, "random_seed")
@@ -62,7 +62,7 @@ def trans_input(input_py: GenerateInput):
     # tmp stream true because cancel has bug
     generate_config_pb.is_streaming = True
     generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
-    
+
     for i in range(len(input_py.generate_config.stop_words_list)):
         stop_words = generate_config_pb.stop_words_list.rows.add()
         stop_words.values.extend(input_py.generate_config.stop_words_list[i])
@@ -81,7 +81,7 @@ def trans_tensor(t: TensorPB):
         return torch.frombuffer(t.bf16_data, dtype=torch.bfloat16).reshape(list(t.shape))
     else:
         raise Exception("unkown error type")
-    
+
 
 def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> GenerateOutputs:
     logging.debug("outputs_pb = ", outputs_pb)
@@ -105,11 +105,15 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
         if output_pb.HasField('hidden_states'):
             output_py.hidden_states = trans_tensor(output_pb.hidden_states)
         if output_pb.HasField('loss'):
-            output_py.loss = trans_tensor(output_pb.loss)
+            # when calculate_loss 1, result should be one element
+            if input_py.generate_config.calculate_loss == 1:
+                output_py.loss = trans_tensor(output_pb.loss)[0]
+            else:
+                output_py.loss = trans_tensor(output_pb.loss)
         if output_pb.HasField('logits'):
             output_py.logits = trans_tensor(output_pb.logits)
         outputs_py.generate_outputs.append(output_py)
-        
+
     return outputs_py
 
 

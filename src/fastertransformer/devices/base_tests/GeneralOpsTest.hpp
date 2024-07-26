@@ -222,4 +222,17 @@ void testMultiply() {
     assertTensorClose(result_tensor, ref.t());
 }
 
+void testLoss() {
+    vector<float> logits_v = {1, 2, 3, 4, 5, 6, 7, 8};
+    vector<int32_t> labels_v = {2, 3};
+    auto logits = createBuffer<float>({2, 4}, logits_v);
+    auto labels = createBuffer<int32_t>({2}, labels_v);
+    auto res1 = device_->loss({*logits, *labels, 1});
+    auto expected1 = torch::tensor({2.5605}, torch::kFloat32);
+    assertTensorClose(bufferToTensor(*res1), expected1);
+    auto res2 = device_->loss({*logits, *labels, 2});
+    auto expected2 = torch::tensor({1.4402, 0.4402}, torch::kFloat32);
+    assertTensorClose(bufferToTensor(*res2), expected2);
+}
+
 };

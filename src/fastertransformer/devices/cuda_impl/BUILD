@@ -17,6 +17,7 @@ cc_library(
         "//src/fastertransformer/devices:devices_base_impl",
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/cuda:allocator_cuda",
+        "//src/fastertransformer/cuda:torch_cuda_allocator",
         "//src/fastertransformer/layers:layers",
         "//src/fastertransformer/kernels:kernels",
         "cutlass_kernels_interface",

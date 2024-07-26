@@ -29,10 +29,10 @@ def http_deps():
     )
 
     http_archive(
-        name = "torch_2.1_py310_cpu",
-        sha256 = "5077921fc2b54e69a534f3a9c0b98493c79a5547c49d46f5e77e42da3610e011",
+        name = "torch_2.1_py310",
+        sha256 = "b2184b7729ef3b9b10065c074a37c1e603fd99f91e38376e25cb7ed6e1d54696",
         urls = [
-            "https://download.pytorch.org/whl/cpu/torch-2.1.0%2Bcpu-cp310-cp310-linux_x86_64.whl#sha256=5077921fc2b54e69a534f3a9c0b98493c79a5547c49d46f5e77e42da3610e011",
+            "https://download.pytorch.org/whl/torch/torch-2.1.2%2Bcu121-cp310-cp310-linux_x86_64.whl#sha256=b2184b7729ef3b9b10065c074a37c1e603fd99f91e38376e25cb7ed6e1d54696",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),
