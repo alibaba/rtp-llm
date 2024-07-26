@@ -213,7 +213,6 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 seq_len)) {
         return;
     } else {
-        FT_LOG_INFO("Do not use fmha!");
         // TODO(lidongjin): Only support float32 gemm output.
         // TODO: deal with GQA: duplicate k_output by head_num / kv_head_num ratio.
         auto qk_output = gemm({*q_output,
