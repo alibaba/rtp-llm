@@ -49,10 +49,10 @@ class BloomWeightInfo(ModelDeployWeightInfo):
             WeightInfo(W.attn_o_b, [CkptWeightInfo('h.{i}.self_attention.dense.bias', identity)],
                        identity),
 
-            WeightInfo(W.ffn_w1, [CkptWeightInfo('h.{i}.mlp.dense_h_to_4h.weight', identity)],
+            WeightInfo(W.ffn_w3, [CkptWeightInfo('h.{i}.mlp.dense_h_to_4h.weight', identity)],
                        transpose),
 
-            WeightInfo(W.ffn_b1, [CkptWeightInfo('h.{i}.mlp.dense_h_to_4h.bias', identity)],
+            WeightInfo(W.ffn_b3, [CkptWeightInfo('h.{i}.mlp.dense_h_to_4h.bias', identity)],
                        identity),
 
             WeightInfo(W.ffn_w2, [CkptWeightInfo('h.{i}.mlp.dense_4h_to_h.weight', identity)],
