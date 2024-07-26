@@ -63,7 +63,7 @@ class Conversation:
 
         for index, message in enumerate(messages):
             if isinstance(message.content, str):
-                prompt += f"{self.roles[message.role]}: {message.content}"
+                prompt += f"{self.roles[message.role]}{self.connector[0]}{message.content}"
             elif isinstance(message.content, list):
                 now_prompt = ""
                 for content_part in message.content:

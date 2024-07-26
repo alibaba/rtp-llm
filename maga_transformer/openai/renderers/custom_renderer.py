@@ -123,8 +123,6 @@ class CustomChatRenderer():
 
         if model.is_multimodal() and os.environ.get("USE_RPC_MODEL", "0") != "1":
             input_ids, images, token_type_ids = model.expand_token_id(input_ids, images)
-        
-        input_token_length = len(input_ids)
 
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
 
@@ -142,16 +140,14 @@ class CustomChatRenderer():
 
         async for response in self.render_response_stream(output_generator, 
                                                           request, 
-                                                          generate_config,
-                                                          input_token_length):
+                                                          generate_config):
             yield response
 
     async def render_response_stream(
             self,
             output_generator: AsyncGenerator[GenerateOutputs, None],
             request: ChatCompletionRequest,
-            generate_config: GenerateConfig,
-            input_token_length: int
+            generate_config: GenerateConfig
     ) -> AsyncGenerator[StreamResponseObject, None]:
         index = 0
         output_token_length = 0
@@ -193,6 +189,7 @@ class CustomChatRenderer():
             index += 1
             output = outputs.generate_outputs[0]
             # all model incremental return output_ids
+            input_token_length = output.aux_info.input_len
             output_tokens_list = torch.cat((output_tokens_list, output.output_ids), dim=1)
             output.output_ids = output_tokens_list
             output_ids = output.output_ids

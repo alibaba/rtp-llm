@@ -130,8 +130,7 @@ class QwenAgentRenderer(CustomChatRenderer):
             self,
             output_generator: AsyncGenerator[GenerateOutputs, None],
             request: ChatCompletionRequest,
-            generate_config: GenerateConfig,
-            input_token_length: int,
+            generate_config: GenerateConfig
     ) -> AsyncGenerator[StreamResponseObject, None]:
         index = 0
         output_string = ""
@@ -156,6 +155,7 @@ class QwenAgentRenderer(CustomChatRenderer):
                 )
             output = output.generate_outputs[0]
             # all mode incremental return output_ids
+            input_token_length = output.aux_info.input_len
             output_tokens_list = torch.cat((output_tokens_list, output.output_ids), dim=1)
             output.output_ids = output_tokens_list
             
