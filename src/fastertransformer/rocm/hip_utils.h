@@ -216,7 +216,7 @@ void check_abs_mean_val(const T* result, const int size);
         bool is_valid_val = (val);                                                                                     \
         if (!is_valid_val) {                                                                                           \
             fastertransformer::myAssert(                                                                               \
-                is_valid_val, __FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__));                     \
+                __FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__));                     \
         }                                                                                                              \
     } while (0)
 

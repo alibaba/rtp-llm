@@ -226,6 +226,7 @@ BufferPtr ROCmDevice::embeddingLookup(const EmbeddingLookupParams& params) {
                                      tokens.data<int>(),
                                      position_ids.has_value() ? position_ids.value().get().data<int>() : nullptr,
                                      token_types.has_value() ? token_types.value().get().data<int>() : nullptr,
+                                     nullptr, //mask
                                      token_num,
                                      hidden_size,
                                      stream_);
@@ -363,6 +364,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
         if (params.norm_type == NormType::layernorm) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type,
                                              invokeGeneralLayerNorm,
+                                             nullptr,
                                              norm_output->data(),
                                              input->data(),
                                              gamma,
