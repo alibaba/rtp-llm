@@ -78,7 +78,6 @@ py_library(
     data = [":cutlass_config"],
     deps = [
         ":torch",
-        ":torchvision",
         "decord",
         ":lru-dict",
         ":cpm_kernels",
@@ -105,7 +104,6 @@ py_library(
     ]),
     deps = [
         ":torch",
-        ":torchvision",
         ":utils",
     ],
 )
@@ -358,6 +356,7 @@ py_wheel(
         "dashscope>=1.11.0",
         "jieba",
         "openai",
+        "nest_asyncio",
     ] + whl_deps(),
 )
 
@@ -404,6 +403,7 @@ py_wheel(
         "decord==0.6.0",
         "timm==0.9.12",
         "kserve",
+        "nest_asyncio",
     ] + whl_deps(),
 )
 

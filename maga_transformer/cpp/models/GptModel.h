@@ -99,7 +99,12 @@ enum GptModelInputIndex : size_t{
     comboPositionIds,
     loraIds,
     loraInputLengths,
-    gptModelInputLength,
+    textTokensMask,
+    mmFeaturesLocs,
+    mmFeaturesNum, // number of mm features
+    mmFeaturesSize, // hidden_size of mm features
+    mmFeaturesDtype,
+    gptModelInputLength
 };
 
 inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
@@ -118,9 +123,32 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::comboPositionIds] = inputs.combo_position_ids.get() ? inputs.combo_position_ids->size() : 0;
     shape_hints_ptr[GptModelInputIndex::loraIds] = inputs.lora_ids.get() ? inputs.lora_ids->size() : 0;
     shape_hints_ptr[GptModelInputIndex::loraInputLengths] = inputs.lora_input_lengths.get() ? inputs.lora_input_lengths->size() : 0;
+    shape_hints_ptr[GptModelInputIndex::textTokensMask] = inputs.text_tokens_mask.get() ? inputs.text_tokens_mask->size() : 0;
+    shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs] = inputs.mm_features_locs.get() ? inputs.mm_features_locs->size() : 0;
+    shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] = inputs.multimodal_features.has_value() ? inputs.multimodal_features.value().size() : 0;
+    shape_hints_ptr[GptModelInputIndex::mmFeaturesSize] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? inputs.multimodal_features.value()[0]->shape()[1] : 0;
+    shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? (std::uint8_t)inputs.multimodal_features.value()[0]->type() : 0;
+    
     device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
     device->syncAndCheck();
+
+    // multimodal features shape broadcast
+    ft::BufferPtr mm_features_shape;
+    int32_t* mm_features_shape_ptr = nullptr;
+    const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
+    if (mm_features_num) {
+        mm_features_shape = 
+            device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesNum]}, ft::AllocationType::HOST});
+        mm_features_shape_ptr = mm_features_shape->data<int32_t>();
+        for (auto i = 0; i < mm_features_num; ++i) {
+            mm_features_shape_ptr[i] = inputs.multimodal_features.has_value() ? inputs.multimodal_features.value()[i]->shape()[0] : 0;
+        }
+        device->broadcast({{mm_features_shape}, 0});
+        device->syncCommunication(false);
+        device->syncAndCheck();
+    }
+
     if (device->getDeviceProperties().tp_rank) {
         inputs.combo_tokens = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]}, ft::AllocationType::HOST});
@@ -148,6 +176,25 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
             inputs.lora_input_lengths = device->allocateBuffer(
                 {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::loraInputLengths]}, ft::AllocationType::HOST});
         }
+        if (shape_hints_ptr[GptModelInputIndex::textTokensMask]) {
+            inputs.text_tokens_mask = device->allocateBuffer(
+                {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::textTokensMask]}, ft::AllocationType::HOST});
+        }
+        if (shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs]) {
+            inputs.mm_features_locs = device->allocateBuffer(
+                {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs]}, ft::AllocationType::HOST});
+        }
+        if (mm_features_num) {
+            std::vector<ft::BufferPtr> mm_features;
+            for (auto mm_index = 0; mm_index < mm_features_num; ++mm_index) {
+                mm_features.emplace_back(
+                    device->allocateBuffer(
+                        {(ft::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype], 
+                         {(size_t)mm_features_shape_ptr[mm_index], (size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]}, 
+                         ft::AllocationType::HOST}));
+            }
+            inputs.multimodal_features = std::move(mm_features);
+        }
     }
     std::vector<ft::BufferPtr> buffers;
     buffers.emplace_back(inputs.combo_tokens);
@@ -161,6 +208,17 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     }
     buffers.emplace_back(inputs.lora_ids);
     buffers.emplace_back(inputs.lora_input_lengths);
+    if (shape_hints_ptr[GptModelInputIndex::textTokensMask]) {
+        buffers.emplace_back(inputs.text_tokens_mask);
+    }
+    if (shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs]) {
+        buffers.emplace_back(inputs.mm_features_locs);
+    }
+    if (mm_features_num) {
+        for (auto& mm_feature: inputs.multimodal_features.value()) {
+            buffers.emplace_back(mm_feature);
+        }
+    }
     device->broadcast({buffers, 0});
     device->syncAndCheck();
 }

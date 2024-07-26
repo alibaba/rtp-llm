@@ -222,7 +222,6 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                 mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs: nullopt
         });
     }
-        
 
     // TODO: fix me
     ft::QScheme qscheme = QScheme::NoQuantize;

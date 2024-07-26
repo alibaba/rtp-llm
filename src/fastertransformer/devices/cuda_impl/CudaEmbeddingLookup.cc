@@ -42,31 +42,24 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
 }
 
 BufferPtr CudaDevice::multimodalEmbedding(const MultimodalEmbeddingParams& params) {
-    if (!params.multimodal_features.has_value()) {
-        return params.word_embeddings;
+    RUNTIME_ASSERT_OP_ARG(params.multimodal_locs, "no multimodal input location found");
+    const auto& embeddings = params.word_embeddings;
+    const auto& features = params.multimodal_features.value().get();
+    const auto& multimodal_locs = params.multimodal_locs.value().get();
+    const auto mm_num = features.size();
+    const auto hidden_size = embeddings->shape()[1];
+
+    RUNTIME_ASSERT_OP_ARG(
+        embeddings->typeSize() == features[0]->typeSize(),
+        "type size of embeddings and multimodal features should be equal.");
+
+    for (int i = 0; i < mm_num; ++i) {
+        auto& feature = features[i];
+        auto loc = multimodal_locs.dataWithOffset<int32_t>(i);
+        copy({embeddings->view(*loc, feature->shape()[0]), *feature});
     }
-    else {
-        RUNTIME_ASSERT_OP_ARG(params.multimodal_locs, "no multimodal input location found");
-        const auto& embeddings = params.word_embeddings;
-        const auto& features = params.multimodal_features.value().get();
-        const auto& multimodal_locs = params.multimodal_locs.value().get();
-        const auto mm_num = features.size();
-        const auto hidden_size = embeddings->shape()[1];
 
-        // not deal with bf16
-        RUNTIME_ASSERT_OP_ARG(
-            embeddings->typeSize() == features[0]->typeSize(),
-            "type size of embeddings and multimodal features should be equal.");
-
-        for (int i = 0; i < mm_num; ++i) {
-            auto& feature = features[i];
-            auto loc = multimodal_locs.dataWithOffset<int>(i);
-            auto x = embeddings->view(*loc, feature->shape()[0]);
-            copy({x, *feature});
-        }
-
-        return move(embeddings);
-    }
+    return move(embeddings);
 }
 
 } // namespace fastertransformer
