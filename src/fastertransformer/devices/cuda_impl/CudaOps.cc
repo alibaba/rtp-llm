@@ -261,10 +261,12 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
     const auto nccl_data_type = getNcclDataType(buffer->type());
 
     // if custom allreduce fails, fallback to the default ncclAllReduce
-    if (custom_allreduce_comm_ && nccl_op == ncclSum && 
-        custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type())) {
-        auto custom_ar_res_buf = allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"custom_ar_buf"});
-        custom_allreduce_comm_->allReduce(custom_ar_res_buf->data(), buffer->size(), buffer->type(), stream_);
+    if (custom_allreduce_comm_ && nccl_op == ncclSum
+        && custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type())) {
+        auto custom_ar_res_buf =
+            allocateBuffer({buffer->type(), buffer->shape(), AllocationType::DEVICE}, {"custom_ar_buf"});
+        custom_allreduce_comm_->allReduce(
+            buffer->data(), custom_ar_res_buf->data(), buffer->size(), buffer->type(), stream_);
         return AllReduceOutput{custom_ar_res_buf};
     }
 

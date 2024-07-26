@@ -388,7 +388,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
             lora_input,
             qscheme,
-            ffn_output_buf,
+            std::move(ffn_output_buf),
         }));
         hidden = ffn_output.hidden_states;
         if (device_props_.tp_size > 1) {

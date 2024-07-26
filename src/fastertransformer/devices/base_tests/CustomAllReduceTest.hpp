@@ -56,7 +56,7 @@ public:
         auto       buf    = device->allocateBuffer({DataType::TYPE_FP32, {static_cast<unsigned long>(tensor.size(0))}});
         buf = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
         copy_tensor_to_buffer(tensor, buf);
-        device->allReduce({buf, ReduceOp::Sum});
+        buf = device->allReduce({buf, ReduceOp::Sum}).buffer;
         device->syncAndCheck();
         auto out = bufferToTensor(*buf, device);
         device->syncAndCheck();
@@ -85,7 +85,7 @@ public:
         for (size_t i = 0; i < warm_iter; ++i) {
             buf = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
             copy_tensor_to_buffer(tensor, buf);
-            device->allReduce({buf, ReduceOp::Sum});
+            buf = device->allReduce({buf, ReduceOp::Sum}).buffer;
         }
         device->syncAndCheck();
 
@@ -93,7 +93,7 @@ public:
         for (size_t i = 0; i < iter_num; ++i) {
             buf = device->prepareAllReduce({std::move(buf), ReduceOp::Sum}).buffer;
             copy_tensor_to_buffer(tensor, buf);
-            device->allReduce({buf, ReduceOp::Sum});
+            buf = device->allReduce({buf, ReduceOp::Sum}).buffer;
         }
         device->syncAndCheck();
         auto end_time = std::chrono::high_resolution_clock::now();

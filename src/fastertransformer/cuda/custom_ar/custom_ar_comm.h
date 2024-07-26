@@ -37,7 +37,7 @@ public:
 
     void init(const NcclParam& nccl_para, cudaStream_t stream);
 
-    void allReduce(void* output_ptr, size_t elts, DataType data_type, cudaStream_t stream);
+    void allReduce(void* input_ptr, void* output_ptr, size_t elts, DataType data_type, cudaStream_t stream);
 
     bool checkAllReduceAvailable(size_t elts, DataType data_type);
 
@@ -71,6 +71,7 @@ private:
     std::vector<cudaIpcMemHandle_t> peer_comm_buffer_handles_;
 };
 
-std::unique_ptr<CustomAllReduceComm> initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<int>& tp_ranks, cudaStream_t stream);
+std::unique_ptr<CustomAllReduceComm>
+initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<int>& tp_ranks, cudaStream_t stream);
 
 }  // namespace fastertransformer

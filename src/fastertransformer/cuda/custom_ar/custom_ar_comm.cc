@@ -37,10 +37,8 @@ using namespace std;
 
 namespace fastertransformer {
 
-CustomAllReduceComm::CustomAllReduceComm(const std::vector<int>& tp_ranks, size_t rank)
-    : rank_(rank) 
-    , tp_ranks_(std::move(tp_ranks))
-{
+CustomAllReduceComm::CustomAllReduceComm(const std::vector<int>& tp_ranks, size_t rank):
+    rank_(rank), tp_ranks_(std::move(tp_ranks)) {
     param_.barrier_flag = 0;
     param_.rank         = rank_;
     param_.local_rank   = rank_;
@@ -70,24 +68,30 @@ CustomAllReduceComm::~CustomAllReduceComm() {
 }
 
 bool CustomAllReduceComm::checkAllReduceAvailable(size_t elts, DataType data_type) {
-    if (elts * getTypeSize(data_type) > CUSTOM_AR_SIZE_THRESHOLD || 
-        elts % (MAX_RANKS_PER_NODE * MAX_RANKS_PER_NODE) != 0) {
+    if (elts * getTypeSize(data_type) > CUSTOM_AR_SIZE_THRESHOLD
+        || elts % (MAX_RANKS_PER_NODE * MAX_RANKS_PER_NODE) != 0) {
         return false;
     }
     return true;
 }
 
-void CustomAllReduceComm::allReduce(void* output_ptr, size_t elts, DataType data_type, cudaStream_t stream) {
-
-    param_.elts_total   = elts;
-    param_.barrier_flag = FLAG(param_.barrier_flag + 1);
+void CustomAllReduceComm::allReduce(
+    void* input_ptr, void* output_ptr, size_t elts, DataType data_type, cudaStream_t stream) {
+    if (input_ptr != peer_comm_buffer_ptr()) {
+        std::string err_msg =
+            "input_ptr != peer_comm_buffer_ptr, check whether BufferPtr after prepareAllReduce is released or replaced";
+        FT_LOG_INFO(err_msg);
+        throw std::runtime_error(err_msg);
+    }
+    param_.elts_total              = elts;
+    param_.barrier_flag            = FLAG(param_.barrier_flag + 1);
     param_.local_output_buffer_ptr = output_ptr;
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(data_type, invokeCustomAllReduceDispatch, &param_, stream, tp_ranks_.size());
 }
 
 void CustomAllReduceComm::init(const NcclParam& nccl_para, cudaStream_t stream) {
     // enable P2P access
-    for (auto i: tp_ranks_) {
+    for (auto i : tp_ranks_) {
         if (i == rank_) {
             continue;
         }
@@ -178,9 +182,9 @@ std::vector<cudaIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Ncc
 
 bool CustomAllReduceComm::shouldCustomAR(const std::vector<int>& tp_ranks, int rank) {
 
-    size_t world_size = tp_ranks.size();
-    char* disable_custom_ar_str = std::getenv("FT_DISABLE_CUSTOM_AR");
-    bool disable_custom_ar = disable_custom_ar_str != nullptr && std::string(disable_custom_ar_str) == "1";
+    size_t world_size            = tp_ranks.size();
+    char*  disable_custom_ar_str = std::getenv("FT_DISABLE_CUSTOM_AR");
+    bool   disable_custom_ar     = disable_custom_ar_str != nullptr && std::string(disable_custom_ar_str) == "1";
     if (disable_custom_ar) {
         FT_LOG_INFO("Disable custom ar since FT_DISABLE_CUSTOM_AR is set");
         return false;
@@ -211,7 +215,8 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<int>& tp_ranks, int r
     return true;
 }
 
-std::unique_ptr<CustomAllReduceComm> initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<int>& tp_ranks, cudaStream_t stream) {
+std::unique_ptr<CustomAllReduceComm>
+initCustomAllReduceComm(const NcclParam& nccl_para, const std::vector<int>& tp_ranks, cudaStream_t stream) {
     if (!CustomAllReduceComm::shouldCustomAR(tp_ranks, nccl_para.rank_)) {
         return nullptr;
     }
