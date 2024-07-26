@@ -178,7 +178,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<int>& tp_ranks, int r
 
     size_t world_size = tp_ranks.size();
     char* disable_custom_ar_str = std::getenv("FT_DISABLE_CUSTOM_AR");
-    bool  disable_custom_ar = disable_custom_ar_str != nullptr;
+    bool disable_custom_ar = disable_custom_ar_str != nullptr && std::string(disable_custom_ar_str) != "0";
     if (disable_custom_ar) {
         FT_LOG_INFO("Disable custom ar since FT_DISABLE_CUSTOM_AR is set");
         return false;
