@@ -8,6 +8,7 @@
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/cuda_fmha_utils.h"
+#include "src/fastertransformer/utils/RopeTypes.h"
 
 #include <type_traits>
 #include <cassert>
@@ -526,15 +527,9 @@ void ParallelAttentionWrapper<T>::SelfAttention(TensorMap*                output
         local_head_num,
         local_head_num_kv,
         params_.size_per_head_,
-        params_.rotary_embedding_dim_,
-        params_.rotary_embedding_style_,
-        params_.rotary_embedding_base_,
-        position_ids,
-        params_.logn_seq_len_,
+        params_.getRopeConfig(),
         params_.use_logn_attn_,
-        params_.rotary_embedding_scale_,
-        params_.dynamic_embedding_max_pos_,
-        params_.base_scale_,
+        position_ids,
         input_tensors->getVal<int>("step"),  // memory_max_len
         input_tensors->getPtr<int>("d_prefix_prompt_lengths", nullptr),
         input_tensors->getVal<int>("max_prefix_prompt_length", 0),
@@ -653,14 +648,7 @@ void ParallelAttentionWrapper<T>::ContextAttention(TensorMap*                out
                                        local_head_num,
                                        local_head_num_kv,
                                        params_.size_per_head_,
-                                       params_.rotary_embedding_dim_,
-                                       params_.rotary_embedding_style_,
-                                       params_.rotary_embedding_base_,
-                                       params_.rotary_embedding_scale_,
-                                       params_.dynamic_embedding_max_pos_,
-                                       params_.org_embedding_max_pos_,
-                                       params_.base_scale_,
-                                       params_.logn_seq_len_,
+                                       params_.getRopeConfig(),
                                        params_.use_logn_attn_,
                                        attention_weights->query_weight.scale_out,
                                        0,

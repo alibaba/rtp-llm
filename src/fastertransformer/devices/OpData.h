@@ -364,7 +364,8 @@ struct AttentionConfigs {
 
     AttentionMaskType mask_type = noMask;
     float q_scaling = 1.0f;
-    bool  fuse_qkv_add_bias = true;
+    bool fuse_qkv_add_bias = true;
+    bool use_logn_attn = false;
 };
 
 using AttentionModuleOutput = void;

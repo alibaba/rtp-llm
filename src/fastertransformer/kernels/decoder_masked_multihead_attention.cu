@@ -125,15 +125,9 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         const int     head_num,
                                         const int     head_num_kv,
                                         const int     size_per_head,
-                                        const int     rotary_embedding_dim,
-                                        const int     rotary_embedding_style,
-                                        const float   rotary_embedding_base,
-                                        const int*    position_ids,
-                                        const int     logn_seq_len,
+                                        const RopeConfig    rope_config,
                                         const bool    use_logn_attn,
-                                        const float   rotary_embedding_scale,
-                                        const int     dynamic_embedding_max_pos,
-                                        const int     base_scale,
+                                        const int*    position_ids,
                                         const int     memory_max_len,
                                         const int*    prefix_prompt_lengths,
                                         const int     max_prefix_prompt_length,
@@ -215,14 +209,8 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
     params.num_heads                      = head_num;
     params.num_kv_heads                   = head_num_kv;
     params.hidden_size_per_head           = size_per_head;
-    params.rotary_embedding_dim           = rotary_embedding_dim;
-    params.rotary_embedding_base          = rotary_embedding_base;
-    params.rotary_embedding_scale         = rotary_embedding_scale;
-    params.rotary_embedding_max_positions = dynamic_embedding_max_pos;
-    params.rotary_embedding_style         = rotary_embedding_style;
+    params.rope_config                    = rope_config;
     params.position_ids                   = position_ids;
-    params.use_logn_attn                  = use_logn_attn;
-    params.logn_seq_len                   = logn_seq_len;
     // Note: keep norm factor (sqrt(K_dim)) when adopting megatron T5 structure (may adjust)
     params.inv_sqrt_dh = 1.F / (sqrtf((float)size_per_head) * q_scaling);
     if (relative_attention_bias != nullptr) {
@@ -230,7 +218,6 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
     }
     params.relative_attention_bias_stride = relative_attention_bias_stride;
     params.max_distance                   = 0;
-    params.base_scale                     = base_scale;
     // The slope of linear position bias per head, e.g., ALiBi.
     if (linear_bias_slopes != nullptr) {
         params.linear_bias_slopes = linear_bias_slopes;
@@ -271,15 +258,9 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                                      const int     head_num,                                           \
                                                      const int     head_num_kv,                                        \
                                                      const int     size_per_head,                                      \
-                                                     const int     rotary_embedding_dim,                               \
-                                                     const int     rotary_embedding_style,                             \
-                                                     const float   rotary_embedding_base,                              \
+                                                     const RopeConfig rope_config,\
+                                                     const bool    use_logn_attn,\
                                                      const int*    position_ids,                                       \
-                                                     const int     logn_seq_len,                                       \
-                                                     const bool    use_logn_attn,                                      \
-                                                     const float   rotary_embedding_scale,                           \
-                                                     const int     dynamic_embedding_max_pos,                          \
-                                                     const int     base_scale,                                         \
                                                      const int     memory_max_len,                                     \
                                                      const int*    prefix_prompt_lengths,                              \
                                                      const int     max_prefix_prompt_length,                           \

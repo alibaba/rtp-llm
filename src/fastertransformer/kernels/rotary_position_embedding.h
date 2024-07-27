@@ -2,6 +2,7 @@
 
 #include "decoder_masked_multihead_attention_utils.h"
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h"
+#include "src/fastertransformer/utils/RopeTypes.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
@@ -301,49 +302,142 @@ __device__ __inline__ void RotaryHalfWrite(vector_t& vec, scalar_t* smem, const 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-inline __device__ float2 rotary_embedding_coefficient(const int   zid,
-                                                      const int   rot_embed_dim,
-                                                      const float t_step,
-                                                      const float base           = 10000.0f,
-                                                      const float scaling_factor = 1.f) {
-    const float inv_freq = (t_step / pow(base, zid / (float)rot_embed_dim)) / scaling_factor;
-    return {cos(inv_freq), sin(inv_freq)};
+__device__ __inline__ float rope_inv_freq(const int   zid,
+                                          const int   rot_embed_dim,
+                                          const float t_step,
+                                          const float base)
+{
+    return (t_step / pow(base, zid / (float)rot_embed_dim));
 }
 
-inline __device__ float linear_ramp_mask(float min_, float max_, int tidx) {
-    if (min_ == max_) {
-         max_ += 0.001;
+template<typename RopeInit>
+__device__ __inline__ float2 rotary_embedding_coefficient(
+        const int   zid,
+        const int   rot_embed_dim,
+        const float t_step,
+        const float base,
+        const RopeInit &rope_init)
+{
+    float inv_freq = rope_inv_freq(zid, rot_embed_dim, t_step, base);
+    inv_freq = rope_init(inv_freq, zid);
+    float sin_cos_scale = rope_init.sin_cos_scale();
+    float sin_i, cos_i;
+    sincos(inv_freq, &sin_i, &cos_i);
+    return {sin_cos_scale * cos_i, sin_cos_scale * sin_i};
+}
+
+struct DefaultRope {
+    __device__ __inline__ float operator()(float inv_freq, int zid) const {
+        return inv_freq;
     }
-    float linear = (tidx / 2 - min_) / (max_ - min_);
-    return std::min(1.f, std::max(0.f, linear));
-}
+    __device__ __inline__ float sin_cos_scale() const {
+        return 1.0;
+    }
+};
 
-inline __device__ float2 rotary_embedding_coefficient_yarn(const int   zid,
-                                                           const int   rot_embed_dim,
-                                                           const float t_step,
-                                                           const float base,
-                                                           const float scaling_factor,
-                                                           const float mscale,
-                                                           const float low,
-                                                           const float high,
-                                                           const float extrapolation_factor=1.f){
-    const float inv_freq_e = (t_step / pow(base, zid / (float)rot_embed_dim));
-    const float inv_freq_i = inv_freq_e / scaling_factor;
+struct LinearScaleRope {
+    float scale = 1.0;
+    __device__ __inline__ float operator()(float inv_freq, int zid) const {
+        return inv_freq / scale;
+    }
 
-    const float mask     = (1 - linear_ramp_mask(low, high, zid)) * extrapolation_factor;
-    const float inv_freq = inv_freq_i * (1 - mask) + inv_freq_e * mask;
+    __device__ __inline__ float sin_cos_scale() const {
+        return 1.0;
+    }
+};
 
-    return {mscale * cos(inv_freq), mscale * sin(inv_freq)};
-}
+struct YarnRope {
+    int dim;
+    int base;
+    int max_pos;
+    float beta_slow;
+    float beta_fast;
+    float scaling_factor;
+    float extrapolation_factor;
 
-inline __device__ float2 rotary_embedding_transform(const float2 v, const float2 coef) {
+    static __device__ __inline__ float find_correction_dim(const int num_rotations, const int dim, const int base,
+                                                           const int max_position_embeddings=2048) {
+
+        float pi = 3.141592654f;
+        float t0 = dim * logf((float)max_position_embeddings / (num_rotations * 2 * pi));
+        float t1 = 2 * logf((float)base);
+        return (t0 / t1);
+    }
+
+    static __device__ __inline__ float2 find_correction_range(float low_rot, float high_rot, int dim, int base,
+                                                              int max_position_embeddings)
+    {
+        float2 low_high;
+        int low = floor(find_correction_dim(low_rot, dim, base, max_position_embeddings));
+        int high = ceil(find_correction_dim(high_rot, dim, base, max_position_embeddings));
+        low_high.x = max(low, 0);
+        low_high.y = min(high, dim-1);
+        return low_high;
+    }
+
+    static __device__ __inline__ float get_mscale(float scale=1) {
+        if (scale <= 1) {
+            return 1.0;
+        } else {
+            return 0.1 * log(scale) + 1.0;
+        }
+    }
+
+    static __device__ __inline__ float linear_ramp_mask(float min_, float max_, int tidx) {
+        if (min_ == max_) {
+            max_ += 0.001;
+        }
+        float linear = (tidx / 2 - min_) / (max_ - min_);
+        return std::min(1.f, std::max(0.f, linear));
+    }
+
+    __device__ __inline__ float operator()(float inv_freq, int zid) const {
+        float2 low_high = find_correction_range(beta_fast, beta_slow, dim, base, max_pos);
+        const float inv_freq_e = inv_freq;
+        const float inv_freq_i = inv_freq_e / scaling_factor;
+        const float mask     = (1 - linear_ramp_mask(low_high.x, low_high.y, zid)) * extrapolation_factor;
+        return inv_freq_i * (1 - mask) + inv_freq_e * mask;
+    }
+
+    __device__ __inline__ float sin_cos_scale() const {
+        return get_mscale(scaling_factor);
+    }
+};
+
+struct Llama3Rope {
+    float low_freq_factor;
+    float high_freq_factor;
+    float factor;
+    int old_context_len;
+
+    __device__ __inline__ float operator()(float inv_freq, int zid) const {
+        const float pi = 3.141592654f;
+        const float wavelen = 2 * pi / inv_freq;
+        const float low_freq_wavelen = old_context_len / low_freq_factor;
+        const float high_freq_wavelen = old_context_len / high_freq_factor;
+        if (wavelen < high_freq_wavelen) {
+            return inv_freq;
+        } else if (wavelen > low_freq_wavelen) {
+            return inv_freq / factor;
+        } else {
+            const float smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor);
+            return (1 - smooth) * inv_freq / factor + smooth * inv_freq;
+        }
+    }
+
+    __device__ __inline__ float sin_cos_scale() const {
+        return 1.0;
+    }
+};
+
+__device__ __inline__ float2 rotary_embedding_transform(const float2 v, const float2 coef) {
     float2 rot_v;
     rot_v.x = coef.x * v.x - coef.y * v.y;
     rot_v.y = coef.x * v.y + coef.y * v.x;
     return rot_v;
 }
 
-inline __device__ uint32_t rotary_embedding_transform(const uint32_t v, const float2 coef) {
+__device__ __inline__ uint32_t rotary_embedding_transform(const uint32_t v, const float2 coef) {
     float2 fv     = half2_to_float2(v);
     float2 rot_fv = rotary_embedding_transform(fv, coef);
     return float2_to_half2(rot_fv);
@@ -361,175 +455,97 @@ inline __device__ uint32_t rotary_embedding_transform(const uint32_t v, const fl
  *
  */
 #ifdef ENABLE_BF16
-inline __device__ __nv_bfloat162 rotary_embedding_transform(const __nv_bfloat162 v, const float2 coef) {
+__device__ __inline__ __nv_bfloat162 rotary_embedding_transform(const __nv_bfloat162 v, const float2 coef) {
     float2 fv     = bf1622float2(v);
     float2 rot_fv = rotary_embedding_transform(fv, coef);
     return __floats2bfloat162_rn(rot_fv.x, rot_fv.y);
 }
 #endif
 
-inline __device__ void apply_rotary_embedding(float& q,
-                                              int    zid,
-                                              int    rot_embed_dim,
-                                              int    t_step,
-                                              float  base                 = 10000.0f,
-                                              float  scaling_factor       = 1.f,
-                                              bool   yarn                 = false,
-                                              float  mscale               = 1.f,
-                                              float  low                  = 0.f,
-                                              float  high                 = 0.f,
-                                              float  extrapolation_factor = 1.f) {
-    return;
-}
-
-inline __device__ void apply_rotary_embedding(float2& q,
-                                              int     tid,
-                                              int     rot_embed_dim,
-                                              int     t_step,
-                                              float   base                 = 10000.0f,
-                                              float   scaling_factor       = 1.f,
-                                              bool    yarn                 = false,
-                                              float   mscale               = 1.f,
-                                              float   low                  = 0.f,
-                                              float   high                 = 0.f,
-                                              float   extrapolation_factor = 1.f) {
+template<typename RopeInit>
+__device__ __inline__ void apply_rotary_embedding(float2& q,
+                                                  int     tid,
+                                                  int     rot_embed_dim,
+                                                  int     t_step,
+                                                  float   base,
+                                                  const RopeInit &rope_init)
+{
     if (2 * tid >= rot_embed_dim) {
         return;
     }
-    float2 coef = {0.f, 0.f};
-    if (yarn) {
-        coef = rotary_embedding_coefficient_yarn(
-            2 * tid, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-
-    } else {
-        coef = rotary_embedding_coefficient(2 * tid, rot_embed_dim, t_step, base, scaling_factor);
-    }
+    float2 coef = rotary_embedding_coefficient(2 * tid, rot_embed_dim, t_step, base, rope_init);
     q = rotary_embedding_transform(q, coef);
 }
 
-inline __device__ void apply_rotary_embedding(float4& q,
-                                              int     tid,
-                                              int     rot_embed_dim,
-                                              int     t_step,
-                                              float   base                 = 10000.0f,
-                                              float   scaling_factor       = 1.f,
-                                              bool    yarn                 = false,
-                                              float   mscale               = 1.f,
-                                              float   low                  = 0.f,
-                                              float   high                 = 0.f,
-                                              float   extrapolation_factor = 1.f) {
-
+template<typename RopeInit>
+__device__ __inline__ void apply_rotary_embedding(float4& q,
+                                                  int     tid,
+                                                  int     rot_embed_dim,
+                                                  int     t_step,
+                                                  float   base,
+                                                  const RopeInit &rope_init)
+{
     if (4 * tid >= rot_embed_dim) {
         return;
     }
 
     Float4_& q_    = *reinterpret_cast<Float4_*>(&q);
-    float2   coef0 = {0.f, 0.f};
-    float2   coef1 = {0.f, 0.f};
-    if (yarn) {
-        coef0 = rotary_embedding_coefficient_yarn(
-            4 * tid, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-        coef1 = rotary_embedding_coefficient_yarn(
-            4 * tid + 2, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-
-    } else {
-        coef0 = rotary_embedding_coefficient(4 * tid, rot_embed_dim, t_step, base, scaling_factor);
-        coef1 = rotary_embedding_coefficient(4 * tid + 2, rot_embed_dim, t_step, base, scaling_factor);
-    }
+    float2 coef0 = rotary_embedding_coefficient(4 * tid, rot_embed_dim, t_step, base, rope_init);
+    float2 coef1 = rotary_embedding_coefficient(4 * tid + 2, rot_embed_dim, t_step, base, rope_init);
     q_.x = rotary_embedding_transform(q_.x, coef0);
     q_.y = rotary_embedding_transform(q_.y, coef1);
 }
 
-inline __device__ void apply_rotary_embedding(uint32_t&   q,
-                                              int         tid,
-                                              int         rot_embed_dim,
-                                              int         t_step,
-                                              float       base                 = 10000.0f,
-                                              const float scaling_factor       = 1.f,
-                                              bool        yarn                 = false,
-                                              float       mscale               = 1.f,
-                                              float       low                  = 0.f,
-                                              float       high                 = 0.f,
-                                              float       extrapolation_factor = 1.f) {
+template<typename RopeInit>
+__device__ __inline__ void apply_rotary_embedding(uint32_t&   q,
+                                                  int         tid,
+                                                  int         rot_embed_dim,
+                                                  int         t_step,
+                                                  float       base,
+                                                  const RopeInit &rope_init)
+{
     if (2 * tid >= rot_embed_dim) {
         return;
     }
-        float2 coef = {0.f, 0.f};
-    if (yarn) {
-        coef = rotary_embedding_coefficient_yarn(
-            2 * tid, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-    } else {
-        coef = rotary_embedding_coefficient(2 * tid, rot_embed_dim, t_step, base, scaling_factor);
-    }
+    float2 coef = rotary_embedding_coefficient(2 * tid, rot_embed_dim, t_step, base, rope_init);
     q = rotary_embedding_transform(q, coef);
 }
 
-inline __device__ void apply_rotary_embedding(uint2&      q,
-                                              int         tid,
-                                              int         rot_embed_dim,
-                                              int         t_step,
-                                              float       base                 = 10000.0f,
-                                              const float scaling_factor       = 1.f,
-                                              bool        yarn                 = false,
-                                              float       mscale               = 1.f,
-                                              float       low                  = 0.f,
-                                              float       high                 = 0.f,
-                                              float       extrapolation_factor = 1.f) {
+template<typename RopeInit>
+__device__ __inline__ void apply_rotary_embedding(uint2&      q,
+                                                  int         tid,
+                                                  int         rot_embed_dim,
+                                                  int         t_step,
+                                                  float       base,
+                                                  const RopeInit &rope_init)
+{
     if (4 * tid >= rot_embed_dim) {
         return;
     }
 
-    float2 coef0 = {0.f, 0.f};
-    float2 coef1 = {0.f, 0.f};
-    if (yarn) {
-        coef0 = rotary_embedding_coefficient_yarn(
-            4 * tid, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-        coef1 = rotary_embedding_coefficient_yarn(
-            4 * tid + 2, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-
-    } else {
-        coef0 = rotary_embedding_coefficient(4 * tid, rot_embed_dim, t_step, base, scaling_factor);
-        coef1 = rotary_embedding_coefficient(4 * tid + 2, rot_embed_dim, t_step, base, scaling_factor);
-    }
+    float2 coef0 = rotary_embedding_coefficient(4 * tid, rot_embed_dim, t_step, base, rope_init);
+    float2 coef1 = rotary_embedding_coefficient(4 * tid + 2, rot_embed_dim, t_step, base, rope_init);
     q.x = rotary_embedding_transform(q.x, coef0);
     q.y = rotary_embedding_transform(q.y, coef1);
 }
 
-inline __device__ void apply_rotary_embedding(uint4&      q,
-                                              int         tid,
-                                              int         rot_embed_dim,
-                                              int         t_step,
-                                              float       base                 = 10000.0f,
-                                              const float scaling_factor       = 1.f,
-                                              bool        yarn                 = false,
-                                              float       mscale               = 1.f,
-                                              float       low                  = 0.f,
-                                              float       high                 = 0.f,
-                                              float       extrapolation_factor = 1.f) {
+template<typename RopeInit>
+__device__ __inline__ void apply_rotary_embedding(uint4&      q,
+                                                  int         tid,
+                                                  int         rot_embed_dim,
+                                                  int         t_step,
+                                                  float       base,
+                                                  const RopeInit &rope_init)
+{
     if (8 * tid >= rot_embed_dim) {
         return;
     }
 
-    float2 coef0 = {0.f, 0.f};
-    float2 coef1 = {0.f, 0.f};
-    float2 coef2 = {0.f, 0.f};
-    float2 coef3 = {0.f, 0.f};
+    float2 coef0 = rotary_embedding_coefficient(8 * tid, rot_embed_dim, t_step, base, rope_init);
+    float2 coef1 = rotary_embedding_coefficient(8 * tid + 2, rot_embed_dim, t_step, base, rope_init);
+    float2 coef2 = rotary_embedding_coefficient(8 * tid + 4, rot_embed_dim, t_step, base, rope_init);
+    float2 coef3 = rotary_embedding_coefficient(8 * tid + 6, rot_embed_dim, t_step, base, rope_init);
 
-    if (yarn) {
-        coef0 = rotary_embedding_coefficient_yarn(
-            8 * tid, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-        coef1 = rotary_embedding_coefficient_yarn(
-            8 * tid + 2, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-        coef2 = rotary_embedding_coefficient_yarn(
-            8 * tid + 4, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-        coef3 = rotary_embedding_coefficient_yarn(
-            8 * tid + 6, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-    } else {
-        const auto coef0 = rotary_embedding_coefficient(8 * tid, rot_embed_dim, t_step, base, scaling_factor);
-        const auto coef1 = rotary_embedding_coefficient(8 * tid + 2, rot_embed_dim, t_step, base, scaling_factor);
-        const auto coef2 = rotary_embedding_coefficient(8 * tid + 4, rot_embed_dim, t_step, base, scaling_factor);
-        const auto coef3 = rotary_embedding_coefficient(8 * tid + 6, rot_embed_dim, t_step, base, scaling_factor);
-    }
     q.x = rotary_embedding_transform(q.x, coef0);
     q.y = rotary_embedding_transform(q.y, coef1);
     q.z = rotary_embedding_transform(q.z, coef2);
@@ -537,422 +553,187 @@ inline __device__ void apply_rotary_embedding(uint4&      q,
 }
 
 #ifdef ENABLE_BF16
-inline __device__ void apply_rotary_embedding(__nv_bfloat162& q,
-                                              int             tid,
-                                              int             rot_embed_dim,
-                                              int             t_step,
-                                              float           base                 = 10000.0f,
-                                              const float     scaling_factor       = 1.f,
-                                              bool            yarn                 = false,
-                                              float           mscale               = 1.f,
-                                              float           low                  = 0.f,
-                                              float           high                 = 0.f,
-                                              float           extrapolation_factor = 1.f) {
+
+template<typename RopeInit>
+__device__ __inline__ void apply_rotary_embedding(__nv_bfloat162& q,
+                                                  int             tid,
+                                                  int             rot_embed_dim,
+                                                  int             t_step,
+                                                  float           base,
+                                                  const RopeInit &rope_init)
+{
     if (2 * tid >= rot_embed_dim) {
         return;
     }
-    float2 coef = {0.f, 0.f};
-    if (yarn) {
-        coef = rotary_embedding_coefficient_yarn(
-            2 * tid, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-    } else {
-        coef = rotary_embedding_coefficient(2 * tid, rot_embed_dim, t_step, base, scaling_factor);
-    }
+    float2 coef = rotary_embedding_coefficient(2 * tid, rot_embed_dim, t_step, base, rope_init);
     q = rotary_embedding_transform(q, coef);
 }
 
-inline __device__ void apply_rotary_embedding(bf16_4_t&   q,
-                                              int         tid,
-                                              int         rot_embed_dim,
-                                              int         t_step,
-                                              float       base                 = 10000.0f,
-                                              const float scaling_factor       = 1.f,
-                                              bool        yarn                 = false,
-                                              float       mscale               = 1.f,
-                                              float       low                  = 0.f,
-                                              float       high                 = 0.f,
-                                              float       extrapolation_factor = 1.f) {
+template<typename RopeInit>
+__device__ __inline__ void apply_rotary_embedding(bf16_4_t&   q,
+                                                  int         tid,
+                                                  int         rot_embed_dim,
+                                                  int         t_step,
+                                                  float       base,
+                                                  const RopeInit &rope_init) {
     if (4 * tid >= rot_embed_dim) {
         return;
     }
 
-    float2 coef0 = {0.f, 0.f};
-    float2 coef1 = {0.f, 0.f};
-    if (yarn) {
-        coef0 = rotary_embedding_coefficient_yarn(
-            4 * tid, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-        coef1 = rotary_embedding_coefficient_yarn(
-            4 * tid + 2, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-    } else {
-        coef0 = rotary_embedding_coefficient(4 * tid, rot_embed_dim, t_step, base, scaling_factor);
-        coef1 = rotary_embedding_coefficient(4 * tid + 2, rot_embed_dim, t_step, base, scaling_factor);
-    }
+    float2 coef0 = rotary_embedding_coefficient(4 * tid, rot_embed_dim, t_step, base, rope_init);
+    float2 coef1 = rotary_embedding_coefficient(4 * tid + 2, rot_embed_dim, t_step, base, rope_init);
+
     q.x = rotary_embedding_transform(q.x, coef0);
     q.y = rotary_embedding_transform(q.y, coef1);
 }
 
-inline __device__ void apply_rotary_embedding(bf16_8_t&   q,
-                                              int         tid,
-                                              int         rot_embed_dim,
-                                              int         t_step,
-                                              float       base                 = 10000.0f,
-                                              const float scaling_factor       = 1.f,
-                                              bool        yarn                 = false,
-                                              float       mscale               = 1.f,
-                                              float       low                  = 0.f,
-                                              float       high                 = 0.f,
-                                              float       extrapolation_factor = 1.f) {
+template<typename RopeInit>
+__device__ __inline__ void apply_rotary_embedding(bf16_8_t&   q,
+                                                  int         tid,
+                                                  int         rot_embed_dim,
+                                                  int         t_step,
+                                                  float       base,
+                                                  const RopeInit &rope_init)
+{
     if (8 * tid >= rot_embed_dim) {
         return;
     }
-    float2 coef0 = {0.f, 0.f};
-    float2 coef1 = {0.f, 0.f};
-    float2 coef2 = {0.f, 0.f};
-    float2 coef3 = {0.f, 0.f};
 
-    if (yarn) {
-        coef0 = rotary_embedding_coefficient_yarn(
-            8 * tid, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-        coef1 = rotary_embedding_coefficient_yarn(
-            8 * tid + 2, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-        coef2 = rotary_embedding_coefficient_yarn(
-            8 * tid + 4, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-        coef3 = rotary_embedding_coefficient_yarn(
-            8 * tid + 6, rot_embed_dim, t_step, base, scaling_factor, mscale, low, high, extrapolation_factor);
-    } else {
-        coef0 = rotary_embedding_coefficient(8 * tid, rot_embed_dim, t_step, base, scaling_factor);
-        coef1 = rotary_embedding_coefficient(8 * tid + 2, rot_embed_dim, t_step, base, scaling_factor);
-        coef2 = rotary_embedding_coefficient(8 * tid + 4, rot_embed_dim, t_step, base, scaling_factor);
-        coef3 = rotary_embedding_coefficient(8 * tid + 6, rot_embed_dim, t_step, base, scaling_factor);
-    }
+    float2 coef0 = rotary_embedding_coefficient(8 * tid, rot_embed_dim, t_step, base, rope_init);
+    float2 coef1 = rotary_embedding_coefficient(8 * tid + 2, rot_embed_dim, t_step, base, rope_init);
+    float2 coef2 = rotary_embedding_coefficient(8 * tid + 4, rot_embed_dim, t_step, base, rope_init);
+    float2 coef3 = rotary_embedding_coefficient(8 * tid + 6, rot_embed_dim, t_step, base, rope_init);
 
     q.x = rotary_embedding_transform(q.x, coef0);
     q.y = rotary_embedding_transform(q.y, coef1);
     q.z = rotary_embedding_transform(q.z, coef2);
     q.w = rotary_embedding_transform(q.w, coef3);
 }
+
 #endif  // ENABLE_BF16
 
-enum class RotaryEmbeddingStyle : int8_t {
-    NoRope        = 0,
-    LinearScalar  = 1,
-    NTKScalar     = 2,
-    QWenNTKScalar = 3,
-    GLM2          = 4,
-    Yarn          = 5,
-};
+template<typename RopeInit, typename scalar_t, typename vector_t>
+__device__ __inline__ void normal_rope(vector_t&   x,
+                                       scalar_t*   smem,
+                                       const int   tidx,
+                                       const int   seqidx,
+                                       const int   dim,
+                                       const float base,
+                                       const RopeInit &rope_init)
+{
+    const int  vec_size = vector_size<scalar_t, vector_t>::size;
+    const bool work     = (tidx * vec_size < dim);
 
-template<typename scalar_t, typename vector_t, RotaryEmbeddingStyle style>
-class Rope {};
-
-template<typename scalar_t, typename vector_t>
-class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NoRope> {
-
-public:
-    static __device__ __inline__ void
-    impl(vector_t& x, scalar_t* smem, const int tidx, const int seqidx, const int dim, const int base = 10000) {
-        return;
-    }
-};
-
-template<typename scalar_t, typename vector_t>
-class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::LinearScalar> {
-
-public:
-    static __device__ __inline__ void impl(vector_t&   x,
-                                           scalar_t*   smem,
-                                           const int   tidx,
-                                           const int   seqidx,
-                                           const int   dim,
-                                           const float base    = 10000.f,
-                                           const float scale   = 1.0,
-                                           const int   seq_len = 0,
-                                           const int   max_pos = 2048) {
-
-        const int  vec_size = vector_size<scalar_t, vector_t>::size;
-        const bool work     = (tidx * vec_size < dim);
-
-        if (work) {
-            reinterpret_cast<vector_t*>(smem)[tidx] = x;
-        }
-
-        __syncthreads();
-
-        if (work) {
-            RotaryHalfRead(x, smem, tidx, dim / 2);
-            apply_rotary_embedding(x, tidx, dim, seqidx, base, scale);
-            RotaryHalfWrite(x, smem, tidx, dim / 2);
-        }
-
-        __syncthreads();
-
-        if (work) {
-            x = reinterpret_cast<vector_t*>(smem)[tidx];
-        }
-
-        __syncthreads();
+    if (work) {
+        reinterpret_cast<vector_t*>(smem)[tidx] = x;
     }
 
-};
+    __syncthreads();
 
-template<typename scalar_t, typename vector_t>
-class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar> {
-
-    static __device__ inline float get_neox_dynamic_embedding_base(
-        const float base, const int seq_len, const int rot_embed_dim, const float scale, const int max_pos) {
-        if (max_pos == 0 || seq_len <= max_pos)
-            return base * 1.0f;
-        else {
-            return base * 1.0f
-                   * pow(((scale * seq_len / max_pos) - (scale - 1)), (rot_embed_dim / (rot_embed_dim - 2.0f)));
-        }
-    }
-
-public:
-    static __device__ __inline__ void impl(vector_t&   x,
-                                           scalar_t*   smem,
-                                           const int   tidx,
-                                           const int   seqidx,
-                                           const int   dim,
-                                           const float base    = 10000.f,
-                                           const float scale   = 1.0,
-                                           const int   seq_len = 0,
-                                           const int   max_pos = 2048) {
-
-        const int  vec_size = vector_size<scalar_t, vector_t>::size;
-        const bool work     = (tidx * vec_size < dim);
-
-        if (work) {
-            reinterpret_cast<vector_t*>(smem)[tidx] = x;
-        }
-
-        __syncthreads();
-
-        if (work) {
-            float newbase = get_neox_dynamic_embedding_base(base, seq_len, dim, scale, max_pos);
-            RotaryHalfRead(x, smem, tidx, dim / 2);
-            apply_rotary_embedding(x, tidx, dim, seqidx, newbase);
-            RotaryHalfWrite(x, smem, tidx, dim / 2);
-        }
-
-        __syncthreads();
-
-        if (work) {
-            x = reinterpret_cast<vector_t*>(smem)[tidx];
-        }
-
-        __syncthreads();
-    }
-};
-
-template<typename scalar_t, typename vector_t>
-class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::QWenNTKScalar> {
-
-private:
-    static __device__ float
-    get_qwen_dynamic_embedding_base(const int dim, const float base, const int seq_len, const int max_logn_seq_len) {
-        float context_value = logf((float)seq_len / max_logn_seq_len) / logf(2.0) + 1.0;
-        float ntk_scalar    = pow(2.0, ceil(context_value)) - 1;
-        ntk_scalar          = max(ntk_scalar, 1.0);
-        float new_base      = base * pow((float)ntk_scalar, (float)dim / (dim - 2));
-
-        return new_base;
-    }
-
-public:
-    static __device__ __inline__ void impl(vector_t&   x,
-                                           scalar_t*   smem,
-                                           const int   tidx,
-                                           const int   seqidx,
-                                           const int   dim,
-                                           const float base         = 10000.f,
-                                           const float scalar       = 1.0,
-                                           const int   seq_len      = 0,
-                                           const int   max_logn_seq = 2048) {
-
-        const int  vec_size = vector_size<scalar_t, vector_t>::size;
-        const bool work     = (tidx * vec_size < dim);
-
-        if (work) {
-            reinterpret_cast<vector_t*>(smem)[tidx] = x;
-        }
-
-        __syncthreads();
-
-        if (work) {
-            float newbase = get_qwen_dynamic_embedding_base(dim, base, seq_len, max_logn_seq);
-            RotaryHalfRead(x, smem, tidx, dim / 2);
-            apply_rotary_embedding(x, tidx, dim, seqidx, newbase);
-            RotaryHalfWrite(x, smem, tidx, dim / 2);
-        }
-
-        __syncthreads();
-
-        if (work) {
-            x = reinterpret_cast<vector_t*>(smem)[tidx];
-        }
-    }
-};
-
-template<typename scalar_t, typename vector_t>
-class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM2> {
-
-public:
-    static __device__ __inline__ void impl(vector_t&   x,
-                                           const int   tidx,
-                                           const int   seqidx,
-                                           const int   dim,
-                                           const float base           = 10000.f,
-                                           const float scaling_factor = 1.f,
-                                           const int   base_scale     = 1) {
-
-        const int  vec_size = vector_size<scalar_t, vector_t>::size;
-        const bool work     = (tidx * vec_size < dim);
-
-        float new_base = base * base_scale;
-
-        if (work) {
-            apply_rotary_embedding(x, tidx, dim, seqidx, new_base, scaling_factor);
-        }
-    }
-};
-
-template<typename scalar_t, typename vector_t>
-class Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>{
-private:
-    static inline __device__ float find_correction_dim(const int num_rotations, const int dim, const int base=10000, 
-                                                const int max_position_embeddings=2048) {
-    
-        float pi = 3.141592654f;
-        float t0 = dim * logf((float)max_position_embeddings / (num_rotations * 2 * pi));
-        float t1 = 2 * logf((float)base);
-        return (t0 / t1);
-    }
-    static inline __device__ float2 find_correction_range(float low_rot, float high_rot, int dim, int base=10000, 
-                                                   int max_position_embeddings=2048) {
-        float2 low_high;
-        int low = floor(find_correction_dim(low_rot, dim, base, max_position_embeddings));
-        int high = ceil(find_correction_dim(high_rot, dim, base, max_position_embeddings));
-        low_high.x = max(low, 0);
-        low_high.y = min(high, dim-1);
-        return low_high;
-    }
-    static inline __device__ float get_mscale(float scale=1) {
-        if (scale <= 1) {
-            return 1.0;
-        } else {
-            return 0.1 * log(scale) + 1.0;
-        }
-    }
-
-public:
-    static __device__ __inline__ void impl(vector_t&   x,
-                                           scalar_t*   smem,
-                                           const int   tidx,
-                                           const int   seqidx,
-                                           const int   dim,
-                                           const int   base                 = 10000,
-                                           const float scale                = 1.0,
-                                           const int   max_pos              = 2048,
-                                           const int   org_max_pos          = 2048,
-                                           float       extrapolation_factor = 1,
-                                           float       beta_fast            = 32,
-                                           float       beta_slow            = 1) {
-
-        float      mscale   = get_mscale(scale);
-
-        float2     low_high               = find_correction_range(beta_fast, beta_slow, dim, base, org_max_pos);
-
-        const int  vec_size = vector_size<scalar_t, vector_t>::size;
-        const bool work     = (tidx * vec_size < dim);
-
-        if (work) {
-            reinterpret_cast<vector_t*>(smem)[tidx] = x;
-        }
-        __syncthreads();
-
+    if (work) {
         RotaryHalfRead(x, smem, tidx, dim / 2);
-        apply_rotary_embedding(x, tidx, dim, seqidx, base, scale, true, mscale, low_high.x, low_high.y, extrapolation_factor);
+        apply_rotary_embedding(x, tidx, dim, seqidx, base, rope_init);
         RotaryHalfWrite(x, smem, tidx, dim / 2);
-        __syncthreads();
-        if (work) {
-            x = reinterpret_cast<vector_t*>(smem)[tidx];
-        }
     }
-};
 
-template<typename scalar_t, typename vector_t>
-__device__ inline void apply_rope(int       RopeStyle,
-                                  vector_t& x,
-                                  scalar_t* smem,
-                                  int       tidx,
-                                  int       seqidx,
-                                  int       dim,
-                                  int       seq_len,
-                                  float     base,
-                                  float     scaling_factor,
-                                  int       dynamic_embedding_max_pos,
-                                  int       org_embedding_pos,
-                                  int       base_scale,
-                                  int       logn_length = 0) {
-    switch (RopeStyle) {
-        case 0:
-            // NoRope
-            break;
+    __syncthreads();
 
-        case 1:
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::NTKScalar>::impl(
-                x, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, dynamic_embedding_max_pos);
-            break;
-
-        case 3:
-            // glm2 rotary embedding
-            // only do rotary embedding for [..., d / 2]
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::GLM2>::impl(
-                x, tidx, seqidx, dim / 2, base, scaling_factor, base_scale);
-            break;
-
-        case 4:
-            // qwen rorary embedding
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::QWenNTKScalar>::impl(
-                x, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, logn_length);
-            break;
-
-        case 5:
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::LinearScalar>::impl(
-                x, smem, tidx, seqidx, dim, base, scaling_factor, seq_len, dynamic_embedding_max_pos);
-            break;
-
-        case 6:
-            Rope<scalar_t, vector_t, RotaryEmbeddingStyle::Yarn>::impl(
-                x, smem, tidx, seqidx, dim, base, scaling_factor, org_embedding_pos);
-            break;
-
-        default:
-            break;
+    if (work) {
+        x = reinterpret_cast<vector_t*>(smem)[tidx];
     }
 }
 
 template<typename scalar_t, typename vector_t>
-__device__ inline void context_rope(int       RopeStyle,
+__device__ __inline__ void glm2_rope(vector_t&   x,
+                                     const int   tidx,
+                                     const int   seqidx,
+                                     const int   dim,
+                                     const float base)
+{
+    const int  vec_size = vector_size<scalar_t, vector_t>::size;
+    const bool work     = (tidx * vec_size < dim);
+
+    if (work) {
+        apply_rotary_embedding(x, tidx, dim, seqidx, base, DefaultRope{});
+    }
+}
+
+__device__ __inline__ float get_dynamic_ntk_base(const int dim, const float base, const int seq_len, const float scale, const int max_pos) {
+    float new_base = base * 1.0f * pow(((scale * seq_len / max_pos) - (scale - 1)), (dim / (dim - 2.0f)));
+    return new_base;
+}
+
+__device__ __inline__ float get_qwen_dynamic_ntk_base(const int dim, const float base, const int seq_len, const int max_pos) {
+    float context_value = logf((float)seq_len / max_pos) / logf(2.0) + 1.0;
+    float ntk_scalar    = pow(2.0, ceil(context_value)) - 1;
+    ntk_scalar = max(ntk_scalar, 1.0);
+    float new_base      = base * pow((float)ntk_scalar, (float)dim / (dim - 2));
+    return new_base;
+}
+
+
+template<typename scalar_t, typename vector_t>
+__device__ inline void apply_rope(RopeConfig rope_config,
+                                  vector_t& x,
+                                  scalar_t* smem,
+                                  int       tidx,
+                                  int       seqidx,
+                                  int       seq_len)
+{
+    auto base = rope_config.base;
+    auto dim = rope_config.dim;
+    switch (rope_config.style) {
+    case RopeType::No:
+        break;
+    case RopeType::Base:
+        normal_rope(x, smem, tidx, seqidx, dim, base, LinearScaleRope{rope_config.scale});
+        break;
+    case RopeType::Glm2:
+        // only do rotary embedding for [..., d / 2]
+        glm2_rope<scalar_t, vector_t>(x, tidx, seqidx, dim / 2, base);
+        break;
+    case RopeType::DynamicNTK:
+        if (seq_len > rope_config.max_pos) {
+            base = get_dynamic_ntk_base(dim, base, seq_len, rope_config.scale, rope_config.max_pos);
+        }
+        normal_rope(x, smem, tidx, seqidx, dim, base, DefaultRope{});
+        break;
+    case RopeType::Yarn:
+        normal_rope(x, smem, tidx, seqidx, dim, base,
+                    YarnRope{rope_config.dim, rope_config.base, rope_config.max_pos,
+                        rope_config.factor1, rope_config.factor2, rope_config.scale,
+                        rope_config.extrapolation_factor});
+        break;
+    case RopeType::QwenDynamicNTK:
+        if (seq_len > rope_config.max_pos) {
+            base = get_qwen_dynamic_ntk_base(dim, base, seq_len, rope_config.max_pos);
+        }
+        normal_rope(x, smem, tidx, seqidx, dim, base, DefaultRope{});
+        break;
+    case RopeType::Llama3:
+        normal_rope(x, smem, tidx, seqidx, dim, base,
+                    Llama3Rope{rope_config.factor1, rope_config.factor2, rope_config.scale,
+                        rope_config.max_pos});
+        break;
+    default:
+        break;
+    }
+}
+
+template<typename scalar_t, typename vector_t>
+__device__ inline void context_rope(RopeConfig rope_config,
                                     vector_t& q,
                                     vector_t& k,
                                     scalar_t* smem,
                                     int       tidx,
                                     int       seqidx,
                                     int       position_id,
-                                    int       dim,
                                     int       seq_len,
-                                    float     base,
-                                    float     scaling_factor,
-                                    int       dynamic_embedding_max_pos,
-                                    int       org_embedding_pos,
-                                    int       base_scale,
                                     int       input_len,
                                     bool      PREFIX_PROMPT,
                                     int       prefix_prompt_length,
-                                    int       count_length,
-                                    int       logn_length = 0) {
+                                    int       count_length)
+{
     if (PREFIX_PROMPT && count_length) {
         input_len = input_len + prefix_prompt_length;
         seqidx    = seqidx + prefix_prompt_length;
@@ -961,97 +742,62 @@ __device__ inline void context_rope(int       RopeStyle,
         seqidx = position_id;
     }
 
-    apply_rope(RopeStyle,
+    apply_rope(rope_config,
                q,
                smem,
                tidx,
                seqidx,
-               dim,
-               seq_len,
-               base,
-               scaling_factor,
-               dynamic_embedding_max_pos,
-               org_embedding_pos,
-               base_scale,
-               logn_length);
+               seq_len);
 
-    apply_rope(RopeStyle,
+    apply_rope(rope_config,
                k,
                smem,
                tidx,
                seqidx,
-               dim,
-               seq_len,
-               base,
-               scaling_factor,
-               dynamic_embedding_max_pos,
-               org_embedding_pos,
-               base_scale,
-               logn_length);
+               seq_len);
 }
 
 template<typename scalar_t, typename vector_t>
-__device__ inline void attention_rope(int       RopeStyle,
+__device__ inline void attention_rope(RopeConfig rope_config,
                                       vector_t& q,
                                       vector_t& k,
                                       scalar_t* smem,
                                       int       tidx,
                                       int       tlength,
                                       int       timestep,
-                                      int       dim,
                                       int       seq_len,
-                                      float     base,
-                                      float     scaling_factor,
-                                      int       dynamic_embedding_max_pos,
-                                      int       org_embedding_pos,
-                                      int       base_scale,
                                       int       position_id,
                                       int       input_len,
                                       int       prefix_prompt_length,
                                       int       count_prefix_length,
-                                      int       logn_length,
-                                      bool      handle_kv) {
-
+                                      bool      handle_kv)
+{
     if (count_prefix_length) {
         prefix_prompt_length = 0;
     }
+
     if (position_id > 0) {
         tlength = position_id;
     }
 
-    if (RopeStyle == 3) {
-        // glm2
+    if (rope_config.style == RopeType::Glm2) {
         tlength = tlength - prefix_prompt_length;
     }
 
-    apply_rope(RopeStyle,
+    apply_rope(rope_config,
                q,
                smem,
                tidx,
                tlength,
-               dim,
-               seq_len,
-               base,
-               scaling_factor,
-               dynamic_embedding_max_pos,
-               org_embedding_pos,
-               base_scale,
-               logn_length);
+               seq_len);
 
     if (handle_kv) {
-        apply_rope(RopeStyle,
+        apply_rope(rope_config,
                    k,
                    smem,
                    tidx,
                    tlength,
-                   dim,
-                   seq_len,
-                   base,
-                   scaling_factor,
-                   dynamic_embedding_max_pos,
-                   org_embedding_pos,
-                   base_scale,
-                   logn_length);
+                   seq_len);
     }
 }
 

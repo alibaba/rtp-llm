@@ -18,6 +18,7 @@
 
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
+#include "src/fastertransformer/utils/RopeTypes.h"
 
 #if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_fp8_utils.h"
@@ -112,31 +113,17 @@ struct Multihead_attention_params_base {
     int num_kv_heads = 0;
     // The hidden dimension per head (Dh).
     int hidden_size_per_head = 0;
-    // Rotary position embedding type
-    // The per-head latent space reserved for rotary embeddings.
-    int   rotary_embedding_dim           = 0;
-    float rotary_embedding_base          = 0.0f;
-    float rotary_embedding_scale         = 0.0f;
-    int   rotary_embedding_max_positions = 0;
-    int   original_max_position_embeddings = 0;
+
+    RopeConfig rope_config;
 
     // Position id of rotary embedding for CogVlm2
     const int* position_ids = nullptr;
-    // 0: none
-    // 1: neox / llama ntk
-    // 2: glm
-    // 3: glm2
-    // 4: qwen dynamic ntk
-    // 5: linear
-    // 6: yarn
-    int  rotary_embedding_style = 0;
+
     bool use_logn_attn          = false;
-    int  logn_seq_len           = 2048;
 
     const int* prefix_prompt_lengths     = nullptr;
     int        max_prefix_prompt_length  = 0;
     bool       count_prefix_length       = false;
-    int        base_scale                = 1;
 
     // The current timestep. TODO Check that do we only this param in cross attention?
     int timestep = 0;
@@ -276,15 +263,9 @@ void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,
                                         const int     head_num,
                                         const int     head_num_kv,
                                         const int     size_per_head,
-                                        const int     rotary_embedding_dim,
-                                        const int     rotary_embedding_style,
-                                        const float   rotary_embedding_base,
-                                        const int*    position_ids,
-                                        const int     logn_seq_len,
+                                        const RopeConfig rope_config,
                                         const bool    use_logn_attn,
-                                        const float   rotary_embedding_scale,
-                                        const int     dynamic_embedding_max_pos,
-                                        const int     base_scale,
+                                        const int*    position_ids,
                                         const int     memory_max_len,
                                         const int*    prefix_prompt_lengths,
                                         const int     max_prefix_prompt_length,

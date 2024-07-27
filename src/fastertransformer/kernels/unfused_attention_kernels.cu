@@ -1478,15 +1478,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                                    const int   head_num,
                                                    const int   head_num_kv,
                                                    const int   size_per_head,
-                                                   const int   rotary_embedding_dim,
-                                                   const int   rotary_embedding_style,
-                                                   const float rotary_embedding_base,
-                                                   const int   logn_seq_len,
-                                                   const bool  use_logn_attn,
-                                                   const float rotary_embedding_scale  = 0.0f,
-                                                   const int   dynamic_embedding_max_pos = 0,
-                                                   const int   base_scale                = 1,
-                                                   const int   org_embedding_max_pos     = 0)
+                                                   RopeConfig  rope_config,
+                                                   const bool  use_logn_attn)
 {
     // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3, head_num, size_per_head], and
     // QKV split to 3 split buffer q, k, v and transpose them to [batch_size, head_num, seq_len, size_per_head].
@@ -1596,28 +1589,21 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     const int position_id = position_ids == nullptr ? -1 : position_ids[token_idx];
     const int pre_len = cu_seqlens[batch_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
-    context_rope(rotary_embedding_style,
+    context_rope(rope_config,
                 q,
                 k,
                 reinterpret_cast<T*>(smem_),
                 tidx,
                 seq_idx,
                 position_id,
-                rotary_embedding_dim,
                 seq_len,
-                rotary_embedding_base,
-                rotary_embedding_scale,
-                dynamic_embedding_max_pos,
-                org_embedding_max_pos,
-                base_scale,
                 input_len,
                 PREFIX_PROMPT,
                 prefix_prompt_length,
-                param.count_length,
-                logn_seq_len);
+                param.count_length);
 
     if (use_logn_attn && !is_masked) {
-        logn_attention(q, seq_idx, logn_seq_len);
+        logn_attention(q, seq_idx, rope_config.max_pos);
     }
 
     if (!is_masked) {
@@ -1664,15 +1650,8 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
                                              head_num,                                                                 \
                                              head_num_kv,                                                              \
                                              size_per_head,                                                            \
-                                             rotary_embedding_dim,                                                     \
-                                             rotary_embedding_style,                                                   \
-                                             rotary_embedding_base,                                                    \
-                                             logn_seq_len,                                                             \
-                                             use_logn_attn,                                                            \
-                                             rotary_embedding_scale,                                                   \
-                                             dynamic_embedding_max_pos,                                                \
-                                             base_scale,                                                               \
-                                             org_embedding_max_pos);
+                                             rope_config, \
+                                             use_logn_attn);
 
 template<typename T>
 void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
@@ -1690,14 +1669,7 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     const int                        head_num,
                                     const int                        head_num_kv,
                                     const int                        size_per_head,
-                                    const int                        rotary_embedding_dim,
-                                    const int                        rotary_embedding_style,
-                                    const float                      rotary_embedding_base,
-                                    const float                      rotary_embedding_scale,
-                                    const int                        dynamic_embedding_max_pos,
-                                    const int                        org_embedding_max_pos,
-                                    const int                        base_scale,
-                                    const int                        logn_seq_len,
+                                    const RopeConfig                 rope_config,
                                     const bool                       use_logn_attn,
                                     const float*                     scale,
                                     const int                        int8_mode,
@@ -1708,11 +1680,11 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
     dim3 block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
     // dim3   grid(token_num + batch_size * param.max_prefix_prompt_length, head_num);
     dim3   grid(token_num + batch_size * param.max_prefix_prompt_length, head_num);
-    size_t smem_size = rotary_embedding_style == 0 ? 0 : 2 * rotary_embedding_dim * sizeof(T);
+    size_t smem_size = rope_config.style == RopeType::No ? 0 : 2 * rope_config.dim * sizeof(T);
 
     // [bs, seq_len, 3, head, Dh]
     FT_CHECK_WITH_INFO(int8_mode != 2, "w8a8 not yet implemented");  // TODO(mseznec)
-    // smem_size        = rotary_embedding_style == 1 ? smem_size : 2 * smem_size;
+    // smem_size        = rope_config.style == 1 ? smem_size : 2 * smem_size;
     // NOTE: add offset for rotary embedding
     if (param.max_prefix_prompt_length == 0) {
         if (param.kv_block_array.int8_mode) {
@@ -1835,14 +1807,7 @@ INSTANTIATESPLITQKV(__nv_bfloat16);
                                                  const int                        head_num,                            \
                                                  const int                        head_num_kv,                         \
                                                  const int                        size_per_head,                       \
-                                                 const int                        rotary_embedding_dim,                \
-                                                 const int                        rotary_embedding_style,              \
-                                                 const float                      rotary_embedding_base,               \
-                                                 const float                      rotary_embedding_scale,              \
-                                                 const int                        dynamic_embedding_max_pos,           \
-                                                 const int                        org_embedding_max_pos,               \
-                                                 const int                        base_scale,                          \
-                                                 const int                        logn_seq_len,                        \
+                                                 const RopeConfig                 rope_config,                         \
                                                  const bool                       use_logn_attn,                       \
                                                  const float*                     scale,                               \
                                                  const int                        int8_mode,                           \

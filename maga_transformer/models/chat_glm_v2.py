@@ -85,7 +85,7 @@ class ChatGlmV2(GPT):
         config.activation_type = "SiGLU"
         config.norm_type = "rmsnorm"
         config.rotary_embedding_dim = 128
-        config.rotary_embedding_style = 3
+        config.rotary_embedding_style = 2
 
         return config
 

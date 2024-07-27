@@ -1415,8 +1415,6 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     zero(k);
     zero(q_bias);
     zero(k_bias);
-    float rotary_embedding_base  = params.rotary_embedding_base;
-    float rotary_embedding_scale = params.rotary_embedding_scale;
     if (is_valid_qk_vec) {
 
         // Query
@@ -1499,33 +1497,26 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     }
     const int input_len            = (params.input_lengths == nullptr) ? 0 : params.input_lengths[batch_beam_idx];
     int       prefix_prompt_length = (params.prefix_prompt_lengths == nullptr) ? 0 : params.prefix_prompt_lengths[batch_beam_idx];
-    if (params.rotary_embedding_dim > 0) {
+    if (params.rope_config.dim > 0) {
         const int position_id = params.position_ids == nullptr ? -1 : params.position_ids[batch_beam_idx];
-        attention_rope(params.rotary_embedding_style,
+        attention_rope(params.rope_config,
                       q,
                       k,
                       reinterpret_cast<T*>(smem_),
                       tidx,
                       tlength,
                       timestep,
-                      params.rotary_embedding_dim,
                       params.length_per_sample[batch_beam_idx],
-                      params.rotary_embedding_base,
-                      params.rotary_embedding_scale,
-                      params.rotary_embedding_max_positions,
-                      params.original_max_position_embeddings,
-                      params.base_scale,
                       position_id,
                       input_len,
                       prefix_prompt_length,
                       count_prefix_length,
-                      params.logn_seq_len,
                       HANDLE_KV);
     }
     __syncthreads();
 
     if (params.use_logn_attn && is_valid_qk_vec) {
-        logn_attention(q, tlength, params.logn_seq_len);
+        logn_attention(q, tlength, params.rope_config.max_pos);
     }
 
     // For the same reason as HANDLE_KV, no compute needed in Cross-Attention's 1st step

@@ -2,6 +2,7 @@
 
 #include "src/fastertransformer/utils/layernorm_types.h"
 #include "src/fastertransformer/utils/activation_types.h"
+#include "src/fastertransformer/utils/RopeTypes.h"
 
 #include <vector>
 #include <map>
@@ -119,14 +120,13 @@ public:
     int64_t position_ids_style_        = 0;
     float rotary_embedding_base_     = 10000.f;
     double  rotary_embedding_scale_  = 1.0;
-    int64_t dynamic_embedding_max_pos_ = 0;
+    double  rotary_factor1_          = 0;
+    double  rotary_factor2_          = 0;
     int64_t org_embedding_max_pos_     = 0;
-    int64_t base_scale_                = 1;
     // for Gemma, hidden_states = hidden_states * (hidden_size**0.5)
     double  input_embedding_scalar_    = 1;
 
     bool    use_logn_attn_ = false;
-    int64_t logn_seq_len_  = 2048;
     double  q_scaling_ = 1;
     bool    qk_norm_ = false;
 
@@ -216,7 +216,9 @@ public:
     void setLayerNormType();
     void setNormType();
     void setActivationType();
-    bool isGatedActivation();
+    bool isGatedActivation() const;
+
+    RopeConfig getRopeConfig() const;
 };
 
 }

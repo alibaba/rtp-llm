@@ -80,19 +80,24 @@ class Llama(GPT):
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
         rope_scaling = config_json.get('rope_scaling')
         if rope_scaling is not None:
-            config.rotary_embedding_scale = rope_scaling['factor']
-            config.dynamic_embedding_max_pos = config_json.get('max_position_embeddings', 2048)
             rope_type = rope_scaling.get('type', rope_scaling.get('rope_type'))
-            if rope_type == 'dynamic':
-                config.rotary_embedding_style = 1
-            elif rope_type == 'linear':
-                config.rotary_embedding_style = 5
+            if rope_type == 'linear':
+                config.rotary_embedding_scale = rope_scaling['factor']
+                config.dynamic_embedding_max_pos = config_json.get('max_position_embeddings', 2048)
+            elif rope_type == 'dynamic':
+                config.rotary_embedding_style = 3
             elif rope_type == 'yarn':
-                config.rotary_embedding_style = 6
+                config.rotary_embedding_style = 5
+                config.rotary_embedding_scale = rope_scaling['factor']
+                config.rotary_factor1 = rope_scaling.get('beta_slow', 1)
+                config.rotary_factor2 = rope_scaling.get('beta_fast', 32)
                 config.org_embedding_max_pos = rope_scaling['original_max_position_embeddings']
             elif rope_type == 'llama3':
-                logging.warn("llama3 rope scaling method not supported now")
-                pass
+                config.rotary_embedding_style = 6
+                config.rotary_embedding_scale = rope_scaling['factor']
+                config.rotary_factor1 = rope_scaling['low_freq_factor']
+                config.rotary_factor2 = rope_scaling['high_freq_factor']
+                config.org_embedding_max_pos = rope_scaling['original_max_position_embeddings']
             else:
                 raise Exception(f"unsupport rope_scaling {rope_scaling}")
         # config.activation_type = config_json.get("hidden_act", config.activation_type)
@@ -103,11 +108,7 @@ class Llama(GPT):
             config.special_tokens.eos_token_id = eos_token_id[0]
         else:
             config.special_tokens.eos_token_id = eos_token_id
-        use_logn_attn = config_json.get("use_logn_attn")
-        if (use_logn_attn):
-            config.use_logn_attn = True
-            config.logn_seq_len = config_json.get("seq_length")
-        
+        config.use_logn_attn = config_json.get("use_logn_attn", False)
 
     @staticmethod
     def from_params(config: GptInitModelParameters, params_json: Dict[str, Any]):

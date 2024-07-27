@@ -12,10 +12,10 @@ TEST_F(CpuAttentionLayerTestFP16, testSimpleContextAttention) {
 
     attention_conf.mask_type = AttentionMaskType::causalMask;
 
-    attention_conf.rope_config.embedding_style = RopeType::Base;
-    attention_conf.rope_config.embedding_base = 10000;
-    attention_conf.rope_config.dynamic_embedding_max_pos = 4096;
-    attention_conf.rope_config.embedding_dim = attention_conf.size_per_head;
+    attention_conf.rope_config.style = RopeType::Base;
+    attention_conf.rope_config.base = 10000;
+    attention_conf.rope_config.max_pos = 4096;
+    attention_conf.rope_config.dim = attention_conf.size_per_head;
 
     const size_t layer_num = 1;
     const size_t block_num = 1024;

@@ -145,7 +145,7 @@ AttentionLayerOutput CpuDevice::attentionLayer(const AttentionLayerParams& param
     int head_num      = attention_conf.head_num;
     int kv_head_num   = attention_conf.kv_head_num;
     int head_dim      = attention_conf.size_per_head;
-    int max_pos_embed = attention_conf.rope_config.dynamic_embedding_max_pos;
+    int max_pos_embed = attention_conf.rope_config.max_pos;
     int max_positions = max_pos_embed;
     int q_size        = head_dim * head_num;
     int kv_size       = head_dim * kv_head_num;

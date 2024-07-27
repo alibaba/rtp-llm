@@ -274,13 +274,10 @@ class QWenBase(GPT):
 
         GPT._load_quant_config(ckpt_path, config_json, config)
 
-        use_dynamic_ntk = config_json.get("use_dynamic_ntk")
-        use_logn_attn = config_json.get("use_logn_attn")
-        if (use_dynamic_ntk):
+        if config_json.get("use_dynamic_ntk"):
             config.rotary_embedding_style = 4
-        if (use_logn_attn):
-            config.use_logn_attn = True
-            config.logn_seq_len = config_json.get("seq_length")
+        config.org_embedding_max_pos = config_json.get("seq_length", 8192)
+        config.use_logn_attn = config_json.get("use_logn_attn")
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):

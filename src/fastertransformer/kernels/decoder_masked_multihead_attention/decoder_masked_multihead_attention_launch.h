@@ -67,9 +67,9 @@ inline size_t smem_size_in_bytes(Multihead_attention_params<T, DO_CROSS_ATTENTIO
     size_t red_sz = rows_per_red * params.hidden_size_per_head * sizeof(Tk) / 2;
 
     size_t transpose_rotary_size = 0;
-    if (params.rotary_embedding_dim > 0) {
-        assert(params.rotary_embedding_dim > 0);
-        transpose_rotary_size = 2 * params.rotary_embedding_dim * sizeof(Tk);
+    if (params.rope_config.dim > 0) {
+        assert(params.rope_config.rotary_embedding_dim > 0);
+        transpose_rotary_size = 2 * params.rope_config.dim * sizeof(Tk);
     }
 
     size_t out_oi_sz = 0;
@@ -98,9 +98,8 @@ inline size_t smem_size_for_threads(Multihead_attention_params<T, DO_CROSS_ATTEN
     }
 
     size_t transpose_rotary_size = 0;
-    if (params.rotary_embedding_dim > 0) {
-        assert(params.rotary_embedding_dim > 0);
-        transpose_rotary_size = 2 * params.rotary_embedding_dim * sizeof(Tk);
+    if (params.rope_config.dim > 0) {
+        transpose_rotary_size = 2 * params.rope_config.dim * sizeof(Tk);
     }
 
     return max(red_sz, transpose_rotary_size);

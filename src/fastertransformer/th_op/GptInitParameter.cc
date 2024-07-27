@@ -42,7 +42,7 @@ void GptInitParameter::setActivationType() {
     activation_type_ = getActivationType(activation_type_str_);
 }
 
-bool GptInitParameter::isGatedActivation() {
+bool GptInitParameter::isGatedActivation() const {
     return fastertransformer::isGatedActivation(activation_type_);
 }
 
@@ -79,6 +79,18 @@ void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int6
     if (group_size_ != 0 && group_size_ != 64 && group_size_ != 128) {
         throw std::invalid_argument("invalid group_size: " + std::to_string(group_size_));
     }
+}
+
+RopeConfig GptInitParameter::getRopeConfig() const {
+    RopeConfig rope_config;
+    rope_config.style        = (RopeType)rotary_embedding_style_;
+    rope_config.dim          = rotary_embedding_dim_;
+    rope_config.base         = rotary_embedding_base_;
+    rope_config.scale        = rotary_embedding_scale_;
+    rope_config.max_pos      = org_embedding_max_pos_;
+    rope_config.factor1      = rotary_factor1_;
+    rope_config.factor2      = rotary_factor2_;
+    return rope_config;
 }
 
 void registerGptInitParameter(py::module m) {
@@ -177,9 +189,9 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(position_ids_style, position_ids_style_)               \
     DEF_PROPERTY(rotary_embedding_base, rotary_embedding_base_)         \
     DEF_PROPERTY(rotary_embedding_scale, rotary_embedding_scale_)       \
-    DEF_PROPERTY(dynamic_embedding_max_pos, dynamic_embedding_max_pos_) \
     DEF_PROPERTY(org_embedding_max_pos, org_embedding_max_pos_)         \
-    DEF_PROPERTY(base_scale, base_scale_)                               \
+    DEF_PROPERTY(rotary_factor1, rotary_factor1_)                       \
+    DEF_PROPERTY(rotary_factor2, rotary_factor2_)                       \
     DEF_PROPERTY(input_embedding_scalar, input_embedding_scalar_)       \
     DEF_PROPERTY(use_norm_input_residual, use_norm_input_residual_)     \
     DEF_PROPERTY(use_norm_attn_out_residual, use_norm_attn_out_residual_) \
@@ -203,7 +215,6 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(special_tokens, special_tokens_)                       \
     DEF_PROPERTY(quant_algo, quant_algo_)                               \
     DEF_PROPERTY(use_logn_attn, use_logn_attn_)                         \
-    DEF_PROPERTY(logn_seq_len, logn_seq_len_)                           \
     DEF_PROPERTY(q_scaling, q_scaling_)                                 \
     DEF_PROPERTY(qk_norm, qk_norm_)                                     \
     DEF_PROPERTY(use_cross_attn, use_cross_attn_)                       \

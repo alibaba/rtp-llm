@@ -136,7 +136,7 @@ void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
     auto padding_offset_device  = createDeviceBuffer<int>(padding_offset_host);
     auto cu_seqlens_device      = createDeviceBuffer<int>(cu_seqlens_host);
     auto attention_mask_device  = createDeviceBuffer<half>(attention_mask_host);
-    auto rope_config            = RopeConfig({RopeType::NOROPE, head_dim, 10000, 1, 2048, 1, 1});
+    auto rope_config            = RopeConfig({RopeType::No, head_dim, 10000, 1, 2048, 1, 1});
 
     auto common_inputs      = AttentionCommonInputs({*input_lengths, *sequence_lengths});
     common_inputs.cu_seqlens = move(cu_seqlens_device);
@@ -248,7 +248,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto sequence_lengths_device    = createDeviceBuffer<int>(sequence_lengths_host);
     auto input_lengths_device       = createDeviceBuffer<int>(input_lengths_host);
 
-    auto rope_config = RopeConfig({RopeType::NOROPE, head_dim, 10000, 1, 2048, 1, 1});
+    auto rope_config = RopeConfig({RopeType::No, head_dim, 10000, 1, 2048, 1, 1});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
