@@ -200,7 +200,9 @@ def InvokeNvcc(argv, log=False):
   # The list of source files get passed after the -c option. I don't know of
   # any other reliable way to just get the list of source files to be compiled.
   src_files = GetOptionValue(argv, '-c')
-
+  mcmodel_options = ''.join([' -mcmodel=' + x for x in GetOptionValue(argv, '-mcmodel')])
+  if mcmodel_options:
+    mcmodel_options = ' -forward-unknown-to-host-compiler ' + mcmodel_options
   # Pass -w through from host to nvcc, but don't do anything fancier with
   # warnings-related flags, since they're not necessarily the same across
   # compilers.
@@ -245,6 +247,7 @@ def InvokeNvcc(argv, log=False):
   nvccopts += m_options
   nvccopts += warning_options
   nvccopts += fatbin_options
+  nvccopts += mcmodel_options
 
   if depfiles:
     # Generate the dependency file

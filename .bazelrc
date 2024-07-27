@@ -18,6 +18,7 @@ build --cxxopt -Wno-class-memaccess # grpc
 build --experimental_cc_implementation_deps
 build --deleted_packages @havenask//aios/kmonitor
 build --copt -DOPENSSL_IS_BORINGSSL
+# build --copt -mcmodel=medium
 build --linkopt="-lm"
 build --action_env LIBRARY_PATH=/opt/conda310/lib
 build --define=grpc_no_ares=true
