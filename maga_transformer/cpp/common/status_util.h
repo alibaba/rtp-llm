@@ -1,3 +1,5 @@
+#pragma once
+
 #include "maga_transformer/cpp/common/fatal_util.h"
 #include "src/fastertransformer/utils/logger.h"
 

@@ -1,3 +1,5 @@
+#pragma once
+
 // weighted only gemm
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_preprocessors.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"

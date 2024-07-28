@@ -1,3 +1,5 @@
+#pragma once
+
 #include "src/fastertransformer/core/Types.h"
 
 namespace fastertransformer {

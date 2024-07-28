@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#pragma once
 // Ignore CUTLASS warnings about type punning
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wstrict-aliasing"

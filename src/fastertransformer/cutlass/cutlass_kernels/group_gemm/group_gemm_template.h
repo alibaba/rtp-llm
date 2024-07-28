@@ -1,4 +1,4 @@
-
+#pragma once
 
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/gemm.h"

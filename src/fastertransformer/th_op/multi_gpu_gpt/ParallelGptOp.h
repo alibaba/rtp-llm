@@ -1,3 +1,5 @@
+#pragma once
+
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGpt.h"
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLoRALayerWeight.h"
 #include "src/fastertransformer/th_op/th_utils.h"

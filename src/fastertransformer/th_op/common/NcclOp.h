@@ -1,3 +1,5 @@
+#pragma once
+
 #include "src/fastertransformer/th_op/th_utils.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 

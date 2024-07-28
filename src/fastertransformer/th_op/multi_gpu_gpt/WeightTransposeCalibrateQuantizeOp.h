@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#pragma once
+
 #include "src/fastertransformer/kernels/calibrate_quantize_weight_kernels.h"
 #include "src/fastertransformer/th_op/th_utils.h"
 

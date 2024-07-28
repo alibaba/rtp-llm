@@ -1,3 +1,4 @@
+#pragma once
 
 #define BOOL_SWITCH(COND, CONST_NAME, ...)      \
   [&] {                                         \
