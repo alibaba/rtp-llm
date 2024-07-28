@@ -116,6 +116,13 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                     AllocationType::DEVICE},
                                     {"v_output"});
 
+    // allocate qkv should be better
+    if (!use_trtv1_fmha && !use_trtv2_fmha && !use_openSource_fmha) {
+        cudaMemsetAsync(q_output->data(), 0, q_output->sizeBytes(), stream_);
+        cudaMemsetAsync(k_output->data(), 0, k_output->sizeBytes(), stream_);
+        cudaMemsetAsync(v_output->data(), 0, v_output->sizeBytes(), stream_);
+    }
+
     KVBlockArray kv_block_array;
     BufferPtr block_pointers, block_scale_pointers;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
@@ -323,15 +330,19 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
 
         auto qkv_output = gemm({*softmax_qk_output, *v_output});
 
+        printBufferData(*qkv_output, "qkv_output");
+
         auto &qkv_transpose_output = params.output;
 
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, invokeTransposeQKV,
-            qkv_transpose_output.data(),
+        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, invokeTransposeAttentionOutRemovePadding,
             qkv_output->data(),
+            qkv_transpose_output.data(),
+            token_num,
             batch_size,
             seq_len,
             head_num,
             size_per_head,
+            params.common.padding_offset->data<int>(),
             nullptr,
             0,
             stream_);
