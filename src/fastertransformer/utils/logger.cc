@@ -19,14 +19,12 @@
 namespace fastertransformer {
 
 Logger::Logger() {
-    char* is_first_rank_only_char = std::getenv("FT_LOG_FIRST_RANK_ONLY");
-    bool  is_first_rank_only =
-        (is_first_rank_only_char != nullptr && std::string(is_first_rank_only_char) == "ON") ? true : false;
+    level_ = getLevelfromstr("FT_DEBUG_LEVEL");
+    print_level_ = getLevelfromstr("FT_DEBUG_PRINT_LEVEL");
+}
 
-    char* env_str = std::getenv("WORLD_RANK");
-    rank          = env_str ? std::atoi(env_str) : 0;
-
-    char* level_name = std::getenv("FT_LOG_LEVEL");
+Logger::Level Logger::getLevelfromstr(const char* s) {
+    char* level_name = std::getenv(s);
     if (level_name != nullptr) {
         std::map<std::string, Level> name_to_level = {
             {"TRACE", TRACE},
@@ -36,21 +34,15 @@ Logger::Logger() {
             {"ERROR", ERROR},
         };
         auto level = name_to_level.find(level_name);
-        // If FT_LOG_FIRST_RANK_ONLY=ON, set LOG LEVEL of other device to ERROR
-        if (is_first_rank_only && rank != 0) {
-            level = name_to_level.find("ERROR");
-        }
         if (level != name_to_level.end()) {
-            setLevel(level->second);
+            return level->second;
         } else {
-            fprintf(stderr,
-                    "[FT][WARNING] Invalid logger level FT_LOG_LEVEL=%s. "
-                    "Ignore the environment variable and use a default "
-                    "logging level.\n",
-                    level_name);
+            throw std::runtime_error(
+                    "[FT][WARNING] Invalid logger level for env: " + std::string(s) + " with value: " + std::string(level_name));
             level_name = nullptr;
         }
-    }
+    }    
+    return Logger::DEFAULT_LOG_LEVEL;
 }
 
 void Logger::log(std::exception const& ex, Logger::Level level)

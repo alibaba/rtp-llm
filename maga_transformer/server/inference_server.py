@@ -289,3 +289,13 @@ class InferenceServer(object):
             return self._inference_worker.model.get_kv_cache_info()
         else:
             return KVCacheInfo(available_kv_cache=0, total_kv_cache=0)
+
+    def set_debug_log(self, req: Union[str,Dict[Any, Any]]) -> None:
+        if isinstance(req, str):
+            req = json.loads(req)
+        return torch.ops.fastertransformer.set_debug_log_level(req['debug'])
+
+    def set_debug_print(self, req: Union[str,Dict[Any, Any]]) -> None:
+        if isinstance(req, str):
+            req = json.loads(req)
+        return torch.ops.fastertransformer.set_debug_print_level(req['debug'])

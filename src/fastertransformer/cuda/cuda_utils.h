@@ -176,22 +176,17 @@ void check(T result, char const* const func, const char* const file, int const l
 #define check_cuda_error_2(val, file, line) fastertransformer::check((val), #val, file, line)
 
 inline void syncAndCheck(const char* const file, int const line) {
-    // When FT_DEBUG_LEVEL=DEBUG, must check error
-    static char* level_name = std::getenv("FT_DEBUG_LEVEL");
-    if (level_name != nullptr) {
-        static std::string level = std::string(level_name);
-        if (level == "DEBUG") {
-            cudaDeviceSynchronize();
-            cudaError_t result = cudaGetLastError();
-            if (result) {
-                std::string msg = std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " "
-                                 + file + ":" + std::to_string(line) + " \n";
-                FT_LOG_INFO(msg);
-                fflush(stdout);
-                throw std::runtime_error(msg);
-            }
-            FT_LOG_DEBUG(fmtstr("run syncAndCheck at %s:%d", file, line));
+    if (Logger::getLogger().getLevel() == Logger::DEBUG) {
+        cudaDeviceSynchronize();
+        cudaError_t result = cudaGetLastError();
+        if (result) {
+            std::string msg = std::string("[FT][ERROR] CUDA runtime error: ") + (_cudaGetErrorEnum(result)) + " " + file
+                              + ":" + std::to_string(line) + " \n";
+            FT_LOG_INFO(msg);
+            fflush(stdout);
+            throw std::runtime_error(msg);
         }
+        FT_LOG_DEBUG(fmtstr("run syncAndCheck at %s:%d", file, line));
     }
 
 #ifndef NDEBUG
@@ -759,10 +754,7 @@ static inline bool shared_mem_sufficient(int smem_size) {
 }
 
 static inline bool should_print() {
-    static char* level_name = std::getenv("FT_DEBUG_PRINT_LEVEL");
-    if (!level_name || (strcmp(level_name, "DEBUG") != 0)) {
-        return false;
-    }
+    return Logger::getLogger().getPrintLevel() == Logger::DEBUG;
 
     static char* tp_rank = std::getenv("WORLD_RANK");
     if (tp_rank && (strcmp(tp_rank, "0") != 0)) {

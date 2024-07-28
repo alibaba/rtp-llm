@@ -153,22 +153,18 @@ void check(T result, char const* const func, const char* const file, int const l
     }
 }
 
-inline void syncAndCheck(const char* const file, int const line)
-{
+inline void syncAndCheck(const char* const file, int const line) {
     // When FT_DEBUG_LEVEL=DEBUG, must check error
-    static char* level_name = std::getenv("FT_DEBUG_LEVEL");
-    if (level_name != nullptr) {
-        static std::string level = std::string(level_name);
-        if (level == "DEBUG") {
-            check_hip_error(hipDeviceSynchronize());
-            hipError_t result = hipGetLastError();
-            if (result) {
-                throw std::runtime_error(std::string("[FT][ERROR] ROCM runtime error: ") + (_hipGetErrorEnum(result))
-                                         + " " + file + ":" + std::to_string(line) + " \n");
-            }
-            FT_LOG_DEBUG(fmtstr("run syncAndCheck at %s:%d", file, line));
+    if (Logger::getLogger().getLevel() == Logger::DEBUG) {
+        check_hip_error(hipDeviceSynchronize());
+        hipError_t result = hipGetLastError();
+        if (result) {
+            throw std::runtime_error(std::string("[FT][ERROR] ROCM runtime error: ") + (_hipGetErrorEnum(result)) + " "
+                                     + file + ":" + std::to_string(line) + " \n");
         }
+        FT_LOG_DEBUG(fmtstr("run syncAndCheck at %s:%d", file, line));
     }
+}
 
 #ifndef NDEBUG
     check_hip_error(hipDeviceSynchronize());

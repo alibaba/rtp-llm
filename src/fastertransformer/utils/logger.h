@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <exception>
 #include <cstdlib>
 #include <iomanip>
 #include <map>
@@ -39,7 +40,7 @@ public:
     };
 
     static Logger& getLogger() {
-        thread_local Logger instance;
+        static Logger instance;
         return instance;
     }
     Logger(Logger const&) = delete;
@@ -70,7 +71,16 @@ public:
     void setLevel(const Level level)
     {
         level_ = level;
-        log(INFO, "Set logger level by %s", getLevelName(level).c_str());
+        log(INFO, "Set logger level to: [%s]", getLevelName(level).c_str());
+    }
+
+    void setPrintLevel(const Level level) {
+        print_level_ = level;
+        log(INFO, "Set debug print logger level to: [%s]", getLevelName(level).c_str());
+    }
+
+    int getPrintLevel() const {
+        return print_level_;
     }
 
     int getLevel() const {
@@ -88,9 +98,12 @@ private:
     const Level DEFAULT_LOG_LEVEL = INFO;
 #endif
     Level   level_ = DEFAULT_LOG_LEVEL;
+    Level   print_level_ = DEFAULT_LOG_LEVEL;
     int32_t rank   = 0;
 
     Logger();
+
+    Level getLevelfromstr(const char* s);
 
     inline const std::string getLevelName(const Level level) {
         return level_name_.at(level);

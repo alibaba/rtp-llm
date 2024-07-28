@@ -26,8 +26,6 @@ class DeviceTestBase : public ::testing::Test {
 public:
     void SetUp() override {
         // Logger::getLogger().setLevel(Logger::Level::DEBUG);
-        // setenv("FT_DEBUG_LEVEL", "DEBUG", 1);
-        // setenv("FT_DEBUG_PRINT_LEVEL", "DEBUG", 1);
 
         initTestDevices();
         initTestDataDir();
