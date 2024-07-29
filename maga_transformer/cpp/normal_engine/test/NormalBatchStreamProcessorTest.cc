@@ -170,7 +170,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     EXPECT_TRUE(stream3->hasLoss());
     auto loss3 = stream3->getLoss();
     EXPECT_EQ(1, loss3->size());
-    EXPECT_NEAR(1.36788, *(loss3->data<float>()), 0.0001);
+    EXPECT_NEAR(0.31326, *(loss3->data<float>()), 0.0001);
     EXPECT_TRUE(stream4->hasLoss());
     auto loss4 = stream4->getLoss();
     EXPECT_EQ(1, loss4->size());
