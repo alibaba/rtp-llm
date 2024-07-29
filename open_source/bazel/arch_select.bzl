@@ -40,6 +40,20 @@ def whl_deps():
         "//conditions:default": ["torch==2.1.0+cu118"],
     })
 
+def torch_deps():
+    torch_version = "2.1_py310"
+    deps = select({
+        "//:using_arm": [
+            "@torch_2.3_py310_cpu_aarch64//:torch_api",
+            "@torch_2.3_py310_cpu_aarch64//:torch",
+            "@torch_2.3_py310_cpu_aarch64//:torch_libs",],
+        "//conditions:default": [
+            "@torch_" + torch_version + "//:torch_api",
+            "@torch_" + torch_version + "//:torch",
+            "@torch_" + torch_version + "//:torch_libs",]
+        })
+    return deps
+
 def cutlass_kernels_interface():
     native.alias(
         name = "cutlass_kernels_interface",
@@ -56,4 +70,3 @@ def cutlass_kernels_interface():
             "//conditions:default": "//src/fastertransformer/cutlass:cutlass_headers",
         })
     )
-

@@ -1,4 +1,5 @@
-load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
+load("//:def.bzl", "copts", "cuda_copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "trt_fused_multihead_attention_impl",
@@ -25,11 +26,11 @@ cc_library(
     name = "trt_fused_multihead_attention_header",
     hdrs = glob([
         "qkvToContext.h",
-    ]),    
-    deps = [        
+    ]),
+    deps = [
         "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",    
+        "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
-    visibility = ["//visibility:public"],    
+    visibility = ["//visibility:public"],
 )

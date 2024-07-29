@@ -1,4 +1,5 @@
-load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts",)
+load("//:def.bzl", "rpm_library", "copts", "cuda_copts",)
+load("//bazel:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
@@ -10,14 +11,14 @@ cc_library(
     hdrs = glob([
         "*.h",
         "*.cuh",
-    ]),    
+    ]),
     deps = [
         "@cutlass//:cutlass",
         ":trt_fmha_header",
         "//3rdparty:cuda_driver",
         "//src/fastertransformer/kernels:kernels",
         "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",        
+        "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
     visibility = ["//:__subpackages__"],
@@ -30,11 +31,11 @@ cc_library(
     hdrs = glob([
         "*.h",
         "**/*.h"
-    ]),    
-    deps = [        
+    ]),
+    deps = [
         "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",    
+        "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
-    visibility = ["//visibility:public"],    
+    visibility = ["//visibility:public"],
 )

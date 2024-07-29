@@ -1,5 +1,5 @@
-load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
-
+load("//:def.bzl", "copts", "cuda_copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 test_linkopts = [
     "-lpython3.10",

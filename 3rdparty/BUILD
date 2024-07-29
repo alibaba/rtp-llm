@@ -1,4 +1,5 @@
-load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts",)
+load("//:def.bzl", "rpm_library", "copts", "cuda_copts",)
+load("//bazel:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//visibility:public"])
 
 
@@ -9,7 +10,7 @@ cc_library(
     ]),
     hdrs = glob([
         "common/*.h",
-    ]),    
+    ]),
     deps = [
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",

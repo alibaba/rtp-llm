@@ -1,5 +1,5 @@
-load("//:def.bzl", "copts", "torch_deps")
-
+load("//:def.bzl", "copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 test_linkopts = [
     "-lpython3.10",
@@ -11,7 +11,7 @@ test_linkopts = [
 
 test_deps = [
     "@com_google_googletest//:gtest",
-] + torch_deps() 
+] + torch_deps()
 
 
 cc_test(
@@ -25,7 +25,7 @@ cc_test(
         "//src/fastertransformer/core:buffer",
         "//src/fastertransformer/core:types",
         "//src/fastertransformer/core:buffer_torch",
-        
+
     ],
     visibility = ["//visibility:public"],
 )

@@ -1,4 +1,5 @@
-load("@//:def.bzl", "cuda_copts", "torch_deps", "copts")
+load("@//:def.bzl", "cuda_copts", "copts")
+load("@//bazel:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//visibility:public"])
 
 config_setting(

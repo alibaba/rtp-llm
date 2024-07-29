@@ -1,5 +1,5 @@
-load("//:def.bzl", "copts", "cuda_copts", "torch_deps")
-load("//bazel:arch_select.bzl", "requirement", "whl_deps")
+load("//:def.bzl", "copts", "cuda_copts")
+load("//bazel:arch_select.bzl", "requirement", "whl_deps", "torch_deps")
 
 requirement([
     "grpcio"

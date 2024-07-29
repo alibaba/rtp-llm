@@ -1,4 +1,5 @@
-load("//:def.bzl", "rpm_library", "torch_deps", "copts", "cuda_copts", "rocm_copts")
+load("//:def.bzl", "rpm_library", "copts", "cuda_copts", "rocm_copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
     name = "cublas",

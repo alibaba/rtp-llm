@@ -1,4 +1,5 @@
-load("//:def.bzl", "copts", "torch_deps", "rocm_copts")
+load("//:def.bzl", "copts", "rocm_copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 load("//src/fastertransformer/devices:device_defs.bzl",
     "device_impl_target", "device_test_envs", "device_linkopts")
 
