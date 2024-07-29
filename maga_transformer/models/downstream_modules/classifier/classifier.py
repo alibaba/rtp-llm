@@ -24,14 +24,14 @@ class ClassifierRenderer(CustomRenderer):
     def __init__(self, config: GptInitModelParameters, tokenizer: PreTrainedTokenizerBase):
         super().__init__(config, tokenizer)
         self.generator = CommonInputGenerator(tokenizer, config)
-        
+
     async def render_request(self, request: Dict[str, Any]):
         return ClassifierRequest(**request)
 
     async def create_input(self, formated_request: ClassifierRequest):
         return await self.generator.generate(formated_request.input)
 
-    async def render_response(self, formated_request: ClassifierRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:        
+    async def render_response(self, formated_request: ClassifierRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
         return ClassifierResponse(score=[x.tolist() for x in outputs.outputs]).model_dump()
 
 
@@ -49,7 +49,7 @@ class ClassifierHandler(CustomHandler):
         self.linear.weight.data = tensor_map['classifier.weight']
         self.linear.bias.data = tensor_map['classifier.bias']
         self.linear = self.linear.to(data_type).eval().cuda()
-        
+
     def forward(self, input_ids: torch.Tensor, hidden_states: torch.Tensor, input_lengths: torch.Tensor) -> List[torch.Tensor]:
         #TODO test it
         if self.config_.is_causal:
@@ -57,4 +57,4 @@ class ClassifierHandler(CustomHandler):
             return self.linear(last_tokens)
         else:
             first_tokens = get_first_token_from_combo_tokens(hidden_states, input_lengths)
-            return self.linear(first_tokens[:, 0, :])
+            return self.linear(first_tokens)
