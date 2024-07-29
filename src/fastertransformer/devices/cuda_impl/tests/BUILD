@@ -75,7 +75,7 @@ cc_test(
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
     deps = test_deps,
-    tags = ["custom_ar"],
+    tags = ["custom_ar_ut"],
 )
 
 cc_test(
