@@ -1,13 +1,11 @@
 #pragma once
 
 #include <string>
-#include <optional>
 #include <vector>
-#include <cstdint>
-#include <cassert>
-#include <cstring>
-#include <algorithm>
 #include <torch/python.h>
+#include "absl/status/statusor.h"
+#include "maga_transformer/cpp/dataclass/Query.h"
+#include "maga_transformer/cpp/common/status_util.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
@@ -19,6 +17,8 @@ struct ExpandedOutput {
     ft::BufferPtr expanded_ids;
     ft::BufferPtr text_tokens_mask;
     ft::BufferPtr locs;
+    ExpandedOutput(ft::BufferPtr expanded_ids, ft::BufferPtr text_tokens_mask = nullptr, ft::BufferPtr locs = nullptr):
+        expanded_ids(expanded_ids), text_tokens_mask(text_tokens_mask), locs(locs) {}
 };
 
 class MultimodalProcessor {
@@ -27,43 +27,54 @@ public:
         mm_process_engine_(mm_proces_engine), sep_token_ids_(sep_token_ids), include_sep_tokens_(include_sep_tokens)
         {}
 
-    std::vector<torch::Tensor> mm_embedding(const std::vector<std::string>& urls) {
+private:
+    py::object mm_process_engine_;
+    std::vector<int64_t> sep_token_ids_;
+    bool include_sep_tokens_;
+
+    absl::StatusOr<std::vector<torch::Tensor>> mm_embedding(const std::vector<std::string>& urls) {
         if (urls.size() == 0) {
             return std::vector<torch::Tensor>();
         } else if (!mm_process_engine_.is_none()) {
-            py::gil_scoped_acquire acquire;
-            auto futures = mm_process_engine_.attr("submit")(urls);
-            auto coro = mm_process_engine_.attr("get")(futures);
+            try {
+                py::gil_scoped_acquire acquire;
+                auto futures = mm_process_engine_.attr("submit")(urls);
+                auto coro = mm_process_engine_.attr("get")(futures);
 
-            auto loop = py::module::import("asyncio").attr("get_event_loop")();
-            auto future = loop.attr("create_task")(coro);
-            loop.attr("run_until_complete")(future);
-            py::handle res = future.attr("result")();
+                auto loop = py::module::import("asyncio").attr("get_event_loop")();
+                auto future = loop.attr("create_task")(coro);
+                loop.attr("run_until_complete")(future);
+                py::handle res = future.attr("result")();
 
-            auto mm_embedding_vec = ft::convertPyObjectToVec(res);
-            std::vector<torch::Tensor> embedding_res;
-            for (auto& emb: mm_embedding_vec) {
-                embedding_res.emplace_back(ft::convertPyObjectToTensor(emb));
+                auto mm_embedding_vec = ft::convertPyObjectToVec(res);
+                std::vector<torch::Tensor> embedding_res;
+                for (auto& emb: mm_embedding_vec) {
+                    embedding_res.emplace_back(ft::convertPyObjectToTensor(emb));
+                }
+                return embedding_res;
+            } catch (py::error_already_set &e) {
+                return absl::InternalError(std::string(e.what()));
             }
-            return embedding_res;
         } else {
-            throw std::runtime_error("Multimodal model but multimodal process engine is None");
+            return absl::InternalError("no mm process engine!");
         }
     }
 
-    ExpandedOutput expand_token_ids(const std::vector<torch::Tensor>& mm_embedding, ft::BufferPtr token_ids) {
+    absl::StatusOr<ExpandedOutput> expand_token_ids(const std::vector<torch::Tensor>& mm_embedding, ft::BufferPtr token_ids) {
         if (mm_embedding.size() == 0) {
-            return {token_ids, nullptr};
+            return ExpandedOutput(token_ids);
         }
 
         assert(token_ids->shape().size() == 1);
         int expanded_len = token_ids->shape()[0];
         std::vector<int> embed_len = {};
 
-        auto locs = get_mm_tags(token_ids);
+        auto locs_status = get_mm_tags(token_ids);
+        RETURN_IF_STATUS_OR_ERROR(locs_status);
+        auto locs = locs_status.value();
         int mm_num = mm_embedding.size();
         if (locs.size() != mm_num) {
-            throw std::runtime_error("number of multimodal tags and multimodal input not matched");
+            return absl::InternalError("number of multimodal tags and multimodal input not matched");
         }
 
         for (int i = 0;i < mm_num;i++) {
@@ -97,15 +108,10 @@ public:
         }
         memcpy(expanded_ids->dataWithOffset<int32_t>(new_loc_idx), token_ids->dataWithOffset<int32_t>(old_loc_idx), token_ids->typeSize() * (expanded_ids->shape()[0] - new_loc_idx));
 
-        return {std::move(expanded_ids), std::move(token_masks), std::move(new_locs)};
+        return ExpandedOutput(std::move(expanded_ids), std::move(token_masks), std::move(new_locs));
     }
-    
-private:
-    py::object mm_process_engine_;
-    std::vector<int64_t> sep_token_ids_;
-    bool include_sep_tokens_;
 
-    std::vector<std::pair<int32_t, int32_t>> get_mm_tags(ft::BufferPtr token_ids) {
+    absl::StatusOr<std::vector<std::pair<int32_t, int32_t>>> get_mm_tags(ft::BufferPtr token_ids) {
         // sep_tokens will split input tokens to text part and multimodal part
         int32_t* data = token_ids->data<int32_t>();
         std::vector<std::pair<int32_t, int32_t>> locs;
@@ -127,7 +133,7 @@ private:
                 auto now_id = *(data + i);
                 if (now_id == sep_token_ids_[0]) {
                     if (right.size() != left.size()) {
-                        throw std::runtime_error("unmatched multimodal tag pairs");
+                        return absl::InternalError("unmatched multimodal tag pairs");
                     }
                     if (!include_sep_tokens_){
                         left.emplace_back(i + 1);
@@ -141,19 +147,32 @@ private:
                         right.emplace_back(i + 1);
                     }
                     if (right.size() != left.size()) {
-                        throw std::runtime_error("unmatched multimodal tag pairs");
+                        return absl::InternalError("unmatched multimodal tag pairs");
                     }
                 }
             }
             if (left.size() != right.size()) {
-                throw std::runtime_error("unclosed multimodal tag pairs");
+                return absl::InternalError("unclosed multimodal tag pairs");
             }
             for (int i = 0;i < left.size();i++) {
                 locs.emplace_back(left[i], right[i]);
             }
         } else {
-            throw std::runtime_error("more than 2 sep tokens or no sep tokens for multimodal model is not supported");
+            return absl::InternalError("more than 2 sep tokens or no sep tokens for multimodal model is not supported");
         }
         return locs;
+    }
+
+public:
+    absl::Status update_mm_features(std::shared_ptr<rtp_llm::GenerateInput>& input) {
+        const auto mm_features = mm_embedding(input->multimodal_urls.value());
+        RETURN_IF_STATUS_OR_ERROR(mm_features);
+        input->multimodal_features = std::move(mm_features.value());
+        auto expanded_ids = expand_token_ids(input->multimodal_features.value(), input->input_ids);
+        RETURN_IF_STATUS_OR_ERROR(expanded_ids);
+        input->input_ids = expanded_ids.value().expanded_ids;
+        input->text_tokens_mask = expanded_ids.value().text_tokens_mask;
+        input->mm_locs = expanded_ids.value().locs;
+        return absl::OkStatus();
     }
 };

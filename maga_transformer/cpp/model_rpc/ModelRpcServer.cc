@@ -69,11 +69,10 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
 
     // todo: catch python exception, such as download timeout
     if (mm_processor_ != nullptr && input->multimodal_urls) {
-        input->multimodal_features = mm_processor_->mm_embedding(input->multimodal_urls.value());
-        auto expanded_ids = mm_processor_->expand_token_ids(input->multimodal_features.value(), input->input_ids);
-        input->input_ids = expanded_ids.expanded_ids;
-        input->text_tokens_mask = expanded_ids.text_tokens_mask;
-        input->mm_locs = expanded_ids.locs;
+        auto mm_res = mm_processor_->update_mm_features(input);
+        if (!mm_res.ok()) {
+            return grpc::Status(grpc::StatusCode::CANCELLED, mm_res.ToString());
+        }
     }
 
     FT_LOG_DEBUG("request:[%ld] trans to stream success", request->request_id());
