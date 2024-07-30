@@ -58,3 +58,17 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
 )
+
+cc_test(
+    name = "lora_manager_test",
+    srcs = [
+        "LoraManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+)
