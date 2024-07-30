@@ -43,11 +43,13 @@ class PtuningConstructor(object):
 
     def _create_multi_task_prompt_params(self, multi_task_prompt: List[Dict[str, Any]]):
         multi_task_prompt_args: Dict[str, PrefixParams] = {}
+        request_counter = 0
         for info in multi_task_prompt:
             id: str = str(info['task_id'])
             prompt: str = info['prompt']
             input_tokens = torch.IntTensor(self.tokenizer.encode(prompt))
-            input = GenerateInput(token_ids=input_tokens, generate_config=GenerateConfig(max_new_tokens=1))
+            request_counter += 1
+            input = GenerateInput(request_id=request_counter, token_ids=input_tokens, generate_config=GenerateConfig(max_new_tokens=1))
             stream = None
             if g_parallel_info.tp_rank == 0:
                 stream = self.decoder_engine.create_stream(input)
