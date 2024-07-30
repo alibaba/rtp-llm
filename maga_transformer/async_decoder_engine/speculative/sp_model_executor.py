@@ -12,7 +12,8 @@ class SpModelExecutor(ExecutorBase):
         self.validate_executor = validate_executor
         self.sp_executor = sp_executor
         self.gen_num = gen_num
-        self.device = validate_executor.device
+        self.validate_executor_device = validate_executor.device
+        self.sp_executor_device = sp_executor.device
 
     @property
     def base_model_ops(self):
@@ -109,7 +110,7 @@ class SpModelExecutor(ExecutorBase):
             for idx in range(0, validate_query.total_batch_size):
                 index_lst.append(offset + validate_query.context_lengths_list[idx] - validate_len + i)
                 offset = offset + validate_query.context_lengths_list[idx]
-        return hidden_states.index_select(0, torch.tensor(index_lst, device=self.device))
+        return hidden_states.index_select(0, torch.tensor(index_lst, device=self.validate_executor_device))
 
     def _creata_fake_sample_query(self, batch_query: BatchQuery, validate_len: int, output_token_list: List[torch.Tensor]):
         fake_sample_query = batch_query.deepcopy()
@@ -144,7 +145,7 @@ class SpModelExecutor(ExecutorBase):
 
         res: List[List[int]] = [[] for i in range(batch_query.total_batch_size)]
         end = [False] * batch_query.total_batch_size
-        finished = torch.zeros((batch_query.total_batch_size), device=self.device).bool()
+        finished = torch.zeros((batch_query.total_batch_size), device=self.validate_executor_device).bool()
 
         tokens = next_tokens.cpu().view(self.gen_num, batch_query.total_batch_size)
         logits = index_probs.view(self.gen_num, batch_query.total_batch_size, -1)
