@@ -46,9 +46,9 @@ void CacheManager::reportMetricsLoop() {
         if (metrics_reporter_) {
             RtpLLMCacheMetricsCollector collector;
             collector.kv_cache_item_num = block_cache_.size();
-            auto free_blocks = freeBlockNums() + block_cache_.holdBlockNums();
-            collector.kv_cache_left_seq = free_blocks * seq_size_per_block_;
-            collector.kv_cache_used_ratio = 100.0 * (config_.block_nums - free_blocks) / config_.block_nums;
+            auto available_blocks = availableBlockNums();
+            collector.kv_cache_left_seq = available_blocks * seq_size_per_block_;
+            collector.kv_cache_used_ratio = 100.0 * (config_.block_nums - available_blocks) / config_.block_nums;
             metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(nullptr, &collector);
             std::this_thread::sleep_for(std::chrono::seconds(1)); // 1s
         }
@@ -61,6 +61,7 @@ void CacheManager::initFreeBlock() {
     for (int i = 1; i < int(config_.block_nums); ++i) {
         free_blocks_index_.insert(i);
     }
+    available_blocks_ = config_.block_nums - 1;
 
     block_ref_counter_ = BlockRefCounter(config_.block_nums);
 }
@@ -135,9 +136,8 @@ size_t CacheManager::freeBlockNums() const {
     return free_blocks_index_.size();
 }
 
-// TODO(xinfei.sxf) consider blocks in block cache is referenced by stream
 size_t CacheManager::availableBlockNums() const {
-    return freeBlockNums() + block_cache_.holdBlockNums();
+    return available_blocks_;
 }
 
 KVCacheInfo CacheManager::getKVCacheInfo() const {
@@ -178,6 +178,24 @@ CacheManager::MatchInfo CacheManager::matchImpl(const std::vector<int>& token_id
     return {cache_blocks, cache_block_num, reuse_length, reuse_block_num};
 }
 
+void CacheManager::incrQueryRefCounter(const std::vector<int>& blocks) {
+    query_ref_counter_.incrementRefCounter(blocks);
+    for (auto block : blocks) {
+        if (query_ref_counter_.getRefCounter(block) == 1) {
+            available_blocks_--;
+        }
+    }
+}
+
+void CacheManager::decrQueryRefCounter(const std::vector<int>& blocks) {
+    query_ref_counter_.decrementRefCounter(blocks);
+    for (auto block : blocks) {
+        if (query_ref_counter_.getRefCounter(block) == 0) {
+            available_blocks_++;
+        }
+    }
+}
+
 std::tuple<bool, std::vector<int>, int> CacheManager::mallocWithCacheImpl(int                     want_block_nums,
                                                                           const std::vector<int>& token_ids) {
     auto match_info = matchImpl(token_ids);
@@ -188,6 +206,7 @@ std::tuple<bool, std::vector<int>, int> CacheManager::mallocWithCacheImpl(int   
 
     std::vector<int> reuse_blocks(match_info.cache_blocks.begin(), match_info.cache_blocks.begin() + match_info.reuse_block_num);
     block_ref_counter_.incrementRefCounter(reuse_blocks);
+    incrQueryRefCounter(reuse_blocks);
     maybeFreeBlockFromCache(want_block_nums - match_info.reuse_block_num);
 
     auto [success, new_blocks] = mallocImpl(want_block_nums - match_info.reuse_block_num);
@@ -198,10 +217,10 @@ std::tuple<bool, std::vector<int>, int> CacheManager::mallocWithCacheImpl(int   
             collector.kv_cache_reuse_length = match_info.reuse_length;
             metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
         }
-
         return {true, reuse_blocks, match_info.reuse_length};
     } else {
-        free(reuse_blocks);
+        decrQueryRefCounter(reuse_blocks);
+        freeImpl(reuse_blocks);
         return {false, {}, 0};
     }
 }
@@ -231,6 +250,7 @@ std::tuple<bool, std::vector<int>> CacheManager::mallocImpl(int nums) {
             result.push_back(block);
         }
         block_ref_counter_.incrementRefCounter(result);
+        incrQueryRefCounter(result);
         return {true, result};
     }
 }
@@ -239,7 +259,18 @@ void CacheManager::reserveBlocks(int nums) {
     maybeFreeBlockFromCache(nums);
 }
 
+void CacheManager::free(const std::vector<KVCacheBlockAddr>& resource) {
+    for (const auto& kv_block : resource) {
+        free(kv_block.offset);
+    }
+}
+
 void CacheManager::free(const std::vector<int>& block_indices) {
+    decrQueryRefCounter(block_indices);
+    freeImpl(block_indices);
+}
+
+void CacheManager::freeImpl(const std::vector<int>& block_indices) {
     block_ref_counter_.decrementRefCounter(block_indices);
     for (auto block : block_indices) {
         int ref_count = block_ref_counter_.getRefCounter(block);
@@ -256,18 +287,13 @@ void CacheManager::maybeFreeBlockFromCache(int nums) {
             // Avoid infinite loop
             break;
         }
-        free(indices);
-    }
-}
-
-void CacheManager::free(const std::vector<KVCacheBlockAddr>& resource) {
-    for (const auto& kv_block : resource) {
-        free(kv_block.offset);
+        freeImpl(indices);
     }
 }
 
 void CacheManager::freeWithCache(const std::vector<int>& block_indices,
                                  const std::vector<int>& token_ids) {
+    decrQueryRefCounter(block_indices);
     insertIntoCache(block_indices, token_ids, false);
 }
 
@@ -286,10 +312,10 @@ void CacheManager::insertIntoCache(const std::vector<int>& block_indices,
             block_cache_.put(std::vector<int>(token_ids.begin(), token_ids.begin() + cache_len),
                              std::vector<int>(block_indices.begin(), block_indices.begin() + block_len),
                              is_resident);
-        free(indices);
-        free(std::vector<int>(block_indices.begin() + block_len, block_indices.end()));
+        freeImpl(indices);
+        freeImpl(std::vector<int>(block_indices.begin() + block_len, block_indices.end()));
     } else {
-        free(block_indices);
+        freeImpl(block_indices);
     }
 }
 

@@ -13,7 +13,7 @@ FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
     cache_manager_(cache_manager),
     max_seq_len_(params.max_seq_len_),
     max_context_batch_size_(params.max_context_batch_size_),
-    reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->freeBlockNums() / 100),
+    reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100),
     enable_partial_fallback_(params.enable_partial_fallback_),
     enable_fast_gen_(params.enable_fast_gen_),
     max_context_len_(params.max_context_len_),
@@ -70,7 +70,7 @@ void FIFOScheduler::evaluateRunningNext() {
     // Only in the case of partial fallback, the stream in the waiting queue may hold blocks resources.
     if (enable_partial_fallback_) {
         for (auto& stream : waiting_streams_) {
-            int need_block_num = (int)runningNextBlockNum() - (int)cache_manager_->freeBlockNums();
+            int need_block_num = (int)runningNextBlockNum() - (int)cache_manager_->availableBlockNums();
             if (need_block_num <= 0) {
                 break;
             }
@@ -84,7 +84,7 @@ void FIFOScheduler::evaluateRunningNext() {
     }
 
     while (!running_streams_.empty()) {
-        int need_block_num = (int)runningNextBlockNum() - (int)cache_manager_->freeBlockNums();
+        int need_block_num = (int)runningNextBlockNum() - (int)cache_manager_->availableBlockNums();
         if (need_block_num <= 0) {
             break;
         }
@@ -144,7 +144,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
         token_capacity_ -= result.value();
         FT_LOG_DEBUG("after stream [%d] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
     }
-    return result.ok() && cache_manager_->freeBlockNums() >= reserve_block_num_; 
+    return result.ok() && cache_manager_->availableBlockNums() >= reserve_block_num_; 
 }
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {

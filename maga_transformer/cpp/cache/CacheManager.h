@@ -63,7 +63,6 @@ public:
     std::tuple<bool, KVCacheBlockAddr>      malloc(int nums = 1);
     std::tuple<bool, KVCacheBlockAddr, int> mallocWithCache(int want_block_nums, const std::vector<int>& token_ids);
     int                                     match(const std::vector<int>& token_ids);
-    std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     void                                    reserveBlocks(int nums);
     void                                    incrBlockRefCounter(const std::vector<int>& indices);
 
@@ -85,10 +84,12 @@ private:
     void                                    allocateAndTpSync();
     void                                    initKvCache();
     MatchInfo                               matchImpl(const std::vector<int>& token_ids);
+    std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     std::tuple<bool, std::vector<int>>      mallocImpl(int nums);
     std::tuple<bool, std::vector<int>, int> mallocWithCacheImpl(int want_block_nums, const std::vector<int>& token_ids);
     void                                    maybeFreeBlockFromCache(int nums);
 
+    void freeImpl(const std::vector<int>& indice);
     void insertIntoCache(const std::vector<int>& block_indices,
                          const std::vector<int>&              token_ids,
                          bool                                 is_resident);
@@ -97,11 +98,16 @@ private:
     SeqPosition getSeqPosition(const std::vector<int>& block_indice_list, int idx);
     void        copyKvCacheFromSeqPosition(const SeqPosition& src_seq_position, const SeqPosition& dst_seq_position);
 
+    void incrQueryRefCounter(const std::vector<int>& blocks);
+    void decrQueryRefCounter(const std::vector<int>& blocks);
+
 private:
     CacheConfig     config_;
     int             seq_size_per_block_;
     std::set<int>   free_blocks_index_;
     BlockRefCounter block_ref_counter_;
+    BlockRefCounter query_ref_counter_;
+    int             available_blocks_;
     BlockCache      block_cache_;
     KVCacheBuffer   kv_cache_;
     ft::DeviceBase* device_;
