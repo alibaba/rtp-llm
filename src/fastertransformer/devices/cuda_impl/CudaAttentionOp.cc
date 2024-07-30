@@ -300,8 +300,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                      token_num);
         return;
     } else {
-        // TODO(lidongjin): Only support float32 gemm output.
-        // TODO: deal with GQA: duplicate k_output by head_num / kv_head_num ratio.
+        q_output->updateShape({batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, size_per_head});
         auto qk_output = gemm({*q_output,
                                *k_output,
                                std::nullopt,
@@ -309,6 +308,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                DataType::TYPE_FP32,
                                TransposeOperation::NONE,
                                TransposeOperation::TRANSPOSE});
+        qk_output->updateShape({batch_size, head_num, seq_len, seq_len_with_prefix});
         printBufferData(*qk_output, "qk_output: ");
 
         float scale = (1.0f / sqrtf(size_per_head * 1.0f));
@@ -326,10 +326,11 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                      datatype,
                      params.common.linear_bias_slopes ? (OptionalConstBufferRef)*params.common.linear_bias_slopes :
                                                         std::nullopt});
+        softmax_qk_output->updateShape({batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, seq_len_with_prefix});
         printBufferData(*softmax_qk_output, "softmax_qk_output: ");
 
         auto qkv_output = gemm({*softmax_qk_output, *v_output});
-
+        qkv_output->updateShape({batch_size, head_num, seq_len, size_per_head});
         printBufferData(*qkv_output, "qkv_output");
 
         auto &qkv_transpose_output = params.output;

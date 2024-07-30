@@ -83,6 +83,32 @@ TEST_F(AttentionOpTest, ContextAttentionOpTest) {
     }
 }
 
+TEST_F(AttentionOpTest, ContextAttentionOpMultiGroupTest) {
+    setenv("ENABLE_TRT_FMHA", "OFF", 1);
+    setenv("ENABLE_TRTV1_FMHA", "OFF", 1);
+    setenv("ENABLE_OPENSOURCE_FMHA", "OFF", 1);
+    device_ = new CudaDevice(DeviceInitParams());
+    device_->init();
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_openSource_fmha);
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv1_fmha);
+    std::vector<size_t> batch = {1, 2, 4, 8};
+    std::vector<size_t> seq   = {1, 10, 20, 30};
+    for (auto batch_size : batch) {
+        for (auto seq_len : seq) {
+            size_t num_heads = 64;
+            size_t num_key_value_heads = 4;
+            size_t head_dim = 64;
+            size_t dim = head_dim;
+            contextAttentionOpTest(batch_size,
+                                   seq_len,
+                                   num_heads,
+                                   num_key_value_heads,
+                                   head_dim);
+        }
+    }
+}
+
 TEST_F(AttentionOpTest, OpenSourceFMHAContextAttentionOpTest) {
     setenv("ENABLE_TRT_FMHA", "OFF", 1);
     setenv("ENABLE_TRTV1_FMHA", "OFF", 1);
@@ -214,4 +240,3 @@ TEST_F(AttentionOpTest, LongSeqSelfAttentionOpTest) {
         }
     }
 }
-

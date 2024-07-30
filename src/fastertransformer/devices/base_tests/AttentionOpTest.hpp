@@ -43,7 +43,12 @@ struct AttentionImpl : torch::nn::Module {
         // k = rope->forward(k, position_ids);
         // std::cout << "k shape is " << k.sizes() << "\n";
         // std::cout << "q shape is " << q.sizes() << "\n";
-
+        if (head_num > head_kv_num) {
+            k = k.reshape({batch_size, head_kv_num, 1, kv_seq_len, head_dim}).expand({-1, -1, head_num / head_kv_num, -1, -1});
+            v = v.reshape({batch_size, head_kv_num, 1, kv_seq_len, head_dim}).expand({-1, -1, head_num / head_kv_num, -1, -1});
+            k = k.reshape({batch_size, head_num, kv_seq_len, head_dim});
+            v = v.reshape({batch_size, head_num, kv_seq_len, head_dim});
+        }
         auto attn_weights = torch::matmul(q, k.transpose(2, 3));
         if (attention_mask.has_value()) {
             attention_mask = attention_mask->view({batch_size, 1, seq_len, kv_seq_len});
