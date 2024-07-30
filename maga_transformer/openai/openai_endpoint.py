@@ -94,6 +94,8 @@ class OpenaiEndopoint():
             config.chat_id = request.chat_id
         if request.seed != None:
             config.random_seed = request.seed
+        config.add_special_tokens(self.model.config.special_tokens)
+        config.convert_select_tokens(self.model.config.vocab_size, self.tokenizer)
         return config
 
     async def _collect_complete_response(
