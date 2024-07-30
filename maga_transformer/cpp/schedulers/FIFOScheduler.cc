@@ -16,7 +16,7 @@ FIFOScheduler::FIFOScheduler(const ft::GptInitParameter&          params,
     reserve_block_num_(params.scheduler_reserve_resource_ratio_ * cache_manager->availableBlockNums() / 100),
     enable_partial_fallback_(params.enable_partial_fallback_),
     enable_fast_gen_(params.enable_fast_gen_),
-    max_context_len_(params.max_context_len_),
+    fast_gen_max_context_len_(params.fast_gen_max_context_len_),
     metrics_reporter_(metrics_reporter) {}
 
 FIFOScheduler::~FIFOScheduler() {
@@ -99,7 +99,7 @@ void FIFOScheduler::evaluateRunningNext() {
     }
 
     if (enable_fast_gen_) {
-        token_capacity_ = max_context_len_;
+        token_capacity_ = fast_gen_max_context_len_;
         FT_LOG_DEBUG("initial token_capacity is %d", token_capacity_);
     }
 

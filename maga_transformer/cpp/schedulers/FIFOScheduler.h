@@ -45,7 +45,7 @@ private:
     int                                 reserve_block_num_  = 0;
     bool                                enable_partial_fallback_ = false;
     bool                                enable_fast_gen_    = false;
-    int                                 max_context_len_    = 0;
+    int                                 fast_gen_max_context_len_    = 0;
     int                                 token_capacity_     = 0;
     std::atomic<bool>                   stop_               = false;
     std::mutex                          lock_;

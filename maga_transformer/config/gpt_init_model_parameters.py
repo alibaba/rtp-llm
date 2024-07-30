@@ -358,8 +358,10 @@ class GptInitModelParameters:
         logging.info(f'enable_partial_fallback: {self.enable_partial_fallback}')
 
         self.enable_fast_gen = bool(int(os.environ.get('ENABLE_FAST_GEN', 0)))
+        logging.info(f'enable_fast_gen: {self.enable_fast_gen}')
         # TODO(xinfei.sxf) fix name
-        self.max_context_len = int(os.environ.get('MAX_CONTEXT_LEN', 1024))
+        self.fast_gen_max_context_len = int(os.environ.get('FAST_GEN_MAX_CONTEXT_LEN', 1024))
+        logging.info(f'fast_gen_max_context_len: {self.fast_gen_max_context_len}')
 
         self.scheduler_reserve_resource_ratio = int(os.environ.get('SCHEDUlER_RESERVE_RESOURCE_RATIO', 5))
         logging.info(f'scheduler_reserve_resource_ratio: {self.scheduler_reserve_resource_ratio}')
