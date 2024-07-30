@@ -110,7 +110,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
 
     origin_torch_cuda_allocator_ = at::cuda::CUDACachingAllocator::allocator;
     initTorchCUDAAllocator(allocator_.get());
-    at::cuda::CUDACachingAllocator::allocator.store(getTorchCUDAAllocator());
+    // tmp not change torch cuda gpu allocate, because conflict with lora weights
+    // at::cuda::CUDACachingAllocator::allocator.store(getTorchCUDAAllocator());
 
     if (params.host_reserve_memory_bytes) {
         RUNTIME_ASSERT_OP_ARG(params.host_reserve_memory_bytes > 0,
@@ -131,7 +132,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
 }
 
 CudaDevice::~CudaDevice() {
-    at::cuda::CUDACachingAllocator::allocator.store(origin_torch_cuda_allocator_);
+    // tmp not change torch cuda gpu allocate, because conflict with lora weights
+    // at::cuda::CUDACachingAllocator::allocator.store(origin_torch_cuda_allocator_);
     curandstate_buf_.reset();
     cublas_mm_wrapper_.reset();
     check_cuda_error(cudaStreamDestroy(stream_));
