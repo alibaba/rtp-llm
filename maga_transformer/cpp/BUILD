@@ -230,6 +230,7 @@ cc_library(
         ":dataclass",
         ":models",
         ":common",
+        ":lora",
         ":system_prompt",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

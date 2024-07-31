@@ -29,6 +29,7 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda",
     "@local_config_cuda//cuda:cudart",
+    "//maga_transformer/cpp:normal_engine",
 ] + torch_deps()
 
 cc_test(
@@ -63,6 +64,20 @@ cc_test(
     name = "lora_manager_test",
     srcs = [
         "LoraManagerTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+)
+
+cc_test(
+    name = "lora_norm_engine_test",
+    srcs = [
+        "LoraNormEngineTest.cc",
     ],
     data = [],
     copts = test_copts,
