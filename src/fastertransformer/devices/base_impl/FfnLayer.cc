@@ -21,7 +21,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             shared_expert_output = ffnLayer({params.input,
                                              params.configs,
                                              *(params.weights.shared_expert),
-                                             params.residual, std::nullopt, params.qscheme}).hidden_states;
+                                             params.residual, params.qscheme}).hidden_states;
 
             // for qwen moe
             // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
@@ -34,16 +34,12 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         }
     } else {
         auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
-        auto up_output = loraLinear(LoraLinearParams(up_gemm_params,
-                                                     *(params.weights.up_lora_weights),
-                                                     params.lora_input)).output;
+        auto up_output = loraLinear(LoraLinearParams(up_gemm_params)).output;
         printBufferData(*up_output, "ffn_up");
 
         if (isGatedActivation(params.configs.activation_type)) {
             auto gate_gemm_params = GemmParams(params.input, *(params.weights.gate_weight->kernel));
-            auto gate_output = loraLinear(LoraLinearParams(gate_gemm_params,
-                                                           *(params.weights.gate_lora_weights),
-                                                           params.lora_input));
+            auto gate_output = loraLinear(LoraLinearParams(gate_gemm_params));
 
             activation({params.configs.activation_type,
                         *(up_output),
@@ -81,9 +77,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
 
         printBufferData(*up_output, "ffn_act");
         auto down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, params.output);
-        output = loraLinear(LoraLinearParams(down_gemm_params,
-                                             *(params.weights.down_lora_weights),
-                                             params.lora_input)).output;
+        output = loraLinear(LoraLinearParams(down_gemm_params)).output;
     }
 
     if (shared_expert_output) {

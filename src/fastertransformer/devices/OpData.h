@@ -72,8 +72,6 @@ using OptionalConstBufferRef    = std::optional<std::reference_wrapper<const Buf
 using OptionalBufferRef         = std::optional<std::reference_wrapper<Buffer>>;
 using OptionalConstVecBufferPtrRef = std::optional<std::reference_wrapper<const std::vector<BufferPtr>>>;
 
-using OptionalConstLoraMapRef    = std::optional<std::reference_wrapper<const LoraWeightsMap>>;
-
 
 using CloneOutput = BufferPtr;
 
@@ -307,13 +305,6 @@ struct EmbeddingLookupParams {
     OptionalConstBufferRef token_type_table;
 };
 
-struct LoraInput {
-    BufferPtr lora_ids;
-    BufferPtr lora_input_lengths;
-};
-
-using OptionalLoraInput = std::optional<LoraInput>;
-
 struct KvCacheInfo {
     BufferPtr kv_cache_offset;  // [batch_size, block_nums], kv cache block offset
     BufferPtr k_cache_buffer;   // [layer_num, block_nums, head, seq_size_per_block, size_per_head]
@@ -350,6 +341,7 @@ struct AttentionCommonInputs {
     BufferPtr prefix_prompt_lengths;
     int32_t   max_prefix_length;
     OptionalLoraInput lora_input = std::nullopt;
+    FMHAType          fmha_type  = FMHAType::NONE;
 };
 
 struct AttentionConfigs {
@@ -424,18 +416,15 @@ struct FfnLayerParams {
                    const FfnConfigs&            configs,
                    const FfnLayerWeights&       weights,
                    const OptionalConstBufferRef residual = std::nullopt,
-                   const OptionalLoraInput lora_input = std::nullopt,
                    const QScheme                qscheme  = QScheme::NoQuantize,
                    BufferPtr                    output = nullptr):
-        input(input), configs(configs), weights(weights), residual(residual), lora_input(lora_input), qscheme(qscheme), output(std::move(output)){}
+        input(input), configs(configs), weights(weights), residual(residual), qscheme(qscheme), output(std::move(output)){}
 
     const Buffer& input;
     const FfnConfigs&            configs;
     const FfnLayerWeights&       weights;
 
     const OptionalConstBufferRef residual; // for intel xft
-
-    const OptionalLoraInput lora_input;
 
     const QScheme qscheme;
     BufferPtr                    output;
@@ -575,16 +564,10 @@ struct LoraLinearOutput {
 
 struct LoraLinearParams {
 
-    LoraLinearParams(GemmParams&                gemm_params,
-                     OptionalConstLoraMapRef    lora_map = std::nullopt,
-                     OptionalLoraInput          lora_input = std::nullopt) :
-                     gemm_params(gemm_params),
-                     lora_map(lora_map),
-                     lora_input(lora_input) {}
+    LoraLinearParams(GemmParams&                gemm_params) :
+                     gemm_params(gemm_params) {}
 
     GemmParams&                             gemm_params;
-    OptionalConstLoraMapRef                 lora_map;
-    OptionalLoraInput                  lora_input;
 };
 
 struct QuantizeParams {

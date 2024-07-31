@@ -60,61 +60,15 @@ struct DenseWeights {
 typedef std::shared_ptr<const DenseWeights> DenseWeightsPtr;
 
 
-struct LoraWeights {
-    ConstBufferPtr A;
-    ConstBufferPtr B;
-};
-typedef std::shared_ptr<const LoraWeights>  LoraWeightsPtr;
-
-
-// thread safe map
-struct LoraWeightsMap {
-    std::unordered_map<int64_t, LoraWeights> lora_map_;
-    mutable std::shared_mutex mutex_;
-
-    bool hasLoraWeight(int64_t lora_id) const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-        auto it = lora_map_.find(lora_id);
-        return it != lora_map_.end();
-    }
-
-    LoraWeights getLoraWeight(int64_t lora_id) const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-        FT_CHECK(hasLoraWeight(lora_id));
-        auto it = lora_map_.find(lora_id);
-        return it->second;
-    }
-
-
-    void setLoRAWeight(int64_t lora_id,
-                       ConstBufferPtr lora_a,
-                       ConstBufferPtr lora_b)
-    {
-        std::unique_lock<std::shared_mutex> lock(mutex_);
-        lora_map_[lora_id] = LoraWeights({lora_a, lora_b});
-    }
-
-    void removeLoRAWeight(int64_t lora_id) {
-        std::unique_lock<std::shared_mutex> lock(mutex_);
-        if (lora_map_.find(lora_id) == lora_map_.end()) {
-            return;
-        }
-        lora_map_.erase(lora_id);
-    }
-
-};
-
 struct AttentionLayerWeights {
     std::shared_ptr<const LayerNormWeights> pre_attention_layernorm;
     std::shared_ptr<const DenseWeights>     qkv_weight;
-    std::shared_ptr<LoraWeightsMap>         qkv_lora_weights;
     std::shared_ptr<const LayerNormWeights> attention_layernorm;
 
     std::shared_ptr<const LayerNormWeights> q_norm_weight;
     std::shared_ptr<const LayerNormWeights> k_norm_weight;
 
     std::shared_ptr<const DenseWeights>     output_weight;
-    std::shared_ptr<LoraWeightsMap>         output_lora_weights;
 
     std::shared_ptr<const DenseWeights>     static_quant_weight;
     std::shared_ptr<const DenseWeights>     static_scale_reciprocal_weight;
@@ -127,15 +81,12 @@ struct AttentionLayerWeights {
 struct FfnLayerWeights {
     std::shared_ptr<const DenseWeights>     up_weight;
     std::shared_ptr<const DenseWeights>     moe_up_weight;
-    std::shared_ptr<LoraWeightsMap>         up_lora_weights;
 
     std::shared_ptr<const DenseWeights>     gate_weight;
     std::shared_ptr<const DenseWeights>     moe_gate_weight;
-    std::shared_ptr<LoraWeightsMap>         gate_lora_weights;
 
     std::shared_ptr<const DenseWeights>     down_weight;
     std::shared_ptr<const DenseWeights>     moe_down_weight;
-    std::shared_ptr<LoraWeightsMap>         down_lora_weights;
 
     std::shared_ptr<const DenseWeights>     moe_gating_weight;
 

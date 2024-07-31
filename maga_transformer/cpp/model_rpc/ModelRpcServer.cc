@@ -40,9 +40,9 @@ ModelRpcServiceImpl::ModelRpcServiceImpl(
     const EngineInitParams& maga_init_params, py::object mm_process_engine) {
     engine_.reset(new NormalEngine(maga_init_params));
     if (!mm_process_engine.is_none()) {
-        mm_processor_.reset(new MultimodalProcessor(mm_process_engine, 
+        mm_processor_.reset(new MultimodalProcessor(mm_process_engine,
             maga_init_params.gpt_init_parameter.mm_sep_tokens_,
-            maga_init_params.gpt_init_parameter.include_sep_tokens_));    
+            maga_init_params.gpt_init_parameter.include_sep_tokens_));
     }
 }
 
@@ -51,21 +51,6 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
     FT_LOG_DEBUG("receive request %ld", request->request_id());
     auto input = QueryConverter::transQuery(request);
-    std::shared_mutex* inner_mutex = nullptr;
-    if (input->lora_id != -1) {
-        std::lock_guard<std::mutex> g_lk(global_mutex_);
-
-        auto it = lora_map_mutex_.find(input->lora_id);
-        if (it != lora_map_mutex_.end() && it->second->alive_) {
-            inner_mutex = it->second->mutex_.get();
-        } else {
-            FT_LOG_INFO("request:[%ld] error lora id[%ld] is not alive", request->request_id(), input->lora_id);
-            return grpc::Status::CANCELLED;
-
-        }
-    }
-    auto lock_scope = (inner_mutex == nullptr) ?
-                      std::shared_lock<std::shared_mutex>() : std::shared_lock<std::shared_mutex>(*inner_mutex);
 
     // todo: catch python exception, such as download timeout
     if (mm_processor_ != nullptr && input->multimodal_urls) {
@@ -122,49 +107,6 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
     return grpc::Status::OK;
 }
 
-void ModelRpcServiceImpl::addLoRA(const int64_t                                                   lora_id,
-                       const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
-                       const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) {
-    std::shared_mutex* inner_mutex = nullptr;
-    {
-        std::lock_guard<std::mutex> g_lk(global_mutex_);
-
-        auto it = lora_map_mutex_.find(lora_id);
-        if (it == lora_map_mutex_.end()) {
-            auto lora_mutex_ptr = std::make_unique<LoraMutex>(
-                LoraMutex({false, std::make_unique<std::shared_mutex>()}));
-            it = lora_map_mutex_.emplace(lora_id, std::move(lora_mutex_ptr)).first;
-        }
-        inner_mutex = it->second->mutex_.get();
-    }
-    {
-        std::unique_lock<std::shared_mutex> c_lk(*inner_mutex);
-        (void)engine_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
-    }
-    {
-        std::lock_guard<std::mutex> g_lk(global_mutex_);
-        auto it = lora_map_mutex_.find(lora_id);
-        it->second->alive_ = true;
-    }
-}
-
-void ModelRpcServiceImpl::removeLoRA(const int64_t lora_id) {
-    std::shared_mutex* inner_mutex = nullptr;
-    {
-        std::lock_guard<std::mutex> g_lk(global_mutex_);
-
-        auto it = lora_map_mutex_.find(lora_id);
-        if (it == lora_map_mutex_.end() || it->second->alive_ == false) {
-            return;
-        }
-        inner_mutex = it->second->mutex_.get();
-        it->second->alive_ = false;
-    }
-    {
-        std::unique_lock<std::shared_mutex> c_lk(*inner_mutex);
-        (void)engine_->removeLoRA(lora_id);
-    }
-}
 
 KVCacheInfo ModelRpcServiceImpl::getKVCacheInfo() const {
     return engine_->getKVCacheInfo();

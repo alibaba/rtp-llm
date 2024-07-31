@@ -23,17 +23,11 @@ public:
     grpc::Status generate_stream(grpc::ServerContext*                   context,
                                  const GenerateInputPB*                 request,
                                  grpc::ServerWriter<GenerateOutputsPB>* writer) override;
-    void addLoRA(const int64_t                                                   lora_id,
-                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
-                 const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights);
-    void removeLoRA(const int64_t lora_id);
     void initMultimodal(const py::object mm_process_engine);
 
     KVCacheInfo getKVCacheInfo() const;
 private:
     std::unique_ptr<NormalEngine> engine_ = nullptr;
-    std::mutex global_mutex_;
-    mutable std::map<int64_t,  std::unique_ptr<LoraMutex>> lora_map_mutex_;
     py::object mm_process_engine_;
     std::unique_ptr<MultimodalProcessor> mm_processor_ = nullptr;
 };

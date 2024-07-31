@@ -38,7 +38,7 @@ WeightsConverter::mayFindBuffer(const ConstBufferPtrMap& map,
 ft::LayerNormWeightsPtr
 WeightsConverter::mayCreateLayerNormWeights(const ConstBufferPtrMap& map,
                                             const std::string& gamma_key,
-                                            const std::string& beta_key, 
+                                            const std::string& beta_key,
                                             const std::string& scale_key,
                                             const std::string& scale_reciprocal_key)
 {
@@ -149,10 +149,6 @@ WeightsConverter::createFfnWeights(const ConstBufferPtrMap& map) {
             ffn_weights.shared_expert_gate = mayCreateDenseWeights(map, W::shared_expert_gate_w);
         }
     }
-    // lora init
-    ffn_weights.up_lora_weights = std::make_shared<LoraWeightsMap>();
-    ffn_weights.down_lora_weights = std::make_shared<LoraWeightsMap>();
-    ffn_weights.gate_lora_weights = std::make_shared<LoraWeightsMap>();
 
     return ffn_weights;
 }
@@ -188,10 +184,6 @@ WeightsConverter::createAttentionWeights(const ConstBufferPtrMap& map) {
     attention_weights.smoother_weight = mayCreateDenseWeights(map,
                                                               W::attn_o_smoother);
 
-    // lora init
-
-    attention_weights.qkv_lora_weights = std::make_shared<LoraWeightsMap>();
-    attention_weights.output_lora_weights = std::make_shared<LoraWeightsMap>();
     attention_weights.static_quant_weight = mayCreateDenseWeights(map, W::attention_output_s);
     attention_weights.static_scale_reciprocal_weight = mayCreateDenseWeights(map, W::attention_output_sr);
 

@@ -45,17 +45,6 @@ void RtpLLMOp::init(const ft::GptInitParameter& gpt_init_params,
     }
 }
 
-void RtpLLMOp::addLoRA(const int64_t lora_id, py::object py_lora_a_weights, py::object py_lora_b_weights) {
-    auto convert = rtp_llm::WeightsConverter(false);
-    auto lora_a_weights = convert.convertLayerWeights_(py_lora_a_weights);
-    auto lora_b_weights = convert.convertLayerWeights_(py_lora_b_weights);
-    model_rpc_server_->addLoRA(lora_id, *lora_a_weights, *lora_b_weights);
-}
-
-void RtpLLMOp::removeLoRA(const int64_t lora_id) {
-    model_rpc_server_->removeLoRA(lora_id);
-}
-
 std::tuple<int64_t, int64_t> RtpLLMOp::getKVCacheInfo() {
     auto info = model_rpc_server_->getKVCacheInfo();
     return std::make_tuple(info.available_kv_cache, info.total_kv_cache);
@@ -96,8 +85,6 @@ void registerRtpLLMOp(const py::module& m) {
     pybind11::class_<torch_ext::RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
         .def("init", &torch_ext::RtpLLMOp::init)
-        .def("add_lora", &torch_ext::RtpLLMOp::addLoRA)
-        .def("remove_lora", &torch_ext::RtpLLMOp::removeLoRA)
         .def("get_kv_cache_info", &torch_ext::RtpLLMOp::getKVCacheInfo)
         .def("stop", &torch_ext::RtpLLMOp::stop);
 }

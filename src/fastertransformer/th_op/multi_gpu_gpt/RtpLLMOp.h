@@ -16,8 +16,6 @@ public:
     void init(const ft::GptInitParameter& gpt_init_parameter, py::object py_layer_weights,
               py::object py_weights, py::object mm_process_engine);
 
-    void addLoRA(const int64_t lora_id, py::object lora_a_weights, py::object lora_b_weights);
-    void removeLoRA(const int64_t lora_id);
     void stop();
     void _init(int64_t model_rpc_port, const rtp_llm::EngineInitParams maga_init_params, py::object mm_process_engine);
     std::tuple<int64_t, int64_t> getKVCacheInfo();

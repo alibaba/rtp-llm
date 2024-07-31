@@ -240,12 +240,6 @@ public:
 
     virtual GptModelOutputs forward(const GptModelInputs& inputs);
 
-    void addLoRA(const int64_t lora_id,
-                const std::vector<LoraMap>& lora_a_weights,
-                const std::vector<LoraMap>& lora_b_weights);
-
-    void removeLoRA(const int64_t lora_id);
-
 private:
     void prepareAttentionInputs(
             const GptModelInputs& inputs,

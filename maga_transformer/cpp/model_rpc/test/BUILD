@@ -81,20 +81,3 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
 )
-
-cc_test(
-    name = "dynamic_lora_model_rpc_server_test",
-    srcs = [
-        "DynamicLoraModelRpcServerTest.cc",
-        "MockModelRpcServer.h"
-    ],
-    copts = test_copts,
-    linkopts = test_linkopts,
-    deps = [
-        "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
-        "//maga_transformer/cpp:components",
-        "//maga_transformer/cpp:model_rpc_server",
-        "//maga_transformer/cpp:utils",
-    ] + test_deps,
-    visibility = ["//visibility:public"]
-)

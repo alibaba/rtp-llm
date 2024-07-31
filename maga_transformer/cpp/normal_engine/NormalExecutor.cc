@@ -29,20 +29,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params, const std::shared
 }
 
 
-absl::Status
-NormalExecutor::addLoRA(const int64_t                                                           lora_id,
-                        const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
-                        const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights)
-{
-    model_->addLoRA(lora_id, lora_a_weights, lora_b_weights);
-    return absl::OkStatus();
-}
-
-absl::Status NormalExecutor::removeLoRA(const int64_t lora_id) {
-    model_->removeLoRA(lora_id);
-    return absl::OkStatus();
-}
-
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     StreamGroups stream_groups(streams);
     reportMetrics(stream_groups);

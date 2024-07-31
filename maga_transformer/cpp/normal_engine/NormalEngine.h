@@ -26,11 +26,6 @@ public:
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) override;
     absl::Status                    stop() override;
 
-    absl::Status addLoRA(const int64_t                                                           lora_id,
-                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_a_weights,
-                         const std::vector<std::unordered_map<std::string, ft::ConstBufferPtr>>& lora_b_weights) override;
-
-    absl::Status removeLoRA(const int64_t lora_id) override;
     KVCacheInfo getKVCacheInfo() const override;
     absl::Status step();
     absl::Status startLoop();
