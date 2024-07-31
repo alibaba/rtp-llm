@@ -22,12 +22,15 @@ _ReportWorker__REPORT_INTERVAL_SECOND = 1
 _ReportWorker__REPORT_HEADERS = {
     'topic': 'py_kmonitor'
 }
+_ReportWorker__REPORT_KMONITOR_MULTI_SEP = '@'
+_ReportWorker__REPORT_KMONITOR_KEYVALUE_SEP = '^'
 
 
 class ReportWorker(object):
     def __init__(self, *args):
         super(ReportWorker, self).__init__(*args)
         self.init_tags = HippoHelper.get_hippo_tags()
+        self.init_tags.update(self.parse_kmon_tags(os.environ.get('kmonitorTags', '')))
         logging.info(f"kmonitor report default tags: {json.dumps(self.init_tags, indent=4)}")
         self.metrics: Dict[str, MetricBase] = {}
         self.metric_lock: Lock = Lock()
@@ -42,6 +45,18 @@ class ReportWorker(object):
             self.flume = None
             self.start()
             logging.info('test mode, kmonitor metrics not reported.')
+
+    def parse_kmon_tags(self, kmon_tags_str: str) -> Dict[str, str]:
+        kmon_tags: Dict[str, str] = {}
+        if not kmon_tags_str:
+            return {}
+        for tag in kmon_tags_str.split(_ReportWorker__REPORT_KMONITOR_MULTI_SEP):
+            kv = tag.split(_ReportWorker__REPORT_KMONITOR_KEYVALUE_SEP)
+            if len(kv) != 2:
+                logging.error(f'kmon parse tags failed: tag can not split: {tag}')
+                return {}
+            kmon_tags[kv[0].strip()] = kv[1].strip()
+        return kmon_tags
 
     def register_metric(self, metric: MetricBase) -> None:
         with self.metric_lock:
@@ -94,4 +109,3 @@ class ReportWorker(object):
         self.started = False
 
 report_worker = ReportWorker()
-

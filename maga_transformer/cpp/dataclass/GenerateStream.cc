@@ -19,6 +19,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                kmonitor::MetricsReporterPtr     metrics_reporter)
     : generate_input_(input)
     , max_seq_len_(params.max_seq_len_)
+    , vocab_size_(params.vocab_size_)
     , stream_cache_resource_(this, resource_context, input->need_release_resource)
     , need_release_resource_(input->need_release_resource)
     , enable_fast_gen_(params.enable_fast_gen_)
@@ -357,6 +358,10 @@ void GenerateStream::checkTimeout() {
     }
 }
 
+bool GenerateStream::checkTokenId(int token_id) {
+    return token_id >= 0 && token_id < vocab_size_;
+}
+
 void GenerateStream::setStop(const std::string& err_msg, absl::StatusCode err_code) {
     std::lock_guard<std::mutex> lock(output_mutex_);
     FT_LOG_WARNING("stop stream: %d %s", streamId(), err_msg.c_str());
@@ -526,6 +531,11 @@ void GenerateStream::update(ft::BufferPtr&    new_tokens,
     // # which needs to update all the generated tokens each update.
     FT_CHECK(new_tokens->dim() == 2);
     for (int i = 0; i < tileNum(); ++i) {
+        auto current_token_id = ((int*)new_tokens->data())[i];
+        if (!checkTokenId(current_token_id)) {
+            setStop("output token id:" + to_string(current_token_id) + " out of vocab size: " + to_string(vocab_size_));
+            return;
+        }
         *(*complete_token_ids_)[i].dataWithOffset<int>(seq_length_) = ((int*)new_tokens->data())[i];
     }
     setSeqLength(seq_length_ + num_new_tokens);

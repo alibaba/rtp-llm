@@ -98,6 +98,7 @@ public:
     std::optional<ft::BufferPtr>& multimodalLocations() const;
 
     void checkTimeout();
+    bool checkTokenId(int token_id);
     void setStop(const std::string& err_msg, absl::StatusCode err_code = absl::StatusCode::kInternal);
     void stopAndRelease(const std::string& err_msg, absl::StatusCode err_code = absl::StatusCode::kInternal);
     bool isDoneWithoutLock(int batch_id) const;
@@ -151,6 +152,7 @@ protected:
     std::vector<GenerateStatus>         sub_generate_status_;
     int                                 max_seq_len_;
     int                                 seq_length_;
+    int64_t                             vocab_size_;
     ft::BufferPtr                       complete_token_ids_;
     int64_t                             begin_time_us_;
     int64_t                             last_pause_us_ = 0;

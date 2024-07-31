@@ -110,9 +110,13 @@ class InferenceServer(object):
         except BaseException as e:
             # 捕获非Cancel以外所有的异常,所以使用BaseException
             self._access_logger.log_exception_access(request, e)
-            kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
+            format_e = format_exception(e)
+            kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {
+                "source": request.get("source", "unkown"),
+                "error_code": str(format_e.get("error_code", -1))
+            })
             yield response_data_prefix + \
-                json.dumps(format_exception(e), ensure_ascii=False) + "\r\n\r\n"
+                json.dumps(format_e, ensure_ascii=False) + "\r\n\r\n"
 
     async def update(self, version_info: VersionInfo):
         request = version_info.model_dump()
@@ -204,7 +208,10 @@ class InferenceServer(object):
             error_code = 499
         else:
             error_code = 500
-            kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
+            kmonitor.report(AccMetrics.ERROR_QPS_METRIC, 1, {
+                "source": request.get("source", "unkown"),
+                "error_code": str(format_exception(e).get("error_code", -1))
+            })
         rep = JSONResponse(format_exception(e), status_code=error_code)
         return rep
 

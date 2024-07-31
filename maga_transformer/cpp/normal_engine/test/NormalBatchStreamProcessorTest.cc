@@ -22,6 +22,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ResourceContext resource_context;
     GptInitParameter param;
     param.max_seq_len_   = 2048;
+    param.vocab_size_   = 2048;
     param.num_layers_    = 2;
     param.int8_kv_cache_ = true;
     NormalBatchStreamProcessor     processor(param);
@@ -110,6 +111,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     ResourceContext resource_context;
     GptInitParameter param;
     param.max_seq_len_   = 2048;
+    param.vocab_size_   = 2048;
     param.num_layers_    = 2;
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
