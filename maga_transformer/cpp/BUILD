@@ -69,6 +69,31 @@ cc_library(
 )
 
 cc_library(
+    name = "lora",
+    hdrs = glob([
+        "lora/*.h",
+    ]),
+    srcs = glob([
+        "lora/*.cc",
+    ]),
+    deps = torch_deps() + [
+        ":utils",
+        ":common",
+        ":cache",
+        ":system_prompt",
+        "//:gpt_init_params_hdr",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@havenask//aios/autil:synchronized_queue",
+        "//src/fastertransformer/utils:utils",
+        "//src/fastertransformer/devices:devices_base",
+        "//src/fastertransformer/devices:device_utils",
+        "//src/fastertransformer/models:weights_define",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "system_prompt",
     hdrs = glob([
         "system_prompt/SystemPrompt.h",
