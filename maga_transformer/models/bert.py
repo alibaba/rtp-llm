@@ -9,6 +9,7 @@ from maga_transformer.config.task_type import TaskType
 from maga_transformer.models.gpt import GPT
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
 from maga_transformer.models.downstream_modules.classifier.roberta_classifier import RobertaClassifierModule
+from maga_transformer.models.downstream_modules.classifier.bert_classifier import BertClassifierModule
 from maga_transformer.models.downstream_modules import RobertaRerankerModule
 from maga_transformer.models.bert_weight import BertWeightInfo, RobertaWeightInfo
 from maga_transformer.model_factory_register import register_model
@@ -50,6 +51,11 @@ class Bert(GPT):
             cls.from_huggingface(config, config_json)
         return config
 
+    def load_custom_module(self) -> Optional[CustomModule]:
+        if self.task_type == TaskType.SEQ_CLASSIFICATION:
+            return BertClassifierModule(self.config, self.tokenizer)
+        return super().load_custom_module()
+
     @classmethod
     def from_huggingface(cls, config: GptInitModelParameters, config_json: Dict[str, Any]):
         # check position_embedding_type == absolute
@@ -64,7 +70,7 @@ class Bert(GPT):
         config.type_vocab_size = config_json.get('type_vocab_size', 0)
         config.layernorm_eps = config_json['layer_norm_eps']
         config.inter_size = config_json['intermediate_size']
-        
+
         GPT._load_quant_config(config.ckpt_path, config_json, config)
 
     @classmethod
