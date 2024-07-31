@@ -65,6 +65,20 @@ cc_test(
     tags = ["multi_device"],
 )
 
+cc_binary(
+    name = "custom_ar_test",
+    srcs = glob([
+        "CustomAllReduceTest.cc",
+    ]),
+    deps = test_deps + [
+        "//src/fastertransformer/devices/torch_impl:torch_reference_impl",
+        "//maga_transformer/cpp:models",
+    ],
+    visibility = ["//visibility:public"],
+    linkopts = ["-ldl"],
+    copts = copts(),
+)
+
 cc_test(
     name = "cuda_custom_all_reduce_test",
     srcs = [
@@ -74,7 +88,9 @@ cc_test(
     env = test_envs,
     copts = cuda_copts() + copts() + torch_deps(),
     linkopts = test_linkopts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//src/fastertransformer/devices/cuda_impl/tests:custom_ar_test"
+    ],
     tags = ["custom_ar_ut"],
 )
 

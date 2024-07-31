@@ -320,40 +320,6 @@ protected:
         }
     }
 
-    // Note: used for catching error code for multiprocess test, do not remove
-    bool checkTensorClose(const torch::Tensor& a, const torch::Tensor& b,
-                           double rtol = 0, double atol = 0) {
-        auto a_cmp = a;
-        auto b_cmp = b;
-        rtol = rtol ? rtol : rtol_;
-        atol = atol ? atol : rtol_;
-        if (a.is_floating_point() != b.is_floating_point()) {
-            return false;
-        }
-
-        if (a_cmp.dtype() != b_cmp.dtype()) {
-            auto cmp_type = (a_cmp.dtype().itemsize() > b_cmp.dtype().itemsize()) ?
-                            a_cmp.dtype() : b_cmp.dtype();
-            a_cmp = a_cmp.to(cmp_type);
-            b_cmp = b_cmp.to(cmp_type);
-        }
-        a_cmp = a_cmp.squeeze();
-        b_cmp = b_cmp.squeeze();
-
-        const auto close = torch::allclose(a_cmp, b_cmp, rtol, atol);
-        if (!close) {
-            std::cout << "assert tensor close failed!" << std::endl;
-            std::cout << "rtol: " << rtol << std::endl;
-            std::cout << "atol: " << atol << std::endl;
-            std::cout << "a: " << a << std::endl;
-            std::cout << "b: " << b << std::endl;
-            std::cout << "abs diff: " << torch::abs(a_cmp - b_cmp) << std::endl;
-            std::cout << "rel diff: " << torch::abs(a_cmp - b_cmp) / torch::abs(a_cmp) << std::endl;
-            return false;
-        }
-        return true;
-    }
-
     size_t getFreePort() {
         int sockfd = socket(AF_INET, SOCK_STREAM, 0);
         EXPECT_TRUE(sockfd >= 0);
