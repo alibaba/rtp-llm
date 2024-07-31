@@ -24,11 +24,10 @@ void LoraManager::removeLora(int64_t lora_id) {
     bool is_timeout = true;
     {
         std::unique_lock<std::shared_mutex> scoped_lock(mutex_);
-        auto lora_resource = lora_map_[lora_id];
-        FT_CHECK_WITH_INFO(lora_resource.alive_,
+        FT_CHECK_WITH_INFO(lora_map_[lora_id].alive_,
             "Lora id[%ld] need alive when remove lora", lora_id);
-        lora_resource.alive_ = false;
-        resource = lora_resource.resource_;
+        lora_map_[lora_id].alive_ = false;
+        resource = lora_map_[lora_id].resource_;
 
     }
     {
@@ -60,15 +59,25 @@ ft::lora::LoraModelPtr LoraManager::getLora(int64_t lora_id) {
     if (it == lora_map_.end()) {
         return nullptr;
     }
-    if (!it->second.alive_) {
-        return nullptr;
-    }
     return it->second.resource_;
 }
 
 bool LoraManager::hasLora(int64_t lora_id) {
     std::shared_lock<std::shared_mutex> scoped_lock(mutex_);
     return (lora_map_.find(lora_id) != lora_map_.end());
+}
+
+bool LoraManager::isLoraAlive(int64_t lora_id) {
+    std::shared_lock<std::shared_mutex> scoped_lock(mutex_);
+    auto it = lora_map_.find(lora_id);
+    if (it == lora_map_.end()) {
+        return false;
+    }
+    if (it->second.alive_) {
+        return true;
+    } else {
+        return false;
+    }
 }
 
 // std::vector<ft::LoraResource> LoraManager::getLoraResource(ft::BufferPtr lora_ids) {

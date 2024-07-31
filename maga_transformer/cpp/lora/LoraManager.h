@@ -40,6 +40,12 @@ public:
 
     bool hasLora(int64_t lora_id);
 
+    bool isLoraAlive(int64_t lora_id);
+
+    void releaseSignal() {
+        cv_.notify_all();
+    }
+
     // std::vector<ft::LoraResource>  getLoraResource(ft::BufferPtr lora_ids);
 
 };
