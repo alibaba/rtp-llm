@@ -106,7 +106,7 @@ build:arm --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
 build:arm --linkopt -ldl
 build:arm --copt="-DUSING_CUDA=0"
 
-build:debug --copt -g --copt -O0
+build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
 
 # remote cache conflicts with remote executor.
