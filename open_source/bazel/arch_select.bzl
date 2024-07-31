@@ -33,6 +33,12 @@ def th_transformer_so():
         cmd = " && ".join(["cp $(SRCS) $(@D)"])
     )
 
+def embedding_arpc_deps():
+    native.alias(
+        name = "embedding_arpc_deps",
+        actual = "//maga_transformer/cpp/embedding_engine:embedding_engine_arpc_server_impl"
+    )
+
 def whl_deps():
     return select({
         "//:use_cuda12": ["torch==2.1.0+cu121"],

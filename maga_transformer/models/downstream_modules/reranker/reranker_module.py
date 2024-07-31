@@ -36,9 +36,9 @@ class RerankerRenderer(CustomRenderer):
     def sigmoid(x: float):
         return float(1 / (1 + np.exp(-x)))
 
-    async def create_input(self, formated_request: VoyageRerankerRequest):
+    def create_input(self, formated_request: VoyageRerankerRequest):
         input: List[Tuple[str, str]] = [(formated_request.query, doc) for doc in formated_request.documents]
-        return await self.generator.generate(input, truncate=formated_request.truncation)
+        return self.generator.generate(input, truncate=formated_request.truncation)
 
     async def render_response(self, formated_request: VoyageRerankerRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
         if outputs.outputs is None:

@@ -15,7 +15,7 @@ class CommonInputGenerator(object):
         self.config_ = config
 
     @torch.inference_mode()
-    async def generate( # type: ignore
+    def generate( # type: ignore
         self,
         prompt: Union[List[str], str, List[Tuple[str, str]]],
         truncate: bool = True

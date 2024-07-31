@@ -1,0 +1,49 @@
+diff --git bazel/defs.bzl bazel/defs.bzl
+index 03ff7ce5..bdaff505 100644
+--- bazel/defs.bzl
++++ bazel/defs.bzl
+@@ -5,7 +5,6 @@
+ load("//bazel:tf_proto.bzl", "tf_proto_library")
+ 
+ load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
+-load("@pip//:requirements.bzl", "requirement")
+ 
+ def if_clang(a, b=[]):
+     return select({
+@@ -952,36 +951,6 @@ def perf_test(group_name,
+     )
+     return full_suite_name
+ 
+-def rtp_perf_test(group_name, suite_name, data=[], tags=[]):
+-    deps = [
+-        "//aios/tools/turing_local_debug:serverlib",
+-    ]
+-    return perf_test(group_name, suite_name,
+-                     online_package="//package/rtp/online:install",
+-                     deps=deps + [
+-                     requirement("pytest"),
+-                     requirement("pytest-xdist"),
+-                     requirement("flatbuffers"),
+-                     ],
+-                     data=data,
+-                     env={'SUEZOPS_PLATFORM':'rtp'},
+-                     tags=tags)
+-
+-def be_perf_test(group_name, suite_name, data=[], tags=[]):
+-    deps = [
+-        "//aios/tools/turing_local_debug:serverlib",
+-    ]
+-    return perf_test(group_name, suite_name,
+-                     online_package="//package/be/test:install",
+-                     deps=deps + [
+-                     requirement("pytest"),
+-                     requirement("pytest-xdist"),
+-                     requirement("flatbuffers"),
+-                     ],
+-                     data=data,
+-                     env={'SUEZOPS_PLATFORM':'rtp'},
+-                     tags=tags)
+-
+ def genshared(name, lib):
+     return native.genrule(
+         name = name,

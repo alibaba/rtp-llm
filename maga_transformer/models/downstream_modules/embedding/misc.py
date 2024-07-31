@@ -60,11 +60,11 @@ class EmbeddingRendererBase(CustomRenderer):
         else:
             return OpenAIEmbeddingRequest(**request_json)
 
-    async def create_input(self, request: Union[OpenAIEmbeddingRequest, SimilarityRequest]):
+    def create_input(self, request: Union[OpenAIEmbeddingRequest, SimilarityRequest]):
         if isinstance(request, OpenAIEmbeddingRequest):
-            engine_inputs = await self.generator.generate(request.input)
+            engine_inputs = self.generator.generate(request.input)
         else:
-            engine_inputs = await self.generator.generate(request.left + request.right)
+            engine_inputs = self.generator.generate(request.left + request.right)
         return engine_inputs
 
     def embedding_func(self, request: BaseModel, res: torch.Tensor, input_length: int, input_tokens: torch.Tensor) -> Union[List[float], Dict[str, float], Dict[int, float]]:

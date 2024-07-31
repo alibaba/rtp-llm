@@ -38,6 +38,28 @@ void GptInitParameter::setNormType() {
     norm_type_ = getNormType(norm_type_str_);
 }
 
+void GptInitParameter::setTaskType(std::string task) {
+    if (task == "DENSE_EMBEDDING") {
+        task_type_ = TaskType::DENSE_EMBEDDING;
+    } else if (task == "ALL_EMBEDDING") {
+        task_type_ = TaskType::ALL_EMBEDDING;
+    } else if (task == "SPARSE_EMBEDDING") {
+        task_type_ = TaskType::SPARSE_EMBEDDING;
+    } else if (task == "COLBERT_EMBEDDING") {
+        task_type_ = TaskType::COLBERT_EMBEDDING;
+        } else if (task == "LANGUAGE_MODEL") {
+        task_type_ = TaskType::LANGUAGE_MODEL;
+    } else if (task == "SEQ_CLASSIFICATION") {
+        task_type_ = TaskType::SEQ_CLASSIFICATION;
+    } else if (task == "RERANKER") {
+        task_type_ = TaskType::RERANKER;
+    } else if (task == "LINEAR_SOFTMAX") {
+        task_type_ = TaskType::LINEAR_SOFTMAX;
+    } else {
+        FT_CHECK_WITH_INFO(false, "unkown task type: " + task);
+    }
+}
+
 void GptInitParameter::setActivationType() {
     activation_type_ = getActivationType(activation_type_str_);
 }
@@ -258,8 +280,8 @@ void registerGptInitParameter(py::module m) {
     .def("setLayerNormType", &GptInitParameter::setLayerNormType)
     .def("setNormType", &GptInitParameter::setNormType)
     .def("setActivationType", &GptInitParameter::setActivationType)
-    .def("isGatedActivation", &GptInitParameter::isGatedActivation)  REGISTER_PROPERTYS;
-
+    .def("setTaskType", &GptInitParameter::setTaskType)
+    .def("isGatedActivation", &GptInitParameter::isGatedActivation)  REGISTER_PROPERTYS;    
 }
 
 }

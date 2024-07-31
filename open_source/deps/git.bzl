@@ -104,6 +104,7 @@ def git_deps():
         name = "havenask",
         remote = "https://github.com/alibaba/havenask.git",
         commit = "3c973500afbd40933eb0a80cfdfb6592274377fb",
+        patches=["//patches/havenask:havenask.patch"],
         shallow_since = "1704038400 +0800",
         build_file = clean_dep("//3rdparty/kmonitor:kmonitor.BUILD"),
     )

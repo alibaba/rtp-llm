@@ -15,7 +15,10 @@ namespace fastertransformer {
 DeviceBase::DeviceBase(const DeviceInitParams& params)
     : device_id_(params.device_id)
     , init_params_(params)
-    {}
+    {
+        // 默认stdout输出到文件的逻辑是全缓冲，导致ft_log和autil_log日志刷不出来，手动设置为行缓冲
+        setlinebuf(stdout);
+    }
 
 void DeviceBase::init() {
     buffer_manager_.reset(new BufferManager(getAllocator(), getHostAllocator()));

@@ -23,6 +23,10 @@ class ALLEmbeddingRenderer(EmbeddingRendererBase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, ** kwargs)
         self.embedding_type = EmbeddingResponseType.DENSE
+
+    def render_cpp(self, input: List[str]):
+        out = self.create_input(OpenAIEmbeddingRequest(input=input))
+        return [out.token_ids, out.token_type_ids, out.input_lengths]
     
     async def render_response(self, request: OpenAIEmbeddingRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
         usage = Usage(prompt_tokens=outputs.input_length, total_tokens=outputs.input_length)

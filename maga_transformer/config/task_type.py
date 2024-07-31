@@ -14,6 +14,7 @@ class TaskType(Enum):
     LANGUAGE_MODEL            = "LANGUAGE_MODEL"
     SEQ_CLASSIFICATION        = "SEQ_CLASSIFICATION"
     RERANKER                  = "RERANKER"
+    LINEAR_SOFTMAX            = "LINEAR_SOFTMAX"
     PLUGIN_TASK               = "PLUGIN_TASK"
     
     @staticmethod

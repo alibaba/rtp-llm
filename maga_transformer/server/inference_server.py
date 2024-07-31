@@ -179,8 +179,8 @@ class InferenceServer(object):
         start_time = time.time()
         request[request_id_field_name] = self._atomic_count.increment()
         kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unkown")})
-        with self._controller:
-            try:
+        try:
+            with self._controller:            
                 assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
                 result, logable_result = await self._embedding_endpoint.handle(request)
                 # do not log result since too big
@@ -188,9 +188,10 @@ class InferenceServer(object):
                     self._access_logger.log_success_access(request, logable_result)
                 end_time = time.time()
                 kmonitor.report(GaugeMetrics.LANTENCY_METRIC, (end_time - start_time) * 1000)
+                kmonitor.report(AccMetrics.SUCCESS_QPS_METRIC, 1, {"source": request.get("source", "unkown")})
                 return ORJSONResponse(result)
-            except BaseException as e:
-                return self._handle_exception(request, e)
+        except BaseException as e:
+            return self._handle_exception(request, e)
 
     async def similarity(self, request: Dict[str, Any], raw_request: Request):
         return await self.embedding(request, raw_request)

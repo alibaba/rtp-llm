@@ -21,7 +21,7 @@ class EmbeddingCppEngine(BaseEngine):
 
     @override
     def start(self):
-        self.cpp_engine.init(self.model.config.gpt_init_params, self.model.custom_module.handler,
+        self.cpp_engine.init(self.model.config.gpt_init_params, self.model.custom_module.renderer, self.model.custom_module.handler,
                              self.model.weight.weights, self.model.weight.global_weights)
         self.model.custom_module.handler.init_cpp_handler()
 

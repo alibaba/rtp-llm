@@ -13,6 +13,6 @@ inline bool enableDebugPrint() {
     return Logger::getLogger().getPrintLevel() == Logger::DEBUG;
 }
 
-void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device = nullptr);
+void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device = nullptr, bool force_print = false);
 
 }

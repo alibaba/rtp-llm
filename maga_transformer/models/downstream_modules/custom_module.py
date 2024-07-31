@@ -52,7 +52,7 @@ class CustomRenderer(object):
     async def render_request(self, request_json: Dict[str, Any]) -> BaseModel:
         raise NotImplementedError
         
-    async def create_input(self, request: BaseModel) -> EngineInputs:
+    def create_input(self, request: BaseModel) -> EngineInputs:
         raise NotImplementedError
     
     async def render_response(self, request: BaseModel, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:

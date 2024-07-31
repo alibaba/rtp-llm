@@ -28,8 +28,8 @@ class ClassifierRenderer(CustomRenderer):
     async def render_request(self, request: Dict[str, Any]):
         return ClassifierRequest(**request)
 
-    async def create_input(self, formated_request: ClassifierRequest):
-        return await self.generator.generate(formated_request.input)
+    def create_input(self, formated_request: ClassifierRequest):
+        return self.generator.generate(formated_request.input)
 
     async def render_response(self, formated_request: ClassifierRequest, inputs: EngineInputs, outputs: EngineOutputs) -> Dict[str, Any]:
         return ClassifierResponse(score=[x.tolist() for x in outputs.outputs]).model_dump()

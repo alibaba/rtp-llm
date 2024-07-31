@@ -19,6 +19,17 @@ enum QuantMethod {
     PerTensorQuant      = 6
 };
 
+enum TaskType {
+    DENSE_EMBEDDING    = 0,
+    ALL_EMBEDDING      = 1,
+    SPARSE_EMBEDDING   = 2,
+    COLBERT_EMBEDDING  = 3,
+    LANGUAGE_MODEL     = 4,
+    SEQ_CLASSIFICATION = 5,
+    RERANKER           = 6,
+    LINEAR_SOFTMAX     = 7
+};
+
 struct RoleSpecialTokens {
 public:
     std::vector<int64_t> token_ids_;
@@ -113,6 +124,7 @@ public:
     std::string        activation_type_str_ = "Gelu";
     LayerNormType  layernorm_type_      = LayerNormType::pre_layernorm;
     NormType       norm_type_           = NormType::layernorm;
+    TaskType       task_type_           = TaskType::LANGUAGE_MODEL;
     ActivationType activation_type_     = ActivationType::Gelu;
 
     int64_t rotary_embedding_dim_      = 0;
@@ -215,6 +227,7 @@ public:
     void insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     void setLayerNormType();
     void setNormType();
+    void setTaskType(std::string task);
     void setActivationType();
     bool isGatedActivation() const;
 

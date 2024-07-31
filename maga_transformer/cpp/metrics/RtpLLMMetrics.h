@@ -59,6 +59,26 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+// corresponding to python metrics
+class RtpEmbeddingGlobalMetricsCollector final {
+public:
+    bool error = false;
+    double total_latency_us = 0;
+};
+
+class RtpEmbeddingGlobalMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpEmbeddingGlobalMetricsCollector* collector);
+public:
+    kmonitor::MutableMetric* qps_metric              = nullptr;
+    kmonitor::MutableMetric* success_qps_metric      = nullptr;
+    kmonitor::MutableMetric* error_qps_metric        = nullptr;
+    kmonitor::MutableMetric* total_latency_us_metric = nullptr;
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpEmbeddingStreamMetricsCollector final {
 public:
     int64_t total_latency_us       = 0;

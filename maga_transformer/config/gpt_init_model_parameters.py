@@ -299,6 +299,7 @@ class GptInitModelParameters:
         
     def update_task_type_use_kvcache(self):
         self.task_type = check_task_type(self.ckpt_path)
+        self.setTaskType(self.task_type.value)
         self.use_kvcache = (self.task_type == TaskType.LANGUAGE_MODEL)
         logging.info(f"model task type: {self.task_type}, use_kvcache: {self.use_kvcache}")
 

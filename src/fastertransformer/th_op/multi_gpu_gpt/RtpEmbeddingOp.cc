@@ -1,8 +1,5 @@
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "maga_transformer/cpp/common/status_util.h"
-#include "maga_transformer/cpp/embedding_engine/EmbeddingQueryConverter.h"
-#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 
 using namespace std;
@@ -13,7 +10,7 @@ namespace th = torch;
 namespace torch_ext {
 RtpEmbeddingOp::RtpEmbeddingOp() {}
 
-void RtpEmbeddingOp::init(const ft::GptInitParameter& gpt_init_params, py::object handler_impl,
+void RtpEmbeddingOp::init(const ft::GptInitParameter& gpt_init_params, py::object py_render, py::object py_handler,
                           py::object py_layers_weights, py::object py_global_weights) {
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
@@ -26,13 +23,28 @@ void RtpEmbeddingOp::init(const ft::GptInitParameter& gpt_init_params, py::objec
         auto kmon_tags = rtp_llm::getHippoTags();
         params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
     }
-    embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, handler_impl));
+    embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, py_handler));        
+    startRpcServer(gpt_init_params, py_render, params.metrics_reporter);
 }
 
 void RtpEmbeddingOp::stop() {
+    if (embedding_rpc_service_) {
+        embedding_rpc_service_->stop();
+    }
     if (!is_server_shutdown_ && embedding_engine_) {
         (void)embedding_engine_->stop();
         is_server_shutdown_ = true;
+    }
+}
+
+void RtpEmbeddingOp::startRpcServer(const ft::GptInitParameter& gpt_init_params, py::object py_render, kmonitor::MetricsReporterPtr reporter) {
+    auto arpc_service = std::move(createEmbeddingArpcService(gpt_init_params, py_render, embedding_engine_, reporter));
+    if (arpc_service) {        
+        FT_LOG_INFO("creating arpc service");
+        embedding_rpc_service_.reset(new rtp_llm::ArpcServerWrapper(std::move(arpc_service), gpt_init_params.model_rpc_port_));
+        embedding_rpc_service_->start();
+    } else {
+        FT_LOG_INFO("Embedding RPC not supported, skip");
     }
 }
 
@@ -40,11 +52,7 @@ th::Tensor RtpEmbeddingOp::decode(th::Tensor token_ids, th::Tensor token_type_id
     if (is_server_shutdown_) {
         throw std::runtime_error("server is shut down, can't handle request");
     }
-    auto embedding_stream = rtp_llm::EmbeddingQueryConverter::convertEmbeddingInputs(token_ids, token_type_ids, input_lengths, request_id);
-    embedding_stream->setMetricReporter(metrics_reporter_);
-    THROW_IF_STATUS_ERROR(embedding_engine_->enqueue(embedding_stream));
-    embedding_stream->waitFinish();
-    return rtp_llm::EmbeddingQueryConverter::convertEmbeddingOutputs(embedding_stream);
+    return embedding_engine_->decode(token_ids, token_type_ids, input_lengths, request_id);
 }
 
 RtpEmbeddingOp::~RtpEmbeddingOp() {

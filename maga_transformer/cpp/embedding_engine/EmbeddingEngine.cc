@@ -1,3 +1,4 @@
+#include "maga_transformer/cpp/embedding_engine/EmbeddingQueryConverter.h"
 #include "maga_transformer/cpp/embedding_engine/EmbeddingEngine.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/engine_base/EngineBase.h"
@@ -46,6 +47,14 @@ void EmbeddingEngine::loop() {
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
+}
+
+th::Tensor EmbeddingEngine::decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id) {
+    auto embedding_stream = rtp_llm::EmbeddingQueryConverter::convertEmbeddingInputs(token_ids, token_type_ids, input_lengths, request_id);
+    embedding_stream->setMetricReporter(metrics_reporter_);
+    THROW_IF_STATUS_ERROR(enqueue(embedding_stream));
+    embedding_stream->waitFinish();
+    return rtp_llm::EmbeddingQueryConverter::convertEmbeddingOutputs(embedding_stream);
 }
 
 absl::Status EmbeddingEngine::trySaveStepError() const {

@@ -7,14 +7,16 @@
 
 namespace fastertransformer {
 
-void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device) {
-    if (!enableDebugPrint()) {
-        return;
-    }
+void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device, bool force_print) {
+    if (!force_print) {
+        if (!enableDebugPrint()) {
+            return;
+        }
 
-    if (buffer.isQBuffer()) {
-        printf("skip QBuffer [%s]: %s \n", hint.c_str(), buffer.debugString().c_str());
-        return;
+        if (buffer.isQBuffer()) {
+            printf("skip QBuffer [%s]: %s \n", hint.c_str(), buffer.debugString().c_str());
+            return;
+        }
     }
 
     if (!device) {

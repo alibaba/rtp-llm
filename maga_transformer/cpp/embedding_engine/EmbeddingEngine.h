@@ -20,6 +20,7 @@ public:
     ~EmbeddingEngine();
 
     absl::Status enqueue(EmbeddingStreamPtr stream);
+    th::Tensor decode(th::Tensor token_ids, th::Tensor token_type_ids, th::Tensor input_lengths, int64_t request_id);
     // absl::Status update_streams(std::list<EmbeddingStreamPtr>& streams);
     absl::Status stop();
 

@@ -6,6 +6,7 @@
 namespace rtp_llm {
 
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMStreamMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingGlobalMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpEmbeddingStreamMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSchedulerMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheMetrics);
@@ -42,7 +43,7 @@ bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
     REGISTER_GAUGE_MUTABLE_METRIC(fallback_tokens_metric, "rtp_llm_fallback_tokens");
     REGISTER_GAUGE_MUTABLE_METRIC(fallback_times_metric, "rtp_llm_fallback_times");
-    
+
     return true;
 }
 
@@ -63,6 +64,25 @@ void RtpLLMStreamMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMStream
 
     REPORT_GAUGE(fallback_tokens);
     REPORT_GAUGE(fallback_times);
+}
+
+// for rpc request
+bool RtpEmbeddingGlobalMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "py_rtp_framework_rt");
+    REGISTER_QPS_MUTABLE_METRIC(error_qps_metric, "py_rtp_framework_error_qps");
+    REGISTER_QPS_MUTABLE_METRIC(qps_metric, "py_rtp_framework_qps");
+    REGISTER_QPS_MUTABLE_METRIC(success_qps_metric, "py_rtp_success_qps_metric");
+    return true;
+}
+
+void RtpEmbeddingGlobalMetrics::report(const kmonitor::MetricsTags* tags, RtpEmbeddingGlobalMetricsCollector* collector) {
+    REPORT_MUTABLE_QPS(qps_metric);
+    if (collector->error) {
+        REPORT_MUTABLE_QPS(error_qps_metric);
+    } else {
+        REPORT_MUTABLE_QPS(success_qps_metric);
+        REPORT_GAUGE(total_latency_us);
+    }
 }
 
 bool RtpEmbeddingStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
