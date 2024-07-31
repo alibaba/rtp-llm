@@ -96,6 +96,9 @@ size_t getTypeSize(DataType type) {
         FT_FOREACH_TYPE(CASE);
         FT_FOREACH_DEVICE_TYPE(CASE);
         CASE(DataType::TYPE_QINT8, int8_t);
+        case DataType::TYPE_INT4X2:
+        case DataType::TYPE_QINT4X2:
+            return 1;
         default:
             return 0;
     }

@@ -15,13 +15,21 @@
  */
 
 #include "src/fastertransformer/utils/assert_utils.h"
+#include "src/fastertransformer/kernels/quantization_tensor.h"
+#include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
+#if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/cuda/cuda_utils.h"
-#include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
-#include "src/fastertransformer/kernels/quantization_tensor.h"
+#endif
+#if USING_ROCM
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
 
 namespace fastertransformer
 {
+#if USING_ROCM
+using namespace rocm;
+#endif
 
 __global__ void quantizedKernel(char4* dst, const float4* src, const int64_t sizeDiv4, const float* scalePtr)
 {
@@ -171,4 +179,431 @@ INSTANTIATE_INVOKE_PER_TOKEN_QUANTIZATION(half);
 INSTANTIATE_INVOKE_PER_TOKEN_QUANTIZATION(__nv_bfloat16);
 #endif
 
-} 
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// int8 col quant ///////////////////////////////////////////////////////////////////////////////
+template<typename T, bool IS_SMOOTHER, bool IS_SHIFT>
+__global__ void perColQuantization(int8_t*       dst,
+                                   const T*      src,
+                                   const int64_t numRows,
+                                   const int64_t numCols,
+                                   half*         scalePtr,
+                                   const float*  smoother,
+                                   const float*  shift,
+                                   float*        dbgfp  = nullptr,
+                                   int*          dbgint = nullptr) {
+    uint32_t colIdx = blockIdx.x;
+    const T* srcCol = src + colIdx;
+    int8_t*  dstCol = dst + colIdx;
+
+    T localMax = 1e-6f;
+    for (int rowIdx = threadIdx.x; rowIdx < numRows; rowIdx += blockDim.x) {
+        T val = srcCol[rowIdx * numCols];
+        if (IS_SMOOTHER) {
+            val = cuda_cast<T>(val / cuda_cast<T>(smoother[rowIdx]));
+        }
+        if (IS_SHIFT) {
+            val = cuda_cast<T>(val + cuda_cast<T>(shift[rowIdx]));
+        }
+        localMax = cuda_max(localMax, cuda_abs(val));
+    }
+    const float colMax = blockAllReduceMax(cuda_cast<float>(localMax));
+
+    if (threadIdx.x == 0) {
+        scalePtr[colIdx] = cuda_cast<half>(colMax / 128.f);
+    }
+
+    const float scaleOrigQuant = 128.f / colMax;
+    for (int rowIdx = threadIdx.x; rowIdx < numRows; rowIdx += blockDim.x) {
+        T val = srcCol[rowIdx * numCols];
+        if (IS_SMOOTHER) {
+            val = val / cuda_cast<T>(smoother[rowIdx]);
+        }
+        if (IS_SHIFT) {
+            val = cuda_cast<T>(val + cuda_cast<T>(shift[rowIdx]));
+        }
+        dstCol[rowIdx * numCols] = cuda_cast<int8_t>(cuda_cast<float>(val) * scaleOrigQuant);
+    }
+}
+
+template<typename T, bool IS_SMOOTHER>
+void dispatch_per_col_quantization_shift(int8_t*       dst,
+                                         const T*      src,
+                                         const int64_t numRows,
+                                         const int64_t numCols,
+                                         half*         scalePtr,
+                                         const float*  smoother,
+                                         const float*  shift,
+                                         cudaStream_t  stream) {
+    // each block is responsible for a single row
+    const dim3 block(512);
+    const dim3 grid(numCols);
+
+    if (shift != nullptr) {
+        perColQuantization<T, IS_SMOOTHER, true>
+            <<<grid, block, 0, stream>>>(dst, src, numRows, numCols, scalePtr, smoother, shift);
+    } else {
+        perColQuantization<T, IS_SMOOTHER, false>
+            <<<grid, block, 0, stream>>>(dst, src, numRows, numCols, scalePtr, smoother, nullptr);
+    }
+}
+
+template<typename T>
+void invokePerColQuantizationInt8(int8_t*       dst,
+                                  const T*      src,
+                                  const int64_t numRows,
+                                  const int64_t numCols,
+                                  half*         scalePtr,
+                                  const float*  smoother,
+                                  const float*  shift,
+                                  cudaStream_t  stream) {
+    if (smoother != nullptr) {
+        dispatch_per_col_quantization_shift<T, true>(dst, src, numRows, numCols, scalePtr, smoother, shift, stream);
+    } else {
+        dispatch_per_col_quantization_shift<T, false>(dst, src, numRows, numCols, scalePtr, nullptr, shift, stream);
+    }
+}
+
+#define INSTANTIATE_INVOKE_PER_COL_QUANTIZATION_INT8(T)                                                                \
+    template void invokePerColQuantizationInt8(int8_t*       dst,                                                      \
+                                               const T*      src,                                                      \
+                                               const int64_t numRows,                                                  \
+                                               const int64_t numCols,                                                  \
+                                               half*         scalePtr,                                                 \
+                                               const float*  smoother,                                                 \
+                                               const float*  shift,                                                    \
+                                               cudaStream_t  stream)
+
+INSTANTIATE_INVOKE_PER_COL_QUANTIZATION_INT8(float);
+INSTANTIATE_INVOKE_PER_COL_QUANTIZATION_INT8(half);
+#ifdef ENABLE_BF16
+INSTANTIATE_INVOKE_PER_COL_QUANTIZATION_INT8(__nv_bfloat16);
+#endif
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// int8 col dequant /////////////////////////////////////////////////////////////////////////////
+template<typename T, bool IS_SMOOTHER, bool IS_SHIFT>
+__global__ void perColDequantization(T*            dst,
+                                     const int8_t* src,
+                                     const int64_t numRows,
+                                     const int64_t numCols,
+                                     const half*   scalePtr,
+                                     const float*  smoother,
+                                     const float*  shift,
+                                     float*        dbgfp  = nullptr,
+                                     int*          dbgint = nullptr) {
+    uint32_t      colIdx = blockIdx.x;
+    const int8_t* srcRow = src + colIdx;
+    T*            dstRow = dst + colIdx;
+
+    float scaleOrigQuant = cuda_cast<float>(scalePtr[colIdx]);
+    if (IS_SMOOTHER) {
+        scaleOrigQuant = scaleOrigQuant * smoother[colIdx];
+    }
+    if (IS_SHIFT) {
+        scaleOrigQuant = scaleOrigQuant - shift[colIdx];
+    }
+
+    for (int rowIdx = threadIdx.x; rowIdx < numRows; rowIdx += blockDim.x) {
+        uint8_t tmpi8 = srcRow[rowIdx * numCols];
+
+        T val = cuda_cast<T>(cuda_cast<float>(tmpi8) * scaleOrigQuant);
+
+        if (IS_SMOOTHER) {
+            val = val * cuda_cast<T>(smoother[rowIdx]);
+        }
+        if (IS_SHIFT) {
+            val = cuda_cast<T>(val - cuda_cast<T>(shift[rowIdx]));
+        }
+
+        dstRow[rowIdx * numCols] = val;
+    }
+}
+
+template<typename T, bool IS_SMOOTHER>
+void dispatch_per_col_dequantization_shift(T*            dst,
+                                           const int8_t* src,
+                                           const int64_t numRows,
+                                           const int64_t numCols,
+                                           half*         scalePtr,
+                                           const float*  smoother,
+                                           const float*  shift,
+                                           cudaStream_t  stream) {
+    // each block is responsible for a single col
+    const dim3 block(512);
+    const dim3 grid(numCols);
+
+    if (shift != nullptr) {
+        perColDequantization<T, IS_SMOOTHER, true>
+            <<<grid, block, 0, stream>>>(dst, src, numRows, numCols, scalePtr, smoother, shift);
+    } else {
+        perColDequantization<T, IS_SMOOTHER, false>
+            <<<grid, block, 0, stream>>>(dst, src, numRows, numCols, scalePtr, smoother, nullptr);
+    }
+}
+
+template<typename T>
+void invokePerColDequantizationInt8(T*            dst,
+                                    const int8_t* src,
+                                    const int64_t numRows,
+                                    const int64_t numCols,
+                                    half*         scalePtr,
+                                    const float*  smoother,
+                                    const float*  shift,
+                                    cudaStream_t  stream) {
+    if (smoother != nullptr) {
+        dispatch_per_col_dequantization_shift<T, true>(dst, src, numRows, numCols, scalePtr, smoother, shift, stream);
+    } else {
+        dispatch_per_col_dequantization_shift<T, false>(dst, src, numRows, numCols, scalePtr, nullptr, shift, stream);
+    }
+}
+
+#define INSTANTIATE_INVOKE_PER_COL_DEQUANTIZATION_INT8(T)                                                              \
+    template void invokePerColDequantizationInt8(T*            dst,                                                    \
+                                                 const int8_t* src,                                                    \
+                                                 const int64_t numRows,                                                \
+                                                 const int64_t numCols,                                                \
+                                                 half*         scalePtr,                                               \
+                                                 const float*  smoother,                                               \
+                                                 const float*  shift,                                                  \
+                                                 cudaStream_t  stream)
+INSTANTIATE_INVOKE_PER_COL_DEQUANTIZATION_INT8(float);
+INSTANTIATE_INVOKE_PER_COL_DEQUANTIZATION_INT8(half);
+#ifdef ENABLE_BF16
+INSTANTIATE_INVOKE_PER_COL_DEQUANTIZATION_INT8(__nv_bfloat16);
+#endif
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// int4 col quant ///////////////////////////////////////////////////////////////////////////////
+template<typename T, bool IS_SMOOTHER, bool IS_SHIFT>
+__global__ void perColQuantization(char4*        dst,
+                                   const T*      src,
+                                   const int64_t numRows,
+                                   const int64_t numCols,
+                                   const int64_t numColsBlk,
+                                   half*         scalePtr,
+                                   const float*  smoother,
+                                   const float*  shift,
+                                   float*        dbgfp  = nullptr,
+                                   int*          dbgint = nullptr) {
+    uint8_t* pDst      = (uint8_t*)dst;
+    uint32_t colBlkIdx = blockIdx.x;
+    const T* srcCol    = src + colBlkIdx * numColsBlk;
+    uint8_t* dstCol    = pDst + colBlkIdx * numColsBlk / 2;
+
+    T localMax = 1e-6f;
+    for (int rowIdx = threadIdx.x; rowIdx < numRows; rowIdx += blockDim.x) {
+        for (int colInBlkIdx = 0; colInBlkIdx < numColsBlk; colInBlkIdx++) {
+            T val = srcCol[rowIdx * numCols + colInBlkIdx];
+            if (IS_SMOOTHER) {
+                val = cuda_cast<T>(val / cuda_cast<T>(smoother[colBlkIdx]));
+            }
+            if (IS_SHIFT) {
+                val = cuda_cast<T>(val + cuda_cast<T>(shift[colBlkIdx]));
+            }
+            localMax = cuda_max(localMax, cuda_abs(val));
+        }
+    }
+    const float colBlkMax = blockAllReduceMax(cuda_cast<float>(localMax));
+
+    if (threadIdx.x == 0) {
+        scalePtr[colBlkIdx] = colBlkMax / 8.0f;
+    }
+
+    const float scaleOrigQuant = 8.f / colBlkMax;
+    for (int rowIdx = threadIdx.x; rowIdx < numRows; rowIdx += blockDim.x) {
+        // one loop process 2 cols of intput, and 1 col of uint8_t output
+        for (int colInBlkIdx = 0; colInBlkIdx < numColsBlk / 2; colInBlkIdx++) {
+            T vall = srcCol[rowIdx * numCols + colInBlkIdx * 2];
+            T valh = srcCol[rowIdx * numCols + colInBlkIdx * 2 + 1];
+            if (IS_SMOOTHER) {
+                vall = vall / cuda_cast<T>(smoother[colBlkIdx]);
+                valh = valh / cuda_cast<T>(smoother[colBlkIdx]);
+            }
+            if (IS_SHIFT) {
+                vall = cuda_cast<T>(vall + cuda_cast<T>(shift[colBlkIdx]));
+                valh = cuda_cast<T>(valh + cuda_cast<T>(shift[colBlkIdx]));
+            }
+
+            int8_t tmpi8l = cuda_cast<int8_t>(cuda_cast<float>(vall) * scaleOrigQuant);
+            int8_t tmpi8h = cuda_cast<int8_t>(cuda_cast<float>(valh) * scaleOrigQuant);
+            int8_t tmpi4l = tmpi8l & 0x0F;
+            int8_t tmpi4h = tmpi8h & 0x0F;
+
+            uint8_t tmpuint = tmpi4l;
+            tmpuint         = tmpuint << 4;
+            tmpuint         = tmpuint | tmpi4h;
+
+            dstCol[rowIdx * numCols / 2 + colInBlkIdx] = tmpuint;
+        }
+    }
+}
+
+template<typename T, bool IS_SMOOTHER>
+void dispatch_per_col_quantization_shift(char4*        dst,
+                                         const T*      src,
+                                         const int64_t numRows,
+                                         const int64_t numCols,
+                                         half*         scalePtr,
+                                         const float*  smoother,
+                                         const float*  shift,
+                                         cudaStream_t  stream) {
+    // each block is responsible for a block cols, share the same scale
+    const int colBlk = 2;
+    assert(colBlk % 2 == 0);
+    assert(numCols % colBlk == 0);
+
+    const dim3 block(512);
+    const dim3 grid(numCols / colBlk);
+
+    if (shift != nullptr) {
+        perColQuantization<T, IS_SMOOTHER, true>
+            <<<grid, block, 0, stream>>>(dst, src, numRows, numCols, colBlk, scalePtr, smoother, shift);
+    } else {
+        perColQuantization<T, IS_SMOOTHER, false>
+            <<<grid, block, 0, stream>>>(dst, src, numRows, numCols, colBlk, scalePtr, smoother, nullptr);
+    }
+}
+
+template<typename T>
+void invokePerColQuantizationInt4x2(int8_t*       dst,
+                                    const T*      src,
+                                    const int64_t numRows,
+                                    const int64_t numCols,
+                                    half*         scalePtr,
+                                    const float*  smoother,
+                                    const float*  shift,
+                                    cudaStream_t  stream) {
+    if (smoother != nullptr) {
+        dispatch_per_col_quantization_shift<T, true>(
+            (char4*)dst, src, numRows, numCols, scalePtr, smoother, shift, stream);
+    } else {
+        dispatch_per_col_quantization_shift<T, false>(
+            (char4*)dst, src, numRows, numCols, scalePtr, nullptr, shift, stream);
+    }
+}
+
+#define INSTANTIATE_INVOKE_PER_COL_QUANTIZATION_INT4X2(T)                                                              \
+    template void invokePerColQuantizationInt4x2(int8_t*       dst,                                                    \
+                                                 const T*      src,                                                    \
+                                                 const int64_t numRows,                                                \
+                                                 const int64_t numCols,                                                \
+                                                 half*         scalePtr,                                               \
+                                                 const float*  smoother,                                               \
+                                                 const float*  shift,                                                  \
+                                                 cudaStream_t  stream)
+INSTANTIATE_INVOKE_PER_COL_QUANTIZATION_INT4X2(float);
+INSTANTIATE_INVOKE_PER_COL_QUANTIZATION_INT4X2(half);
+#ifdef ENABLE_BF16
+INSTANTIATE_INVOKE_PER_COL_QUANTIZATION_INT4X2(__nv_bfloat16);
+#endif
+
+/////////////////////////////////////////////////////////////////////////////////////////////////
+// int4 col dequant /////////////////////////////////////////////////////////////////////////////
+template<typename T, bool IS_SMOOTHER, bool IS_SHIFT>
+__global__ void perColDequantization(T*            dst,
+                                     const char4*  src,
+                                     const int64_t numRows,
+                                     const int64_t numCols,
+                                     const int64_t numColsBlk,
+                                     const half*   scalePtr,
+                                     const float*  smoother,
+                                     const float*  shift,
+                                     float*        dbgfp  = nullptr,
+                                     int*          dbgint = nullptr) {
+    const uint8_t* pSrc      = (const uint8_t*)src;
+    uint32_t       colBlkIdx = blockIdx.x;
+
+    float scaleOrigQuant = scalePtr[colBlkIdx];
+    if (IS_SMOOTHER) {
+        scaleOrigQuant = scaleOrigQuant * smoother[colBlkIdx];
+    }
+    if (IS_SHIFT) {
+        scaleOrigQuant = scaleOrigQuant - shift[colBlkIdx];
+    }
+
+    for (int rowIdx = threadIdx.x; rowIdx < numRows; rowIdx += blockDim.x) {
+        // one loop process 1 col uint8 input, and 2 cols of output
+        for (int colInBlkIdx = 0; colInBlkIdx < numColsBlk / 2; colInBlkIdx++) {
+            uint8_t tmpu8 = pSrc[rowIdx * numCols / 2 + colBlkIdx * numColsBlk / 2 + colInBlkIdx];
+
+            uint8_t tmpi4l = tmpu8 & 0x0F;
+            uint8_t tmpi4h = (tmpu8 >> 4) & 0x0F;
+
+            T vall = cuda_cast<T>(cuda_cast<float>(tmpi4l) * scaleOrigQuant);
+            T valh = cuda_cast<T>(cuda_cast<float>(tmpi4h) * scaleOrigQuant);
+
+            if (IS_SMOOTHER) {
+                vall = vall * cuda_cast<T>(smoother[colBlkIdx]);
+                valh = valh * cuda_cast<T>(smoother[colBlkIdx]);
+            }
+            if (IS_SHIFT) {
+                vall = cuda_cast<T>(vall - cuda_cast<T>(shift[colBlkIdx]));
+                valh = cuda_cast<T>(valh - cuda_cast<T>(shift[colBlkIdx]));
+            }
+
+            dst[rowIdx * numCols + colBlkIdx * numColsBlk + colInBlkIdx * 2 + 0] = valh;
+            dst[rowIdx * numCols + colBlkIdx * numColsBlk + colInBlkIdx * 2 + 1] = vall;
+        }
+    }
+}
+
+template<typename T, bool IS_SMOOTHER>
+void dispatch_per_col_dequantization_shift(T*            dst,
+                                           const char4*  src,
+                                           const int64_t numRows,
+                                           const int64_t numCols,
+                                           half*         scalePtr,
+                                           const float*  smoother,
+                                           const float*  shift,
+                                           cudaStream_t  stream) {
+    // each block is responsible for a block cols, share the same scale
+    const int colBlk = 2;
+    assert(colBlk % 2 == 0);
+    assert(numCols % colBlk == 0);
+
+    const dim3 block(512);
+    const dim3 grid(numCols / colBlk);
+
+    if (shift != nullptr) {
+        perColDequantization<T, IS_SMOOTHER, true>
+            <<<grid, block, 0, stream>>>(dst, src, numRows, numCols, colBlk, scalePtr, smoother, shift);
+    } else {
+        perColDequantization<T, IS_SMOOTHER, false>
+            <<<grid, block, 0, stream>>>(dst, src, numRows, numCols, colBlk, scalePtr, smoother, nullptr);
+    }
+}
+
+template<typename T>
+void invokePerColDequantizationInt4x2(T*            dst,
+                                      const int8_t* src,
+                                      const int64_t numRows,
+                                      const int64_t numCols,
+                                      half*         scalePtr,
+                                      const float*  smoother,
+                                      const float*  shift,
+                                      cudaStream_t  stream) {
+    if (smoother != nullptr) {
+        dispatch_per_col_dequantization_shift<T, true>(
+            dst, (char4*)src, numRows, numCols, scalePtr, smoother, shift, stream);
+    } else {
+        dispatch_per_col_dequantization_shift<T, false>(
+            dst, (char4*)src, numRows, numCols, scalePtr, nullptr, shift, stream);
+    }
+}
+
+#define INSTANTIATE_INVOKE_PER_COL_DEQUANTIZATION_INT4X2(T)                                                            \
+    template void invokePerColDequantizationInt4x2(T*            dst,                                                  \
+                                                   const int8_t* src,                                                  \
+                                                   const int64_t numRows,                                              \
+                                                   const int64_t numCols,                                              \
+                                                   half*         scalePtr,                                             \
+                                                   const float*  smoother,                                             \
+                                                   const float*  shift,                                                \
+                                                   cudaStream_t  stream)
+INSTANTIATE_INVOKE_PER_COL_DEQUANTIZATION_INT4X2(float);
+INSTANTIATE_INVOKE_PER_COL_DEQUANTIZATION_INT4X2(half);
+#ifdef ENABLE_BF16
+INSTANTIATE_INVOKE_PER_COL_DEQUANTIZATION_INT4X2(__nv_bfloat16);
+#endif
+
+}  // namespace fastertransformer

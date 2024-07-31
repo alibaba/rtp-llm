@@ -84,8 +84,8 @@ cc_library(
         "sampling_topp_kernels.cu",
         "sampling_penalty_kernels.cu",
         "custom_ar_kernels.cu",
-    # ],
         "decoder_masked_multihead_attention.cu",
+        "quantization_tensor.cu",
     ]+glob([
         "decoder_masked_multihead_attention/*.cu",
     ]),
@@ -119,6 +119,7 @@ cc_library(
         "penalty_types.h",
         "decoder_masked_multihead_attention.h",
         "custom_ar_kernels.h",
+        "quantization_tensor.h",
     ] + glob([
         "decoder_masked_multihead_attention/*.h",
     ]),

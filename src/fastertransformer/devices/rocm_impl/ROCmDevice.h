@@ -17,6 +17,7 @@
 #include "src/fastertransformer/rocm/hip_utils.h"
 #include "src/fastertransformer/rocm/hipblasMMWrapper.h"
 #include "src/fastertransformer/rocm/rocmFmhaWrapper.h"
+#include "src/fastertransformer/rocm/quantizePreprocessors.h"
 
 namespace fastertransformer {
 
@@ -47,6 +48,8 @@ public:
     void broadcast(const BroadcastParams& params);
     void allReduce(const AllReduceParams& params);
     void allGather(const AllGatherParams& params);
+
+    BufferPtr quantize(const QuantizeParams& params) override;
 
 public:
     BufferPtr        testVecAdd(const BufferPtr a, const BufferPtr b);

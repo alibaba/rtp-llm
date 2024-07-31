@@ -117,17 +117,34 @@ public:
 
     template<typename T>
     std::string debugDataString(size_t count) const {
+        if (where_ == MemoryType::MEMORY_GPU) {
+            return "Device buffer data can NOT be dump, please use Device->clone() to convert to cpu buffer.";
+        }
         auto base = data<T>();
         auto total_size = size();
         std::ostringstream oss;
         auto data_size = std::min(count, total_size);
-        for (size_t i = 0; i < data_size; i++) {
-            oss << base[i] << ", ";
-        }
-        if (data_size != total_size) {
-            oss << "...... ";
-            for (size_t i = total_size - data_size; i < total_size; i++) {
+        if (type_ == DataType::TYPE_QINT4X2 || type_ == DataType::TYPE_INT4X2) {
+            for (size_t i = 0; i < data_size / 2; i++) {
+                oss << ((uint8_t)(base[i]) & 0x0F) << ", ";
+                oss << (((uint8_t)(base[i]) & 0xF0) >> 4) << ", ";
+            }
+            if (data_size != total_size) {
+                oss << "...... ";
+                for (size_t i = (total_size - data_size) / 2; i < total_size / 2; i++) {
+                    oss << ((uint8_t)(base[i]) & 0x0F) << ", ";
+                    oss << (((uint8_t)(base[i]) & 0xF0) >> 4) << ", ";
+                }
+            }
+        } else {
+            for (size_t i = 0; i < data_size; i++) {
                 oss << base[i] << ", ";
+            }
+            if (data_size != total_size) {
+                oss << "...... ";
+                for (size_t i = total_size - data_size; i < total_size; i++) {
+                    oss << base[i] << ", ";
+                }
             }
         }
         return "BufferData Detail(" + oss.str() + ")";

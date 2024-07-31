@@ -51,7 +51,7 @@ cc_test(
 cc_test(
     name = "gemm_op_test",
     srcs = [
-        "ops/ROCmGemmOpTest.cc",
+        "ROCmGemmOpTest.cc",
     ],
     data = [],
     env = device_test_envs(),
