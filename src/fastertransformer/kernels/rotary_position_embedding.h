@@ -321,7 +321,13 @@ __device__ __inline__ float2 rotary_embedding_coefficient(
     float inv_freq = rope_inv_freq(zid, rot_embed_dim, t_step, base);
     inv_freq = rope_init(inv_freq, zid);
     float sin_cos_scale = rope_init.sin_cos_scale();
+#if USING_CUDA
     float sin_i, cos_i;
+#endif
+
+#if USING_ROCM
+    double sin_i, cos_i;
+#endif
     sincos(inv_freq, &sin_i, &cos_i);
     return {sin_cos_scale * cos_i, sin_cos_scale * sin_i};
 }
