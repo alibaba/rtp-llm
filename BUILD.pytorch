@@ -1,17 +1,48 @@
+config_setting(
+    name = "using_cuda",
+    values = {"define": "using_cuda=true"},
+)
+
+config_setting(
+    name = "using_rocm",
+    values = {"define": "using_rocm=true"},
+)
+
 cc_library(
     name = "torch",
     srcs = [
         "torch/lib/libtorch.so",
+        "torch/lib/libtorch_python.so",
+        "torch/lib/libtorch_cpu.so",
         "torch/lib/libshm.so",
         "torch/lib/libc10.so",
-    ] + glob([
-        "torch/lib/libtorch_*.so",
-        "torch/lib/libc10_*.so",
-        "torch/lib/libgomp*.so*",
-        "torch/lib/libmagma*.so*",
-        "torch/lib/libcudart*.so*",
-        "torch/lib/libnvToolsExt*.so*",
-    ]),
+    ] + select({
+        "//:using_cuda": [
+            "torch/lib/libtorch_cuda.so",
+            "torch/lib/libc10_cuda.so",
+        ] + glob([
+            "torch/lib/libgomp*.so*",
+            "torch/lib/libcudart*.so*",
+            "torch/lib/libnvToolsExt*.so*",
+        ]),
+        "//:using_rocm": [
+            "torch/lib/libtorch_hip.so",
+            "torch/lib/libc10_hip.so",
+        ] +  glob([
+            "torch/lib/libgomp*.so*",
+            "torch/lib/libmagma*.so*",
+            # "torch/lib/libtinfo.so*",
+            # "torch/lib/libsuitesparseconfig.so*",
+            # "torch/lib/libcholmod.so*",
+            # "torch/lib/libsatlas.so*",
+            # "torch/lib/libgfortran.so*",
+            # "torch/lib/libquadmath.so*",
+            # "torch/lib/libgomp*.so*",
+            # "torch/lib/libhip*.so*",
+            # "torch/lib/lib*amd*.so*",
+        ]),
+        "//conditions:default": [],
+    }),
     hdrs = glob([
         "torch/include/*.h",
         "torch/include/**/*.h",
