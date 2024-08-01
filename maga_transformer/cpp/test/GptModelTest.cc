@@ -30,7 +30,7 @@ TEST_F(GptModelTest, testSimple) {
     attention_conf.kv_head_num = 16;
     attention_conf.size_per_head = 64;
     attention_conf.tokens_per_block = 16;
-    attention_conf.rope_config.style = RopeType::Base;
+    attention_conf.rope_config.style = RopeStyle::Base;
     attention_conf.rope_config.dim = 64;
     attention_conf.rope_config.base = 1000000;
     attention_conf.mask_type = AttentionMaskType::causalMask;

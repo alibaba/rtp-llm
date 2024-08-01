@@ -10,7 +10,7 @@ namespace unittest {
 
 __global__ void KernelWrapper(
     at::PackedTensorAccessor32<float,4,at::RestrictPtrTraits> input,
-    RopeType style, int dim, int base, float scale,
+    RopeStyle style, int dim, int base, float scale,
     int max_pos)
 {
     extern __shared__ __align__(sizeof(float2)) char smem[];  // align on largest vector type
@@ -27,17 +27,19 @@ __global__ void KernelWrapper(
     rope_config.base = base;
     rope_config.scale = scale;
     rope_config.max_pos = max_pos;
-    if (style == RopeType::Yarn) {
+    if (style == RopeStyle::Yarn) {
         rope_config.factor1 = 1;
         rope_config.factor2 = 32;
-    } else if (style == RopeType::Llama3) {
+    } else if (style == RopeStyle::Llama3) {
         rope_config.factor1 = 1;
         rope_config.factor2 = 4;
     }
     if (work) {
         float2 x;
         x = *reinterpret_cast<float2*>(&input[batch_idx][seq_idx][headnum_idx][headsize_idx * 2]);
-        apply_rope(rope_config, x, (float*)smem, headsize_idx, seq_idx, input.size(1));
+        FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&]{
+            apply_rope<float, float2, ROPE_STYLE>(rope_config, x, (float*)smem, headsize_idx, seq_idx, input.size(1));
+        });
         *reinterpret_cast<float2*>(&input[batch_idx][seq_idx][headnum_idx][headsize_idx * 2]) = x;
     }
 }
@@ -73,7 +75,7 @@ torch::Tensor RotaryPositionEmbeddingOp::forward(torch::Tensor input) {
 
     KernelWrapper<<<grid, block, smem_size, stream>>>(
             input.packed_accessor32<float, 4 ,at::RestrictPtrTraits>(),
-            RopeType(style), dim, base, scale, max_pos);
+            RopeStyle(style), dim, base, scale, max_pos);
 
     torch::Tensor output = input.detach().clone();
     return output;

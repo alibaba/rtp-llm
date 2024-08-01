@@ -24,15 +24,6 @@ def th_transformer_so():
         })
     )
 
-    native.genrule(
-        name = "libth_transformer_so",
-        srcs = [":th_transformer_so"],
-        outs = [
-            "libth_transformer.so",
-        ],
-        cmd = " && ".join(["cp $(SRCS) $(@D)"])
-    )
-
 def embedding_arpc_deps():
     native.alias(
         name = "embedding_arpc_deps",

@@ -3,24 +3,6 @@ load("//bazel:arch_select.bzl", "torch_deps")
 load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
 
 cutlass_kernels_interface()
-################################ cpp test ################################
-
-test_copts = [
-    "-fno-access-control",
-] + cuda_copts() + copts()
-
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    "-ltorch_cpu",
-    "-ltorch_python",
-    "-L/usr/local/cuda/lib64",
-    "-lcudart",
-    "-lcuda",
-    "-lnccl",
-    "-lnvToolsExt",
-]
 
 cc_library(
     name = "test_lib",

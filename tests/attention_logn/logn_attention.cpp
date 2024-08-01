@@ -1,7 +1,5 @@
-#include "src/fastertransformer/kernels/decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h"
 
-#include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"

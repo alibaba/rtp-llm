@@ -838,7 +838,6 @@ void setCudaValue(T* ptr, int index, T value) {
     check_cuda_error(cudaMemcpy(ptr + index, &value, sizeof(T), cudaMemcpyHostToDevice));
 }
 
-
 /* ************************** end of common utils ************************** */
 
 }  // namespace fastertransformer

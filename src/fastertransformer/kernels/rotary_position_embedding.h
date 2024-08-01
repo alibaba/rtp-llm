@@ -1,8 +1,7 @@
 #pragma once
 
 #include "decoder_masked_multihead_attention_utils.h"
-#include "src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h"
-#include "src/fastertransformer/utils/RopeTypes.h"
+#include "src/fastertransformer/utils/RopeConfig.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
@@ -678,7 +677,7 @@ __device__ __inline__ float get_qwen_dynamic_ntk_base(const int dim, const float
 }
 
 
-template<typename scalar_t, typename vector_t>
+template<typename scalar_t, typename vector_t, RopeStyle ROPE_STYLE>
 __device__ inline void apply_rope(RopeConfig rope_config,
                                   vector_t& x,
                                   scalar_t* smem,
@@ -688,35 +687,35 @@ __device__ inline void apply_rope(RopeConfig rope_config,
 {
     auto base = rope_config.base;
     auto dim = rope_config.dim;
-    switch (rope_config.style) {
-    case RopeType::No:
+    switch (ROPE_STYLE) {
+    case RopeStyle::No:
         break;
-    case RopeType::Base:
+    case RopeStyle::Base:
         normal_rope(x, smem, tidx, seqidx, dim, base, LinearScaleRope{rope_config.scale});
         break;
-    case RopeType::Glm2:
+    case RopeStyle::Glm2:
         // only do rotary embedding for [..., d / 2]
         glm2_rope<scalar_t, vector_t>(x, tidx, seqidx, dim / 2, base);
         break;
-    case RopeType::DynamicNTK:
+    case RopeStyle::DynamicNTK:
         if (seq_len > rope_config.max_pos) {
             base = get_dynamic_ntk_base(dim, base, seq_len, rope_config.scale, rope_config.max_pos);
         }
         normal_rope(x, smem, tidx, seqidx, dim, base, DefaultRope{});
         break;
-    case RopeType::Yarn:
+    case RopeStyle::Yarn:
         normal_rope(x, smem, tidx, seqidx, dim, base,
                     YarnRope{rope_config.dim, rope_config.base, rope_config.max_pos,
                         rope_config.factor1, rope_config.factor2, rope_config.scale,
                         rope_config.extrapolation_factor});
         break;
-    case RopeType::QwenDynamicNTK:
+    case RopeStyle::QwenDynamicNTK:
         if (seq_len > rope_config.max_pos) {
             base = get_qwen_dynamic_ntk_base(dim, base, seq_len, rope_config.max_pos);
         }
         normal_rope(x, smem, tidx, seqidx, dim, base, DefaultRope{});
         break;
-    case RopeType::Llama3:
+    case RopeStyle::Llama3:
         normal_rope(x, smem, tidx, seqidx, dim, base,
                     Llama3Rope{rope_config.factor1, rope_config.factor2, rope_config.scale,
                         rope_config.max_pos});
@@ -726,7 +725,7 @@ __device__ inline void apply_rope(RopeConfig rope_config,
     }
 }
 
-template<typename scalar_t, typename vector_t>
+template<typename scalar_t, typename vector_t, RopeStyle ROPE_STYLE>
 __device__ inline void context_rope(RopeConfig rope_config,
                                     vector_t& q,
                                     vector_t& k,
@@ -748,22 +747,14 @@ __device__ inline void context_rope(RopeConfig rope_config,
         seqidx = position_id;
     }
 
-    apply_rope(rope_config,
-               q,
-               smem,
-               tidx,
-               seqidx,
-               seq_len);
+    apply_rope<scalar_t, vector_t, ROPE_STYLE>(
+            rope_config, q, smem, tidx, seqidx, seq_len);
 
-    apply_rope(rope_config,
-               k,
-               smem,
-               tidx,
-               seqidx,
-               seq_len);
+    apply_rope<scalar_t, vector_t, ROPE_STYLE>(
+            rope_config, k, smem, tidx, seqidx, seq_len);
 }
 
-template<typename scalar_t, typename vector_t>
+template<typename scalar_t, typename vector_t, RopeStyle ROPE_STYLE>
 __device__ inline void attention_rope(RopeConfig rope_config,
                                       vector_t& q,
                                       vector_t& k,
@@ -786,24 +777,16 @@ __device__ inline void attention_rope(RopeConfig rope_config,
         tlength = position_id;
     }
 
-    if (rope_config.style == RopeType::Glm2) {
+    if constexpr (ROPE_STYLE == RopeStyle::Glm2) {
         tlength = tlength - prefix_prompt_length;
     }
 
-    apply_rope(rope_config,
-               q,
-               smem,
-               tidx,
-               tlength,
-               seq_len);
+    apply_rope<scalar_t, vector_t, ROPE_STYLE>(
+            rope_config, q, smem, tidx, tlength, seq_len);
 
     if (handle_kv) {
-        apply_rope(rope_config,
-                   k,
-                   smem,
-                   tidx,
-                   tlength,
-                   seq_len);
+        apply_rope<scalar_t, vector_t, ROPE_STYLE>(
+                rope_config, k, smem, tidx, tlength, seq_len);
     }
 }
 

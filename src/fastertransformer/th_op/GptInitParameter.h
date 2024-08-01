@@ -2,7 +2,7 @@
 
 #include "src/fastertransformer/utils/layernorm_types.h"
 #include "src/fastertransformer/utils/activation_types.h"
-#include "src/fastertransformer/utils/RopeTypes.h"
+#include "src/fastertransformer/utils/RopeConfig.h"
 
 #include <vector>
 #include <map>

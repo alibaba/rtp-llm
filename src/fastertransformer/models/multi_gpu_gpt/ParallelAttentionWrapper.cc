@@ -1,5 +1,5 @@
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelAttentionWrapper.h"
-#include "src/fastertransformer/kernels/decoder_masked_multihead_attention.h"
+#include "src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
@@ -8,7 +8,7 @@
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/cuda_fmha_utils.h"
-#include "src/fastertransformer/utils/RopeTypes.h"
+#include "src/fastertransformer/utils/RopeConfig.h"
 
 #include <type_traits>
 #include <cassert>

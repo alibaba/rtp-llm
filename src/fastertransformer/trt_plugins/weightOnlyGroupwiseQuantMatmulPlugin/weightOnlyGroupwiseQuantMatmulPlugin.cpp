@@ -35,9 +35,9 @@ void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type, bool ha
     mType = type;
     mGroupSize = group_size;
     mHasZeros = has_zeros;
-    T_SWITCH(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&]{
-        V_SWITCH(has_zeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY, [&]{
-            T_SWITCH(weight_bits == 4, WT, cutlass::uint4b_t, uint8_t, [&] {
+    FT_SWITCH_T(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&]{
+        FT_SWITCH_V(has_zeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY, [&]{
+            FT_SWITCH_T(weight_bits == 4, WT, cutlass::uint4b_t, uint8_t, [&] {
                 m_weightOnlyGroupwiseGemmRunner
                     = std::make_shared<tensorrt_llm::kernels::cutlass_kernels::CutlassFpAIntBGemmRunner<T, WT, Q>>();
             });

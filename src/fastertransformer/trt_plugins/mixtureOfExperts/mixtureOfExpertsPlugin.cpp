@@ -49,9 +49,9 @@ void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normali
     mGroupSize = group_size;
     mNormalizationMode = normalization_mode;
     if (mWeightType == DataType::kINT8 || mWeightType == DataType::kINT4){
-        T_SWITCH(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&]{
-            V_SWITCH(mHasZeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY, [&]{
-                T_SWITCH(mWeightType == DataType::kINT4, WT, cutlass::uint4b_t, uint8_t, [&] {
+        FT_SWITCH_T(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&]{
+            FT_SWITCH_V(mHasZeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY, [&]{
+                FT_SWITCH_T(mWeightType == DataType::kINT4, WT, cutlass::uint4b_t, uint8_t, [&] {
                     mMOERunner
                         = std::make_shared<CutlassMoeFCRunner<T, WT, Q>>();
                 });

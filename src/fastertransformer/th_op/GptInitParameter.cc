@@ -105,7 +105,7 @@ void QuantAlgo::setQuantAlgo(const std::string &quant_method, int64_t bits, int6
 
 RopeConfig GptInitParameter::getRopeConfig() const {
     RopeConfig rope_config;
-    rope_config.style        = (RopeType)rotary_embedding_style_;
+    rope_config.style        = (RopeStyle)rotary_embedding_style_;
     rope_config.dim          = rotary_embedding_dim_;
     rope_config.base         = rotary_embedding_base_;
     rope_config.scale        = rotary_embedding_scale_;

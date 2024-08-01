@@ -4,7 +4,7 @@
 #include "src/fastertransformer/devices/LoraWeights.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/utils/activation_types.h"
-#include "src/fastertransformer/utils/RopeTypes.h"
+#include "src/fastertransformer/utils/RopeConfig.h"
 
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/QBuffer.h"

@@ -17,7 +17,6 @@
 
 #pragma once
 
-#include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include <stdint.h>

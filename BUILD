@@ -144,6 +144,9 @@ cc_binary(
     }),
     copts = copts(),
     linkshared = 1,
+    linkopts = [
+        "-Wl,-rpath='$$ORIGIN'"
+    ],
     visibility = ["//visibility:public"],
 )
 

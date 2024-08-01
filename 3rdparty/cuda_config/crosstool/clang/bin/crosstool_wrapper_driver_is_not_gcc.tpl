@@ -202,7 +202,7 @@ def InvokeNvcc(argv, log=False):
   src_files = GetOptionValue(argv, '-c')
   mcmodel_options = ''.join([' -mcmodel=' + x for x in GetOptionValue(argv, '-mcmodel')])
   if mcmodel_options:
-    mcmodel_options = ' -forward-unknown-to-host-compiler ' + mcmodel_options
+    mcmodel_options = ' -Xcompiler ' + mcmodel_options
   # Pass -w through from host to nvcc, but don't do anything fancier with
   # warnings-related flags, since they're not necessarily the same across
   # compilers.

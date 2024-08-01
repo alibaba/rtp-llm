@@ -16,9 +16,8 @@
 
 #pragma once
 
-#include "src/fastertransformer/kernels/gpt_kernels.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include "src/fastertransformer/utils/RopeTypes.h"
+#include "src/fastertransformer/utils/RopeConfig.h"
 
 #if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_fp8_utils.h"
@@ -33,17 +32,6 @@
 #include <stdlib.h>
 
 namespace fastertransformer {
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-#define CHECK_CUDA(call)                                                                                               \
-    do {                                                                                                               \
-        cudaError_t status_ = call;                                                                                    \
-        if (status_ != cudaSuccess) {                                                                                  \
-            fprintf(stderr, "CUDA error (%s:%d): %s\n", __FILE__, __LINE__, cudaGetErrorString(status_));              \
-            exit(1);                                                                                                   \
-        }                                                                                                              \
-    } while (0)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -229,26 +217,6 @@ struct outputCrossAttentionParam {
     T*   cross_attention_out        = nullptr;
     bool is_return_cross_attentions = false;
 };
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-#define DECLARE_MMHA_NORMAL_AND_PAGED(T)                                                                               \
-    void masked_multihead_attention(                                                                                   \
-        Masked_multihead_attention_params<T>& params, const KVBlockArray& block_array, const cudaStream_t& stream);    \
-    void masked_multihead_attention(Masked_multihead_attention_params<T>& params,                                      \
-                                    const KVLinearBuffer&                 kv_cache_buffer,                             \
-                                    const cudaStream_t&                   stream);                                                       \
-    void masked_multihead_attention(                                                                                   \
-        Cross_multihead_attention_params<T>& params, const KVBlockArray& block_array, const cudaStream_t& stream);     \
-    void masked_multihead_attention(Cross_multihead_attention_params<T>& params,                                       \
-                                    const KVLinearBuffer&                kv_cache_buffer,                              \
-                                    const cudaStream_t&                  stream);
-DECLARE_MMHA_NORMAL_AND_PAGED(float);
-DECLARE_MMHA_NORMAL_AND_PAGED(uint16_t);
-#ifdef ENABLE_BF16
-DECLARE_MMHA_NORMAL_AND_PAGED(__nv_bfloat16);
-#endif
-#undef DECLARE_MMHA_NORMAL_AND_PAGED
 
 template<typename T, typename KVCacheBuffer>
 void fusedQKV_masked_attention_dispatch(const T*      qkv_buf,

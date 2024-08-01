@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-#include "src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h"
+#include "src/fastertransformer/utils/utils.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
 #include "src/fastertransformer/kernels/reduce_kernel_utils.cuh"
 #include "src/fastertransformer/kernels/rotary_position_embedding.h"
@@ -1463,7 +1463,7 @@ struct Vec_t<__nv_bfloat16> {
 };
 #endif
 
-template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA>
+template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
 __global__ void add_fusedQKV_bias_transpose_kernel(T*                               q_buf,
                                                    T*                               k_buf,
                                                    T*                               v_buf,
@@ -1589,18 +1589,19 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     const int position_id = position_ids == nullptr ? -1 : position_ids[token_idx];
     const int pre_len = cu_seqlens[batch_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
-    context_rope(rope_config,
-                q,
-                k,
-                reinterpret_cast<T*>(smem_),
-                tidx,
-                seq_idx,
-                position_id,
-                seq_len,
-                input_len,
-                PREFIX_PROMPT,
-                prefix_prompt_length,
-                param.count_length);
+    context_rope<T, Vec_t, ROPE_STYLE>(
+            rope_config,
+            q,
+            k,
+            reinterpret_cast<T*>(smem_),
+            tidx,
+            seq_idx,
+            position_id,
+            seq_len,
+            input_len,
+            PREFIX_PROMPT,
+            prefix_prompt_length,
+            param.count_length);
 
     if (use_logn_attn && !is_masked) {
         logn_attention(q, seq_idx, rope_config.max_pos);
@@ -1634,25 +1635,6 @@ __global__ void add_fusedQKV_bias_transpose_kernel(T*                           
     }
 }
 
-#define FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(Tcache, PREFIX_PROMPT, USE_PAGED_FMHA)                                         \
-    add_fusedQKV_bias_transpose_kernel<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA>                                       \
-        <<<grid, block, smem_size, stream>>>(q_buf,                                                                    \
-                                             k_buf,                                                                    \
-                                             v_buf,                                                                    \
-                                             param,                                                                    \
-                                             QKV,                                                                      \
-                                             position_ids,                                                             \
-                                             qkv_bias,                                                                 \
-                                             padding_offset,                                                           \
-                                             cu_seqlens,                                                               \
-                                             batch_size,                                                               \
-                                             seq_len,                                                                  \
-                                             head_num,                                                                 \
-                                             head_num_kv,                                                              \
-                                             size_per_head,                                                            \
-                                             rope_config, \
-                                             use_logn_attn);
-
 template<typename T>
 void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
                                     T*                               k_buf,
@@ -1678,46 +1660,36 @@ void invokeAddFusedQKVBiasTranspose(T*                               q_buf,
 {
     auto &param = *param_ptr;
     dim3 block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
-    // dim3   grid(token_num + batch_size * param.max_prefix_prompt_length, head_num);
-    dim3   grid(token_num + batch_size * param.max_prefix_prompt_length, head_num);
-    size_t smem_size = rope_config.style == RopeType::No ? 0 : 2 * rope_config.dim * sizeof(T);
+    dim3 grid(token_num + batch_size * param.max_prefix_prompt_length, head_num);
+    size_t smem_size = rope_config.style == RopeStyle::No ? 0 : 2 * rope_config.dim * sizeof(T);
 
-    // [bs, seq_len, 3, head, Dh]
-    FT_CHECK_WITH_INFO(int8_mode != 2, "w8a8 not yet implemented");  // TODO(mseznec)
-    // smem_size        = rope_config.style == 1 ? smem_size : 2 * smem_size;
-    // NOTE: add offset for rotary embedding
-    if (param.max_prefix_prompt_length == 0) {
-        if (param.kv_block_array.int8_mode) {
-            if (use_paged_fmha) {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(int8_t, false, true);
-            } else {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(int8_t, false, false);
-            }
-        } else {
-            if (use_paged_fmha) {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, false, true);
-            } else {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, false, false);
-            }
-        }
-    } else {
-        if (param.kv_block_array.int8_mode) {
-            if (use_paged_fmha) {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(int8_t, true, true);
-            } else {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(int8_t, true, false);
-            }
-        } else {
-            if (use_paged_fmha) {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, true, true);
-            } else {
-                FUSED_QKV_BIAS_TRANSPOSE_LAUNCH(T, true, false);
-            }
-        }
-    }
+    FT_SWITCH(param.max_prefix_prompt_length != 0, PREFIX_PROMPT, [&]{
+        FT_SWITCH(use_paged_fmha, USE_PAGED_FMHA, [&]{
+            FT_SWITCH_T(param.kv_block_array.int8_mode, Tcache, int8_t, T, [&]{
+                FT_ROPE_SWITCH(rope_config.style, ROPE_STYLE, [&]{
+                    add_fusedQKV_bias_transpose_kernel<T, Tcache, PREFIX_PROMPT, USE_PAGED_FMHA, ROPE_STYLE>
+                        <<<grid, block, smem_size, stream>>>(
+                                q_buf,
+                                k_buf,
+                                v_buf,
+                                param,
+                                QKV,
+                                position_ids,
+                                qkv_bias,
+                                padding_offset,
+                                cu_seqlens,
+                                batch_size,
+                                seq_len,
+                                head_num,
+                                head_num_kv,
+                                size_per_head,
+                                rope_config,
+                                use_logn_attn);
+                });
+            });
+        });
+    });
 }
-
-#undef FUSED_QKV_BIAS_TRANSPOSE_LAUNCH
 
 template<typename T>
 __global__ void SplitQKV_kernel(T*        q_buf,

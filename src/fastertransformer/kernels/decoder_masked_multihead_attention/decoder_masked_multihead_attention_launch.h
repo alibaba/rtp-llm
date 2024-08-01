@@ -16,10 +16,8 @@
 #pragma once
 
 #include "decoder_masked_multihead_attention_template.h"
-#include "src/fastertransformer/kernels/decoder_masked_multihead_attention.h"
-#include "src/fastertransformer/kernels/gpt_kernels.h"
-#include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include <assert.h>
+#include "decoder_masked_multihead_attention.h"
+#include "src/fastertransformer/utils/utils.h"
 
 #if USING_CUDA
 #include "driver_types.h"
@@ -87,7 +85,7 @@ inline size_t smem_size_for_threads(Multihead_attention_params<T, DO_CROSS_ATTEN
 {
     using Tk = typename kernel_type_t<T>::Type;
     auto constexpr threads_per_value_ = threads_per_value<T>(dh_max(Dh));
-    
+
     size_t red_sz = 0;
 
     if (DO_MULTI_BLOCK) {
@@ -149,7 +147,8 @@ inline void multi_block_grid_setup(dim3&                                        
                                                                                  DYNAMIC_THDS_PER_BLOCK,               \
                                                                                  KernelParamsType::DO_CROSS_ATTENTION, \
                                                                                  HAS_BEAMS,                            \
-                                                                                 DO_MULTI_BLOCK>,                      \
+                                                                                 DO_MULTI_BLOCK, \
+                                 ROPE_STYLE>,                                     \
                                                cudaFuncAttributeMaxDynamicSharedMemorySize,                            \
                                                dynamic_smem_sz);                                                       \
         FT_CHECK_WITH_INFO(res == cudaSuccess,                                                                         \
@@ -164,7 +163,8 @@ inline void multi_block_grid_setup(dim3&                                        
                                           DYNAMIC_THDS_PER_BLOCK,                                                      \
                                           KernelParamsType::DO_CROSS_ATTENTION,                                        \
                                           HAS_BEAMS,                                                                   \
-                                          DO_MULTI_BLOCK>,                                                             \
+        DO_MULTI_BLOCK,\
+        ROPE_STYLE>,                                                              \
         DYNAMIC_THDS_PER_BLOCK,                                                                                        \
         dynamic_smem_sz));
 
@@ -180,7 +180,8 @@ inline void multi_block_grid_setup(dim3&                                        
                                                                                  DYNAMIC_THDS_PER_BLOCK,                                                                                             \
                                                                                  KernelParamsType::DO_CROSS_ATTENTION,                                                                               \
                                                                                  HAS_BEAMS,                                                                                                          \
-                                                                                 ENABLE_MULTI_BLOCK>,                                                                                                \
+                                 ENABLE_MULTI_BLOCK,\
+                                 ROPE_STYLE>,                                     \
                                                cudaFuncAttributeMaxDynamicSharedMemorySize,                                                                                                          \
                                                dynamic_smem_sz);                                                                                                                                     \
         FT_CHECK_WITH_INFO(                                                                                                                                                                          \
@@ -201,7 +202,8 @@ inline void multi_block_grid_setup(dim3&                                        
                                       DYNAMIC_THDS_PER_BLOCK,                                                                                                                                        \
                                       KernelParamsType::DO_CROSS_ATTENTION,                                                                                                                          \
                                       HAS_BEAMS,                                                                                                                                                     \
-                                      ENABLE_MULTI_BLOCK>                                                                                                                                            \
+                                      ENABLE_MULTI_BLOCK,               \
+                                      ROPE_STYLE>                                 \
         <<<grid, DYNAMIC_THDS_PER_BLOCK, dynamic_smem_sz, stream>>>(params, kv_cache_buffer);
 
 // if resources are not enough to launch 512 threads per block, we will fallback to 256.
@@ -232,9 +234,9 @@ template<typename T,
          typename KVCacheBuffer,
          typename KernelParamsType,
          int  Dh,
-         int  THDS_PER_BLOCK,
          bool HAS_BEAMS,
-         bool DO_MULTI_BLOCK>
+         bool DO_MULTI_BLOCK,
+         RopeStyle ROPE_STYLE>
 void mmha_launch_kernel_ex(KernelParamsType&    params,
                            const KVCacheBuffer& kv_cache_buffer,
                            const cudaStream_t&  stream,
@@ -243,32 +245,9 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
     dim3 grid{static_cast<unsigned>(params.num_heads), static_cast<unsigned>(params.batch_size), 1};
 
     int min_seq_len_tile = 0;
+    int dynamic_block_size = 1024;
 
-    // Tune block size based on batchxhead to increase occupancy.
-    int num_blocks_per_sm = -1;
-    // Set 0 dynamic shared memory size as we need the number of available blocks limited by registers.
-    // Dynamic shared memory is fixed for different block size.
-    check_cuda_error(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &num_blocks_per_sm,
-        masked_multihead_attention_kernel<T,
-                                          T_cache,
-                                          KVCacheBuffer,
-                                          Dh,
-                                          THDS_PER_BLOCK,
-                                          KernelParamsType::DO_CROSS_ATTENTION,
-                                          HAS_BEAMS,
-                                          DO_MULTI_BLOCK>,
-        THDS_PER_BLOCK,
-        0));
-
-    const int kernel_total_blocks = params.batch_size * params.num_heads;
-
-    int block_size_factor =
-        min(divUp(params.multi_processor_count * num_blocks_per_sm, kernel_total_blocks), num_blocks_per_sm);
-    // Max block size is 1024.
-    int dynamic_block_size = min(THDS_PER_BLOCK * block_size_factor, 1024);
-
-    // MMHA_LAUNCH_CHECK to get max dynamic_block_size. 
+    // MMHA_LAUNCH_CHECK to get max dynamic_block_size.
     int available_blocks = -1;
     if (dynamic_block_size < 512) {
         MMHA_LAUNCH_CHECK(256);
@@ -284,22 +263,22 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
     // check smem to decide if force enable multi block mode
     int device;
     check_cuda_error(cudaGetDevice(&device));
-    
+
     // max smem on device
     int max_dsmem_sz_on_device = -1;
     check_cuda_error(cudaDeviceGetAttribute(
-        &max_dsmem_sz_on_device,
-        cudaDevAttrMaxSharedMemoryPerMultiprocessor,
-        device));
-    
+                             &max_dsmem_sz_on_device,
+                             cudaDevAttrMaxSharedMemoryPerMultiprocessor,
+                             device));
+
     // reserve 1KB for static smem.
-    // CUDA reserves 1 KB of shared memory per thread block. 
+    // CUDA reserves 1 KB of shared memory per thread block.
     // Details in https://docs.nvidia.com/cuda/ampere-tuning-guide/index.html#unified-shared-memory-l1-texture-cache
     max_dsmem_sz_on_device = max_dsmem_sz_on_device - 1024 * available_blocks - 1024;
 
     // required smem for current tlength when not using multi block mode
     size_t dsmem_smem_sz_for_kernel{smem_size_in_bytes<T, Dh, false>(params, dynamic_block_size)};
-    
+
     if(dsmem_smem_sz_for_kernel > max_dsmem_sz_on_device){
         if (DO_MULTI_BLOCK){
             min_seq_len_tile = dsmem_smem_sz_for_kernel / max_dsmem_sz_on_device + 1;
@@ -312,116 +291,22 @@ void mmha_launch_kernel_ex(KernelParamsType&    params,
     // If blocks with larger block size already fill all SMs, then disable the multi blocks mode.
     multi_block_grid_setup<T, Dh>(grid, params, available_blocks, dynamic_block_size, tlength, DO_MULTI_BLOCK, min_seq_len_tile);
 
+#define FT_BLOCK_SWITCH(COND, ...)                                      \
+    [&] {                                                               \
+        switch (COND) {                                                 \
+            FT_SWITCH_ONE_CASE(DYNAMIC_BLOCK_SIZE, 256, __VA_ARGS__)    \
+            FT_SWITCH_ONE_CASE(DYNAMIC_BLOCK_SIZE, 512, __VA_ARGS__)    \
+            FT_SWITCH_ONE_CASE(DYNAMIC_BLOCK_SIZE, 1024, __VA_ARGS__)   \
+            FT_SWITCH_DEFAULT_CASE(DYNAMIC_BLOCK_SIZE, 1024, __VA_ARGS__) \
+        }                                                               \
+    }()
+
     // Launch kernels based on the valid block size.
-    switch (dynamic_block_size) {
-        case 256:
-            if (params.enable_multi_block_mode()) {
-                MMHA_KERNEL(256, true);
-            }
-            else {
-                MMHA_KERNEL(256, false);
-            }
-            break;
-        case 512:
-            if (params.enable_multi_block_mode()) {
-                MMHA_KERNEL(512, true);
-            }
-            else {
-                MMHA_KERNEL(512, false);
-            }
-            break;
-        case 1024:
-            if (params.enable_multi_block_mode()) {
-                MMHA_KERNEL(1024, true);
-            }
-            else {
-                MMHA_KERNEL(1024, false);
-            }
-            break;
-        default:
-            MMHA_KERNEL(1024, false);
-    }
+    FT_BLOCK_SWITCH(dynamic_block_size, [&]{
+        FT_SWITCH(params.enable_multi_block_mode(), MULTI_BLOCK_MODE, [&]{
+            MMHA_KERNEL(DYNAMIC_BLOCK_SIZE, MULTI_BLOCK_MODE);
+        });
+    });
 }
-
-template<typename T,
-         typename KVCacheBuffer,
-         typename KernelParamsType,
-         int  Dh,
-         int  THDS_PER_BLOCK,
-         bool HAS_BEAMS,
-         bool DO_MULTI_BLOCK>
-void mmha_launch_kernel_dispatch_8bits_kv_cache(KernelParamsType&    params,
-                                                const KVCacheBuffer& kv_cache_buffer,
-                                                const cudaStream_t&  stream,
-                                                int                  tlength)
-{
-    if (params.int8_kv_cache) {
-        mmha_launch_kernel_ex<T,
-                              int8_t,
-                              KVCacheBuffer,
-                              KernelParamsType,
-                              Dh,
-                              THDS_PER_BLOCK,
-                              HAS_BEAMS,
-                              DO_MULTI_BLOCK>(params, kv_cache_buffer, stream, tlength);
-    }
-#ifdef ENABLE_FP8
-    else if (params.fp8_kv_cache) {
-        mmha_launch_kernel_ex<T,
-                              __nv_fp8_e4m3,
-                              KVCacheBuffer,
-                              KernelParamsType,
-                              Dh,
-                              THDS_PER_BLOCK,
-                              HAS_BEAMS,
-                              DO_MULTI_BLOCK>(params, kv_cache_buffer, stream, tlength);
-    }
-#endif  // ENABLE_FP8
-    else {
-        mmha_launch_kernel_ex<T, T, KVCacheBuffer, KernelParamsType, Dh, THDS_PER_BLOCK, HAS_BEAMS, DO_MULTI_BLOCK>(
-            params, kv_cache_buffer, stream, tlength);
-    }
-}
-
-template<typename T, typename KVCacheBuffer, typename KernelParamsType, int Dh, bool HAS_BEAMS>
-void mmha_launch_kernel_dispatch(KernelParamsType&    params,
-                                 const KVCacheBuffer& kv_cache_buffer,
-                                 const cudaStream_t&  stream)
-{
-    int const tlength = params.timestep;
-    if (params.multi_block_mode) {
-        mmha_launch_kernel_dispatch_8bits_kv_cache<T, KVCacheBuffer, KernelParamsType, Dh, 256, HAS_BEAMS, true>(
-            params, kv_cache_buffer, stream, tlength);
-    }
-    else {
-        mmha_launch_kernel_dispatch_8bits_kv_cache<T, KVCacheBuffer, KernelParamsType, Dh, 256, HAS_BEAMS, false>(
-            params, kv_cache_buffer, stream, tlength);
-    }
-}
-
-template<typename T, typename KVCacheBuffer, typename KernelParamsType, int Dh>
-void mmha_launch_kernel(KernelParamsType& params, const KVCacheBuffer& kv_cache_buffer, const cudaStream_t& stream)
-{
-    assert(params.rotary_embedding_dim >= 0);
-    mmha_launch_kernel_dispatch<T, KVCacheBuffer, KernelParamsType, Dh, false>(params, kv_cache_buffer, stream);
-}
-
-#define INSTANTIATE_MMHA_LAUNCHERS(T, Dh)                                                                              \
-    template void mmha_launch_kernel<T, KVLinearBuffer, Masked_multihead_attention_params<T>, Dh>(                     \
-        Masked_multihead_attention_params<T> & params,                                                                 \
-        const KVLinearBuffer& kv_cache_buffer,                                                                         \
-        const cudaStream_t&   stream);                                                                                   \
-    template void mmha_launch_kernel<T, KVBlockArray, Masked_multihead_attention_params<T>, Dh>(                       \
-        Masked_multihead_attention_params<T> & params,                                                                 \
-        const KVBlockArray& kv_cache_buffer,                                                                           \
-        const cudaStream_t& stream);                                                                                   \
-    template void mmha_launch_kernel<T, KVLinearBuffer, Cross_multihead_attention_params<T>, Dh>(                      \
-        Cross_multihead_attention_params<T> & params,                                                                  \
-        const KVLinearBuffer& kv_cache_buffer,                                                                         \
-        const cudaStream_t&   stream);                                                                                   \
-    template void mmha_launch_kernel<T, KVBlockArray, Cross_multihead_attention_params<T>, Dh>(                        \
-        Cross_multihead_attention_params<T> & params,                                                                  \
-        const KVBlockArray& kv_cache_buffer,                                                                           \
-        const cudaStream_t& stream);
 
 }  // namespace fastertransformer

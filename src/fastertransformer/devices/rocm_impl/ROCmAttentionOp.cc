@@ -2,13 +2,9 @@
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
-// #include "src/fastertransformer/kernels/layernorm_kernels.h"
-// #include "src/fastertransformer/kernels/activation_kernels.h"
-// #include "src/fastertransformer/cutlass/interface.h"
-// #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
-#include "src/fastertransformer/kernels/decoder_masked_multihead_attention.h"
-// #include "src/fastertransformer/kernels/kv_cache_utils.h"
+#include "src/fastertransformer/kernels/gpt_kernels.h"
+#include "src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention.h"
 
 using namespace std;
 namespace fastertransformer {
