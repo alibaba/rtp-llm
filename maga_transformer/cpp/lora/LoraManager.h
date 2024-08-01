@@ -46,8 +46,22 @@ public:
         cv_.notify_all();
     }
 
-    // std::vector<ft::LoraResource>  getLoraResource(ft::BufferPtr lora_ids);
 
+    // helper function
+    ft::lora::LoraModelInputPtr makeLoraModelInput(ft::BufferPtr lora_ids, ft::BufferPtr lora_input_lengths);
+
+};
+
+
+struct LoraResourceGuard {
+    std::shared_ptr<LoraManager> lora_manager_;
+
+    LoraResourceGuard(std::shared_ptr<LoraManager> lora_manager) :
+                                    lora_manager_(lora_manager) {}
+
+    ~LoraResourceGuard() {
+        lora_manager_->releaseSignal();
+    }
 };
 
 } // namespace lora

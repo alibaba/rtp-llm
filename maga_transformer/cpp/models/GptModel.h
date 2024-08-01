@@ -45,8 +45,12 @@ struct GptModelInputs {
     ft::BufferPtr combo_tokens_type_ids;      // [cumulated_seq_len]
     ft::BufferPtr combo_position_ids;         // [cumulated_seq_len]
 
+    // for tp sync
     ft::BufferPtr lora_ids;           // [batch_size]
     ft::BufferPtr lora_input_lengths; // [batch_size]
+
+    // no need tp sync
+    ft::lora::LoraModelInputPtr lora_model_input;
 
     ft::BufferPtr attention_mask;  // [batch_size, seq_len, seq_len]
 

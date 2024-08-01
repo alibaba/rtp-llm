@@ -320,6 +320,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                 attention_common_inputs.kv_cache->v_scale_buffer = inputs.v_scale_buffer->index(i);
             }
         }
+        if (inputs.lora_model_input) {
+            auto qkv_lora = inputs.lora_model_input->getOpInput(i, ft::W::attn_qkv_w);
+            auto out_lora = inputs.lora_model_input->getOpInput(i, ft::W::attn_o_w);
+            attention_common_inputs.lora_input = AttentionLayerLoraInput({qkv_lora, out_lora});
+        }
 
         auto attn_output = device_->attentionLayer(AttentionLayerParams({
             *hidden,
@@ -394,14 +399,18 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by
         // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
         ffn_output_buf = device_->prepareAllReduce({std::move(ffn_output_buf), ReduceOp::Sum}).buffer;
-        auto ffn_output = device_->ffnLayer(FfnLayerParams({
-            *hidden,
-            description_.ffn_conf,
-            layer.ffn_weights,
-            device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
-            qscheme,
-            std::move(ffn_output_buf),
-        }));
+        auto ffn_layer_params = FfnLayerParams({*hidden, description_.ffn_conf,
+                                                layer.ffn_weights,
+                                                device_props_.ffn_fuse_add_residual ? (OptionalConstBufferRef)*residual : nullopt,
+                                                qscheme,
+                                                std::move(ffn_output_buf)});
+        if (inputs.lora_model_input) {
+            auto gate_lora = inputs.lora_model_input->getOpInput(i, ft::W::ffn_w1);
+            auto down_lora = inputs.lora_model_input->getOpInput(i, ft::W::ffn_w2);
+            auto up_lora = inputs.lora_model_input->getOpInput(i, ft::W::ffn_w3);
+            ffn_layer_params.lora_input = FfnLayerLoraInput({gate_lora, up_lora, down_lora});
+        }
+        auto ffn_output = device_->ffnLayer(ffn_layer_params);
         hidden = ffn_output.hidden_states;
         if (device_props_.tp_size > 1) {
             // Note: for custom all reduce, allReduce will allocate a new buffer and replace the original attn_hidden with it

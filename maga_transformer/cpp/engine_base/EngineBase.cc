@@ -44,10 +44,6 @@ void EngineBase::removeLora(int64_t lora_id) {
     lora_manager_->removeLora(lora_id);
 }
 
-void EngineBase::releaseLoraResource() {
-    lora_manager_->releaseSignal();
-}
-
 std::shared_ptr<lora::LoraManager> EngineBase::getLoraManager() {
     return lora_manager_;
 }

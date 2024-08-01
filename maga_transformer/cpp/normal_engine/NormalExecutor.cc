@@ -12,9 +12,13 @@ using namespace std;
 
 namespace rtp_llm {
 
-NormalExecutor::NormalExecutor(const EngineInitParams& params, const std::shared_ptr<CacheManager>& cache_manager, ft::DeviceBase* device):
+NormalExecutor::NormalExecutor(const EngineInitParams& params,
+                               const std::shared_ptr<CacheManager>& cache_manager,
+                               ft::DeviceBase* device,
+                               const std::shared_ptr<lora::LoraManager>& lora_manager = nullptr):
     Executor(device),
     cache_manager_(cache_manager),
+    lora_manager_(lora_manager),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)),
     dtype_(ft::getDataType(params.gpt_init_parameter.data_type_)),
@@ -36,6 +40,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     auto& model_input = model_input_status.value();
     tpSyncModelInputs(model_input, device_);
+    // get lora input
+    if (lora_manager_ != nullptr) {
+        model_input.lora_model_input = lora_manager_->makeLoraModelInput(model_input.lora_ids,
+                                                                         model_input.lora_input_lengths);
+    }
     auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
     model_input.k_cache_buffer = kv_cache_buffer.k_blocks;
     model_input.v_cache_buffer = kv_cache_buffer.v_blocks;

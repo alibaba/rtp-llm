@@ -24,8 +24,6 @@ public:
 
     void removeLora(int64_t lora_id);
 
-    void releaseLoraResource();
-
     std::shared_ptr<lora::LoraManager> getLoraManager();
 
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;

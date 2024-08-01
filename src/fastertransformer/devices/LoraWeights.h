@@ -116,7 +116,7 @@ struct LoraModel {
         }
     }
 
-    LoraWeightsPtr getLoraWeights(const size_t layer_num, const std::string& target_module) {
+    LoraWeightsPtr getLoraWeights(const size_t layer_num, const std::string& target_module) const {
         FT_CHECK_WITH_INFO((layer_num < lora_model_.size()),
             "layer index[%d] is greate than layer num[%d]", layer_num, lora_model_.size());
         return lora_model_[layer_num].getLoraWeights(target_module);
@@ -148,13 +148,19 @@ struct LoraOpInput {
         FT_CHECK_WITH_INFO(((lora_weights.size() == batch_size)),
             "lora_weights[%d] size must be equal to batch size[%d].",
             lora_weights.size(), batch_size);
-
+        lora_input_lengths_ = lora_input_length;
         lora_a_.resize(batch_size);
         lora_b_.resize(batch_size);
 
         for (int i = 0; i < batch_size; i++) {
-            lora_a_[i] = lora_weights[i]->lora_a_;
-            lora_b_[i] = lora_weights[i]->lora_b_;
+            if (lora_weights[i] == nullptr) {
+                lora_a_[i] = nullptr;
+                lora_b_[i] = nullptr;
+            } else {
+                lora_a_[i] = lora_weights[i]->lora_a_;
+                lora_b_[i] = lora_weights[i]->lora_b_;
+            }
+
         }
 
     }
@@ -179,6 +185,19 @@ struct LoraModelInput {
 
         lora_input_lengths_ = lora_input_lengths;
         lora_model_input_   = lora_model_input;
+    }
+
+    LoraOpInput getOpInput(const size_t layer_num, const std::string& target_module) {
+        std::vector<LoraWeightsPtr> lora_weights(lora_model_input_.size());
+        for (int i = 0; i < lora_weights.size(); i++) {
+            if (lora_model_input_[i] == nullptr) {
+                lora_weights[i] = nullptr;
+            } else {
+                lora_weights[i] = lora_model_input_[i]->getLoraWeights(layer_num, target_module);
+            }
+
+        }
+        return LoraOpInput(lora_input_lengths_, lora_weights);
     }
 };
 

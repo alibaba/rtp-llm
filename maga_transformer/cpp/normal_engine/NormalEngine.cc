@@ -20,7 +20,7 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
     FT_LOG_INFO(__PRETTY_FUNCTION__);
     initCacheManager();
     FT_LOG_INFO("create cache manager done");
-    executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_));
+    executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
     FT_LOG_INFO("create normal executor done");
     scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter_));
     FT_LOG_INFO("create fifo scheduler done");

@@ -80,18 +80,28 @@ bool LoraManager::isLoraAlive(int64_t lora_id) {
     }
 }
 
-// std::vector<ft::LoraResource> LoraManager::getLoraResource(ft::BufferPtr lora_ids) {
-//     if (lora_ids == nullptr) {
-//         return std::vector<ft::LoraResource>();
-//     }
-//     size_t batch_size = lora_ids->shape()[0];
-//     std::vector<ft::LoraResource> result(batch_size);
-//     int32_t* lora_ids_ptr = lora_ids->data<int32_t>();
-//     for (int i = 0; i < batch_size; i++) {
-//         result[i] = getLora(lora_ids_ptr[i]);
-//     }
-//     return result;
-// }
+ft::lora::LoraModelInputPtr LoraManager::makeLoraModelInput(ft::BufferPtr lora_ids,
+                                                            ft::BufferPtr lora_input_lengths)
+{
+    if (lora_ids == nullptr || lora_input_lengths == nullptr) {
+        return nullptr;
+    }
+    FT_CHECK_WITH_INFO((lora_ids->dim() == 1 && lora_input_lengths->dim() == 1),
+        "lora_ids dim[%d] and lora_input_lengths dim[%d] must be equal to 1.",
+        lora_ids->dim(), lora_input_lengths->dim());
+
+    FT_CHECK_WITH_INFO((lora_ids->shape()[0] == lora_input_lengths->shape()[0]),
+        "lora_ids [%d] and lora_input_lengths [%d] must has same batch_size.",
+        lora_ids->shape()[0], lora_input_lengths->shape()[0]);
+
+    size_t batch_size = lora_ids->shape()[0];
+    std::vector<ft::lora::LoraModelPtr> result(batch_size);
+    int32_t* lora_ids_ptr = lora_ids->data<int32_t>();
+    for (int i = 0; i < batch_size; i++) {
+        result[i] = getLora(lora_ids_ptr[i]);
+    }
+    return std::make_shared<ft::lora::LoraModelInput>(lora_input_lengths, result);
+}
 
 }  // namespace lora
 }  // namespace rtp_llm

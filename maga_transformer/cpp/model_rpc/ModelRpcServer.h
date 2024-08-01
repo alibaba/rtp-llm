@@ -26,6 +26,12 @@ public:
     void initMultimodal(const py::object mm_process_engine);
 
     KVCacheInfo getKVCacheInfo() const;
+
+    void addLora(const int64_t lora_id,
+                 const ft::lora::loraLayerWeightsMap& lora_a_weights,
+                 const ft::lora::loraLayerWeightsMap& lora_b_weights);
+
+    void removeLora(const int64_t lora_id);
 private:
     std::unique_ptr<NormalEngine> engine_ = nullptr;
     py::object mm_process_engine_;

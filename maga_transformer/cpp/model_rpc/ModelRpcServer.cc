@@ -59,7 +59,7 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
             return grpc::Status(grpc::StatusCode::CANCELLED, mm_res.ToString());
         }
     }
-
+    auto lora_gurad = lora::LoraResourceGuard(engine_->getLoraManager());
     FT_LOG_DEBUG("request:[%ld] trans to stream success", request->request_id());
     auto stream = engine_->enqueue(input);
     FT_LOG_DEBUG("request:[%ld] enqueue success", request->request_id());
@@ -110,6 +110,16 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
 
 KVCacheInfo ModelRpcServiceImpl::getKVCacheInfo() const {
     return engine_->getKVCacheInfo();
+}
+
+void ModelRpcServiceImpl::addLora(const int64_t lora_id,
+                                  const ft::lora::loraLayerWeightsMap& lora_a_weights,
+                                  const ft::lora::loraLayerWeightsMap& lora_b_weights)
+{
+    engine_->addLora(lora_id, lora_a_weights, lora_b_weights);
+}
+void ModelRpcServiceImpl::removeLora(const int64_t lora_id) {
+    engine_->removeLora(lora_id);
 }
 
 }  // namespace rtp_llm
