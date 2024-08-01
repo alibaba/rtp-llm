@@ -3,6 +3,8 @@ FROM $BASE_OS_IMAGE
 
 MAINTAINER wangyin.yx
 
+ADD /etc/rc.d/init.d/functions /etc/rc.d/init.d/functions
+
 RUN echo "%sdev ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
     groupadd sdev
 
@@ -10,7 +12,7 @@ RUN dnf install -y \
         unzip wget which findutils rsync tar \
         gcc gcc-c++ libstdc++-static gdb coreutils \
         binutils bash glibc-devel libdb glibc glibc-langpack-en bison lld \
-        emacs-nox git git-lfs nfs-utils && \
+        emacs-nox git git-lfs nfs-utils java-11-openjdk-devel docker && \
     rpm --rebuilddb
 
 ARG CONDA_URL

@@ -10,14 +10,23 @@ test_linkopts = [
     "-ltorch",
     "-lc10",
     "-ltorch_cpu",
-    "-lc10_cuda",
-    "-ltorch_cuda",
     "-ltorch_python",
     "-L/usr/local/cuda/lib64",
     "-lcudart",
     "-lnccl",
     "-lnvToolsExt",
-]
+] + select({
+    "//:using_cuda": [
+        "-ltorch_cuda",
+        "-lc10_cuda",
+    ],
+    "//:using_rocm": [
+        "-ltorch_hip",
+        "-lc10_hip",
+    ],
+    "//conditions:default": [
+    ],
+})
 
 cc_library(
     name = "mock_engine",

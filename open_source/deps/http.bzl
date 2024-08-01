@@ -39,6 +39,16 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_2.1_py310_rocm",
+        sha256 = "d19e70296deabe78059fcd06bd86b2ee0a18848fd2f08ca14bae2aafd9640146",
+        urls = [
+            "https://repo.radeon.com/rocm/manylinux/rocm-rel-6.1/torch-2.1.2%2Brocm6.1-cp310-cp310-linux_x86_64.whl"
+        ],
+        type = "zip",
+        build_file = clean_dep("//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "xfastertransformer_devel_icx",
         sha256 = "18bb9c0d65f73dde0939ce1024c2717510ff9692a8b88d3d12233b27950da2e7",
         urls = [

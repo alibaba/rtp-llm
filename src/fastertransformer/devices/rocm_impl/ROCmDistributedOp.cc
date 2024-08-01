@@ -38,9 +38,9 @@ void ROCmDevice::broadcast(const BroadcastParams& params) {
     }
 }
 
-void ROCmDevice::allReduce(const AllReduceParams& params) {
+AllReduceOutput ROCmDevice::allReduce(const AllReduceParams& params) {
     if (nccl_param_.world_size_ < 2) {
-        return;
+        return {params.buffer};
     }
     auto& buffer = params.buffer;
     const auto nccl_op = static_cast<ncclRedOp_t>(params.op);
@@ -50,7 +50,7 @@ void ROCmDevice::allReduce(const AllReduceParams& params) {
     if (custom_allreduce_comm_ && nccl_op == ncclSum && 
         custom_allreduce_comm_->checkAllReduceAvailable(buffer->size(), buffer->type())) {
         custom_allreduce_comm_->allReduce(buffer->data(), buffer->data(), buffer->size(), buffer->type(), stream_);
-        return;
+        return {params.buffer};
     }
 
     RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps,
@@ -58,6 +58,7 @@ void ROCmDevice::allReduce(const AllReduceParams& params) {
  
     NCCLCHECK(ncclAllReduce(buffer->data(), buffer->data(), buffer->size(), nccl_data_type,
                             nccl_op, nccl_param_.nccl_comm_, stream_));
+    return {params.buffer};
 }
 
 void ROCmDevice::allGather(const AllGatherParams& params) {

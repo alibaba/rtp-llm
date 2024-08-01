@@ -48,7 +48,7 @@ public:
     
     void syncCommunication(bool timeout = true) override;
     void broadcast(const BroadcastParams& params);
-    void allReduce(const AllReduceParams& params);
+    AllReduceOutput allReduce(const AllReduceParams& params);
     void allGather(const AllGatherParams& params);
 
     BufferPtr quantize(const QuantizeParams& params) override;

@@ -174,7 +174,7 @@ inline void syncAndCheck(const char* const file, int const line) {
                                  + file + ":" + std::to_string(line) + " \n");
     }
 #endif
-}
+
 
 template<typename T>
 void print_to_file(const T*           result,
