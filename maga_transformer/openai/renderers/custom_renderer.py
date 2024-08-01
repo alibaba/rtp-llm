@@ -138,8 +138,8 @@ class CustomChatRenderer():
             )
         )
 
-        async for response in self.render_response_stream(output_generator, 
-                                                          request, 
+        async for response in self.render_response_stream(output_generator,
+                                                          request,
                                                           generate_config):
             yield response
 

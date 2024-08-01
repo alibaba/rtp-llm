@@ -23,18 +23,14 @@ class ChatRendererFactory():
         if not isinstance(tokenizer, PreTrainedTokenizerBase):
             return None
 
-        model_type = params.model_type
         try:
-            logging.info(f"try fast chat conversation with [{model_type}]")
             return FastChatRenderer(tokenizer, params)
         except KeyError:
-            logging.info(f"[{model_type}] not found in fast chat conversation, try llama template")
             pass
 
         try:
             return LlamaTemplateRenderer(tokenizer, params)
         except AssertionError as e: # assertion at llama_template.py:229
-            logging.info(f"[{model_type}] not found in llama template.")
             pass
         return None
 
@@ -53,7 +49,7 @@ class ChatRendererFactory():
         if model_template_type:
             new_params = copy.deepcopy(params)
             new_params.model_type = model_template_type
-            logging.info(f"try get renderer from MODEL_TEMPLATE_TYPE: {model_template_type}")
+            logging.info(f"Renderer factory try found MODEL_TEMPLATE_TYPE: {model_template_type}, try get predefined renderer.")
             renderer = ChatRendererFactory.try_get_imported_renderer(tokenizer, new_params)
             if renderer:
                 return renderer
@@ -64,24 +60,24 @@ class ChatRendererFactory():
         # qwen needs to deal with function call, multimodal models need to add image token
         global _renderer_factory
         if params.model_type in _renderer_factory:
+            logging.info(f"Renderer factory found model type [{params.model_type}] has dedicated renderer, use this.")
             return _renderer_factory[params.model_type](tokenizer, params)
 
         try:
             if tokenizer.chat_template != None:
-                logging.info(f"tokenizer has chat_template [{tokenizer.chat_template}], use it.")
+                logging.info(f"Renderer factory found tokenizer has chat_template [{tokenizer.chat_template}], use it.")
                 return BasicRenderer(tokenizer, params)
             else:
-                logging.info("tokenizer chat_template is None, skip.")
+                pass
         except AttributeError:
-            logging.info("tokenizer has no chat_template attribute.")
-            # tokenizer may has no chat_template property
             pass
 
+        logging.info(f"Renderer factory try get predefined renderer via model type [{params.model_type}]")
         imported_template_renderer = ChatRendererFactory.try_get_imported_renderer(tokenizer, params)
         if imported_template_renderer:
             logging.info(f"found renderer from imported template for [{params.model_type}]")
             return imported_template_renderer
 
-        logging.warn(f"model [{params.model_type}] falls back to basic renderer, this is typically unwanted.")
+        logging.warn(f"Renderer factory found model [{params.model_type}] falls back to basic renderer, this is typically unwanted.")
         return BasicRenderer(tokenizer, params)
 

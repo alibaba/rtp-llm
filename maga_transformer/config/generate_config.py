@@ -31,7 +31,7 @@ class GenerateConfig(BaseModel):
     bos_token_id: Optional[int] = None
     using_hf_sampling: bool = False
     print_stop_words: bool = False
-    timeout_ms: int = -1
+    timeout_ms: Optional[int] = -1
     chat_id: Optional[str] = None
     task_id: Optional[Union[str,int]] = None
     request_format: str = RequestFormat.RAW
@@ -67,7 +67,7 @@ class GenerateConfig(BaseModel):
         for key, value in new.items():
             if hasattr(self, key):
                 setattr(self, key, value)
-                
+
     def update_and_pop(self, new: Dict[str, Any]):
         to_remove: List[str] = []
         for key, value in new.items():
@@ -85,7 +85,7 @@ class GenerateConfig(BaseModel):
         temperature: List[float] = []
         min_new_tokens: List[int] = []
         repetition_penalty: List[float] = []
-        for config in configs:            
+        for config in configs:
             top_k.append(config.top_k)
             top_p.append(config.top_p)
             temperature.append(config.temperature)
@@ -120,7 +120,7 @@ class GenerateConfig(BaseModel):
         if not all(token_id < vocab_size and token_id >= 0 for token_id in self.select_tokens_id):
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                                     f"token_id in select_tokens_id {self.select_tokens_id} should be less than vocab_size {vocab_size}, and shoud not be negative")
-        
+
     def add_special_tokens(self, special_tokens: Any):
         # 这里假设外部传进来的stop_word_list和stop_word_str都不包含batch维度
         self.stop_words_list += special_tokens.stop_words_list
@@ -136,7 +136,7 @@ class GenerateConfig(BaseModel):
              (isinstance(self.min_new_tokens, list) and all([isinstance(i, int) for i in self.min_new_tokens]))
             assert isinstance(self.repetition_penalty, (float, int)) or \
              (isinstance(self.repetition_penalty, list) and all([isinstance(i, (int, float)) for i in self.repetition_penalty]))
-             
+
             calculate_loss_list = [0, 1, 2]
             assert self.calculate_loss in calculate_loss_list, \
                 f"calculate_loss in generate_config can only be in {calculate_loss_list}, but it's {self.calculate_loss}"

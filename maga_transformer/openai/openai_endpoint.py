@@ -56,6 +56,7 @@ class OpenaiEndopoint():
         )
 
         self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)
+        logging.info(f"Finally openai endpoint uses renderer: {self.chat_renderer} ")
         self.template_renderer: CustomChatRenderer = self.chat_renderer \
             if (type(self.chat_renderer) == BasicRenderer) \
             else BasicRenderer(self.tokenizer, render_params)
@@ -126,7 +127,7 @@ class OpenaiEndopoint():
                 for i in range(len(all_choices)):
                     if all_choices[i].message.content == None:
                         all_choices[i].message.content = (response.choices[i].delta.content or None)
-                    else: 
+                    else:
                         all_choices[i].message.content += (response.choices[i].delta.content or "")
                     all_choices[i].message.role = response.choices[i].delta.role or all_choices[i].message.role
                     all_choices[i].message.function_call = response.choices[i].delta.function_call or all_choices[i].message.function_call
