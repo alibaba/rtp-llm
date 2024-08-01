@@ -138,8 +138,6 @@ class Pipeline(object):
         if self.model.is_multimodal():
             prompt, images = self.piple_funcs.multimodal_modify_prompt_func(prompt, images=images, img_token=self._img_token,
                                                                             generate_config=generate_config.model_dump(), **kwargs)
-            if len(images) > 0 and os.environ.get("USE_RPC_MODEL", "0") != "1":
-                images = self.vit_engine.submit(images)
 
         token_ids = self.piple_funcs.process_encode_func(prompt,
                                              generate_config=generate_config.model_dump(),
@@ -258,14 +256,6 @@ class Pipeline(object):
     async def generate_stream(self, request_id: int, token_ids: List[int], images: List[Future[torch.Tensor]],
                             generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
-        if self.model.is_multimodal() and len(images) > 0 and os.environ.get("USE_RPC_MODEL", "0") != "1":
-            tasks = [asyncio.create_task(self.vit_engine.get(images))]
-            await asyncio.wait(tasks)
-            images = tasks[0].result()
-
-        if self.model.is_multimodal() and os.environ.get("USE_RPC_MODEL", "0") != "1":
-            token_ids, images, token_type_ids = self.model.expand_token_id(token_ids, images)
-
         token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
 
         input = GenerateInput(request_id=request_id,

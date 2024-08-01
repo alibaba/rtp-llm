@@ -70,11 +70,10 @@ class ModelFactory:
         model = ModelFactory._create_model(model_config)
         if model_config.model_type != 'fake_model': # for test
             sp_model = None if sp_model_config is None else ModelFactory._create_model(sp_model_config)
-            model = AsyncModel(model, sp_model, model_config.use_rpc)
+            model = AsyncModel(model, sp_model)
             if sp_model:
                 logging.info("create sp model done")
-            if model_config.use_rpc:
-                logging.info("create rpc model done")
+            logging.info("create rpc model done")
         return model
 
     @staticmethod
@@ -119,7 +118,6 @@ class ModelFactory:
         ACT_TYPE = "ACT_TYPE"
         if os.environ.get(ACT_TYPE, None):
             act_type = WEIGHT_TYPE.from_str(os.environ.get(ACT_TYPE))
-        use_rpc_model = bool(int(os.environ.get("USE_RPC_MODEL", 0)))
         model_config = ModelConfig(model_type=model_type,
                                    ckpt_path=ckpt_path,
                                    tokenizer_path=tokenizer_path,
@@ -128,8 +126,7 @@ class ModelFactory:
                                    max_seq_len=max_seq_len,
                                    seq_size_per_block=seq_size_per_block,
                                    lora_infos=lora_infos,
-                                   ptuning_path=ptuning_path,
-                                   use_rpc=use_rpc_model)
+                                   ptuning_path=ptuning_path)
 
         return model_config
 

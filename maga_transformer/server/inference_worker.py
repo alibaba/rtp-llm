@@ -63,7 +63,7 @@ class InferenceWorker():
         return token_ids, tokens
 
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
-        request_extractor = RequestExtractor(self.model.default_generate_config, self.model.config.use_rpc)
+        request_extractor = RequestExtractor(self.model.default_generate_config)
         request, kwargs = request_extractor.extract_request(kwargs)
 
         if request.is_streaming is False and request.incremental:
@@ -133,10 +133,7 @@ class InferenceWorker():
     async def _yield_generate(self, request_id: int, text: str, images: List[str], generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[Dict[str, Any], None]:
         stream = self.pipeline.pipeline_async(prompt=text, request_id=request_id, images=images, generate_config=generate_config, **kwargs)
         async for generate_response in stream:
-            if self.model.config.use_rpc:
-                yield self._format_response_new(generate_response, generate_config)
-            else:
-                yield self._format_response(generate_response, generate_config)
+            yield self._format_response_new(generate_response, generate_config)
 
     def is_streaming(self, req: Dict[str, Any]):
         return RequestExtractor.is_streaming(req) or req.get('stream', False)
@@ -167,18 +164,6 @@ class InferenceWorker():
             if len(done_idxs) == len(iterators):
                 break
             batch = batch_state
-            if num_return_sequences > 0 and not self.model.config.use_rpc:
-                batch_size = int(len(batch_state) / num_return_sequences)
-                new_batch: List[Any] = []
-                for batch_idx in range(batch_size):
-                    seqs = batch_state[batch_idx * num_return_sequences:(batch_idx + 1) * num_return_sequences]
-                    sequences_pipeline_response = MultiSequencesPipelineResponse(
-                        response=[seq.response for seq in seqs],
-                        finished=all([seq.finished for seq in seqs]),
-                        aux_info=[seq.aux_info for seq in seqs]
-                    )
-                    new_batch.append(sequences_pipeline_response)
-                batch = new_batch
             if batch_infer:
                 yield BatchPipelineResponse(response_batch=batch)
             else:

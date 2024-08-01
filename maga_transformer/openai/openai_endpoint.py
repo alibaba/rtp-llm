@@ -198,10 +198,7 @@ class OpenaiEndopoint():
         generate_config = self._extract_generation_config(chat_request)
 
         if self.model.is_multimodal():
-            if os.environ.get("USE_RPC_MODEL", "0") != "1":
-                images = self.vit_engine.submit(input_images)
-            else:
-                images = input_images
+            images = input_images
         else:
             images = []
 

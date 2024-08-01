@@ -14,6 +14,7 @@ from maga_transformer.server.inference_worker import InferenceWorker, BatchPipel
 from maga_transformer.pipeline.pipeline import Pipeline
 from maga_transformer.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from maga_transformer.structure.request_extractor import request_id_field_name
+from maga_transformer.distribute.worker_info import DEFAULT_START_PORT, update_master_info
 
 os.environ['KV_CACHE_MEM_MB'] = '100'
 
@@ -37,6 +38,7 @@ class InferenceWorkerTest(TestCase):
         self.ckpt_path = os.path.join(os.getcwd(), "maga_transformer/test/model_test/fake_test/testdata/llama/fake/hf_source")
 
     def create_inference_worker(self):
+        update_master_info('0.0.0.0', int(os.environ.get('START_PORT', DEFAULT_START_PORT)))
         self.fake_model_loader = FakeModelLoader(model_type='llama',
                                                  tokenizer_path=self.tokenizer_path,
                                                  ckpt_path=self.ckpt_path,
@@ -87,8 +89,7 @@ class InferenceWorkerTest(TestCase):
                 result_text, aux_info, finished = result[i].result()
                 expect_text = "ProductsProductsProducts"
                 logging.info(f"{i} th : {result_text}, aux_info: {aux_info}, finished:{finished}")
-                # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
-            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
+                self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
         finally:
             inference_worker.stop()
 
@@ -99,7 +100,6 @@ class InferenceWorkerTest(TestCase):
             # logging.info(f"test text input : {result_text}, aux_info: {aux_info}, finished:{finished}")
             expect_text = "ProductsProductsProducts"
             self.assertEqual(expect_text, result_text)
-            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             inference_worker.stop()
 
@@ -119,7 +119,7 @@ class InferenceWorkerTest(TestCase):
             # just ensure every input has result
             for i in range(0, thread_count):
                 result_text, aux_info, finished = result[i].result()
-                expect_text = "ProductsProductsProducts"
+                expect_text = "ProductsProductsProductsProducts"
                 logging.info(f"batch * num {i} th : {result_text}, aux_info: {aux_info}, finished:{finished}")
                 self.assertEqual(2, len(result_text))
                 self.assertEqual(3, len(result_text[0]))
@@ -128,8 +128,7 @@ class InferenceWorkerTest(TestCase):
                 self.assertEqual(3, len(aux_info[0]))
                 self.assertEqual(3, len(aux_info[1]))
                 self.assertEqual([True, True], finished)
-                # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
-            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
+                self.assertEqual(result_text, [[expect_text] * 3] * 2, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
         finally:
             inference_worker.stop()
 
@@ -144,7 +143,6 @@ class InferenceWorkerTest(TestCase):
             self.assertEqual(1, len(result_text))
             self.assertEqual(1, len(aux_info))
             self.assertEqual(True, finished)
-            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             inference_worker.stop()
 
@@ -163,7 +161,6 @@ class InferenceWorkerTest(TestCase):
             self.assertEqual(1, len(aux_info[0]))
             self.assertEqual(1, len(aux_info[1]))
             self.assertEqual([True, True], finished)
-            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
         finally:
             inference_worker.stop()
 
@@ -187,8 +184,7 @@ class InferenceWorkerTest(TestCase):
                 self.assertEqual(3, aux_info.get("iter_count"))
                 self.assertEqual(True, finished)
                 logging.info(f"incremental {i} th : {result_text}, aux_info: {aux_info}, finished:{finished}")
-                # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
-            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
+                self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
         finally:
             inference_worker.stop()
 
@@ -212,8 +208,7 @@ class InferenceWorkerTest(TestCase):
                 self.assertEqual(2, len(aux_info))
                 self.assertEqual([True, True], finished)
                 logging.info(f"batch incremental {i} th : {result_text}, aux_info: {aux_info}, finished:{finished}")
-                # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
-            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
+                self.assertEqual(result_text, [expect_text] * 2, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
         finally:
             inference_worker.stop()
 
@@ -234,13 +229,12 @@ class InferenceWorkerTest(TestCase):
             # just ensure every input has result
             for i in range(0, thread_count):
                 result_text, aux_info, finished = result[i].result()
-                expect_text = "ProductsProductsProducts"
+                expect_text = "ProductsProductsProductsProducts"
                 logging.info(f"incremental num return {i} th : {result_text}, aux_info: {aux_info}, finished:{finished}")
                 self.assertEqual(3, len(result_text))
                 self.assertEqual(3, len(aux_info))
                 self.assertEqual(True, finished)
-                # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
-            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
+                self.assertEqual(result_text, [expect_text] * 3, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
         finally:
             inference_worker.stop()
 
@@ -260,7 +254,7 @@ class InferenceWorkerTest(TestCase):
             # just ensure every input has result
             for i in range(0, thread_count):
                 result_text, aux_info, finished = result[i].result()
-                expect_text = "ProductsProductsProducts"
+                expect_text = "ProductsProductsProductsProducts"
                 logging.info(f"incremental batch * num return {i} th : {result_text}, aux_info: {aux_info}, finished:{finished}")
                 self.assertEqual(2, len(result_text))
                 self.assertEqual(3, len(result_text[0]))
@@ -269,8 +263,7 @@ class InferenceWorkerTest(TestCase):
                 self.assertEqual(3, len(aux_info[0]))
                 self.assertEqual(3, len(aux_info[1]))
                 self.assertEqual([True, True], finished)
-                # self.assertEqual(result_text, expect_text, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
-            self.assertFalse(inference_worker.pipeline.model.decoder_engine_.scheduler_.have_streams())
+                self.assertEqual(result_text, [[expect_text] * 3] * 2, f"{i} th result is not same: expect is :[{expect_text}] actual is :[{result_text}]")
         finally:
             inference_worker.stop()
 

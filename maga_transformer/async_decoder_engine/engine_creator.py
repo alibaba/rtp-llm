@@ -40,14 +40,11 @@ def check_exeutor_type(model: BaseModel, config: GptInitModelParameters, specula
         return ExecutorType.Embedding
     return ExecutorType.Normal
 
-def create_engine(model: BaseModel, config: GptInitModelParameters, speculative_model: Any = None, speculative_config: Optional[GptInitModelParameters] = None, use_rpc: bool = True) -> BaseEngine:
+def create_engine(model: BaseModel, config: GptInitModelParameters, speculative_model: Any = None, speculative_config: Optional[GptInitModelParameters] = None) -> BaseEngine:
     executor_type = check_exeutor_type(model, config, speculative_model, speculative_config)
     logging.info(f"executor_type: {executor_type}")
     if executor_type == ExecutorType.Normal:
-        if use_rpc:
-            return _create_cpp_engine(model, config)
-        else:
-            return _create_normal_engine(model, config)
+        return _create_cpp_engine(model, config)
     elif executor_type == ExecutorType.Speculative:
         assert speculative_config
         return _create_sp_engine(model, config, speculative_model, speculative_config)
@@ -61,22 +58,6 @@ def create_engine(model: BaseModel, config: GptInitModelParameters, speculative_
 def _create_cpp_engine(model: BaseModel, config: GptInitModelParameters) -> RPCEngine:
     logging.info(f'ft op mem info: used: {get_mem_info().used} free: {get_mem_info().free}')
     return RPCEngine(model, None)
-
-def _create_normal_engine(model: BaseModel, config: GptInitModelParameters) -> DecoderEngine:
-    model_ops = _create_ops(ModelType.Normal, model, config)
-    logging.info(f'ft op mem info: used: {get_mem_info().used} free: {get_mem_info().free}')
-    nccl_op = NcclOp()
-    gen_num_per_circle = 1
-    cache_config = CacheConfigGenerator.create_config(config)
-    cache_manager = CacheManager(cache_config, nccl_op)
-    stream_cache_manager = StreamCacheManager(config, cache_manager, gen_num_per_circle)
-    scheduler = Scheduler(config, stream_cache_manager, gen_num_per_circle, nccl_op)
-    executor = NormalModelExecutor(model_ops, cache_manager)
-    model.weight.lora_resource.ft_op = [model_ops.gpt_op]
-    decoder_engine =  DecoderEngine(executor, scheduler, config)
-    ptuning_params = PtuningConstructor(model, model.tokenizer, cache_manager, decoder_engine).construct()
-    stream_cache_manager.set_ptuning(ptuning_params)
-    return decoder_engine
 
 def _create_sp_engine(model: BaseModel, config: GptInitModelParameters, sp_model: BaseModel, sp_config: GptInitModelParameters) -> DecoderEngine:
     model_ops = _create_ops(ModelType.Normal, model, config)

@@ -29,9 +29,8 @@ class Request(NamedTuple):
         return self.generate_configs[0].return_incremental
 
 class RequestExtractor:
-    def __init__(self, default_generate_config: GenerateConfig, use_rpc: bool):
+    def __init__(self, default_generate_config: GenerateConfig):
         self.default_generate_config = default_generate_config
-        self.use_rpc = use_rpc
 
     def extract_request(self, kwargs: Dict[str, Any]) -> Tuple[Request, Dict[str, Any]]:
         generate_config, remain_args = self._format_request(kwargs)
@@ -136,15 +135,7 @@ class RequestExtractor:
                 generate_configs[i].adapter_name = adapter_name[i] if isinstance(adapter_name, list) else adapter_name
         return generate_configs
 
-    def extend_sequences(self, input_texts: Any, input_images: Any, generate_configs: List[GenerateConfig]):        
-        num_return_sequences = generate_configs[0].num_return_sequences
-        # check adapter_name size is same with prompt
-        def repeat_elements(lst, n):
-            return [e for e in lst for _ in range(n)]
-        if num_return_sequences > 0 and not self.use_rpc:
-            input_texts = repeat_elements(input_texts, num_return_sequences)
-            input_images = repeat_elements(input_images, num_return_sequences)
-            generate_configs = repeat_elements(generate_configs, num_return_sequences)
+    def extend_sequences(self, input_texts: Any, input_images: Any, generate_configs: List[GenerateConfig]):
         return input_texts, input_images, generate_configs
 
     def _get_request(self, generate_config: GenerateConfig, kwargs: Dict[str,Any]) -> Request:

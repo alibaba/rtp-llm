@@ -126,7 +126,6 @@ class Llava(Llama, MultiModalMixin):
             Llava.from_huggingface(config, config_json)
         else:
             raise Exception("llava parameter from unkown source")
-        config.tp_split_emb_and_lm_head = True if int(os.environ.get("USE_RPC_MODEL", "0")) == 1 else False
         return config
 
     @staticmethod

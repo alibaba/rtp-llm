@@ -174,16 +174,11 @@ def run_test(model_args: Dict[str, Any], test_args: Dict[str, Any]):
     else:
         devices = [str(x) for x in range(tp_size)]
 
-    use_rpc_model = model_args.get('use_rpc', False)
-
     barrier = multiprocessing.Barrier(tp_size)
     for i in range(1, tp_size):
         logging.info('launch tp_rank=%s', str(i))
         os.environ['WORLD_RANK'] = str(i)
-        if use_rpc_model:
-            os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(devices)
-        else:
-            os.environ['CUDA_VISIBLE_DEVICES'] = devices[i]
+        os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(devices)
         proc = multiprocessing.Process(target=pipeline_proc,
                                        args=(model_args, barrier))
         proc.start()
@@ -255,7 +250,7 @@ def report_latency_test_res(model_type, model_size, prec, device, framework,
 class testcase:
 
     def __init__(self, model_type, ckpt_path, tokenizer_path, prec,
-                 test_batch_size, test_input_len, lora_infos, use_rpc):
+                 test_batch_size, test_input_len, lora_infos):
         self.model_type = model_type
         self.ckpt_path = ckpt_path
         self.tokenizer_path = tokenizer_path
@@ -263,7 +258,6 @@ class testcase:
         self.test_input_len = test_input_len
         self.prec = prec
         self.lora_infos = lora_infos
-        self.use_rpc = use_rpc
 
     def get_args(self):
         return {
@@ -279,9 +273,7 @@ class testcase:
                 'max_seq_len':
                 int(os.environ['MAX_SEQ_LEN']),
                 'lora_infos':
-                self.lora_infos,
-                'use_rpc':
-                self.use_rpc,
+                self.lora_infos
             },
             'test_args': {
                 'test_batchsize': self.test_batch_size,
@@ -306,7 +298,6 @@ if __name__ == '__main__':
     parser.add_argument('--input_len', type=str, required=True)
     parser.add_argument('--prec', type=str, required=True)
     parser.add_argument('--lora_infos', type=str, required=True)
-    parser.add_argument('--use_rpc', action="store_true")
 
     args, _ = parser.parse_known_args()
     lora_infos = {}
@@ -320,7 +311,7 @@ if __name__ == '__main__':
 
     t_case = testcase(args.model_type, args.ckpt_path, args.tokenizer_path,
                       args.prec, [int(x) for x in args.batch_size.split(',')],
-                      [int(x) for x in args.input_len.split(',')], lora_infos, args.use_rpc)
+                      [int(x) for x in args.input_len.split(',')], lora_infos)
 
     lock_path = '/tmp/maga_transformer/perf_test/gpu_status_lock'
     logging.info(f"env is {os.environ}")

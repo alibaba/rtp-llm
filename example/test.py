@@ -15,7 +15,6 @@ async def main():
     os.environ["CHECKPOINT_PATH"] = os.environ.get("CHECKPOINT_PATH", "Qwen/Qwen-1_8B-Chat")
 
     model_config = ModelFactory.create_normal_model_config()
-    model_config.use_rpc = True
     model = ModelFactory.from_huggingface(model_config.ckpt_path, model_config=model_config)
     pipeline = Pipeline(model, model.tokenizer)
 

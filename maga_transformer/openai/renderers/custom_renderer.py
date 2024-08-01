@@ -116,14 +116,6 @@ class CustomChatRenderer():
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
-        if model.is_multimodal() and len(images) > 0 and os.environ.get("USE_RPC_MODEL", "0") != "1":
-            tasks = [asyncio.create_task(MMProcessEngine.get(images))]
-            await asyncio.wait(tasks)
-            images = tasks[0].result()
-
-        if model.is_multimodal() and os.environ.get("USE_RPC_MODEL", "0") != "1":
-            input_ids, images, token_type_ids = model.expand_token_id(input_ids, images)
-
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
 
         generate_config.is_streaming = True

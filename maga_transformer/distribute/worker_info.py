@@ -13,17 +13,18 @@ class ParallelInfo(object):
     def __init__(
             self, tp_size: int, pp_size: int,
             world_size: int, world_rank: int,
-            local_world_size: int, use_rpc_model: bool
+            local_world_size: int
     ):
         self.tp_size = tp_size
         self.pp_size = pp_size
         self.world_size = world_size
         self.world_rank = world_rank
         self.local_world_size = local_world_size
-        if use_rpc_model:
-            self.device = self.world_rank % self.local_world_size
-        else:
+        if bool(os.environ.get("SP_CHECKPOINT_PATH", "") != ""):
             self.device = 'cuda:0'
+        else:
+            self.device = self.world_rank % self.local_world_size
+
 
     @property
     def is_pp_first(self) -> bool:
@@ -51,14 +52,12 @@ class ParallelInfo(object):
 
     @staticmethod
     def from_env() -> ParallelInfo:
-        use_rpc_model = bool(int(os.environ.get("USE_RPC_MODEL", 0)))
         info = ParallelInfo(
                 tp_size=int(os.environ.get('TP_SIZE', '1')),
                 pp_size=int(os.environ.get('PP_SIZE', '1')),
                 world_size=int(os.environ.get('WORLD_SIZE', '1')),
                 world_rank=int(os.environ.get('WORLD_RANK', '0')),
-                local_world_size=int(os.environ.get('LOCAL_WORLD_SIZE', '1')),
-                use_rpc_model=use_rpc_model)
+                local_world_size=int(os.environ.get('LOCAL_WORLD_SIZE', '1')))
         if (info.tp_size * info.pp_size != info.world_size or
             info.world_rank >= info.world_size):
             raise Exception(f'tp_size:{info.tp_size}, pp_size:{info.pp_size}, world_size:{info.world_size}, world_rank:{info.world_rank} invalid world config')
@@ -67,10 +66,8 @@ class ParallelInfo(object):
             raise Exception("not support info.world_size mod info.local_world_size != 0")
         
         if torch.cuda.is_available():
-            if use_rpc_model:
-                torch.cuda.set_device(info.local_rank)
-            else:
-                torch.cuda.set_device(0)            
+            torch.cuda.set_device(info.local_rank)
+     
         return info
 
     # used for ut

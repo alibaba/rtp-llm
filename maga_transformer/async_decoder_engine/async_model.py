@@ -14,14 +14,14 @@ from maga_transformer.async_decoder_engine.base_engine import KVCacheInfo
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 
 class AsyncModel:
-    def __init__(self, model: BaseModel, sp_model: Optional[BaseModel] = None, use_rpc: bool = True) -> None:
+    def __init__(self, model: BaseModel, sp_model: Optional[BaseModel] = None) -> None:
         self.model = model
         self.sp_model = sp_model
         self.config = model.config
 
         assert self.config.max_seq_len > 0
         self.tokenizer = model.tokenizer
-        self.decoder_engine_ = create_engine(self.model, self.config, self.sp_model, self.sp_model.config if self.sp_model else None, use_rpc)
+        self.decoder_engine_ = create_engine(self.model, self.config, self.sp_model, self.sp_model.config if self.sp_model else None)
         self.decoder_engine_.start()
 
     def is_multimodal(self) -> bool:

@@ -128,8 +128,7 @@ class ModelConfig:
             ptuning_path: Optional[str] = None,
             lora_infos: Optional[Dict[str, str]] = None,
             ref_module: Optional[torch.nn.Module] = None,
-            ref_dict: Dict[str, torch.Tensor] = {},
-            use_rpc: bool = False
+            ref_dict: Dict[str, torch.Tensor] = {}
         ):
         self.model_type: str = model_type
         self.ckpt_path: str = ckpt_path
@@ -143,7 +142,6 @@ class ModelConfig:
         self.lora_infos: Optional[Dict[str, str]] = lora_infos
         self.ref_module: Optional[torch.nn.Module] = ref_module
         self.ref_dict: Dict[str, torch.Tensor] = ref_dict
-        self.use_rpc: bool = use_rpc
 
     @property
     def int8_mode(self):
@@ -172,7 +170,6 @@ class BaseModel(object):
         config: GptInitModelParameters = cls._create_config(model_config.ckpt_path)
         if config.hidden_size == 0:
             config.hidden_size = config.size_per_head * config.head_num
-        config.use_rpc = model_config.use_rpc
         config.update_common(
             ckpt_path=model_config.ckpt_path,
             tokenizer_path=model_config.tokenizer_path,

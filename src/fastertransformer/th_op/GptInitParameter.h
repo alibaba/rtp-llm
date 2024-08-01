@@ -214,8 +214,6 @@ public:
     int64_t     tp_size_        = 1;
     int64_t     tp_rank_        = 0;
 
-    bool use_rpc_ = false;
-
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens_;
 
     GptInitParameter();

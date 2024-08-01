@@ -93,7 +93,6 @@ class QWen_VL(QWen, MultiModalMixin):
             is_multimodal=True
         )
         QWen_VL._common_config(config, ckpt_path)
-        config.tp_split_emb_and_lm_head = True if int(os.environ.get("USE_RPC_MODEL", "0")) == 1 else False
         return config
 
     @staticmethod
