@@ -81,6 +81,7 @@ build:cpu --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
 build:cpu --linkopt -ldl
 build:cpu --copt="-DUSING_CUDA=0"
 
+build:rocm --copt="-DENABLE_BF16=1"
 build:rocm --action_env TF_NEED_CUDA="0"
 build:rocm --host_action_env TF_NEED_CUDA="0"
 build:rocm --crosstool_top=@local_config_rocm//crosstool:toolchain
