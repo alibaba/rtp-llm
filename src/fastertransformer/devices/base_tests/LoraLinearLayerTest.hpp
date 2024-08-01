@@ -1,4 +1,5 @@
 #pragma once
+#include "src/fastertransformer/devices/torch_impl/FfnLayer.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include <torch/torch.h>
 
@@ -33,13 +34,13 @@ public:
         auto token_num = std::accumulate(input_lengths.begin(), input_lengths.end(), 0);
 
         auto input = torch::rand({token_num, k}, torch::Device(torch::kCPU)).to(input_dtype_);
-        auto weight = 0.001 * torch::rand({k, n}, torch::Device(torch::kCPU)).to(input_dtype_);
+        auto weight = torch::rand({k, n}, torch::Device(torch::kCPU)).to(input_dtype_);
 
         std::vector<torch::Tensor> lora_a(batch_size);
         std::vector<torch::Tensor> lora_b(batch_size);
         for (int i = 0; i < batch_size; i++) {
-            lora_a[i] = 0.001 * torch::rand({k, ranks[i]}, torch::Device(torch::kCPU)).to(lora_dtype_);
-            lora_b[i] = 0.001 * torch::rand({ranks[i], n}, torch::Device(torch::kCPU)).to(lora_dtype_);
+            lora_a[i] = torch::rand({k, ranks[i]}, torch::Device(torch::kCPU)).to(lora_dtype_);
+            lora_b[i] = torch::rand({ranks[i], n}, torch::Device(torch::kCPU)).to(lora_dtype_);
         }
         return LoraLinearLayerTestInput({input, weight, input_lengths, lora_a, lora_b});
     }
@@ -69,19 +70,16 @@ public:
     }
 
 
-    LoraLinearLayerTestOutput torchLoraLinearLayerRun(LoraLinearLayerTestInput& input) {
-        auto output = torch::matmul(input.input.to(torch::kFloat), input.weight.to(torch::kFloat));
-        int start = 0;
-        torch::Tensor lora_output = torch::empty(0);
-        for (int i = 0; i < input.input_lengths.size(); i++) {
-            auto intput_tmp = input.input.index({torch::indexing::Slice(start, start + input.input_lengths[i])}).contiguous();
-            auto lora_output_tmp = torch::matmul(intput_tmp.to(torch::kFloat), input.lora_a[i].to(torch::kFloat));
-            lora_output_tmp = torch::matmul(lora_output_tmp.to(torch::kFloat), input.lora_b[i].to(torch::kFloat));
-            lora_output = torch::cat({lora_output, lora_output_tmp}, 0);
-            start = start + input.input_lengths[i];
-        }
-        output = output + lora_output;
-        return LoraLinearLayerTestOutput({output});
+    LoraLinearLayerTestOutput torchLoraLinearLayerRun(LoraLinearLayerTestInput& params) {
+        torch_impl::LoraLinearLayer lora_linear(params.weight.sizes()[0], params.weight.sizes()[1]);
+        lora_linear.ptr()->to(torch::Device(torch::kCPU));
+        auto state_dict = lora_linear.ptr()->named_parameters();
+        torch::NoGradGuard no_grad;
+        state_dict["f.weight"].set_data(params.weight.t().to(torch::kFloat));
+        return LoraLinearLayerTestOutput({lora_linear->forwardLora(params.input.to(torch::kFloat),
+                                                    params.input_lengths,
+                                                    params.lora_a,
+                                                    params.lora_b)});
     }
 
     LoraLinearLayerTestOutput torchNoLoraLinearLayerRun(LoraLinearLayerTestInput& input) {

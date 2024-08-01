@@ -349,7 +349,7 @@ struct AttentionCommonInputs {
     OptionalLoraInput lora_input = std::nullopt;
     FMHAType          fmha_type  = FMHAType::NONE;
 
-    std::optional<AttentionLayerLoraInput> lora_input;
+    std::optional<AttentionLayerLoraInput> lora_input = std::nullopt;
 };
 
 struct AttentionConfigs {
@@ -443,7 +443,7 @@ struct FfnLayerParams {
     const QScheme qscheme;
     BufferPtr                    output;
 
-    std::optional<FfnLayerLoraInput> lora_input;
+    std::optional<FfnLayerLoraInput> lora_input = std::nullopt;
 };
 
 struct GreedyParams {

@@ -3,7 +3,7 @@ load("//:def.bzl", "copts")
 cc_library(
     name = "torch_reference_impl",
     hdrs = glob([
-        "*.hpp",
+        "*.hpp", "*.h"
     ]),
     srcs = glob([
         "*.cc",

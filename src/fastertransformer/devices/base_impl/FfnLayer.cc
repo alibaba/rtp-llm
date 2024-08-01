@@ -18,10 +18,12 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
 
         // deal with moe layers with parallel dense ffn layer
         if (params.weights.shared_expert) {
-            shared_expert_output = ffnLayer({params.input,
+            auto ffn_params = FfnLayerParams({params.input,
                                              params.configs,
                                              *(params.weights.shared_expert),
-                                             params.residual, params.qscheme}).hidden_states;
+                                             params.residual, params.qscheme});
+            ffn_params.lora_input = params.lora_input;
+            shared_expert_output = ffnLayer(ffn_params).hidden_states;
 
             // for qwen moe
             // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
@@ -34,12 +36,14 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
         }
     } else {
         auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
-        auto up_output = loraLinear(LoraLinearParams(up_gemm_params)).output;
+        auto up_lora_params = (params.lora_input != std::nullopt) ? params.lora_input.value().up_lora_input : std::nullopt;
+        auto up_output = loraLinear(LoraLinearParams(up_gemm_params, up_lora_params)).output;
         printBufferData(*up_output, "ffn_up");
 
         if (isGatedActivation(params.configs.activation_type)) {
             auto gate_gemm_params = GemmParams(params.input, *(params.weights.gate_weight->kernel));
-            auto gate_output = loraLinear(LoraLinearParams(gate_gemm_params));
+            auto gate_lora_params = (params.lora_input != std::nullopt) ? params.lora_input.value().gate_lora_input : std::nullopt;
+            auto gate_output = loraLinear(LoraLinearParams(gate_gemm_params, gate_lora_params));
 
             activation({params.configs.activation_type,
                         *(up_output),
@@ -77,7 +81,8 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
 
         printBufferData(*up_output, "ffn_act");
         auto down_gemm_params = GemmParams(*(up_output), *(params.weights.down_weight->kernel), nullopt, params.output);
-        output = loraLinear(LoraLinearParams(down_gemm_params)).output;
+        auto down_lora_params = (params.lora_input != std::nullopt) ? params.lora_input.value().down_lora_input : std::nullopt;
+        output = loraLinear(LoraLinearParams(down_gemm_params, down_lora_params)).output;
     }
 
     if (shared_expert_output) {
