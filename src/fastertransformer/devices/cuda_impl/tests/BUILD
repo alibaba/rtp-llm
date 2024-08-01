@@ -213,3 +213,15 @@ cc_test(
     linkopts = test_linkopts,
     deps = test_deps,
 )
+
+cc_test(
+    name = "lora_linear_layer_test",
+    srcs = [
+        "CudaLoraLinearLayerTest.cc",
+    ],
+    data = [],
+    env = test_envs,
+    copts = cuda_copts() + copts() + torch_deps(),
+    linkopts = test_linkopts,
+    deps = test_deps,
+)

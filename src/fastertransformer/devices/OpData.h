@@ -1,6 +1,7 @@
 #pragma once
 
 #include "src/fastertransformer/devices/Weights.h"
+#include "src/fastertransformer/devices/LoraWeights.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/utils/activation_types.h"
 #include "src/fastertransformer/utils/RopeTypes.h"
@@ -319,6 +320,11 @@ struct MultimodalEmbeddingParams {
     OptionalConstBufferRef multimodal_locs;
 };
 
+struct AttentionLayerLoraInput {
+    std::optional<lora::LoraOpInput> qkv_lora_input;
+    std::optional<lora::LoraOpInput> out_lora_input;
+};
+
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs
     const Buffer& input_lengths;      // int32_t, [decoder_batch_size + context_batch_size]
@@ -342,6 +348,8 @@ struct AttentionCommonInputs {
     int32_t   max_prefix_length;
     OptionalLoraInput lora_input = std::nullopt;
     FMHAType          fmha_type  = FMHAType::NONE;
+
+    std::optional<AttentionLayerLoraInput> lora_input;
 };
 
 struct AttentionConfigs {
@@ -411,6 +419,12 @@ struct FfnLayerOutput {
     BufferPtr hidden_states;
 };
 
+struct FfnLayerLoraInput {
+    std::optional<lora::LoraOpInput> gate_lora_input;
+    std::optional<lora::LoraOpInput> up_lora_input;
+    std::optional<lora::LoraOpInput> down_lora_input;
+};
+
 struct FfnLayerParams {
     FfnLayerParams(const Buffer&                input,
                    const FfnConfigs&            configs,
@@ -428,6 +442,8 @@ struct FfnLayerParams {
 
     const QScheme qscheme;
     BufferPtr                    output;
+
+    std::optional<FfnLayerLoraInput> lora_input;
 };
 
 struct GreedyParams {
@@ -564,10 +580,13 @@ struct LoraLinearOutput {
 
 struct LoraLinearParams {
 
-    LoraLinearParams(GemmParams&                gemm_params) :
-                     gemm_params(gemm_params) {}
+    LoraLinearParams(GemmParams& gemm_params,
+                     std::optional<lora::LoraOpInput> lora_input = std::nullopt) :
+                     gemm_params(gemm_params),
+                     lora_input(lora_input) {}
 
-    GemmParams&                             gemm_params;
+    GemmParams& gemm_params;
+    std::optional<lora::LoraOpInput> lora_input;
 };
 
 struct QuantizeParams {

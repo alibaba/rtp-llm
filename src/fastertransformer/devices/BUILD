@@ -15,6 +15,7 @@ cc_library(
         "//src/fastertransformer/core:buffer",
         "//src/fastertransformer/utils:utils",
         "//:gpt_init_params_hdr",
+        "//src/fastertransformer/models:weights_define",
     ],
     visibility = ["//visibility:public"],
     copts = copts(),

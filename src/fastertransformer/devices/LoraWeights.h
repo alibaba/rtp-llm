@@ -126,6 +126,42 @@ struct LoraModel {
 
 using LoraModelPtr = std::shared_ptr<const LoraModel>;
 
+struct LoraOpInput {
+    BufferPtr lora_input_lengths_;
+    std::vector<ConstBufferPtr> lora_a_;
+    std::vector<ConstBufferPtr> lora_b_;
+
+    LoraOpInput(BufferPtr lora_input_lengths,
+                std::vector<ConstBufferPtr> lora_a,
+                std::vector<ConstBufferPtr> lora_b) :
+                lora_input_lengths_(lora_input_lengths),
+                lora_a_(lora_a), lora_b_(lora_b) {}
+
+
+    LoraOpInput(BufferPtr lora_input_length, std::vector<LoraWeightsPtr>& lora_weights)
+    {
+        FT_CHECK_WITH_INFO((lora_input_length->dim() == 1),
+            "lora_input_length[%d] dim must be 1.", lora_input_length->dim());
+
+        size_t batch_size = lora_input_length->shape()[0];
+
+        FT_CHECK_WITH_INFO(((lora_weights.size() == batch_size)),
+            "lora_weights[%d] size must be equal to batch size[%d].",
+            lora_weights.size(), batch_size);
+
+        lora_a_.resize(batch_size);
+        lora_b_.resize(batch_size);
+
+        for (int i = 0; i < batch_size; i++) {
+            lora_a_[i] = lora_weights[i]->lora_a_;
+            lora_b_[i] = lora_weights[i]->lora_b_;
+        }
+
+    }
+};
+
+using LoraOpInputPtr = std::shared_ptr<LoraOpInput>;
+
 struct LoraModelInput {
     BufferPtr lora_input_lengths_;
     std::vector<LoraModelPtr> lora_model_input_;
@@ -145,6 +181,10 @@ struct LoraModelInput {
         lora_model_input_   = lora_model_input;
     }
 };
+
+using LoraModelInputPtr = std::shared_ptr<LoraModelInput>;
+
+
 
 }  // namespace lora
 
