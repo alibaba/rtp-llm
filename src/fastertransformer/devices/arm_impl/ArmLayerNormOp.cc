@@ -71,7 +71,7 @@ LayernormOutput ArmCpuDevice::layernorm(const LayernormParams& params) {
 
     if (!params.is_inplace && params.qscheme == QScheme::NoQuantize) {
         norm_output = allocateBufferLike(*params.input);
-    } else if (params.qscheme == Qint8PerChannelLastAxis) {
+    } else if (params.qscheme == Qint8PerToken) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 

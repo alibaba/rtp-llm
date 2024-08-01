@@ -23,7 +23,7 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     const auto& gamma = norm_weight ? norm_weight->get().gamma.get()->data() : nullptr;
     const auto& beta = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
 
-    const auto& static_scale = (norm_weight && norm_weight->get().static_scale) ? norm_weight->get().static_scale.get()->data<float>() : nullptr;        
+    const auto& static_scale = (norm_weight && norm_weight->get().static_scale) ? norm_weight->get().static_scale.get()->data<float>() : nullptr;
     const auto norm_type = params.norm_type;
     const auto eps = params.eps;
 
@@ -35,10 +35,10 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                                             AllocationType::DEVICE},
                                             {"kernel"});
         BufferPtr scales;
-        // when QScheme::Qint8PerChannelLastAxis the scale is created by layernorm kernel
-        if (params.qscheme == QScheme::Qint8PerChannelLastAxis) {
+        // when QScheme::Qint8PerToken the scale is created by layernorm kernel
+        if (params.qscheme == QScheme::Qint8PerToken) {
             scales = allocateBuffer({DataType::TYPE_FP32,
-                                            {input->shape()[1]},
+                                            {input->shape()[0]},
                                             AllocationType::DEVICE},
                                             {"scales"});
         // when QScheme::Qint8PerTensor, the scale is from ckpt
@@ -61,9 +61,9 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
                                                 {0},
                                                 nullptr)))));
         quant_output = std::dynamic_pointer_cast<QBuffer>(norm_output)->kernel().data<int8_t>();
-        if (params.qscheme == QScheme::Qint8PerChannelLastAxis) {
-            scales_ptr = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();   
-        }        
+        if (params.qscheme == QScheme::Qint8PerToken) {
+            scales_ptr = std::dynamic_pointer_cast<QBuffer>(norm_output)->scalesData<float>();
+        }
     }
 
     if (params.stride != 0) {

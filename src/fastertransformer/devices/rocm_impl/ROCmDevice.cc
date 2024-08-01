@@ -108,7 +108,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
 
     hipblasCreate(&hipblas_handle_);
     hipblasLtCreate(&hipblaslt_handle_);
-    
+
     hipblas_algo_map_.reset(new hipblasAlgoMap(GEMM_CONFIG));
     hipblas_mm_wrapper_.reset(new hipblasMMWrapper(hipblas_handle_,
                                                    hipblaslt_handle_,
@@ -307,7 +307,7 @@ LayernormOutput ROCmDevice::layernorm(const LayernormParams& params) {
 
     if (!params.is_inplace && params.qscheme == QScheme::NoQuantize) {
         norm_output = allocateBufferLike(*params.input);
-    } else if (params.qscheme == Qint8PerChannelLastAxis) {
+    } else if (params.qscheme == Qint8PerToken) {
         auto kernel = allocateBuffer({DataType::TYPE_INT8,
                                             {input->shape()},
                                             AllocationType::DEVICE},

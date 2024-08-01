@@ -189,7 +189,7 @@ protected:
                                                                     false,
                                                                     false,
                                                                     NormType::layernorm,
-                                                                    QScheme::Qint8PerChannelLastAxis));
+                                                                    QScheme::Qint8PerToken));
 
         auto scales = bufferToTensor(std::dynamic_pointer_cast<QBuffer>(testcase5_output.output)->scales());
         auto zeros = torch::zeros_like(scales);
@@ -200,4 +200,3 @@ protected:
     }
 
 };
-

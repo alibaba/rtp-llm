@@ -92,9 +92,9 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
             "cuda quantize only support 2D input.");
         // FT_LOG_INFO("invoke invokePerTokenQuantization");
         BufferPtr scales;
-        if (params.qscheme == QScheme::Qint8PerChannelLastAxis) {
+        if (params.qscheme == QScheme::Qint8PerToken) {
             scales = allocateBuffer(
-                {DataType::TYPE_FP32, {params.input.shape()[1]}, getMemAllocationType(params.input.where())},
+                {DataType::TYPE_FP32, {params.input.shape()[0]}, getMemAllocationType(params.input.where())},
                 {"scales"});
         } else if (params.qscheme == QScheme::Qint8PerTensor) {
             FT_CHECK_WITH_INFO(params.static_scale_reciprocal.has_value(), "static_scale_reciprocal should not be nullptr in Qint8PerTensor");
@@ -111,7 +111,7 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
                                     getMemAllocationType(params.input.where())},
                                     {"kernel"});
 
-        if (params.qscheme == QScheme::Qint8PerChannelLastAxis) {
+        if (params.qscheme == QScheme::Qint8PerToken) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.input.type(), invokePerTokenQuantization,
                                             kernel->data<int8_t>(),
                                             params.input.data(),
@@ -147,4 +147,3 @@ BufferPtr CudaDevice::quantize(const QuantizeParams& params) {
 }
 
 }   // namespace fastertransformer
-

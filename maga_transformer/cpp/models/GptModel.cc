@@ -249,7 +249,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     if (weights_.layers[0].post_layernorm && weights_.layers[0].post_layernorm->static_scale != nullptr) {
         qscheme = QScheme::Qint8PerTensor;
     } else if (weights_.layers[0].self_attention_weights.smoother_weight != nullptr) {
-        qscheme = QScheme::Qint8PerChannelLastAxis;
+        qscheme = QScheme::Qint8PerToken;
     }
 
     // pre layernorm

@@ -625,13 +625,13 @@ struct QuantizeParams {
         input(input),
         qtype(qtype),
         axis(axis),
-        qscheme(QScheme::Qint8PerChannelLastAxis),
+        qscheme(QScheme::Qint8PerToken),
         groupSize(64) {}
     QuantizeParams(const Buffer& input, DataType qtype, size_t axis, int64_t groupSize):
         input(input),
         qtype(qtype),
         axis(axis),
-        qscheme(QScheme::Qint8PerChannelLastAxis),
+        qscheme(QScheme::Qint8PerToken),
         groupSize(groupSize) {}
 };
 
