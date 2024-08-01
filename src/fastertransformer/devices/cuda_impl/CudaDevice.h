@@ -33,6 +33,7 @@ public:
 
     void syncAndCheck() override;
     void syncCommunication(bool timeout = true) override;
+    FMHAType checkAndSetFMHA(const FMHAParams& params) override;
 
 private:
     void checkUseOpenSourceFMHA();
@@ -99,10 +100,12 @@ private:
 
     std::unique_ptr<cufmha> cufmha_runner_;
     std::unique_ptr<cuggemm> cuggemm_runner_;
-    bool use_trtv1_fmha         = false;
-    bool use_trtv2_fmha         = false;
-    bool use_openSource_fmha    = false;
-    bool use_multi_block_mode   = false;
+    bool use_trtv1_fmha             = false;
+    bool use_trtv2_fmha             = false;
+    bool use_trtv2_fmha_paged       = false;
+    bool use_open_source_fmha       = false;
+    bool use_open_source_fmha_paged = false;
+    bool use_multi_block_mode       = false;
 
     std::unique_ptr<tensorrt_llm::kernels::CutlassMoeFCRunnerInterface> moe_runner_;
 };

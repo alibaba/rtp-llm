@@ -29,7 +29,6 @@ private:
 
     ft::DataType                                dtype_               = ft::DataType::TYPE_FP16 ;
     bool                                        is_causal_           = true;
-    bool                                        need_attention_mask_ = false;
 };
 
 }  // namespace rtp_llm

@@ -3,6 +3,7 @@
 #include "src/fastertransformer/devices/DeviceOps.h"
 #include "src/fastertransformer/devices/DeviceData.h"
 #include "src/fastertransformer/devices/BufferManager.h"
+#include "src/fastertransformer/devices/OpData.h"
 
 namespace fastertransformer {
 
@@ -24,6 +25,7 @@ public:
                                  const BufferHints& hints = {});
     virtual void syncAndCheck();
     virtual void syncCommunication(bool timeout = true);
+    virtual FMHAType checkAndSetFMHA(const FMHAParams& params);
 
 public:
     // device-independence op implementations
@@ -34,6 +36,7 @@ public:
     FfnLayerOutput ffnLayer(const FfnLayerParams& params) override;
     LoraLinearOutput loraLinear(const LoraLinearParams& params) override;
     LossOutput loss(const LossParams& params) override;
+    MaskOutput attentionMask(const MaskParams& params) override;
 
 protected:
     BufferStatus queryBufferStatus();

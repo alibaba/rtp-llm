@@ -5,6 +5,7 @@
 #include "src/fastertransformer/cuda/nccl/nccl_utils_torch.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/core/TrackerAllocator.h"
+#include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/cuda/torch_cuda_allocator.h"
@@ -172,9 +173,35 @@ DeviceProperties CudaDevice::getDeviceProperties() {
         prop->id = device_id_;
         prop->tp_rank = nccl_param_.rank_;
         prop->tp_size = nccl_param_.world_size_;
-        prop->attention_need_mask = !(use_openSource_fmha || use_trtv1_fmha || use_trtv2_fmha);
     }
     return *prop;
+}
+
+FMHAType CudaDevice::checkAndSetFMHA(const FMHAParams& params) {
+    cufmha_runner_->setup(params.dtype,
+                          params.configs.mask_type,
+                          params.configs.head_num,
+                          params.configs.kv_head_num,
+                          params.configs.size_per_head,
+                          params.configs.q_scaling,
+                          params.has_alibi_slopes);
+    if (params.diff_qkv_len && params.has_kv_cache && !params.int8_kv_cache && !params.sprase_head) {
+        if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaSupport()) {
+            return FMHAType::PAGED_TRT_V2;
+        } else if (use_open_source_fmha_paged && cufmha_runner_->openSourceFmhaSupport()
+                   && params.configs.tokens_per_block % 256 == 0) {
+            return FMHAType::PAGED_OPEN_SOURCE;
+        }
+    } else if (!params.diff_qkv_len) {
+        if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
+            return FMHAType::TRT_V2;
+        } else if (use_open_source_fmha && cufmha_runner_->openSourceFmhaSupport()) {
+            return FMHAType::OPEN_SOURCE;
+        } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport()) {
+            return FMHAType::TRT_V1;
+        }
+    }
+    return FMHAType::NONE;
 }
 
 void CudaDevice::checkUseOpenSourceFMHA() {
@@ -183,7 +210,6 @@ void CudaDevice::checkUseOpenSourceFMHA() {
         return;
     }
 
-
     char* fmha_env = std::getenv("ENABLE_OPENSOURCE_FMHA");
     if (fmha_env && std::string(fmha_env) == "OFF") {
         FT_LOG_WARNING("opensource FMHA is disabled for by env");
@@ -191,7 +217,14 @@ void CudaDevice::checkUseOpenSourceFMHA() {
     }
 
     FT_LOG_INFO("use opensource fmha");
-    use_openSource_fmha = true;
+    use_open_source_fmha = true;
+    char* paged_fmha_env = std::getenv("ENABLE_PAGED_OPEN_SOURCE_FMHA");
+    if (paged_fmha_env && std::string(paged_fmha_env) == "OFF") {
+        FT_LOG_INFO("Paged open source FMHA is disabled for by ENABLE_PAGED_TRT_FMHA=OFF env");
+        return;
+    }
+    FT_LOG_INFO("use opensource fmha paged");
+    use_open_source_fmha_paged = true;
 }
 
 void CudaDevice::checkUseTrtV1FMHA() {
@@ -223,6 +256,17 @@ void CudaDevice::checkUseTrtV2FMHA() {
     }
     FT_LOG_INFO("use TRTV2 fmha");
     use_trtv2_fmha = true;
+    if (!(is_sm8x() || is_sm90())) {
+        FT_LOG_INFO("Paged TRT FMHA is disabled for sm %d", get_sm());
+        return;
+    }
+    char* paged_fmha_env = std::getenv("ENABLE_PAGED_TRT_FMHA");
+    if (paged_fmha_env && std::string(paged_fmha_env) == "OFF") {
+        FT_LOG_INFO("Paged TRT FMHA is disabled for by ENABLE_PAGED_TRT_FMHA=OFF env");
+        return;
+    }
+    FT_LOG_INFO("use TRTV2 fmha paged");
+    use_trtv2_fmha_paged = true;
 }
 
 void CudaDevice::checkUseMultiBlockMode() {

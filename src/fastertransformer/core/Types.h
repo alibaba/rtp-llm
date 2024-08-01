@@ -11,7 +11,6 @@ enum AttentionMaskType {
     // ones matrix, for bert model.
     noMask,
     causalMask,
-    promptMask,
 };
 
 typedef enum memorytype_enum {
@@ -85,4 +84,3 @@ size_t getTypeSize(DataType type);
 size_t getTypeBits(DataType type);
 
 } // namespace fastertransformer
-

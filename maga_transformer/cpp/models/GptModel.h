@@ -128,7 +128,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] = inputs.multimodal_features.has_value() ? inputs.multimodal_features.value().size() : 0;
     shape_hints_ptr[GptModelInputIndex::mmFeaturesSize] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? inputs.multimodal_features.value()[0]->shape()[1] : 0;
     shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? (std::uint8_t)inputs.multimodal_features.value()[0]->type() : 0;
-    
+
     device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
     device->syncAndCheck();
@@ -138,7 +138,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     int32_t* mm_features_shape_ptr = nullptr;
     const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
     if (mm_features_num) {
-        mm_features_shape = 
+        mm_features_shape =
             device->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesNum]}, ft::AllocationType::HOST});
         mm_features_shape_ptr = mm_features_shape->data<int32_t>();
         for (auto i = 0; i < mm_features_num; ++i) {
@@ -189,8 +189,8 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
             for (auto mm_index = 0; mm_index < mm_features_num; ++mm_index) {
                 mm_features.emplace_back(
                     device->allocateBuffer(
-                        {(ft::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype], 
-                         {(size_t)mm_features_shape_ptr[mm_index], (size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]}, 
+                        {(ft::DataType)shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype],
+                         {(size_t)mm_features_shape_ptr[mm_index], (size_t)shape_hints_ptr[GptModelInputIndex::mmFeaturesSize]},
                          ft::AllocationType::HOST}));
             }
             inputs.multimodal_features = std::move(mm_features);
@@ -247,7 +247,10 @@ public:
     void removeLoRA(const int64_t lora_id);
 
 private:
-    void prepareAttentionInputs(const GptModelInputs& inputs, ft::AttentionCommonInputs& attention_inputs);
+    void prepareAttentionInputs(
+            const GptModelInputs& inputs,
+            ft::DataType dtype,
+            ft::AttentionCommonInputs& attention_inputs);
     ft::BufferPtr tpSyncEmbeddingOrLogits(const ft::BufferPtr& buffer);
 
 private:

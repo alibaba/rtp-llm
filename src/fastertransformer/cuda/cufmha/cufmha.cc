@@ -80,7 +80,8 @@ bool cufmha::trtV2FmhaSupport() {
 
     return trtv2_fmha_runner_->fmha_supported() &&
            (mtype_ == AttentionMaskType::causalMask ||
-            mtype_ == AttentionMaskType::noMask);
+            mtype_ == AttentionMaskType::noMask) &&
+        !(mtype_ == AttentionMaskType::noMask && use_linear_bias_slopes_);
 }
 
 bool cufmha::openSourceFmhaSupport()

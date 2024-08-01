@@ -1,3 +1,4 @@
+#include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 
 #define private public
@@ -150,11 +151,13 @@ TEST_F(GptModelTest, testSimple) {
 }
 
 TEST_F(GptModelTest, testAttentionInputs) {
+    auto dtype = ft::DataType::TYPE_FP16;
     GptModelDescription description;
     Weights weights;
     auto model = createGptModel({device_, weights, description});
     GptModelInputs inputs;
     inputs.input_lengths = createBuffer<int32_t>({4}, {3, 5, 2, 7}, AllocationType::HOST);
+    inputs.prefix_lengths = createBuffer<int32_t>({4}, {0, 0, 0, 0}, AllocationType::HOST);
     inputs.sequence_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
     inputs.combo_tokens = createBuffer<int32_t>({17}, std::vector<int32_t>(17, 0), AllocationType::HOST);
     AttentionCommonInputs attention_inputs({
@@ -164,7 +167,7 @@ TEST_F(GptModelTest, testAttentionInputs) {
 
     {
         device_->syncAndCheck();
-        model->prepareAttentionInputs(inputs, attention_inputs);
+        model->prepareAttentionInputs(inputs, dtype, attention_inputs);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
@@ -178,10 +181,11 @@ TEST_F(GptModelTest, testAttentionInputs) {
     }
 
     inputs.sequence_lengths = createBuffer<int32_t>({3}, {4, 19, 23}, AllocationType::HOST);
+    inputs.prefix_lengths = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
     inputs.combo_tokens = createBuffer<int32_t>({10}, std::vector<int32_t>(10, 0), AllocationType::HOST);
     {
         device_->syncAndCheck();
-        model->prepareAttentionInputs(inputs, attention_inputs);
+        model->prepareAttentionInputs(inputs, dtype, attention_inputs);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);
@@ -195,10 +199,11 @@ TEST_F(GptModelTest, testAttentionInputs) {
     }
 
     inputs.sequence_lengths = createBuffer<int32_t>({2}, {4, 6}, AllocationType::HOST);
+    inputs.prefix_lengths = createBuffer<int32_t>({2}, {0, 0}, AllocationType::HOST);
     inputs.combo_tokens = createBuffer<int32_t>({11}, std::vector<int32_t>(11, 0), AllocationType::HOST);
     {
         device_->syncAndCheck();
-        model->prepareAttentionInputs(inputs, attention_inputs);
+        model->prepareAttentionInputs(inputs, dtype, attention_inputs);
         device_->syncAndCheck();
         printBuffer<int32_t>(*attention_inputs.cu_seqlens);
         printBuffer<int32_t>(*attention_inputs.padding_offset);

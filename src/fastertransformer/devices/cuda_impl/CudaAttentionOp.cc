@@ -1,3 +1,4 @@
+#include "src/fastertransformer/devices/OpData.h"
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
@@ -90,6 +91,154 @@ void writeContextKvCache(
         stream);
 }
 
+void MHA(const AttentionModuleParams& params,
+         cufmha*                      cufmha_runner,
+         KVBlockArray                 kv_block_array,
+         const BufferPtr&             q_output,
+         const BufferPtr&             k_output,
+         const BufferPtr&             v_output,
+         cudaStream_t                 stream,
+         DeviceBase*                  device) {
+    FT_LOG_DEBUG("FMHA Type use %s.", std::to_string((int)params.common.fmha_type).c_str());
+    auto datatype            = params.input.type();
+    auto token_num           = params.input.shape()[0];
+    auto batch_size          = params.common.context_batch_size;
+    auto seq_len             = params.common.context_max_seq_len;
+    auto seq_len_with_prefix = seq_len + params.common.max_prefix_length;
+    auto head_num            = params.configs.head_num;
+    auto kv_head_num         = params.configs.kv_head_num;
+    auto size_per_head       = params.configs.size_per_head;
+    switch (params.common.fmha_type) {
+        case FMHAType::PAGED_TRT_V2: {
+            cufmha_runner->runTrtV2FmhaPaged(q_output->data(),
+                                             params.common.cu_seqlens->data(),
+                                             params.common.cu_kv_seqlens->data(),
+                                             params.output.data(),
+                                             batch_size,
+                                             seq_len,
+                                             seq_len_with_prefix,
+                                             token_num,
+                                             kv_block_array,
+                                             false,
+                                             false,
+                                             params.common.linear_bias_slopes != nullptr,
+                                             false);
+            break;
+        }
+        case FMHAType::TRT_V2: {
+            cufmha_runner->runTrtV2Fmha(params.input.data(),
+                                        params.common.cu_seqlens->data(),
+                                        params.output.data(),
+                                        batch_size,
+                                        seq_len,
+                                        token_num,
+                                        false,
+                                        false,
+                                        params.common.linear_bias_slopes != nullptr,
+                                        false);
+            break;
+        }
+        case FMHAType::PAGED_OPEN_SOURCE: {
+            const size_t max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
+            const auto   ws_size              = cufmha_runner->getOpenSourceWorkSpaceSize(
+                batch_size, seq_len, max_blocks_per_batch * params.configs.tokens_per_block, true);
+            auto ws = device->allocateBuffer({DataType::TYPE_INT8, {ws_size}, AllocationType::DEVICE},
+                                             {"open_source_paged_fmha_ws"});
+            cufmha_runner->runOpenSourceFmhaPaged(
+                params.input.data(),
+                params.common.kv_cache->k_cache_buffer->data(),
+                params.common.kv_cache->v_cache_buffer->data(),
+                params.output.data(),
+                params.common.cu_seqlens->data<int>(),
+                params.common.cu_kv_seqlens->data<int>(),
+                params.common.kv_cache->kv_cache_offset->data<int>(),
+                batch_size,
+                max_blocks_per_batch,
+                params.configs.tokens_per_block,
+                seq_len,
+                ws->data(),
+                params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr);
+            break;
+        }
+        case FMHAType::OPEN_SOURCE: {
+            const auto   ws_size      = cufmha_runner->getOpenSourceWorkSpaceSize(batch_size, seq_len);
+            auto         ws           = device->allocateBuffer({DataType::TYPE_INT8, {ws_size}, AllocationType::DEVICE},
+                                                               {"open_source_fmha_ws"});
+            const size_t hidden_units = head_num * size_per_head;
+            const size_t hidden_units_kv = kv_head_num * size_per_head;
+            cufmha_runner->runOpenSourceFmha(
+                params.input.data(),
+                params.input.dataWithOffset(hidden_units),
+                params.input.dataWithOffset(hidden_units + hidden_units_kv),
+                params.output.data(),
+                params.common.cu_seqlens->data<int>(),
+                batch_size,
+                seq_len,
+                ws->data(),
+                params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>() : nullptr);
+            break;
+        }
+        case FMHAType::TRT_V1: {
+            auto qkv_buf_temp = device->allocateBuffer(
+                {datatype, {token_num, head_num + 2 * kv_head_num, size_per_head}, AllocationType::DEVICE},
+                {"qkv_buf_temp"});
+            cufmha_runner->runTrtV1Fmha(params.input.data(),
+                                        params.common.cu_seqlens->data(),
+                                        params.output.data(),
+                                        qkv_buf_temp->data(),
+                                        batch_size,
+                                        seq_len,
+                                        token_num);
+            break;
+        }
+        default: {
+            q_output->updateShape({batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, size_per_head});
+            auto qk_output = device->gemm({*q_output,
+                                           *k_output,
+                                           std::nullopt,
+                                           nullptr,
+                                           DataType::TYPE_FP32,
+                                           TransposeOperation::NONE,
+                                           TransposeOperation::TRANSPOSE});
+            qk_output->updateShape({batch_size, head_num, seq_len, seq_len_with_prefix});
+            printBufferData(*qk_output, "qk_output: ");
+            float scale = (1.0f / sqrtf(size_per_head * 1.0f));
+            // TODO(lidongjin): Only support float32(in)\float16(output).
+            auto softmax_type = qk_output->type();
+            RUNTIME_ASSERT_OP_ARG(params.common.attention_mask,
+                                  "attention_mask must be provided for default context attention implementation");
+            auto softmax_qk_output = device->softmax({std::move(qk_output),
+                                                      *params.common.attention_mask,
+                                                      std::nullopt,
+                                                      scale,
+                                                      datatype,
+                                                      params.common.linear_bias_slopes ?
+                                                          (OptionalConstBufferRef)*params.common.linear_bias_slopes :
+                                                          std::nullopt});
+            softmax_qk_output->updateShape(
+                {batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, seq_len_with_prefix});
+            printBufferData(*softmax_qk_output, "softmax_qk_output: ");
+            auto qkv_output = device->gemm({*softmax_qk_output, *v_output});
+            qkv_output->updateShape({batch_size, head_num, seq_len, size_per_head});
+            printBufferData(*qkv_output, "qkv_output");
+            auto& qkv_transpose_output = params.output;
+            DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
+                                             invokeTransposeAttentionOutRemovePadding,
+                                             qkv_output->data(),
+                                             qkv_transpose_output.data(),
+                                             token_num,
+                                             batch_size,
+                                             seq_len,
+                                             head_num,
+                                             size_per_head,
+                                             params.common.padding_offset->data<int>(),
+                                             nullptr,
+                                             0,
+                                             stream);
+        }
+    }
+}
+
 AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& params) {
     auto datatype       = params.input.type();
     auto token_num      = params.input.shape()[0];
@@ -117,7 +266,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                     {"v_output"});
 
     // allocate qkv should be better
-    if (!use_trtv1_fmha && !use_trtv2_fmha && !use_openSource_fmha) {
+    if (params.common.fmha_type == FMHAType::NONE) {
         cudaMemsetAsync(q_output->data(), 0, q_output->sizeBytes(), stream_);
         cudaMemsetAsync(k_output->data(), 0, k_output->sizeBytes(), stream_);
         cudaMemsetAsync(v_output->data(), 0, v_output->sizeBytes(), stream_);
@@ -170,7 +319,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         params.configs.use_logn_attn,
         scale_out_ptr,
         int8_mode,
-        params.common.max_prefix_length && use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport(),
+        params.common.fmha_type == FMHAType::PAGED_TRT_V2,
         stream_
     );
     sync_check_cuda_error();
@@ -187,149 +336,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                 stream_);
         sync_check_cuda_error();
     }
-
-    cufmha_runner_->setup(datatype,
-                          params.configs.mask_type,
-                          head_num,
-                          kv_head_num,
-                          size_per_head,
-                          params.configs.q_scaling,
-                          params.common.linear_bias_slopes != nullptr);
-    if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
-        if (params.common.max_prefix_length) {
-            cufmha_runner_->runTrtV2FmhaPaged(q_output->data(),
-                                              params.common.cu_seqlens->data(),
-                                              params.common.cu_kv_seqlens->data(),
-                                              params.output.data(),
-                                              batch_size,
-                                              seq_len,
-                                              seq_len_with_prefix,
-                                              token_num,
-                                              kv_block_array,
-                                              false,
-                                              false,
-                                              params.common.linear_bias_slopes != nullptr,
-                                              false);
-        } else {
-            cufmha_runner_->runTrtV2Fmha(params.input.data(),
-                                         params.common.cu_seqlens->data(),
-                                         params.output.data(),
-                                         batch_size,
-                                         seq_len,
-                                         token_num,
-                                         false,
-                                         false,
-                                         params.common.linear_bias_slopes != nullptr,
-                                         false);
-        }
-        return;
-    } else if (use_openSource_fmha && cufmha_runner_->openSourceFmhaSupport()
-               && (params.common.max_prefix_length ==0 || params.configs.tokens_per_block % 256 == 0)) {
-        if (params.common.max_prefix_length) {
-            const size_t max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
-            const auto ws_size = cufmha_runner_->getOpenSourceWorkSpaceSize(
-                    batch_size, seq_len, max_blocks_per_batch * params.configs.tokens_per_block, true);
-            auto ws = allocateBuffer({DataType::TYPE_INT8,
-                                      {ws_size},
-                                      AllocationType::DEVICE},
-                {"open_source_paged_fmha_ws"});
-            cufmha_runner_->runOpenSourceFmhaPaged(params.input.data(),
-                                                   params.common.kv_cache->k_cache_buffer->data(),
-                                                   params.common.kv_cache->v_cache_buffer->data(),
-                                                   params.output.data(),
-                                                   params.common.cu_seqlens->data<int>(),
-                                                   params.common.cu_kv_seqlens->data<int>(),
-                                                   params.common.kv_cache->kv_cache_offset->data<int>(),
-                                                   batch_size,
-                                                   max_blocks_per_batch,
-                                                   params.configs.tokens_per_block,
-                                                   seq_len,
-                                                   ws->data(),
-                                                   params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>(): nullptr);
-        } else {
-            const auto ws_size = cufmha_runner_->getOpenSourceWorkSpaceSize(batch_size, seq_len);
-            auto ws = allocateBuffer({DataType::TYPE_INT8,
-                                      {ws_size},
-                                      AllocationType::DEVICE},
-                {"open_source_fmha_ws"});
-            const size_t hidden_units = head_num * size_per_head;
-            const size_t hidden_units_kv = kv_head_num * size_per_head;
-            cufmha_runner_->runOpenSourceFmha(params.input.data(),
-                                              params.input.dataWithOffset(hidden_units),
-                                              params.input.dataWithOffset(hidden_units + hidden_units_kv),
-                                              params.output.data(),
-                                              params.common.cu_seqlens->data<int>(),
-                                              batch_size,
-                                              seq_len,
-                                              ws->data(),
-                                              params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data<float>(): nullptr);
-        }
-        return;
-    } else if (use_trtv1_fmha && cufmha_runner_->trtV1FmhaSupport() && params.common.max_prefix_length == 0) {
-
-        auto qkv_buf_temp  = allocateBuffer({datatype,
-                                            {token_num, head_num + 2 * kv_head_num, size_per_head},
-                                             AllocationType::DEVICE},
-                                            {"qkv_buf_temp"});
-
-        cufmha_runner_->runTrtV1Fmha(params.input.data(),
-                                     params.common.cu_seqlens->data(),
-                                     params.output.data(),
-                                     qkv_buf_temp->data(),
-                                     batch_size,
-                                     seq_len,
-                                     token_num);
-        return;
-    } else {
-        q_output->updateShape({batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, size_per_head});
-        auto qk_output = gemm({*q_output,
-                               *k_output,
-                               std::nullopt,
-                               nullptr,
-                               DataType::TYPE_FP32,
-                               TransposeOperation::NONE,
-                               TransposeOperation::TRANSPOSE});
-        qk_output->updateShape({batch_size, head_num, seq_len, seq_len_with_prefix});
-        printBufferData(*qk_output, "qk_output: ");
-
-        float scale = (1.0f / sqrtf(size_per_head * 1.0f));
-
-        // TODO(lidongjin): Only support float32(in)\float16(output).
-        auto softmax_type = qk_output->type();
-        RUNTIME_ASSERT_OP_ARG(
-            params.common.attention_mask,
-            "attention_mask must be provided for default context attention implementation");
-        auto softmax_qk_output =
-            softmax({std::move(qk_output),
-                     *params.common.attention_mask,
-                     std::nullopt,
-                     scale,
-                     datatype,
-                     params.common.linear_bias_slopes ? (OptionalConstBufferRef)*params.common.linear_bias_slopes :
-                                                        std::nullopt});
-        softmax_qk_output->updateShape({batch_size, kv_head_num, (head_num / kv_head_num) * seq_len, seq_len_with_prefix});
-        printBufferData(*softmax_qk_output, "softmax_qk_output: ");
-
-        auto qkv_output = gemm({*softmax_qk_output, *v_output});
-        qkv_output->updateShape({batch_size, head_num, seq_len, size_per_head});
-        printBufferData(*qkv_output, "qkv_output");
-
-        auto &qkv_transpose_output = params.output;
-
-        DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, invokeTransposeAttentionOutRemovePadding,
-            qkv_output->data(),
-            qkv_transpose_output.data(),
-            token_num,
-            batch_size,
-            seq_len,
-            head_num,
-            size_per_head,
-            params.common.padding_offset->data<int>(),
-            nullptr,
-            0,
-            stream_);
-    }
-
+    MHA(params, cufmha_runner_.get(), kv_block_array, q_output, k_output, v_output, stream_, this);
 }
 
 template<typename T>
@@ -364,7 +371,6 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     // prefix prompt
 
     auto prefix_lengths = params.common.prefix_prompt_lengths ? params.common.prefix_prompt_lengths->data<int>() : nullptr;
-    auto max_prefix_length = params.common.max_prefix_length;
 
     const auto* input_lengths = params.common.input_lengths.data<int>();
     const auto* sequence_lengths = params.common.sequence_lengths.data<int>();

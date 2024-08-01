@@ -19,6 +19,15 @@
 
 namespace fastertransformer {
 
+enum class FMHAType {
+    NONE,
+    PAGED_TRT_V2,
+    TRT_V2,
+    PAGED_OPEN_SOURCE,
+    OPEN_SOURCE,
+    TRT_V1
+};
+
 enum class OpErrorType {
     ERROR_NONE,
     ERROR_INVALID_ARGS,
@@ -76,6 +85,8 @@ using OptionalConstLoraMapRef    = std::optional<std::reference_wrapper<const Lo
 
 
 using CloneOutput = BufferPtr;
+
+
 
 struct CloneParams {
     CloneParams(const Buffer& input,
@@ -146,7 +157,7 @@ struct LayernormParams {
                     double eps = 1e-5,
                     bool is_inplace = true,
                     bool return_normed_output = false,
-                    NormType norm_type = NormType::layernorm,                    
+                    NormType norm_type = NormType::layernorm,
                     QScheme qscheme = QScheme::NoQuantize) :
                     input(std::move(input)),
                     before_norm_output(std::move(before_norm_output)),
@@ -347,7 +358,7 @@ struct AttentionCommonInputs {
     ConstBufferPtr linear_bias_slopes;
     BufferPtr prefix_prompt_lengths;
     int32_t   max_prefix_length;
-
+    FMHAType          fmha_type  = FMHAType::NONE;
     OptionalLoraInput lora_input = std::nullopt;
 };
 
@@ -542,6 +553,26 @@ struct LossParams {
 };
 
 using LossOutput = BufferPtr;
+
+struct MaskParams {
+public:
+    const Buffer& input_lengths;
+    const Buffer& prefix_lengths;
+    DataType      dtype;
+    bool          is_causal;
+};
+
+using MaskOutput = BufferPtr;
+
+struct FMHAParams {
+    const AttentionConfigs& configs;
+    DataType dtype;
+    bool has_kv_cache     = true;
+    bool diff_qkv_len     = false;
+    bool int8_kv_cache    = false;
+    bool has_alibi_slopes = false;
+    bool sprase_head      = false;
+};
 
 struct LoraLinearOutput {
     BufferPtr output;

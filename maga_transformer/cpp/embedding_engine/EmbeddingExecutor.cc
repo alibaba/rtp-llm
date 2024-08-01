@@ -23,7 +23,6 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, ft::DeviceB
     params_(params.gpt_init_parameter)
 {
     model_.reset(new GptModel({device_, params.gpt_weights, Executor::genModelDescription(params_)}));
-    need_attention_mask_ = device_->getDeviceProperties().attention_need_mask;
     init_position_ids(params_.max_seq_len_);
 }
 
@@ -84,10 +83,6 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         token_idx += length;
     }
     size_t max_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
-    if (need_attention_mask_) {
-        // 只有context请求，没有decode请求，所以直接使用input和prefix length，不需要像normal一样view
-        model_input.attention_mask = NormalBatchStreamProcessor::createAttentionMask({*model_input.input_lengths, *model_input.prefix_lengths, ft::getDataType(params_.data_type_), params_.is_causal_, device_});
-    }
     reportMetrics(batch_size, token_num, max_seq_len);
     return model_input;
 }

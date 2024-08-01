@@ -3,6 +3,7 @@
 #include "c10/util/Optional.h"
 #include "src/fastertransformer/core/TrackerAllocator.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "src/fastertransformer/devices/OpData.h"
 #include "torch/extension.h"
 #include "torch/types.h"
 #include <numeric>
@@ -64,6 +65,10 @@ BufferPtr DeviceBase::allocateBufferLike(const Buffer& buffer,
 
 void DeviceBase::syncAndCheck() {
     return;
+}
+
+FMHAType DeviceBase::checkAndSetFMHA(const FMHAParams& params) {
+    return FMHAType::NONE;
 }
 
 void DeviceBase::syncCommunication(bool timeout) {
@@ -174,6 +179,38 @@ LossOutput DeviceBase::loss(const LossParams& params) {
         RUNTIME_ASSERT_OP_ARG(false, "calculate_loss not support %d.", params.calculate_loss);
     }
     return clone({*torchTensor2Buffer(output)});
+}
+
+MaskOutput DeviceBase::attentionMask(const MaskParams& params) {
+    const int *input_lengths = params.input_lengths.data<int32_t>();
+    const int batch_size = params.input_lengths.size();
+    const int max_input_seq_len = *std::max_element(input_lengths, input_lengths + batch_size);
+    const auto torch_type = dataTypeToTorchType(params.dtype);
+    auto tensor_options = torch::TensorOptions(torch::kBool).device(torch::Device(torch::kCPU));
+    auto attention_mask = torch::ones({(int)max_input_seq_len, (int)max_input_seq_len}, tensor_options);
+    if (params.is_causal) {
+        attention_mask = attention_mask.tril();
+    }
+    attention_mask = attention_mask.unsqueeze_(0).tile({(int)batch_size, 1, 1}).to(torch_type);
+    for (int i = 0; i < batch_size; ++i) {
+        attention_mask[i].slice(0, input_lengths[i], max_input_seq_len) = 0;
+        if (!params.is_causal) {
+            attention_mask[i].slice(1, input_lengths[i], max_input_seq_len) = 0;
+        }
+    }
+    if (params.prefix_lengths.size()) {
+        FT_CHECK(int(params.prefix_lengths.size()) == batch_size);
+        const int *prefix_lengths = params.prefix_lengths.data<int32_t>();
+        auto max_reuse_length = *std::max_element(prefix_lengths, prefix_lengths + batch_size);
+        attention_mask = torch::cat({attention_mask, torch::zeros({(int)batch_size, max_input_seq_len, max_reuse_length}).to(torch_type)}, -1);
+        if (max_reuse_length) {
+            for (int i = 0; i < batch_size; ++i) {
+                attention_mask[i] = attention_mask[i].roll({prefix_lengths[i]}, {-1});
+                attention_mask[i].slice(0, 0, input_lengths[i]).slice(1, 0, prefix_lengths[i]) = 1;
+            }
+        }
+    }
+    return clone({*torchTensor2Buffer(attention_mask)});
 }
 
 } // namespace fastertransformer

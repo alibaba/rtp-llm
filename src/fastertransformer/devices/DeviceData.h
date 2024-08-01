@@ -47,8 +47,6 @@ struct DeviceProperties {
     // xfastertransformer fuses adding residual in their layer implementation.
     bool attn_fuse_add_residual = false;
     bool ffn_fuse_add_residual  = false;
-
-    bool attention_need_mask    = true;
 };
 
 struct MemoryStatus {

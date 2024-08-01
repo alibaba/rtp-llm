@@ -70,6 +70,10 @@ LossOutput DeviceOps::loss(const LossParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+MaskOutput DeviceOps::attentionMask(const MaskParams& params) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 AttentionModuleOutput DeviceOps::contextAttention(const AttentionModuleParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }

@@ -26,7 +26,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params, const std::shared
 
     model_.reset(new GptModel({device_, params.gpt_weights, genModelDescription(params.gpt_init_parameter)}));
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.gpt_init_parameter));
-    need_attention_mask_ = device_->getDeviceProperties().attention_need_mask;
 }
 
 
@@ -56,14 +55,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     model_input.v_cache_buffer = kv_cache_buffer.v_blocks;
     model_input.k_scale_buffer = kv_cache_buffer.k_scale;
     model_input.v_scale_buffer = kv_cache_buffer.v_scale;
-    if (need_attention_mask_ && model_input.input_lengths->size() > model_input.sequence_lengths->size()) {
-        const auto generate_batch_size = model_input.sequence_lengths->size();
-        const auto context_batch_size = model_input.input_lengths->size() - generate_batch_size;
-        model_input.attention_mask = NormalBatchStreamProcessor::createAttentionMask({
-                model_input.input_lengths->view(generate_batch_size, context_batch_size),
-                *model_input.prefix_lengths,
-                dtype_, is_causal_, device_});
-    }
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto            merged_output = std::make_unique<MergedOutput>();
     GptModelOutputs model_output;

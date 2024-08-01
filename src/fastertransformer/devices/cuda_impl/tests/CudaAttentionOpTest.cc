@@ -64,7 +64,7 @@ TEST_F(AttentionOpTest, ContextAttentionOpTest) {
     device_ = new CudaDevice(DeviceInitParams());
     device_->init();
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
-    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_openSource_fmha);
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_open_source_fmha);
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv1_fmha);
     std::vector<size_t> batch = {1, 2, 4, 8};
     std::vector<size_t> seq   = {1, 10, 20, 30};
@@ -90,7 +90,7 @@ TEST_F(AttentionOpTest, ContextAttentionOpMultiGroupTest) {
     device_ = new CudaDevice(DeviceInitParams());
     device_->init();
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
-    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_openSource_fmha);
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_open_source_fmha);
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv1_fmha);
     std::vector<size_t> batch = {1, 2, 4, 8};
     std::vector<size_t> seq   = {1, 10, 20, 30};
@@ -117,7 +117,7 @@ TEST_F(AttentionOpTest, OpenSourceFMHAContextAttentionOpTest) {
     device_->init();
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv1_fmha);
-    ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_openSource_fmha);
+    ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_open_source_fmha);
 
     std::vector<size_t> batch = {1, 2, 4, 8};
     std::vector<size_t> seq   = {1, 10, 20, 30};
@@ -145,7 +145,7 @@ TEST_F(AttentionOpTest, TrtV2ContextAttentionOpTest) {
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv1_fmha);
-    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_openSource_fmha);
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_open_source_fmha);
 
     std::vector<size_t> batch = {1, 2, 4, 8};
     std::vector<size_t> seq   = {1, 10, 20, 30};
@@ -172,7 +172,7 @@ TEST_F(AttentionOpTest, TrtV1ContextAttentionOpTest) {
     device_->init();
     ASSERT_TRUE(static_cast<CudaDevice*>(device_)->use_trtv1_fmha);
     ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_trtv2_fmha);
-    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_openSource_fmha);
+    ASSERT_TRUE(!static_cast<CudaDevice*>(device_)->use_open_source_fmha);
 
     std::vector<size_t> batch = {1, 2, 4, 8};
     std::vector<size_t> seq   = {1, 10, 20, 30};

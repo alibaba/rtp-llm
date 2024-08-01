@@ -76,6 +76,7 @@ BufferPtr GptModel::tpSyncEmbeddingOrLogits(const BufferPtr& buffer) {
 
 void GptModel::prepareAttentionInputs(
         const GptModelInputs& inputs,
+        ft::DataType dtype,
         AttentionCommonInputs& attention_inputs)
 {
     if (inputs.kv_cache_offset) {
@@ -144,7 +145,26 @@ void GptModel::prepareAttentionInputs(
     if (weights_.linear_bias_slopes) {
         attention_inputs.linear_bias_slopes = weights_.linear_bias_slopes->kernel;
     }
-    attention_inputs.attention_mask = inputs.attention_mask;
+    if (context_batch_size) {
+        attention_inputs.fmha_type = device_->checkAndSetFMHA({
+                description_.attention_conf,
+                dtype,
+                (bool)inputs.k_cache_buffer,
+                attention_inputs.max_prefix_length > 0,
+                (bool)inputs.k_scale_buffer,
+                (bool)weights_.linear_bias_slopes,
+                false // sparse head not support now
+            });
+        if (attention_inputs.fmha_type == ft::FMHAType::NONE) {
+            attention_inputs.attention_mask = device_->attentionMask({
+                    inputs.input_lengths->view(decoder_batch_size, context_batch_size),
+                    *inputs.prefix_lengths,
+                    dtype,
+                    description_.attention_conf.mask_type == ft::AttentionMaskType::causalMask
+                });
+        }
+    }
+
 }
 
 
@@ -190,9 +210,9 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     const auto& embedding_table = weights_.embedding->kernel;
 
     const BufferPtr combo_position_ids = inputs.combo_position_ids ? device_->clone({*inputs.combo_position_ids}): nullptr;
-    const BufferPtr combo_tokens_type_ids = inputs.combo_tokens_type_ids ? device_->clone({*inputs.combo_tokens_type_ids}): nullptr;    
+    const BufferPtr combo_tokens_type_ids = inputs.combo_tokens_type_ids ? device_->clone({*inputs.combo_tokens_type_ids}): nullptr;
 
-    const BufferPtr text_tokens_mask = inputs.multimodal_features ? 
+    const BufferPtr text_tokens_mask = inputs.multimodal_features ?
         device_->clone({*inputs.text_tokens_mask, AllocationType::DEVICE, {"text_tokens_mask"}}) : nullptr;
     const BufferPtr mm_feature_locs = inputs.mm_features_locs ? inputs.mm_features_locs: nullptr;
 
@@ -218,7 +238,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     if (inputs.multimodal_features) {
         hidden = device_->multimodalEmbedding({
                 hidden,
-                inputs.multimodal_features ? (OptionalConstVecBufferPtrRef)inputs.multimodal_features : nullopt, 
+                inputs.multimodal_features ? (OptionalConstVecBufferPtrRef)inputs.multimodal_features : nullopt,
                 mm_feature_locs ? (OptionalConstBufferRef)*mm_feature_locs: nullopt
         });
     }
@@ -231,13 +251,13 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         qscheme = QScheme::Qint8PerChannelLastAxis;
     }
 
-    // pre layernorm    
+    // pre layernorm
     BufferPtr pre_decoder_residual = nullptr;
     if (qscheme != QScheme::NoQuantize && weights_.pre_decoder_layernorm) {
         pre_decoder_residual = device_->allocateBufferLike(*hidden);
     }
     printBufferData(*hidden, "before decoder layernorm hidden");
-    if (weights_.pre_decoder_layernorm) {    
+    if (weights_.pre_decoder_layernorm) {
         auto decoder_input = device_->layernorm(LayernormParams(hidden,
                                                                 pre_decoder_residual,
                                                                 *weights_.pre_decoder_layernorm,
@@ -260,7 +280,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         *sequence_lengths
     });
 
-    prepareAttentionInputs(inputs, attention_common_inputs);
+    prepareAttentionInputs(inputs, dtype, attention_common_inputs);
     attention_common_inputs.lora_input = lora_input;
     attention_common_inputs.position_ids = combo_position_ids;
 
@@ -272,8 +292,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         // here hidden->dtype maybe int8, so use dytpe of embedding lookup result instead
         auto attn_out_buf = device_->allocateBuffer({dtype, hidden->shape()}, {"attn_out_buf"});
-        // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with 
-        // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by 
+        // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with
+        // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by
         // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
         attn_out_buf = device_->prepareAllReduce({std::move(attn_out_buf), ReduceOp::Sum}).buffer;
         auto residual = pre_decoder_residual ? pre_decoder_residual : hidden;
@@ -347,7 +367,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                 attn_hidden = std::move(post_layernorm_output.before_norm_output);
                 residual = attn_hidden;
             }
-            printBufferData(*residual, "post_layernorm_residual");    
+            printBufferData(*residual, "post_layernorm_residual");
         } else {
             residual2 = attn_hidden;
         }
@@ -376,8 +396,8 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
 
         printBufferData(*hidden, "layer_" + to_string(i) + "_ffn_input");
         auto ffn_output_buf = device_->allocateBuffer({dtype, hidden->shape()}, {"ffn_out_buf"});
-        // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with 
-        // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by 
+        // Note: for custom all reduce, prepareAllReduce will replace the original attn_out_buf with
+        // a new custom_ar_comm buffer. Here we must make sure that attn_out_buf is not released or replaced by
         // other buffer before the actual allreduce operations. Otherwise, it will raise an error in custom ar.
         ffn_output_buf = device_->prepareAllReduce({std::move(ffn_output_buf), ReduceOp::Sum}).buffer;
         auto ffn_output = device_->ffnLayer(FfnLayerParams({
@@ -405,7 +425,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                                        ft::mayGetRef(WEIGHT_MAY_GET_BIAS(layer.ffn_weights.down_weight)),
                                                                        1.0f,
                                                                        norm_eps,
-                                                                       true,                                                                       
+                                                                       true,
                                                                        description_.post_layernorm,
                                                                        norm_type,
                                                                        ((i == layer_num - 1) || (!layer.post_ffn_layernorm)) ? QScheme::NoQuantize: qscheme));
