@@ -19,15 +19,6 @@
 
 namespace fastertransformer {
 
-enum class FMHAType {
-    NONE,
-    PAGED_TRT_V2,
-    TRT_V2,
-    PAGED_OPEN_SOURCE,
-    OPEN_SOURCE,
-    TRT_V1
-};
-
 enum class OpErrorType {
     ERROR_NONE,
     ERROR_INVALID_ARGS,
@@ -358,7 +349,6 @@ struct AttentionCommonInputs {
     ConstBufferPtr linear_bias_slopes;
     BufferPtr prefix_prompt_lengths;
     int32_t   max_prefix_length;
-    FMHAType          fmha_type  = FMHAType::NONE;
     OptionalLoraInput lora_input = std::nullopt;
 };
 
@@ -564,14 +554,19 @@ public:
 
 using MaskOutput = BufferPtr;
 
-struct FMHAParams {
+struct DevicePrepParams {
     const AttentionConfigs& configs;
     DataType dtype;
+    size_t context_batch_size;
     bool has_kv_cache     = true;
     bool diff_qkv_len     = false;
     bool int8_kv_cache    = false;
     bool has_alibi_slopes = false;
     bool sprase_head      = false;
+};
+
+struct DevicePrepOutput {
+    bool need_mask = true;
 };
 
 struct LoraLinearOutput {

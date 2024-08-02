@@ -145,24 +145,25 @@ void GptModel::prepareAttentionInputs(
     if (weights_.linear_bias_slopes) {
         attention_inputs.linear_bias_slopes = weights_.linear_bias_slopes->kernel;
     }
-    if (context_batch_size) {
-        attention_inputs.fmha_type = device_->checkAndSetFMHA({
-                description_.attention_conf,
+
+    const auto prep_output = device_->prepareModelRun({
+            description_.attention_conf,
+            dtype,
+            context_batch_size,
+            (bool)inputs.k_cache_buffer,
+            attention_inputs.max_prefix_length > 0,
+            (bool)inputs.k_scale_buffer,
+            (bool)weights_.linear_bias_slopes,
+            false // sparse head not support now
+        });
+
+    if (context_batch_size && prep_output.need_mask) {
+        attention_inputs.attention_mask = device_->attentionMask({
+                inputs.input_lengths->view(decoder_batch_size, context_batch_size),
+                *inputs.prefix_lengths,
                 dtype,
-                (bool)inputs.k_cache_buffer,
-                attention_inputs.max_prefix_length > 0,
-                (bool)inputs.k_scale_buffer,
-                (bool)weights_.linear_bias_slopes,
-                false // sparse head not support now
+                description_.attention_conf.mask_type == ft::AttentionMaskType::causalMask
             });
-        if (attention_inputs.fmha_type == ft::FMHAType::NONE) {
-            attention_inputs.attention_mask = device_->attentionMask({
-                    inputs.input_lengths->view(decoder_batch_size, context_batch_size),
-                    *inputs.prefix_lengths,
-                    dtype,
-                    description_.attention_conf.mask_type == ft::AttentionMaskType::causalMask
-                });
-        }
     }
 
 }

@@ -67,8 +67,8 @@ void DeviceBase::syncAndCheck() {
     return;
 }
 
-FMHAType DeviceBase::checkAndSetFMHA(const FMHAParams& params) {
-    return FMHAType::NONE;
+DevicePrepOutput DeviceBase::prepareModelRun(const DevicePrepParams& params) {
+    return DevicePrepOutput();
 }
 
 void DeviceBase::syncCommunication(bool timeout) {

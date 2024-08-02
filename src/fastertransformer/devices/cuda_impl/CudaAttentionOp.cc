@@ -92,6 +92,7 @@ void writeContextKvCache(
 }
 
 void MHA(const AttentionModuleParams& params,
+         FMHAType                     fmha_type,
          cufmha*                      cufmha_runner,
          KVBlockArray                 kv_block_array,
          const BufferPtr&             q_output,
@@ -99,7 +100,7 @@ void MHA(const AttentionModuleParams& params,
          const BufferPtr&             v_output,
          cudaStream_t                 stream,
          DeviceBase*                  device) {
-    FT_LOG_DEBUG("FMHA Type use %s.", std::to_string((int)params.common.fmha_type).c_str());
+    FT_LOG_DEBUG("FMHA Type use %s.", std::to_string((int)fmha_type).c_str());
     auto datatype            = params.input.type();
     auto token_num           = params.input.shape()[0];
     auto batch_size          = params.common.context_batch_size;
@@ -108,7 +109,7 @@ void MHA(const AttentionModuleParams& params,
     auto head_num            = params.configs.head_num;
     auto kv_head_num         = params.configs.kv_head_num;
     auto size_per_head       = params.configs.size_per_head;
-    switch (params.common.fmha_type) {
+    switch (fmha_type) {
         case FMHAType::PAGED_TRT_V2: {
             cufmha_runner->runTrtV2FmhaPaged(q_output->data(),
                                              params.common.cu_seqlens->data(),
@@ -266,7 +267,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                                     {"v_output"});
 
     // allocate qkv should be better
-    if (params.common.fmha_type == FMHAType::NONE) {
+    if (fmha_type_ == FMHAType::NONE) {
         cudaMemsetAsync(q_output->data(), 0, q_output->sizeBytes(), stream_);
         cudaMemsetAsync(k_output->data(), 0, k_output->sizeBytes(), stream_);
         cudaMemsetAsync(v_output->data(), 0, v_output->sizeBytes(), stream_);
@@ -319,7 +320,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         params.configs.use_logn_attn,
         scale_out_ptr,
         int8_mode,
-        params.common.fmha_type == FMHAType::PAGED_TRT_V2,
+        fmha_type_ == FMHAType::PAGED_TRT_V2,
         stream_
     );
     sync_check_cuda_error();
@@ -336,7 +337,7 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
                 stream_);
         sync_check_cuda_error();
     }
-    MHA(params, cufmha_runner_.get(), kv_block_array, q_output, k_output, v_output, stream_, this);
+    MHA(params, fmha_type_, cufmha_runner_.get(), kv_block_array, q_output, k_output, v_output, stream_, this);
 }
 
 template<typename T>

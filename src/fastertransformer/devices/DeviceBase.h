@@ -25,7 +25,7 @@ public:
                                  const BufferHints& hints = {});
     virtual void syncAndCheck();
     virtual void syncCommunication(bool timeout = true);
-    virtual FMHAType checkAndSetFMHA(const FMHAParams& params);
+    virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
 
 public:
     // device-independence op implementations

@@ -19,6 +19,15 @@ namespace trt_plugins = tensorrt_llm::plugins;
 
 namespace fastertransformer {
 
+enum class FMHAType {
+    NONE,
+    PAGED_TRT_V2,
+    TRT_V2,
+    PAGED_OPEN_SOURCE,
+    OPEN_SOURCE,
+    TRT_V1
+};
+
 class CudaDevice : public DeviceBase {
 public:
     CudaDevice(const DeviceInitParams& params);
@@ -33,7 +42,7 @@ public:
 
     void syncAndCheck() override;
     void syncCommunication(bool timeout = true) override;
-    FMHAType checkAndSetFMHA(const FMHAParams& params) override;
+    DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
 
 private:
     void checkUseOpenSourceFMHA();
@@ -98,6 +107,7 @@ private:
 
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr; // for custom allreduce use
 
+    FMHAType fmha_type_ = FMHAType::NONE;
     std::unique_ptr<cufmha> cufmha_runner_;
     std::unique_ptr<cuggemm> cuggemm_runner_;
     bool use_trtv1_fmha             = false;
