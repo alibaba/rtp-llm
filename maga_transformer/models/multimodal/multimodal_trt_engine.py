@@ -219,9 +219,6 @@ class MultiModalTRTEngine(
             input_shape[0] = self.cur_batch_size
             self.context.set_input_shape(self.input_names[0], tuple(input_shape))
 
-            self.output_shape = tuple(
-                self.engine.get_tensor_shape(self.output_names[0])
-            )
             self.output_dtype = torch_dtype_from_trt(
                 self.engine.get_tensor_dtype(self.output_names[0])
             )
@@ -232,25 +229,28 @@ class MultiModalTRTEngine(
             raise ValueError(f"Failed loading {self.engine_file_path}")
 
     def forward(self, *inputs):
-        input = inputs[0]
-        batch_size = input.shape[0]
-
-        # update input shape
-        if batch_size != self.cur_batch_size:
-            input_shape = self.engine.get_tensor_shape(self.input_names[0])
-            input_shape[0] = self.cur_batch_size
-            self.context.set_input_shape(self.input_names[0], tuple(input_shape))
-            self.output_shape = tuple(
-                self.engine.get_tensor_shape(self.output_names[0])
-            )
-            self.output_shape[0] = self.cur_batch_size
-
-        output = torch.empty(
-            size=self.output_shape, dtype=self.output_dtype, device=self.output_device
-        )
-
         # use lock to avoid concurrency conflict issue
         with self.lock:
+
+            input = inputs[0]
+            batch_size = input.shape[0]
+
+            output_shape = tuple(
+                self.engine.get_tensor_shape(self.output_names[0])
+            )
+            
+            # update input shape
+            if batch_size != self.cur_batch_size:
+                self.cur_batch_size = batch_size
+                input_shape = self.engine.get_tensor_shape(self.input_names[0])
+                input_shape[0] = self.cur_batch_size
+                self.context.set_input_shape(self.input_names[0], tuple(input_shape))
+                output_shape[0] = self.cur_batch_size
+
+            output = torch.empty(
+                size=output_shape, dtype=self.output_dtype, device=self.output_device
+            )
+
             # ensure the input tensor passed into trt engine is continous in memory,
             # if not, change the input tensor to be continous
             self.context.set_tensor_address(self.input_names[0], input.data_ptr())
