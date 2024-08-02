@@ -14,41 +14,27 @@ void LoraManager::addLora(int64_t lora_id,
     FT_CHECK_WITH_INFO(!hasLora(lora_id),
         "Lora id[%ld] is globally unique and cannot be added repeatedly", lora_id);
     std::unique_lock<std::shared_mutex> scoped_lock(mutex_);
-    lora_map_[lora_id] = LoraResource({true, std::make_shared<ft::lora::LoraModel>(lora_a_weights, lora_b_weights)});
+    lora_map_[lora_id] = LoraResource({std::make_shared<ft::lora::LoraModel>(lora_a_weights, lora_b_weights)});
 }
 
 void LoraManager::removeLora(int64_t lora_id) {
     FT_CHECK_WITH_INFO(hasLora(lora_id),
         "Lora id[%ld] need exits when remove lora", lora_id);
     ft::lora::LoraModelPtr resource = nullptr;
-    bool is_timeout = true;
     {
         std::unique_lock<std::shared_mutex> scoped_lock(mutex_);
-        FT_CHECK_WITH_INFO(lora_map_[lora_id].alive_,
-            "Lora id[%ld] need alive when remove lora", lora_id);
-        lora_map_[lora_id].alive_ = false;
         resource = lora_map_[lora_id].resource_;
 
     }
     {
         std::unique_lock<std::mutex> scoped_lock(remove_mutex_);
-        if (wait_remove_timeout_ == 0) {
-            // one for var resource, another for lora_map_
-            cv_.wait(scoped_lock, [&resource]{ return resource.use_count() == 2; });
-            is_timeout = false;
-        } else {
-            auto end_time = std::chrono::high_resolution_clock::now() + std::chrono::seconds(wait_remove_timeout_);
-            is_timeout = !cv_.wait_until(scoped_lock, end_time, [&resource]{ return resource.use_count() == 2; });
-        }
+        // one for var resource, another for lora_map_
+        cv_.wait(scoped_lock, [&resource]{ return resource.use_count() == 2; });
     }
 
     {
         std::unique_lock<std::shared_mutex> scoped_lock(mutex_);
-        if (is_timeout) {
-            FT_CHECK_WITH_INFO(false, "remove lora[%d] timeout.", lora_id);
-        } else {
-            lora_map_.erase(lora_id);
-        }
+        lora_map_.erase(lora_id);
     }
     return;
 }
@@ -67,18 +53,6 @@ bool LoraManager::hasLora(int64_t lora_id) {
     return (lora_map_.find(lora_id) != lora_map_.end());
 }
 
-bool LoraManager::isLoraAlive(int64_t lora_id) {
-    std::shared_lock<std::shared_mutex> scoped_lock(mutex_);
-    auto it = lora_map_.find(lora_id);
-    if (it == lora_map_.end()) {
-        return false;
-    }
-    if (it->second.alive_) {
-        return true;
-    } else {
-        return false;
-    }
-}
 
 ft::lora::LoraModelInputPtr LoraManager::makeLoraModelInput(ft::BufferPtr lora_ids,
                                                             ft::BufferPtr lora_input_lengths)

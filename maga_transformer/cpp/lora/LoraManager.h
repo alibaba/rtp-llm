@@ -8,7 +8,6 @@ namespace rtp_llm {
 namespace lora {
 
 struct LoraResource {
-    bool alive_;
     ft::lora::LoraModelPtr resource_;
 };
 
@@ -23,9 +22,6 @@ private:
 public:
 
     LoraManager() = default;
-    LoraManager(int wait_remove_timeout) {
-        wait_remove_timeout_ = wait_remove_timeout;
-    };
     ~LoraManager() = default;
     LoraManager(LoraManager& other) = delete;
     LoraManager(LoraManager&& other) = delete;
@@ -40,8 +36,6 @@ public:
 
     bool hasLora(int64_t lora_id);
 
-    bool isLoraAlive(int64_t lora_id);
-
     void releaseSignal() {
         cv_.notify_all();
     }
@@ -55,11 +49,15 @@ public:
 
 struct LoraResourceGuard {
     std::shared_ptr<LoraManager> lora_manager_;
+    ft::lora::LoraModelPtr lora_ptr_;
 
-    LoraResourceGuard(std::shared_ptr<LoraManager> lora_manager) :
-                                    lora_manager_(lora_manager) {}
+    LoraResourceGuard(std::shared_ptr<LoraManager> lora_manager, int lora_id) {
+        lora_manager_ = lora_manager;
+        lora_ptr_ = lora_manager_->getLora(lora_id);
+    }
 
     ~LoraResourceGuard() {
+        lora_ptr_ = nullptr;
         lora_manager_->releaseSignal();
     }
 };

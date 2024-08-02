@@ -104,26 +104,6 @@ TEST_F(LoraManagerTest, testRemoveSimple) {
     EXPECT_EQ(lora_manager.hasLora(0), false);
 }
 
-TEST_F(LoraManagerTest, testTimeoutSimple) {
-    auto lora_manager = lora::LoraManager(10);
-    ft::lora::loraLayerWeightsMap lora_a_map(1);
-    ft::lora::loraLayerWeightsMap lora_b_map(1);
-    EXPECT_EQ(lora_manager.getLora(0), nullptr);
-    EXPECT_EQ(lora_manager.hasLora(0), false);
-
-    lora_manager.addLora(0, lora_a_map, lora_b_map);
-    auto lora_resource = lora_manager.getLora(0);
-    EXPECT_NE(lora_resource, nullptr);
-    EXPECT_EQ(lora_manager.hasLora(0), true);
-    EXPECT_EQ(lora_resource.use_count(), 2);
-
-    EXPECT_ANY_THROW(lora_manager.removeLora(0));
-
-    EXPECT_NE(lora_resource, nullptr);
-    EXPECT_EQ(lora_manager.hasLora(0), true);
-    EXPECT_EQ(lora_resource.use_count(), 2);
-}
-
 TEST_F(LoraManagerTest, testisLoraAliveSimple) {
     auto lora_manager = lora::LoraManager();
     ft::lora::loraLayerWeightsMap lora_a_map(1);
@@ -137,7 +117,6 @@ TEST_F(LoraManagerTest, testisLoraAliveSimple) {
 
     EXPECT_NE(lora_resource, nullptr);
     EXPECT_EQ(lora_resource.use_count(), 2);
-    EXPECT_EQ(lora_manager.isLoraAlive(0), true);
 
     // start remove lora
     auto removeLoraFunc = [&lora_manager](int64_t lora_id) {
@@ -145,21 +124,19 @@ TEST_F(LoraManagerTest, testisLoraAliveSimple) {
     };
     std::thread removeLora(removeLoraFunc, 0);
     // when lora resource ref cout not release and removing lora
-    // we can still get lora resource from getLora, But isLoraAlive will return false.
+    // we can still get lora resource from getLora.
     std::this_thread::sleep_for(2000ms);
     EXPECT_EQ(lora_manager.hasLora(0), true);
     EXPECT_NE(lora_manager.getLora(0), nullptr);
-    EXPECT_EQ(lora_manager.isLoraAlive(0), false);
 
 
     // after lora resource release, we can not get lora.
-    // hasLora will return nullptr and isLoraAlive will return false.
+    // hasLora will return nullptr.
     lora_resource = nullptr;
     lora_manager.releaseSignal();
     removeLora.join();
     EXPECT_EQ(lora_manager.getLora(0), nullptr);
     EXPECT_EQ(lora_manager.hasLora(0), false);
-    EXPECT_EQ(lora_manager.isLoraAlive(0), false);
 }
 
 
@@ -177,7 +154,7 @@ TEST_F(LoraManagerTest, testMultiAddWithMultiRemove) {
     auto removeLoraFunc = [&](size_t lora_num) {
         for (int i = 0; i < lora_num; i ++) {
             while(true) {
-                if (lora_manager.hasLora(i) && lora_manager.isLoraAlive(i)) {
+                if (lora_manager.hasLora(i)) {
                     break;
                 }
             }
@@ -194,7 +171,6 @@ TEST_F(LoraManagerTest, testMultiAddWithMultiRemove) {
     for (int i = 0; i < 1000; i++) {
         EXPECT_EQ(lora_manager.hasLora(0), false);
         EXPECT_EQ(lora_manager.getLora(0), nullptr);
-        EXPECT_EQ(lora_manager.isLoraAlive(0), false);
     }
 }
 
@@ -296,10 +272,6 @@ TEST_F(LoraManagerTest, testMakeLoraModelInput) {
         EXPECT_EQ(ffn_w2_lora_input.lora_a_[7], nullptr);
         EXPECT_EQ(ffn_w2_lora_input.lora_b_[7], nullptr);
     }
-
-
-
-
 }
 
 }  // namespace rtp_llm
