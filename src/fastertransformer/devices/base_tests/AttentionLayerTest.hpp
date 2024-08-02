@@ -22,10 +22,6 @@ public:
     using TestType = TestT;
     void SetUp() override {
         DeviceTestBase::SetUp();
-        GptModelDescription description;
-        Weights weights;
-        model_.reset(new GptModel({device_, weights, description}));
-        GptModel model({device_, weights, description});
     }
 
     void testAttentionLayer(const CacheConfig& cache_conf,
@@ -35,8 +31,7 @@ public:
 
     AttentionLayerWeights getAttentionWeights(const GptAttention& gpt_attention);
 
-protected:
-    std::shared_ptr<GptModel> model_;
+
 };
 
 torch::Tensor fakeAttentionInputs(const int64_t hidden_size, const int64_t token_num) {
@@ -66,6 +61,10 @@ void AttentionLayerTest<T>::testAttentionLayer(
     const std::vector<int32_t>& input_lengths,
     const std::vector<int32_t>& sequence_lengths)
 {
+    GptModelDescription description;
+    Weights weights;
+    description.attention_conf = attention_conf;
+    GptModel model({device_, weights, description});
     auto dtype = getTensorType<TestType>();
     // 1. prepare inputs
     const auto context_token_num = std::accumulate(
@@ -79,7 +78,7 @@ void AttentionLayerTest<T>::testAttentionLayer(
         input_lengths.begin() + sequence_lengths.size(), input_lengths.end());
     const auto prefix_lengths = std::vector<int32_t>(context_lengths.size(), 0);
 
-    const auto mask_tensor = create_context_mask(context_lengths)
+    const auto mask_tensor = create_context_mask(context_lengths, attention_conf.mask_type == AttentionMaskType::causalMask)
         .to(dataTypeToTorchType(dtype));
     std::cout << "mask: " << mask_tensor << std::endl;
     const auto input_buffer = tensorToBuffer(
@@ -90,8 +89,6 @@ void AttentionLayerTest<T>::testAttentionLayer(
     model_inputs.input_lengths = device_->clone({*vector2Buffer(input_lengths), AllocationType::HOST});
     model_inputs.prefix_lengths = device_->clone({*vector2Buffer(prefix_lengths), AllocationType::HOST});
     model_inputs.sequence_lengths = device_->clone({*vector2Buffer(sequence_lengths), AllocationType::HOST});
-    const auto mask_buf = tensorToBuffer(mask_tensor);
-    model_inputs.attention_mask = mask_buf;
     auto kv_cache = torch::empty(0);
     model_inputs.kv_cache_offset = allocateKVBlocks(cache_conf, input_lengths, kv_cache);
     auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
@@ -105,7 +102,8 @@ void AttentionLayerTest<T>::testAttentionLayer(
             *sequence_lengths_device
         });
 
-    model_->prepareAttentionInputs(model_inputs, dtype, common_inputs);
+    model.prepareAttentionInputs(model_inputs, dtype, common_inputs);
+
     auto layer_k_cache_buffer = model_inputs.k_cache_buffer->index(0);
     auto layer_v_cache_buffer = model_inputs.v_cache_buffer->index(0);
     common_inputs.kv_cache = KvCacheInfo({

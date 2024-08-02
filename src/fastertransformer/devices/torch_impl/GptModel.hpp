@@ -109,47 +109,6 @@ torch::Tensor repeat_kv(torch::Tensor hidden_states, int n_rep) {
     return hidden_states.reshape({batch, num_key_value_heads * n_rep, slen, head_dim});
 }
 
-/*
-    This function merges rtp-llm mask tensor into pytroch gpt style mask tensor
-    python equivalent code:
-    ``` python
-    mask = torch.block_diag(*torch.unbind(mask, 0))
-    mask = mask[mask.sum(dim=1)!= 0][:, mask.sum(dim=0)!= 0].unsqueeze(0)
-    ```
-    Args:
-        mask: torch.Tensor, shape [batch_size, max_seq_len, max_seq_len]
-    Returns:
-        torch.Tensor, shape [1, h_token_num, h_token_num]
-    Example:
-        input:
-            tensor([[[1., 0., 0., 0.],
-                    [1., 1., 0., 0.],
-                    [0., 0., 0., 0.],
-                    [0., 0., 0., 0.]],
-
-                    [[1., 0., 0., 0.],
-                    [1., 1., 0., 0.],
-                    [1., 1., 1., 0.],
-                    [1., 1., 1., 1.]]])
-        output:
-            tensor([[[1., 0., 0., 0., 0., 0.],
-            [1., 1., 0., 0., 0., 0.],
-            [0., 0., 1., 0., 0., 0.],
-            [0., 0., 1., 1., 0., 0.],
-            [0., 0., 1., 1., 1., 0.],
-            [0., 0., 1., 1., 1., 1.]]])
-*/
-torch::Tensor merge_mask(const torch::Tensor& mask) {
-    auto mask_diag = torch::block_diag(torch::unbind(mask, 0));
-    auto row_sum = mask_diag.sum(1);
-    auto col_sum = mask_diag.sum(0);
-    auto row_mask = (row_sum!= 0);
-    auto col_mask = (col_sum!= 0);
-    auto ret_mask = mask_diag.index_select(0, row_mask.nonzero().squeeze(1).to(torch::kInt32))
-                             .index_select(1, col_mask.nonzero().squeeze(1).to(torch::kInt32)).unsqueeze(0);
-    return ret_mask;
-}
-
 class GptAttentionImpl : public torch::nn::Module {
 public:
     GptAttentionImpl(const AttentionConfigs& config)
@@ -193,7 +152,6 @@ public:
 
         auto attn_weights = torch::matmul(query_states, key_states.transpose(2, 3)) / sqrtf(head_dim * 1.0f);
         if (attention_mask.defined()) {
-            attention_mask = merge_mask(attention_mask);
             // NOTE: the definition of mask is different in transformers and rtp_llm
             // in transformers, attention_mask is bias added to the attention weights
             // in rtp_llm, attention_mask is a binary value with 0s in the positions to be masked
@@ -230,4 +188,3 @@ public:
 
 TORCH_MODULE(GptAttention);
 };
-
