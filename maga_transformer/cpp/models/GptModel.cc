@@ -275,7 +275,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         *sequence_lengths
     });
 
-    prepareAttentionInputs(inputs, attention_common_inputs);
+    prepareAttentionInputs(inputs, dtype, attention_common_inputs);
     attention_common_inputs.position_ids = combo_position_ids;
 
     printBufferData(*hidden, "input_hidden");

@@ -59,7 +59,7 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
             return grpc::Status(grpc::StatusCode::CANCELLED, mm_res.ToString());
         }
     }
-    auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), lora_id);
+    auto lora_guard = lora::LoraResourceGuard(engine_->getLoraManager(), input->lora_id);
     FT_LOG_DEBUG("request:[%ld] trans to stream success", request->request_id());
     auto stream = engine_->enqueue(input);
     FT_LOG_DEBUG("request:[%ld] enqueue success", request->request_id());
