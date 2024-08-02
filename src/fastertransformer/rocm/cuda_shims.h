@@ -72,6 +72,8 @@ template<> __host__ __device__ inline float special_cast<float, amd_bfloat16>(am
 #define cudaOccupancyMaxActiveBlocksPerMultiprocessor hipOccupancyMaxActiveBlocksPerMultiprocessor
 #define cudaDeviceSynchronize hipDeviceSynchronize
 
+#define cudaFree hipFree
+#define cudaMalloc hipMalloc
 #define cudaMemcpy hipMemcpy
 #define cudaMemset hipMemset
 #define cudaMemsetAsync hipMemsetAsync

@@ -1,3 +1,8 @@
+load(
+    "@local_config_rocm//rocm:build_defs.bzl",
+    "rocm_default_copts",
+)
+
 cc_library(
     name = "ck_headers",
     hdrs = glob([
@@ -14,12 +19,14 @@ cc_library(
 
 cc_library(
     name = "ck_library_headers",
+    srcs = glob(["library/src/utility/**/*.cpp"]),
     hdrs = glob([
         "library/inlcude/**/*.h",
         "library/include/**/*.inc",
         "library/include/**/*.hpp",
     ]),
     strip_include_prefix = "library/include",
+    copts = rocm_default_copts(),
     deps = [
         "@local_config_rocm//rocm:rocm_headers",
     ],

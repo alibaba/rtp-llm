@@ -94,6 +94,7 @@ build:rocm --copt="-DUSING_ROCM=1"
 build:rocm --copt="-D__HIP_PLATFORM_AMD__=1"
 build:rocm --repo_env CK_FMHA_GEN_ARGS="--receipt 2"
 build:rocm --copt -Wno-tautological-compare # grpc
+build:rocm --action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:$LD_LIBRARY_PATH:$HADOOP_HOME/lib/native/:./aios/fslib:/opt/taobao/java/jre/lib/amd64/server/"
 
 build:arm --copt="-DENABLE_BF16=1"
 build:arm --define=using_cuda=false --define=using_cuda_nvcc=false
