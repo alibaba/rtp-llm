@@ -43,6 +43,10 @@ def whl_deps():
 def torch_deps():
     torch_version = "2.1_py310"
     deps = select({
+        "@//:using_rocm": [
+            "@torch_2.1_py310_rocm//:torch_api",
+            "@torch_2.1_py310_rocm//:torch",
+            "@torch_2.1_py310_rocm//:torch_libs",],
         "//:using_arm": [
             "@torch_2.3_py310_cpu_aarch64//:torch_api",
             "@torch_2.3_py310_cpu_aarch64//:torch",
