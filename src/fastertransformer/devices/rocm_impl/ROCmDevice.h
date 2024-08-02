@@ -18,6 +18,7 @@
 #include "src/fastertransformer/rocm/hipblasMMWrapper.h"
 #include "src/fastertransformer/rocm/rocmFmhaWrapper.h"
 #include "src/fastertransformer/rocm/quantizePreprocessors.h"
+#include "src/fastertransformer/rocm/rocmMoeWrapper.h"
 
 namespace fastertransformer {
 
@@ -40,6 +41,7 @@ public:
     void activation(const ActivationParams& params) override;
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
+    FfnLayerOutput moeFfnLayer(const FfnLayerParams& params);
     BufferPtr softmax(const SoftmaxParams& params) override;
     void sampleGreedy(const GreedyParams& params);
     DeviceStatus getDeviceStatus() override;
@@ -85,6 +87,8 @@ private:
     NcclParam nccl_param_;
     std::unique_ptr<CustomAllReduceComm> custom_allreduce_comm_ = nullptr; // for custom allreduce use
 
+    //moe
+    std::unique_ptr<rocmMoeWrapper> moe_runner_;
 };
 
 }  // namespace fastertransformer

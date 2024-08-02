@@ -119,6 +119,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
 
     fmha_runner_.reset(new rocmFmhaWrapper());
     fmha_runner_->init(stream_);
+    moe_runner_.reset(new rocmMoeWrapper());
 }
 
 ROCmDevice::~ROCmDevice() {
