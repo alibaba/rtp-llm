@@ -99,7 +99,7 @@ BufferPtr ROCmDevice::quantize(const QuantizeParams& params) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                 params.input.type(),
                 invokePerColQuantizationInt4x2,
-                kernel->data<int8_t>(),
+                (int8_t*)(kernel->data()),
                 params.input.data(),
                 params.input.shape()[0],
                 params.input.shape()[1],

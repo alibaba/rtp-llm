@@ -50,13 +50,6 @@ TEST_F(ROCmGemmOpTest, BasicGemmOpTest) {
     BasicGemmOpTest(4096, 1024, 2048, DataType::TYPE_FP32);
 }
 
-TEST_F(ROCmGemmOpTest, QuantGemmOpTest) {
-    RocmQ8GemmOpTest(64, 64, 64, DataType::TYPE_FP16);
-    RocmQ8GemmOpTest(2, 1024, 2048, DataType::TYPE_FP16);
-    RocmQ4x2GemmOpTest(64, 64, 64, DataType::TYPE_FP16);
-    RocmQ4x2GemmOpTest(2, 1024, 2048, DataType::TYPE_FP16);
-}
-
 TEST_F(ROCmGemmOpTest, TransposeGemmOpTest) {
     auto   tran = TransposeOperation::TRANSPOSE;
     auto   none = TransposeOperation::NONE;

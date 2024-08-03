@@ -35,12 +35,6 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
     auto device_tokens = clone({params.token_ids});
     auto transposed_tokens = transpose({*device_tokens});
 
-    printf("\n");
-    printf(device_tokens->debugStringWithData<int32_t>().c_str());
-    printf("\n");
-    printf(transposed_tokens->debugStringWithData<int32_t>().c_str());
-    printf("\n");
-
     // 1. prepare buffers
     auto& top_k = params.top_k;
     auto& top_p = params.top_p;
@@ -248,9 +242,6 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
         stream_,
         batch_size,
         skip_top_k_decode_buf->data<bool>());
-    printf("\n");
-    printf(transposed_tokens->debugStringWithData<int32_t>().c_str());
-    printf("\n");
 
     // 4.2. run top_p
     // NOTE: running top_k could write values to runtime bufs, so need to copy again.
@@ -318,11 +309,6 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
     auto output_tokens = transpose({*transposed_tokens});
     copy({params.token_ids, *output_tokens});
     sync_check_cuda_error();
-    printf("\nmax_top_p: %d \n", max_top_p);
-    printf(transposed_tokens->debugStringWithData<int32_t>().c_str());
-    printf("\n");
-    printf(output_tokens->debugStringWithData<int32_t>().c_str());
-    printf("\n");
 }
 
 } // namespace fastertransformer

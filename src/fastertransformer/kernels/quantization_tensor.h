@@ -72,7 +72,17 @@ void invokePerColDequantizationInt4x2(T*            dst,
                                       const int64_t numRows,
                                       const int64_t numCols,
                                       half*         scalePtr,
-                                      const float*  smoother,
-                                      const float*  shift,
+                                      half*         zerosPtr,
+                                      const int64_t groupSize,
                                       cudaStream_t  stream = 0);
+
+template<typename T>
+void invokePerRowDequantizationInt4x2(T*            dst,
+                                      const int8_t* src,
+                                      const int64_t numRows,
+                                      const int64_t numCols,
+                                      half*         scalePtr,
+                                      half*         zerosPtr,
+                                      const int64_t groupSize,
+                                      cudaStream_t  stream = 0);                                      
 }

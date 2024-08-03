@@ -96,6 +96,10 @@ filegroup(
             "src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptOp.cc",
             "src/fastertransformer/th_op/multi_gpu_gpt/WeightTransposeCalibrateQuantizeOp.cc",
         ],
+        "//:using_rocm": [
+            "src/fastertransformer/th_op/th_utils.cc",
+            "src/fastertransformer/th_op/common/WeightOnlyQuantOps.cc",
+        ],
         "//conditions:default": [],
     }),
 )
