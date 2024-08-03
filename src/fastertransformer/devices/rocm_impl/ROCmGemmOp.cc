@@ -181,64 +181,16 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
     }
 
     if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
-        if (params.B.type() == DataType::TYPE_QINT8) {
-            BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16});
-            BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});
+        if (reinterpret_cast<const QBuffer&>(params.B).zerosData() != nullptr) {
+            FT_CHECK(reinterpret_cast<const QBuffer&>(params.B).scales().dim() == 2);
+            size_t kernel_dim0 = params.B.shape()[0];
+            size_t scales_dim0 = reinterpret_cast<const QBuffer&>(params.B).scales().shape()[0];
+            FT_CHECK((kernel_dim0 % scales_dim0 == 0));
+            size_t group_size = (kernel_dim0 / scales_dim0);
+            FT_CHECK((group_size == 64 || group_size == 128));
+            size_t type_bits = getTypeBits(params.B.type());
+            FT_CHECK((type_bits == 4 || type_bits == 8));
 
-            const QBuffer& QB  = reinterpret_cast<const QBuffer&>(params.B);
-            auto           fpB = allocateBuffer({params.A.type(), {params.B.shape()}, AllocationType::DEVICE}, {"fpB"});
-
-            // dequant B
-            DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.A.type(),
-                                             invokePerColDequantizationInt8,
-                                             fpB.get()->data(),
-                                             QB.kernel().data<int8_t>(),
-                                             arguments.k,
-                                             arguments.n,
-                                             QB.scales().data<half>(),
-                                             nullptr,
-                                             nullptr,
-                                             stream_);
-            sync_check_cuda_error();
-
-            const auto A = params.A.data();
-            const auto B = fpB.get()->data();
-            auto       D = output->data();
-
-            auto a_op = opConvert(params.transA);
-            auto b_op = opConvert(params.transB);
-
-            auto A_data_type = dtypeConvert(arguments.ADtype);
-            auto B_data_type = dtypeConvert(fpB.get()->type());
-            auto D_data_type = dtypeConvert(arguments.DDtype);
-            auto computeType = dtypeConvert(arguments.DDtype);
-            
-            hipblas_mm_wrapper_->stridedBatchedGemm(b_op,
-                                                    a_op,
-                                                    arguments.n,
-                                                    arguments.m,
-                                                    arguments.k,
-                                                    arguments.alpha,
-                                                    B,
-                                                    B_data_type,
-                                                    arguments.ldb,
-                                                    arguments.stride_b,
-                                                    A,
-                                                    A_data_type,
-                                                    arguments.lda,
-                                                    arguments.stride_a,
-                                                    arguments.beta,
-                                                    D,
-                                                    D_data_type,
-                                                    arguments.ldc,
-                                                    arguments.stride_c,
-                                                    arguments.batch_size,
-                                                    computeType);
-
-            sync_check_cuda_error();
-            return move(output);
-        }
-        if (params.B.type() == DataType::TYPE_QINT4X2) {
             BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_FP16, DataType::TYPE_BF16});
             BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT4X2});
 
@@ -249,12 +201,12 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.A.type(),
                                              invokePerColDequantizationInt4x2,
                                              fpB.get()->data(),
-                                             QB.kernel().data<int8_t>(),
+                                             (int8_t*)(QB.kernel().data()),
                                              arguments.k,
                                              arguments.n,
                                              QB.scales().data<half>(),
-                                             nullptr,
-                                             nullptr,
+                                             QB.zeros().data<half>(),
+                                             group_size,
                                              stream_);
             sync_check_cuda_error();
 
@@ -269,7 +221,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
             auto B_data_type = dtypeConvert(fpB.get()->type());
             auto D_data_type = dtypeConvert(arguments.DDtype);
             auto computeType = dtypeConvert(arguments.DDtype);
-            
+
             hipblas_mm_wrapper_->stridedBatchedGemm(b_op,
                                                     a_op,
                                                     arguments.n,
@@ -294,6 +246,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
 
             sync_check_cuda_error();
             return move(output);
+        } else {
         }
     }
 
@@ -321,6 +274,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
         hipblas_mm_wrapper_->Gemm(
             b_op, a_op, arguments.n, arguments.m, arguments.k, B, arguments.ldb, A, arguments.lda, D, arguments.ldc);
         sync_check_hip_error();
+
         return std::move(output);
     } else if (ROCmGemmDispatch::dispatch(params) == GemmImplementType::hipblas_batch_gemm) {
 

@@ -378,11 +378,11 @@ void add_bias_and_interleave_int8s_inplace(int8_t* int8_tensor, const size_t num
     // bit 32                                                      0
     //      [elt_3  elt_1  elt_2  elt_0] (each elt occupies 8 bits)
 
-    FT_CHECK_WITH_INFO(num_elts % 4 == 0, "Dimensions of int8 tensor must be a multiple of 4 for register relayout");
+    /*FT_CHECK_WITH_INFO(num_elts % 4 == 0, "Dimensions of int8 tensor must be a multiple of 4 for register relayout");
     for (size_t base = 0; base < num_elts; base += 4)
     {
         std::swap(int8_tensor[base + 1], int8_tensor[base + 2]);
-    }
+    }*/
 }
 
 void add_bias_and_interleave_int4s_inplace(int8_t* packed_int4_tensor, const size_t num_elts)
@@ -391,7 +391,7 @@ void add_bias_and_interleave_int4s_inplace(int8_t* packed_int4_tensor, const siz
 
     // Step 1 will be to transform all the int4s to unsigned in order to make the dequantize take as little
     // instructions as possible in the CUDA code.
-    for (size_t ii = 0; ii < num_bytes; ++ii)
+    /*for (size_t ii = 0; ii < num_bytes; ++ii)
     {
         int8_t transformed_packed_int4s = 0;
         int8_t transformed_first_elt
@@ -407,7 +407,7 @@ void add_bias_and_interleave_int4s_inplace(int8_t* packed_int4_tensor, const siz
         transformed_packed_int4s |= transformed_first_elt;
         transformed_packed_int4s |= (transformed_second_elt << 4);
         packed_int4_tensor[ii] = transformed_packed_int4s;
-    }
+    }*/
 
     // Step 2 will transform the layout of a 32-bit register in CUDA in order to minimize the number of shift & logical
     // instructions That are needed to extract the int4s in the GEMM main loop. Pictorially, the loop below will do the
@@ -418,7 +418,7 @@ void add_bias_and_interleave_int4s_inplace(int8_t* packed_int4_tensor, const siz
     // bit 32                                                      0
     //      [elt_7  elt_5  elt_3  elt_1  elt_6  elt_4  elt_2  elt_0] (each elt occupies 4 bits)
 
-    FT_CHECK_WITH_INFO(num_bytes % 4 == 0, "Dimensions of int4 tensor must be a multiple of 8 for register relayout");
+    /*FT_CHECK_WITH_INFO(num_bytes % 4 == 0, "Dimensions of int4 tensor must be a multiple of 8 for register relayout");
     const size_t num_registers = num_bytes / 4;
 
     uint32_t* register_ptr = reinterpret_cast<uint32_t*>(packed_int4_tensor);
@@ -437,7 +437,7 @@ void add_bias_and_interleave_int4s_inplace(int8_t* packed_int4_tensor, const siz
             transformed_register |= (src_bits << dest_shift);
         }
         register_ptr[ii] = transformed_register;
-    }
+    }*/
 }
 
 void add_bias_and_interleave_quantized_tensor_inplace(int8_t* tensor, const size_t num_elts, QuantType quant_type)
@@ -536,7 +536,7 @@ void preprocess_weights_for_mixed_gemm(int8_t* preprocessed_quantized_weight, co
     std::copy(row_major_quantized_weight, row_major_quantized_weight + num_bytes, src_buf.begin());
 
     // Works on row major data, so issue this permutation first.
-    if (details.uses_imma_ldsm)
+    /*if (details.uses_imma_ldsm)
     {
         const int arch = getSMVersion();
         permute_B_rows_for_mixed_gemm(dst_buf.data(), src_buf.data(), shape, quant_type, arch);
@@ -553,7 +553,7 @@ void preprocess_weights_for_mixed_gemm(int8_t* preprocessed_quantized_weight, co
     {
         interleave_column_major_tensor(dst_buf.data(), src_buf.data(), shape, quant_type, details);
         src_buf.swap(dst_buf);
-    }
+    }*/
 
     add_bias_and_interleave_quantized_tensor_inplace(src_buf.data(), num_elts, quant_type);
     std::copy(src_buf.begin(), src_buf.end(), preprocessed_quantized_weight);

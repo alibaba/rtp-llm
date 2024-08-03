@@ -17,19 +17,26 @@
 #pragma once
 #include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/core/allocator.h"
-#include "src/fastertransformer/cuda/allocator_torch.h"
 
-#include "torch/csrc/cuda/Stream.h"
 #include "torch/extension.h"
-#include <ATen/cuda/CUDAContext.h>
 #include <cstdio>
-#include <cuda_fp16.h>
-#include <cuda_runtime.h>
 #include <iostream>
-#include <nvToolsExt.h>
 #include <torch/custom_class.h>
 #include <torch/script.h>
 #include <vector>
+
+#if USING_CUDA
+#include "src/fastertransformer/cuda/allocator_torch.h"
+#include "torch/csrc/cuda/Stream.h"
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
+#include <nvToolsExt.h>
+#endif
+#if USING_ROCM
+#include <hip/hip_runtime.h>
+#include "src/fastertransformer/rocm/hip_utils.h"
+#endif
 
 #define CHECK_TYPE(x, st) TORCH_CHECK(x.scalar_type() == st, "Inconsistency of Tensor type: " #x)
 #define CHECK_TH_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")

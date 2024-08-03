@@ -107,14 +107,12 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
     std::apply(func_name<T>, typed_args);                                                   \
 }
 
-#if USING_CUDA || USING_ROCM
 #define DISPATCH_FOR_EACH_COMPUTE_TYPE(MACRO, ...)         \
     MACRO(DataType::TYPE_FP32, float, __VA_ARGS__)         \
     MACRO(DataType::TYPE_FP16, half, __VA_ARGS__)          \
     MACRO(DataType::TYPE_BF16, __nv_bfloat16, __VA_ARGS__) \
     default: \
         FT_CHECK(false);
-#endif
 
 #define DISPATCH_FOR_EACH_NUMERIC_TYPE(MACRO, ...)         \
     MACRO(DataType::TYPE_INT8, int8_t, __VA_ARGS__)        \

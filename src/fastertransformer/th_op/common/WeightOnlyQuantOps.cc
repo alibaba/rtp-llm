@@ -14,8 +14,15 @@
  * limitations under the License.
  */
 
+#if USING_CUDA
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_preprocessors.h"
 #include "src/fastertransformer/th_op/th_utils.h"
+#endif
+
+#if USING_ROCM
+#include "src/fastertransformer/rocm/quantizePreprocessors.h"
+#include "src/fastertransformer/th_op/th_utils.h"
+#endif
 
 
 #if defined(TORCH_VERSION_MAJOR)                                                                                       \
@@ -24,6 +31,7 @@
 #endif
 
 namespace torch_ext {
+#if USING_CUDA
 namespace ft = tensorrt_llm::kernels::cutlass_kernels;
 using torch::Tensor;
 
@@ -328,9 +336,101 @@ Tensor pack_int8_tensor_to_packed_int4(Tensor weight)
     }
     return packed_weight;
 }
+#endif
 
+#if USING_ROCM
+using torch::Tensor;
+namespace ft = fastertransformer::rocm;
+
+void check_quant_type_allowed(torch::ScalarType quant_type) {
+#ifdef TORCH_IS_AT_LEAST_v190
+    TORCH_CHECK(quant_type == torch::kInt8 || quant_type == at::ScalarType::QUInt4x2,
+                "Must be int4 or int8 quantization");
+#else
+    TORCH_CHECK(quant_type == torch::kInt8, "Must be int8 quantization");
+#endif
+}
+
+ft::QuantType get_ft_quant_type(torch::ScalarType quant_type) {
+    if (quant_type == torch::kInt8) {
+        return ft::QuantType::INT8_WEIGHT_ONLY;
+    }
+#ifdef TORCH_IS_AT_LEAST_v190
+    else if (quant_type == at::ScalarType::QUInt4x2) {
+        return ft::QuantType::PACKED_INT4_WEIGHT_ONLY;
+    }
+#endif
+    else {
+        TORCH_CHECK(false, "Invalid quantization type");
+    }
+}
+
+Tensor preprocess_weights_for_mixed_gemm(Tensor row_major_quantized_weight, torch::ScalarType quant_type) {
+    return row_major_quantized_weight;
+
+    // TODO: DO preprocess from here and call rocm/quantizePreprocessors.cc
+    /*auto _st = row_major_quantized_weight.scalar_type();
+    CHECK_CPU(row_major_quantized_weight);
+    CHECK_CONTIGUOUS(row_major_quantized_weight);
+    TORCH_CHECK(_st == torch::kInt8, "Quantized tensor must be int8 dtype");
+    check_quant_type_allowed(quant_type);
+    TORCH_CHECK(row_major_quantized_weight.dim() == 2 || row_major_quantized_weight.dim() == 3,
+                "Invalid dim. The dim of weight should be 2 or 3");
+
+    ft::QuantType ft_quant_type      = get_ft_quant_type(quant_type);
+    const size_t  bits_in_quant_type = get_bits_in_quant_type(ft_quant_type);
+
+    const size_t num_experts = row_major_quantized_weight.dim() == 2 ? 1 : row_major_quantized_weight.size(0);
+    const size_t num_rows    = row_major_quantized_weight.size(-2);
+    const size_t num_cols    = (8 / bits_in_quant_type) * row_major_quantized_weight.size(-1);
+
+    Tensor  processed_tensor = torch::zeros_like(row_major_quantized_weight);
+    int8_t* input_byte_ptr   = get_ptr<int8_t>(row_major_quantized_weight);
+    int8_t* output_byte_ptr  = get_ptr<int8_t>(processed_tensor);
+
+    ft::preprocess_weights_for_mixed_gemm(
+        output_byte_ptr, input_byte_ptr, {num_experts, num_rows, num_cols}, ft_quant_type);
+
+    return processed_tensor;*/
+}
+
+Tensor pack_int8_tensor_to_packed_int4(Tensor weight) {
+    CHECK_CPU(weight);
+    CHECK_CONTIGUOUS(weight);
+    TORCH_CHECK(weight.numel() != 0, "weight should not be empty tensor");
+    TORCH_CHECK(weight.dtype() == torch::kInt8, "Weight must be a int8 tensor");
+
+    std::vector<long int> packed_tensor_size(weight.dim());
+    for (int i = 0; i < weight.dim(); ++i) {
+        packed_tensor_size[i] = weight.size(i);
+    }
+    packed_tensor_size[weight.dim() - 1] = (packed_tensor_size[weight.dim() - 1] + 1) / 2;
+
+    Tensor packed_weight =
+        torch::zeros(packed_tensor_size, torch::dtype(torch::kInt8).device(torch::kCPU).requires_grad(false));
+
+    int8_t* unpacked_ptr = get_ptr<int8_t>(weight);
+    int8_t* packed_ptr   = get_ptr<int8_t>(packed_weight);
+
+    for (int packed_idx = 0; packed_idx < packed_weight.numel(); ++packed_idx) {
+        int8_t packed_int4s = 0;
+        int8_t elt_0        = unpacked_ptr[2 * packed_idx + 0];
+        int8_t elt_1        = unpacked_ptr[2 * packed_idx + 1];
+
+        TORCH_CHECK(elt_0 >= -8 && elt_0 <= 7, "Value in unpacked tensor not in int4 range");
+        TORCH_CHECK(elt_1 >= -8 && elt_1 <= 7, "Value in unpacked tensor not in int4 range");
+
+        packed_int4s |= ((elt_0 & 0x0F));
+        packed_int4s |= int8_t(elt_1 << 4);
+
+        packed_ptr[packed_idx] = packed_int4s;
+    }
+    return packed_weight;
+}
+#endif
 }  // namespace torch_ext
 
+#if USING_CUDA
 // Utility methods that may be useful for preprocessing weights in torch.
 static auto symmetric_quantize_last_axis_of_batched_matrix =
     torch::RegisterOperators("fastertransformer::symmetric_quantize_last_axis_of_batched_matrix",
@@ -361,3 +461,14 @@ static auto permute_B_rows_for_mixed_gemm = torch::RegisterOperators(
 
 static auto subbyte_transpose =
     torch::RegisterOperators("fastertransformer::_subbyte_transpose", &torch_ext::subbyte_transpose);
+#endif
+
+#if USING_ROCM
+
+static auto preprocess_weights_for_mixed_gemm = torch::RegisterOperators(
+    "fastertransformer::preprocess_weights_for_mixed_gemm", &torch_ext::preprocess_weights_for_mixed_gemm);
+
+static auto pack_int8_tensor_to_packed_int4 = torch::RegisterOperators(
+    "fastertransformer::pack_int8_tensor_to_packed_int4", &torch_ext::pack_int8_tensor_to_packed_int4);
+
+#endif
