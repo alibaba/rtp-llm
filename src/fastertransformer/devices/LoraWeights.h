@@ -154,6 +154,17 @@ struct LoraOpInput {
 
 using LoraOpInputPtr = std::shared_ptr<LoraOpInput>;
 
+struct AttentionLayerLoraInput {
+    LoraOpInputPtr qkv_lora_input = nullptr;
+    LoraOpInputPtr out_lora_input = nullptr;
+};
+
+struct FfnLayerLoraInput {
+    LoraOpInputPtr gate_lora_input = nullptr;
+    LoraOpInputPtr up_lora_input = nullptr;
+    LoraOpInputPtr down_lora_input = nullptr;
+};
+
 struct LoraModelInput {
     BufferPtr lora_input_lengths_;
     std::vector<LoraModelPtr> lora_model_input_;
@@ -173,7 +184,7 @@ struct LoraModelInput {
         lora_model_input_   = lora_model_input;
     }
 
-    LoraOpInput getOpInput(const size_t layer_num, const std::string& target_module) {
+    LoraOpInputPtr getOpInput(const size_t layer_num, const std::string& target_module) {
         std::vector<LoraWeightsPtr> lora_weights(lora_model_input_.size());
         for (int i = 0; i < lora_weights.size(); i++) {
             if (lora_model_input_[i] == nullptr) {
@@ -183,8 +194,25 @@ struct LoraModelInput {
             }
 
         }
-        return LoraOpInput(lora_input_lengths_, lora_weights);
+        return std::make_shared<LoraOpInput>(lora_input_lengths_, lora_weights);
     }
+
+    AttentionLayerLoraInput getAttentionLayerLoraInput(const size_t layer_num) {
+        auto result = AttentionLayerLoraInput();
+        result.qkv_lora_input = getOpInput(layer_num, W::attn_qkv_w);
+        result.out_lora_input = getOpInput(layer_num, W::attn_o_w);
+        return result;
+    }
+
+    FfnLayerLoraInput getFfnLayerLoraInput(const size_t layer_num) {
+        auto result = FfnLayerLoraInput();
+        result.gate_lora_input = getOpInput(layer_num, W::ffn_w1);
+        result.down_lora_input = getOpInput(layer_num, W::ffn_w2);
+        result.up_lora_input = getOpInput(layer_num, W::ffn_w3);
+        return result;
+    }
+
+
 };
 
 using LoraModelInputPtr = std::shared_ptr<LoraModelInput>;

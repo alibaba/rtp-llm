@@ -56,7 +56,7 @@ public:
             lora_as.push_back(tensorToBuffer(params.lora_a[i]));
             lora_bs.push_back(tensorToBuffer(params.lora_b[i]));
         }
-        auto lora_input = lora::LoraOpInput({lora_input_lengths, lora_as, lora_bs});
+        auto lora_input = std::make_shared<lora::LoraOpInput>(lora_input_lengths, lora_as, lora_bs);
         auto output = device_->loraLinear(LoraLinearParams(gemm_params, lora_input));
         return LoraLinearLayerTestOutput({bufferToTensor(*output.output)});
     }

@@ -196,81 +196,81 @@ TEST_F(LoraManagerTest, testMakeLoraModelInput) {
 
     for (int i = 0; i < layer_num; i++) {
         auto attn_qkv_w_lora_input = lora_model_input_ptr->getOpInput(i, ft::W::attn_qkv_w);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_a_[0], nullptr);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_b_[0], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_a_[0], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_b_[0], nullptr);
 
-        EXPECT_NE(attn_qkv_w_lora_input.lora_a_[1], nullptr);
-        EXPECT_NE(attn_qkv_w_lora_input.lora_b_[1], nullptr);
-        auto lora_a_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(attn_qkv_w_lora_input.lora_a_[1]));
-        auto lora_b_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(attn_qkv_w_lora_input.lora_b_[1]));
+        EXPECT_NE(attn_qkv_w_lora_input->lora_a_[1], nullptr);
+        EXPECT_NE(attn_qkv_w_lora_input->lora_b_[1], nullptr);
+        auto lora_a_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(attn_qkv_w_lora_input->lora_a_[1]));
+        auto lora_b_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(attn_qkv_w_lora_input->lora_b_[1]));
         auto lora_a_1_ref = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_1[0][i][ft::W::attn_qkv_w]));
         auto lora_b_1_ref = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_1[1][i][ft::W::attn_qkv_w]));
         torch::equal(lora_a_1_tensor, lora_a_1_ref);
         torch::equal(lora_b_1_tensor, lora_b_1_ref);
-        EXPECT_NE(attn_qkv_w_lora_input.lora_a_[2], nullptr);
-        EXPECT_NE(attn_qkv_w_lora_input.lora_b_[2], nullptr);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_a_[3], nullptr);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_b_[3], nullptr);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_a_[4], nullptr);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_b_[4], nullptr);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_a_[5], nullptr);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_b_[5], nullptr);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_a_[6], nullptr);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_b_[6], nullptr);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_a_[7], nullptr);
-        EXPECT_EQ(attn_qkv_w_lora_input.lora_b_[7], nullptr);
+        EXPECT_NE(attn_qkv_w_lora_input->lora_a_[2], nullptr);
+        EXPECT_NE(attn_qkv_w_lora_input->lora_b_[2], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_a_[3], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_b_[3], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_a_[4], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_b_[4], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_a_[5], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_b_[5], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_a_[6], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_b_[6], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_a_[7], nullptr);
+        EXPECT_EQ(attn_qkv_w_lora_input->lora_b_[7], nullptr);
     }
 
     for (int i = 0; i < layer_num; i++) {
         auto ffn_w1_lora_input = lora_model_input_ptr->getOpInput(i, ft::W::ffn_w1);
-        EXPECT_EQ(ffn_w1_lora_input.lora_a_[0], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_b_[0], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_a_[1], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_b_[1], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_a_[2], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_b_[2], nullptr);
-        EXPECT_NE(ffn_w1_lora_input.lora_a_[3], nullptr);
-        EXPECT_NE(ffn_w1_lora_input.lora_b_[3], nullptr);
-        auto lora_a_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w1_lora_input.lora_a_[3]));
-        auto lora_b_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w1_lora_input.lora_b_[3]));
+        EXPECT_EQ(ffn_w1_lora_input->lora_a_[0], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_b_[0], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_a_[1], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_b_[1], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_a_[2], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_b_[2], nullptr);
+        EXPECT_NE(ffn_w1_lora_input->lora_a_[3], nullptr);
+        EXPECT_NE(ffn_w1_lora_input->lora_b_[3], nullptr);
+        auto lora_a_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w1_lora_input->lora_a_[3]));
+        auto lora_b_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w1_lora_input->lora_b_[3]));
         auto lora_a_1_ref = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_2[0][i][ft::W::ffn_w1]));
         auto lora_b_1_ref = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_2[1][i][ft::W::ffn_w1]));
         torch::equal(lora_a_1_tensor, lora_a_1_ref);
         torch::equal(lora_b_1_tensor, lora_b_1_ref);
-        EXPECT_EQ(ffn_w1_lora_input.lora_a_[4], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_b_[4], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_a_[5], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_b_[5], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_a_[6], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_b_[6], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_a_[7], nullptr);
-        EXPECT_EQ(ffn_w1_lora_input.lora_b_[7], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_a_[4], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_b_[4], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_a_[5], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_b_[5], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_a_[6], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_b_[6], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_a_[7], nullptr);
+        EXPECT_EQ(ffn_w1_lora_input->lora_b_[7], nullptr);
     }
 
     for (int i = 0; i < layer_num; i++) {
         auto ffn_w2_lora_input = lora_model_input_ptr->getOpInput(i, ft::W::ffn_w2);
-        EXPECT_EQ(ffn_w2_lora_input.lora_a_[0], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_b_[0], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_a_[1], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_b_[1], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_a_[2], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_b_[2], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_a_[3], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_b_[3], nullptr);
-        EXPECT_NE(ffn_w2_lora_input.lora_a_[4], nullptr);
-        EXPECT_NE(ffn_w2_lora_input.lora_b_[4], nullptr);
-        auto lora_a_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w2_lora_input.lora_a_[4]));
-        auto lora_b_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w2_lora_input.lora_b_[4]));
+        EXPECT_EQ(ffn_w2_lora_input->lora_a_[0], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_b_[0], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_a_[1], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_b_[1], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_a_[2], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_b_[2], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_a_[3], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_b_[3], nullptr);
+        EXPECT_NE(ffn_w2_lora_input->lora_a_[4], nullptr);
+        EXPECT_NE(ffn_w2_lora_input->lora_b_[4], nullptr);
+        auto lora_a_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w2_lora_input->lora_a_[4]));
+        auto lora_b_1_tensor = bufferToTensor(*std::const_pointer_cast<Buffer>(ffn_w2_lora_input->lora_b_[4]));
         auto lora_a_1_ref = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_3[0][i][ft::W::ffn_w2]));
         auto lora_b_1_ref = bufferToTensor(*std::const_pointer_cast<Buffer>(lora_map_3[1][i][ft::W::ffn_w2]));
         torch::equal(lora_a_1_tensor, lora_a_1_ref);
         torch::equal(lora_b_1_tensor, lora_b_1_ref);
-        EXPECT_EQ(ffn_w2_lora_input.lora_a_[5], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_b_[5], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_a_[6], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_b_[6], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_a_[7], nullptr);
-        EXPECT_EQ(ffn_w2_lora_input.lora_b_[7], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_a_[5], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_b_[5], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_a_[6], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_b_[6], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_a_[7], nullptr);
+        EXPECT_EQ(ffn_w2_lora_input->lora_b_[7], nullptr);
     }
 }
 

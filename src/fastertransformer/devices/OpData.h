@@ -320,10 +320,6 @@ struct MultimodalEmbeddingParams {
     OptionalConstBufferRef multimodal_locs;
 };
 
-struct AttentionLayerLoraInput {
-    std::optional<lora::LoraOpInput> qkv_lora_input;
-    std::optional<lora::LoraOpInput> out_lora_input;
-};
 
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs
@@ -349,7 +345,7 @@ struct AttentionCommonInputs {
     OptionalLoraInput lora_input = std::nullopt;
     FMHAType          fmha_type  = FMHAType::NONE;
 
-    std::optional<AttentionLayerLoraInput> lora_input = std::nullopt;
+    lora::AttentionLayerLoraInput lora_input;
 };
 
 struct AttentionConfigs {
@@ -419,12 +415,6 @@ struct FfnLayerOutput {
     BufferPtr hidden_states;
 };
 
-struct FfnLayerLoraInput {
-    std::optional<lora::LoraOpInput> gate_lora_input;
-    std::optional<lora::LoraOpInput> up_lora_input;
-    std::optional<lora::LoraOpInput> down_lora_input;
-};
-
 struct FfnLayerParams {
     FfnLayerParams(const Buffer&                input,
                    const FfnConfigs&            configs,
@@ -443,7 +433,7 @@ struct FfnLayerParams {
     const QScheme qscheme;
     BufferPtr                    output;
 
-    std::optional<FfnLayerLoraInput> lora_input = std::nullopt;
+    lora::FfnLayerLoraInput lora_input;
 };
 
 struct GreedyParams {
@@ -581,12 +571,12 @@ struct LoraLinearOutput {
 struct LoraLinearParams {
 
     LoraLinearParams(GemmParams& gemm_params,
-                     std::optional<lora::LoraOpInput> lora_input = std::nullopt) :
+                     lora::LoraOpInputPtr lora_input = nullptr) :
                      gemm_params(gemm_params),
                      lora_input(lora_input) {}
 
     GemmParams& gemm_params;
-    std::optional<lora::LoraOpInput> lora_input;
+    lora::LoraOpInputPtr lora_input;
 };
 
 struct QuantizeParams {

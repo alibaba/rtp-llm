@@ -321,9 +321,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
             }
         }
         if (inputs.lora_model_input) {
-            auto qkv_lora = inputs.lora_model_input->getOpInput(i, ft::W::attn_qkv_w);
-            auto out_lora = inputs.lora_model_input->getOpInput(i, ft::W::attn_o_w);
-            attention_common_inputs.lora_input = AttentionLayerLoraInput({qkv_lora, out_lora});
+            attention_common_inputs.lora_input = inputs.lora_model_input->getAttentionLayerLoraInput(i);
         }
 
         auto attn_output = device_->attentionLayer(AttentionLayerParams({
@@ -405,10 +403,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
                                                 qscheme,
                                                 std::move(ffn_output_buf)});
         if (inputs.lora_model_input) {
-            auto gate_lora = inputs.lora_model_input->getOpInput(i, ft::W::ffn_w1);
-            auto down_lora = inputs.lora_model_input->getOpInput(i, ft::W::ffn_w2);
-            auto up_lora = inputs.lora_model_input->getOpInput(i, ft::W::ffn_w3);
-            ffn_layer_params.lora_input = FfnLayerLoraInput({gate_lora, up_lora, down_lora});
+            ffn_layer_params.lora_input =  inputs.lora_model_input->getFfnLayerLoraInput(i);
         }
         auto ffn_output = device_->ffnLayer(ffn_layer_params);
         hidden = ffn_output.hidden_states;

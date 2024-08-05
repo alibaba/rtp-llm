@@ -7,9 +7,9 @@ namespace fastertransformer {
 LoraLinearOutput DeviceBase::loraLinear(const LoraLinearParams& params) {
     auto output = gemm(params.gemm_params);
     if (params.lora_input) {
-        auto& lora_input_lengths = *params.lora_input.value().lora_input_lengths_;
-        auto& lora_a = params.lora_input.value().lora_a_;
-        auto& lora_b = params.lora_input.value().lora_b_;
+        auto& lora_input_lengths = *params.lora_input->lora_input_lengths_;
+        auto& lora_a = params.lora_input->lora_a_;
+        auto& lora_b = params.lora_input->lora_b_;
         int32_t* lora_input_lengths_ptr = lora_input_lengths.data<int32_t>();
         std::vector<BufferPtr> inputs;
         std::vector<BufferPtr> outputs;

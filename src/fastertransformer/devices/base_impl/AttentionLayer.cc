@@ -70,8 +70,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     // other devices need to be careful about this.
     // maybe add a device property here.
     auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));
-    auto qkv_lora_params = (params.common.lora_input != std::nullopt) ? params.common.lora_input.value().qkv_lora_input : std::nullopt;
-    auto qkv = loraLinear(LoraLinearParams(qkv_gemm_params, qkv_lora_params)).output;
+    auto qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
     printBufferData(*qkv, "qkv");
 
     if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight) {
@@ -159,12 +158,10 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         BufferPtr quantized_attention_output = quantize(quant_params);
 
         auto output_gemm_params = GemmParams(*quantized_attention_output, *(output_weight->kernel), nullopt, output);
-        auto output_lora_params = (params.common.lora_input != std::nullopt) ? params.common.lora_input.value().out_lora_input : std::nullopt;
-        loraLinear(LoraLinearParams(output_gemm_params, output_lora_params)).output;
+        loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     } else {
         auto output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, output);
-        auto output_lora_params = (params.common.lora_input != std::nullopt) ? params.common.lora_input.value().out_lora_input : std::nullopt;
-        loraLinear(LoraLinearParams(output_gemm_params, output_lora_params)).output;
+        loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     }
 
     return {std::move(output)};

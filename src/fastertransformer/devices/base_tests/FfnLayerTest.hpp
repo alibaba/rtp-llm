@@ -173,10 +173,10 @@ public:
             down_lora_as.push_back(tensorToBuffer(params.down_lora_a[i]));
             down_lora_bs.push_back(tensorToBuffer(params.down_lora_b[i]));
         }
-        Opparams.lora_input = FfnLayerLoraInput({
-            lora::LoraOpInput({lora_input_lengths, gate_lora_as, gate_lora_bs}),
-            lora::LoraOpInput({lora_input_lengths, up_lora_as, up_lora_bs}),
-            lora::LoraOpInput({lora_input_lengths, down_lora_as, down_lora_bs})
+        Opparams.lora_input = lora::FfnLayerLoraInput({
+            std::make_shared<lora::LoraOpInput>(lora_input_lengths, gate_lora_as, gate_lora_bs),
+            std::make_shared<lora::LoraOpInput>(lora_input_lengths, up_lora_as, up_lora_bs),
+            std::make_shared<lora::LoraOpInput>(lora_input_lengths, down_lora_as, down_lora_bs)
         });
 
         auto output  = this->device_->ffnLayer(Opparams);
