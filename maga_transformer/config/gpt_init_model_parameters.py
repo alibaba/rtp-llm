@@ -87,9 +87,8 @@ class SparseConfig(DataClassBase):
 class VitParameters:
     # config includes origin vit config in ckpt/config.json
     config: Dict[str, Any] = {}
-    vit_special_token_ids: Dict[str, Any] = {}
-    vit_special_tokens: Dict[str, Any] = {}
-    image_expand_token: Optional[int] = None
+    special_token_ids: Dict[str, Any] = {}
+    special_tokens: Dict[str, Any] = {}
     vit_weights = None
 
 
@@ -107,7 +106,7 @@ class GptInitModelParameters:
         "src_quantization_bit",
         "ptuning_path",
         "tp_split_emb_and_lm_head",
-        "vit_related_params",
+        "mm_related_params",
         "lora_infos",
         "multi_task_prompt",
         "medusa_config",
@@ -148,7 +147,7 @@ class GptInitModelParameters:
         self.multi_task_prompt = None
         self.pre_seq_len = 0
         self.prefix_projection = False
-        self.vit_related_params: VitParameters = VitParameters()
+        self.mm_related_params: VitParameters = VitParameters()
         self.ref_module: Optional[torch.nn.Module] = None
         self.ref_dict: Dict[str, torch.Tensor] = {}
         self.task_type = TaskType.LANGUAGE_MODEL

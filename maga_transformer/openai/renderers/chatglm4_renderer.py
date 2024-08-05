@@ -96,7 +96,7 @@ class ChatGlm4Renderer(CustomChatRenderer):
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         assert isinstance(self.tokenizer, PreTrainedTokenizerBase)
         input_ids, input_message, input_image = self.handle_single_conversation(request.messages)
-        return RenderedInputs(input_ids=input_ids, rendered_prompt=input_message, input_images=input_image)
+        return RenderedInputs(input_ids=input_ids, rendered_prompt=input_message, input_urls=input_image)
 
 
 register_renderer('chatglm4', ChatGlm4Renderer)

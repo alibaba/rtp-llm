@@ -81,12 +81,12 @@ class InferenceWorker():
     def _inference(self, request: Request, **kwargs: Any):
         if len(request.input_texts) > 1 or request.batch_infer or request.num_return_sequences > 0:
             num_return_sequences = request.generate_configs[0].num_return_sequences
-            generators = [self._yield_generate(request.request_id, text, images, generate_config=generate_config, **kwargs)
-                          for text, images, generate_config in
-                            zip(request.input_texts, request.input_images, request.generate_configs)]
+            generators = [self._yield_generate(request.request_id, text, urls, generate_config=generate_config, **kwargs)
+                          for text, urls, generate_config in
+                            zip(request.input_texts, request.input_urls, request.generate_configs)]
             return self._batch_async_generators(request.incremental, num_return_sequences, generators, request.batch_infer)
         else:
-            return self._yield_generate(request.request_id, request.input_texts[0], request.input_images[0], generate_config=request.generate_configs[0], **kwargs)
+            return self._yield_generate(request.request_id, request.input_texts[0], request.input_urls[0], generate_config=request.generate_configs[0], **kwargs)
 
     def stop(self) -> None:
         if isinstance(self.model, AsyncModel):
@@ -130,8 +130,8 @@ class InferenceWorker():
         else:
             return self._format_response(gen_responses, generate_config)
 
-    async def _yield_generate(self, request_id: int, text: str, images: List[str], generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[Dict[str, Any], None]:
-        stream = self.pipeline.pipeline_async(prompt=text, request_id=request_id, images=images, generate_config=generate_config, **kwargs)
+    async def _yield_generate(self, request_id: int, text: str, urls: List[str], generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[Dict[str, Any], None]:
+        stream = self.pipeline.pipeline_async(prompt=text, request_id=request_id, urls=urls, generate_config=generate_config, **kwargs)
         async for generate_response in stream:
             yield self._format_response_new(generate_response, generate_config)
 

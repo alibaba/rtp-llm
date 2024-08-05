@@ -335,9 +335,9 @@ get_current_weather: Get the current weather in a given location. 输入参数�
             tokenzier_path = f"{self.test_data_path}/model_test/fake_test/testdata/llava/tokenizer/",
             mm_use_im_patch_token = False,
             mm_use_im_start_end = False,
-            vit_special_token_ids = {'ignore_token_index': -100, 'image_token_index': -200},
-            vit_special_tokens = {
-                'default_image_token': '<image>',
+            special_token_ids = {'ignore_token_index': -100, 'image_token_index': -200},
+            special_tokens = {
+                'default_mm_token': '<image>',
                 'default_im_start_token': '<im_start>',
                 'default_im_end_token': '<im_end>'
             }

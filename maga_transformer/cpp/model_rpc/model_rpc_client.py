@@ -36,7 +36,7 @@ def trans_input(input_py: GenerateInput):
     input_pb.request_id = request_counter.increment()
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.lora_id = input_py.lora_id
-    input_pb.multimodal_urls.extend(input_py.images)
+    input_pb.multimodal_urls.extend(input_py.urls)
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens

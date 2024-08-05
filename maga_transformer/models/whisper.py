@@ -48,7 +48,7 @@ class Whisper(GPT, MultiModalMixin):
             with torch.cuda.device(torch.device(g_parallel_info.device)):
                 ckpt_path = config.ckpt_path
                 self.mm_part = WhisperAudioEmbedding(WhisperProcessor.from_pretrained(ckpt_path), WhisperEncoder.from_pretrained(ckpt_path), config.cross_attn_input_len)
-            config.vit_related_params.vit_weights = BaseVitWeights({}, False)
+            config.mm_related_params.vit_weights = BaseVitWeights({}, False)
         GPT.__init__(self, config)
 
     @classmethod
@@ -119,10 +119,6 @@ class Whisper(GPT, MultiModalMixin):
             raise Exception('Whisper can only accept single audio')
 
         return self.word_embedding(input_ids)
-
-    @torch.no_grad()
-    def expand_token_id(self, token_ids: List[int], images: List[torch.Tensor]) -> Tuple[List[int], List[torch.Tensor], List[int]]:
-        return token_ids, images, []
 
     def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
         inputs = inputs.reshape(1, -1)

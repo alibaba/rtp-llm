@@ -177,7 +177,7 @@ class OpenaiEndopoint():
         return DebugInfo(
             input_prompt=prompt,
             input_ids=renderered_input.input_ids,
-            input_images=renderered_input.input_images,
+            input_images=renderered_input.input_urls,
             tokenizer_info=str(self.tokenizer),
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
@@ -194,20 +194,19 @@ class OpenaiEndopoint():
         rendered_input = renderer.render_chat(chat_request)
         input_ids = rendered_input.input_ids
 
-        input_images = rendered_input.input_images
         generate_config = self._extract_generation_config(chat_request)
 
         if self.model.is_multimodal():
-            images = input_images
+            urls = rendered_input.input_urls
         else:
-            images = []
+            urls = []
 
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config) \
             if chat_request.debug_info else None
         choice_generator = renderer.generate_choice(
             request_id,
             input_ids,
-            images,
+            urls,
             generate_config,
             self.model,
             chat_request

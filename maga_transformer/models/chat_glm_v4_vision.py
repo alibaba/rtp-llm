@@ -21,7 +21,7 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         self.nccl_op_ = NcclOp()
         if g_parallel_info.tp_rank == 0:
             self.mm_part = EVA2CLIPImageEmbedding(config)
-            config.vit_related_params.vit_weights = ChatGlmV4VisionVitWeights(
+            config.mm_related_params.vit_weights = ChatGlmV4VisionVitWeights(
                 {"vit": self.mm_part.vit}
             )
         ChatGlmV4.__init__(self, config)
@@ -35,7 +35,7 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
             self.init_mm_trt(
                 weights_info, self.config.ckpt_path,
-                self.config.vit_related_params, device, to_torch_dtype(self.config.data_type)
+                self.config.mm_related_params, device, to_torch_dtype(self.config.data_type)
             )
         super().load(device=device)
 
@@ -44,12 +44,12 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         config = ChatGlmV4._create_config(ckpt_path)
         config_dict = get_config_from_path(ckpt_path)
         vit_config = config_dict["vision_config"]
-        config.vit_related_params.config.update(vit_config)
+        config.mm_related_params.config.update(vit_config)
         config.build_position_ids = True
         # use initial hidden size for linear_proj and conv layer in eva2clip
-        config.vit_related_params.config['use_vision_hidden_size'] = False
-        config.vit_related_params.config["boi_token_id"] = config_dict.get("boi_token_id", 0)
-        config.vit_related_params.config["eoi_token_id"] = config_dict.get("eoi_token_id", 0)
+        config.mm_related_params.config['use_vision_hidden_size'] = False
+        config.mm_related_params.config["boi_token_id"] = config_dict.get("boi_token_id", 0)
+        config.mm_related_params.config["eoi_token_id"] = config_dict.get("eoi_token_id", 0)
         config.mm_sep_tokens = [config_dict.get("boi_token_id", 0), config_dict.get("eoi_token_id", 0)]
         config.is_multimodal = True
         config.cal_mm_tokens_in_rotary_emb = False
@@ -89,8 +89,8 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         token_type_ids: torch.Tensor, token_ids: torch.Tensor
     ) -> List[int]:
 
-        img_start_token_id: int = self.config.vit_related_params.config["boi_token_id"]
-        img_end_token_id: int = self.config.vit_related_params.config["eoi_token_id"]
+        img_start_token_id: int = self.config.mm_related_params.config["boi_token_id"]
+        img_end_token_id: int = self.config.mm_related_params.config["eoi_token_id"]
 
         bos_pos = torch.where(token_ids == img_start_token_id)[0]
         eos_pos = torch.where(token_ids == img_end_token_id)[0]
@@ -110,58 +110,5 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
             list(range(img_begin_position + 1, img_begin_position + 1 + token_ids.shape[0] - eos_pos[0]))
 
         return position_ids
-
-    def expand_token_id(
-        self, token_ids: List[int], images: List[torch.tensor]
-    ) -> Tuple[List[int], List[torch.Tensor], List[int]]:
-        if len(images) > 1:
-            raise Exception("ChatGLM4V support processes one image at a time")
-
-        img_start_token_id: int = self.config.vit_related_params.config["boi_token_id"]
-        img_end_token_id: int = self.config.vit_related_params.config["eoi_token_id"]
-
-        img_start_positions = [i for i, x in enumerate(token_ids) if x == img_start_token_id]
-        img_end_positions = [i for i, x in enumerate(token_ids) if x == img_end_token_id]
-        assert len(img_start_positions) == len(img_end_positions) and len(img_start_positions) <= 1
-
-        # only text
-        if len(img_start_positions) == 0:
-            return token_ids, images, []
-
-        # add placehold tokens for image
-        patch_size: int = self.config.vit_related_params.config["patch_size"]
-        image_size: int = self.config.vit_related_params.config["image_size"]
-
-        vision_token_num = (image_size // patch_size // 2) ** 2 + 2
-        img_pad_token_id = self.config.special_tokens.pad_token_id
-
-        new_token_ids = token_ids[:img_start_positions[0] + 1] + [img_pad_token_id] * (vision_token_num - 2) + \
-            token_ids[img_end_positions[0]:]
-
-        return new_token_ids, images, []
-
-    def multimodal_embedding(
-        self,
-        input_ids: torch.Tensor,
-        images_embedding: List[torch.Tensor],
-        token_type_ids: torch.Tensor,
-    ):
-
-        img_start_token_id: int = self.config.vit_related_params.config["boi_token_id"]
-        img_end_token_id: int = self.config.vit_related_params.config["eoi_token_id"]
-
-        bos_pos = torch.where(input_ids == img_start_token_id)
-        eos_pos = torch.where(input_ids == img_end_token_id)
-        assert (bos_pos[0] == eos_pos[0]).all()
-        img_pos = torch.stack((bos_pos[0], bos_pos[1], eos_pos[1]), dim=1)
-
-        input_embeds = self.word_embedding(input_ids)
-
-        # replace virtual placeholder embedding with real image embedding
-        if images_embedding != []:
-            for idx, (i, a, b) in enumerate(img_pos):
-                input_embeds[i][a:b + 1] = images_embedding[idx]
-
-        return input_embeds
 
 register_model("chatglm4v", ChatGlmV4Vision, [], ["THUDM/glm-4v-9b"])

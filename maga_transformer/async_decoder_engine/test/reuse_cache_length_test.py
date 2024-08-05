@@ -35,8 +35,8 @@ class ReuseCacheLengthTest(TestCase):
                                         vocab_size=0)
         config.reuse_cache = True
         if img_start_id and img_end_id:
-            config.vit_related_params.vit_special_token_ids['image_start_id'] = img_start_id
-            config.vit_related_params.vit_special_token_ids['image_end_id'] = img_end_id
+            config.mm_related_params.special_token_ids['image_start_id'] = img_start_id
+            config.mm_related_params.special_token_ids['image_end_id'] = img_end_id
         cache_config = CacheConfigGenerator.create_config(config)
         cache_manager = CacheManager(cache_config, None)
         return StreamCacheManager(config, cache_manager, 1)

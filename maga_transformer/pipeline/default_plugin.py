@@ -11,8 +11,8 @@ class DefaultPlugin(object):
         return prompt
 
     @staticmethod
-    def multimodal_modify_prompt_func(prompt: str, **kwargs: Any) -> Tuple[str, List[Any]]:
-        return prompt, kwargs['image']
+    def multimodal_modify_prompt_func(prompt: str, urls: List[str], mm_token: str, **kwargs: Any) -> Tuple[str, List[Any]]:
+        return prompt, urls
 
     @staticmethod
     def modify_response_func(response: str, **kwargs: Any) -> str:

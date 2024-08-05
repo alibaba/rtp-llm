@@ -28,7 +28,7 @@ class CogVLM2(Llama, MultiModalMixin):
         self.nccl_op_ = NcclOp()
         if g_parallel_info.tp_rank == 0:
             self.mm_part = EVA2CLIPImageEmbedding(config)
-            config.vit_related_params.vit_weights = CogVLM2VitWeights(
+            config.mm_related_params.vit_weights = CogVLM2VitWeights(
                 {"vit": self.mm_part.vit}
             )
         Llama.__init__(self, config)
@@ -38,7 +38,7 @@ class CogVLM2(Llama, MultiModalMixin):
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
             self.init_mm_trt(
                 weights_info, self.config.ckpt_path,
-                self.config.vit_related_params, device, to_torch_dtype(self.config.data_type)
+                self.config.mm_related_params, device, to_torch_dtype(self.config.data_type)
             )
         super().load(device=device)
 
@@ -106,9 +106,9 @@ class CogVLM2(Llama, MultiModalMixin):
         config.reserve_runtime_mem_mb = 2048
 
         vit_config = config_json["vision_config"]
-        config.vit_related_params.config.update(vit_config)
+        config.mm_related_params.config.update(vit_config)
         # use vision hidden size for linear_proj and conv layer in eva2clip
-        config.vit_related_params.config['use_vision_hidden_size'] = True
+        config.mm_related_params.config['use_vision_hidden_size'] = True
         config.special_tokens.bos_token_id = config_json["bos_token_id"]
         config.special_tokens.pad_token_id = config_json["pad_token_id"]
 
@@ -188,8 +188,8 @@ class CogVLM2(Llama, MultiModalMixin):
         token_type_ids = [LANGUAGE_TOKEN_TYPE]
 
         if len(images) > 0:
-            patch_size: int = self.config.vit_related_params.config["patch_size"]
-            image_size: int = self.config.vit_related_params.config["image_size"]
+            patch_size: int = self.config.mm_related_params.config["patch_size"]
+            image_size: int = self.config.mm_related_params.config["image_size"]
 
             vision_token_num = (image_size // patch_size // 2) * (
                 image_size // patch_size // 2

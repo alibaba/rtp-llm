@@ -17,7 +17,6 @@ class RPCEngine(BaseEngine):
         self.sp_model = sp_model
         self.tokenizer = model.tokenizer
         self.config = model.config
-        self.vit_expand_token_id_lock = asyncio.Lock()
         if self.model.is_multimodal():
             self.mm_engine = MMProcessEngine(self.model)
         else:

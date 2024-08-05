@@ -27,10 +27,6 @@ class AsyncModel:
     def is_multimodal(self) -> bool:
         return self.model.is_multimodal()
 
-    def expand_token_id(self, token_ids: List[int], images: List[Image.Image]) -> Tuple[List[int], Union[torch.Tensor, List[torch.Tensor]], List[int]]:
-        assert self.is_multimodal()
-        return self.model.expand_token_id(token_ids, images)
-
     @property
     def default_generate_config(self) -> GenerateConfig:
         return self.model.default_generate_config

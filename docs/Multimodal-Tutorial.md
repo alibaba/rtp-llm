@@ -39,7 +39,7 @@ generate_config = {
 ```
 按以下方式请求response：
 ``` python
-for res in pipeline("Picture 1:<img/>\n这是什么", images = ["https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"], generate_config = generate_config):
+for res in pipeline("Picture 1:<img/>\n这是什么", urls = ["https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"], generate_config = generate_config):
     print(res.batch_response)
 
 pipeline.stop()

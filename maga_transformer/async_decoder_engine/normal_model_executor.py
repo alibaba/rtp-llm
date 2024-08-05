@@ -161,7 +161,7 @@ class NormalModelExecutor(ExecutorBase):
             if any([t < 0 or t >= self.model_ops.config.vocab_size for t in combo_tokens]):
                 raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')
         else:
-            special_set = set([v for v in self.model_ops.config.vit_related_params.vit_special_token_ids.values()])
+            special_set = set([v for v in self.model_ops.config.mm_related_params.special_token_ids.values()])
             if any([((t < 0 or t >= self.model_ops.config.vocab_size) and (t not in special_set)) for t in combo_tokens]):
                 raise Exception(f'tokens: {combo_tokens} not in vocab_size: {self.model_ops.config.vocab_size}')
         return to_cuda(torch.IntTensor(combo_tokens)), batch_query.images, torch.IntTensor(combo_token_types)

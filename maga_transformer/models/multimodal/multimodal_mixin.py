@@ -59,7 +59,7 @@ class BaseVitWeights:
 
 class BaseMultiModalWeightInfo:
     def __init__(self, config: GptInitModelParameters):
-        self.vit_weights: Optional[BaseVitWeights] = config.vit_related_params.vit_weights
+        self.vit_weights: Optional[BaseVitWeights] = config.mm_related_params.vit_weights
 
     def _get_vit_info(self, llm_weights: ModelDeployWeightInfo):
         # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
@@ -91,8 +91,8 @@ class MultiModalMixin:
             return tokenizer.encode(prompt, add_special_tokens=False)
 
     @staticmethod
-    def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str],
-                                        img_token: str, **kwargs: Any) -> Tuple[str, List[str]]:
+    def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], urls: List[str],
+                                        mm_token: str, **kwargs: Any) -> Tuple[str, List[str]]:
         # should delete after chatapi interface update
         if kwargs.get('generate_config', {})['request_format'] == RequestFormat.CHAT_API:
             if isinstance(prompt, str):
@@ -100,7 +100,7 @@ class MultiModalMixin:
             else:
                 messages = prompt
             new_prompt: str = ""
-            new_images: List[str] = []
+            new_urls: List[str] = []
             for message in messages:
                 new_prompt += message['role'].upper() + ' :'
                 if isinstance(message['content'], str):
@@ -109,24 +109,21 @@ class MultiModalMixin:
                     for x in message['content']:
                         if x['type'] == 'text':
                             new_prompt += x['text']
-                        elif x['type'] == 'image_url':
-                            now_images = x['image_url']
-                            if isinstance(now_images, List):
-                                new_images.extend(now_images)
-                                new_prompt += (img_token + '\n') * len(now_images)
+                        elif x['type'].endswith('_url'):
+                            now_urls = x[x['type']]
+                            if isinstance(now_urls, List):
+                                new_urls.extend(now_urls)
+                                new_prompt += (mm_token + '\n') * len(now_urls)
                             else:
-                                new_images.append(now_images)
-                                new_prompt += img_token + '\n'
+                                new_urls.append(now_urls)
+                                new_prompt += mm_token + '\n'
                         else:
                             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "content type can only be text or image_url, but get: " + x['type'])
                     new_prompt += '\n'
-            return new_prompt + 'ASSISTANT :', new_images
+            return new_prompt + 'ASSISTANT :', new_urls
         elif isinstance(prompt, List):
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "raw request format cannot accept dict prompt")
-        return prompt, images
-
-    def expand_token_id(self, token_ids: List[int], images: List[torch.Tensor]) -> Tuple[List[int], List[torch.Tensor], List[int]]:
-        raise NotImplementedError()
+        return prompt, urls
 
     def _load_mm_weight(
         self, weights_info: ModelDeployWeightInfo, ckpt_path: str, vit_params: VitParameters,
@@ -224,7 +221,7 @@ class MultiModalMixin:
         if isinstance(self.mm_part, MultiModalTRTEngine):
             return
 
-        vit_weight = self.config.vit_related_params.vit_weights
+        vit_weight = self.config.mm_related_params.vit_weights
         ckpt_prefix = vit_weight.ckpt_prefix
         ft_prefix = vit_weight.ft_prefix
         weight_names = vit_weight.weight_names

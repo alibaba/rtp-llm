@@ -32,8 +32,8 @@ class QWen_VL(QWen, MultiModalMixin):
         self.nccl_op_ = NcclOp()
         if g_parallel_info.tp_rank == 0:
             with torch.cuda.device(torch.device(g_parallel_info.device)):
-                self.mm_part = QwenVLImageEmbedding(config.vit_related_params.config)
-            config.vit_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})
+                self.mm_part = QwenVLImageEmbedding(config.mm_related_params.config)
+            config.mm_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})
         QWen.__init__(self, config)
 
     @classmethod
@@ -45,14 +45,14 @@ class QWen_VL(QWen, MultiModalMixin):
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
             self.init_mm_trt(
                 weights_info, self.config.ckpt_path,
-                self.config.vit_related_params, device, to_torch_dtype(self.config.data_type)
+                self.config.mm_related_params, device, to_torch_dtype(self.config.data_type)
             )
         super().load(device=device)
     
     @staticmethod
-    def multimodal_modify_prompt_plugin(prompt: str, **kwargs: Any) -> Tuple[str, List[Any]]:
-        prompt, images = MultiModalMixin.multimodal_modify_prompt_plugin(prompt, **kwargs)
-        img_token: str = kwargs.get('img_token')
+    def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str],
+                                        img_token: str, **kwargs: Any) -> Tuple[str, List[str]]:
+        prompt, images = MultiModalMixin.multimodal_modify_prompt_plugin(prompt, images, img_token, **kwargs)
         start_str = '<img>'
         end_str = '</img>'
         if img_token in prompt:
@@ -112,12 +112,12 @@ class QWen_VL(QWen, MultiModalMixin):
             config_json = json.loads(content)
 
         vit_config = config_json['visual']
-        config.vit_related_params.config.update(vit_config)
-        config.vit_related_params.vit_special_token_ids.update({
+        config.mm_related_params.config.update(vit_config)
+        config.mm_related_params.special_token_ids.update({
             'image_start_id': vit_config['image_start_id'],
             'image_end_id': vit_config['image_start_id'] + 1,
             'image_pad_id': vit_config['image_start_id'] + 2})
-        config.vit_related_params.vit_special_tokens.update({'default_image_token': '<img/>'})
+        config.mm_related_params.special_tokens.update({'default_mm_token': '<img/>'})
         config.mm_sep_tokens = [vit_config['image_start_id'], vit_config['image_start_id'] + 1]
 
     @classmethod
@@ -131,25 +131,6 @@ class QWen_VL(QWen, MultiModalMixin):
     def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
         return MultiModalMixin.async_input_word_embedding(self, inputs, images, token_type_ids)
 
-    def expand_token_id(self, token_ids: List[int], images: List[torch.tensor]) -> Tuple[List[int], List[torch.Tensor], List[int]]:
-        return token_ids, images, []
-    
-    def multimodal_embedding(self, input_ids: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
-        img_start_id: int = self.config.vit_related_params.vit_special_token_ids['image_start_id']
-        img_end_id: int = self.config.vit_related_params.vit_special_token_ids['image_end_id']
-        bos_pos = torch.where(input_ids == img_start_id)
-        eos_pos = torch.where(input_ids == img_end_id)
-        assert (bos_pos[0] == eos_pos[0]).all()
-        img_pos = torch.stack((bos_pos[0], bos_pos[1], eos_pos[1]), dim=1)
-
-        input_embeds = self.word_embedding(input_ids)
-
-        if images != []:
-            for idx, (i, a, b) in enumerate(img_pos):
-                input_embeds[i][a + 1: b] = images[idx]
-
-        return input_embeds
-
     @staticmethod
     def eval_model_size(config: GptInitModelParameters):
         llm_size = BaseModel.eval_model_size(config)
@@ -160,7 +141,7 @@ class QWen_VL(QWen, MultiModalMixin):
     
     @staticmethod
     def eval_vit_param_count(config: GptInitModelParameters):
-        vit_config = config.vit_related_params.config
+        vit_config = config.mm_related_params.config
         embed_dim = vit_config["output_dim"]
         width = vit_config["width"]
         layers = vit_config["layers"]

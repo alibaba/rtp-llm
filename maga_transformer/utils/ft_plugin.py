@@ -10,7 +10,7 @@ class ModifyPromptCallable(Protocol):
         ...
 
 class MultiModalModifyPromptCallable(Protocol):
-    def __call__(self, prompt: str, **kwargs: Any) -> Tuple[str, List[Any]]:
+    def __call__(self, prompt: str, urls: List[str], mm_token: str, **kwargs: Any) -> Tuple[str, List[Any]]:
         ...
 
 class EncodeCallable(Protocol):

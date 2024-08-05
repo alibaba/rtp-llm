@@ -37,7 +37,7 @@ class EmbeddingOutput:
 class GenerateInput(PyBaseModel):
     request_id: int
     token_ids: torch.Tensor
-    images: Union[torch.Tensor, List[Any]] = []
+    urls: List[str] = []
     generate_config: GenerateConfig
     tokenizer: Any = None # TODO: remove this
     lora_id: int = -1

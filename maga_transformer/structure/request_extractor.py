@@ -16,7 +16,7 @@ class Request(NamedTuple):
     request_id: int
     batch_infer: bool
     input_texts: Any
-    input_images: Any
+    input_urls: Any
     generate_configs: List[GenerateConfig]
     is_streaming: bool
     
@@ -94,28 +94,28 @@ class RequestExtractor:
             raise FtRuntimeException(ExceptionType.NO_PROMPT_ERROR, "not input prompt")
         return input_texts
 
-    def _get_images(self, input_len: int, kwargs: Dict[str,Any]):
-        input_images: Optional[Union[List[str], List[List[str]]]] = None
-        images = kwargs.pop('images', None)
-        if images is not None and not isinstance(images, list):
-            raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "input images should be list")
+    def _get_urls(self, input_len: int, kwargs: Dict[str,Any]):
+        mm_urls: Optional[Union[List[str], List[List[str]]]] = None
+        urls = kwargs.pop('images', kwargs.pop('urls', None))
+        if urls is not None and not isinstance(urls, list):
+            raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "input urls should be list")
         if "prompt_batch" in kwargs:
-            if images is not None:
-                if not isinstance(images[0], list):
-                    raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "prompt batch images should be list[list]")
-                if len(images) != input_len:
-                    raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "prompt batch images and input should have same length")
-                input_images = images
+            if urls is not None:
+                if not isinstance(urls[0], list):
+                    raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "prompt batch urls should be list[list]")
+                if len(urls) != input_len:
+                    raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, "prompt batch urls and input should have same length")
+                mm_urls = urls
             else:
-                input_images = [[]] * input_len
+                mm_urls = [[]] * input_len
         else:
-            if images == None or len(images) == 0:
-                input_images = [[]] * input_len
-            elif len(images) > 0 and isinstance(images[0], str):
-                input_images = [images]
+            if urls == None or len(urls) == 0:
+                mm_urls = [[]] * input_len
+            elif len(urls) > 0 and isinstance(urls[0], str):
+                mm_urls = [urls]
             else:
-                input_images = images
-        return input_images
+                mm_urls = urls
+        return mm_urls
 
     def _get_request_id(self, kwargs: Dict[str,Any]) -> int:
         return kwargs[request_id_field_name]
@@ -135,19 +135,19 @@ class RequestExtractor:
                 generate_configs[i].adapter_name = adapter_name[i] if isinstance(adapter_name, list) else adapter_name
         return generate_configs
 
-    def extend_sequences(self, input_texts: Any, input_images: Any, generate_configs: List[GenerateConfig]):
-        return input_texts, input_images, generate_configs
+    def extend_sequences(self, input_texts: Any, input_urls: Any, generate_configs: List[GenerateConfig]):
+        return input_texts, input_urls, generate_configs
 
     def _get_request(self, generate_config: GenerateConfig, kwargs: Dict[str,Any]) -> Request:
         request_id = self._get_request_id(kwargs)
         batch_infer = self._is_batch(kwargs)
         input_texts = self._get_text(kwargs)
-        input_images = self._get_images(len(input_texts), kwargs)
+        input_urls = self._get_urls(len(input_texts), kwargs)
         generate_configs = self._get_adapter(generate_config, len(input_texts))
-        input_texts, input_images, generate_configs = self.extend_sequences(input_texts, input_images, generate_configs)
+        input_texts, input_urls, generate_configs = self.extend_sequences(input_texts, input_urls, generate_configs)
         is_streaming = RequestExtractor.is_streaming(kwargs)
 
-        return Request(request_id, batch_infer, input_texts, input_images, generate_configs, is_streaming)
+        return Request(request_id, batch_infer, input_texts, input_urls, generate_configs, is_streaming)
 
     def _format_chat_api_messages(self, generate_config: GenerateConfig, kwargs: Dict[str, Any]) -> Tuple[GenerateConfig, Dict[str, Any]]:
         if 'messages' in kwargs:

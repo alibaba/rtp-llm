@@ -6,7 +6,6 @@ import threading
 import queue
 import json
 from typing import Any, List, Union, Iterator, Tuple, Callable, Optional, Dict, Generator, AsyncGenerator
-from PIL import Image
 from concurrent.futures import Future
 from torch.nn.utils.rnn import pad_sequence
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
@@ -34,7 +33,7 @@ class Pipeline(object):
         self.model = model
         self.tokenizer = tokenizer
         self._special_tokens: int = self.model.config.special_tokens
-        self._img_token: str = self.model.config.vit_related_params.vit_special_tokens.get('default_image_token', '')
+        self._mm_token: str = self.model.config.mm_related_params.special_tokens.get('default_mm_token', '')
         self.piple_funcs: PipelineCustomFunc = get_piple_custom_func(self.model)
         if self.model.is_multimodal():
             if isinstance(self.model, AsyncModel):
@@ -66,14 +65,14 @@ class Pipeline(object):
         config.convert_select_tokens(vocab_size, tokenizer)
         return config
 
-    def __call__(self, prompt: str, images: Optional[List[str]] = None, **kwargs: Any) -> Iterator[GenerateResponse]:
-        # if not multimodal model, just pass images = [[]] * len(prompt)
-        return self.pipeline(prompt, images, **kwargs)
+    def __call__(self, prompt: str, urls: Optional[List[str]] = None, **kwargs: Any) -> Iterator[GenerateResponse]:
+        # if not multimodal model, just pass [[]] * len(prompt)
+        return self.pipeline(prompt, urls = urls, **kwargs)
 
     def pipeline(self,
                  prompt: str,
                  request_id: int = None,
-                 images: Optional[List[str]] = None,
+                 urls: Optional[List[str]] = None,
                  **kwargs: Any) -> Iterator[GenerateResponse]:
 
         q = queue.Queue()
@@ -81,7 +80,7 @@ class Pipeline(object):
         async def generator():
             res = None
             try:
-                res = self.pipeline_async(prompt, request_id, images, **kwargs)
+                res = self.pipeline_async(prompt, request_id, urls, **kwargs)
                 async for x in res:
                     q.put(x)
                 q.put(None)
@@ -118,7 +117,7 @@ class Pipeline(object):
         self,
         prompt: str,
         request_id: int = None,
-        images: Optional[List[str]] = None,
+        urls: Optional[List[str]] = None,
         **kwargs: Any
     ) -> AsyncGenerator[GenerateResponse, None]:
         begin_time = current_time_ms()
@@ -126,17 +125,17 @@ class Pipeline(object):
         if request_id == None:
             request_id = request_counter.increment()
 
-        # align images and prompts
-        if images is None or len(images) == 0:
-            images = []
+        # align urls and prompts
+        if urls is None or len(urls) == 0:
+            urls = []
         generate_config_json = kwargs.pop("generate_config", {})
         generate_config = self.create_generate_config(generate_config_json, self.model.config.vocab_size,
                                                       self.model.config.special_tokens, self.tokenizer, **kwargs)
         # for delete stop word from output
-        prompt = self.piple_funcs.modify_prompt_func(prompt, generate_config=generate_config.model_dump(), images=images, **kwargs)
+        prompt = self.piple_funcs.modify_prompt_func(prompt, generate_config=generate_config.model_dump(), **kwargs)
 
         if self.model.is_multimodal():
-            prompt, images = self.piple_funcs.multimodal_modify_prompt_func(prompt, images=images, img_token=self._img_token,
+            prompt, urls = self.piple_funcs.multimodal_modify_prompt_func(prompt, urls, self._mm_token,
                                                                             generate_config=generate_config.model_dump(), **kwargs)
 
         token_ids = self.piple_funcs.process_encode_func(prompt,
@@ -149,7 +148,7 @@ class Pipeline(object):
         kmonitor.report(GaugeMetrics.PRE_PIPELINE_RT_METRIC, current_time_ms() - begin_time)
         kmonitor.report(GaugeMetrics.NUM_BEAMS_METRIC, generate_config.num_beams)
         kmonitor.report(GaugeMetrics.INPUT_TOKEN_SIZE_METRIC, len(token_ids))
-        return self.generate_stream(request_id, token_ids, images, generate_config, **kwargs)
+        return self.generate_stream(request_id, token_ids, urls, generate_config, **kwargs)
 
     def process_stop_id(self,
                         generate_config: GenerateConfig,
@@ -253,14 +252,14 @@ class Pipeline(object):
         return texts, output_lens, decoding_states, token_buffers, ouput_tokens_list
 
     @torch.inference_mode()
-    async def generate_stream(self, request_id: int, token_ids: List[int], images: List[Future[torch.Tensor]],
+    async def generate_stream(self, request_id: int, token_ids: List[int], urls: List[Future[torch.Tensor]],
                             generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
         token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
 
         input = GenerateInput(request_id=request_id,
                               token_ids=token_ids,
-                              images=images,
+                              urls=urls,
                               generate_config=generate_config,
                               tokenizer=self.tokenizer,
                               token_type_ids=token_type_ids)

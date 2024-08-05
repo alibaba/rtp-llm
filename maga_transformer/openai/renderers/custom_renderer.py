@@ -36,7 +36,7 @@ class RendererParams:
 @dataclass
 class RenderedInputs:
     input_ids: List[int] = field(default_factory=list)
-    input_images: List[str] = field(default_factory=list)
+    input_urls: List[str] = field(default_factory=list)
     rendered_prompt: str = field(default_factory=str)
 
 class CustomChatRenderer():
@@ -109,7 +109,7 @@ class CustomChatRenderer():
             self,
             request_id: int,
             input_ids: List[int],
-            images: List[Future[Image.Image]],
+            urls: List[str],
             generate_config: GenerateConfig,
             model: Union[AsyncModel, BaseModel],
             request: ChatCompletionRequest
@@ -123,7 +123,7 @@ class CustomChatRenderer():
             GenerateInput(
                 request_id=request_id,
                 token_ids=input_id_tensor,
-                images=images,
+                urls=urls,
                 generate_config=generate_config,
                 tokenizer=self.tokenizer,
                 token_type_ids=token_type_ids

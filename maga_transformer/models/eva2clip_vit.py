@@ -16,7 +16,7 @@ class EVA2CLIPImageEmbedding(ImageEmbeddingInterface):
         torch.set_default_dtype(torch.half)
         self.vit = EVA2CLIPModel(config)
         torch.set_default_dtype(torch_default_dtype)
-        self.image_transform = ImageTransform(config.vit_related_params.config["image_size"])
+        self.image_transform = ImageTransform(config.mm_related_params.config["image_size"])
 
     def image_embedding(self, images: List[Any], device: Union[str, torch.device]) -> torch.Tensor:
         with torch.inference_mode():
@@ -155,7 +155,7 @@ class GLU(nn.Module):
 class EVA2CLIPModel(nn.Module):
     def __init__(self, config):
         super().__init__()
-        vision_config = Namespace(**config.vit_related_params.config)
+        vision_config = Namespace(**config.mm_related_params.config)
         self.patch_embedding = PatchEmbedding(vision_config)
         self.transformer = Transformer(vision_config)
         self.linear_proj = GLU(

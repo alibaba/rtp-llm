@@ -30,9 +30,9 @@ DEFAULT_CHAT_API_TEMPLATE = (
 )
 
 @dataclass
-class PromptWithImages:
+class PromptWithMMInput:
     prompt: str
-    image_urls: List[str]
+    urls: List[str]
 
 # This class is designed to replace `PreTrainedTokenizerBase.apply_chat_template` functionality,
 # providing more capability to customize the template.

@@ -132,7 +132,7 @@ class RendererInfo(BaseModel):
 class DebugInfo(BaseModel):
     input_prompt: str
     input_ids: List[int]
-    input_images: List[str]
+    input_urls: List[str]
     tokenizer_info: str
     max_seq_len: int
     eos_token_id: Optional[int]

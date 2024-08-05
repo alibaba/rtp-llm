@@ -9,7 +9,7 @@ from transformers import PreTrainedTokenizerBase
 from maga_transformer.config.gpt_init_model_parameters import TemplateType
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
-from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, PromptWithImages
+from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
     ContentPart, ContentPartTypeEnum, FunctionCall
@@ -30,7 +30,7 @@ class CogVLM2Renderer(CustomChatRenderer):
         else:
             raise Exception("Unknown template type")
 
-    def _render_messages(self, messages: List[ChatMessage]) -> PromptWithImages:
+    def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
         prompt = ""
         images = []
         template_type = self.template_type
@@ -74,12 +74,12 @@ class CogVLM2Renderer(CustomChatRenderer):
             # remove tail answer_format for template_type 'vqa' and 'chat'
             prompt += 'Question: {}{}'.format(last_message, answer_format[:-4])
 
-        return PromptWithImages(prompt=prompt, image_urls=images)
+        return PromptWithMMInput(prompt=prompt, urls=images)
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         messages = copy.deepcopy(request.messages)
-        prompt_and_images = self._render_messages(messages)
-        input_ids = self.tokenizer.encode(prompt_and_images.prompt)
-        return RenderedInputs(input_ids=input_ids, input_images=prompt_and_images.image_urls, rendered_prompt=prompt_and_images.prompt)
+        prompt_and_mm_input = self._render_messages(messages)
+        input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
+        return RenderedInputs(input_ids=input_ids, input_urls=prompt_and_mm_input.urls, rendered_prompt=prompt_and_mm_input.prompt)
 
 register_renderer('cogvlm2', CogVLM2Renderer)

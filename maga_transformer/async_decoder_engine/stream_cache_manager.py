@@ -57,15 +57,15 @@ class StreamCacheManager:
 
     def _cal_kvcache_reuse_length(self, block_num: int, stream: GenerateStream) -> Tuple[List[int], int]:
         input_token_ids = stream.complete_token_ids[0].numpy().tolist()
-        if len(self.config_.vit_related_params.vit_special_token_ids) > 0:
+        if len(self.config_.mm_related_params.special_token_ids) > 0:
             # for qwen_vl; todo llava
             return self._cal_kvcache_reuse_length_for_multimodal(block_num, input_token_ids)
         else:
             return self.cache_manager_.malloc_with_cache(block_num, input_token_ids)
 
     def _cal_kvcache_reuse_length_for_multimodal(self, block_num: int, input_token_ids: List[int]):
-        img_start_id = self.config_.vit_related_params.vit_special_token_ids.get('image_start_id', -1)
-        img_end_id = self.config_.vit_related_params.vit_special_token_ids.get('image_end_id', -1)
+        img_start_id = self.config_.mm_related_params.special_token_ids.get('image_start_id', -1)
+        img_end_id = self.config_.mm_related_params.special_token_ids.get('image_end_id', -1)
         if img_start_id > 0 and img_end_id > 0:
             start_token_list = [index for index, id in enumerate(input_token_ids) if id == img_start_id]
             end_token_list = [index for index, id in enumerate(input_token_ids) if id == img_end_id]

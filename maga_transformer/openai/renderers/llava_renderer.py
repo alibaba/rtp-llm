@@ -13,7 +13,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     ChatCompletionRequest, RoleEnum, FunctionCall
 from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer, RendererParams, \
     StreamResponseObject, RenderedInputs
-from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, PromptWithImages
+from maga_transformer.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo, \
     ContentPart, ContentPartTypeEnum
@@ -32,7 +32,7 @@ class Conversation:
     seps: List[str]
     connector: List[str]
 
-    def render_messages(self, messages: List[ChatMessage], tokenizer) -> PromptWithImages:
+    def render_messages(self, messages: List[ChatMessage], tokenizer) -> PromptWithMMInput:
         prompt: str = ""
         images: List[str] = []
 
@@ -55,7 +55,7 @@ class Conversation:
                             now_prompt = f"<image>\n" + now_prompt
                     chat_template_messages.append({"role": role, "content": now_prompt})
 
-            return PromptWithImages(tokenizer.apply_chat_template(chat_template_messages, tokenize=False, add_generation_prompt=True),
+            return PromptWithMMInput(tokenizer.apply_chat_template(chat_template_messages, tokenize=False, add_generation_prompt=True),
                                     images)
 
         if messages[0].role != RoleEnum.system:
@@ -80,7 +80,7 @@ class Conversation:
             else:
                 prompt += self.seps[0]
         prompt += self.roles[RoleEnum.assistant] + self.connector[1]
-        return PromptWithImages(prompt, images)
+        return PromptWithMMInput(prompt, images)
 
 conv_llava_v0 = Conversation(
     system_content="A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions.",
@@ -137,7 +137,7 @@ class LlavaRenderer(CustomChatRenderer):
 
         return conv_templates[conv_mode]
 
-    def _render_messages(self, messages: List[ChatMessage]) -> PromptWithImages:
+    def _render_messages(self, messages: List[ChatMessage]) -> PromptWithMMInput:
         ckpt_path: str = os.environ['CHECKPOINT_PATH']
         model_name: str = ckpt_path.split('?')[0] # oss style path
         model_name = model_name.strip('/').split('/')[-1]
@@ -147,8 +147,8 @@ class LlavaRenderer(CustomChatRenderer):
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         messages = copy.deepcopy(request.messages)
-        prompt_and_images = self._render_messages(messages)
-        input_ids = self.tokenizer.encode(prompt_and_images.prompt)
-        return RenderedInputs(input_ids=input_ids, input_images=prompt_and_images.image_urls, rendered_prompt=prompt_and_images.prompt)
+        prompt_and_mm_input = self._render_messages(messages)
+        input_ids = self.tokenizer.encode(prompt_and_mm_input.prompt)
+        return RenderedInputs(input_ids=input_ids, input_urls=prompt_and_mm_input.urls, rendered_prompt=prompt_and_mm_input.prompt)
 
 register_renderer('llava', LlavaRenderer)
