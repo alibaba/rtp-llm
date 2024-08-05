@@ -57,26 +57,16 @@ struct LoraModelImpl {
         if (lora_a != nullptr && lora_b != nullptr) {
             lora_weights = std::make_shared<const LoraWeights>(lora_a, lora_b);
         }
-        auto it = std::find(std::begin(target::target_modules), std::end(target::target_modules), target_module);
-        if (it != std::end(target::target_modules)) {
-            lora_model_[target_module] = lora_weights;
-        } else {
-            FT_CHECK_WITH_INFO(false, "lora model do not support %s.", target_module.c_str());
-        }
+        lora_model_[target_module] = lora_weights;
     };
 
     LoraWeightsPtr getLoraWeights(const std::string& target_module) const {
-        auto it = std::find(std::begin(target::target_modules), std::end(target::target_modules), target_module);
-        if (it != std::end(target::target_modules)) {
-            auto it = lora_model_.find(target_module);
-            if (it != lora_model_.end()) {
-                return it->second;
-            }
+        auto it = lora_model_.find(target_module);
+        if (it != lora_model_.end()) {
+            return it->second;
         } else {
-            FT_CHECK_WITH_INFO(false, "lora model do not support %s.", target_module.c_str());
+            return nullptr;
         }
-        return nullptr;
-
     };
 };
 

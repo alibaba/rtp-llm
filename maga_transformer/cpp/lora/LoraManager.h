@@ -7,17 +7,12 @@ namespace rtp_llm {
 
 namespace lora {
 
-struct LoraResource {
-    ft::lora::LoraModelPtr resource_;
-};
 
 class LoraManager {
 private:
-    std::shared_mutex mutex_;
-    std::mutex remove_mutex_;
+    std::mutex mutex_;
     std::condition_variable cv_;
-    std::unordered_map<int64_t, LoraResource> lora_map_;
-    size_t wait_remove_timeout_ = 0;
+    std::unordered_map<int64_t, ft::lora::LoraModelPtr> lora_map_;
 
 public:
 

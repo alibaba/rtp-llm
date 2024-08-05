@@ -13,43 +13,38 @@ void LoraManager::addLora(int64_t lora_id,
     FT_CHECK_WITH_INFO((lora_id >= 0), "add lora need lora id[%ld] be greater than 0", lora_id);
     FT_CHECK_WITH_INFO(!hasLora(lora_id),
         "Lora id[%ld] is globally unique and cannot be added repeatedly", lora_id);
-    std::unique_lock<std::shared_mutex> scoped_lock(mutex_);
-    lora_map_[lora_id] = LoraResource({std::make_shared<ft::lora::LoraModel>(lora_a_weights, lora_b_weights)});
+    std::unique_lock<std::mutex> scoped_lock(mutex_);
+    lora_map_[lora_id] = std::make_shared<ft::lora::LoraModel>(lora_a_weights, lora_b_weights);
 }
 
 void LoraManager::removeLora(int64_t lora_id) {
     FT_CHECK_WITH_INFO(hasLora(lora_id),
         "Lora id[%ld] need exits when remove lora", lora_id);
-    ft::lora::LoraModelPtr resource = nullptr;
     {
-        std::unique_lock<std::shared_mutex> scoped_lock(mutex_);
-        resource = lora_map_[lora_id].resource_;
-
-    }
-    {
-        std::unique_lock<std::mutex> scoped_lock(remove_mutex_);
+        std::unique_lock<std::mutex> scoped_lock(mutex_);
+        ft::lora::LoraModelPtr resource = lora_map_[lora_id];
         // one for var resource, another for lora_map_
         cv_.wait(scoped_lock, [&resource]{ return resource.use_count() == 2; });
     }
 
     {
-        std::unique_lock<std::shared_mutex> scoped_lock(mutex_);
+        std::unique_lock<std::mutex> scoped_lock(mutex_);
         lora_map_.erase(lora_id);
     }
     return;
 }
 
 ft::lora::LoraModelPtr LoraManager::getLora(int64_t lora_id) {
-    std::shared_lock<std::shared_mutex> scoped_lock(mutex_);
+    std::unique_lock<std::mutex> scoped_lock(mutex_);
     auto it = lora_map_.find(lora_id);
     if (it == lora_map_.end()) {
         return nullptr;
     }
-    return it->second.resource_;
+    return it->second;
 }
 
 bool LoraManager::hasLora(int64_t lora_id) {
-    std::shared_lock<std::shared_mutex> scoped_lock(mutex_);
+    std::unique_lock<std::mutex> scoped_lock(mutex_);
     return (lora_map_.find(lora_id) != lora_map_.end());
 }
 

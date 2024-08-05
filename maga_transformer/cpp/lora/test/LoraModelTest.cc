@@ -39,9 +39,6 @@ TEST_F(LoraModelTest, testLoraModelImplConstruct) {
     EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::ffn_w3), nullptr);
     EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::ffn_w2), nullptr);
 
-    EXPECT_ANY_THROW(lora_model_impl.setLoraWeigths("xxxx", lora_a_buffer_ptr, lora_b_buffer_ptr));
-    EXPECT_ANY_THROW(lora_model_impl.getLoraWeights("xxxx"));
-
 }
 
 TEST_F(LoraModelTest, testLoraModelErrorLayernumConstruct) {
@@ -62,7 +59,6 @@ TEST_F(LoraModelTest, testLoraModelConstructCase0) {
     EXPECT_EQ(lora_model.getLoraWeights(0, ft::W::ffn_w3), nullptr);
 
     EXPECT_ANY_THROW(lora_model.getLoraWeights(1, ft::W::attn_o_w));
-    EXPECT_ANY_THROW(lora_model.getLoraWeights(0, "xxxxx"));
 
 }
 
