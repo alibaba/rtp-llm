@@ -177,7 +177,7 @@ class QWen_VL(QWen, MultiModalMixin):
     @staticmethod
     def eval_model_param_count(config: GptInitModelParameters):
         llm_param_count = BaseModel.eval_model_param_count(config)
-        llm_param_count += QWen_VL.eval_model_param_count(config)
+        llm_param_count += QWen_VL.eval_vit_param_count(config)
 
         return llm_param_count
 
