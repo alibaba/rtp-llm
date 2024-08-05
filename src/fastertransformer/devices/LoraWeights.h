@@ -13,6 +13,10 @@ namespace fastertransformer {
 
 namespace lora {
 
+namespace target {
+    static const std::array<std::string, 5> target_modules = {W::attn_qkv_w, W::attn_o_w, W::ffn_w1, W::ffn_w2, W::ffn_w3};
+};
+
 
 struct LoraWeights {
     ConstBufferPtr lora_a_;
@@ -46,47 +50,33 @@ struct LoraWeights {
 typedef std::shared_ptr<const LoraWeights>  LoraWeightsPtr;
 
 struct LoraModelImpl {
-    LoraWeightsPtr attn_qkv_lora_weights_ = nullptr;
-    LoraWeightsPtr attn_out_lora_weights_ = nullptr;
-    LoraWeightsPtr ffn_gate_lora_weights_ = nullptr;
-    LoraWeightsPtr ffn_up_lora_weights_   = nullptr;
-    LoraWeightsPtr ffn_down_lora_weights_ = nullptr;
+    std::unordered_map<std::string, LoraWeightsPtr> lora_model_;
 
     void setLoraWeigths(const std::string& target_module, ConstBufferPtr lora_a, ConstBufferPtr lora_b) {
         LoraWeightsPtr lora_weights = nullptr;
         if (lora_a != nullptr && lora_b != nullptr) {
             lora_weights = std::make_shared<const LoraWeights>(lora_a, lora_b);
         }
-        if (target_module == W::attn_qkv_w) {
-            attn_qkv_lora_weights_ = lora_weights;
-        } else if (target_module == W::attn_o_w) {
-            attn_out_lora_weights_ = lora_weights;
-        } else if (target_module == W::ffn_w1) {
-            ffn_gate_lora_weights_ = lora_weights;
-        } else if (target_module == W::ffn_w2) {
-            ffn_down_lora_weights_ = lora_weights;
-        } else if (target_module == W::ffn_w3) {
-            ffn_up_lora_weights_ = lora_weights;
+        auto it = std::find(std::begin(target::target_modules), std::end(target::target_modules), target_module);
+        if (it != std::end(target::target_modules)) {
+            lora_model_[target_module] = lora_weights;
         } else {
             FT_CHECK_WITH_INFO(false, "lora model do not support %s.", target_module.c_str());
         }
     };
 
     LoraWeightsPtr getLoraWeights(const std::string& target_module) const {
-        if (target_module == W::attn_qkv_w) {
-            return attn_qkv_lora_weights_;
-        } else if (target_module == W::attn_o_w) {
-            return attn_out_lora_weights_;
-        } else if (target_module == W::ffn_w1) {
-            return ffn_gate_lora_weights_;
-        } else if (target_module == W::ffn_w2) {
-            return ffn_down_lora_weights_;
-        } else if (target_module == W::ffn_w3) {
-            return ffn_up_lora_weights_;
+        auto it = std::find(std::begin(target::target_modules), std::end(target::target_modules), target_module);
+        if (it != std::end(target::target_modules)) {
+            auto it = lora_model_.find(target_module);
+            if (it != lora_model_.end()) {
+                return it->second;
+            }
         } else {
             FT_CHECK_WITH_INFO(false, "lora model do not support %s.", target_module.c_str());
         }
         return nullptr;
+
     };
 };
 
@@ -100,14 +90,10 @@ struct LoraModel {
             "lora lora_a and lora b need has same size.");
         size_t layer_num = lora_a.size();
         lora_model_.resize(layer_num);
-        std::vector<std::string> target_modules = {W::attn_qkv_w,
-                                                   W::attn_o_w,
-                                                   W::ffn_w1,
-                                                   W::ffn_w2,
-                                                   W::ffn_w3};
+
         for (size_t i = 0; i < layer_num; i++) {
             auto lora_model_impl = LoraModelImpl();
-            for (auto target_module : target_modules) {
+            for (auto target_module : target::target_modules) {
                 lora_model_impl.setLoraWeigths(target_module,
                                                lora_a[i][target_module],
                                                lora_b[i][target_module]);

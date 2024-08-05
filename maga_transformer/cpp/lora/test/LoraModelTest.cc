@@ -17,11 +17,11 @@ protected:
 
 TEST_F(LoraModelTest, testLoraModelImplConstruct) {
     auto lora_model_impl = ft::lora::LoraModelImpl();
-    EXPECT_EQ(lora_model_impl.attn_qkv_lora_weights_, nullptr);
-    EXPECT_EQ(lora_model_impl.attn_out_lora_weights_, nullptr);
-    EXPECT_EQ(lora_model_impl.ffn_gate_lora_weights_, nullptr);
-    EXPECT_EQ(lora_model_impl.ffn_up_lora_weights_, nullptr);
-    EXPECT_EQ(lora_model_impl.ffn_down_lora_weights_, nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::attn_qkv_w), nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::attn_o_w), nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::ffn_w1), nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::ffn_w3), nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::ffn_w2), nullptr);
 
     auto lora_a = torch::rand({10, 8});
     auto lora_b = torch::rand({8, 10});
@@ -33,17 +33,11 @@ TEST_F(LoraModelTest, testLoraModelImplConstruct) {
     torch::equal(bufferToTensor(*std::const_pointer_cast<Buffer>(lora_weights->lora_a_)), lora_a);
     torch::equal(bufferToTensor(*std::const_pointer_cast<Buffer>(lora_weights->lora_b_)), lora_b);
 
-    EXPECT_NE(lora_model_impl.attn_qkv_lora_weights_, nullptr);
-    EXPECT_EQ(lora_model_impl.attn_out_lora_weights_, nullptr);
-    EXPECT_EQ(lora_model_impl.ffn_gate_lora_weights_, nullptr);
-    EXPECT_EQ(lora_model_impl.ffn_up_lora_weights_, nullptr);
-    EXPECT_EQ(lora_model_impl.ffn_down_lora_weights_, nullptr);
-
     EXPECT_NE(lora_model_impl.getLoraWeights(ft::W::attn_qkv_w), nullptr);
     EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::attn_o_w), nullptr);
     EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::ffn_w1), nullptr);
-    EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::ffn_w2), nullptr);
     EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::ffn_w3), nullptr);
+    EXPECT_EQ(lora_model_impl.getLoraWeights(ft::W::ffn_w2), nullptr);
 
     EXPECT_ANY_THROW(lora_model_impl.setLoraWeigths("xxxx", lora_a_buffer_ptr, lora_b_buffer_ptr));
     EXPECT_ANY_THROW(lora_model_impl.getLoraWeights("xxxx"));
