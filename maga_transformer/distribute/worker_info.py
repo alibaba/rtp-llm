@@ -66,10 +66,11 @@ class ParallelInfo(object):
         if info.world_size % info.local_world_size != 0:
             raise Exception("not support info.world_size mod info.local_world_size != 0")
         
-        if use_rpc_model:
-            torch.cuda.set_device(info.local_rank)
-        else:
-            torch.cuda.set_device(0)
+        if torch.cuda.is_available():
+            if use_rpc_model:
+                torch.cuda.set_device(info.local_rank)
+            else:
+                torch.cuda.set_device(0)            
         return info
 
     # used for ut
