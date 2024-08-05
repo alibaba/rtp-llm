@@ -1,5 +1,4 @@
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGpt.h"
-#include "src/fastertransformer/kernels/bert_preprocess_kernels.h"
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
 #include <algorithm>

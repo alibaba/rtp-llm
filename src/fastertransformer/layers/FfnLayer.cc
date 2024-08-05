@@ -16,7 +16,6 @@
 
 #include "src/fastertransformer/layers/FfnLayer.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
-#include "src/fastertransformer/kernels/transpose_int8_kernels.h"
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 
 namespace fastertransformer {

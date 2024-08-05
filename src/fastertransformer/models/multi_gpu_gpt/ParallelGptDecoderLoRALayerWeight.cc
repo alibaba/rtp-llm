@@ -1,5 +1,4 @@
 #include "src/fastertransformer/models/multi_gpu_gpt/ParallelGptDecoderLoRALayerWeight.h"
-#include "src/fastertransformer/kernels/transpose_int8_kernels.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/models/W.h"
 namespace fastertransformer {

@@ -1476,4 +1476,71 @@ INSTANTIATE_INVOKE_SUM_LENGTH_DIMENSION(__nv_bfloat16);
 #endif
 #undef INSTANTIATE_INVOKE_SUM_LENGTH_DIMENSION
 
+__global__ void getPaddingOffsetAndCuSeqLensKernel(int*       padding_offset,
+                                                   int*       cu_seqlens,
+                                                   const int* sequence_length,
+                                                   const int  batch_size,
+                                                   const int  max_seq_len)
+{
+    // do cumulated sum
+    int        total_seq_len        = 0;
+    int        cum_offset           = 0;
+    int        index                = 0;
+    const bool calculate_cu_seqlens = cu_seqlens != nullptr;
+    for (int i = 0; i < batch_size; i++) {
+        const int seq_len = sequence_length[i];
+        if (calculate_cu_seqlens) {
+            cu_seqlens[i] = total_seq_len;
+        }
+        for (int j = 0; j < seq_len; j++) {
+            padding_offset[index] = cum_offset;
+            index++;
+        }
+        cum_offset += max_seq_len - seq_len;
+        total_seq_len += seq_len;
+    }
+    if (calculate_cu_seqlens) {
+        cu_seqlens[batch_size] = total_seq_len;
+    }
+}
+
+__global__ void getCuSeqLensKernel(int* cu_seqlens, 
+                                   const int* sequence_length, 
+                                   const int* prefix_length, 
+                                   const int batch_size) {
+    // do cumulated sum
+    int        total_seq_len        = 0;    
+    const bool has_prefix_length  = prefix_length != nullptr;
+    for (int i = 0; i < batch_size; i++) {
+        int seq_len = sequence_length[i];
+        if (has_prefix_length) {
+            seq_len += prefix_length[i];
+        }
+        cu_seqlens[i] = total_seq_len;
+        total_seq_len += seq_len;
+    }    
+    cu_seqlens[batch_size] = total_seq_len;
+}
+
+void invokeGetPaddingOffsetAndCuSeqLens(int*         padding_offset,
+                                        int*         cu_seqlens,
+                                        const int*   sequence_lengths,
+                                        const int    batch_size,
+                                        const int    max_seq_len,
+                                        cudaStream_t stream) {
+    getPaddingOffsetAndCuSeqLensKernel<<<1, 1, 0, stream>>>(
+        padding_offset, cu_seqlens, sequence_lengths, batch_size, max_seq_len);
+    sync_check_cuda_error();
+}
+
+void invokeGetCuSeqLens(int* cu_seqlens, 
+                        const int* sequence_length, 
+                        const int* prefix_length, 
+                        const int batch_size, 
+                        cudaStream_t stream) {
+    getCuSeqLensKernel<<<1, 1, 0, stream>>>(
+        cu_seqlens, sequence_length, prefix_length, batch_size);
+    sync_check_cuda_error();
+}
+
 }  // namespace fastertransformer

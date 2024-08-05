@@ -293,10 +293,17 @@ void invokeConvertOffsetToAddrOneLayer(uint64_t*      block_addr, // [b, 2, m]
                                        int            block_size,
                                        cudaStream_t   stream);
 
-// void invokeMinLength(size_t*      h_pinned_min_length,
-//                      const int*   lengths,
-//                      size_t*      min_length,
-//                      const size_t size,
-//                      cudaStream_t stream = 0);
+void invokeGetPaddingOffsetAndCuSeqLens(int*         tmp_mask_offset,
+                                        int*         cu_seqlens,
+                                        const int*   sequence_length,
+                                        const int    batch_size,
+                                        const int    max_seq_len,
+                                        cudaStream_t stream);
+
+void invokeGetCuSeqLens(int* cu_seqlens,
+                        const int* sequence_length,
+                        const int* prefix_length,
+                        const int batch_size,
+                        cudaStream_t stream);
 
 }  // namespace fastertransformer

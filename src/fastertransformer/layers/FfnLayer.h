@@ -18,7 +18,6 @@
 
 #include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
-#include "src/fastertransformer/kernels/matrix_vector_multiplication.h"
 #include "src/fastertransformer/layers/BaseLayer.h"
 #include "src/fastertransformer/layers/FfnWeight.h"
 #include "src/fastertransformer/layers/GemmRunner.h"

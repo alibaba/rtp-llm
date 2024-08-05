@@ -1,6 +1,5 @@
 #pragma once
 #include <string>
-#include "src/fastertransformer/kernels/calibrate_quantize_weight_kernels.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/layers/FfnLayer.h"
 #include "src/fastertransformer/layers/FfnWeight.h"
