@@ -195,7 +195,7 @@ class CustomChatRenderer():
             output_ids = output.output_ids
             output_ids = self._clean_output_ids(output_ids)
             output_token_length = len(output_ids)
-            finish_reason = self._check_finish_reason(output_ids, input_token_length)
+            finish_reason = self._check_finish_reason(output_ids, input_token_length, generate_config.max_new_tokens)
             output_ids = self._remove_stop_word_ids(output_ids)
             # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
             decoded_prev_token = self.tokenizer.decode(responded_output_ids[-last_token_length:])
@@ -239,8 +239,10 @@ class CustomChatRenderer():
             aux_info=output.aux_info if request.aux_info else None
         )
 
-    def _check_finish_reason(self, token_ids: List[int], input_token_length: int) -> Optional[FinisheReason]:
+    def _check_finish_reason(self, token_ids: List[int], input_token_length: int, max_new_tokens: int = -1) -> Optional[FinisheReason]:
         stop_word_ids_list_all = self.get_all_extra_stop_word_ids_list() + self.stop_word_ids_list
+        if max_new_tokens > 0 and len(token_ids) >= max_new_tokens:
+            return FinisheReason.length
         if len(token_ids) + input_token_length >= self.max_seq_len:
             return FinisheReason.length
         if token_ids and token_ids[-1] == self.eos_token_id:
