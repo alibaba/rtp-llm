@@ -342,8 +342,6 @@ struct AttentionCommonInputs {
     ConstBufferPtr linear_bias_slopes;
     BufferPtr prefix_prompt_lengths;
     int32_t   max_prefix_length;
-    OptionalLoraInput lora_input = std::nullopt;
-    FMHAType          fmha_type  = FMHAType::NONE;
 
     lora::AttentionLayerLoraInput lora_input;
 };
