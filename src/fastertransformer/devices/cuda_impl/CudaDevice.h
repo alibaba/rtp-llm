@@ -9,8 +9,8 @@
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
 #include "src/fastertransformer/trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 #include "src/fastertransformer/trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
-#include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_kernels.h"
 #include "src/fastertransformer/trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
+#include "src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 #include "src/fastertransformer/cutlass/interface.h"
 
 #include <nvml.h>
@@ -27,6 +27,8 @@ enum class FMHAType {
     OPEN_SOURCE,
     TRT_V1
 };
+
+nvinfer1::DataType nvinfer1DtypeConvert(fastertransformer::DataType dtype);
 
 class CudaDevice : public DeviceBase {
 public:
@@ -99,6 +101,7 @@ private:
     std::unique_ptr<trt_plugins::SmoothQuantGemmPlugin> smooth_quant_plugin_;
 
     std::unique_ptr<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin> weight_only_groupwise_matmul_plugin_;
+    std::unique_ptr<trt_plugins::MixtureOfExpertsPlugin> moe_plugin_;
 
     nvmlDevice_t nvml_device_;
     NcclParam nccl_param_;
@@ -116,8 +119,6 @@ private:
     bool use_open_source_fmha       = false;
     bool use_open_source_fmha_paged = false;
     bool use_multi_block_mode       = false;
-
-    std::unique_ptr<tensorrt_llm::kernels::CutlassMoeFCRunnerInterface> moe_runner_;
 };
 
 } // namespace fastertransformer

@@ -32,14 +32,6 @@ cudaDataType_t dtypeConvert(DataType dtype) {
     }
 };
 
-nvinfer1::DataType nvinfer1DtypeConvert(DataType dtype) {
-    switch (dtype) {
-        case DataType::TYPE_FP16 : return nvinfer1::DataType::kHALF;
-        case DataType::TYPE_BF16 : return nvinfer1::DataType::kBF16;
-        default: throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-    }
-};
-
 struct CudaGemmArguments {
     std::vector<size_t> Ashape;
     std::vector<size_t> Bshape;

@@ -34,6 +34,8 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
 
     weight_only_groupwise_matmul_plugin_ = std::make_unique<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin>();
 
+    moe_plugin_ = std::make_unique<trt_plugins::MixtureOfExpertsPlugin>();
+
     auto ret = nvmlInit();
     FT_CHECK(ret == NVML_SUCCESS);
     ret = nvmlDeviceGetHandleByIndex(device_id_, &nvml_device_);
@@ -296,38 +298,6 @@ void CudaDevice::checkUseMultiBlockMode() {
     use_multi_block_mode = true;
 }
 
-template <typename ComputeT, typename WeightsT, cutlass::WeightOnlyQuantOp QuantOp>
-void initMoeRunnerImpl(unique_ptr<CutlassMoeFCRunnerInterface>& moe_runner) {
-    if (moe_runner && dynamic_cast<CutlassMoeFCRunner<ComputeT, WeightsT, QuantOp>*>(moe_runner.get())) {
-        return;
-    } else {
-        moe_runner.reset(new CutlassMoeFCRunner<ComputeT, WeightsT, QuantOp>());
-    }
-}
-
-void CudaDevice::initMoeRunner(const DataType compute_type, const DataType weights_type) {
-    if (compute_type == DataType::TYPE_FP16 && weights_type == DataType::TYPE_FP16) {
-        initMoeRunnerImpl<half, half, cutlass::WeightOnlyQuantOp::UNDEFINED>(moe_runner_);
-    } else if (compute_type == DataType::TYPE_FP32 && weights_type == DataType::TYPE_FP32) {
-        initMoeRunnerImpl<float, float, cutlass::WeightOnlyQuantOp::UNDEFINED>(moe_runner_);
-    } else if (compute_type == DataType::TYPE_FP16 && weights_type == DataType::TYPE_QINT8) {
-        initMoeRunnerImpl<half, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>(moe_runner_);
-    } else if (compute_type == DataType::TYPE_BF16 && weights_type == DataType::TYPE_BF16) {
-        initMoeRunnerImpl<__nv_bfloat16, __nv_bfloat16, cutlass::WeightOnlyQuantOp::UNDEFINED>(moe_runner_);
-    } else if (compute_type == DataType::TYPE_BF16 && weights_type == DataType::TYPE_QINT8) {
-        initMoeRunnerImpl<__nv_bfloat16, uint8_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>(moe_runner_);
-    } else if (compute_type == DataType::TYPE_FP16 && weights_type == DataType::TYPE_QINT4X2) {
-        initMoeRunnerImpl<half, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>(moe_runner_);
-    } else if (compute_type == DataType::TYPE_BF16 && weights_type == DataType::TYPE_QINT4X2) {
-        initMoeRunnerImpl<__nv_bfloat16, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>(moe_runner_);
-    } else {
-        RUNTIME_ASSERT_OP_ARG(
-            false,
-            "MoE runner can not be initialized via compute type %d and weights bits %d",
-            compute_type, weights_type);
-    }
-}
-
 // TODO(wangyin.yx): fill all memory status.
 DeviceStatus CudaDevice::getDeviceStatus() {
     DeviceStatus status;
@@ -352,5 +322,17 @@ DeviceStatus CudaDevice::getDeviceStatus() {
 }
 
 RTP_LLM_REGISTER_DEVICE(Cuda);
+
+nvinfer1::DataType nvinfer1DtypeConvert(fastertransformer::DataType dtype)
+ {
+    switch (dtype) {
+        case fastertransformer::DataType::TYPE_FP16 : return nvinfer1::DataType::kHALF;
+        case fastertransformer::DataType::TYPE_BF16 : return nvinfer1::DataType::kBF16;
+        case fastertransformer::DataType::TYPE_FP32 : return nvinfer1::DataType::kFLOAT;
+        case fastertransformer::DataType::TYPE_QINT8 : return nvinfer1::DataType::kINT8;
+        case fastertransformer::DataType::TYPE_QINT4X2 : return nvinfer1::DataType::kINT4;
+        default: throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
 
 }; // namespace fastertransformer

@@ -29,27 +29,25 @@ using tensorrt_llm::plugins::MixtureOfExpertsPlugin;
 MixtureOfExpertsPlugin::MixtureOfExpertsPlugin(int number_of_experts, int top_k, bool normalize_expert_scale,
     int expert_hidden_size, int expert_inter_size, fastertransformer::ActivationType activation_type,
     nvinfer1::DataType type, nvinfer1::DataType weight_type,  bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode)
-    : mNumExperts(number_of_experts)
-    , mK(top_k)
-    , mExpertHiddenSize(expert_hidden_size)
-    , mExpertInterSize(expert_inter_size)
-    , mNormalizeExpertScale(normalize_expert_scale)
-    , mActivationType(activation_type)
-    , mType(type)
-    , mWeightType(weight_type)
-    , mHasZeros(has_zeros)
-    , mGroupSize(group_size)
-    // , mQuantMode(quant_mode)
-    // , mTPSize(tp_size)
-    // , mTPRank(tp_rank)
-    // , mParallelismMode(parallelism_mode)
-    , mNormalizationMode(normalization_mode)
 {
-    init();
+    init(number_of_experts, top_k, normalize_expert_scale, expert_hidden_size, expert_inter_size, activation_type, type, weight_type, has_zeros, group_size, normalization_mode );
 }
 
-void MixtureOfExpertsPlugin::init()
+void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normalize_expert_scale,
+    int expert_hidden_size, int expert_inter_size, fastertransformer::ActivationType activation_type,
+    nvinfer1::DataType type, nvinfer1::DataType weight_type,  bool has_zeros, int group_size, MOEExpertScaleNormalizationMode normalization_mode)
 {
+    mNumExperts = number_of_experts;
+    mK = top_k;
+    mExpertHiddenSize = expert_hidden_size;
+    mExpertInterSize = expert_inter_size;
+    mNormalizeExpertScale = normalize_expert_scale;
+    mActivationType = activation_type;
+    mType = type;
+    mWeightType = weight_type;
+    mHasZeros = has_zeros;
+    mGroupSize = group_size;
+    mNormalizationMode = normalization_mode;
     if (mWeightType == DataType::kINT8 || mWeightType == DataType::kINT4){
         T_SWITCH(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&]{
             V_SWITCH(mHasZeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY, [&]{
