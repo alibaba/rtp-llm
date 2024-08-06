@@ -54,7 +54,13 @@ class GangServer:
             return {'initializing':not self._initialized}
 
         try:
-            uvicorn.run(app, host="0.0.0.0", port=g_worker_info.gang_hb_port, log_config=UVICORN_LOGGING_CONFIG)
+            uvicorn.run(
+                app,
+                host="0.0.0.0",
+                port=g_worker_info.gang_hb_port,
+                log_config=UVICORN_LOGGING_CONFIG,
+                loop='asyncio',
+            )
         except:
             logging.error(traceback.format_exc())
             os._exit(-1)
@@ -97,7 +103,7 @@ class GangServer:
                 miss.append(member.name)
             else:
                 ready.append(member.name)
-        if len(miss) > 0:            
+        if len(miss) > 0:
             raise Exception(f"worker rank: {g_parallel_info.tp_rank} not ready, collected workers: {ready}, missed workers: {miss}")
 
     def _wait_ready(self):
@@ -118,14 +124,14 @@ class GangServer:
                 if cur_time - start_time > datetime.timedelta(minutes=timeout_minutes):
                     raise Exception("failed to start gang server")
                 retry_time += 1
-                time.sleep(sleep_time)    
-    
+                time.sleep(sleep_time)
+
     def wait_infernece_server_ready(self):
         for member in self._gang_info.workers():
             url = f'http://{member.ip}:{member.server_port}/health'
             try:
                 resposne = requests.get(url, timeout=1)
-            except:                
+            except:
                 raise Exception(f"failed to check member {member.ip}:{member.server_port}/health")
             if resposne.status_code != 200:
                 raise Exception(f"member {member.ip}:{member.server_port} /health status_code: {resposne.status_code}, is not ready")
@@ -184,18 +190,18 @@ class GangServer:
         master_url = f"tcp://{g_master_info.ip}:{g_master_info.th_nccl_port}"
         logging.info(f'gang worker {g_parallel_info} exchange done')
         # init_process_group会去检查gpu num > 0, 所以测试环境不希望init_process_group
-        
+
         init_process_timeout = int(os.environ.get('DIST_BARRIER_TIMEOUT', 45))
         # 使用ProcessGroupNCCL自带的health check进行一次同步+nccl检测
         if os.environ.get('FAKE_GANG_ENV', None) == None:
             os.environ['ENABLE_NCCL_HEALTH_CHECK'] = '1'
-            dist.init_process_group(backend=dist.Backend.NCCL, 
-                                    init_method=master_url, 
-                                    rank=g_parallel_info.world_rank, 
-                                    world_size=g_parallel_info.world_size, 
+            dist.init_process_group(backend=dist.Backend.NCCL,
+                                    init_method=master_url,
+                                    rank=g_parallel_info.world_rank,
+                                    world_size=g_parallel_info.world_size,
                                     timeout=timedelta(seconds=init_process_timeout))
         else:
-            # 由于后续会进行health check，且init_process_group默认不进行block，因此使用memory barrier进行一次同步                
+            # 由于后续会进行health check，且init_process_group默认不进行block，因此使用memory barrier进行一次同步
             self.memory_barrier(master_url, timeout=init_process_timeout)
 
         self.start_health_check()

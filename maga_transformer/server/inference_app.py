@@ -9,6 +9,7 @@ import uvicorn
 from uvicorn import Server, Config
 import asyncio
 import socket
+import threading
 from typing import Union, Any, Dict, Optional, List
 
 from fastapi import FastAPI, status, HTTPException
@@ -17,6 +18,7 @@ from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from anyio.lowlevel import RunVar
 from anyio import CapacityLimiter
+from uvicorn.loops.auto import auto_loop_setup
 
 from maga_transformer.distribute.worker_info import g_worker_info, g_parallel_info
 from maga_transformer.openai.openai_endpoint import OpenaiEndopoint
@@ -59,18 +61,26 @@ class InferenceApp(object):
         self.inference_server.wait_all_worker_ready()
 
         timeout_keep_alive = int(os.environ.get("TIMEOUT_KEEP_ALIVE", 5))
+
+        loop = "auto"
+        if (threading.current_thread() != threading.main_thread()):
+            # NOTE: asyncio
+            loop = "none"
+            auto_loop_setup()
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
         config = Config(
             app,
             host="0.0.0.0",
+            loop=loop,
             port=g_worker_info.server_port,
             log_config=UVICORN_LOGGING_CONFIG,
             timeout_keep_alive=timeout_keep_alive,
             h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE,
         )
+
         server = GracefulShutdownServer(config)
         server.run()
-        # uvicorn.run(app, host="0.0.0.0", port=g_worker_info.server_port, log_config=UVICORN_LOGGING_CONFIG,
-        #             timeout_keep_alive = timeout_keep_alive, h11_max_incomplete_event_size=MAX_INCOMPLETE_EVENT_SIZE)
 
     def create_app(self):
         middleware = [
@@ -148,7 +158,7 @@ class InferenceApp(object):
             # compat for huggingface-pipeline request endpoint
             if self.inference_server.is_embedding:
                 start_time = time.time()
-                res = await self.inference_server.embedding(req, raw_request)                
+                res = await self.inference_server.embedding(req, raw_request)
                 end_time = time.time()
                 # print("total: ", end_time - start_time)
                 return res
@@ -191,7 +201,7 @@ class InferenceApp(object):
         @check_is_master()
         async def encode(req: Union[str,Dict[Any, Any]]):
             return self.inference_server.tokenizer_encode(req)
-        
+
         @app.post("/set_debug_log")
         async def set_debug_log(req: Union[str,Dict[Any, Any]]):
             try:
@@ -199,7 +209,7 @@ class InferenceApp(object):
                 return {"status": "ok"}
             except Exception as e:
                 return {"error": str(e)}
-        
+
         @app.post("/set_debug_print")
         async def set_debug_print(req: Union[str,Dict[Any, Any]]):
             try:
