@@ -203,7 +203,7 @@ void ftNcclStreamSynchronize(NcclParam tensor_para, cudaStream_t stream, bool ti
         check_cuda_error(cudaStreamSynchronize(stream));
         return;
     }
-    auto opTimeout            = std::chrono::milliseconds(5000);
+    auto opTimeout            = std::chrono::milliseconds(120000);
     auto synchronizeTimepoint = std::chrono::steady_clock::now();
 
     while (1) {
