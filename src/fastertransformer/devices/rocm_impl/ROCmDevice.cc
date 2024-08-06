@@ -71,13 +71,13 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, tp_ranks, stream_);
     }
 
-    allocator_.reset(new Allocator<AllocatorType::ROCM>());
-    hostAllocator_.reset(new Allocator<AllocatorType::ROCM_HOST>());
+    auto allocator_ptr     = new Allocator<AllocatorType::ROCM>();
+    auto hostAllocator_ptr = new Allocator<AllocatorType::ROCM_HOST>();
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
         HIP_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
         TrackerAllocatorParams tracker_params;
-        tracker_params.real_allocator     = allocator_.get();  // TODO(rocm): leak?
+        tracker_params.real_allocator     = allocator_ptr;
         tracker_params.target_track_bytes = params.device_reserve_memory_bytes > 0 ?
                                                 params.device_reserve_memory_bytes :
                                                 free_bytes + params.device_reserve_memory_bytes;
@@ -87,6 +87,8 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
                     free_bytes,
                     tracker_params.target_track_bytes);
         allocator_.reset(new TrackerAllocator(tracker_params));
+    } else {
+        allocator_.reset(allocator_ptr);
     }
 
     if (params.host_reserve_memory_bytes) {
@@ -94,10 +96,12 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
                               "rocm host memory can not reserve as much as possible (%lu), must specify concrete size.",
                               params.host_reserve_memory_bytes);
         TrackerAllocatorParams tracker_params;
-        tracker_params.real_allocator     = hostAllocator_.release();
+        tracker_params.real_allocator     = hostAllocator_ptr;
         tracker_params.target_track_bytes = params.host_reserve_memory_bytes;
         tracker_params.align_size         = 32;
         hostAllocator_.reset(new TrackerAllocator(tracker_params));
+    } else {
+        hostAllocator_.reset(hostAllocator_ptr);
     }
 
     check_hip_error(hipGetDeviceProperties(&device_prop_, device_id_));
