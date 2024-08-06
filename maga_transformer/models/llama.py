@@ -83,7 +83,7 @@ class Llama(GPT):
             rope_type = rope_scaling.get('type', rope_scaling.get('rope_type'))
             if rope_type == 'linear':
                 config.rotary_embedding_scale = rope_scaling['factor']
-                config.dynamic_embedding_max_pos = config_json.get('max_position_embeddings', 2048)
+                config.org_embedding_max_pos = config_json.get('max_position_embeddings', 2048)
             elif rope_type == 'dynamic':
                 config.rotary_embedding_style = 3
             elif rope_type == 'yarn':

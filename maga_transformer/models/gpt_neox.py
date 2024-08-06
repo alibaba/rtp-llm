@@ -58,7 +58,7 @@ class GPTNeox(GPT):
         if config_json.get('rope_scaling', None):
             config.rotary_embedding_style = 3
             config.rotary_embedding_scale = config_json['rope_scaling']['factor']
-            config.dynamic_embedding_max_pos = config_json.get('max_position_embeddings', 2048)
+            config.org_embedding_max_pos = config_json.get('max_position_embeddings', 2048)
 
         config.has_pre_decoder_layernorm = False
         config.has_post_decoder_layernorm = True
