@@ -15,74 +15,18 @@
  */
 #pragma once
 
-#if USING_CUDA
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#endif
-
-#if USING_ROCM
-#include "src/fastertransformer/rocm/cuda_shims.h"
-#include "src/fastertransformer/cuda/cuda_type_utils.cuh"
-#endif
 
 namespace fastertransformer
 {
-#if USING_CUDA
+
 template <typename T>
 void invokeQuantization(
     int8_t* dst, const T* src, const int64_t size, const float* scalePtr, cudaStream_t stream = 0, int maxGirdSize = 0);
-#endif
+
 template <typename T>
 void invokePerTokenQuantization(
     int8_t* dst, const T* src, const int64_t numRows, const int64_t numCols, float* scalePtr, const float* smoother,  const float* shift, cudaStream_t stream = 0);
 
-template<typename T>
-void invokePerColQuantizationInt8(int8_t*       dst,
-                                  const T*      src,
-                                  const int64_t numRows,
-                                  const int64_t numCols,
-                                  half*         scalePtr,
-                                  const float*  smoother,
-                                  const float*  shift,
-                                  cudaStream_t  stream = 0);
-
-template<typename T>
-void invokePerColDequantizationInt8(T*            dst,
-                                    const int8_t* src,
-                                    const int64_t numRows,
-                                    const int64_t numCols,
-                                    half*         scalePtr,
-                                    const float*  smoother,
-                                    const float*  shift,
-                                    cudaStream_t  stream = 0);
-
-template<typename T>
-void invokePerColQuantizationInt4x2(int8_t*       dst,
-                                    const T*      src,
-                                    const int64_t numRows,
-                                    const int64_t numCols,
-                                    half*         scalePtr,
-                                    const float*  smoother,
-                                    const float*  shift,
-                                    cudaStream_t  stream = 0);
-
-template<typename T>
-void invokePerColDequantizationInt4x2(T*            dst,
-                                      const int8_t* src,
-                                      const int64_t numRows,
-                                      const int64_t numCols,
-                                      half*         scalePtr,
-                                      half*         zerosPtr,
-                                      const int64_t groupSize,
-                                      cudaStream_t  stream = 0);
-
-template<typename T>
-void invokePerRowDequantizationInt4x2(T*            dst,
-                                      const int8_t* src,
-                                      const int64_t numRows,
-                                      const int64_t numCols,
-                                      half*         scalePtr,
-                                      half*         zerosPtr,
-                                      const int64_t groupSize,
-                                      cudaStream_t  stream = 0);                                      
 }

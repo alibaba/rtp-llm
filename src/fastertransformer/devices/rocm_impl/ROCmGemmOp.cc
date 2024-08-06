@@ -8,7 +8,7 @@
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
 #include "src/fastertransformer/rocm/quantizePreprocessors.h"
-#include "src/fastertransformer/kernels/quantization_tensor.h"
+#include "src/fastertransformer/kernels/rocm/quantization_rocm.h"
 
 #include <numeric>
 #include <utility>
@@ -201,12 +201,12 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(params.A.type(),
                                              invokePerColDequantizationInt4x2,
                                              fpB.get()->data(),
-                                             (int8_t*)(QB.kernel().data()),
                                              arguments.k,
                                              arguments.n,
+                                             group_size,
+                                             (int8_t*)(QB.kernel().data()),
                                              QB.scales().data<half>(),
                                              QB.zeros().data<half>(),
-                                             group_size,
                                              stream_);
             sync_check_cuda_error();
 

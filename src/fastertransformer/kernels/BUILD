@@ -11,6 +11,7 @@ cc_library(
         "activation_fp8_kernels.cu",
         "unfused_attention_fp8_kernels.cu",
         "moe_kernels.cu",
+        "rocm/*.cu",
     ]),
     hdrs = glob([
         "*.h",
@@ -21,6 +22,7 @@ cc_library(
     ], exclude=[
         "AttentionFP8Weight.h",
         "moe_kernels.h",
+        "rocm/*.h",
     ]),
     deps = [
         "//src/fastertransformer/cuda:memory_utils",
@@ -85,7 +87,7 @@ cc_library(
         "sampling_penalty_kernels.cu",
         "custom_ar_kernels.cu",
         "decoder_masked_multihead_attention.cu",
-        "quantization_tensor.cu",
+        "rocm/quantization_rocm.cu",
     ]+glob([
         "decoder_masked_multihead_attention/*.cu",
     ]),
@@ -119,7 +121,7 @@ cc_library(
         "penalty_types.h",
         "decoder_masked_multihead_attention.h",
         "custom_ar_kernels.h",
-        "quantization_tensor.h",
+        "rocm/quantization_rocm.h",
     ] + glob([
         "decoder_masked_multihead_attention/*.h",
     ]),

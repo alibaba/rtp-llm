@@ -535,6 +535,76 @@ DeviceStatus ROCmDevice::getDeviceStatus() {
     return status;
 }
 
+static float cpu_half2float(uint16_t h) {
+    unsigned sign     = ((((uint16_t)h) >> 15) & 1);
+    unsigned exponent = ((((uint16_t)h) >> 10) & 0x1f);
+    unsigned mantissa = ((((uint16_t)h) & 0x3ff) << 13);
+
+    if (exponent == 0x1f) { /* NaN or Inf */
+        mantissa = (mantissa ? (sign = 0, 0x7fffff) : 0);
+        exponent = 0xff;
+    } else if (!exponent) { /* Denorm or Zero */
+        if (mantissa) {
+            unsigned int msb;
+            exponent = 0x71;
+            do {
+                msb = (mantissa & 0x400000);
+                mantissa <<= 1; /* normalize */
+                --exponent;
+            } while (!msb);
+            mantissa &= 0x7fffff; /* 1.mantissa is implicit */
+        }
+    } else {
+        exponent += 0x70;
+    }
+
+    int temp = ((sign << 31) | (exponent << 23) | mantissa);
+    return *((float*)((void*)&temp));
+}
+void ROCmDevice::printBuffer(const BufferPtr b) {
+    BufferPtr hb = b;
+    if (b.get()->where() == MemoryType::MEMORY_GPU) {
+        hb = clone({*b, AllocationType::HOST});
+    }
+
+    if (b.get()->type() == DataType::TYPE_FP16) {
+        printf("%s", hb.get()->debugString().c_str());
+        uint16_t* phb = (uint16_t*)(hb.get()->data());
+        for (uint32_t i = 0; i < hb.get()->size(); i++) {
+            if (i % hb.get()->shape()[0] == 0)
+                printf("\n");
+            uint16_t val = phb[i];
+            printf("%.2e, ", cpu_half2float(val));
+        }
+        printf("\n");
+    } else if (b.get()->type() == DataType::TYPE_INT4X2) {
+        printf("%s", hb.get()->debugString().c_str());
+        uint16_t* phb = (uint16_t*)(hb.get()->data());
+        for (uint32_t i = 0; i < hb.get()->size(); i++) {
+            if (i % (hb.get()->shape()[0] / 2) == 0)
+                printf("\n");
+            uint8_t val = phb[i];
+            printf("%d, %d, ", (val & 0x0F), ((val & 0xF0) >> 4));
+        }
+        printf("\n");
+    } else if (b.get()->type() == DataType::TYPE_QINT4X2) {
+        const QBuffer& qb = reinterpret_cast<const QBuffer&>(*hb);
+
+        size_t kernel_dim0 = qb.kernel().shape()[0];
+        size_t scales_dim0 = qb.scales().shape()[0];
+        size_t group_size  = (kernel_dim0 / scales_dim0);
+
+        printf("QBuffer( group_size = %d\n [\n", group_size);
+        printf("   kernel: ");
+        printBuffer(BufferPtr(new Buffer(qb.kernel())));
+        printf("   scales: ");
+        printBuffer(BufferPtr(new Buffer(qb.scales())));
+        printf("   zeros: ");
+        printBuffer(BufferPtr(new Buffer(qb.zeros())));
+        printf("])\n");
+    }
+}
+
 RTP_LLM_REGISTER_DEVICE(ROCm);
 
 }  // namespace fastertransformer

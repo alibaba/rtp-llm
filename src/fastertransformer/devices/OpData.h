@@ -551,6 +551,9 @@ struct QuantizeParams {
     OptionalConstBufferRef  static_scale;
     OptionalConstBufferRef  static_scale_reciprocal;
 
+    // for groupwise quantize
+    int64_t    groupSize;
+
     QuantizeParams(const Buffer&          input,
                    DataType               qtype,
                    size_t                 axis,
@@ -566,9 +569,20 @@ struct QuantizeParams {
         smoother(smoother),
         shift(shift),
         static_scale(static_scale),
-        static_scale_reciprocal(static_scale_reciprocal) {}
-
-    QuantizeParams(const Buffer& input, DataType qtype, size_t axis): input(input), qtype(qtype), axis(axis), qscheme(QScheme::Qint8PerChannelLastAxis) {}
+        static_scale_reciprocal(static_scale_reciprocal),
+        groupSize(64) {}
+    QuantizeParams(const Buffer& input, DataType qtype, size_t axis):
+        input(input),
+        qtype(qtype),
+        axis(axis),
+        qscheme(QScheme::Qint8PerChannelLastAxis),
+        groupSize(64) {}
+    QuantizeParams(const Buffer& input, DataType qtype, size_t axis, int64_t groupSize):
+        input(input),
+        qtype(qtype),
+        axis(axis),
+        qscheme(QScheme::Qint8PerChannelLastAxis),
+        groupSize(groupSize) {}
 };
 
 }  // namespace fastertransformer
