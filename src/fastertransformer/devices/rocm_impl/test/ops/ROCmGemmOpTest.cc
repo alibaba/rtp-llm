@@ -7,37 +7,49 @@ using namespace fastertransformer;
 
 class ROCmGemmOpTest: public GemmOpTest {
 public:
-    GemmOpTestOutput RocmQ8GemmOpRun(GemmOpTestInput& input) {
-        auto       A   = tensorToBuffer(input.A);
-        auto       B   = tensorToBuffer(input.B);
-        auto       Q8B = device_->quantize({*B, DataType::TYPE_QINT8, 1});
-        auto       D   = device_->allocateBuffer({A->type(), {A->shape()[0], Q8B->shape()[1]}});
-        GemmParams params{*A, *Q8B, std::nullopt, D};
-        device_->gemm(params);
-        return GemmOpTestOutput({bufferToTensor(*D)});
-    }
-    GemmOpTestOutput RocmQ4x2GemmOpRun(GemmOpTestInput& input) {
-        auto       A   = tensorToBuffer(input.A);
-        auto       B   = tensorToBuffer(input.B);
-        auto       Q4B = device_->quantize({*B, DataType::TYPE_QINT4X2, 1});
-        auto       D   = device_->allocateBuffer({A->type(), {A->shape()[0], Q4B->shape()[1]}});
+    GemmOpTestOutput RocmQ4x2GemmOpRun(GemmOpTestInput& input, int64_t group_size) {
+        BufferPtr  A   = tensorToBuffer(input.A);
+        BufferPtr  B   = tensorToBuffer(input.B);
+        BufferPtr  Q4B = device_->quantize({*B, DataType::TYPE_QINT4X2, 1, group_size});
+        BufferPtr  D   = device_->allocateBuffer({A->type(), {A->shape()[0], Q4B->shape()[1]}});
         GemmParams params{*A, *Q4B, std::nullopt, D};
         device_->gemm(params);
         return GemmOpTestOutput({bufferToTensor(*D)});
     }
-    void RocmQ8GemmOpTest(size_t m, size_t n, size_t k, DataType dtype) {
-        auto input      = PrepareGemmOpInput(m, n, k, dtype);
-        auto result     = RocmQ8GemmOpRun(input);
-        auto result_ref = BasicGemmTorchRefRun(input);
-        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C, 1e-1, 1e-1);
+
+    void RocmQ4x2OpTest(long row, long col, int64_t group_size, DataType dtype) {
+        ROCmDevice* rocDev = static_cast<ROCmDevice*>(device_);
+
+        auto          ttype = dataTypeToTorchType(dtype);
+        torch::Tensor tA    = torch::rand({row, col}).to(ttype);
+        BufferPtr     A     = tensorToBuffer(tA);
+        BufferPtr     Q4A   = rocDev->quantize({*A, DataType::TYPE_QINT4X2, 1, group_size});
+        BufferPtr     DQ4A  = rocDev->dequantize({*Q4A, DataType::TYPE_QINT4X2, 1});
+        torch::Tensor tDA   = bufferToTensor(*DQ4A);
+        assertTensorClose(tA, tDA, 1, 1);
     }
-    void RocmQ4x2GemmOpTest(size_t m, size_t n, size_t k, DataType dtype) {
+
+    void RocmQ4x2GemmOpTest(size_t m, size_t n, size_t k, int64_t group_size, DataType dtype) {
         auto input      = PrepareGemmOpInput(m, n, k, dtype);
-        auto result     = RocmQ4x2GemmOpRun(input);
+        auto result     = RocmQ4x2GemmOpRun(input, group_size);
         auto result_ref = BasicGemmTorchRefRun(input);
-        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C, 1, 1);
+        assertTensorClose(result.C.to(result_ref.C.type()), result_ref.C, 5e-1, 5e-1);
     }
 };
+
+TEST_F(ROCmGemmOpTest, Q4x2GemmOpTest) {
+    RocmQ4x2OpTest(64, 64, 64, DataType::TYPE_FP16);
+    RocmQ4x2OpTest(2048, 256, 64, DataType::TYPE_FP16);
+    RocmQ4x2OpTest(1024, 2048, 128, DataType::TYPE_FP16);
+
+    RocmQ4x2GemmOpTest(64, 64, 64, 64, DataType::TYPE_FP16);
+    RocmQ4x2GemmOpTest(256, 128, 256, 64, DataType::TYPE_FP16);
+    RocmQ4x2GemmOpTest(1024, 2048, 512, 64, DataType::TYPE_FP16);
+
+    RocmQ4x2GemmOpTest(128, 128, 128, 128, DataType::TYPE_FP16);
+    RocmQ4x2GemmOpTest(256, 128, 256, 128, DataType::TYPE_FP16);
+    RocmQ4x2GemmOpTest(1024, 2048, 512, 128, DataType::TYPE_FP16);
+}
 
 TEST_F(ROCmGemmOpTest, BasicGemmOpTest) {
     BasicGemmOpTest(2, 1024, 2048, DataType::TYPE_FP16);

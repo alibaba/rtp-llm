@@ -52,6 +52,8 @@ public:
     void allGather(const AllGatherParams& params);
 
     BufferPtr quantize(const QuantizeParams& params) override;
+    BufferPtr dequantize(const QuantizeParams& params);
+    void      printBuffer(const BufferPtr buffer);
 
 public:
     BufferPtr        testVecAdd(const BufferPtr a, const BufferPtr b);
