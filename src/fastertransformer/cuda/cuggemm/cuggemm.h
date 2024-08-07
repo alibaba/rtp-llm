@@ -15,6 +15,8 @@ public:
     void init(cudaStream_t stream) {
         stream_ = stream;
         half_runner_ = std::make_unique<CutlassGroupGemmRunner<half>>();
+        bf16_runner_ = std::make_unique<CutlassGroupGemmRunner<__nv_bfloat16>>();
+        fp32_runner_ = std::make_unique<CutlassGroupGemmRunner<float>>();
     }
 
     void setup(DataType dtype) {
@@ -33,6 +35,8 @@ public:
 
 private:
     std::unique_ptr<CutlassGroupGemmRunner<half>> half_runner_;
+    std::unique_ptr<CutlassGroupGemmRunner<__nv_bfloat16>> bf16_runner_;
+    std::unique_ptr<CutlassGroupGemmRunner<float>> fp32_runner_;
     DataType dtype_;
     cudaStream_t stream_;
 };

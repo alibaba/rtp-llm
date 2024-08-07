@@ -121,7 +121,7 @@ cc_test(
 cc_test(
     name = "cuda_group_gemm_op_test",
     srcs = [
-        "ops/CudaGroupGemmOpTest.cc",
+        "CudaGroupGemmOpTest.cc",
     ],
     data = [],
     env = test_envs,

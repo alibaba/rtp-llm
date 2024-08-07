@@ -19,7 +19,8 @@ GroupedGemmOutput CudaDevice::groupedGemm(const GroupedGemmParams& params) {
 
     size_t num = params.A.size();
     auto dtype = params.A[0]->type();
-    FT_CHECK_WITH_INFO((dtype == DataType::TYPE_FP16), "cuda group gemm only support half.");
+    FT_CHECK_WITH_INFO((dtype == DataType::TYPE_FP16 || dtype == DataType::TYPE_BF16 || dtype == DataType::TYPE_FP32),
+        "cuda group gemm only support half/bf16/fp32.");
     cuggemm_runner_->setup(dtype);
     std::vector<BufferPtr>  output(num);
     std::vector<void*> a_pointers(num);

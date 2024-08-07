@@ -87,13 +87,14 @@ public:
     void groupGemmOpTest(std::vector<std::tuple<size_t, size_t>> Aconfig,
                          std::vector<std::tuple<size_t, size_t>> Bconfig,
                          DataType type,
-                         bool bias = false)
+                         bool bias = false,
+                         double rtol = 0, double atol = 0)
     {
         auto input = prepareInput(Aconfig, Bconfig, type, bias);
         auto result = deviceGroupGemmOpRun(input, bias);
         auto result_ref = torchGroupGemmOpRun(input);
         for (int i = 0; i < result.Cs.size(); i++) {
-            assertTensorClose(result.Cs[i].to(result_ref.Cs[i].scalar_type()), result_ref.Cs[i]);
+            assertTensorClose(result.Cs[i].to(result_ref.Cs[i].scalar_type()), result_ref.Cs[i], rtol, atol);
         }
 
     }
