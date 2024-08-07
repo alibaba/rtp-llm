@@ -88,12 +88,10 @@ filegroup(
         "//:using_cuda": [
             "src/fastertransformer/th_op/th_utils.cc",
             "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
-            "src/fastertransformer/th_op/common/DynamicDecodeOp.cc",
             "src/fastertransformer/th_op/common/FusedEmbeddingOp.cc",
             "src/fastertransformer/th_op/common/GptOps.cc",
             "src/fastertransformer/th_op/common/NcclOp.cc",
             "src/fastertransformer/th_op/common/WeightOnlyQuantOps.cc",
-            "src/fastertransformer/th_op/multi_gpu_gpt/ParallelGptOp.cc",
         ],
         "//:using_rocm": [
             "src/fastertransformer/th_op/th_utils.cc",

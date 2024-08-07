@@ -20,7 +20,6 @@ os.environ['WORLD_SIZE'] = os.environ['TP_SIZE']
 os.environ['LOCAL_WORLD_SIZE'] = os.environ['TP_SIZE']
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
-sys.path.append('/home/zw193905/FasterTransformer')
 from example.perf_test.test_util import (
     origin_prompt, write_odps, get_prompt)
 from maga_transformer.model_factory import ModelFactory

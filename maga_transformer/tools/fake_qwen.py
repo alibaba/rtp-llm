@@ -27,7 +27,6 @@ def save_config_func(model_type,
         "bos_token_id": 151643,
         "embd_pdrop": 0.0,
         "eos_token_id": 151643,
-        # todo(xieshui): in hf json, here is ffn_hidden_size * 2 for two weight, however in raw config need store
         "ffn_hidden_size": ffn_hidden_size,
         "ffn_inter_padding_size": ffn_hidden_size,
         "fp16": False,

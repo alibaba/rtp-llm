@@ -16,10 +16,9 @@ from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 
-from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateOutputs, GenerateResponse
+from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateOutputs, GenerateResponse, GenerateInput
 from maga_transformer.model_factory import ModelFactory, AsyncModel, ModelConfig
 from maga_transformer.pipeline.pipeline_custom_func import PipelineCustomFunc, get_piple_custom_func
-from maga_transformer.async_decoder_engine.generate_stream import GenerateInput
 from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slices, \
             truncate_response_with_stop_words, truncate_token_with_stop_word_id, match_stop_words
 from maga_transformer.utils.tokenizer_utils import DecodingState

@@ -191,7 +191,4 @@ class Llava(Llama, MultiModalMixin):
                               config.mm_related_params.special_tokens,
                               config.special_tokens.bos_token_id)
     
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
-        return MultiModalMixin.async_input_word_embedding(self, inputs, images, token_type_ids)
-    
 register_model("llava", Llava, ["LlavaLlamaForCausalLM"])

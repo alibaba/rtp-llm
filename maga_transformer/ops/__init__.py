@@ -55,10 +55,7 @@ xft_loaded = False
 
 try:
     # CUDA GPU build
-    from libth_transformer import GptInitParameter, ParallelGptOp, RtpEmbeddingOp, RtpLLMOp, SpecialTokens
-except BaseException as e:
     from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens
+except BaseException as e:
     import traceback
-    logging.info(f"ParallelGptOp not registred in libth_transformer.so, this might be a none-cuda build. "
-                 f"Exception: {e}, traceback: {traceback.format_exc()}")
-    ParallelGptOp = None
+    logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")

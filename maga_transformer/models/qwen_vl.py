@@ -128,9 +128,6 @@ class QWen_VL(QWen, MultiModalMixin):
     def get_weight_cls():
         return QWenVLWeightInfo
 
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
-        return MultiModalMixin.async_input_word_embedding(self, inputs, images, token_type_ids)
-
     @staticmethod
     def eval_model_size(config: GptInitModelParameters):
         llm_size = BaseModel.eval_model_size(config)

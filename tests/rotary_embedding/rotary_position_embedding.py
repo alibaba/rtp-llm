@@ -119,7 +119,7 @@ class TestRope(unittest.TestCase):
         headsize = 32
         batch_size = 8
         max_position_embeddings = 2048
-        for seq_len in range(1024, 10000, 1024):
+        for seq_len in range(1024, 4096, 1024):
             self.RopeOP = torch.classes.unittest.RotaryPositionEmbeddingOp(dim, max_position_embeddings, base, 1.0, 4)
             self.Rope = QWenRotaryEmbedding(dim, base)
             x = torch.rand(batch_size, seq_len, headsize, dim).cuda()

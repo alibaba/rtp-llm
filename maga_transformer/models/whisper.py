@@ -15,7 +15,6 @@ from maga_transformer.models.multimodal.multimodal_common import AudioEmbeddingI
 from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.models.base_model import EmbeddingOutput
 from maga_transformer.models.whisper_weight import WhisperWeightInfo
 
 class WhisperAudioEmbedding(AudioEmbeddingInterface):
@@ -109,9 +108,6 @@ class Whisper(GPT, MultiModalMixin):
         # besides whipser not accept any input prompt
         return [50258, 50259, 50360, 50364]
 
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
-        return MultiModalMixin.async_input_word_embedding(self, inputs, images, token_type_ids)
-
     def multimodal_embedding(
         self, input_ids: torch.Tensor, image_features: List[torch.Tensor], token_type_ids: torch.Tensor
     ):
@@ -119,33 +115,5 @@ class Whisper(GPT, MultiModalMixin):
             raise Exception('Whisper can only accept single audio')
 
         return self.word_embedding(input_ids)
-
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
-        inputs = inputs.reshape(1, -1)
-        if g_parallel_info.tp_size <= 1:
-            return EmbeddingOutput(self.multimodal_embedding(inputs, images, token_type_ids).squeeze(0), images)
-
-        if g_parallel_info.tp_rank == 0:
-            embedding_tensor = self.multimodal_embedding(inputs, images, token_type_ids).squeeze(0)
-            images_embedding_shape = torch.tensor([[image.shape[0], image.shape[1]] for image in images])
-        else:
-            embedding_tensor = torch.zeros((inputs.shape[1], self.config.head_num * self.config.size_per_head), dtype=self.dtype, device=self.device)
-            # images is a list of 2-dim tensors
-            images_embedding_shape = torch.zeros((len(images), 2))
-
-        self.nccl_op_.broadcast_tp([embedding_tensor, images_embedding_shape])
-
-        extra_input = []
-        for idx in range(len(images)):
-            if g_parallel_info.tp_rank == 0:
-                tmp_image = images[idx]
-            else:
-                tmp_image = torch.zeros((images_embedding_shape[idx][0], images_embedding_shape[idx][1]))
-            extra_input.append(tmp_image)
-
-        self.nccl_op_.broadcast_tp(extra_input)
-
-        torch.cuda.current_stream().synchronize()
-        return EmbeddingOutput(embedding_tensor, extra_input)
 
 register_model('whisper', Whisper)

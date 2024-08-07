@@ -13,7 +13,8 @@ async def main():
     update_master_info('127.0.0.1', 42345)
     os.environ["MODEL_TYPE"] = os.environ.get("MODEL_TYPE", "qwen2")
     os.environ["CHECKPOINT_PATH"] = os.environ.get("CHECKPOINT_PATH", "Qwen/Qwen-1_8B-Chat")
-
+    os.environ["RESERVER_RUNTIME_MEM_MB"] = "0"
+    os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = f"{128 * 1024 ** 2}"
     model_config = ModelFactory.create_normal_model_config()
     model = ModelFactory.from_huggingface(model_config.ckpt_path, model_config=model_config)
     pipeline = Pipeline(model, model.tokenizer)

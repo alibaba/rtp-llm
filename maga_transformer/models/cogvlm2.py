@@ -168,16 +168,6 @@ class CogVLM2(Llama, MultiModalMixin):
         y = y.cumsum()
         return y.tolist()
 
-    def async_input_word_embedding(
-        self,
-        inputs: torch.Tensor,
-        images: List[torch.Tensor],
-        token_type_ids: torch.Tensor,
-    ):
-        return MultiModalMixin.async_input_word_embedding(
-            self, inputs, images, token_type_ids
-        )
-
     def expand_token_id(
         self, token_ids: List[int], images: List[torch.Tensor]
     ) -> Tuple[List[int], List[torch.Tensor], List[int]]:

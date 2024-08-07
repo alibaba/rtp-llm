@@ -11,7 +11,6 @@ from maga_transformer.config.exceptions import (ExceptionType,
 from maga_transformer.config.generate_config import RequestFormat
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters, VitParameters
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.models.base_model import EmbeddingOutput
 from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from maga_transformer.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
 from maga_transformer.utils.database import CkptDatabase
@@ -234,30 +233,3 @@ class MultiModalMixin:
             w_name = re.sub(r'\.\d+\.', lambda x: '[' + x.group(0)[1:-1] + '].', w_name)
             param = eval(w_name)
             _safe_load_from_module(param, ckpt_prefix + w, ctype)
-
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
-        inputs = inputs.reshape(1, -1)
-        if g_parallel_info.tp_size <= 1:
-            return EmbeddingOutput(self.multimodal_embedding(inputs, images, token_type_ids).squeeze(0), None)
-
-        # for tp_size > 1
-        check_num: int = 998244353
-        check_num2: int = 1000000007
-        shape_hints = torch.IntTensor([
-            check_num,
-            inputs.shape[1],
-            check_num2
-        ])
-        shape_hints = to_cuda(shape_hints)
-        self.nccl_op_.broadcast_tp([shape_hints])
-        torch.cuda.current_stream().synchronize()
-        assert shape_hints[0] == check_num and shape_hints[-1] == check_num2, 'check sum error'
-
-        if g_parallel_info.tp_rank == 0:
-            embedding_tensor = self.multimodal_embedding(inputs, images, token_type_ids).squeeze(0)
-        else:
-            input_length = shape_hints[1]
-            embedding_tensor = torch.zeros((input_length, self.config.head_num * self.config.size_per_head), dtype=self.dtype, device=self.device)
-        self.nccl_op_.broadcast_tp([embedding_tensor])
-        torch.cuda.current_stream().synchronize()
-        return EmbeddingOutput(embedding_tensor, None)

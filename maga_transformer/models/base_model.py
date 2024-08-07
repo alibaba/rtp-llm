@@ -8,7 +8,6 @@ from transformers import PreTrainedTokenizerBase
 
 from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
-from maga_transformer.utils.sample_utils import HuggingfaceSampler, FtSampler, BaseSampler, DynamicDecodeOp, BeamSearchSampler
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
@@ -58,10 +57,6 @@ class GenerateInput(PyBaseModel):
     def update_prefix(self, prefix_tokens: torch.Tensor):
         self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
         self.prefix_length = prefix_tokens.nelement()
-
-    @property
-    def vision_token_length(self):
-        return self.images[0].shape[0] if len(self.images) > 0 else 0
 
 class AuxInfo(PyBaseModel):
     cost_time: float = 0
@@ -246,21 +241,6 @@ class BaseModel(object):
     def extend_generate_combo_token_types(self, combo_tokens: List[int]) -> List[int]:
         return []
 
-    def extend_generate_position_ids(
-        self, generate_batch_size: int, num_beams: int,
-        vision_token_length: List[int], seq_lengths_list: List[int]
-    ) -> List[int]:
-        return [i - 1 for i in seq_lengths_list]
-
-    def extend_context_position_ids(
-        self, context_begin_position: int, context_end_position: int,
-        token_type_ids: torch.Tensor, token_ids: torch.Tensor
-    ) -> List[int]:
-        return range(context_begin_position, context_end_position)
-
-    def async_input_word_embedding(self, inputs: torch.Tensor, images: List[torch.Tensor], token_type_ids: torch.Tensor):
-        return EmbeddingOutput(self.word_embedding(inputs), None)
-
     def create_context_position_ids(self, input_lengths: Union[List[int], torch.Tensor]):
         return torch.concat([torch.arange(int(input_length), dtype=torch.int32) for input_length in input_lengths], dim=0)
 
@@ -285,23 +265,3 @@ class BaseModel(object):
     @staticmethod
     def eval_model_param_count(config: GptInitModelParameters):
         return config.model_param_count
-
-    def _create_hf_sampler(self, generate_config: GenerateConfig) -> HuggingfaceSampler:
-        return HuggingfaceSampler(generate_config)
-
-    def _create_ft_sampler(self, generate_config: GenerateConfig) -> FtSampler:
-        dynamic_decoder = DynamicDecodeOp(self.config.vocab_size, self.vocab_size_padded)
-        return FtSampler(config=generate_config, dynamic_decoder=dynamic_decoder)
-
-    def _create_beam_search_sampler(self, generate_config: GenerateConfig) -> BeamSearchSampler:
-        dynamic_decoder = DynamicDecodeOp(self.config.vocab_size, self.vocab_size_padded)
-        return BeamSearchSampler(generate_config, dynamic_decoder)
-
-    def create_sampler(self, generate_config: GenerateConfig) -> BaseSampler:
-        using_hf_sampling = generate_config.using_hf_sampling or self.config.using_hf_sampling
-        if generate_config.num_beams > 1:
-            return self._create_beam_search_sampler(generate_config)
-        elif using_hf_sampling:
-            return self._create_hf_sampler(generate_config)
-        else:
-            return self._create_ft_sampler(generate_config)

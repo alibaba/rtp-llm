@@ -45,8 +45,8 @@ class GPT(BaseModel):
         self.config = config
         self.load_tokenizer()
         self.init_misc()
-        self.init_prefix_encoder()
-        self.init_medusa()
+        # self.init_prefix_encoder()
+        # self.init_medusa()
         self.init_pipeline_param()
         self.load(self.device)
         self.init_linear_bias()
@@ -68,16 +68,16 @@ class GPT(BaseModel):
             self.linear_bias_slopes = slopes.to(torch.float).cuda()
             self.weight.append_global_weight(W.linear_bias_slopes, self.linear_bias_slopes)
 
-    def init_prefix_encoder(self):
-        self.prefix_encoder = None
-        if self.config.pre_seq_len is not None and self.config.pre_seq_len > 0:
-            self.prefix_tokens = torch.arange(self.config.pre_seq_len).long()
-            self.prefix_encoder = PrefixEncoder(self.config)
+    # def init_prefix_encoder(self):
+    #     self.prefix_encoder = None
+    #     if self.config.pre_seq_len is not None and self.config.pre_seq_len > 0:
+    #         self.prefix_tokens = torch.arange(self.config.pre_seq_len).long()
+    #         self.prefix_encoder = PrefixEncoder(self.config)
 
-    def init_medusa(self):
-        self.medusa_head: Optional[torch.nn.Module] = None
-        if self.config.gpt_init_params.use_medusa:
-            self.medusa_head = MedusaHead(self.config)
+    # def init_medusa(self):
+    #     self.medusa_head: Optional[torch.nn.Module] = None
+    #     if self.config.gpt_init_params.use_medusa:
+    #         self.medusa_head = MedusaHead(self.config)
 
     def init_pipeline_param(self):
         # Embeddings to encode or decode tokens.
@@ -236,21 +236,21 @@ class GPT(BaseModel):
         for key in named_parameters.keys():
             named_parameters[key].data = self.weight.steal_pytorch_weight(key).reshape(named_parameters[key].data.shape).to(ctype).to(self.device)
 
-    def init_prefix_encoder_weight(self):
-        #TODO@miji check tp
-        if self.prefix_encoder is not None:
-            self._safe_load_prefix_encoder_weight_from_module(
-                self.prefix_encoder.embedding.weight,
-                W.prefix_w,
-                self.compute_dtype)
-            if self.prefix_encoder.prefix_projection:
-                raise Exception("not implement prefix_projection yet")
+    # def init_prefix_encoder_weight(self):
+    #     #TODO@miji check tp
+    #     if self.prefix_encoder is not None:
+    #         self._safe_load_prefix_encoder_weight_from_module(
+    #             self.prefix_encoder.embedding.weight,
+    #             W.prefix_w,
+    #             self.compute_dtype)
+    #         if self.prefix_encoder.prefix_projection:
+    #             raise Exception("not implement prefix_projection yet")
 
-    def init_medusa_weight(self):
-        if self.medusa_head is not None:
-            self._safe_load_medusa_head_weight_from_module(
-                self.medusa_head,
-                self.compute_dtype)
+    # def init_medusa_weight(self):
+    #     if self.medusa_head is not None:
+    #         self._safe_load_medusa_head_weight_from_module(
+    #             self.medusa_head,
+    #             self.compute_dtype)
 
     def init_pipeline_weight(self):
         # pylint:disable=line-too-long
@@ -292,8 +292,8 @@ class GPT(BaseModel):
     def _initialize_from_weight(self):
         self.init_word_embedding_weight()
         self.init_lm_head_weight()
-        self.init_prefix_encoder_weight()
-        self.init_medusa_weight()
+        # self.init_prefix_encoder_weight()
+        # self.init_medusa_weight()
         self.init_pipeline_weight()
         torch.cuda.empty_cache()
 

@@ -177,7 +177,7 @@ class OpenaiEndopoint():
         return DebugInfo(
             input_prompt=prompt,
             input_ids=renderered_input.input_ids,
-            input_images=renderered_input.input_urls,
+            input_urls=renderered_input.input_urls,
             tokenizer_info=str(self.tokenizer),
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,

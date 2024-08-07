@@ -7,6 +7,8 @@ from maga_transformer.models.base_model import GenerateOutput, GenerateOutputs
 from maga_transformer.test.model_test.test_util.fake_model_loader import  FakeModelLoader
 
 os.environ['KV_CACHE_MEM_MB'] = '100'
+os.environ['RESERVER_RUNTIME_MEM_MB'] = '1'
+os.environ['DEVICE_RESERVE_MEMORY_BYTES'] = str(64 * 1024 ** 2)
 
 class SliceStopWordListTest(TestCase):
     def __init__(self, *args, **kwargs):

@@ -14,14 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from maga_transformer.distribute.worker_info import update_master_info, DEFAULT_START_PORT
 from unittest import mock
 
-
 os.environ['KV_CACHE_MEM_MB'] = '100'
-
-class MockMemInfo:
-    free: int  = 2 * 1024 * 1024 # byte
-    used: int  = 0
-
-@mock.patch('maga_transformer.config.cache_config.get_mem_info', MockMemInfo)
 @mock.patch.dict('os.environ', {'RESERVER_RUNTIME_MEM_MB': '1', 'DEVICE_RESERVE_MEMORY_BYTES': str(64 * 1024 * 1024)})
 class RpcModelTest(TestCase):
     def __init__(self, *args, **kwargs) -> None:
