@@ -15,6 +15,7 @@ build --copt -Wno-stringop-truncation # grpc
 build --copt -Wno-stringop-overflow # grpc
 build --copt -Wno-maybe-uninitialized # protobuf
 build --cxxopt -Wno-class-memaccess # grpc
+build --copt -Wno-deprecated-declarations
 build --experimental_cc_implementation_deps
 build --deleted_packages @havenask//aios/kmonitor
 build --copt -DOPENSSL_IS_BORINGSSL
