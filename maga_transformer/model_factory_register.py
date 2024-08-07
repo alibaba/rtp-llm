@@ -72,7 +72,10 @@ class ModelDict:
                     return 'chatglm2'
             if architecture == 'QWenLMHeadModel':
                 if config.get('visual'):
-                    return 'qwen_vl'
+                    if config['visual'].get('layers'):
+                        return 'qwen_vl'
+                    else:
+                        return 'qwen_vl_1b8'
             if architecture == 'BaichuanForCausalLM':
                 vocab_size = config.get('vocab_size', 64000)
                 if vocab_size == 125696:
