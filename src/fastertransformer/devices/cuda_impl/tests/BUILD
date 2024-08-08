@@ -50,18 +50,30 @@ cc_test(
     ],
 )
 
-cc_test(
-    name = "cuda_dist_test",
+cc_binary(
+    name = "cuda_dist_test_binary",
     srcs = [],
+    copts = cuda_copts() + copts() + torch_deps(),
+    linkopts = test_linkopts + ["-ldl"],
+    deps = test_deps + [
+        "//src/fastertransformer/devices/base_tests:distributed_test"
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "cuda_dist_test",
+    srcs = ["cuda_dist_test_runner.py"],
+    main = "cuda_dist_test_runner.py",
     env = {
         "TEST_USING_DEVICE": "CUDA",
         "FT_DISABLE_CUSTOM_AR": "1"
     },
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
-    deps = test_deps + [
-        "//src/fastertransformer/devices/base_tests:distributed_test"
+    deps = [
+        "//maga_transformer/test/utils:device_resource"
     ],
+    data = [":cuda_dist_test_binary"],
+    args = ["$(location :cuda_dist_test_binary)"],
     tags = ["multi_device"],
 )
 
