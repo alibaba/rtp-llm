@@ -186,47 +186,132 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
     const void* alpha = is_fp16_computeType ? reinterpret_cast<void*>(&h_alpha) : reinterpret_cast<void*>(&f_alpha);
     const void* beta  = is_fp16_computeType ? reinterpret_cast<void*>(&h_beta) : reinterpret_cast<void*>(&f_beta);
 
-    int findAlgo = hipblas_algo_map_->isExist(batch_count, m, n, k, Atype_);
-    hipblasLtMatmulAlgo_info info = hipblas_algo_map_->getAlgo(batch_count, m, n, k, Atype_);
+    //int findAlgo = hipblas_algo_map_->isExist(batch_count, m, n, k, Atype_);
+    bool                      findHipblasLtAlog = true;  
+    hipblasLtMatmulAlgo_info info     = hipblas_algo_map_->getAlgo(batch_count, m, n, k, Atype_);
 
-    if (findAlgo) {
+    // --------------------------------------------------------------------------------------
+    // hipblasLT: get all algo 
+    hipblasLtMatmulDesc_t   operationDesc = NULL;
+    hipblasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL;
+    hipDataType             scaleType   = HIP_R_32F;
+    hipblasComputeType_t    computeType = HIPBLAS_COMPUTE_32F;
+
+    // --------------------------------------
+    // Create descriptors for the original matrices
+    hipblasLtMatrixLayoutCreate(
+        &Adesc, getHipDataType(Atype_), transa == HIPBLAS_OP_N ? m : k, transa == HIPBLAS_OP_N ? k : m, lda);
+    hipblasLtMatrixLayoutCreate(
+        &Bdesc, getHipDataType(Btype_), transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb);
+    hipblasLtMatrixLayoutCreate(&Cdesc, getHipDataType(Ctype_), m, n, ldc);
+    hipblasLtMatmulDescCreate(&operationDesc, computeType, scaleType);
+
+    hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(int32_t));
+    hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(int32_t));
+    // std::vector<hipblasLtMatmulHeuristicResult_t> heuristicResult;
+    // check_hip_error(hipblaslt_ext::getAllAlgos(hipblaslt_handle_,
+    //                                            hipblaslt_ext::GemmType::HIPBLASLT_GEMM,
+    //                                            transa,
+    //                                            transb,
+    //                                            getHipDataType(Atype_),
+    //                                            getHipDataType(Btype_),
+    //                                            getHipDataType(Ctype_),
+    //                                            getHipDataType(Ctype_),
+    //                                            HIPBLAS_COMPUTE_32F,
+    //                                            heuristicResult));
+
+
+
+    // --------------------DEBUG---------------------------------
+    // Heruristic to get all one algorithm forcely
+    hipblasLtMatmulPreference_t pref;
+    check_hip_error(hipblasLtMatmulPreferenceCreate(&pref));
+    const int                        request_solutions = 1;
+    hipblasLtMatmulHeuristicResult_t heuristicResult_tmp[request_solutions];
+    int                              returnedAlgoCount = 0;
+    check_hip_error(hipblasLtMatmulAlgoGetHeuristic(hipblaslt_handle_,
+                                                    operationDesc,
+                                                    Adesc,
+                                                    Bdesc,
+                                                    Cdesc,
+                                                    Cdesc,
+                                                    pref,
+                                                    request_solutions,
+                                                    heuristicResult_tmp,
+                                                    &returnedAlgoCount));
+
+    
+
+    // --------------------------------------------------------------
+
+    void*               workSpace     = hipblas_workspace_;
+    int                 workspaceSize = hipblas_workspace_ == NULL ? 0 : HIPBLAS_WORKSPACE_SIZE;
+    std::vector<size_t> validIdx;
+    hipblasLtMatmulHeuristicResult_t heuristicResult;
+    
+    if(returnedAlgoCount)
+    {
+        heuristicResult = heuristicResult_tmp[0];
+    
+        size_t workspaceSizeInBytes = 0;
+        if(hipblaslt_ext::matmulIsAlgoSupported(hipblaslt_handle_,
+                                                operationDesc,
+                                                (void*)&f_alpha,
+                                                Adesc,
+                                                Bdesc,
+                                                (void*)&f_beta,
+                                                Cdesc,
+                                                Cdesc,
+                                                heuristicResult.algo,
+                                                workspaceSizeInBytes)
+        == HIPBLAS_STATUS_SUCCESS)
+        {
+            if(workspaceSizeInBytes <= HIPBLAS_WORKSPACE_SIZE)
+            {
+                workspaceSize = max(workspaceSize, workspaceSizeInBytes);
+            }
+            findHipblasLtAlog = true;
+        }
+    }
+
+    // // Here we use matmulIsAlgoSupported to check if the algo supports the problem
+    // for(size_t i = 0; i < heuristicResult.size(); i++)
+    // {
+    //     size_t workspaceSizeInBytes = 0;
+    //     if(hipblaslt_ext::matmulIsAlgoSupported(hipblaslt_handle_,
+    //                                             operationDesc,
+    //                                             (void*)&f_alpha,
+    //                                             Adesc,
+    //                                             Bdesc,
+    //                                             (void*)&f_beta,
+    //                                             Cdesc,
+    //                                             Cdesc,
+    //                                             heuristicResult[i].algo,
+    //                                             workspaceSizeInBytes)
+    //     == HIPBLAS_STATUS_SUCCESS)
+    //     {
+    //         if(workspaceSizeInBytes <= HIPBLAS_WORKSPACE_SIZE)
+    //         {
+    //             workspaceSize = max(workspaceSize, workspaceSizeInBytes);
+    //             validIdx.push_back(i);
+    //         }
+    //     }
+    // }
+
+    // if(validIdx.empty())
+    // {
+    //     std::cerr << "No valid solution found! will using the hipblas matmul" << std::endl;
+    //     findHipblasLtAlog = false;
+    // }
+
+    if (findHipblasLtAlog) {
         using_hipblasLt = true;
     } else {
         using_hipblasLt = false;
     }
 
     if (using_hipblasLt) {
-        hipblasLtMatmulDesc_t   operationDesc = NULL;
-        hipblasLtMatrixLayout_t Adesc = NULL, Bdesc = NULL, Cdesc = NULL;
-        hipDataType             scaleType   = HIP_R_32F;
-        hipblasComputeType_t    computeType = HIPBLAS_COMPUTE_32F;
-
-        // --------------------------------------
-        // Create descriptors for the original matrices
-        hipblasLtMatrixLayoutCreate(
-            &Adesc, getHipDataType(Atype_), transa == HIPBLAS_OP_N ? m : k, transa == HIPBLAS_OP_N ? k : m, lda);
-        hipblasLtMatrixLayoutCreate(
-            &Bdesc, getHipDataType(Btype_), transb == HIPBLAS_OP_N ? k : n, transb == HIPBLAS_OP_N ? n : k, ldb);
-        hipblasLtMatrixLayoutCreate(&Cdesc, getHipDataType(Ctype_), m, n, ldc);
-        hipblasLtMatmulDescCreate(&operationDesc, computeType, scaleType);
-
-        hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(int32_t));
-        hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(int32_t));
-
-        hipblasLtMatmulAlgo_t algo;
-        void*                 workSpace     = hipblas_workspace_;
-        int                   workspaceSize = hipblas_workspace_ == NULL ? 0 : HIPBLAS_WORKSPACE_SIZE;
-        std::vector<hipblasLtMatmulHeuristicResult_t> heuristicResult(1);
-        if (findAlgo) {
-            if (info.workspaceSize > workspaceSize) {
-                findAlgo = 0;
-            } else {
-                std::vector<int> algoIndex(1);
-                algoIndex[0] = info.algoId;
-                hipblaslt_ext::getAlgosFromIndex(hipblaslt_handle_, algoIndex, heuristicResult);
-            }
-        }
-
+        printf("DEBUG -> Calling the hipblasLtMatmul\n");
         hipblasLtMatmul(hipblaslt_handle_,
                         operationDesc,
                         alpha,
@@ -239,7 +324,7 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                         Cdesc,
                         C,
                         Cdesc,
-                        (findAlgo == 1 ? (&heuristicResult[0].algo) : NULL),
+                        &heuristicResult.algo,
                         workSpace,
                         workspaceSize,
                         stream_);
