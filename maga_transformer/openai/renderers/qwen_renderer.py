@@ -324,6 +324,7 @@ class QwenRenderer(CustomChatRenderer):
                         index=index,
                         delta=DeltaMessage(
                             role=RoleEnum.assistant,
+                            content="",
                         ),
                     )]
                 )
