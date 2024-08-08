@@ -132,7 +132,25 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             stop_word_ids_list=[],
         )
         chat_renderer = ChatRendererFactory.get_renderer(tokenizer, render_params)
-        request = ChatCompletionRequest(messages=[])
+        # function call 格式返回，输入有functions
+        functions = [
+            GPTFunctionDefinition(**{
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city and state, e.g. San Francisco, CA",
+                        },
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                    },
+                    "required": ["location"],
+                },
+            })
+        ]
+        request = ChatCompletionRequest(messages=[], functions=functions)
         id_generator = fake_output_generator(test_ids, 1024, tokenizer.eos_token_id or 0, 314)
         stream_generator = chat_renderer.render_response_stream(id_generator, request, GenerateConfig())
         generate = self.endpoint._complete_stream_response(stream_generator, None)
@@ -156,6 +174,28 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 "tool_calls": None
             },
             "finish_reason": "function_call"
+        })
+        # 非functioncall 格式返回，输入没有functions
+        request = ChatCompletionRequest(messages=[])
+        id_generator = fake_output_generator(test_ids, 1024, tokenizer.eos_token_id or 0, 314)
+        gen_config = GenerateConfig()
+        stream_generator = chat_renderer.render_response_stream(id_generator, request, gen_config)
+        generate = self.endpoint._complete_stream_response(stream_generator, None)
+        async for x in generate:
+            response = x
+            response = await generate.gen_complete_response_once()
+            print(response.choices[0].model_dump_json())
+        self.assertEqual(1, len(response.choices))
+        self.assertEqual(json.loads(response.choices[0].model_dump_json()), {
+            "index": 0,
+            "message":
+            {
+                "role": "assistant",
+                "content": ": 我需要调用get_current_weather API来获取天气✿FUNCTION✿: get_current_weather\n✿ARGS✿: {\"location\": \"洛杉矶, 美国\", \"unit\": \"fahrenheit\"}",
+                "function_call": None,
+                "tool_calls": None
+            },
+            "finish_reason": "stop"
         })
 
     def test_chatglm_stop_word(self):

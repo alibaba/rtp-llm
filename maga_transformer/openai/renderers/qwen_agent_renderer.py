@@ -62,7 +62,7 @@ class QwenAgentRenderer(CustomChatRenderer):
         
         messages = []
         functions = []
-        extra_generate_cfg = request.extend_fields if request.extend_fields else {}
+        extra_generate_cfg = request.extra_configs.dict() if request.extra_configs else {}
 
         if request.messages:
             messages = [msg.model_dump() for msg in request.messages]
@@ -103,7 +103,7 @@ class QwenAgentRenderer(CustomChatRenderer):
 
 
     def _process_output_ids_tensor(
-            self, input_length, output_ids_tensor: torch.Tensor, max_new_tokens: int, finished: bool = False
+            self, input_length, output_ids_tensor: torch.Tensor, max_new_tokens: int, finished: bool = False, input_with_functions: bool = False
     ) -> ProcessedOutput:
         output_ids_tensor = output_ids_tensor.cpu().reshape([-1])
         # TODO(wangyin): This slicing shouldn't be done here.
@@ -116,10 +116,11 @@ class QwenAgentRenderer(CustomChatRenderer):
         output_str = self.tokenizer.decode(output_ids)
 
         # following qwen agent function_calling.py process
-        if output_str.startswith(': '):
-            output_str = output_str[2:]
-        elif output_str.startswith(':'):
-            output_str = output_str[1:]
+        if input_with_functions:
+            if output_str.startswith(': '):
+                output_str = output_str[2:]
+            elif output_str.startswith(':'):
+                output_str = output_str[1:]
 
         output_str = output_str.strip(u'\uFFFD')
         for stop_word in self.stop_words_list:
@@ -142,6 +143,7 @@ class QwenAgentRenderer(CustomChatRenderer):
         generating_function_call = False
         stop_word_slice_list = get_stop_word_slices(generate_config.stop_words_str)
         output_tokens_list = torch.empty(0, dtype=torch.int32)
+        input_with_functions = not (request.functions == None or len(request.functions) == 0)
 
         async for output in output_generator:
             if output_token_length == 0:
@@ -149,7 +151,7 @@ class QwenAgentRenderer(CustomChatRenderer):
                     choices=[ChatCompletionResponseStreamChoice(
                         index=index,
                         delta=DeltaMessage(
-                            role=RoleEnum.assistant,
+                            role=RoleEnum.assistant
                         ),
                     )]
                 )
@@ -160,14 +162,14 @@ class QwenAgentRenderer(CustomChatRenderer):
             output.output_ids = output_tokens_list
             
             processed_output = self._process_output_ids_tensor(
-                input_token_length, output.output_ids, generate_config.max_new_tokens, output.finished)
+                input_token_length, output.output_ids, generate_config.max_new_tokens, output.finished, input_with_functions)
             output_string = processed_output.output_str.strip()
             # print(f"==============> {output_string}")
             output_length = len(processed_output.output_str)
             finish_reason = processed_output.finish_reason
             output_token_length = processed_output.output_token_length
 
-            if (output_string.endswith("✿FUNCTION✿:")):
+            if (input_with_functions and output_string.endswith("✿FUNCTION✿:")):
                 generating_function_call = True
                 continue
 
