@@ -104,7 +104,7 @@ private:
         }
         
         if (expanded_ids->shape()[0] - new_loc_idx != token_ids->shape()[0] - old_loc_idx) {
-            throw std::runtime_error("number of multimodal tags and multimodal input not matched");
+            throw std::runtime_error("expanded length calculate error");
         }
         memcpy(expanded_ids->dataWithOffset<int32_t>(new_loc_idx), token_ids->dataWithOffset<int32_t>(old_loc_idx), token_ids->typeSize() * (expanded_ids->shape()[0] - new_loc_idx));
 

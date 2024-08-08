@@ -32,7 +32,11 @@ class MMProcessEngine:
         for future in futures:
             try:
                 embeddings = await asyncio.wait_for(future, timeout = time_out)
-                result.append(embeddings)
+                # a single url embeds to several tensor, supposed to be [num, len, hidden_size]
+                if len(embeddings.shape) > 2:
+                    result.extend(list(embeddings))
+                else:
+                    result.append(embeddings)
             except Exception as e:
                 raise e
         return result

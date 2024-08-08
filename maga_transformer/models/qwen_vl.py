@@ -24,7 +24,6 @@ class QwenVLImageEmbedding(ImageEmbeddingInterface):
     @torch.no_grad()
     def image_embedding(self, images: List[Any], device) -> torch.Tensor:
         images = self.vit.encode(images, device, self.vit.dtype)
-        assert images.shape[0] == len(images)
         return images.to(device=device)
 
 class QWen_VL(QWen, MultiModalMixin):
