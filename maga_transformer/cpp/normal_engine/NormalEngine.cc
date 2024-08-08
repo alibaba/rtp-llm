@@ -102,9 +102,7 @@ absl::Status NormalEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0) {
-        const auto streams_status = scheduler_->schedule();
-        RETURN_IF_STATUS_OR_ERROR(streams_status);
-        streams = streams_status.value();
+        CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         if (streams.empty()) {
             return absl::OkStatus();
         }

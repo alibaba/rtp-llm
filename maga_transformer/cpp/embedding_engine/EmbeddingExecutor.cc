@@ -145,18 +145,14 @@ absl::StatusOr<th::Tensor> EmbeddingExecutor::postProcess(const ModelRequest& mo
 }
 
 absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& streams) {
-    auto model_input_status = gatherModelInput(streams);
-    RETURN_IF_STATUS_OR_ERROR(model_input_status);
-    auto& model_input = model_input_status.value();
+    CHECK_AND_RETURN_REF(model_input, gatherModelInput(streams));
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto         merged_output        = std::make_unique<MergedOutput>();
     GptModelOutputs model_output;
     ModelRequest model_request = generateOldModelRequest(model_input);
     model_output = std::move(model_->forward(model_input));
-    auto post_state = postProcess(model_request, model_output);
-    RETURN_IF_STATUS_OR_ERROR(post_state);
-    return updateStreams(post_state.value(), streams);
-    // return updateStreams(output, streams);
+    CHECK_AND_RETURN_REF(post, postProcess(model_request, model_output));
+    return updateStreams(post, streams);
 }
 
 void EmbeddingExecutor::reportMetrics(size_t context_batch_size, size_t combo_token_num, size_t max_seq_len) const {

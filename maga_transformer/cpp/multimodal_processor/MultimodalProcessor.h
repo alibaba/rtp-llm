@@ -69,9 +69,8 @@ private:
         int expanded_len = token_ids->shape()[0];
         std::vector<int> embed_len = {};
 
-        auto locs_status = get_mm_tags(token_ids);
-        RETURN_IF_STATUS_OR_ERROR(locs_status);
-        auto locs = locs_status.value();
+        CHECK_AND_RETURN_REF(locs, get_mm_tags(token_ids));
+
         int mm_num = mm_embedding.size();
         if (locs.size() != mm_num) {
             return absl::InternalError("number of multimodal tags and multimodal input not matched");
@@ -165,14 +164,12 @@ private:
 
 public:
     absl::Status update_mm_features(std::shared_ptr<rtp_llm::GenerateInput>& input) {
-        const auto mm_features = mm_embedding(input->multimodal_urls.value());
-        RETURN_IF_STATUS_OR_ERROR(mm_features);
-        input->multimodal_features = std::move(mm_features.value());
-        auto expanded_ids = expand_token_ids(input->multimodal_features.value(), input->input_ids);
-        RETURN_IF_STATUS_OR_ERROR(expanded_ids);
-        input->input_ids = expanded_ids.value().expanded_ids;
-        input->text_tokens_mask = expanded_ids.value().text_tokens_mask;
-        input->mm_locs = expanded_ids.value().locs;
+        CHECK_AND_RETURN_REF(mm_features, mm_embedding(input->multimodal_urls.value()));
+        input->multimodal_features = std::move(mm_features);
+        CHECK_AND_RETURN_REF(expanded_ids, expand_token_ids(input->multimodal_features.value(), input->input_ids));
+        input->input_ids = expanded_ids.expanded_ids;
+        input->text_tokens_mask = expanded_ids.text_tokens_mask;
+        input->mm_locs = expanded_ids.locs;
         return absl::OkStatus();
     }
 };

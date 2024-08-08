@@ -34,9 +34,8 @@ absl::StatusOr<CacheConfig> CacheConfigCreator::createConfig(const ft::GptInitPa
     if (param.block_nums_ > 0) {
         block_nums = param.block_nums_;
     } else {
-        auto result = CacheConfigCreator::getKVCacheMemorySize(param);
-        RETURN_IF_STATUS_OR_ERROR(result);
-        block_nums = result.value() / config.block_size;
+        CHECK_AND_RETURN_REF(result, CacheConfigCreator::getKVCacheMemorySize(param));
+        block_nums = result / config.block_size;
     }
     if (block_nums == 0) {
         return absl::InternalError("kv cache block nums is 0");

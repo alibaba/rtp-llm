@@ -67,17 +67,13 @@ absl::Status EmbeddingEngine::enqueue(EmbeddingStreamPtr streams) {
 
 absl::Status EmbeddingEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    auto streams_status = scheduler_->scheduleNew();
-    RETURN_IF_STATUS_OR_ERROR(streams_status);
-    auto& streams = streams_status.value();
+    CHECK_AND_RETURN_REF(streams, scheduler_->scheduleNew());
     if (streams.empty()) {
         FT_LOG_WARNING("no query run and sleep");
         return absl::OkStatus();
     }
     try {
         RETURN_IF_STATUS_ERROR(executor_->process(streams));
-        RETURN_IF_STATUS_OR_ERROR(streams_status);
-        // RETURN_IF_STATUS_ERROR(update_streams(streams));
     } catch (const exception& e) {
         FT_LOG_WARNING("run engine failed, stream size: %d, error: %s", streams.size(), e.what());
         for (auto& stream: streams) {

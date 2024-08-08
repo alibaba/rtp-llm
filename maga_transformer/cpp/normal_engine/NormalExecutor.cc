@@ -36,9 +36,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams& params,
 absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     StreamGroups stream_groups(streams);
     reportMetrics(stream_groups);
-    auto model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
-    RETURN_IF_STATUS_OR_ERROR(model_input_status);
-    auto& model_input = model_input_status.value();
+    CHECK_AND_RETURN_REF(model_input, batch_stream_processor_->gatherModelInput(stream_groups));
     tpSyncModelInputs(model_input, device_);
     // get lora input
     if (lora_manager_ != nullptr) {
@@ -58,9 +56,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (device_->getDeviceProperties().tp_rank > 0) {
         return absl::OkStatus();
     }
-    auto sampler_input_status = batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output);
-    RETURN_IF_STATUS_OR_ERROR(sampler_input_status);
-    auto& sampler_input           = sampler_input_status.value();
+    CHECK_AND_RETURN_REF(sampler_input, batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
     merged_output->model_output   = std::move(model_output);
     merged_output->sampler_output = std::move(sampler_->forward(sampler_input));
     FT_LOG_DEBUG("sampler forward done");

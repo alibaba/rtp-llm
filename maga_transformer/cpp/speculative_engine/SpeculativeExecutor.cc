@@ -57,20 +57,15 @@ absl::Status SpeculativeExecutor::updateTargetProb(const list<GenerateStreamPtr>
 }
 
 absl::Status SpeculativeExecutor::process(const std::list<GenerateStreamPtr>& streams) {
-    const auto target_streams_status = getTargetStreams(streams);
-    RETURN_IF_STATUS_OR_ERROR(target_streams_status);
-    StreamGroups stream_groups(target_streams_status.value());
-    auto         model_input_status = batch_stream_processor_->gatherModelInput(stream_groups);
-    RETURN_IF_STATUS_OR_ERROR(model_input_status);
-    auto& model_input = model_input_status.value();
+    CHECK_AND_RETURN_CONST_REF(target_streams, getTargetStreams(streams));
+    StreamGroups stream_groups(target_streams);
+    CHECK_AND_RETURN_REF(model_input, batch_stream_processor_->gatherModelInput(stream_groups));
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto         merged_output = std::make_unique<MergedOutput>();
     ModelRequest model_request = std::move(generateOldModelRequest(model_input));
     auto         model_output  = std::move(model_wrapper_->forward(model_request));
     (void)updateTargetProb(streams, *(model_output->logits));
-    auto sampler_input_status = batch_stream_processor_->gatherSpeculativeSamplerInput(stream_groups, *model_output);
-    RETURN_IF_STATUS_OR_ERROR(sampler_input_status);
-    auto& sampler_input  = sampler_input_status.value();
+    CHECK_AND_RETURN_REF(sampler_input, batch_stream_processor_->gatherSpeculativeSamplerInput(stream_groups, *model_output));
     auto  sampler_output = std::move(sampler_->forward(sampler_input));
     return batch_stream_processor_->dispatch(stream_groups, *model_output, sampler_output);
 }

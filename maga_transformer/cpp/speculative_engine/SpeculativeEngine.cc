@@ -85,9 +85,7 @@ absl::Status SpeculativeEngine::updateDraftProb(const list<GenerateStreamPtr>& s
 
 absl::Status SpeculativeEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    const auto streams_status = scheduler_->schedule();
-    RETURN_IF_STATUS_OR_ERROR(streams_status);
-    const auto& streams = streams_status.value();
+    CHECK_AND_RETURN_CONST_REF(streams, scheduler_->schedule());
     for (uint i = 0; i < params_.gpt_init_parameter.gen_num_per_circle_; ++i) {
         RETURN_IF_STATUS_ERROR(draft_executor_->process(streams));
         (void)updateDraftProb(streams, i);
