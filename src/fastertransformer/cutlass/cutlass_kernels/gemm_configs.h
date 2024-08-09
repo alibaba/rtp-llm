@@ -70,6 +70,17 @@ enum class CutlassTileConfig
     CtaShape256x128x128_WarpShape64x64x128
 };
 
+enum class CutlassActivationType {
+    INVALID,
+    IDENTITY,
+    GELU_FAST,
+    GELU,
+    SIGMOID,
+    RELU,
+    SILU
+};
+
+
 enum class SplitKStyle
 {
     NO_SPLIT_K,

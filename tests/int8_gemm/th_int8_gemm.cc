@@ -21,7 +21,7 @@ namespace tc = tensorrt_llm::cutlass_extensions;
 namespace ft = fastertransformer;
 
 template <typename T>
-Tensor int8_gemm_helper(Tensor input_activations, Tensor weight, Tensor alphaCol, Tensor alphaRow,
+Tensor int8_gemm_helper(Tensor input_activations, Tensor weight, Tensor alphaCol, Tensor alphaRow, torch::optional<Tensor> bias,
     const int64_t timing_iterations, float& avg_time, bool select_config)
 {
 
@@ -34,6 +34,8 @@ Tensor int8_gemm_helper(Tensor input_activations, Tensor weight, Tensor alphaCol
     const int8_t* weight_ptr = get_ptr<const int8_t>(weight);
     const float* alpha_col_ptr = get_ptr<const float>(alphaCol);
     const float* alpha_row_ptr = get_ptr<const float>(alphaRow);
+
+    T* bias_ptr = bias.has_value() ? (T*)bias.value().data_ptr() : nullptr;
 
     auto output_tensor = torch::empty({m, n}, torch::dtype(torch::kFloat16).device(torch::kCUDA).requires_grad(false));
     T* output_tensor_ptr = get_ptr<T>(output_tensor);
@@ -64,7 +66,7 @@ Tensor int8_gemm_helper(Tensor input_activations, Tensor weight, Tensor alphaCol
 
             auto runner_operation = [&](cudaStream_t stream)
             {
-                runner->gemm(input_act_ptr, weight_ptr, quant_mode, alpha_col_ptr, alpha_row_ptr, output_tensor_ptr, m,
+                runner->gemm(input_act_ptr, weight_ptr, quant_mode, alpha_col_ptr, alpha_row_ptr, output_tensor_ptr, bias_ptr, tc::CutlassActivationType::IDENTITY, m,
                     n, k, configs[i], ws_ptr, ws_bytes, stream);
             };
             float cur_avg_time = ft::timing_function(runner_operation, timing_iterations, stream);
@@ -85,7 +87,7 @@ Tensor int8_gemm_helper(Tensor input_activations, Tensor weight, Tensor alphaCol
 
         auto runner_operation = [&](cudaStream_t stream)
         {
-            runner->gemm(input_act_ptr, weight_ptr, quant_mode, alpha_col_ptr, alpha_row_ptr, output_tensor_ptr, m, n, k,
+            runner->gemm(input_act_ptr, weight_ptr, quant_mode, alpha_col_ptr, alpha_row_ptr, output_tensor_ptr, bias_ptr, tc::CutlassActivationType::IDENTITY, m, n, k,
                 config, ws_ptr, ws_bytes, stream);
         };
         avg_time = ft::timing_function(runner_operation, timing_iterations, stream);
@@ -94,7 +96,7 @@ Tensor int8_gemm_helper(Tensor input_activations, Tensor weight, Tensor alphaCol
     return output_tensor;
 }
 
-Tensor _int8_gemm(Tensor input_activations, Tensor weight, Tensor alphaCol, Tensor alphaRow, int64_t timing_iterations,
+Tensor _int8_gemm(Tensor input_activations, Tensor weight, Tensor alphaCol, Tensor alphaRow, torch::optional<Tensor> bias, int64_t timing_iterations,
     float& avg_time, bool select_config)
 {
     TORCH_CHECK(input_activations.dim() == 2, "Invalid rank for activations");
@@ -103,21 +105,21 @@ Tensor _int8_gemm(Tensor input_activations, Tensor weight, Tensor alphaCol, Tens
     TORCH_CHECK(input_activations.size(1) == weight.size(1), "dim 1 of act and dim 0 of weight must be equal");
 
     Tensor output_tensor;
-    output_tensor = int8_gemm_helper<half>(input_activations, weight, alphaCol, alphaRow, timing_iterations, avg_time, select_config);
+    output_tensor = int8_gemm_helper<half>(input_activations, weight, alphaCol, alphaRow, bias, timing_iterations, avg_time, select_config);
     return output_tensor;
 }
 
-Tensor int8_gemm(Tensor input_activations, Tensor weight, Tensor alphaCol, Tensor alphaRow)
+Tensor int8_gemm(Tensor input_activations, Tensor weight, Tensor alphaCol, Tensor alphaRow, torch::optional<Tensor> bias)
 {
     float dummy = 0.f;
-    return _int8_gemm(input_activations, weight, alphaCol, alphaRow, 1, dummy, false);
+    return _int8_gemm(input_activations, weight, alphaCol, alphaRow, bias, 1, dummy, false);
 }
 
 Tensor int8_gemm_config_select(Tensor input_activations, Tensor weight, Tensor alphaCol, Tensor alphaRow, const int64_t timing_iterations)
 {
     float avg_time =0;
     return _int8_gemm(
-        input_activations, weight, alphaCol, alphaRow, timing_iterations, avg_time, true);
+        input_activations, weight, alphaCol, alphaRow, torch::optional<Tensor>(), timing_iterations, avg_time, true);
 }
 
 TORCH_LIBRARY(int8_gemm_ops, m) {

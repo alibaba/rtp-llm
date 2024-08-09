@@ -159,16 +159,19 @@ private:
 
     const bool per_token_quant_;
     const bool per_channel_quant_;
+    const bool has_bias_;
 
     AlphaScaleElementType* ptr_alpha_row_;
     AlphaScaleElementType* ptr_alpha_col_;
     ScaleTileIterator iterator_alpha_col_;
     OutputTileIterator iterator_C_;
     OutputTileIterator iterator_D_;
+    OutputTileIterator iterator_bias_;
 
     AlphaScaleElementType element_alpha_row_ = 1.0f;
     AlphaScaleElementType element_alpha_col_ = 1.0f;
     typename ScaleTileIterator::Fragment fragment_alpha_col_;
+    typename OutputTileIterator::Fragment fragment_bias_;
     typename OutputTileIterator::Fragment fragment_C_;
     typename OutputTileIterator::Fragment fragment_D_;
 
@@ -183,9 +186,10 @@ public:
     EpilogueVisitorPerRowPerCol(Params const& params, SharedStorage& shared_storage,
         cutlass::MatrixCoord const& problem_size, int thread_idx, int warp_idx, int lane_idx,
         typename ScaleTileIterator::Params params_alpha_col, typename OutputTileIterator::Params params_C,
-        typename OutputTileIterator::Params params_D, tk::QuantMode quant_option, AlphaScaleElementType* ptr_alpha_row,
+        typename OutputTileIterator::Params params_D, typename OutputTileIterator::Params params_bias, tk::QuantMode quant_option, AlphaScaleElementType* ptr_alpha_row,
         AlphaScaleElementType* ptr_alpha_col, typename OutputTileIterator::Element* ptr_C,
         typename OutputTileIterator::Element* ptr_D,
+        typename OutputTileIterator::Element* ptr_bias,
         cutlass::MatrixCoord const& threadblock_offset = cutlass::MatrixCoord(0, 0), int column_offset = 0,
         cutlass::MatrixCoord const& problem_size_real = cutlass::MatrixCoord(0, 0))
         : params_(params)
@@ -194,9 +198,11 @@ public:
         , elementwise_(params.elementwise)
         , per_token_quant_(quant_option.hasPerTokenScaling())
         , per_channel_quant_(quant_option.hasPerChannelScaling())
+        , has_bias_(ptr_bias != nullptr)
         , ptr_alpha_row_(ptr_alpha_row)
         , ptr_alpha_col_(ptr_alpha_col)
         , iterator_alpha_col_(params_alpha_col, ptr_alpha_col, problem_size, thread_idx, threadblock_offset)
+        , iterator_bias_(params_bias, ptr_bias, problem_size, thread_idx, threadblock_offset)
         , iterator_C_(params_C, ptr_C, problem_size, thread_idx, threadblock_offset)
         , iterator_D_(params_D, ptr_D, problem_size, thread_idx, threadblock_offset)
         , extent_real_(problem_size_real)
@@ -242,6 +248,9 @@ public:
         if (per_channel_quant_)
         {
             iterator_alpha_col_.load(fragment_alpha_col_);
+        }
+        if (has_bias_) {
+            iterator_bias_.load(fragment_bias_);
         }
     }
 
@@ -291,11 +300,16 @@ public:
         {
             result = per_token_scale_accumulator_(result, element_alpha_col_, element_alpha_row_);
         }
-
-        // Convert to the output
-        NumericArrayConverter<ElementOutput, ElementCompute, kElementsPerAccess> output_converter;
+        NumericArrayConverter<ElementCompute, ElementOutput, kElementsPerAccess> bias_converter;
+        ComputeFragment compute_bias_fragement;
         OutputVector& output = reinterpret_cast<OutputVector*>(&fragment_D_)[frag_idx];
-        output = output_converter(result);
+        if (has_bias_) {
+            const OutputVector& bias_vec = reinterpret_cast<OutputVector*>(&fragment_bias_)[column_idx];
+            output = elementwise_(result, bias_vec);
+        } else {
+            output = elementwise_(result);
+        }
+        // Convert to the output
     }
 
     /// Called at the end of a row

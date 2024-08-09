@@ -49,9 +49,11 @@ public:
     virtual ~CutlassInt8GemmRunnerInterface() {}
 
     virtual void gemm(const void* A, const void* B, tk::QuantMode quantOption, const float* alphaCol,
-        const float* alphaRow, void* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
+        const float* alphaRow, void* C, void* bias, tkc::CutlassActivationType activation_type, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream)
         = 0;
+
+    virtual bool activationEpilogueSupported(tkc::CutlassActivationType activation) = 0;
 
     // Returns desired workspace size in bytes.
     virtual size_t getWorkspaceSize(const int m, const int n, const int k) = 0;
@@ -82,11 +84,13 @@ public:
     ~CutlassInt8GemmRunner();
 
     void gemm(const void* A, const void* B, tk::QuantMode quantOption, const float* alphaCol, const float* alphaRow,
-        void* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
+        void* C, void* bias, tkc::CutlassActivationType activation_type, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream) override;
 
     // Returns desired workspace size in bytes.
     size_t getWorkspaceSize(const int m, const int n, const int k) override;
+
+    bool activationEpilogueSupported(tkc::CutlassActivationType activation);
 
     std::vector<tkc::CutlassGemmConfig> getConfigs() const override;
 
@@ -100,7 +104,7 @@ public:
 
 private:
     void dispatchToArch(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,
-        const float* alphaRow, T* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
+        const float* alphaRow, T* C, T* Bias, tkc::CutlassActivationType activation, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr);
 
     int mSm;

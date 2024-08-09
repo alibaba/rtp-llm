@@ -59,7 +59,7 @@ size_t SmoothQuantGemmPlugin::getWorkspaceSize(const int m, const int n, const i
 }
 
 int SmoothQuantGemmPlugin::enqueue(const void* A, const void* B, const float* alphaCol, const float* alphaRow, void* C,
-    char* workspace, const int m, const int n, const int k, cudaStream_t stream) noexcept
+    char* workspace, void* bias, tkc::CutlassActivationType activation, const int m, const int n, const int k, cudaStream_t stream) noexcept
 {
     // inputs
     //     mat1           [M(*), K]
@@ -78,7 +78,7 @@ int SmoothQuantGemmPlugin::enqueue(const void* A, const void* B, const float* al
         "configurations of the CUTLASS kernel, please pay attention to the warning information when building the "
         "engine.)");
 
-    m_sqGemmRunner->gemm(A, B, mQuantMode, alphaCol, alphaRow, C, m, n, k, bestTactic, workspace, wsSize, stream);
+    m_sqGemmRunner->gemm(A, B, mQuantMode, alphaCol, alphaRow, C, bias, activation, m, n, k, bestTactic, workspace, wsSize, stream);
 
     return 0;
 }

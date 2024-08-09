@@ -96,6 +96,20 @@ py_test(
 )
 
 py_test(
+    name = "th_int8_gemm",
+    srcs = [
+        "int8_gemm/th_int8_gemm.py"
+    ],
+    data = [
+        "//:th_transformer",
+        ":test_ops"
+    ],
+    deps = [
+        "//maga_transformer:torch",
+    ],
+)
+
+py_test(
     name = "th_gemm_dequantize",
     srcs = [
         "gemm_dequantize/th_gemm_dequantize.py"

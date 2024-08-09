@@ -142,6 +142,7 @@ public:
         TensorRefAlphaRow ref_alpha_row;
         TensorRefC ref_C;
         TensorRefC ref_D;
+        TensorRefC ref_bias;
 
         int64_t batch_stride_A;
         int64_t batch_stride_B;
@@ -162,7 +163,7 @@ public:
         /// constructs an arguments structure
         Arguments(GemmUniversalMode mode_, GemmCoord problem_size_, int batch_count_, TensorRefA ref_A_,
             TensorRefB ref_B_, tk::QuantMode quant_option_, TensorRefAlphaCol ref_alpha_col_,
-            TensorRefAlphaRow ref_alpha_row_, TensorRefC ref_C_, TensorRefC ref_D_, int64_t batch_stride_A_,
+            TensorRefAlphaRow ref_alpha_row_, TensorRefC ref_C_, TensorRefC ref_D_, TensorRefC ref_bias_, int64_t batch_stride_A_,
             int64_t batch_stride_B_, typename EpilogueVisitor::Arguments epilogue_visitor_)
             : mode(mode_)
             , problem_size(problem_size_)
@@ -174,6 +175,7 @@ public:
             , ref_alpha_row(ref_alpha_row_)
             , ref_C(ref_C_)
             , ref_D(ref_D_)
+            , ref_bias(ref_bias_)
             , batch_stride_A(batch_stride_A_)
             , batch_stride_B(batch_stride_B_)
             , batch_stride_D(0)
@@ -200,6 +202,7 @@ public:
         typename EpilogueVisitor::ScaleTileIterator::Params params_alpha_row;
         typename EpilogueVisitor::OutputTileIterator::Params params_C;
         typename EpilogueVisitor::OutputTileIterator::Params params_D;
+        typename EpilogueVisitor::OutputTileIterator::Params params_bias;
 
         GemmUniversalMode mode;
         int batch_count;
@@ -212,6 +215,7 @@ public:
         typename EpilogueVisitor::ScaleTileIterator::Element* ptr_alpha_row;
         ElementC* ptr_C;
         ElementC* ptr_D;
+        ElementC* ptr_bias;
 
         int64_t batch_stride_A;
         int64_t batch_stride_B;
@@ -254,6 +258,7 @@ public:
             , params_alpha_row(args.ref_alpha_col.layout())
             , params_C(args.ref_C.layout())
             , params_D(args.ref_D.layout())
+            , params_bias(args.ref_bias.layout())
             , mode(args.mode)
             , batch_count(args.batch_count)
             , gemm_k_size(args.problem_size.k())
@@ -264,6 +269,7 @@ public:
             , ptr_alpha_row(args.ref_alpha_row.data())
             , ptr_C(args.ref_C.data())
             , ptr_D(args.ref_D.data())
+            , ptr_bias(args.ref_bias.data())
             , batch_stride_A(args.batch_stride_A)
             , batch_stride_B(args.batch_stride_B)
             , epilogue_visitor(args.epilogue_visitor)
@@ -515,8 +521,8 @@ public:
 
         EpilogueVisitor epilogue_visitor(params.epilogue_visitor, shared_storage.epilogue.visitor,
             params.problem_size.mn(), thread_idx, warp_idx, lane_idx, params.params_alpha_col, params.params_C,
-            params.params_D, params.quant_option, params.ptr_alpha_row, params.ptr_alpha_col, params.ptr_C,
-            params.ptr_D, threadblock_offset, blockIdx.y * params.problem_size.m());
+            params.params_D, params.params_bias, params.quant_option, params.ptr_alpha_row, params.ptr_alpha_col, params.ptr_C,
+            params.ptr_D, params.ptr_bias, threadblock_offset, blockIdx.y * params.problem_size.m());
 
         if (params.mode == GemmUniversalMode::kGemm)
         {

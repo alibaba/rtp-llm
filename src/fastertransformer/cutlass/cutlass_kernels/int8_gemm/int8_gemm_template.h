@@ -26,6 +26,7 @@
 #include <cutlass_extensions/gemm/device/gemm_universal_base_compat.h>
 #include <cutlass/gemm/kernel/default_gemm.h>
 #include <cutlass/epilogue/threadblock/epilogue_with_visitor.h>
+#include <cutlass/epilogue/thread/linear_combination_generic.h>
 // clang-format on
 
 #include "cutlass_extensions/compute_occupancy.h"
@@ -61,9 +62,9 @@ namespace kernels
 namespace cutlass_kernels
 {
 
-template <typename T, typename arch, typename ThreadblockShape, typename WarpShape, int Stages>
+template <typename T, typename arch, template<typename T1> class ActivationFunctor, typename ThreadblockShape, typename WarpShape, int Stages>
 void genericInt8GemmKernelLauncher(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,
-    const float* alphaRow, T* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
+    const float* alphaRow, T* C, T* bias, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
     size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr)
 {
     TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
@@ -91,7 +92,7 @@ void genericInt8GemmKernelLauncher(const int8_t* A, const int8_t* B, tk::QuantMo
     using DefaultGemmConf = typename cutlass::gemm::device::DefaultGemmConfiguration<OperatorClass, arch, ElementInput,
         ElementInput, ElementOutput, ElementCompute>;
     using GemmOp = typename DefaultGemmConf::Operator;
-    using EpilogueOp = typename DefaultGemmConf::EpilogueOutputOp;
+    using EpilogueOp = cutlass::epilogue::thread::LinearCombinationGeneric<ActivationFunctor, ElementOutput, DefaultGemmConf::EpilogueOutputOp::kCount, ElementCompute, ElementCompute, cutlass::epilogue::thread::ScaleType::NoBetaScaling>;
 
     // only TN is supported (s8 * s8 + s32)
     using GemmKernel_ = typename cutlass::gemm::kernel::DefaultGemm<ElementInput, cutlass::layout::RowMajor,
@@ -128,14 +129,14 @@ void genericInt8GemmKernelLauncher(const int8_t* A, const int8_t* B, tk::QuantMo
 
     using Gemm = cutlass::gemm::device::GemmUniversalBaseCompat<GemmKernel>;
 
-    typename EpilogueOp::Params linearScalingParams; // TODO: right now it's unused (scaling is done in
-                                                     // visitor, no activation needed)
+    typename EpilogueOp::Params linearScalingParams; // use default since no beta and gamma
     typename Gemm::Arguments args{cutlass::gemm::GemmUniversalMode::kBatched, {m, n, k}, 1,
         {reinterpret_cast<ElementInput*>(const_cast<ElementInput*>(A)), k},
         {reinterpret_cast<ElementInput*>(const_cast<ElementInput*>(B)), k}, quantOption,
         {reinterpret_cast<ElementCompute*>(const_cast<float*>(alphaCol)), 0},
         {reinterpret_cast<ElementCompute*>(const_cast<float*>(alphaRow)), 0}, {nullptr, 0},
-        {reinterpret_cast<ElementOutput*>(C), n}, 0, 0,
+        {reinterpret_cast<ElementOutput*>(C), n},
+        {reinterpret_cast<ElementOutput*>(bias), 0}, 0, 0,
         typename EpilogueVisitor::Arguments(linearScalingParams, 0, 0, 0)};
 
     Gemm gemm;
@@ -173,11 +174,11 @@ void genericInt8GemmKernelLauncher(const int8_t* A, const int8_t* B, tk::QuantMo
     }
 }
 
-template <typename T, typename arch, typename ThreadblockShape, typename WarpShape, int Stages, typename Enable = void>
+template <typename T, typename arch, template<typename T1> class ActivationFunctor, typename ThreadblockShape, typename WarpShape, int Stages, typename Enable = void>
 struct dispatchStages
 {
     static void dispatch(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,
-        const float* alphaRow, T* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
+        const float* alphaRow, T* C, T* bias, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
         size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr)
     {
         TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
@@ -187,37 +188,37 @@ struct dispatchStages
     }
 };
 
-template <typename T, typename arch, typename ThreadblockShape, typename WarpShape>
-struct dispatchStages<T, arch, ThreadblockShape, WarpShape, 2>
+template <typename T, typename arch, template<typename T1> class ActivationFunctor, typename ThreadblockShape, typename WarpShape>
+struct dispatchStages<T, arch, ActivationFunctor, ThreadblockShape, WarpShape, 2>
 {
     static void dispatch(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,
-        const float* alphaRow, T* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
+        const float* alphaRow, T* C, T* bias, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
         size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr)
     {
         TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
-        genericInt8GemmKernelLauncher<T, arch, ThreadblockShape, WarpShape, 2>(A, B, quantOption, alphaCol, alphaRow, C,
-            m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
+        genericInt8GemmKernelLauncher<T, arch, ActivationFunctor, ThreadblockShape, WarpShape, 2>(A, B, quantOption, alphaCol, alphaRow, C,
+            bias, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
     }
 };
 
-template <typename T, typename ThreadblockShape, typename WarpShape, int Stages>
-struct dispatchStages<T, cutlass::arch::Sm80, ThreadblockShape, WarpShape, Stages,
+template <typename T, template<typename T1> class ActivationFunctor, typename ThreadblockShape, typename WarpShape, int Stages>
+struct dispatchStages<T, cutlass::arch::Sm80, ActivationFunctor, ThreadblockShape, WarpShape, Stages,
     typename std::enable_if<(Stages > 2)>::type>
 {
     static void dispatch(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,
-        const float* alphaRow, T* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
+        const float* alphaRow, T* C, T* bias, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
         size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr)
     {
 
         TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
-        genericInt8GemmKernelLauncher<T, cutlass::arch::Sm80, ThreadblockShape, WarpShape, Stages>(A, B, quantOption,
-            alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
+        genericInt8GemmKernelLauncher<T, cutlass::arch::Sm80, ActivationFunctor, ThreadblockShape, WarpShape, Stages>(A, B, quantOption,
+            alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
     }
 };
 
-template <typename T, typename arch, typename ThreadblockShape, typename WarpShape>
+template <typename T, typename arch, template<typename T1> class ActivationFunctor, typename ThreadblockShape, typename WarpShape>
 void dispatchGemmConfig(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,
-    const float* alphaRow, T* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
+    const float* alphaRow, T* C, T* bias, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace,
     size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr)
 {
 
@@ -225,28 +226,28 @@ void dispatchGemmConfig(const int8_t* A, const int8_t* B, tk::QuantMode quantOpt
     switch (gemmConfig.stages)
     {
     case 2:
-        using DispatcherStages2 = dispatchStages<T, arch, ThreadblockShape, WarpShape, 2>;
-        DispatcherStages2::dispatch(A, B, quantOption, alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace,
+        using DispatcherStages2 = dispatchStages<T, arch, ActivationFunctor, ThreadblockShape, WarpShape, 2>;
+        DispatcherStages2::dispatch(A, B, quantOption, alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace,
             workspaceBytes, stream, occupancy);
         break;
     case 3:
-        using DispatcherStages3 = dispatchStages<T, arch, ThreadblockShape, WarpShape, 3>;
-        DispatcherStages3::dispatch(A, B, quantOption, alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace,
+        using DispatcherStages3 = dispatchStages<T, arch, ActivationFunctor, ThreadblockShape, WarpShape, 3>;
+        DispatcherStages3::dispatch(A, B, quantOption, alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace,
             workspaceBytes, stream, occupancy);
         break;
     case 4:
-        using DispatcherStages4 = dispatchStages<T, arch, ThreadblockShape, WarpShape, 4>;
-        DispatcherStages4::dispatch(A, B, quantOption, alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace,
+        using DispatcherStages4 = dispatchStages<T, arch, ActivationFunctor, ThreadblockShape, WarpShape, 4>;
+        DispatcherStages4::dispatch(A, B, quantOption, alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace,
             workspaceBytes, stream, occupancy);
         break;
     case 5:
-        using DispatcherStages5 = dispatchStages<T, arch, ThreadblockShape, WarpShape, 5>;
-        DispatcherStages5::dispatch(A, B, quantOption, alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace,
+        using DispatcherStages5 = dispatchStages<T, arch, ActivationFunctor, ThreadblockShape, WarpShape, 5>;
+        DispatcherStages5::dispatch(A, B, quantOption, alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace,
             workspaceBytes, stream, occupancy);
         break;
     case 6:
-        using DispatcherStages6 = dispatchStages<T, arch, ThreadblockShape, WarpShape, 6>;
-        DispatcherStages6::dispatch(A, B, quantOption, alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace,
+        using DispatcherStages6 = dispatchStages<T, arch, ActivationFunctor, ThreadblockShape, WarpShape, 6>;
+        DispatcherStages6::dispatch(A, B, quantOption, alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace,
             workspaceBytes, stream, occupancy);
         break;
     default:
@@ -256,9 +257,9 @@ void dispatchGemmConfig(const int8_t* A, const int8_t* B, tk::QuantMode quantOpt
     }
 }
 
-template <typename T, typename arch>
+template <typename T, typename arch, template<typename T1> class ActivationFunctor>
 void dispatchGemmToCutlass(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,
-    const float* alphaRow, T* C, int m, int n, int k, char* workspace, size_t workspaceBytes,
+    const float* alphaRow, T* C, T* bias, int m, int n, int k, char* workspace, size_t workspaceBytes,
     tkc::CutlassGemmConfig gemmConfig, cudaStream_t stream, int* occupancy = nullptr)
 {
 
@@ -267,28 +268,28 @@ void dispatchGemmToCutlass(const int8_t* A, const int8_t* B, tk::QuantMode quant
     switch (gemmConfig.tile_config)
     {
     case tkc::CutlassTileConfig::CtaShape128x64x64_WarpShape64x32x64:
-        dispatchGemmConfig<T, arch, cutlass::gemm::GemmShape<128, 128, 64>, cutlass::gemm::GemmShape<64, 32, 64>>(A, B,
-            quantOption, alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
+        dispatchGemmConfig<T, arch, ActivationFunctor, cutlass::gemm::GemmShape<128, 128, 64>, cutlass::gemm::GemmShape<64, 32, 64>>(A, B,
+            quantOption, alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
         break;
     case tkc::CutlassTileConfig::CtaShape256x128x64_WarpShape64x64x64:
-        dispatchGemmConfig<T, arch, cutlass::gemm::GemmShape<256, 128, 64>, cutlass::gemm::GemmShape<64, 64, 64>>(A, B,
-            quantOption, alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
+        dispatchGemmConfig<T, arch, ActivationFunctor, cutlass::gemm::GemmShape<256, 128, 64>, cutlass::gemm::GemmShape<64, 64, 64>>(A, B,
+            quantOption, alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
         break;
     case tkc::CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64:
-        dispatchGemmConfig<T, arch, cutlass::gemm::GemmShape<32, 128, 64>, cutlass::gemm::GemmShape<32, 32, 64>>(A, B,
-            quantOption, alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
+        dispatchGemmConfig<T, arch, ActivationFunctor, cutlass::gemm::GemmShape<32, 128, 64>, cutlass::gemm::GemmShape<32, 32, 64>>(A, B,
+            quantOption, alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
         break;
     case tkc::CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64:
-        dispatchGemmConfig<T, arch, cutlass::gemm::GemmShape<64, 128, 64>, cutlass::gemm::GemmShape<64, 32, 64>>(A, B,
-            quantOption, alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
+        dispatchGemmConfig<T, arch, ActivationFunctor, cutlass::gemm::GemmShape<64, 128, 64>, cutlass::gemm::GemmShape<64, 32, 64>>(A, B,
+            quantOption, alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
         break;
     case tkc::CutlassTileConfig::CtaShape64x64x128_WarpShape32x64x64:
-        dispatchGemmConfig<T, arch, cutlass::gemm::GemmShape<64, 64, 128>, cutlass::gemm::GemmShape<32, 64, 64>>(A, B,
-            quantOption, alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
+        dispatchGemmConfig<T, arch, ActivationFunctor, cutlass::gemm::GemmShape<64, 64, 128>, cutlass::gemm::GemmShape<32, 64, 64>>(A, B,
+            quantOption, alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
         break;
     case tkc::CutlassTileConfig::CtaShape128x256x64_WarpShape64x64x64:
-        dispatchGemmConfig<T, arch, cutlass::gemm::GemmShape<128, 256, 64>, cutlass::gemm::GemmShape<64, 64, 64>>(A, B,
-            quantOption, alphaCol, alphaRow, C, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
+        dispatchGemmConfig<T, arch, ActivationFunctor, cutlass::gemm::GemmShape<128, 256, 64>, cutlass::gemm::GemmShape<64, 64, 64>>(A, B,
+            quantOption, alphaCol, alphaRow, C, bias, m, n, k, gemmConfig, workspace, workspaceBytes, stream, occupancy);
         break;
     case tkc::CutlassTileConfig::Undefined:
         throw std::runtime_error("[TensorRT-LLM Error][int8][dispatch_gemm_to_cutlass] gemm config undefined.");
@@ -304,6 +305,28 @@ void dispatchGemmToCutlass(const int8_t* A, const int8_t* B, tk::QuantMode quant
         break;
     }
 }
+
+template <typename T, typename arch>
+void dispatchGemmActivationFunc(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,
+    const float* alphaRow, T* C, T* bias, tkc::CutlassActivationType activation, int m, int n, int k, char* workspace, size_t workspaceBytes,
+    tkc::CutlassGemmConfig gemmConfig, cudaStream_t stream, int* occupancy = nullptr) {
+    TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
+    switch (activation) {
+        case tkc::CutlassActivationType::IDENTITY:
+            dispatchGemmToCutlass<T, arch, cutlass::epilogue::thread::Identity>(A, B, quantOption, alphaCol, alphaRow, C, bias, m, n, k, workspace,
+                workspaceBytes, gemmConfig, stream, occupancy);
+            break;
+        case tkc::CutlassActivationType::GELU_FAST:
+            dispatchGemmToCutlass<T, arch, cutlass::epilogue::thread::GELU_taylor>(A, B, quantOption, alphaCol, alphaRow, C, bias, m, n, k, workspace,
+                workspaceBytes, gemmConfig, stream, occupancy);       
+            break;
+        default:
+        throw std::runtime_error(
+            "[TensorRT-LLM Error][int8][dispatchGemmActivationFunc] Config is invalid for int8 GEMM.");
+        break;
+    }
+}
+
 
 template <typename T>
 CutlassInt8GemmRunner<T>::CutlassInt8GemmRunner()
@@ -324,28 +347,28 @@ CutlassInt8GemmRunner<T>::~CutlassInt8GemmRunner()
 
 template <typename T>
 void CutlassInt8GemmRunner<T>::dispatchToArch(const int8_t* A, const int8_t* B, tk::QuantMode quantOption,
-    const float* alphaCol, const float* alphaRow, T* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig,
+    const float* alphaCol, const float* alphaRow, T* C, T* bias, tkc::CutlassActivationType activation, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig,
     char* workspacePtr, const size_t workspaceBytes, cudaStream_t stream, int* occupancy)
 {
-    TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
+    TLLM_LOG_TRACE(__PRETTY_FUNCTION__) ;
     if (mSm >= 70 && mSm < 72)
     {
-        dispatchGemmToCutlass<T, cutlass::arch::Sm70>(A, B, quantOption, alphaCol, alphaRow, C, m, n, k, workspacePtr,
+        dispatchGemmActivationFunc<T, cutlass::arch::Sm70>(A, B, quantOption, alphaCol, alphaRow, C, bias, activation, m, n, k, workspacePtr,
             workspaceBytes, gemmConfig, stream, occupancy);
     }
     else if (mSm >= 72 && mSm < 75)
     {
-        dispatchGemmToCutlass<T, cutlass::arch::Sm72>(A, B, quantOption, alphaCol, alphaRow, C, m, n, k, workspacePtr,
+        dispatchGemmActivationFunc<T, cutlass::arch::Sm72>(A, B, quantOption, alphaCol, alphaRow, C, bias, activation, m, n, k, workspacePtr,
             workspaceBytes, gemmConfig, stream, occupancy);
     }
     else if (mSm >= 75 && mSm < 80)
     {
-        dispatchGemmToCutlass<T, cutlass::arch::Sm75>(A, B, quantOption, alphaCol, alphaRow, C, m, n, k, workspacePtr,
+        dispatchGemmActivationFunc<T, cutlass::arch::Sm75>(A, B, quantOption, alphaCol, alphaRow, C, bias, activation, m, n, k, workspacePtr,
             workspaceBytes, gemmConfig, stream, occupancy);
     }
     else if (mSm >= 80 && mSm <= 90)
     {
-        dispatchGemmToCutlass<T, cutlass::arch::Sm80>(A, B, quantOption, alphaCol, alphaRow, C, m, n, k, workspacePtr,
+        dispatchGemmActivationFunc<T, cutlass::arch::Sm80>(A, B, quantOption, alphaCol, alphaRow, C, bias, activation, m, n, k, workspacePtr,
             workspaceBytes, gemmConfig, stream, occupancy);
     }
     else
@@ -357,12 +380,13 @@ void CutlassInt8GemmRunner<T>::dispatchToArch(const int8_t* A, const int8_t* B, 
 
 template <typename T>
 void CutlassInt8GemmRunner<T>::gemm(const void* A, const void* B, tk::QuantMode quantOption, const float* alphaCol,
-    const float* alphaRow, void* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
+    const float* alphaRow, void* C, void* bias, tkc::CutlassActivationType activation_type, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
     const size_t workspaceBytes, cudaStream_t stream)
 {
     TLLM_LOG_TRACE(__PRETTY_FUNCTION__);
+    
     dispatchToArch(reinterpret_cast<const int8_t*>(A), reinterpret_cast<const int8_t*>(B), quantOption, alphaCol,
-        alphaRow, reinterpret_cast<T*>(C), m, n, k, gemmConfig, workspacePtr, workspaceBytes, stream);
+        alphaRow, reinterpret_cast<T*>(C), (T*)bias, activation_type, m, n, k, gemmConfig, workspacePtr, workspaceBytes, stream);
 }
 
 template <typename T>
@@ -373,6 +397,11 @@ std::vector<tkc::CutlassGemmConfig> CutlassInt8GemmRunner<T>::getConfigs() const
         = get_candidate_configs(mSm, isWeightOnly, false, /* SIMT configs */
             true, SPLIT_K_LIMIT);                             /* INT8 configs */
     return candidateConfigs;
+}
+
+template <typename T>
+bool CutlassInt8GemmRunner<T>::activationEpilogueSupported(tkc::CutlassActivationType activation) {
+    return activation == CutlassActivationType::GELU_FAST || activation == CutlassActivationType::IDENTITY;
 }
 
 template <typename T>
@@ -397,7 +426,7 @@ std::vector<tkc::CutlassGemmConfig> CutlassInt8GemmRunner<T>::getValidConfigs(co
     for (size_t ii = 0; ii < valid_splitk_configs.size(); ++ii)
     {
         dispatchToArch(reinterpret_cast<const int8_t*>(A), reinterpret_cast<const int8_t*>(B), quantOption, alphaCol,
-            alphaRow, reinterpret_cast<T*>(C), m, n, k, valid_splitk_configs[ii], workspacePtr, workspaceBytes, stream,
+            alphaRow, reinterpret_cast<T*>(C), (T*)nullptr, tkc::CutlassActivationType::IDENTITY, m, n, k, valid_splitk_configs[ii], workspacePtr, workspaceBytes, stream,
             &(occupancies[ii]));
     }
     std::vector<tkc::CutlassGemmConfig> valid_configs
@@ -440,7 +469,7 @@ tkc::CutlassGemmConfig CutlassInt8GemmRunner<T>::getChosenConfig(const void* A, 
     for (size_t ii = 0; ii < valid_configs.size(); ++ii)
     {
         dispatchToArch(reinterpret_cast<const int8_t*>(A), reinterpret_cast<const int8_t*>(B), quantOption, alphaCol,
-            alphaRow, reinterpret_cast<T*>(C), m, n, k, valid_configs[ii], workspacePtr, workspaceBytes, stream,
+            alphaRow, reinterpret_cast<T*>(C), nullptr, tkc::CutlassActivationType::IDENTITY, m, n, k, valid_configs[ii], workspacePtr, workspaceBytes, stream,
             &(occupancies[ii]));
     }
     tkc::CutlassGemmConfig chosen_config = estimate_best_config_from_occupancies(valid_configs, occupancies, m, n, k,

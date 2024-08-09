@@ -185,6 +185,8 @@ BufferPtr CudaDevice::gemm(const GemmParams& params) {
                                       reinterpret_cast<const QBuffer&>(params.A).scalesData<float>(),
                                       output->data(),
                                       workspace->data<char>(),
+                                      nullptr,
+                                      tkc::CutlassActivationType::IDENTITY,
                                       arguments.m,
                                       arguments.n,
                                       arguments.k,

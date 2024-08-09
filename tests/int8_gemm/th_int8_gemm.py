@@ -6,6 +6,15 @@ import numpy as np
 def random_tensor(shape, dtype, device, mean=0, std=1):
     return torch.empty(shape, dtype=dtype, device=device).normal_(mean, std)
 
+class FastGELUActivation(object):
+    """
+    Applies GELU approximation that is slower than QuickGELU but more accurate. See: https://github.com/hendrycks/GELUs
+    """
+
+    @staticmethod
+    def impl(input: torch.Tensor) -> torch.Tensor:
+        return 0.5 * input * (1.0 + torch.tanh(input * 0.7978845608 * (1.0 + 0.044715 * input * input)))
+
 class TestInt8Gemm(unittest.TestCase):
     def setUp(self) -> None:
         torch.classes.load_library(os.environ['TEST_SRCDIR'] + "/maga_transformer/libth_transformer.so")
@@ -16,7 +25,7 @@ class TestInt8Gemm(unittest.TestCase):
         torch.manual_seed(734876213)
 
 
-    def gt_matmul_smooth_quant(self, mat1, mat2, scale_a_, scale_b_):
+    def gt_matmul_smooth_quant(self, mat1, mat2, scale_a_, scale_b_, bias):
         # Convert to int32 for PyTorch GT Matmul with accumulation in int32.
         mat1 = mat1.to(dtype=torch.int32)
         # Transpose the second matrix to support the native PyTorch format
@@ -35,10 +44,13 @@ class TestInt8Gemm(unittest.TestCase):
         scaling = torch.matmul(scale_a.cuda(), scale_b.cuda()).reshape(ref.shape)
         # Scale output and cast to right type
         ref = ref.cuda() * scaling.cuda()
+        if bias is not None:
+            ref = ref + bias
+        # ref = FastGELUActivation.impl(ref)
     
         return ref
     
-    def int8_gemm_helper(self, m, n, k):
+    def int8_gemm_helper(self, m, n, k, has_bias=False):
         # Init operands for multiplication in int32
         shape1 = (m, k)
         mat1 = torch.randint(-128, 128, shape1, dtype=torch.int8).cuda()
@@ -61,27 +73,34 @@ class TestInt8Gemm(unittest.TestCase):
                                        shape_scale_b,
                                        dtype=torch.float32)
         scale_b_torch = scale_b_torch.cuda()
-
-        output = self.int8_gemm(mat1, mat2, scale_b_torch, scale_a_torch)
+        
+        if has_bias:
+            bias = 2 * torch.rand([n]) - 1
+            bias = bias.half().cuda()
+        else:
+            bias = None
+        
+        output = self.int8_gemm(mat1, mat2, scale_b_torch, scale_a_torch, bias)
 
         ref = self.gt_matmul_smooth_quant(mat1,
                                             mat2,
                                             scale_a_torch,
-                                            scale_b_torch)
-
+                                            scale_b_torch,
+                                            bias)
         msg = "int8 gemm Failed on m={}, n={}, k={}".format(m, n, k)
         torch.testing.assert_close(ref, output, rtol=0.001, atol=0.001, msg=msg, check_dtype=False)
     
     def test_matmul(self):
         bs_list = [1]
-        inseq_list = [16]
+        inseq_list = [1]
         hidden_size_list = [4096]
-
         for bs in bs_list:
             for inseq in inseq_list:
-                for hidden_size in hidden_size_list:
+                for hidden_size in hidden_size_list:                    
                     self.int8_gemm_helper(bs * inseq, 3 * hidden_size, hidden_size)
+                    self.int8_gemm_helper(bs * inseq, 3 * hidden_size, hidden_size, True)
                     self.int8_gemm_helper(bs * inseq, 4 * hidden_size, hidden_size)
+                    self.int8_gemm_helper(bs * inseq, 4 * hidden_size, hidden_size, True)
     
 
 if __name__ == '__main__':

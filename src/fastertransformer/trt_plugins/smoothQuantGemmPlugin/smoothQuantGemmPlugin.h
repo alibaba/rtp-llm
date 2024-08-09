@@ -39,7 +39,7 @@ public:
 
     size_t getWorkspaceSize(const int m, const int n, const int k) noexcept;
     int enqueue(const void* A, const void* B, const float* alphaCol, const float* alphaRow, void* C, char* workspace,
-        const int m, const int n, const int k, cudaStream_t stream) noexcept;
+        void* bias, tkc::CutlassActivationType activation, const int m, const int n, const int k, cudaStream_t stream) noexcept;
 
     void init(tensorrt_llm::common::QuantMode quantMode,
               nvinfer1::DataType type);
