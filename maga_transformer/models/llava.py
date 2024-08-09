@@ -9,7 +9,6 @@ from maga_transformer.config.gpt_init_model_parameters import GptInitModelParame
 from maga_transformer.models.llava_weight import LlavaWeightInfo
 from maga_transformer.models.llama import Llama
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin, BaseVitWeights
-from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.models.llava_vit import LlavaImageEmbedding
 from maga_transformer.utils.util import to_torch_dtype
@@ -73,7 +72,6 @@ class LlavaTokenizer(object):
 
 class Llava(Llama, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        self.nccl_op_ = NcclOp()
         if g_parallel_info.tp_rank == 0:
             with torch.cuda.device(torch.device(g_parallel_info.device)):
                 self.mm_part = LlavaImageEmbedding(config.mm_related_params.config, g_parallel_info.device)

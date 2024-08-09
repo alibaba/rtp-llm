@@ -1,6 +1,5 @@
 #include "maga_transformer/cpp/speculative_engine/SpeculativeExecutor.h"
 #include "maga_transformer/cpp/common/status_util.h"
-#include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include "maga_transformer/cpp/speculative_engine/SpeculativeBatchStreamProcessor.h"
 #include "maga_transformer/cpp/speculative_engine/SpeculativeStream.h"

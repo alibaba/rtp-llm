@@ -89,7 +89,6 @@ filegroup(
             "src/fastertransformer/th_op/th_utils.cc",
             "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
             "src/fastertransformer/th_op/common/FusedEmbeddingOp.cc",
-            "src/fastertransformer/th_op/common/GptOps.cc",
             "src/fastertransformer/th_op/common/NcclOp.cc",
             "src/fastertransformer/th_op/common/WeightOnlyQuantOps.cc",
         ],
@@ -115,8 +114,6 @@ cc_library(
     ] + select({
         "//:using_cuda": [
             "//src/fastertransformer/cuda:allocator_torch",
-            "//src/fastertransformer/layers:layers",
-            "//src/fastertransformer/models:models",
         ],
         "//conditions:default": [],
     }),

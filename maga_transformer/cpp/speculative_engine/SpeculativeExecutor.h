@@ -1,6 +1,5 @@
 #pragma once
 
-#include "maga_transformer/cpp/deprecated/ParallelModelWrapper.h"
 #include "maga_transformer/cpp/common/fatal_util.h"
 #include "maga_transformer/cpp/dataclass/MagaInitParameter.h"
 #include "maga_transformer/cpp/dataclass/MergedQuery.h"

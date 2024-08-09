@@ -13,7 +13,6 @@ cc_library(
         "//src/fastertransformer/kernels:kernels",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/cuda:cuda",
-        "//src/fastertransformer/layers:layers",
         "//src/fastertransformer/models:models",
         "@flash_attention//:flash_attention2_impl",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",

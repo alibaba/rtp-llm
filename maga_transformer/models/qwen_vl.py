@@ -14,7 +14,6 @@ from maga_transformer.models.base_model import BaseModel
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.models.multimodal.multimodal_common import ImageEmbeddingInterface
 from maga_transformer.model_factory_register import register_model
-from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.utils.util import to_torch_dtype
 
 class QwenVLImageEmbedding(ImageEmbeddingInterface):
@@ -28,7 +27,6 @@ class QwenVLImageEmbedding(ImageEmbeddingInterface):
 
 class QWen_VL(QWen, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        self.nccl_op_ = NcclOp()
         if g_parallel_info.tp_rank == 0:
             with torch.cuda.device(torch.device(g_parallel_info.device)):
                 self.mm_part = QwenVLImageEmbedding(config.mm_related_params.config)

@@ -18,7 +18,6 @@ cc_library(
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/cuda:allocator_cuda",
         "//src/fastertransformer/cuda:torch_cuda_allocator",
-        "//src/fastertransformer/layers:layers",
         "//src/fastertransformer/kernels:kernels",
         "cutlass_kernels_interface",
         "@havenask//aios/autil:string_helper",

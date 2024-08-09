@@ -18,8 +18,6 @@ from maga_transformer.utils.model_weight import ModelDeployWeightInfo, CkptWeigh
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader
 
 from maga_transformer.ops.comm.nccl_op import NcclOp
-from maga_transformer.utils.util import to_cuda
-
 
 class BaseVitWeights:
     def __init__(self, vit_part: Dict[str, Any], with_prefix: bool = False):
@@ -75,7 +73,6 @@ class BaseMultiModalWeightInfo:
 
 class MultiModalMixin:
     mm_part: MultiModalEmbeddingInterface
-    nccl_op_: NcclOp
 
     @staticmethod
     def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], tokenizer: Any, add_special_tokens: bool, **kwargs: Any) -> List[int]:
@@ -155,6 +152,8 @@ class MultiModalMixin:
         except ImportError:
             raise RuntimeError("tensorrt library not fonnd")
 
+        nccl_op_ = NcclOp()
+
         try:
             # TODO(xyz): currently model_name_path is ugly, we should let model_name_path passed by the frontend in
             # environment variable
@@ -188,7 +187,7 @@ class MultiModalMixin:
 
             # for TP > 1, only rank0 will generate trt engine, other ranks will wait rank0 to generate trt engine
             if g_parallel_info.tp_size > 1:
-                self.nccl_op_.barrier(torch.device(device))
+                nccl_op_.barrier(torch.device(device))
 
             self.gc_mm_part(vit_params)
             # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
@@ -214,8 +213,9 @@ class MultiModalMixin:
             os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = "-2048000000"
 
         # wait rank0 finish loading weight, otherwise gang_server will die
+        nccl_op_ = NcclOp()
         if g_parallel_info.tp_size > 1:
-            self.nccl_op_.barrier(torch.device(device))
+            nccl_op_.barrier(torch.device(device))
         # Currently, the multimodel network isn't split between devices. Only Rank 0 loads the weights.
         # After supporting TP mm network, we will remove the check here.
         if g_parallel_info.tp_rank >= 1:

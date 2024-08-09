@@ -14,7 +14,6 @@ from maga_transformer.models.eva2clip_vit import EVA2CLIPImageEmbedding
 from maga_transformer.models.cogvlm2_weight import CogVLM2WeightInfo, CogVLM2VitWeights
 from maga_transformer.models.llama import Llama
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
-from maga_transformer.ops.comm.nccl_op import NcclOp
 from maga_transformer.utils.util import to_torch_dtype
 
 LANGUAGE_TOKEN_TYPE = 0
@@ -25,7 +24,6 @@ class CogVLM2(Llama, MultiModalMixin):
         quant_algo = config.quant_algo
         if quant_algo.isGptq() or quant_algo.isAwq() or quant_algo.isSmoothQuant() or quant_algo.isOmniQuant():
             raise Exception("CogVLM2 only support FP32, BF16, FP16, INT8, not support other quant algorithm")
-        self.nccl_op_ = NcclOp()
         if g_parallel_info.tp_rank == 0:
             self.mm_part = EVA2CLIPImageEmbedding(config)
             config.mm_related_params.vit_weights = CogVLM2VitWeights(

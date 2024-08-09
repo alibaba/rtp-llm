@@ -100,24 +100,6 @@ cc_library(
 )
 
 cc_test(
-    name = "lora_gemm_test",
-    srcs = [
-        "lora_gemm_test.cc",
-    ],
-    deps = [
-        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
-        "//src/fastertransformer/layers:layers",
-        "//src/fastertransformer/utils:utils",
-        "//src/fastertransformer/cuda:allocator_cuda",
-        "@com_google_googletest//:gtest"
-    ],
-    copts = cuda_copts(),
-    visibility = ["//visibility:public"],
-    linkopts = test_linkopts,
-    linkstatic = 1,
-)
-
-cc_test(
     name = "memory_test",
     srcs = [
         "MemoryTest.cc",

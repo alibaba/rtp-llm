@@ -10,7 +10,6 @@ class AccMetrics(Enum):
     CONFLICT_QPS_METRIC = "py_rtp_framework_concurrency_exception_qps"    
     ITER_QPS_METRIC = "py_rtp_response_iterate_qps"    
     UPDATE_QPS_METRIC = "py_rtp_update_qps_metric"
-    FALLBACK_QPS_METRIC = "py_rtp_fallback_qps_metric"
     ERROR_UPDATE_QPS_METRIC = "py_rtp_error_update_target_qps"
 
 class GaugeMetrics(Enum):
@@ -20,22 +19,12 @@ class GaugeMetrics(Enum):
     LANTENCY_METRIC = "py_rtp_framework_rt"
 
     FT_ITERATE_COUNT_METRIC = "ft_iterate_count"
-    FT_FIRST_TOKEN_RT_METRIC = "ft_iterate_first_token_rt"
-    ERROR_EXIT_METRIC = "ft_error_exit"
-    QUERY_BATCH_SIZE_METRIC = "ft_query_batch_size"
     INPUT_TOKEN_SIZE_METRIC = "ft_input_token_length"
     OUTPUT_TOKEN_SIZE_METRIC = "ft_output_token_length"
     PRE_PIPELINE_RT_METRIC = "ft_pre_pipeline_rt"
     POST_PIPELINE_RT_METRIC = "ft_post_pipeline_rt"
     NUM_BEAMS_METRIC = "ft_num_beams"
 
-    ASYNC_BATCH_SIZE_METRIC = "ft_async_batch_size"
-    ASYNC_WAIT_QUERY_SIZE_METRIC = "ft_async_wait_query_size"
-    ASYNC_WAIT_WAIT_TIME_METRIC = "ft_async_wait_time"
-    ASYNC_ITERATE_LANTENCY = "ft_async_iterate_rt"
-    KV_CACHE_MEM_USED_RATIO_METRIC = "ft_kv_cache_mem_used_ratio"
-    KV_CACHE_REUSE_LENGTH_METRIC = "ft_kvcache_reuse_length"
-    KV_CACHE_ITEM_NUM_METRIC = "ft_kvcache_item_num"
     UPDATE_LANTENCY_METRIC = "py_rtp_update_framework_rt"
 
 class MetricReporter(object):
