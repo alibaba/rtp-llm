@@ -36,6 +36,7 @@ public:
     void syncAndCheck() override;
     BufferPtr gemm(const GemmParams& params) override;
     SelectOutput select(const SelectParams& params) override;
+    MultiplyOutput multiply(const MultiplyParams& params);
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
     LayernormOutput layernorm(const LayernormParams& params) override;
     BufferPtr activation(const ActivationParams& params) override;

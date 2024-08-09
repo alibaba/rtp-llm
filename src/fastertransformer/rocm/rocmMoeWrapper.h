@@ -11,16 +11,19 @@ struct rocmMoeParams {
     void* gate_scales;
     void* gate_zeros;
     void* gate_bias;
+    bool  isGate_RowMajor;
 
     void* up_weight;
     void* up_scales;
     void* up_zeros;
     void* up_bias;
+    bool  isUp_RowMajor;
 
     void* down_weight;
     void* down_scales;
     void* down_zeros;
     void* down_bias;
+    bool  isDown_RowMajor;
 
     void*  output;
     void*  output_gate;

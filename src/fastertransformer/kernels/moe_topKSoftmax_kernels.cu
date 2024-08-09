@@ -807,6 +807,9 @@ void finalizeMoeRoutingKernelLauncherSelectBias(const T*       expanded_permuted
     // if (normalization_mode == MOEExpertScaleNormalizationMode::RENORMALIZE) {
     //     renorm_scales = k == 1 ? ScaleMode2::NO_SCALE : ScaleMode2::RENORM_SCALE;
     // }
+    if (renorm_scales == 2) {
+        renorm_scales = k == 1 ? 0 : 2;
+    }
 
     using FuncPtr             = decltype(&finalizeMoeRoutingKernel<T, RESIDUAL_NUM, false, ScaleMode2::DEFAULT, false>);
     FuncPtr func_map[2][3][2] = {

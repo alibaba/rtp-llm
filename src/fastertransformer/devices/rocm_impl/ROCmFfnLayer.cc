@@ -21,7 +21,7 @@ FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
     const auto  num_token    = hidden.shape()[0];
     const auto  model_dim    = hidden.shape()[1];
     const auto  num_expert   = params.weights.moe_gating_weight->kernel->shape()[1];
-    const auto  inter_dim    = params.weights.moe_gate_weight->kernel->shape()[2];
+    const auto  inter_dim    = (size_t)moe_conf.moe_inter_padding_size;
     const auto  top_k        = moe_conf.top_k;
     // TODO group_size
     auto group_size = 0;
@@ -51,11 +51,11 @@ FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
     // top_k will be 1, 2, 4, 8, ..., 2**n
     // topk_rowColID >> log2(top_k)   = rowID (i.e. tokenID)
     // topk_rowColID &&     (top_k-1) = colID (i.e. k_ID)
-    const auto topk_rowColID                 = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
-    const auto topk_rowColID_sorted          = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
-    const auto topk_expertID                 = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
-    const auto topk_expertID_sorted          = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
-    const auto total_rows_before_expert      = allocateBuffer({DataType::TYPE_INT32, {num_experts_per_node}});
+    const auto topk_rowColID            = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}}, {"topk_rowColID"});
+    const auto topk_rowColID_sorted     = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
+    const auto topk_expertID            = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
+    const auto topk_expertID_sorted     = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
+    const auto total_rows_before_expert = allocateBuffer({DataType::TYPE_INT32, {num_experts_per_node}});
     const auto total_rows_before_expert_host =
         allocateBuffer({DataType::TYPE_INT32, {num_experts_per_node}, AllocationType::HOST});
 
@@ -123,16 +123,19 @@ FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
                                     BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
                                     BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_gate_weight->kernel),
                                     OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_gate_weight->bias),
+                                    inter_dim == params.weights.moe_gate_weight->kernel->shape()[2],  // is_rowMajor
 
                                     weights.moe_up_weight->kernel->data(),
                                     BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_up_weight->kernel),
                                     BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_up_weight->kernel),
                                     OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_up_weight->bias),
+                                    inter_dim == params.weights.moe_up_weight->kernel->shape()[2],  // is_rowMajor
 
                                     weights.moe_down_weight->kernel->data(),
                                     BUFFER_GET_SCALE_IF_Q_BUFFER(weights.moe_down_weight->kernel),
                                     BUFFER_GET_ZERO_IF_Q_BUFFER(weights.moe_down_weight->kernel),
                                     OPTIONAL_BUFFER_GET_DATA_OR_NULLPTR(weights.moe_down_weight->bias),
+                                    inter_dim == params.weights.moe_down_weight->kernel->shape()[1],  // is_rowMajor
 
                                     output->data(),
                                     output_gate->data(),
@@ -145,39 +148,36 @@ FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
 
     // std::cout << "1111gate" << weights.moe_gate_weight->kernel->debugStringMeta() << std::endl;
     // printBufferData(*((weights.moe_gate_weight->kernel->index(0))->slice(0, 6)), "moe_gate_weight");
-    std::cout << "output_gate" << output_gate->index(0)->debugStringMeta() << std::endl;
     printBufferData(*(output_gate->index(0)), "output_gate");
 
     // std::cout << "1111up" << weights.moe_up_weight->kernel->debugStringMeta() << std::endl;
     // printBufferData(*((weights.moe_up_weight->kernel->index(0))->slice(0, 6)), "moe_up_weight");
-    std::cout << "output_up" << output_gate->index(1)->debugStringMeta() << std::endl;
     printBufferData(*(output_gate->index(1)), "output_up");
 
     // std::cout << "1111down" << weights.moe_down_weight->kernel->debugStringMeta() << std::endl;
     // printBufferData(*((weights.moe_down_weight->kernel->index(0))->slice(0, 6)), "moe_down_weight");
-    std::cout << "output_all1" << hidden_permuted->debugStringMeta() << std::endl;
     printBufferData(*(hidden_permuted), "output_all");
 
     // todo: moe_norm not implemented, this dispatch need be fused into runCKMoe
     assert(moe_conf.has_moe_norm == false);
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(compute_type,
-                                     finalizeMoeRoutingKernelLauncher,
-                                     hidden_permuted->data(),
-                                     output->data(),
-                                     nullptr,  // skip_1
-                                     nullptr,  // skip_2
-                                     nullptr,  // bias
-                                     topk_scales->data<float>(),
-                                     expanded_source_row_to_expanded_dest_row->data<int>(),
-                                     topk_expertID->data<int>(),
-                                     num_token,
-                                     model_dim,
-                                     top_k,
-                                     nullptr,  // num_valid_ptr
-                                     parallelism_config.tp_rank,
-                                     1,  // renormalization_mode, 0: no norm, 1: * topk_scale, 2: renorm_scale
-                                     stream_);
-    std::cout << "output_all2" << output->debugStringMeta() << std::endl;
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(
+        compute_type,
+        finalizeMoeRoutingKernelLauncher,
+        hidden_permuted->data(),
+        output->data(),
+        nullptr,  // skip_1
+        nullptr,  // skip_2
+        nullptr,  // bias
+        topk_scales->data<float>(),
+        expanded_source_row_to_expanded_dest_row->data<int>(),
+        topk_expertID->data<int>(),
+        num_token,
+        model_dim,
+        top_k,
+        nullptr,  // num_valid_ptr
+        parallelism_config.tp_rank,
+        moe_conf.has_moe_norm ? 2 : 1,  // renormalization_mode, 0: no norm, 1: * topk_scale, 2: renorm_scale
+        stream_);
     printBufferData(*(output), "output_all2");
 
     return FfnLayerOutput({move(output)});

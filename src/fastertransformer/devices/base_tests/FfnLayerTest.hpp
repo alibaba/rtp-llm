@@ -263,7 +263,7 @@ public:
         return MoELayerTestInput({input, gating, gate, up, down});
     }
 
-    MoELayerTestOutput MoELayerRun(MoELayerTestInput& params, size_t expertNum, size_t topK, ActivationType Atype) {
+    MoELayerTestOutput MoELayerRun(MoELayerTestInput& params, size_t inter_size, size_t expertNum, size_t topK, ActivationType Atype) {
         bool is_cpu     = (this->device_->getDeviceProperties().type == DeviceType::Cpu);
         auto alloc_type = is_cpu ? AllocationType::HOST : AllocationType::DEVICE;
         auto input      = tensorToBuffer(params.input, alloc_type);
@@ -278,7 +278,7 @@ public:
         weights.moe_down_weight   = std::make_unique<const DenseWeights>(DenseWeights(down));
         weights.moe_gate_weight   = std::make_unique<const DenseWeights>(DenseWeights(gate));
 
-        MoeConfigs     moe_configs({expertNum, topK});
+        MoeConfigs     moe_configs({expertNum, topK, false, (int64_t)inter_size, false});
         FfnConfigs     ffn_configs({Atype, moe_configs});
         FfnLayerParams Opparams(*input, ffn_configs, weights);
 
@@ -311,7 +311,7 @@ public:
                    ActivationType act,
                    DataType       type) {
         auto input      = PrepareMoELayerInput(token_num, tok_dim, inter_size, expertNum, type);
-        auto result     = MoELayerRun(input, expertNum, topK, act);
+        auto result     = MoELayerRun(input, inter_size, expertNum, topK, act);
         auto result_ref = MoETorchRefRun(input, expertNum, topK, act);
         assertTensorClose(result.out.to(result_ref.out.type()), result_ref.out, 1e2, 1e2);
     }

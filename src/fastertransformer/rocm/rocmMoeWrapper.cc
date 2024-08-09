@@ -79,7 +79,12 @@ void MoeRunnerImpl(const rocmMoeParams& params) {
                                                    params.N,
                                                    params.K,
                                                    params.stream});
-        MoeRunnerImpl_groupGEMM_caller<InputT, WeightT>(gemmParamsGate, params.activation_type);
+
+        if (params.isGate_RowMajor) {
+            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsGate, params.activation_type);
+        } else {
+            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsGate, params.activation_type);
+        }
 
         auto gemmParamsUp = rocmGroupGEMMParams({params.input,
                                                  params.up_weight,
@@ -92,11 +97,20 @@ void MoeRunnerImpl(const rocmMoeParams& params) {
                                                  params.N,
                                                  params.K,
                                                  stream});
-        MoeRunnerImpl_groupGEMM_caller<InputT, WeightT>(gemmParamsUp, ActivationType::Identity);
+
+        if (params.isUp_RowMajor) {
+            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsUp, ActivationType::Identity);
+        } else {
+            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsUp, ActivationType::Identity);
+        }
         hipStreamSynchronize(stream);
 
         // start stage2. do "gate_O*UP_O, then GEMM with down_W"
-        MoeRunnerImpl_stage2<InputT, WeightT>(params);
+        if (params.isDown_RowMajor) {
+            MoeRunnerImpl_stage2<InputT, WeightT, true>(params);
+        } else {
+            MoeRunnerImpl_stage2<InputT, WeightT, false>(params);
+        }
     } else {
         // start stage1. do "input GEMM with UP_W", then "activation"
         auto gemmParamsUp = rocmGroupGEMMParams({params.input,
@@ -110,7 +124,12 @@ void MoeRunnerImpl(const rocmMoeParams& params) {
                                                  params.N,
                                                  params.K,
                                                  params.stream});
-        MoeRunnerImpl_groupGEMM_caller<InputT, WeightT>(gemmParamsUp, params.activation_type);
+
+        if (params.isUp_RowMajor) {
+            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsUp, params.activation_type);
+        } else {
+            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsUp, params.activation_type);
+        }
 
         // start stage2. do "GEMM with down_W"
         auto gemmParamsDown = rocmGroupGEMMParams({params.output_gate,
@@ -124,34 +143,38 @@ void MoeRunnerImpl(const rocmMoeParams& params) {
                                                    params.K,
                                                    params.N,
                                                    params.stream});
-        MoeRunnerImpl_groupGEMM_caller<InputT, WeightT>(gemmParamsDown, ActivationType::Identity);
+        if (params.isDown_RowMajor) {
+            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, true>(gemmParamsDown, ActivationType::Identity);
+        } else {
+            MoeRunnerImpl_groupGEMM_caller<InputT, WeightT, false>(gemmParamsDown, ActivationType::Identity);
+        }
     }
     hipStreamDestroy(stream);
 }
 
-template<typename InputT, typename WeightT>
+template<typename InputT, typename WeightT, bool isWeightRowMajor>
 void MoeRunnerImpl_groupGEMM_caller(const rocmGroupGEMMParams& params, ActivationType activation_type) {
     switch (activation_type) {
         case ActivationType::Gelu:
         case ActivationType::Geglu:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, Gelu>(params);
+            MoeRunnerImpl_groupGEMM<InputT, WeightT, Gelu, isWeightRowMajor>(params);
             break;
         case ActivationType::Relu:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, Relu>(params);
+            MoeRunnerImpl_groupGEMM<InputT, WeightT, Relu, isWeightRowMajor>(params);
             break;
         case ActivationType::Silu:
         case ActivationType::Swiglu:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, Silu>(params);
+            MoeRunnerImpl_groupGEMM<InputT, WeightT, Silu, isWeightRowMajor>(params);
             break;
         case ActivationType::Sigmoid:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, Sigmoid>(params);
+            MoeRunnerImpl_groupGEMM<InputT, WeightT, Sigmoid, isWeightRowMajor>(params);
             break;
         case ActivationType::Identity:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, PassThrough>(params);
+            MoeRunnerImpl_groupGEMM<InputT, WeightT, PassThrough, isWeightRowMajor>(params);
             break;
         case ActivationType::GeluNoneApproximate:
         case ActivationType::GeGluNoneApproximate:
-            MoeRunnerImpl_groupGEMM<InputT, WeightT, Gelu>(params);
+            MoeRunnerImpl_groupGEMM<InputT, WeightT, Gelu, isWeightRowMajor>(params);
             break;
         default:
             FT_CHECK_WITH_INFO(false, "not support activation type");
@@ -159,7 +182,7 @@ void MoeRunnerImpl_groupGEMM_caller(const rocmGroupGEMMParams& params, Activatio
     }
 }
 
-template<typename InputT, typename WeightT, typename ActiveT>
+template<typename InputT, typename WeightT, typename ActiveT, bool isWeightRowMajor_>
 void MoeRunnerImpl_groupGEMM(const rocmGroupGEMMParams& params) {
     int K = params.K;
     int N = params.N;
@@ -171,10 +194,15 @@ void MoeRunnerImpl_groupGEMM(const rocmGroupGEMMParams& params) {
     using DsDataType       = ck::Tuple<>;
     using EDataType        = InputT;
 
-    using ALayout  = Row;
-    using BLayout  = Row;
-    using DsLayout = ck::Tuple<>;
-    using ELayout  = Row;
+    using ALayout                    = Row;
+    static constexpr bool isRowMajor = isWeightRowMajor_;
+    using BLayout                    = std::conditional_t<isRowMajor, Row, Col>;
+    using BAccessOrder               = std::conditional_t<isRowMajor, S<0, 2, 1>, S<1, 0, 2>>;
+    const auto BSrcVectorDim         = isRowMajor ? 1 : 2;
+    const auto BSrcScalar            = isRowMajor ? 4 : 8;
+    auto       B_Srtide              = isRowMajor ? N : K;
+    using DsLayout                   = ck::Tuple<>;
+    using ELayout                    = Row;
 
     using AElementOp   = PassThrough;
     using BElementOp   = PassThrough;
@@ -191,7 +219,7 @@ void MoeRunnerImpl_groupGEMM(const rocmGroupGEMMParams& params) {
 //######|        |        |         |        |      Type|      Type|        Type|         DataType|       Type|      Type| Elementwise| Elementwise|  Elementwise| Spacialization| Prefetch|  Size| Block| Block| Block|    |    |  XDL|  XDL|  Per|  Per|   ThreadCluster|  ThreadCluster| SrcAccessOrder|   SrcVectorDim|      SrcScalar|      DstScalar| AddExtraM|   ThreadCluster|  ThreadCluster| SrcAccessOrder|  SrcVectorDim|      SrcScalar|      DstScalar| AddExtraN| MXdlPerWave| NXdlPerWave|         _MBlock_MWaveMPerXdl| ScalarPerVector|
 //######|        |        |         |        |          |          |            |                 |           |          |   Operation|   Operation|    Operation|               |    Stage|      |      |      |      |    |    |     |     | Wave| Wave| Lengths_K0_M_K1|   ArrangeOrder|               |               |      PerVector|   PerVector_K1|          | Lengths_K0_N_K1|   ArrangeOrder|               |              |      PerVector|   PerVector_K1|          |  PerShuffle|  PerShuffle|         _NBlock_NWaveNPerXdl|   _NWaveNPerXdl|
 //######|        |        |         |        |          |          |            |                 |           |          |            |            |             |               |         |      |      |      |      |    |    |     |     |     |     |                |               |               |               |               |               |          |                |               |               |              |               |               |          |            |            |                             |                |
-        < ALayout, BLayout, DsLayout, ELayout, ADataType, BDataType, AccDataType, CShuffleDataType, DsDataType, EDataType,  AElementOp,  BElementOp, CDEElementOp,       GemmSpec,        1,   128,    64,   128,    32,   8,   2,   32,   32,    2,    2,     S<4, 32, 1>,     S<1, 0, 2>,     S<1, 0, 2>,              2,              8,              8,         1,     S<4, 32, 1>,     S<0, 2, 1>,     S<0, 2, 1>,             1,              4,              2,         0,           1,           1,               S<1, 16, 1, 8>,              8>;
+        < ALayout, BLayout, DsLayout, ELayout, ADataType, BDataType, AccDataType, CShuffleDataType, DsDataType, EDataType,  AElementOp,  BElementOp, CDEElementOp,       GemmSpec,        1,   128,    64,   128,    32,   8,   8,   32,   32,    2,    2,     S<4, 32, 1>,     S<1, 0, 2>,     S<1, 0, 2>,              2,              8,              8,         1,     S<4, 32, 1>,   BAccessOrder,   BAccessOrder, BSrcVectorDim,     BSrcScalar,              8,         1,           1,           1,               S<1, 16, 1, 8>,              8>;
 
     auto gemmRunner=DeviceGemmInstance{};
 
@@ -215,7 +243,7 @@ void MoeRunnerImpl_groupGEMM(const rocmGroupGEMMParams& params) {
                               N,           // N
                               K,           // K
                               (int)K,      // stride A
-                              (int)N,      // stride B
+                              (int)B_Srtide,      // stride B
                               (int)N,      // stride C
                               {}});
         p_a.push_back(add_offset(params.input, startRowID * K, dtypeSize));
@@ -248,7 +276,7 @@ void MoeRunnerImpl_groupGEMM(const rocmGroupGEMMParams& params) {
     invoker.Run(argument, StreamConfig{params.stream, false});
 }
 
-template<typename InputT, typename WeightT>
+template<typename InputT, typename WeightT, bool isWeightRowMajor_>
 void MoeRunnerImpl_stage2(const rocmMoeParams& params){
     int N = params.K;
     int K = params.N;
@@ -261,7 +289,13 @@ void MoeRunnerImpl_stage2(const rocmMoeParams& params){
     using EDataType        = InputT;
 
     using AsLayout = ck::Tuple<Row, Row>;
-    using BsLayout = ck::Tuple<Row>;
+    static constexpr bool isRowMajor = isWeightRowMajor_;
+    using BLayout                    = std::conditional_t<isRowMajor, Row, Col>;
+    using BAccessOrder               = std::conditional_t<isRowMajor, S<0, 2, 1>, S<1, 0, 2>>;
+    const auto BSrcVectorDim         = isRowMajor ? 1 : 2;
+    const auto BSrcScalar            = isRowMajor ? 2 : 8;
+    auto       B_Srtide              = isRowMajor ? N : K;
+    using BsLayout = ck::Tuple<BLayout>;
     using DsLayout = ck::Tuple<>;
     using ELayout  = Row;
 
@@ -278,7 +312,7 @@ void MoeRunnerImpl_stage2(const rocmMoeParams& params){
 //######|         |         |         |        |       Type|       Type|        Type|         DataType|       Type|      Type|  Elementwise| Elementwise|  Elementwise| Spacialization| Prefetch|  Size| Block| Block| Block|    |    |  XDL|  XDL|  Per|  Per|   ThreadCluster|  ThreadCluster| SrcAccessOrder|   SrcVectorDim|      SrcScalar|      DstScalar| AddExtraM|   ThreadCluster|  ThreadCluster| SrcAccessOrder|  SrcVectorDim|      SrcScalar|      DstScalar| AddExtraN| MXdlPerWave| NXdlPerWave|         _MBlock_MWaveMPerXdl| ScalarPerVector|
 //######|         |         |         |        |           |           |            |                 |           |          |    Operation|   Operation|    Operation|               |    Stage|      |      |      |      |    |    |     |     | Wave| Wave| Lengths_K0_M_K1|   ArrangeOrder|               |               |      PerVector|   PerVector_K1|          | Lengths_K0_N_K1|   ArrangeOrder|               |              |      PerVector|   PerVector_K1|          |  PerShuffle|  PerShuffle|         _NBlock_NWaveNPerXdl|   _NWaveNPerXdl|
 //######|         |         |         |        |           |           |            |                 |           |          |             |            |             |               |         |      |      |      |      |    |    |     |     |     |     |                |               |               |               |               |               |          |                |               |               |              |               |               |          |            |            |                             |                |
-        < AsLayout, BsLayout, DsLayout, ELayout, AsDataType, BsDataType, AccDataType, CShuffleDataType, DsDataType, EDataType,  AsElementOp,  BElementOp, CDEElementOp,       GemmSpec,        1,   256,    64,   128,    32,   8,   8,   32,   32,    1,    2,     S<4, 64, 1>,     S<1, 0, 2>,     S<1, 0, 2>,              2,              8,              8,         1,     S<4, 64, 1>,     S<0, 2, 1>,     S<0, 2, 1>,             1,              2,              8,         1,           1,           1,               S<1, 32, 1, 8>,               8, InputT>;
+        < AsLayout, BsLayout, DsLayout, ELayout, AsDataType, BsDataType, AccDataType, CShuffleDataType, DsDataType, EDataType,  AsElementOp,  BElementOp, CDEElementOp,       GemmSpec,        1,   256,    64,   128,    32,   8,   8,   32,   32,    1,    2,     S<4, 64, 1>,     S<1, 0, 2>,     S<1, 0, 2>,              2,              8,              8,         1,     S<4, 64, 1>,   BAccessOrder,   BAccessOrder, BSrcVectorDim,     BSrcScalar,              8,         1,           1,           1,               S<1, 32, 1, 8>,               8, InputT>;
 
     auto gemmRunner=DeviceGemmInstance{};
 
@@ -298,9 +332,15 @@ void MoeRunnerImpl_stage2(const rocmMoeParams& params){
     using GroupedGemmKernelArgument = ck::tensor_operation::device::GroupedGemmMultiABDKernelArgument<NumATensor, NumBTensor, NumDTensor>;
     std::vector<GroupedGemmKernelArgument> grouped_gemm_kernel_args_;
     grouped_gemm_kernel_args_.reserve(params.num_experts);
+    int  M = 0;
 
     for (int i = 0; i < params.num_experts; i++) {
         rowID = params.total_rows_before_expert_host[i];
+        M = rowID - startRowID;
+        if (M==0)
+        {
+            continue;
+        }
 
         gemm_descs.push_back({totlaM, N, K, {1,1}, {1}, {}, 1});
 
@@ -310,11 +350,11 @@ void MoeRunnerImpl_stage2(const rocmMoeParams& params){
              std::array<const void*, NumBTensor>{add_offset(params.down_weight, i * K*N, wtypeSize)},
              std::array<const void*, NumDTensor>{},
              add_offset(params.input, startRowID*N, dtypeSize),//reuse input as output
-             rowID - startRowID, //M
+             M, //M
              N, //N
              K, //K
              std::array<ck::index_t, NumATensor>{(int)K, (int)K},
-             std::array<ck::index_t, NumBTensor>{(int)N},
+             std::array<ck::index_t, NumBTensor>{(int)B_Srtide},
              std::array<ck::index_t, NumDTensor>{},
              (int)N});
 
