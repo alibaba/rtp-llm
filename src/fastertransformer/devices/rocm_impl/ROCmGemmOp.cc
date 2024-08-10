@@ -25,7 +25,7 @@ hipblasOperation_t opConvert(TransposeOperation op) {
         case TransposeOperation::TRANSPOSE:
             return hipblasOperation_t::HIPBLAS_OP_T;
         default:
-            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+            FT_FAIL("[GEMM]: Other TransposeOperation not implemented");
     }
 };
 
@@ -33,10 +33,12 @@ hipblasDatatype_t dtypeConvert(DataType dtype) {
     switch (dtype) {
         case DataType::TYPE_FP16:
             return hipblasDatatype_t::HIPBLAS_R_16F;
+        case DataType::TYPE_BF16: 
+            return hipblasDatatype_t::HIPBLAS_R_16B;
         case DataType::TYPE_FP32:
             return hipblasDatatype_t::HIPBLAS_R_32F;
         default:
-            throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+            FT_FAIL("[GEMM]: Other DataType not implemented");
     }
 };
 
@@ -247,6 +249,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
             sync_check_cuda_error();
             return move(output);
         } else {
+            FT_FAIL("[GEMM]: Other weight quantization not implemented");
         }
     }
 
@@ -315,7 +318,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
         sync_check_hip_error();
         return std::move(output);
     } else {
-        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+        FT_FAIL("[GEMM]:other dispatch not implemented");
     }
     return std::move(output);
 }

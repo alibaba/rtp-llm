@@ -30,6 +30,8 @@ extern "C" half __truncdfhf2(double a) {
 namespace fastertransformer {
 using namespace rocm;
 
+#define PINCPU_MEM 1
+
 ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     RUNTIME_ASSERT_OP_ARG(params.tp_rank == 0, "rocm device doesn't support nccl");
     HIP_CHECK(hipInit(0));
@@ -71,13 +73,22 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
         custom_allreduce_comm_ = initCustomAllReduceComm(nccl_param_, tp_ranks, stream_);
     }
 
+#if PINCPU_MEM
+    allocator_.reset(new Allocator<AllocatorType::ROCM>());
+    hostAllocator_.reset(new Allocator<AllocatorType::ROCM_HOST>());
+#else
     auto allocator_ptr     = new Allocator<AllocatorType::ROCM>();
     auto hostAllocator_ptr = new Allocator<AllocatorType::ROCM_HOST>();
+#endif
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
         HIP_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
         TrackerAllocatorParams tracker_params;
+#if PINCPU_MEM
+        tracker_params.real_allocator     = allocator_.get();  // TODO(rocm): leak?
+#else
         tracker_params.real_allocator     = allocator_ptr;
+#endif
         tracker_params.target_track_bytes = params.device_reserve_memory_bytes > 0 ?
                                                 params.device_reserve_memory_bytes :
                                                 free_bytes + params.device_reserve_memory_bytes;
@@ -87,22 +98,34 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
                     free_bytes,
                     tracker_params.target_track_bytes);
         allocator_.reset(new TrackerAllocator(tracker_params));
+#if PINCPU_MEM
+    }
+#else
     } else {
         allocator_.reset(allocator_ptr);
     }
+#endif
 
     if (params.host_reserve_memory_bytes) {
         RUNTIME_ASSERT_OP_ARG(params.host_reserve_memory_bytes > 0,
                               "rocm host memory can not reserve as much as possible (%lu), must specify concrete size.",
                               params.host_reserve_memory_bytes);
         TrackerAllocatorParams tracker_params;
+#if PINCPU_MEM
+        tracker_params.real_allocator     = hostAllocator_.release();
+#else
         tracker_params.real_allocator     = hostAllocator_ptr;
+#endif
         tracker_params.target_track_bytes = params.host_reserve_memory_bytes;
         tracker_params.align_size         = 32;
         hostAllocator_.reset(new TrackerAllocator(tracker_params));
+#if PINCPU_MEM
+    }
+#else
     } else {
         hostAllocator_.reset(hostAllocator_ptr);
     }
+#endif
 
     check_hip_error(hipGetDeviceProperties(&device_prop_, device_id_));
 
