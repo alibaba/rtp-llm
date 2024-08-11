@@ -56,7 +56,7 @@ namespace threadblock
 {
 
 template <typename ThreadblockShape_, int ThreadCount, typename ScaleTileIterator_, typename OutputTileIterator_,
-    typename ElementAccumulator_, typename ElementCompute_, typename ElementwiseFunctor_, bool UseMasking_ = false>
+    typename ElementAccumulator_, typename ElementCompute_, typename ElementwiseFunctor_, typename EpilogueCompute_, bool UseMasking_ = false>
 class EpilogueVisitorPerRowPerCol
 {
 public:
@@ -66,6 +66,7 @@ public:
     using ScaleTileIterator = ScaleTileIterator_;
     using OutputTileIterator = OutputTileIterator_;
     using ElementwiseFunctor = ElementwiseFunctor_;
+    using EpilogueCompute = EpilogueCompute_;
 
     static int const kIterations = OutputTileIterator::kIterations;
     static int const kElementsPerAccess = OutputTileIterator::kElementsPerAccess;
@@ -79,7 +80,8 @@ public:
     using ElementCompute = ElementCompute_;
     using AccumulatorFragment = Array<ElementAccumulator, kElementsPerAccess>;
     using ComputeFragment = Array<ElementCompute_, kElementsPerAccess>;
-    using OutputVector = Array<ElementOutput, kElementsPerAccess>;
+    using OutputFragment = Array<ElementOutput, kElementsPerAccess>;
+    using EpilogueFragment = Array<EpilogueCompute, kElementsPerAccess>;
 
     static int const kThreadsPerRow = OutputTileIterator::ThreadMap::Detail::kAccessWidth;
     static bool const kHasMultiStepsInRow = (OutputTileIterator::ThreadMap::Iterations::kColumn > 1);
@@ -300,14 +302,14 @@ public:
         {
             result = per_token_scale_accumulator_(result, element_alpha_col_, element_alpha_row_);
         }
-        NumericArrayConverter<ElementCompute, ElementOutput, kElementsPerAccess> bias_converter;
-        ComputeFragment compute_bias_fragement;
-        OutputVector& output = reinterpret_cast<OutputVector*>(&fragment_D_)[frag_idx];
+        OutputFragment& output = reinterpret_cast<OutputFragment*>(&fragment_D_)[frag_idx];
+        NumericArrayConverter<EpilogueCompute, ElementCompute, kElementsPerAccess> epilogue_converter;
+        EpilogueFragment epilogue_input = epilogue_converter(result);
         if (has_bias_) {
-            const OutputVector& bias_vec = reinterpret_cast<OutputVector*>(&fragment_bias_)[column_idx];
-            output = elementwise_(result, bias_vec);
+            const OutputFragment& bias_vec = reinterpret_cast<OutputFragment*>(&fragment_bias_)[column_idx];
+            output = elementwise_(epilogue_input, bias_vec);
         } else {
-            output = elementwise_(result);
+            output = elementwise_(epilogue_input);
         }
         // Convert to the output
     }

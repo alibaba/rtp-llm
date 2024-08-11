@@ -92,7 +92,10 @@ void genericInt8GemmKernelLauncher(const int8_t* A, const int8_t* B, tk::QuantMo
     using DefaultGemmConf = typename cutlass::gemm::device::DefaultGemmConfiguration<OperatorClass, arch, ElementInput,
         ElementInput, ElementOutput, ElementCompute>;
     using GemmOp = typename DefaultGemmConf::Operator;
-    using EpilogueOp = cutlass::epilogue::thread::LinearCombinationGeneric<ActivationFunctor, ElementOutput, DefaultGemmConf::EpilogueOutputOp::kCount, ElementCompute, ElementCompute, cutlass::epilogue::thread::ScaleType::NoBetaScaling>;
+    using EpilogueCompute =
+        typename cutlass::platform::conditional<cutlass::platform::is_same<T, int32_t>::value, ElementCompute, ElementOutput>::type;
+    
+    using EpilogueOp = cutlass::epilogue::thread::LinearCombinationGeneric<ActivationFunctor, ElementOutput, DefaultGemmConf::EpilogueOutputOp::kCount, EpilogueCompute, EpilogueCompute, cutlass::epilogue::thread::ScaleType::NoBetaScaling>;
 
     // only TN is supported (s8 * s8 + s32)
     using GemmKernel_ = typename cutlass::gemm::kernel::DefaultGemm<ElementInput, cutlass::layout::RowMajor,
@@ -111,7 +114,7 @@ void genericInt8GemmKernelLauncher(const int8_t* A, const int8_t* B, tk::QuantMo
     // Epilogue visitor
     using EpilogueVisitor = typename cutlass::epilogue::threadblock::EpilogueVisitorPerRowPerCol<ThreadblockShape,
         GemmKernel_::kThreadCount, AlphaColTileIterator, typename GemmKernel_::Epilogue::OutputTileIterator,
-        ElementAccumulator, ElementCompute, EpilogueOp>;
+        ElementAccumulator, ElementCompute, EpilogueOp, EpilogueCompute>;
 
     /// Epilogue
     using Epilogue = typename cutlass::epilogue::threadblock::EpilogueWithVisitorFromExistingEpilogue<EpilogueVisitor,
