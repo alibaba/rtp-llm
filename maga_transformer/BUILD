@@ -58,9 +58,6 @@ requirement([
 if_cuda(
     requirement([
         "tensorrt",
-        "tensorrt-cu12",
-        "tensorrt-cu12-bindings",
-        "tensorrt-cu12-libs",
     ])
 )
 
@@ -150,9 +147,6 @@ py_library(
         ":nest_asyncio"
     ] + if_cuda([
         ":tensorrt",
-        ":tensorrt-cu12",
-        ":tensorrt-cu12-bindings",
-        ":tensorrt-cu12-libs",
     ]),
 )
 
