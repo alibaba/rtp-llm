@@ -5,6 +5,8 @@
 #include "xfastertransformer/include/layers_mlp.h"
 #include "xfastertransformer/include/layers_attention.h"
 #include "xfastertransformer/include/layers_norm.h"
+#include "xfastertransformer/include/layers_token_embedding.h"
+#include "xfastertransformer/include/layers_gemm.h"
 #include <cstring>
 #include <cmath>
 #include <immintrin.h>
@@ -87,7 +89,38 @@ LayernormOutput CpuDevice::layernorm(const LayernormParams& params) {
 }
 
 BufferPtr CpuDevice::gemm(const GemmParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    auto A = params.A.data();
+    auto B = params.B.data();
+
+    const auto data_type = params.A.type();
+    int        dim       = params.A.dim();
+
+    bool transA = (params.transA == TransposeOperation::TRANSPOSE);
+    bool transB = (params.transB == TransposeOperation::TRANSPOSE);
+
+    int m = transA ? params.A.shape()[dim - 1] : params.A.shape()[dim - 2];
+    int k = transA ? params.A.shape()[dim - 2] : params.A.shape()[dim - 1];
+    int n = transB ? params.B.shape()[dim - 2] : params.B.shape()[dim - 1];
+
+    BufferPtr output;
+    if (params.D) {
+        output = params.D;
+    } else {
+        output = allocateBuffer({data_type, {size_t(m), size_t(n)}, AllocationType::HOST});
+    }
+
+    xft::DataType xft_dt;
+    if (data_type == TYPE_FP16) {
+        xft_dt = xft::DataType::fp16;
+    } else if (data_type == TYPE_BF16) {
+        xft_dt = xft::DataType::bf16;
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+
+    xft::invokeGemm(xft_dt, transA, transB, m, n, k, 1.0, A, k, B, 0.0, output->data(), n);
+
+    return output;
 }
 
 GroupedGemmOutput CpuDevice::groupedGemm(const GroupedGemmParams& params) {
@@ -95,7 +128,26 @@ GroupedGemmOutput CpuDevice::groupedGemm(const GroupedGemmParams& params) {
 }
 
 BufferPtr CpuDevice::embeddingLookup(const EmbeddingLookupParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    const auto& tokens          = params.combo_tokens;
+    const auto& embedding_table = params.embedding_table;
+
+    const auto token_num   = tokens.size();
+    const auto hidden_size = embedding_table.shape()[1];
+    const auto data_type   = embedding_table.type();
+
+    xft::DataType xft_dt;
+    if (data_type == TYPE_FP16) {
+        xft_dt = xft::DataType::fp16;
+    } else if (data_type == TYPE_BF16) {
+        xft_dt = xft::DataType::bf16;
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+
+    BufferPtr emb_out = allocateBuffer({DataType::TYPE_FP32, {token_num, hidden_size}, AllocationType::HOST}, {});
+
+    invokeTokenEmbedding(xft_dt, emb_out->data(), tokens.data(), embedding_table.data(), token_num, hidden_size);
+    return emb_out;
 }
 
 BufferPtr CpuDevice::multimodalEmbedding(const MultimodalEmbeddingParams& params) {
@@ -178,8 +230,8 @@ AttentionLayerOutput CpuDevice::attentionLayer(const AttentionLayerParams& param
                          output_weight->data());
 
     AttentionLayerOutput atten_out;
-    atten_out.hidden_states =
-        allocateBuffer({DataType::TYPE_FP32, {size_t(batch_size * input_seq_len), size_t(hidden_size)}, AllocationType::HOST}, {});
+    atten_out.hidden_states = allocateBuffer(
+        {DataType::TYPE_FP32, {size_t(batch_size * input_seq_len), size_t(hidden_size)}, AllocationType::HOST}, {});
 
     /* If not add rmsnorm then need following extra process */
     float* input_ptr      = static_cast<float*>(input.data());
@@ -242,7 +294,8 @@ FfnLayerOutput CpuDevice::ffnLayer(const FfnLayerParams& params) {
                         down_weight.data());
 
     FfnLayerOutput ffnout;
-    ffnout.hidden_states = allocateBuffer({DataType::TYPE_FP32, {size_t(token_num), size_t(hidden_size)}, AllocationType::HOST}, {});
+    ffnout.hidden_states =
+        allocateBuffer({DataType::TYPE_FP32, {size_t(token_num), size_t(hidden_size)}, AllocationType::HOST}, {});
 
     /* If not add rmsnorm then need following extra process */
     float*    input_ptr      = static_cast<float*>(input.data());

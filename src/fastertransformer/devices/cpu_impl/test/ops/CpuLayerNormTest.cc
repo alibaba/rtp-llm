@@ -52,7 +52,7 @@ protected:
                                                  gamma_tensor.to(torch::kFloat32),
                                                  beta_tensor.to(torch::kFloat32),
                                                  1e-6);
-        // assertTensorClose(expected_output, bufferToTensor(*(testcase1_output.output)));
+        assertTensorClose(expected_output, bufferToTensor(*(testcase1_output.output)));
 
         // test case 2: rms norm without residual
         auto testcase2_output = device_->layernorm(LayernormParams(input,

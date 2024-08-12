@@ -51,6 +51,30 @@ cc_test(
 )
 
 cc_test(
+    name = "cpu_embedding_test",
+    srcs = [
+        "ops/CpuEmbeddingTest.cc",
+    ],
+    data = [],
+    tags = ["manual"],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
+
+cc_test(
+    name = "cpu_gemm_test",
+    srcs = [
+        "ops/CpuGemmTest.cc",
+    ],
+    data = [],
+    tags = ["manual"],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+)
+
+cc_test(
     name = "cpu_ops_test",
     srcs = [
         "CpuOpsTest.cc",

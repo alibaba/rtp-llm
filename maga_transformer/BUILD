@@ -42,7 +42,7 @@ requirement([
     "onnx",
     "sentence-transformers",
     "orjson",
-    "xfastertransformer_devel_icx",
+    "xfastertransformer_devel",
     "decord",
     # add qwen agent package
     "pydantic",
@@ -145,7 +145,7 @@ py_library(
         ":ops",
         ":timm",
         ":onnx",
-        ":xfastertransformer_devel_icx",
+        ":xfastertransformer_devel",
         ":decord",
         ":nest_asyncio"
     ] + if_cuda([
@@ -349,7 +349,7 @@ py_wheel(
         "timm==0.9.12",
         "sentence-transformers==2.7.0",
         "grpcio==1.62.0",
-        "xfastertransformer_devel_icx==1.7.2",
+        "xfastertransformer_devel==1.8.1.1",
         "decord==0.6.0",
         "oss2",
         "json5",
@@ -399,7 +399,7 @@ py_wheel(
         "pydantic==2.5.3",
         "sentence-transformers==2.7.0",
         "grpcio==1.62.0",
-        "xfastertransformer_devel_icx==1.7.2",
+        "xfastertransformer_devel==1.8.1.1",
         "decord==0.6.0",
         "timm==0.9.12",
         "kserve",

@@ -15,7 +15,7 @@ cc_library(
         "//src/fastertransformer/core:cpu_allocator",
         "//src/fastertransformer/devices:device_utils",
         "//src/fastertransformer/devices:devices_base_impl",
-        "@xfastertransformer_devel_icx//:xft_pip",
+        "@xfastertransformer_devel//:xft_pip",
     ],
     visibility = ["//visibility:public"],
     copts = copts() + ["-mavx512f", "-mavx512bw", "-mavx512vl"],
