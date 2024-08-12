@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import copy
 from collections import OrderedDict
@@ -61,6 +62,7 @@ class NormalHandler(CustomHandler):
 class SentenceTransformerHandler(CustomHandler):
     def __init__(self, config: GptInitModelParameters):
         super().__init__(config)
+        sys.path.append(config.ckpt_path)
         dtype = to_torch_dtype(config.data_type)
         modules_config_path = os.path.join(config.ckpt_path, 'modules.json')
         assert os.path.exists(modules_config_path), "not found modules.json from sentence_transformer"
