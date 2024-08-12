@@ -9,8 +9,13 @@ config_setting(
 )
 
 config_setting(
-    name = "use_cuda12",
-    values = {"define": "use_cuda12=true"},
+    name = "using_cuda12",
+    values = {"define": "using_cuda12=true"},
+)
+
+config_setting(
+    name = "using_cuda11",
+    values = {"define": "using_cuda11=true"},
 )
 
 config_setting(

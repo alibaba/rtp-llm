@@ -16,12 +16,13 @@ cc_library(
         "torch/lib/libtorch_cpu.so",
         "torch/lib/libshm.so",
         "torch/lib/libc10.so",
-    ] + select({
+    ] + glob([
+        "torch/lib/libgomp*.so*",
+    ]) + select({
         "//:using_cuda": [
             "torch/lib/libtorch_cuda.so",
             "torch/lib/libc10_cuda.so",
         ] + glob([
-            "torch/lib/libgomp*.so*",
             "torch/lib/libcudart*.so*",
             "torch/lib/libnvToolsExt*.so*",
         ]),
@@ -29,7 +30,6 @@ cc_library(
             "torch/lib/libtorch_hip.so",
             "torch/lib/libc10_hip.so",
         ] +  glob([
-            "torch/lib/libgomp*.so*",
             "torch/lib/libmagma*.so*",
             # "torch/lib/libtinfo.so*",
             # "torch/lib/libsuitesparseconfig.so*",
