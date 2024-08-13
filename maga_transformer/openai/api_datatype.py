@@ -39,6 +39,7 @@ class RoleEnum(str, Enum):
     system = "system"
     function = "function"
     tool = "tool"
+    observation = "observation"
 
 class ContentPartTypeEnum(str, Enum):
     text = "text"
