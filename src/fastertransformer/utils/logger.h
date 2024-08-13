@@ -129,7 +129,7 @@ private:
 
 #define FT_LOG(level, ...)                                                                                             \
     do {                                                                                                               \
-        auto logger_level = fastertransformer::Logger::getLogger().getLevel();                                         \
+        auto logger_level = fastertransformer::Logger::getLogger().getPrintLevel();                                    \
         if (logger_level <= level) {                                                                                   \
             fastertransformer::Logger::getLogger().log(level, __VA_ARGS__);                                            \
         }                                                                                                              \
