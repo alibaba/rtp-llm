@@ -181,6 +181,11 @@ DeviceProperties CudaDevice::getDeviceProperties() {
 
 DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     DevicePrepOutput output;
+    if (params.dtype == DataType::TYPE_FP32) {
+        fmha_type_ = FMHAType::NONE;
+        output.need_mask = true;
+        return output;
+    }
     if (params.context_batch_size) {
         cufmha_runner_->setup(params.dtype,
                             params.configs.mask_type,
