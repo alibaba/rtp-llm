@@ -44,6 +44,8 @@ namespace fastertransformer {
     do {                                                                                                               \
         if (Dtype == DataType::TYPE_FP16) {                                                                            \
             ATYPE_DISPATCH(half, __VA_ARGS__);                                                                         \
+        } else if (Dtype == DataType::TYPE_BF16) {                                                                     \
+            ATYPE_DISPATCH(__nv_bfloat16, __VA_ARGS__);                                                                \
         } else {                                                                                                       \
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);                                                       \
         }                                                                                                              \

@@ -31,10 +31,10 @@ hipblasOperation_t opConvert(TransposeOperation op) {
 
 hipblasDatatype_t dtypeConvert(DataType dtype) {
     switch (dtype) {
-        case DataType::TYPE_FP16:
-            return hipblasDatatype_t::HIPBLAS_R_16F;
         case DataType::TYPE_BF16: 
             return hipblasDatatype_t::HIPBLAS_R_16B;
+        case DataType::TYPE_FP16:
+            return hipblasDatatype_t::HIPBLAS_R_16F;
         case DataType::TYPE_FP32:
             return hipblasDatatype_t::HIPBLAS_R_32F;
         default:
@@ -293,7 +293,7 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
         auto B_data_type = dtypeConvert(arguments.BDtype);
         auto D_data_type = dtypeConvert(arguments.DDtype);
         auto computeType = dtypeConvert(arguments.DDtype);
-
+            
         hipblas_mm_wrapper_->stridedBatchedGemm(b_op,
                                                 a_op,
                                                 arguments.n,

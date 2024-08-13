@@ -145,6 +145,7 @@ test --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/nvidia/lib64:/usr
 test --test_env OMP_NUM_THREADS=8
 test --test_env FT_SERVER_TEST="1"
 test --test_env PY_LOG_LEVEL="INFO"
+#test --test_env ACT_TYPE="bf16"
 
 # compat for low driver < 535
 test:compat --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64"

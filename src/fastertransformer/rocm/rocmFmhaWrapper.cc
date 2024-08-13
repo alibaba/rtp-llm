@@ -78,7 +78,7 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
     else if (mtype_ == AttentionMaskType::causalMask)
     {
         msk_str = "b";
-        FT_LOG_INFO("Using causal_bottom_right Mask");
+        // FT_LOG_INFO("Using causal_bottom_right Mask");
     }
     else
     {
@@ -245,7 +245,7 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
     };
 
     float run_time = fmha_fwd(fmha_traits, fmha_args, stream_config);
-    std::cout << "\nrun_time for ck fmha_fwd: " << run_time << std::endl;
+    // std::cout << "\nrun_time for ck fmha_fwd: " << run_time << std::endl;
     if (run_time < 0) {
         return false;
     } else {

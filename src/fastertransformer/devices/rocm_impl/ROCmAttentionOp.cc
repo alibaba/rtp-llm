@@ -174,7 +174,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                         size_per_head,
                         params.configs.q_scaling);
     auto seq_len_round_32 = (seq_len + 31) / 32 * 32;
-    auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32,
+    auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32, // params.output.type(),
                                         {batch_size, head_num, seq_len_round_32},
                                         AllocationType::DEVICE},
                                         {"softmax_lse"});
@@ -185,7 +185,7 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                                 k_output->data(),
                                 v_output->data(),
                                 params.output.data(),
-                                softmax_lse_->data(),
+                                softmax_lse_->data(), // nullptr
                                 batch_size,
                                 seq_len)) {
         return;
