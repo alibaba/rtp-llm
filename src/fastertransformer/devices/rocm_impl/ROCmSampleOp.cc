@@ -53,7 +53,7 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
         max_top_k = 1;
     }
     auto max_top_p = *max_element(top_p.data<SamplerT>(), top_p.dataWithOffset<SamplerT>(top_p.size()));
-    FT_LOG_WARNING("max_top_k: %d, max_top_p: %f", max_top_k, max_top_p);
+    // FT_LOG_WARNING("max_top_k: %d, max_top_p: %f", max_top_k, max_top_p);
 
     size_t topk_ws_size;
     size_t topp_ws_size;
@@ -101,7 +101,7 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
                                 &device_prop_,
                                 nullptr);
 
-    FT_LOG_WARNING("topk_ws_size: %d, topp_ws_size: %d", topk_ws_size, topp_ws_size);
+    // FT_LOG_WARNING("topk_ws_size: %d, topp_ws_size: %d", topk_ws_size, topp_ws_size);
 
     // see BaseSamplingLayer<T>::allocateBuffer ------------------
     auto skip_top_k_decode_buf = allocateBuffer({DataType::TYPE_BOOL, {batch_size}});
