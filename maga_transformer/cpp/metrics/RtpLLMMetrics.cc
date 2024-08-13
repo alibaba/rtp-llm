@@ -217,7 +217,11 @@ bool initKmonitorFactory() {
     kmonitor::MetricsConfig metricsConfig;
     metricsConfig.set_tenant_name(param.kmonitorTenant);
     metricsConfig.set_service_name(param.kmonitorServiceName);
-    metricsConfig.set_sink_address((param.kmonitorSinkAddress + ":" + param.kmonitorPort).c_str());
+    std::string sink_address = param.kmonitorSinkAddress;
+    if (!param.kmonitorPort.empty()) {
+        sink_address += ":" + param.kmonitorPort;
+    }
+    metricsConfig.set_sink_address(sink_address.c_str());
     metricsConfig.set_enable_log_file_sink(param.kmonitorEnableLogFileSink);
     metricsConfig.set_enable_prometheus_sink(param.kmonitorEnablePrometheusSink);
     metricsConfig.set_manually_mode(param.kmonitorManuallyMode);
