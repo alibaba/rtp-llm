@@ -66,8 +66,11 @@ private:
     nvinfer1::DataType mType;
     bool mCudaKernelEnabled;
     bool mHasZeros;
+    tensorrt_llm::kernels::weight_only::KernelType mCudaKernelType;
+    int mArch;
 
     int mGroupSize;
+    static constexpr int SMALL_M_FAST_PATH = 4;
 
 };
 

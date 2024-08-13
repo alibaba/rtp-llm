@@ -211,37 +211,26 @@ Tensor fused_gemv_dq_helper(
 
     T* output_tensor_ptr = get_ptr<T>(output_tensor);
 
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    int arch = fastertransformer::getSMVersion();
 
-    ft::kernels::WeightOnlyActivationType weight_only_act_type =
-        ft::kernels::WeightOnlyActivationType::FP16;
-    ft::kernels::WeightOnlyParams params{
-        reinterpret_cast<const uint8_t*>(weight_ptr),
-        reinterpret_cast<const void*>(scales_ptr),
-        nullptr,
-        reinterpret_cast<const void*>(input_act_ptr),
-        nullptr,
-        reinterpret_cast<void*>(output_tensor_ptr),
-        m,
-        n,
-        k,
-        0,
-        ft::kernels::WeightOnlyQuantType::Int8b,
-        ft::kernels::WeightOnlyType::PerChannel,
-        ft::kernels::WeightOnlyActivationFunctionType::Identity,
-        weight_only_act_type};
+    tensorrt_llm::kernels::weight_only::KernelType type = tensorrt_llm::kernels::weight_only::KernelType::FP16Int8PerChannel;
 
-    cudaEventRecord(start, stream);
-    for (int64_t iter = 0; iter < timing_iterations; ++iter) {
-        ft::kernels::weight_only_batched_gemv_launcher(params, stream);
-    }
-    cudaEventRecord(stop, stream);
-    cudaEventSynchronize(stop);
-    float total_time_ms = 0;
-    cudaEventElapsedTime(&total_time_ms, start, stop);
-    avg_time = total_time_ms / float(timing_iterations);
+    tensorrt_llm::kernels::weight_only::Params params(input_act_ptr,
+                                                      nullptr,
+                                                      weight_ptr,
+                                                      scales_ptr,
+                                                      nullptr,
+                                                      nullptr,
+                                                      output_tensor_ptr,
+                                                      1.f,
+                                                      m,
+                                                      n,
+                                                      k,
+                                                      0,
+                                                      type);
+    tensorrt_llm::kernels::weight_only::kernel_launcher(arch, params, stream);
+
+    avg_time = 0;
 
     return output_tensor;
 }

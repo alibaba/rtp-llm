@@ -23,7 +23,7 @@ cc_binary(
 cc_binary(
     name = "gemm_perf",
     srcs = [
-        "fpa_intb_perf.cu"
+        "int4_perf.cu"
     ],
     deps = [
         "cutlass_kernels_interface",

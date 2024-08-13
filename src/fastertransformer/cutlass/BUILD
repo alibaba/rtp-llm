@@ -25,9 +25,10 @@ cc_library(
 cc_library(
     name = "weight_only_gemm_cu",
     srcs = glob([
-            "cutlass_kernels/weightOnlyBatchedGemv/weightOnlyBatchedGemvInt8b.cu",
-            "cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.cu",
-            "cutlass_kernels/weightOnlyBatchedGemv/enabled.cc"
+            "cutlass_kernels/weightOnlyBatchedGemv/*.cu",
+            "cutlass_kernels/weightOnlyBatchedGemv/*.h",
+            # "cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.cu",
+            # "cutlass_kernels/weightOnlyBatchedGemv/enabled.cc"
         ]),
     hdrs = glob([
             "cutlass_kernels/weightOnlyBatchedGemv/*.h",
@@ -190,6 +191,7 @@ cc_library(
         "cutlass_kernels/cutlass_preprocessors.h",
         "cutlass_kernels/weight_only_quant_op.h",
         "cutlass_kernels/gemm_configs.h",
+        "cutlass_kernels/weightOnlyBatchedGemv/details.h",
         "cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.h",
         "cutlass_kernels/weightOnlyBatchedGemv/common.h",
         "cutlass_kernels/cutlass_heuristic.h",

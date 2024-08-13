@@ -11,7 +11,7 @@ cc_library(
         "weightOnlyGroupwiseQuantMatmulPlugin/*.cpp",
         "mixtureOfExperts/*.cpp",
         "smoothQuantGemmPlugin/*.cpp",
-    ]), 
+    ]),
     hdrs = glob([
         "*.h",
         "common/checkMacrosPlugin.h",

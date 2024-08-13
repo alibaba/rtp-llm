@@ -32,6 +32,7 @@ WeightOnlyGroupwiseQuantMatmulPlugin::WeightOnlyGroupwiseQuantMatmulPlugin(nvinf
 
 void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type, bool has_zeros,int group_size, int weight_bits)
 {
+    mArch = fastertransformer::getSMVersion();
     mType = type;
     mGroupSize = group_size;
     mHasZeros = has_zeros;
@@ -43,6 +44,24 @@ void WeightOnlyGroupwiseQuantMatmulPlugin::init(nvinfer1::DataType type, bool ha
             });
         });
     });
+
+    if (weight_bits == 4) {
+        if (mType == nvinfer1::DataType::kHALF) {
+
+            mCudaKernelEnabled = tensorrt_llm::kernels::weight_only::is_supported(
+                mArch, tensorrt_llm::kernels::weight_only::KernelType::FP16Int4Groupwise);
+            mCudaKernelType = tensorrt_llm::kernels::weight_only::KernelType::FP16Int4Groupwise;
+        }
+#if defined(ENABLE_BF16)
+        else if (mType == nvinfer1::DataType::kBF16) {
+            mCudaKernelEnabled = tensorrt_llm::kernels::weight_only::is_supported(
+                mArch, tensorrt_llm::kernels::weight_only::KernelType::BF16Int4Groupwise);
+            mCudaKernelType = tensorrt_llm::kernels::weight_only::KernelType::BF16Int4Groupwise;
+        }
+#endif
+    } else {
+        mCudaKernelEnabled = false;
+    }
 }
 
 size_t WeightOnlyGroupwiseQuantMatmulPlugin::getWorkspaceSize(const int m, const int n, const int k) noexcept
@@ -72,6 +91,7 @@ int WeightOnlyGroupwiseQuantMatmulPlugin::enqueue(const void*  inputs,
     // outputs
     //   mat                [M, N]
 
+    bool use_cuda_kernel = m < SMALL_M_FAST_PATH && mCudaKernelEnabled;
     const void* act_ptr = reinterpret_cast<const void*>(inputs);
 
 #if defined(ENABLE_BF16)
@@ -81,41 +101,60 @@ int WeightOnlyGroupwiseQuantMatmulPlugin::enqueue(const void*  inputs,
     TLLM_CHECK_WITH_INFO(mType == nvinfer1::DataType::kHALF, "No valid weightOnlyGropwiseQuantMatmul configuration");
 #endif
 
-    // Use cutlass kernels for large batch size
-    const int ws_size = m_weightOnlyGroupwiseGemmRunner->getWorkspaceSize(m, n, k);
+    // Quantized weights are packed in FP16 format (INT4*4 -> FP16)
+    if (use_cuda_kernel) {
+        tensorrt_llm::kernels::weight_only::Params params{inputs,
+                                                          nullptr,
+                                                          weights,
+                                                          scales,
+                                                          zeros,
+                                                          biases,
+                                                          outputs,
+                                                          1.0f,
+                                                          m,
+                                                          n,
+                                                          k,
+                                                          mGroupSize,
+                                                          mCudaKernelType,
+                                                          false};
+        tensorrt_llm::kernels::weight_only::kernel_launcher(mArch, params, stream);
+    } else {
+        // Use cutlass kernels for large batch size
+        const int ws_size = m_weightOnlyGroupwiseGemmRunner->getWorkspaceSize(m, n, k);
 
-    const auto bestTactic = m_weightOnlyGroupwiseGemmRunner->getChosenConfig(inputs,
-                                                                             weights,
-                                                                             scales,
-                                                                             zeros,
-                                                                             biases,
-                                                                             outputs,
-                                                                             m,
-                                                                             n,
-                                                                             k,
-                                                                             mGroupSize,
-                                                                             reinterpret_cast<char*>(workspace),
-                                                                             ws_size,
-                                                                             stream);
-    TLLM_CHECK_WITH_INFO(
-        &bestTactic,
-        "No valid weight only groupwise GEMM tactic(It is usually caused by the failure to execute all candidate "
-        "configurations of the CUTLASS kernel, please pay attention to the warning information when building the "
-        "engine.)");
-    m_weightOnlyGroupwiseGemmRunner->gemm(act_ptr,
-                                          weights,
-                                          scales,
-                                          zeros,
-                                          biases,
-                                          outputs,
-                                          m,
-                                          n,
-                                          k,
-                                          mGroupSize,
-                                          bestTactic,
-                                          reinterpret_cast<char*>(workspace),
-                                          ws_size,
-                                          stream);
+        const auto bestTactic = m_weightOnlyGroupwiseGemmRunner->getChosenConfig(inputs,
+                                                                                 weights,
+                                                                                 scales,
+                                                                                 zeros,
+                                                                                 biases,
+                                                                                 outputs,
+                                                                                 m,
+                                                                                 n,
+                                                                                 k,
+                                                                                 mGroupSize,
+                                                                                 reinterpret_cast<char*>(workspace),
+                                                                                 ws_size,
+                                                                                 stream);
+        TLLM_CHECK_WITH_INFO(
+            &bestTactic,
+            "No valid weight only groupwise GEMM tactic(It is usually caused by the failure to execute all candidate "
+            "configurations of the CUTLASS kernel, please pay attention to the warning information when building the "
+            "engine.)");
+        m_weightOnlyGroupwiseGemmRunner->gemm(act_ptr,
+                                              weights,
+                                              scales,
+                                              zeros,
+                                              biases,
+                                              outputs,
+                                              m,
+                                              n,
+                                              k,
+                                              mGroupSize,
+                                              bestTactic,
+                                              reinterpret_cast<char*>(workspace),
+                                              ws_size,
+                                              stream);
+    }
 
     return 0;
 }
