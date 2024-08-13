@@ -208,6 +208,11 @@ class MultiModalMixin:
         torch.cuda.empty_cache()
 
     def load_mm_weight(self, ctype: str, device: str):
+        # reserve mem for runtime mm part
+        device_reserve_mem_bytes = int(os.environ.get("DEVICE_RESERVE_MEMORY_BYTES", "-1"))
+        if device_reserve_mem_bytes > -2048000000:
+            os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = "-2048000000"
+
         # wait rank0 finish loading weight, otherwise gang_server will die
         if g_parallel_info.tp_size > 1:
             self.nccl_op_.barrier(torch.device(device))
