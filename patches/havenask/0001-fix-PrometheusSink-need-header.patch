@@ -1,0 +1,25 @@
+From 5b4a301f467bd2ad4ff701af7d2d38c911ad047d Mon Sep 17 00:00:00 2001
+From: zw193905 <zw193905@alibaba-inc.com>
+Date: Wed, 14 Aug 2024 16:11:36 +0800
+Subject: [PATCH] fix PrometheusSink need header
+
+---
+ .../cpp_client/src/kmonitor/client/sink/PrometheusSink.cpp      | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/sink/PrometheusSink.cpp aios/kmonitor/cpp_client/src/kmonitor/client/sink/PrometheusSink.cpp
+index 24125b99..ea3616f9 100644
+--- aios/kmonitor/cpp_client/src/kmonitor/client/sink/PrometheusSink.cpp
++++ aios/kmonitor/cpp_client/src/kmonitor/client/sink/PrometheusSink.cpp
+@@ -50,7 +50,7 @@ PrometheusSink::PrometheusSink(const std::string &addr) : Sink(PrometheusSink::N
+ 
+     gatewayAddr_ += "/metrics/job/havenask";
+ 
+-    network::Header httpHeader;
++    network::Header httpHeader{{"Content-Type", "text/plain"}};
+     httpClientPtr_ = std::make_unique<network::HttpClient>(HTTP_CLIENT_THREAD_NUM,
+                                                            HTTP_CLIENT_CONNECT_TIMEOUT_MS,
+                                                            HTTP_CLIENT_TIMEOUT_MS,
+-- 
+2.19.1.6.gb485710b
+

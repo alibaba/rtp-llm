@@ -106,6 +106,10 @@ def git_deps():
         commit = "3c973500afbd40933eb0a80cfdfb6592274377fb",
         patches=["//patches/havenask:havenask.patch"],
         shallow_since = "1704038400 +0800",
+        patches=[
+            "//patches/havenask:havenask.patch",
+            "//patches/havenask:0001-fix-PrometheusSink-need-header.patch"
+        ],
         build_file = clean_dep("//3rdparty/kmonitor:kmonitor.BUILD"),
     )
 
