@@ -41,9 +41,6 @@ def device_impl_target():
     return select({
         "//:using_cuda": [
             "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-            "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-            "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
-            "@flash_attention//:flash_attention2_impl",
         ],
         "//:using_rocm": [
             "//src/fastertransformer/devices/rocm_impl:rocm_impl",

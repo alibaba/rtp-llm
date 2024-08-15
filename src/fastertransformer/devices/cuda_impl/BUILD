@@ -7,7 +7,8 @@ cc_library(
     name = "cuda_impl",
     hdrs = glob([
         "*.h",
-    ]),
+    ]) + [
+    ],
     srcs = glob([
         "*.cc",
     ]),

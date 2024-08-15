@@ -22,13 +22,22 @@ genrule(
     cmd = "cp $(SRCS) $(@D)",
 )
 
+genrule(
+    name = "libfa_so",
+    srcs = ["//src/fastertransformer/cuda:fa"],
+    outs = [
+        "libfa.so",
+    ],
+    cmd = "cp $(SRCS) $(@D)",
+)
+
 filegroup(
     name = "libs",
     srcs = [],
     data = [
         ":libth_transformer_so",
     ] + select({
-        "//:using_cuda": [":libmmha_so"],
+        "//:using_cuda": [":libmmha_so", "libfa_so"],
         "//:using_rocm": [":libmmha_so"],
         "//conditions:default":[],
     })

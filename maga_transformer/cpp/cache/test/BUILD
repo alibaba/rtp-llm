@@ -22,9 +22,6 @@ test_linkopts = [
 test_deps = [
     "//src/fastertransformer/devices/testing:device_test_utils",
     "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-    "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-    "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
-    "@flash_attention//:flash_attention2_impl",
     "//:gpt_init_params",
     "//maga_transformer/cpp:cache",
     "@com_google_googletest//:gtest",

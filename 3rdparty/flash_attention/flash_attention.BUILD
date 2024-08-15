@@ -50,5 +50,32 @@ cc_library(
     ] + torch_deps(),
     copts = cuda_copts(),
     visibility = ["//visibility:public"],
-    alwayslink = True,
+)
+
+
+cc_library(
+    name = "fa_hdrs",
+    hdrs = glob([
+        "csrc/flash_attn/src/*.h",
+        "csrc/flash_attn/src/*.cuh",
+    ], exclude=["csrc/flash_attn/src/flash.h"]),
+    deps = torch_deps() + [
+        "@cutlass//:cutlass",
+        ":flash_attention2_header",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_shared_library(
+    name = "fa",
+    roots = [":flash_attention2_impl"],
+    preloaded_deps = torch_deps() + [
+        "@cutlass//:cutlass",
+        ":flash_attention2_header",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
 )

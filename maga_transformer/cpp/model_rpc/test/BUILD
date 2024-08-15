@@ -72,9 +72,6 @@ cc_test(
         "//maga_transformer/cpp:dataclass",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices/cuda_impl:cuda_impl",
-        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
-        "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
-        "@flash_attention//:flash_attention2_impl",
         "//src/fastertransformer/devices/testing:device_test_utils"
     ] + torch_deps(),
     env = {

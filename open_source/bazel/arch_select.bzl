@@ -72,3 +72,14 @@ def cutlass_kernels_interface():
         name = "cutlass_headers_interface",
         actual = "//src/fastertransformer/cutlass:cutlass_headers",
     )
+
+def fa_deps():
+    native.alias(
+        name = "fa",
+        actual = "@flash_attention//:fa2"
+    )
+
+    native.alias(
+        name = "fa_hdrs",
+        actual = "@flash_attention//:fa2_hdrs",
+    )

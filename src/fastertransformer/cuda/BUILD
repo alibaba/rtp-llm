@@ -1,5 +1,6 @@
 load("//:def.bzl", "rpm_library", "copts", "cuda_copts", "rocm_copts")
-load("//bazel:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps", "fa_deps")
+package(default_visibility=["//maga_transformer:__subpackages__"])
 
 cc_library(
     name = "cublas",
@@ -23,15 +24,19 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+fa_deps()
+
 cc_library(
     name = "cufmha",
     srcs = [
         "cufmha/cufmha.cc",
+        ":fa",
     ],
     hdrs = [
         "cufmha/cufmha.h",
     ],
     deps = [
+        ":fa_hdrs",
         ":cuda_utils",
         "//src/fastertransformer/core:types",
         "@local_config_cuda//cuda:cuda",
