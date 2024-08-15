@@ -1180,7 +1180,7 @@ class LoraResource():
             lora_name = lora_config.name
             if self.lora_map.has_id(lora_name):
                 continue
-            lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name, self.device)
+            lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name, 'cpu')
             self.model_weights_loader.show_warns(lora_name=lora_name, only_dump_lora=True)
             _ = self.add_lora_name(lora_name, lora_weights)
         for op in self.ft_op:
