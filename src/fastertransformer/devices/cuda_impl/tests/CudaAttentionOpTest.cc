@@ -1,4 +1,3 @@
-#define private public
 
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/cuda_impl/tests/CudaTestUtils.h"
@@ -73,7 +72,6 @@ TEST_F(AttentionOpTest, ContextAttentionOpTest) {
             size_t num_heads = 64;
             size_t num_key_value_heads = num_heads;
             size_t head_dim = 64;
-            size_t dim = head_dim;
             contextAttentionOpTest(batch_size,
                                    seq_len,
                                    num_heads,
@@ -99,7 +97,6 @@ TEST_F(AttentionOpTest, ContextAttentionOpMultiGroupTest) {
             size_t num_heads = 64;
             size_t num_key_value_heads = 4;
             size_t head_dim = 64;
-            size_t dim = head_dim;
             contextAttentionOpTest(batch_size,
                                    seq_len,
                                    num_heads,
@@ -126,7 +123,6 @@ TEST_F(AttentionOpTest, OpenSourceFMHAContextAttentionOpTest) {
             size_t num_heads = 64;
             size_t num_key_value_heads = num_heads;
             size_t head_dim = 64;
-            size_t dim = head_dim;
             contextAttentionOpTest(batch_size,
                                    seq_len,
                                    num_heads,
@@ -154,7 +150,6 @@ TEST_F(AttentionOpTest, TrtV2ContextAttentionOpTest) {
             size_t num_heads = 64;
             size_t num_key_value_heads = num_heads;
             size_t head_dim = 64;
-            size_t dim = head_dim;
             contextAttentionOpTest(batch_size,
                                    seq_len,
                                    num_heads,
@@ -181,7 +176,6 @@ TEST_F(AttentionOpTest, TrtV1ContextAttentionOpTest) {
             size_t num_heads = 64;
             size_t num_key_value_heads = num_heads;
             size_t head_dim = 64;
-            size_t dim = head_dim;
             contextAttentionOpTest(batch_size,
                                    seq_len,
                                    num_heads,

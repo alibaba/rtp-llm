@@ -1,4 +1,4 @@
-load("//:def.bzl", "rpm_library", "copts", "cuda_copts", "rocm_copts")
+load("//:def.bzl", "rpm_library", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps", "fa_deps")
 package(default_visibility=["//maga_transformer:__subpackages__"])
 
@@ -264,7 +264,7 @@ cc_library(
     hdrs = [
         "torch_cuda_allocator.h"
     ],
-    copts = cuda_copts(),
+    copts = copts(),
     deps = [
         "//src/fastertransformer/core:allocator",
     ] + torch_deps(),
@@ -280,7 +280,7 @@ cc_library(
     hdrs = [
         "allocator_cuda.h"
     ],
-    copts = cuda_copts(),
+    copts = copts(),
     deps = [
         "//src/fastertransformer/core:allocator",
         ":cuda_utils",

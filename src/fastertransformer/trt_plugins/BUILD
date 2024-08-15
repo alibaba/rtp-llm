@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
 
 cutlass_kernels_interface()

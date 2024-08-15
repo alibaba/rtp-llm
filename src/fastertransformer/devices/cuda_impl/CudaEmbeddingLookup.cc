@@ -38,7 +38,7 @@ BufferPtr CudaDevice::embeddingLookup(const EmbeddingLookupParams& params) {
         stream_
     );
 
-    return move(embeddings);
+    return embeddings;
 }
 
 BufferPtr CudaDevice::multimodalEmbedding(const MultimodalEmbeddingParams& params) {
@@ -47,7 +47,6 @@ BufferPtr CudaDevice::multimodalEmbedding(const MultimodalEmbeddingParams& param
     const auto& features = params.multimodal_features.value().get();
     const auto& multimodal_locs = params.multimodal_locs.value().get();
     const auto mm_num = features.size();
-    const auto hidden_size = embeddings->shape()[1];
 
     RUNTIME_ASSERT_OP_ARG(
         embeddings->typeSize() == features[0]->typeSize(),

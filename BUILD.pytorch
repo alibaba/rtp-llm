@@ -51,6 +51,7 @@ cc_library(
     ]),
     deps = [
         "@local_config_python//:python_headers",
+        "@local_config_python//:python_lib",
     ],
     strip_include_prefix = "torch/include",
     visibility = ["//visibility:public"],

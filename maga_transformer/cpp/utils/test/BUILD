@@ -1,16 +1,9 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 test_copts = [
     "-fno-access-control",
-] + cuda_copts() + copts()
-
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-ltorch_cpu",
-    "-ltorch_python",
-]
+] + copts()
 
 test_deps = [
     "//maga_transformer/cpp:utils",
@@ -28,7 +21,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",

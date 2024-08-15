@@ -1,23 +1,11 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("//src/fastertransformer/devices:device_defs.bzl",
     "device_impl_target", "device_test_envs", "device_linkopts")
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    "-ltorch_cpu",
-    "-ltorch_python",
-    "-L/usr/local/cuda/lib64",
-    "-lcudart",
-    "-lcuda",
-    "-lnccl",
-    "-lnvToolsExt",
-]
 
 test_copts = [
     "-fno-access-control",
-] + cuda_copts() + copts()
+] + copts()
 
 
 # py_test (
@@ -44,7 +32,6 @@ test_deps = [
 #         "ModelRpcServerTest.cc",
 #     ],
 #     copts = test_copts,
-#     linkopts = test_linkopts,
 #     deps = [
 #         "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
 #         "//maga_transformer/cpp:components",
@@ -61,7 +48,6 @@ cc_test(
         "QueryConverterTest.cc",
     ],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = [
         "//maga_transformer/cpp/proto:model_rpc_service_cc_proto",
         "@com_google_googletest//:gtest",

@@ -3,20 +3,6 @@ load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
 
 cutlass_kernels_interface()
 
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    "-ltorch_cpu",
-    "-ltorch_python",
-    "-L/usr/local/cuda/lib64",
-    "-lcudart",
-    "-lcuda",
-    "-lnccl",
-    "-lnvToolsExt",
-    "-ldl"
-]
-
 cc_binary(
     name = "long_seq_perf",
     srcs = [
@@ -31,7 +17,6 @@ cc_binary(
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
-    linkopts = test_linkopts,
     visibility = ["//visibility:public"],
 )
 
@@ -49,7 +34,6 @@ cc_binary(
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
-    linkopts = test_linkopts,
     visibility = ["//visibility:public"],
 )
 
@@ -68,7 +52,6 @@ cc_binary(
     ],
     copts = cuda_copts(),
     visibility = ["//visibility:public"],
-    linkopts = test_linkopts,
 )
 
 cc_binary(
@@ -87,7 +70,6 @@ cc_binary(
     ],
     copts = cuda_copts(),
     visibility = ["//visibility:public"],
-    linkopts = test_linkopts,
 )
 
 cc_library(
@@ -111,5 +93,4 @@ cc_test(
         "@com_google_googletest//:gtest"
     ],
     copts = copts(),
-    linkopts = test_linkopts,
 )

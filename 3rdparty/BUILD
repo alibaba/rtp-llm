@@ -2,7 +2,6 @@ load("//:def.bzl", "rpm_library", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//visibility:public"])
 
-
 cc_library(
     name = "cuda_driver",
     srcs = glob([
@@ -15,7 +14,10 @@ cc_library(
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
-    copts = cuda_copts(),
+    copts = copts(),
+    linkopts = [
+        "-ldl",
+    ],
     visibility = ["//:__subpackages__"],
 )
 

@@ -24,7 +24,6 @@ LayernormOutput CudaDevice::layernorm(const LayernormParams& params) {
     const auto& beta = (norm_weight && norm_weight->get().beta) ? norm_weight->get().beta.get()->data() : nullptr;
 
     const auto& static_scale = (norm_weight && norm_weight->get().static_scale) ? norm_weight->get().static_scale.get()->data<float>() : nullptr;
-    const auto norm_type = params.norm_type;
     const auto eps = params.eps;
 
     if (!params.is_inplace && params.qscheme == QScheme::NoQuantize) {

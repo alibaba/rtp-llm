@@ -1,23 +1,9 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 test_copts = [
     "-fno-access-control",
-] + cuda_copts() + copts()
-
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    "-ltorch_cpu",
-    "-lcudart",
-    "-ltorch_python",
-    "-L/usr/local/cuda/lib64",
-    "-L/usr/local/nvidia/lib64",
-    "-lcuda",
-    "-lnccl",
-    "-lnvToolsExt",
-]
+] + copts()
 
 test_deps = [
     "//src/fastertransformer/devices/testing:device_test_utils",
@@ -37,7 +23,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
@@ -51,7 +36,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",

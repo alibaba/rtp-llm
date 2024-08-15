@@ -1,4 +1,4 @@
-load("//:def.bzl", "cuda_copts")
+load("//:def.bzl", "copts")
 
 cc_library(
     name = "cutlass_extensions",
@@ -12,7 +12,7 @@ cc_library(
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
-    copts = cuda_copts(),
+    copts = copts(),
     strip_include_prefix = "include",
     visibility = ["//src:__subpackages__"],
 )

@@ -4,9 +4,8 @@ load("//bazel:arch_select.bzl", "torch_deps")
 cc_library(
     name = "trt_fused_multihead_attention_impl",
     srcs = glob([
-        "*.cu",
         "*.cpp",
-        ]),
+    ]),
     hdrs = glob([
         "*.h",
     ]),
@@ -17,7 +16,7 @@ cc_library(
         "//src/fastertransformer/cuda:cuda_utils",
         "//3rdparty:cuda_driver",
     ],
-    copts = cuda_copts(),
+    copts = copts(),
     visibility = ["//:__subpackages__"],
     alwayslink = True,
 )
@@ -31,6 +30,6 @@ cc_library(
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
-    copts = cuda_copts(),
+    copts = copts(),
     visibility = ["//visibility:public"],
 )

@@ -1,21 +1,9 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 test_copts = [
     "-fno-access-control",
-] + cuda_copts() + copts()
-
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    "-ltorch_cpu",
-    "-ltorch_python",
-    "-L/usr/local/cuda/lib64",
-    "-lcudart",
-    "-lnccl",
-    "-lnvToolsExt",
-]
+] + copts()
 
 cc_library(
     name = "test_headers",
@@ -46,7 +34,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
@@ -60,7 +47,6 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    linkopts = test_linkopts,
     deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",

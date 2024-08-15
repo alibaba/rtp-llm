@@ -206,7 +206,6 @@ void MHA(const AttentionModuleParams& params,
             printBufferData(*qk_output, "qk_output: ");
             float scale = (1.0f / sqrtf(size_per_head * 1.0f));
             // TODO(lidongjin): Only support float32(in)\float16(output).
-            auto softmax_type = qk_output->type();
             RUNTIME_ASSERT_OP_ARG(params.common.attention_mask,
                                   "attention_mask must be provided for default context attention implementation");
             auto softmax_qk_output = device->softmax({std::move(qk_output),
@@ -355,7 +354,6 @@ void selfAttentionwrapper(const AttentionModuleParams params,
                           KVBlockArray kv_block_array,
                           cudaStream_t stream)
 {
-    size_t token_num            = params.input.shape()[0];
     size_t batch_size           = params.common.decoder_batch_size;
     size_t step                 = params.common.decoder_max_seq_len + 1;
     size_t local_head_num       = params.configs.head_num;
@@ -374,8 +372,6 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     const T* relative_attention_bias_ptr = nullptr;
 
     // prefix prompt
-
-    auto prefix_lengths = params.common.prefix_prompt_lengths ? params.common.prefix_prompt_lengths->data<int>() : nullptr;
 
     const auto* input_lengths = params.common.input_lengths.data<int>();
     const auto* sequence_lengths = params.common.sequence_lengths.data<int>();

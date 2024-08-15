@@ -316,7 +316,7 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
             InvokeGeneralGemm(params, arguments, output);
         }
         sync_check_cuda_error();
-        return std::move(output);
+        return output;
 }
 
 } // namespace fastertransformer

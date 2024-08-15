@@ -1,5 +1,3 @@
-#define private public
-
 #include <memory>
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"

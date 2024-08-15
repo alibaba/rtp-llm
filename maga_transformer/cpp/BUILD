@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "requirement", "whl_deps", "torch_deps")
 load("//bazel:arch_select.bzl", "embedding_arpc_deps")
 package(default_visibility = ["//maga_transformer:__subpackages__"])
@@ -10,20 +10,6 @@ requirement([
 
 embedding_arpc_deps()
 # load("//bazel:tf_proto.bzl", "tf_proto_library")
-
-linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-lc10",
-    "-ltorch_cpu",
-    "-ltorch_python",
-    "-L/usr/local/cuda/lib64",
-    "-lcudart",
-    "-lcuda",
-    "-lnccl",
-    "-lnvToolsExt",
-    "-ldl",
-]
 
 cc_library(
     name = "common",

@@ -28,7 +28,6 @@ protected:
 
     void prepareResource() {
         auto            cache_config = init_config();
-        ft::DeviceBase* device;
         cache_manager_ = std::make_shared<CacheManager>(cache_config, device_);
         ASSERT_EQ(cache_manager_->freeBlockNums(), 8);
         ResourceContext resource_context;
@@ -47,7 +46,7 @@ protected:
         stream_->setRunning();
     }
 
-    void checkBlockFunc(const auto& block_vec, auto outter_size, auto inner_size) {
+    void checkBlockFunc(const vector<vector<int>>& block_vec, int outter_size, int inner_size) {
         ASSERT_EQ(block_vec.size(), outter_size);
         ASSERT_EQ(block_vec[0].size(), inner_size);
     };
@@ -318,7 +317,6 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     std::vector<size_t> shape = {7};
     generate_input->input_ids = std::make_unique<ft::Buffer>(ft::MEMORY_CPU, ft::TYPE_INT32, shape, (void*)(vec.data()));
     generate_input->generate_config = generate_config;
-    int max_seq_len = 2048;
 
     ResourceContext resource_context;
     resource_context.reuse_cache = true;
@@ -380,7 +378,6 @@ TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     std::vector<size_t> shape = {7};
     generate_input->input_ids = std::make_unique<ft::Buffer>(ft::MEMORY_CPU, ft::TYPE_INT32, shape, (void*)(vec.data()));
     generate_input->generate_config = generate_config;
-    int max_seq_len = 2048;
 
     ResourceContext resource_context;
     resource_context.reuse_cache = true;

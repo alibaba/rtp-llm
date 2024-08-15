@@ -10,17 +10,15 @@ cc_library(
     ]),
     hdrs = glob([
         "*.h",
-        "*.cuh",
     ]),
     deps = [
-        "@cutlass//:cutlass",
         ":trt_fmha_header",
         "//3rdparty:cuda_driver",
         "//src/fastertransformer/kernels:kernels",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
-    copts = cuda_copts(),
+    copts = copts(),
     visibility = ["//:__subpackages__"],
     alwayslink = True,
 )
@@ -36,6 +34,6 @@ cc_library(
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
-    copts = cuda_copts(),
+    copts = copts(),
     visibility = ["//visibility:public"],
 )

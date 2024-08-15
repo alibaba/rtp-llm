@@ -70,7 +70,7 @@ BufferPtr CudaDevice::softmax(const SoftmaxParams& params) {
         } else {
             RUNTIME_ASSERT_OP_ARG(
                 input_type == DataType::TYPE_FP32,
-                "cuda softmax currently not mixed type with input type [%d]",
+                "cuda softmax currently not mixed type with input type [%d] vs [%d]",
                 input_type, output_type);
             DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                 output_type,
@@ -98,7 +98,7 @@ BufferPtr CudaDevice::softmax(const SoftmaxParams& params) {
             stream_
         );
     }
-    return move(output);
+    return output;
 }
 
 } // namespace fastertransformer

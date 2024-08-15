@@ -2,10 +2,9 @@ licenses(["restricted"])
 
 package(default_visibility = ["//visibility:public"])
 
-cc_import(
+cc_library(
     name = "python_lib",
-    interface_library = "not-existing.lib",
-    system_provided = 1,
+    srcs = [":python_import_lib"],
 )
 
 cc_library(
@@ -16,4 +15,13 @@ cc_library(
 )
 
 %{PYTHON_INCLUDE_GENRULE}
-%{PYTHON_IMPORT_LIB_GENRULE}
+
+genrule(
+    name = "python_import_lib",
+    outs = [
+        "libpython3.10.so",
+    ],
+    cmd = """
+cp -f "/opt/conda310/lib/libpython3.10.so" "$(@D)/libpython3.10.so"
+   """,
+)

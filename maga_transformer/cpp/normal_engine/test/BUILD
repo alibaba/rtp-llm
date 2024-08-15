@@ -1,9 +1,9 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 test_copts = [
     "-fno-access-control",
-] + cuda_copts() + copts()
+] + copts()
 
 test_linkopts = [
     "-lpython3.10",

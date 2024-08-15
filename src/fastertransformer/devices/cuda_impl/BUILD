@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
 
 cutlass_kernels_interface()
@@ -25,6 +25,6 @@ cc_library(
         "//src/fastertransformer/trt_plugins:trt_plugins",
     ],
     visibility = ["//visibility:public"],
-    copts = cuda_copts(),
+    copts = copts(),
     alwayslink = 1,
 )

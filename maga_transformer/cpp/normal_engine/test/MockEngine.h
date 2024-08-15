@@ -1,15 +1,16 @@
 #pragma once
 
+#include <memory>
+#include <cuda_fp16.h>
 #include "c10/util/intrusive_ptr.h"
-#include "src/fastertransformer/core/Types.h"
 #include "torch/all.h"
 
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
+#include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include "src/fastertransformer/models/W.h"
-#include <memory>
 
 using namespace std;
 namespace W  = ft::W;

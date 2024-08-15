@@ -49,7 +49,7 @@ static inline void set_alpha(uint32_t& alpha, float norm, Data_type dtype)
         temp.fp162 = __float2half2_rn(norm);
         alpha = temp.u32;
     }
-    else if (dtype == DATA_TYPE_FP32)
+    else if (dtype == DATA_TYPE_FP32 || dtype == DATA_TYPE_BF16)
     {
         __float_uint32_t_union temp;
         temp.fp32 = norm;
@@ -59,12 +59,6 @@ static inline void set_alpha(uint32_t& alpha, float norm, Data_type dtype)
     {
         int32_t inorm = static_cast<int32_t>(norm);
         alpha = reinterpret_cast<const uint32_t&>(inorm);
-    }
-    else if (dtype == DATA_TYPE_BF16)
-    {
-        // TODO HACK!! BF16 Outputs are computed in FP32 for FP8.
-        // This is because cublas does not allow current FP32 output.
-        alpha = reinterpret_cast<const uint32_t&>(norm);
     }
     else
     {
@@ -78,11 +72,11 @@ class FusedMHARunnerV2::mhaImpl
 {
 public:
     mhaImpl(const Data_type data_type, const int numHeads, const int headSize, const float qScaling, int sm_)
-        : mDataType(data_type)
+        : sm(sm_)
+        , mDataType(data_type)
         , mNumHeads(numHeads)
         , mHeadSize(headSize)
         , mQScaling(qScaling)
-        , sm(sm_)
     {
         FT_CHECK_WITH_INFO(
             (sm == kSM_70 || sm == kSM_80 || sm == kSM_86 || sm == kSM_89 || sm == kSM_90), "Unsupported architecture");

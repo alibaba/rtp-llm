@@ -76,13 +76,13 @@ TransposeOutput CudaDevice::transpose(const TransposeParams& params) {
         DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis01,
                                             output->data(), input.data(), shape[0], shape[1], stream_
                                             );
-        return std::move(output);
+        return output;
     } else {
         auto output = allocateBuffer({data_type, {shape[1], shape[0], shape[2]}});
         DISPATCH_CUDA_FUNCTION_GENERAL_TYPE(data_type, invokeTransposeAxis012,
                                             output->data(), input.data(), shape[0], shape[1], shape[2], stream_
                                             );
-        return std::move(output);
+        return output;
     }
 }
 
@@ -101,6 +101,10 @@ SPECIALIZE_CAST_TO(int64_t, __half);
 SPECIALIZE_CAST_TO(uint64_t, __half);
 SPECIALIZE_CAST_TO(int64_t, __nv_bfloat16);
 SPECIALIZE_CAST_TO(uint64_t, __nv_bfloat16);
+SPECIALIZE_CAST_TO(__half, int8_t);
+SPECIALIZE_CAST_TO(__half, uint8_t);
+SPECIALIZE_CAST_TO(__half, int32_t);
+SPECIALIZE_CAST_TO(__half, uint32_t);
 SPECIALIZE_CAST_TO(__half, int64_t);
 SPECIALIZE_CAST_TO(__half, uint64_t);
 SPECIALIZE_CAST_TO(__nv_bfloat16, int64_t);
@@ -138,7 +142,7 @@ ConvertOutput CudaDevice::convert(const ConvertParams& params) {
     );
 
     auto output = (alloc_type == AllocationType::HOST) ? host_output : clone({*host_output, alloc_type});
-    return {move(output)};
+    return {output};
 }
 
 SelectOutput CudaDevice::select(const SelectParams& params) {
@@ -164,7 +168,7 @@ SelectOutput CudaDevice::select(const SelectParams& params) {
         num_selected_element,
         0,
         stream_);
-    return std::move(output);
+    return output;
 }
 
 MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
@@ -198,9 +202,9 @@ MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
                               "Output type must be same as A and B, but got %d vs %d",
                               output->type(), data_type);
         RUNTIME_ASSERT_OP_ARG(output->shape()[0] == n,
-                              "Output 0-d size must be %d, but got %d", n, output->shape()[0]);
+                              "Output 0-d size must be %d, but got %ld", n, output->shape()[0]);
         RUNTIME_ASSERT_OP_ARG(output->size() == B.size(),
-                              "Output size must be %d, but got %d", B.size(), output->size());
+                              "Output size must be %ld, but got %ld", B.size(), output->size());
     } else {
         output = allocateBuffer({data_type, B.shape()});
     }
@@ -218,7 +222,7 @@ MultiplyOutput CudaDevice::multiply(const MultiplyParams& params) {
 
     printBufferData(*output, "multiply_output");
 
-    return move(output);
+    return output;
 }
 
 inline ncclDataType_t getNcclDataType(DataType type) {
@@ -271,7 +275,7 @@ AllReduceOutput CudaDevice::allReduce(const AllReduceParams& params) {
     }
 
     RUNTIME_ASSERT_OP_ARG((int32_t)params.op < ncclRedOp_t::ncclNumOps,
-                          "Invalid reduce op: %d", params.op);
+                          "Invalid reduce op: %d", int(params.op));
  
     NCCLCHECK(ncclAllReduce(buffer->data(), buffer->data(), buffer->size(), nccl_data_type,
                             nccl_op, nccl_param_.nccl_comm_, stream_));
@@ -308,7 +312,7 @@ void CudaDevice::allGather(const AllGatherParams& params) {
         const auto nccl_data_type = getNcclDataType(buffer->type());
         const auto data_num = buffer->size() / nccl_param_.world_size_;
         RUNTIME_ASSERT_OP_ARG(data_num * nccl_param_.world_size_ == buffer->size(),
-            "Buffer size %d must be divisible by world size %d",
+            "Buffer size %ld must be divisible by world size %d",
             buffer->size(), nccl_param_.world_size_);
         const auto data_size = data_num * buffer->typeSize();
         NCCLCHECK(ncclAllGather((char*)(buffer->data()) + nccl_param_.rank_ * data_size, buffer->data(),

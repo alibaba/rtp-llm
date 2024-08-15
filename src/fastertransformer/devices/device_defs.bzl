@@ -1,4 +1,3 @@
-load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 def device_linkopts():

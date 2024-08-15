@@ -76,7 +76,7 @@ BufferPtr CudaDevice::activation(const ActivationParams& params) {
     }
 
     RUNTIME_ASSERT_OP_ARG(states->shape().size() == 2,
-                          "activation states must be 2D, but got %d", states->shape().size());
+                          "activation states must be 2D, but got %ld", states->shape().size());
     size_t m = states->shape()[0];
     size_t n = states->shape()[1];
 

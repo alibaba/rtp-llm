@@ -170,18 +170,3 @@ py_runtime(
     python_version = "PY3",
     stub_shebang = "#!/opt/conda310/bin/python"
 )
-
-cc_binary(
-    name = "kernel_unittest",
-    srcs = glob([
-        "tests/layernorm/*.cpp",
-        "tests/logn_attention/*.cpp",
-        "tests/rotary_embedding/*.cpp",
-    ]),
-    deps = [
-        "//tests:test_ops",
-    ],
-    copts = cuda_copts(),
-    linkshared = 1,
-    visibility = ["//visibility:public"],
-)

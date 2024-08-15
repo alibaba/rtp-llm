@@ -1,15 +1,5 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
-
-test_linkopts = [
-    "-lpython3.10",
-    "-ltorch",
-    "-L/usr/local/cuda/lib64",
-    "-lcudart",
-    "-lcuda",
-    "-lnccl",
-    "-lnvToolsExt",
-]
 
 test_envs = {
     "TEST_USING_DEVICE": "CUDA",
@@ -25,7 +15,7 @@ cc_library(
         "@com_google_googletest//:gtest",
     ],
     visibility = ["//visibility:public"],
-    copts = cuda_copts() + copts(),
+    copts = copts(),
 )
 
 test_deps = [
@@ -40,8 +30,7 @@ cc_test(
     name = "cuda_basic_test",
     srcs = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps + [
         "//src/fastertransformer/devices/base_tests:basic_test_cases"
     ],
@@ -50,10 +39,10 @@ cc_test(
 cc_binary(
     name = "cuda_dist_test_binary",
     srcs = [],
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts + ["-ldl"],
+    copts = copts(),
     deps = test_deps + [
-        "//src/fastertransformer/devices/base_tests:distributed_test"
+        "//src/fastertransformer/devices/base_tests:distributed_test",
+        "@local_config_cuda//cuda:nccl",
     ],
     visibility = ["//visibility:public"],
 )
@@ -84,7 +73,6 @@ cc_binary(
         "//maga_transformer/cpp:models",
     ],
     visibility = ["//visibility:public"],
-    linkopts = ["-ldl"],
     copts = copts(),
 )
 
@@ -95,8 +83,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps + [
         "//src/fastertransformer/devices/cuda_impl/tests:custom_ar_test"
     ],
@@ -110,8 +97,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps,
 )
 
@@ -122,8 +108,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps,
 )
 
@@ -134,8 +119,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps,
 )
 
@@ -146,8 +130,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps,
 )
 
@@ -158,8 +141,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps,
 )
 
@@ -170,8 +152,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts() + ["-fno-access-control"],
     deps = test_deps,
 )
 
@@ -182,8 +163,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps,
 )
 
@@ -194,8 +174,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps,
 )
 
@@ -206,8 +185,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps,
 )
 
@@ -218,8 +196,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps,
 )
 
@@ -230,7 +207,6 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = cuda_copts() + copts() + torch_deps(),
-    linkopts = test_linkopts,
+    copts = copts(),
     deps = test_deps,
 )

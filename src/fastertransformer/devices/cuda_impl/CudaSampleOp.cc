@@ -22,15 +22,15 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     const auto& logits = params.logits;
     const auto batch_size = logits.shape()[0];
     RUNTIME_ASSERT_OP_ARG(batch_size < init_params_.max_batch_size,
-                          "batch_size exceeded device limit %d: %d",
+                          "batch_size exceeded device limit %ld: %ld",
                           init_params_.max_batch_size, batch_size);
     const auto vocab_size_padded = logits.shape()[1];
     const auto step = params.step;
     RUNTIME_ASSERT_OP_ARG(batch_size == params.token_ids.shape()[0],
-                          "logits.shape[0] should equal to token_ids.shape[0], but %d vs %d",
+                          "logits.shape[0] should equal to token_ids.shape[0], but %ld vs %ld",
                           batch_size, params.token_ids.shape()[0]);
     RUNTIME_ASSERT_OP_ARG((step == params.token_ids.shape()[1] - 1),
-                          "step should equal to token_ids.shape[1] - 1, but %d vs %d",
+                          "step should equal to token_ids.shape[1] - 1, but %ld vs %ld",
                           step, params.token_ids.shape()[1] - 1);
     auto device_tokens = clone({params.token_ids});
     auto transposed_tokens = transpose({*device_tokens});
@@ -86,7 +86,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
         } else {
             auto random_seeds_buf = allocateBuffer({DataType::TYPE_UINT64, {batch_size}});
             RUNTIME_ASSERT_OP_ARG((seeds.size() == batch_size),
-                                  "random_seed.size() should equal to batch_size, but %d vs %d",
+                                  "random_seed.size() should equal to batch_size, but %ld vs %ld",
                                   seeds.size(), batch_size);
             copy({*random_seeds_buf, seeds});
             invokeCurandBatchInitialize(

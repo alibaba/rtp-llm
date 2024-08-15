@@ -1,12 +1,11 @@
-
+#include <chrono>
+#include <memory>
+#include <thread>
+#include <cuda_fp16.h>
 #include "gtest/gtest.h"
 
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
-
-#include <chrono>
-#include <memory>
-#include <thread>
 
 using namespace std;
 

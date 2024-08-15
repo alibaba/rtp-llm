@@ -166,6 +166,8 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
         GENERAL_OUTER_TYPE_CASE(DataType::TYPE_UINT32, uint32_t, dtype2, function, __VA_ARGS__)      \
         GENERAL_OUTER_TYPE_CASE(DataType::TYPE_INT64, int64_t, dtype2, function, __VA_ARGS__)        \
         GENERAL_OUTER_TYPE_CASE(DataType::TYPE_UINT64, uint64_t, dtype2, function, __VA_ARGS__)      \
+        default:                                                        \
+        FT_CHECK(false);                                                \
     }
 
 #define COMPUTE_OUTER_TYPE_CASE(dtype1, T1, dtype2, function, ...)                           \
@@ -180,7 +182,9 @@ CastedTuple castArgs(const std::tuple<Args...>& args) {
     switch (dtype1) {                                                                                \
         COMPUTE_OUTER_TYPE_CASE(DataType::TYPE_FP16, half, dtype2, function, __VA_ARGS__)            \
         COMPUTE_OUTER_TYPE_CASE(DataType::TYPE_BF16, __nv_bfloat16, dtype2, function, __VA_ARGS__)   \
-        COMPUTE_OUTER_TYPE_CASE(DataType::TYPE_FP32, float, dtype2, function, __VA_ARGS__)           \
+        COMPUTE_OUTER_TYPE_CASE(DataType::TYPE_FP32, float, dtype2, function, __VA_ARGS__) \
+        default:                                                        \
+        FT_CHECK(false);                                                \
     }
 
 }  // namespace fastertransformer

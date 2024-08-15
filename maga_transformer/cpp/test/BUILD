@@ -1,11 +1,11 @@
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 load("//src/fastertransformer/devices:device_defs.bzl",
     "device_impl_target", "device_test_envs", "device_linkopts")
 
 test_copts = [
     "-fno-access-control",
-] + cuda_copts() + copts()
+] + copts()
 
 test_linkopts = [
     "-lpython3.10",

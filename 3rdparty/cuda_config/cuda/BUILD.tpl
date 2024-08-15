@@ -108,6 +108,15 @@ cuda_header_library(
     includes = ["curand/include"],
 )
 
+cuda_header_library(
+    name = "nccl_headers",
+    hdrs = [":nccl-include"],
+    include_prefix = "third_party/gpus/cuda/include",
+    strip_include_prefix = "nccl/include",
+    deps = [":cuda_headers"],
+    includes = ["nccl/include"],
+)
+
 cc_library(
     name = "cublas",
     srcs = ["cuda/lib/%{cublas_lib}"],
@@ -163,6 +172,13 @@ cc_library(
     name = "curand",
     srcs = ["cuda/lib/%{curand_lib}"],
     data = ["cuda/lib/%{curand_lib}"],
+    linkstatic = 1,
+)
+
+cc_library(
+    name = "nccl",
+    srcs = ["cuda/lib/%{nccl_lib}"],
+    data = ["cuda/lib/%{nccl_lib}"],
     linkstatic = 1,
 )
 

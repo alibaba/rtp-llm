@@ -1,4 +1,4 @@
-load("//:def.bzl", "rpm_library", "copts", "cuda_copts", "rocm_copts")
+load("//:def.bzl", "rpm_library", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(

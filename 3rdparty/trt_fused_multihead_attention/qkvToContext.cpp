@@ -41,7 +41,7 @@ static inline void set_alpha(uint32_t& alpha, float norm, Data_type dtype)
         temp.fp162 = __float2half2_rn(norm);
         alpha      = temp.u32;
     }
-    else if (dtype == DATA_TYPE_FP32) {
+    else if (dtype == DATA_TYPE_FP32 || dtype == DATA_TYPE_BF16) {
         __float_uint32_t_union temp;
         temp.fp32 = norm;
         alpha     = temp.u32;
@@ -49,11 +49,6 @@ static inline void set_alpha(uint32_t& alpha, float norm, Data_type dtype)
     else if (dtype == DATA_TYPE_INT32) {
         int32_t inorm = static_cast<int32_t>(norm);
         alpha         = reinterpret_cast<const uint32_t&>(inorm);
-    }
-    else if (dtype == DATA_TYPE_BF16) {
-        // TODO HACK!! BF16 Outputs are computed in FP32 for FP8.
-        // This is because cublas does not allow current FP32 output.
-        alpha = reinterpret_cast<const uint32_t&>(norm);
     }
     else {
         assert(false);

@@ -39,8 +39,8 @@ public:
             snprintf(benchmark, sizeof(benchmark), "%d", run_benchmark);
             snprintf(i_str, sizeof(i_str), "%zu", i);
             snprintf(world_size_str, sizeof(world_size_str), "%zu", world_size);
-            snprintf(port_str, sizeof(port_str), "%d", port);
-            snprintf(port2_str, sizeof(port2_str), "%d", port2);
+            snprintf(port_str, sizeof(port_str), "%ld", port);
+            snprintf(port2_str, sizeof(port2_str), "%ld", port2);
 
             char* argv[] = {(char*)custom_ar_test_executable_path.c_str(),
                             benchmark,

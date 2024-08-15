@@ -2,8 +2,6 @@
 #include "torch/all.h"
 #include <cstdlib>
 
-#define private public
-
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"

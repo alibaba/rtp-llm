@@ -105,7 +105,7 @@ TEST_F(SamplerTest, testGeneralSampling) {
     }
 
     for (size_t j = 0; j < batch_size; j++) {
-        printf("batch %d: ", j);
+        printf("batch %ld: ", j);
         for (size_t i = 0; i < vocab_size; i++) {
             printf("%d ", token_bins[j][i]);
         }
