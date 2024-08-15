@@ -228,34 +228,38 @@ struct AddBiasParams {
 };
 
 // D = alpha * op(A) * op(B) + beta * C
-// shapes of A, B, C, D have two options: [m, k], [k, n], [m, n], [m, n]
+// shapes of A, B, C, D have two options: [m, k], [k, n], [m, n] / [1, n], [m, n]
 // or [bs, m, k], [bs, k, n], [bs, m, n], [bs, m, n] where bs is batch_size
 // D is optional, if not passed, it will be allocated by the op
 struct GemmParams {
     GemmParams(const Buffer& A,
                const Buffer& B,
-               OptionalBufferRef C = std::nullopt,
+               OptionalConstBufferRef C = std::nullopt,
                BufferPtr D = nullptr,
                const DataType compute_type = DataType::TYPE_INVALID,
                TransposeOperation transA = TransposeOperation::NONE,
-               TransposeOperation transB = TransposeOperation::NONE):
+               TransposeOperation transB = TransposeOperation::NONE,
+               const ActivationType activationType = ActivationType::Identity):
                A(A),
                B(B),
                C(C),
                D(D),
                compute_type(compute_type),
                transA(transA),
-               transB(transB) {}
+               transB(transB),
+               activationType(activationType) {}
 
 
     const Buffer& A;
     const Buffer& B;
-    OptionalBufferRef C;
+    OptionalConstBufferRef C;
     BufferPtr D;
     const DataType compute_type = DataType::TYPE_INVALID; // If passed invalid type, op should infer type
 
     const TransposeOperation transA = TransposeOperation::NONE;
     const TransposeOperation transB = TransposeOperation::NONE;
+
+    ActivationType activationType = ActivationType::Identity;
 
     const float alpha = 1.0f;
     const float beta  = 0.0f;
@@ -366,6 +370,7 @@ struct AttentionConfigs {
 using AttentionModuleOutput = void;
 
 struct AttentionModuleParams {
+    const int32_t                   layer_id;
     // qkv shape[h_token_num, (head_num + 2 * kv_head_num) * size_per_head]
     const Buffer&                   input;
     Buffer&                         output; // shape [token_num, size_per_head]
@@ -385,6 +390,7 @@ struct LayerNormConfig {
 };
 
 struct AttentionLayerParams {
+    int32_t                         layer_id;
     const Buffer&                   input;
     BufferPtr                       output;
     const AttentionConfigs&         configs;

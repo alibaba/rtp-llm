@@ -53,7 +53,9 @@ public:
         const size_t workspaceBytes, cudaStream_t stream)
         = 0;
 
-    virtual bool activationEpilogueSupported(tkc::CutlassActivationType activation) = 0;
+    static bool addBiasActivationEpilogueSupported(tkc::CutlassActivationType activation) {
+        return activation == CutlassActivationType::IDENTITY || activation == CutlassActivationType::GELU_FAST;
+    }
 
     // Returns desired workspace size in bytes.
     virtual size_t getWorkspaceSize(const int m, const int n, const int k) = 0;
@@ -89,8 +91,6 @@ public:
 
     // Returns desired workspace size in bytes.
     size_t getWorkspaceSize(const int m, const int n, const int k) override;
-
-    bool activationEpilogueSupported(tkc::CutlassActivationType activation);
 
     std::vector<tkc::CutlassGemmConfig> getConfigs() const override;
 

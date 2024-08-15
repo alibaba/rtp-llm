@@ -133,6 +133,7 @@ void AttentionLayerTest<T>::testAttentionLayer(
     // 3. compute kernel result and compare
     auto attention_weights = getAttentionWeights(gpt_attention);
     AttentionLayerParams params {
+        -1,
         *input_buffer,
         nullptr,
         attention_conf,

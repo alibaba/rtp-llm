@@ -15,4 +15,6 @@ inline bool enableDebugPrint() {
 
 void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* device = nullptr, bool force_print = false);
 
+void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::string& fileName);
+
 }

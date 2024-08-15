@@ -15,7 +15,7 @@ AddBiasOutput CudaDevice::addbias(const AddBiasParams& params) {
     BufferPtr input = params.input;
     const auto& bias = params.bias;
     const auto data_type = input->type();
-    FT_CHECK_WITH_INFO(params.inplace == false, "bias only support inplace now");
+    FT_CHECK_WITH_INFO(params.inplace == true, "bias only support inplace now");
     FT_CHECK_WITH_INFO(bias.dim() == 1, "bias dim should be 1");
     FT_CHECK_WITH_INFO(input->dim() == 2, "input dim should be 2");
     FT_CHECK_WITH_INFO(input->shape()[1] == bias.shape()[0], "input and bias last dim should equal");

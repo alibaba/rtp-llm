@@ -39,6 +39,28 @@ void printBufferData(const Buffer& buffer, const std::string& hint, DeviceBase* 
     std::cout << "Buffer " << hint << " : " << tensor << std::endl;
 }
 
+void saveBufferDataToTorch(const Buffer& buffer, DeviceBase* device, const std::string& fileName) {
+    if (!device) {
+        device = DeviceFactory::getDefaultDevice();
+    }
+
+    auto host_buffer = device->allocateBuffer(
+        {buffer.type(), buffer.shape(), AllocationType::HOST}
+    );
+    device->copy({*host_buffer, buffer});
+    device->syncAndCheck();
+    auto tensor = torch::from_blob(
+        host_buffer->data(),
+        bufferShapeToTorchShape(buffer),
+        c10::TensorOptions().device(torch::Device(torch::kCPU))
+                            .dtype(dataTypeToTorchType(buffer.type()))
+    );
+    auto pickled = torch::pickle_save(tensor);
+    std::ofstream fout(fileName, std::ios::out | std::ios::binary);
+    fout.write(pickled.data(), pickled.size());
+    fout.close();
+}
+
 } // namespace fastertransformer
 
 

@@ -52,6 +52,10 @@ void SmoothQuantGemmPlugin::init(tensorrt_llm::common::QuantMode quantMode,
     }
 }
 
+bool SmoothQuantGemmPlugin::addBiasActivationEpilogueSupported(tkc::CutlassActivationType activation) {
+    return CutlassInt8GemmRunnerInterface::addBiasActivationEpilogueSupported(activation);
+}
+
 size_t SmoothQuantGemmPlugin::getWorkspaceSize(const int m, const int n, const int k) noexcept
 {
     m_workspaceMaxSize = m_sqGemmRunner->getWorkspaceSize(m, n, k);

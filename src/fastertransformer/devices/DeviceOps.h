@@ -49,9 +49,9 @@ public:
     virtual void broadcast(const BroadcastParams& params);
     virtual AllReduceOutput allReduce(const AllReduceParams& params);
     virtual void allGather(const AllGatherParams& params);
-    virtual PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) {
-        return PrepareAllReduceOutput{params.buffer};
-    };
+    virtual PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params);
+
+    virtual bool gemmSupportFuseBiasActivation(GemmParams params, ActivationType activation_type);
 
     virtual BufferPtr quantize(const QuantizeParams& params);
 };

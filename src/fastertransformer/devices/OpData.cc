@@ -23,7 +23,8 @@ void GemmParams::check() const {
 
     if (C != std::nullopt) {
         auto c_dim = C.value().get().dim();
-        FT_CHECK_WITH_INFO((C.value().get().dim() == dim),
+        // c_dim == 1: do broadcast
+        FT_CHECK_WITH_INFO((c_dim == dim || c_dim == 1),
                             "Gemm op param C dim %d should be equal to A and B", c_dim);
     }
 
@@ -63,18 +64,23 @@ void GemmParams::check() const {
                         ShapeStringView(B.shape()).c_str());
 
     if (C != std::nullopt) {
-        auto m_c = C.value().get().shape()[dim - 2];
-        auto n_c = C.value().get().shape()[dim - 1];
+        auto c_dim = C.value().get().dim();
+        auto n_c   = C.value().get().shape()[c_dim - 1];
 
-        FT_CHECK_WITH_INFO((m_a == m_c) && (n_c == n_b),
-                          "Gemm op A (%s) [%s] and B (%s) [%s] need compact with C [%s]!",
-                          enumToString(transA).c_str(),
-                          ShapeStringView(A.shape()).c_str(),
-                          enumToString(transB).c_str(),
-                          ShapeStringView(B.shape()).c_str(),
-                          ShapeStringView(C.value().get().shape()).c_str());
+        FT_CHECK_WITH_INFO((n_c == n_b),
+                           "Gemm op B (%s) [%s] need compact with C [%s]!",
+                           enumToString(transB).c_str(),
+                           ShapeStringView(B.shape()).c_str(),
+                           ShapeStringView(C.value().get().shape()).c_str());
+        if (c_dim > 1) {
+            auto m_c = C.value().get().shape()[c_dim - 2];
+            FT_CHECK_WITH_INFO((m_c == m_a),
+                               "Gemm op A (%s) [%s] need compact with C [%s]!",
+                               enumToString(transA).c_str(),
+                               ShapeStringView(A.shape()).c_str(),
+                               ShapeStringView(C.value().get().shape()).c_str());
+        }
     }
-
 }
 
 GemmType GemmParams::dispatch() const {

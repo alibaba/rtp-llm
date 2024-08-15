@@ -69,15 +69,23 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     // NOTE: Cuda implementation fused adding qkv_weight->bias in invokeAddFusedQKVBiasTranspose kernel call.
     // other devices need to be careful about this.
     // maybe add a device property here.
+
+    BufferPtr qkv;
     auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));
-    auto qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
+    if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight) {
+        if (gemmSupportFuseBiasActivation(qkv_gemm_params, ActivationType::Identity)) {
+            FT_LOG_DEBUG("qkv gemm fuse add bias");
+            qkv_gemm_params.C =(OptionalConstBufferRef)(*params.weights.qkv_weight->bias);
+            qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
+        } else {
+            qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
+            qkv = addbias({qkv, *(params.weights.qkv_weight->bias)}).output;
+        }
+    } else {
+        qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
+    }
     printBufferData(*qkv, "qkv");
 
-    if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight) {
-        const auto bias_add_output = addbias({qkv, *(params.weights.qkv_weight->bias)});
-        qkv = std::move(bias_add_output.output);
-        printBufferData(*qkv, "qkv_after_bias_add");
-    }
 
     if (params.weights.q_norm_weight) {
         auto after_q_norm = layernorm(LayernormParams(
@@ -114,7 +122,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         if (layer_kv_cache) {
             params.common.kv_cache->kv_cache_offset = kv_cache_offset->slice(0, generate_batch_size);
         }
-        decoderSelfAttention({generate_qkv, generate_output, params.common, params.weights, params.configs});
+        decoderSelfAttention({params.layer_id, generate_qkv, generate_output, params.common, params.weights, params.configs});
     }
     if (context_batch_size) {
         auto context_qkv = qkv->view(generate_batch_size, context_token_num);
@@ -122,7 +130,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         if (layer_kv_cache) {
             params.common.kv_cache->kv_cache_offset = kv_cache_offset->slice(generate_batch_size, context_batch_size);
         }
-        contextAttention({context_qkv, context_output, params.common, params.weights, params.configs});
+        contextAttention({params.layer_id, context_qkv, context_output, params.common, params.weights, params.configs});
     }
     printBufferData(*qkv_output, "qkv_output");
 

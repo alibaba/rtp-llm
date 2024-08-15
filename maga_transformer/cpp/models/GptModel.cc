@@ -325,6 +325,7 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
         }
 
         auto attn_output = device_->attentionLayer(AttentionLayerParams({
+            i,
             *hidden,
             move(attn_out_buf),
             description_.attention_conf,

@@ -35,11 +35,11 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             }
         }
     } else {
-        auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
-        auto up_output = loraLinear(LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input)).output;
-        printBufferData(*up_output, "ffn_up");
-
+        BufferPtr up_output;
         if (isGatedActivation(params.configs.activation_type)) {
+            auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
+            up_output = loraLinear(LoraLinearParams(up_gemm_params, params.lora_input.up_lora_input)).output;
+            printBufferData(*up_output, "ffn_up");
             auto gate_gemm_params = GemmParams(params.input, *(params.weights.gate_weight->kernel));
             auto gate_output = loraLinear(LoraLinearParams(gate_gemm_params,  params.lora_input.gate_lora_input));
 
@@ -50,12 +50,19 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
                         std::nullopt,
                         mayGetRef(params.weights.act_scale)});
         } else {
-            activation({params.configs.activation_type,
-                        *(up_output),
-                        mayGetRef(params.weights.up_weight->bias),
-                        std::nullopt,
-                        std::nullopt,
-                        mayGetRef(params.weights.act_scale)});
+            auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
+            if (gemmSupportFuseBiasActivation(up_gemm_params, params.configs.activation_type)) {
+                auto fuse_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel), mayGetRef(params.weights.up_weight->bias), nullptr, DataType::TYPE_INVALID, TransposeOperation::NONE, TransposeOperation::NONE, params.configs.activation_type);
+                up_output = loraLinear({fuse_gemm_params, params.lora_input.up_lora_input}).output;
+            } else {
+                up_output = loraLinear({up_gemm_params, params.lora_input.up_lora_input}).output;
+                activation({params.configs.activation_type,
+                            *(up_output),
+                            mayGetRef(params.weights.up_weight->bias),
+                            std::nullopt,
+                            std::nullopt,
+                            mayGetRef(params.weights.act_scale)});
+            }
         }
 
         if (params.qscheme != QScheme::NoQuantize) {

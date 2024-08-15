@@ -403,11 +403,6 @@ std::vector<tkc::CutlassGemmConfig> CutlassInt8GemmRunner<T>::getConfigs() const
 }
 
 template <typename T>
-bool CutlassInt8GemmRunner<T>::activationEpilogueSupported(tkc::CutlassActivationType activation) {
-    return activation == CutlassActivationType::GELU_FAST || activation == CutlassActivationType::IDENTITY;
-}
-
-template <typename T>
 std::vector<tkc::CutlassGemmConfig> CutlassInt8GemmRunner<T>::getValidConfigs(const void* A, const void* B,
     tk::QuantMode quantOption, const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k,
     char* workspacePtr, const size_t workspaceBytes, cudaStream_t stream)

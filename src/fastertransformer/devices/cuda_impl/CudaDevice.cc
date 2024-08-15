@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/cuda/cutlass_utils.h"
 #include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/cuda/allocator_cuda.h"
@@ -280,6 +281,15 @@ void CudaDevice::checkUseTrtV2FMHA() {
     }
     FT_LOG_INFO("use TRTV2 fmha paged");
     use_trtv2_fmha_paged = true;
+}
+
+bool CudaDevice::gemmSupportFuseBiasActivation(GemmParams params, ActivationType activation_type) {
+    auto gemm_type = params.dispatch();
+    // only smooth quant support fuse
+    if (gemm_type != GemmType::QBufferA_QBufferB_BufferC_2DGemm) {
+        return false;
+    }
+    return smooth_quant_plugin_->addBiasActivationEpilogueSupported(CutlassUtils::ActivationToCutlassType(activation_type));
 }
 
 void CudaDevice::checkUseMultiBlockMode() {

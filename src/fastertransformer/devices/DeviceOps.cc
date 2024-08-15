@@ -122,4 +122,12 @@ BufferPtr DeviceOps::quantize(const QuantizeParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+PrepareAllReduceOutput DeviceOps::prepareAllReduce(const PrepareAllReduceParams& params) {
+    return PrepareAllReduceOutput{params.buffer};
+};
+
+bool DeviceOps::gemmSupportFuseBiasActivation(GemmParams params, ActivationType activation_type) {
+    return false;
+}
+
 } // namespace fastertransformer

@@ -214,6 +214,7 @@ cc_library(
     ],
     hdrs = [
         "cuda_utils.h",
+        "cutlass_utils.h",
         "Dispatch.h",
         "trt_utils.h"
     ],

@@ -25,7 +25,8 @@ public:
             params.is_causal_ ? fastertransformer::AttentionMaskType::causalMask :
                                 fastertransformer::AttentionMaskType::noMask,
             1.0,
-            params.qk_norm_ ? false: true};
+            // if qk_norm or use embedding model, fuse add bias in gemm
+            params.qk_norm_ || (params.rotary_embedding_style_ == 0 && !params.use_kvcache_) ? false: true};
         auto moe_configs = params.moe_style_ ?
             (std::optional<ft::MoeConfigs>)ft::MoeConfigs({
                 (size_t)params.expert_num_,

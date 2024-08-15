@@ -30,6 +30,8 @@ enum class FMHAType {
 
 nvinfer1::DataType nvinfer1DtypeConvert(fastertransformer::DataType dtype);
 
+class CudaGemmArguments;
+
 class CudaDevice : public DeviceBase {
 public:
     CudaDevice(const DeviceInitParams& params);
@@ -58,30 +60,42 @@ public:
     NcclParam getNcclParam() {return nccl_param_;}
 
 public:
-    void copy(const CopyParams& params);
-    TransposeOutput transpose(const TransposeParams& params);
-    AddBiasOutput addbias(const AddBiasParams& params);
-    ConvertOutput convert(const ConvertParams& params);
-    SelectOutput select(const SelectParams& params);
-    LayernormOutput layernorm(const LayernormParams& params);
-    BufferPtr gemm(const GemmParams& params);
-    GroupedGemmOutput groupedGemm(const GroupedGemmParams& params);
-    MultiplyOutput multiply(const MultiplyParams& params);
-    BufferPtr embeddingLookup(const EmbeddingLookupParams& params);
-    BufferPtr multimodalEmbedding(const MultimodalEmbeddingParams& params);
-    void activation(const ActivationParams& params);
-    BufferPtr softmax(const SoftmaxParams& params);
-    AttentionModuleOutput contextAttention(const AttentionModuleParams& params);
-    AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);
-    FfnLayerOutput moeFfnLayer(const FfnLayerParams& params);
-    void sampleGreedy(const GreedyParams& params);
-    void broadcast(const BroadcastParams& params);
-    AllReduceOutput allReduce(const AllReduceParams& params);
-    void allGather(const AllGatherParams& params);
-    PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params);
+    void copy(const CopyParams& params) override;
+    TransposeOutput transpose(const TransposeParams& params) override;
+    AddBiasOutput addbias(const AddBiasParams& params) override;
+    ConvertOutput convert(const ConvertParams& params) override;
+    SelectOutput select(const SelectParams& params) override;
+    LayernormOutput layernorm(const LayernormParams& params) override;
+    BufferPtr gemm(const GemmParams& params) override;
+    GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;
+    MultiplyOutput multiply(const MultiplyParams& params) override;
+    BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
+    BufferPtr multimodalEmbedding(const MultimodalEmbeddingParams& params) override;
+    void activation(const ActivationParams& params) override;
+    BufferPtr softmax(const SoftmaxParams& params) override;
+    AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
+    AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
+    FfnLayerOutput moeFfnLayer(const FfnLayerParams& params) override;
+    void sampleGreedy(const GreedyParams& params) override;
+    void broadcast(const BroadcastParams& params) override;
+    AllReduceOutput allReduce(const AllReduceParams& params) override;
+    void allGather(const AllGatherParams& params) override;
+    PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
+    bool gemmSupportFuseBiasActivation(GemmParams params, ActivationType activation_type) override;
 
-    BufferPtr quantize(const QuantizeParams& params);
+    BufferPtr quantize(const QuantizeParams& params) override;
     void preRun() override { check_cuda_error(cudaSetDevice(device_id_)); }
+
+protected:
+    void InvokeSmoothQaunt(const GemmParams&       params,
+                           const CudaGemmArguments arguments,
+                           BufferPtr               output);
+    void InvokeWeightOnlyGemm(const GemmParams&       params,
+                              const CudaGemmArguments arguments,
+                              BufferPtr               output);
+    void InvokeGeneralGemm(const GemmParams&       params,
+                           const CudaGemmArguments arguments,
+                           BufferPtr               output);
 
 private:
     std::unique_ptr<IAllocator> allocator_;
