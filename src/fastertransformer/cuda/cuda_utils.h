@@ -28,9 +28,6 @@
 #include <string>
 #include <vector>
 #include <functional>
-#ifdef SPARSITY_ENABLED
-#include <cusparseLt.h>
-#endif
 
 #ifdef ENABLE_BF16
 #include <cuda_bf16.h>
@@ -288,18 +285,6 @@ void check_abs_mean_val(const T* result, const int size);
     do {                                                                                                               \
         std::cout << "[FT][CALL] " << __FUNCTION__ << " " << std::endl;                                                \
     } while (0)
-
-#ifdef SPARSITY_ENABLED
-#define CHECK_CUSPARSE(func)                                                                                           \
-    {                                                                                                                  \
-        cusparseStatus_t status = (func);                                                                              \
-        if (status != CUSPARSE_STATUS_SUCCESS) {                                                                       \
-            throw std::runtime_error(std::string("[FT][ERROR] CUSPARSE API failed at line ")                           \
-                                     + std::to_string(__LINE__) + " in file " + __FILE__ + ": "                        \
-                                     + cusparseGetErrorString(status) + " " + std::to_string(status));                 \
-        }                                                                                                              \
-    }
-#endif
 
 /*************Time Handling**************/
 class CudaTimer {

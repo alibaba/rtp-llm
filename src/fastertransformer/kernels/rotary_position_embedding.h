@@ -765,7 +765,7 @@ __device__ inline void attention_rope(RopeConfig rope_config,
                                       int       seq_len,
                                       int       position_id,
                                       int       input_len,
-                                      int       prefix_prompt_length,
+                                      [[maybe_unused]] int       prefix_prompt_length,
                                       int       count_prefix_length,
                                       bool      handle_kv)
 {

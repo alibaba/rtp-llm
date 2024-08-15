@@ -31,12 +31,6 @@ class cublasMMWrapper {
 protected:
     cublasHandle_t   cublas_handle_;
     cublasLtHandle_t cublaslt_handle_;
-#ifdef SPARSITY_ENABLED
-    cusparseLtHandle_t                               cusparselt_handle_;
-    std::map<std::string, cusparseLtMatDescriptor_t> sp_mat_A_desc_map_;
-    std::map<std::string, cusparseLtMatDescriptor_t> sp_mat_B_desc_map_;
-    std::map<std::string, cusparseLtMatDescriptor_t> sp_mat_C_desc_map_;
-#endif
 
     cudaDataType_t Atype_;
     cudaDataType_t Btype_;
@@ -72,16 +66,6 @@ public:
                     cublasAlgoMap*   map,
                     std::mutex*      mu,
                     IAllocator*      allocator);
-
-#ifdef SPARSITY_ENABLED
-    cublasMMWrapper(cublasHandle_t     cublas_handle_,
-                    cublasLtHandle_t   cublaslt_handle_,
-                    cusparseLtHandle_t cusparselt_handle,
-                    cudaStream_t       stream,
-                    cublasAlgoMap*     map,
-                    std::mutex*        mu,
-                    IAllocator*        allocator);
-#endif
 
     virtual ~cublasMMWrapper();
 
@@ -289,22 +273,6 @@ public:
                      const int          batch_count);
 
     bool isFuseBatchGemm(const int batch_count, const int m, const int k, const int n);
-
-#ifdef SPARSITY_ENABLED
-    void SpGemm(cublasOperation_t transa,
-                cublasOperation_t transb,
-                const int         m,
-                const int         n,
-                const int         k,
-                const void*       A,
-                const void*       B,
-                void*             C);
-
-    size_t getSparseMatrixSize(int m, int k);
-    void   compressMatrix(const void* input, void* output, const int m, const int k);
-
-    bool isUseSparse(const int batch_count, const int m, const int n, const int k);
-#endif
 };
 
 }  // namespace fastertransformer

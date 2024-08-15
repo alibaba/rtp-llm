@@ -5,14 +5,10 @@ cc_library(
     name = "cublas",
     srcs = [
         "cublas/cublasAlgoMap.cc",
-        # "cublas/cublasFP8MMWrapper.cc",
-        "cublas/cublasINT8MMWrapper.cc",
         "cublas/cublasMMWrapper.cc",
     ],
     hdrs = [
         "cublas/cublasAlgoMap.h",
-        # "cublas/cublasFP8MMWrapper.h",
-        "cublas/cublasINT8MMWrapper.h",
         "cublas/cublasMMWrapper.h",
         "cublas/cublas.h",
     ],

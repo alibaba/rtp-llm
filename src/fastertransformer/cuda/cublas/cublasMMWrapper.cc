@@ -40,28 +40,6 @@ cublasMMWrapper::cublasMMWrapper(cublasHandle_t   cublas_handle,
     }
 }
 
-#ifdef SPARSITY_ENABLED
-cublasMMWrapper::cublasMMWrapper(cublasHandle_t     cublas_handle,
-                                 cublasLtHandle_t   cublaslt_handle,
-                                 cusparseLtHandle_t cusparselt_handle,
-                                 cudaStream_t       stream,
-                                 cublasAlgoMap*     cublas_algo_map,
-                                 std::mutex*        mu,
-                                 IAllocator*        allocator):
-    cublas_handle_(cublas_handle),
-    cublaslt_handle_(cublaslt_handle),
-    cusparselt_handle_(cusparselt_handle),
-    stream_(stream),
-    cublas_algo_map_(cublas_algo_map),
-    mu_(mu),
-    allocator_(allocator) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    if (allocator_ != nullptr) {
-        cublas_workspace_ = allocator_->reMalloc(cublas_workspace_, CUBLAS_WORKSPACE_SIZE);
-    }
-}
-#endif
-
 cublasMMWrapper::~cublasMMWrapper() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     mu_ = nullptr;
@@ -74,9 +52,6 @@ cublasMMWrapper::~cublasMMWrapper() {
 cublasMMWrapper::cublasMMWrapper(const cublasMMWrapper& wrapper):
     cublas_handle_(wrapper.cublas_handle_),
     cublaslt_handle_(wrapper.cublaslt_handle_),
-#ifdef SPARSITY_ENABLED
-    cusparselt_handle_(wrapper.cusparselt_handle_),
-#endif
     stream_(wrapper.stream_),
     cublas_algo_map_(wrapper.cublas_algo_map_),
     mu_(wrapper.mu_),
@@ -705,150 +680,6 @@ bool cublasMMWrapper::isFuseBatchGemm(const int batch_count, const int m, const 
                < 3 * cublas_algo_map_->getAlgo(1, m, k, n, data_type).exec_time;
     }
 }
-
-#ifdef SPARSITY_ENABLED
-void cublasMMWrapper::SpGemm(cublasOperation_t transa,
-                             cublasOperation_t transb,
-                             const int         m,
-                             const int         n,
-                             const int         k,
-                             const void*       A,
-                             const void*       B,
-                             void*             C) {
-    if (Atype_ != CUDA_R_16F || Btype_ != CUDA_R_16F || Ctype_ != CUDA_R_16F) {
-        throw std::runtime_error("\n[FT][ERROR] sparse GEMM only supports FP16 data type now.");
-    }
-    static bool not_printed_fp32_accumulation_warning = true;
-    if (computeType_ != CUDA_R_16F && not_printed_fp32_accumulation_warning) {
-        printf("[FT][WARNING] cublasMMWrapper sets to FP32 compute type, "
-               "but sparse gemm will use FP16 compute type since cusparselt "
-               "supports FP16 accumulation only.\n");
-        not_printed_fp32_accumulation_warning = false;
-    }
-    cusparseOrder_t     order = CUSPARSE_ORDER_COL;
-    cusparseOperation_t opA = (transa == CUBLAS_OP_N) ? CUSPARSE_OPERATION_NON_TRANSPOSE : CUSPARSE_OPERATION_TRANSPOSE;
-    cusparseOperation_t opB = (transb == CUBLAS_OP_N) ? CUSPARSE_OPERATION_NON_TRANSPOSE : CUSPARSE_OPERATION_TRANSPOSE;
-    cusparseComputeType compute_type = CUSPARSE_COMPUTE_16F;
-    cusparseLtMatmulDescriptor_t   matmul;
-    cusparseLtMatmulAlgSelection_t alg_sel;
-    cusparseLtMatmulPlan_t         plan;
-
-    bool     is_rowmajor    = (order == CUSPARSE_ORDER_ROW);
-    bool     isA_transposed = (opA != CUSPARSE_OPERATION_NON_TRANSPOSE);
-    bool     isB_transposed = (opB != CUSPARSE_OPERATION_NON_TRANSPOSE);
-    auto     num_A_rows     = (isA_transposed) ? k : m;
-    auto     num_A_cols     = (isA_transposed) ? m : k;
-    auto     num_B_rows     = (isB_transposed) ? n : k;
-    auto     num_B_cols     = (isB_transposed) ? k : n;
-    auto     num_C_rows     = m;
-    auto     num_C_cols     = n;
-    unsigned alignment      = 16;
-    auto     lda            = (is_rowmajor) ? num_A_cols : num_A_rows;
-    auto     ldb            = (is_rowmajor) ? num_B_cols : num_B_rows;
-    auto     ldc            = (is_rowmajor) ? num_C_cols : num_C_rows;
-    float    _alpha(1.0f);
-    float    _beta(0.0f);
-
-    char mark[256];
-    sprintf(mark, "%d_%d_%d_%d", 1, m, n, k);
-    if (sp_mat_A_desc_map_.find(mark) != sp_mat_A_desc_map_.end()) {
-        CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(&cusparselt_handle_,
-                                                      &matmul,
-                                                      opA,
-                                                      opB,
-                                                      &sp_mat_A_desc_map_[mark],
-                                                      &sp_mat_B_desc_map_[mark],
-                                                      &sp_mat_C_desc_map_[mark],
-                                                      &sp_mat_C_desc_map_[mark],
-                                                      compute_type))
-    } else {
-        // initializing MatDesc takes a lot of time
-        cusparseLtMatDescriptor_t matA, matB, matC;
-        sp_mat_A_desc_map_[mark] = matA;
-        sp_mat_B_desc_map_[mark] = matB;
-        sp_mat_C_desc_map_[mark] = matC;
-        CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(&cusparselt_handle_,
-                                                          &sp_mat_A_desc_map_[mark],
-                                                          num_A_rows,
-                                                          num_A_cols,
-                                                          lda,
-                                                          alignment,
-                                                          Atype_,
-                                                          order,
-                                                          CUSPARSELT_SPARSITY_50_PERCENT))
-        CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(
-            &cusparselt_handle_, &sp_mat_B_desc_map_[mark], num_B_rows, num_B_cols, ldb, alignment, Btype_, order))
-        CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(
-            &cusparselt_handle_, &sp_mat_C_desc_map_[mark], num_C_rows, num_C_cols, ldc, alignment, Ctype_, order))
-        CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(&cusparselt_handle_,
-                                                      &matmul,
-                                                      opA,
-                                                      opB,
-                                                      &sp_mat_A_desc_map_[mark],
-                                                      &sp_mat_B_desc_map_[mark],
-                                                      &sp_mat_C_desc_map_[mark],
-                                                      &sp_mat_C_desc_map_[mark],
-                                                      compute_type))
-    }
-    mu_->lock();
-    CHECK_CUSPARSE(
-        cusparseLtMatmulAlgSelectionInit(&cusparselt_handle_, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
-    int alg = cublas_algo_map_->getSpAlgo(1, num_A_rows, num_B_cols, num_A_cols);
-    CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
-        &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &alg, sizeof(alg)))
-    size_t workspace_size;
-    CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&cusparselt_handle_, &alg_sel, &workspace_size))
-    CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &plan, &matmul, &alg_sel, workspace_size))
-
-    void*        d_workspace = nullptr;
-    int          num_streams = 1;
-    cudaStream_t streams[1]  = {stream_};
-    CHECK_CUSPARSE(
-        cusparseLtMatmul(&cusparselt_handle_, &plan, &_alpha, A, B, &_beta, C, C, d_workspace, streams, num_streams))
-    CHECK_CUSPARSE(cusparseLtMatmulPlanDestroy(&plan))
-    sync_check_cuda_error();
-    mu_->unlock();
-}
-
-size_t cublasMMWrapper::getSparseMatrixSize(int m, int k) {
-    // Get a compressed matrix size of shape (m, k) used in cusparselt.
-    auto            Atype_     = CUDA_R_16F;
-    cusparseOrder_t order      = CUSPARSE_ORDER_COL;
-    unsigned        alignment  = 16;
-    int             num_A_rows = m;
-    int             num_A_cols = k;
-    int             lda        = num_A_rows;
-
-    cusparseLtMatDescriptor_t matA;
-    CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(&cusparselt_handle_,
-                                                      &matA,
-                                                      num_A_rows,
-                                                      num_A_cols,
-                                                      lda,
-                                                      alignment,
-                                                      Atype_,
-                                                      order,
-                                                      CUSPARSELT_SPARSITY_50_PERCENT));
-    size_t compressed_size = 0;
-    CHECK_CUSPARSE(cusparseLtSpMMACompressedSize2(&cusparselt_handle_, &matA, &compressed_size));
-    return compressed_size;
-}
-
-void cublasMMWrapper::compressMatrix(const void* input, void* output, const int m, const int k) {
-    cusparseOrder_t           order = CUSPARSE_ORDER_COL;
-    cusparseOperation_t       opA   = CUSPARSE_OPERATION_NON_TRANSPOSE;
-    cusparseLtMatDescriptor_t matA;
-    unsigned                  alignment = 16;
-    CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(
-        &cusparselt_handle_, &matA, m, k, m, alignment, CUDA_R_16F, order, CUSPARSELT_SPARSITY_50_PERCENT))
-    CHECK_CUSPARSE(cusparseLtSpMMACompress2(&cusparselt_handle_, &matA, true, opA, input, output, stream_))
-    sync_check_cuda_error();
-}
-
-bool cublasMMWrapper::isUseSparse(const int batch_count, const int m, const int n, const int k) {
-    return cublas_algo_map_->isUseSparse(batch_count, m, n, k);
-}
-#endif
 
 std::pair<bool, cublasLtMatmulAlgo_t> cublasMMWrapper::findBestAlgo(cublasLtHandle_t       lightHandle,
                                                                     cublasLtMatmulDesc_t   computeDesc,

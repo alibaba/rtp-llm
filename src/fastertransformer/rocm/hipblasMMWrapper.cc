@@ -25,9 +25,6 @@ hipblasMMWrapper::hipblasMMWrapper(hipblasHandle_t   hipblas_handle,
 hipblasMMWrapper::hipblasMMWrapper(const hipblasMMWrapper& wrapper):
     hipblas_handle_(wrapper.hipblas_handle_),
     hipblaslt_handle_(wrapper.hipblaslt_handle_),
-#ifdef SPARSITY_ENABLED
-    cusparselt_handle_(wrapper.cusparselt_handle_),
-#endif
     stream_(wrapper.stream_),
     hipblas_algo_map_(wrapper.hipblas_algo_map_),
     mu_(wrapper.mu_),
@@ -39,27 +36,7 @@ hipblasMMWrapper::hipblasMMWrapper(const hipblasMMWrapper& wrapper):
         hipblas_workspace_ = allocator_->malloc(HIPBLAS_WORKSPACE_SIZE);
     }
 }
-#ifdef SPARSITY_ENABLED
-hipblasMMWrapper::hipblasMMWrapper(hipblasHandle_t    hipblas_handle,
-                                   cublasLtHandle_t   hipblaslt_handle,
-                                   cusparseLtHandle_t cusparselt_handle,
-                                   hipStream_t        stream,
-                                   hipblasAlgoMap*    hipblas_algo_map,
-                                   std::mutex*        mu,
-                                   IAllocator*        allocator):
-    hipblas_handle_(hipblas_handle),
-    hipblaslt_handle_(hipblaslt_handle),
-    cusparselt_handle_(cusparselt_handle),
-    stream_(stream),
-    hipblas_algo_map_(hipblas_algo_map),
-    mu_(mu),
-    allocator_(allocator) {
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    if (allocator_ != nullptr) {
-        hipblas_workspace_ = allocator_->malloc(hipblas_workspace_, HIPBLAS_WORKSPACE_SIZE, false);
-    }
-}
-#endif
+
 hipblasMMWrapper::~hipblasMMWrapper() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     mu_ = nullptr;
@@ -529,153 +506,6 @@ void hipblasMMWrapper::batchedGemm(hipblasOperation_t transa,
                                          static_cast<hipblasGemmAlgo_t>(info.algoId)));
     mu_->unlock();
 }
-
-// =========================================== spars =================================================
-#ifdef SPARSITY_ENABLED
-void hipblasMMWrapper::SpGemm(hipblasOperation_t transa,
-                              hipblasOperation_t transb,
-                              const int          m,
-                              const int          n,
-                              const int          k,
-                              const void*        A,
-                              const void*        B,
-                              void*              C) {
-    if (Atype_ != HIPBLAS_R_16F || Btype_ != HIPBLAS_R_16F || Ctype_ != HIPBLAS_R_16F) {
-        throw std::runtime_error("\n[FT][ERROR] sparse GEMM only supports FP16 data type now.");
-    }
-    static bool not_printed_fp32_accumulation_warning = true;
-    if (computeType_ != HIPBLAS_R_16F && not_printed_fp32_accumulation_warning) {
-        printf("[FT][WARNING] hipblasMMWrapper sets to FP32 compute type, "
-               "but sparse gemm will use FP16 compute type since cusparselt "
-               "supports FP16 accumulation only.\n");
-        not_printed_fp32_accumulation_warning = false;
-    }
-    hipsparseOrder_t     order = HIPSPARSE_ORDER_COL;
-    hipsparseOperation_t opA =
-        (transa == HIPBLAS_OP_N) ? HIPSPARSE_OPERATION_NON_TRANSPOSE : HIPSPARSE_OPERATION_TRANSPOSE;
-    hipsparseOperation_t opB =
-        (transb == HIPBLAS_OP_N) ? HIPSPARSE_OPERATION_NON_TRANSPOSE : HIPSPARSE_OPERATION_TRANSPOSE;
-    cusparseComputeType            compute_type = CUSPARSE_COMPUTE_16F;
-    cusparseLtMatmulDescriptor_t   matmul;
-    cusparseLtMatmulAlgSelection_t alg_sel;
-    cusparseLtMatmulPlan_t         plan;
-
-    bool     is_rowmajor    = (order == HIPSPARSE_ORDER_ROW);
-    bool     isA_transposed = (opA != HIPSPARSE_OPERATION_NON_TRANSPOSE);
-    bool     isB_transposed = (opB != HIPSPARSE_OPERATION_NON_TRANSPOSE);
-    auto     num_A_rows     = (isA_transposed) ? k : m;
-    auto     num_A_cols     = (isA_transposed) ? m : k;
-    auto     num_B_rows     = (isB_transposed) ? n : k;
-    auto     num_B_cols     = (isB_transposed) ? k : n;
-    auto     num_C_rows     = m;
-    auto     num_C_cols     = n;
-    unsigned alignment      = 16;
-    auto     lda            = (is_rowmajor) ? num_A_cols : num_A_rows;
-    auto     ldb            = (is_rowmajor) ? num_B_cols : num_B_rows;
-    auto     ldc            = (is_rowmajor) ? num_C_cols : num_C_rows;
-    float    _alpha(1.0f);
-    float    _beta(0.0f);
-
-    char mark[256];
-    sprintf(mark, "%d_%d_%d_%d", 1, m, n, k);
-    if (sp_mat_A_desc_map_.find(mark) != sp_mat_A_desc_map_.end()) {
-        CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(&cusparselt_handle_,
-                                                      &matmul,
-                                                      opA,
-                                                      opB,
-                                                      &sp_mat_A_desc_map_[mark],
-                                                      &sp_mat_B_desc_map_[mark],
-                                                      &sp_mat_C_desc_map_[mark],
-                                                      &sp_mat_C_desc_map_[mark],
-                                                      compute_type))
-    } else {
-        // initializing MatDesc takes a lot of time
-        cusparseLtMatDescriptor_t matA, matB, matC;
-        sp_mat_A_desc_map_[mark] = matA;
-        sp_mat_B_desc_map_[mark] = matB;
-        sp_mat_C_desc_map_[mark] = matC;
-        CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(&cusparselt_handle_,
-                                                          &sp_mat_A_desc_map_[mark],
-                                                          num_A_rows,
-                                                          num_A_cols,
-                                                          lda,
-                                                          alignment,
-                                                          Atype_,
-                                                          order,
-                                                          CUSPARSELT_SPARSITY_50_PERCENT))
-        CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(
-            &cusparselt_handle_, &sp_mat_B_desc_map_[mark], num_B_rows, num_B_cols, ldb, alignment, Btype_, order))
-        CHECK_CUSPARSE(cusparseLtDenseDescriptorInit(
-            &cusparselt_handle_, &sp_mat_C_desc_map_[mark], num_C_rows, num_C_cols, ldc, alignment, Ctype_, order))
-        CHECK_CUSPARSE(cusparseLtMatmulDescriptorInit(&cusparselt_handle_,
-                                                      &matmul,
-                                                      opA,
-                                                      opB,
-                                                      &sp_mat_A_desc_map_[mark],
-                                                      &sp_mat_B_desc_map_[mark],
-                                                      &sp_mat_C_desc_map_[mark],
-                                                      &sp_mat_C_desc_map_[mark],
-                                                      compute_type))
-    }
-    mu_->lock();
-    CHECK_CUSPARSE(
-        cusparseLtMatmulAlgSelectionInit(&cusparselt_handle_, &alg_sel, &matmul, CUSPARSELT_MATMUL_ALG_DEFAULT))
-    int alg = hipblas_algo_map_->getSpAlgo(1, num_A_rows, num_B_cols, num_A_cols);
-    CHECK_CUSPARSE(cusparseLtMatmulAlgSetAttribute(
-        &cusparselt_handle_, &alg_sel, CUSPARSELT_MATMUL_ALG_CONFIG_ID, &alg, sizeof(alg)))
-    size_t workspace_size;
-    CHECK_CUSPARSE(cusparseLtMatmulGetWorkspace(&cusparselt_handle_, &alg_sel, &workspace_size))
-    CHECK_CUSPARSE(cusparseLtMatmulPlanInit(&cusparselt_handle_, &plan, &matmul, &alg_sel, workspace_size))
-
-    void*       d_workspace = nullptr;
-    int         num_streams = 1;
-    hipStream_t streams[1]  = {stream_};
-    CHECK_CUSPARSE(
-        cusparseLtMatmul(&cusparselt_handle_, &plan, &_alpha, A, B, &_beta, C, C, d_workspace, streams, num_streams))
-    CHECK_CUSPARSE(cusparseLtMatmulPlanDestroy(&plan))
-    sync_check_hip_error();
-    mu_->unlock();
-}
-
-size_t hipblasMMWrapper::getSparseMatrixSize(int m, int k) {
-    // Get a compressed matrix size of shape (m, k) used in cusparselt.
-    auto             Atype_     = HIPBLAS_R_16F;
-    hipsparseOrder_t order      = HIPSPARSE_ORDER_COL;
-    unsigned         alignment  = 16;
-    int              num_A_rows = m;
-    int              num_A_cols = k;
-    int              lda        = num_A_rows;
-
-    cusparseLtMatDescriptor_t matA;
-    CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(&cusparselt_handle_,
-                                                      &matA,
-                                                      num_A_rows,
-                                                      num_A_cols,
-                                                      lda,
-                                                      alignment,
-                                                      Atype_,
-                                                      order,
-                                                      CUSPARSELT_SPARSITY_50_PERCENT));
-    size_t compressed_size = 0;
-    CHECK_CUSPARSE(cusparseLtSpMMACompressedSize2(&cusparselt_handle_, &matA, &compressed_size));
-    return compressed_size;
-}
-
-void hipblasMMWrapper::compressMatrix(const void* input, void* output, const int m, const int k) {
-    hipsparseOrder_t          order = HIPSPARSE_ORDER_COL;
-    hipsparseOperation_t      opA   = HIPSPARSE_OPERATION_NON_TRANSPOSE;
-    cusparseLtMatDescriptor_t matA;
-    unsigned                  alignment = 16;
-    CHECK_CUSPARSE(cusparseLtStructuredDescriptorInit(
-        &cusparselt_handle_, &matA, m, k, m, alignment, HIPBLAS_R_16F, order, CUSPARSELT_SPARSITY_50_PERCENT))
-    CHECK_CUSPARSE(cusparseLtSpMMACompress2(&cusparselt_handle_, &matA, true, opA, input, output, stream_))
-    sync_check_hip_error();
-}
-
-bool hipblasMMWrapper::isUseSparse(const int batch_count, const int m, const int n, const int k) {
-    return hipblas_algo_map_->isUseSparse(batch_count, m, n, k);
-}
-#endif
 
 // =========================================== int8 =================================================
 // TODO: int8 NOT supported yet

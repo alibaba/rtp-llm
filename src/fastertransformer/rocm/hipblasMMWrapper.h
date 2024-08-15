@@ -16,12 +16,6 @@ class hipblasMMWrapper {
 protected:
     hipblasHandle_t   hipblas_handle_;
     hipblasLtHandle_t hipblaslt_handle_;
-#ifdef SPARSITY_ENABLED
-    cusparseLtHandle_t                               cusparselt_handle_;
-    std::map<std::string, cusparseLtMatDescriptor_t> sp_mat_A_desc_map_;
-    std::map<std::string, cusparseLtMatDescriptor_t> sp_mat_B_desc_map_;
-    std::map<std::string, cusparseLtMatDescriptor_t> sp_mat_C_desc_map_;
-#endif
 
     hipblasDatatype_t Atype_;
     hipblasDatatype_t Btype_;
@@ -57,16 +51,6 @@ public:
                      rocm::hipblasAlgoMap* map,
                      std::mutex*           mu,
                      IAllocator*           allocator);
-
-#ifdef SPARSITY_ENABLED
-    hipblasMMWrapper(hipblasHandle_t       hipblas_handle_,
-                     hipblasLtHandle_t     hipblaslt_handle_,
-                     cusparseLtHandle_t    cusparselt_handle,
-                     hipStream_t           stream,
-                     rocm::hipblasAlgoMap* map,
-                     std::mutex*           mu,
-                     IAllocator*           allocator);
-#endif
 
     ~hipblasMMWrapper();
     hipblasMMWrapper(const hipblasMMWrapper& wrapper);
@@ -220,22 +204,6 @@ public:
                      void* const*       C,
                      const int          ldc,
                      const int          batch_count);
-
-#ifdef SPARSITY_ENABLED
-    void SpGemm(hipblasOperation_t transa,
-                hipblasOperation_t transb,
-                const int          m,
-                const int          n,
-                const int          k,
-                const void*        A,
-                const void*        B,
-                void*              C);
-
-    size_t getSparseMatrixSize(int m, int k);
-    void   compressMatrix(const void* input, void* output, const int m, const int k);
-
-    bool isUseSparse(const int batch_count, const int m, const int n, const int k);
-#endif
 };
 }  // namespace rocm
 }  // namespace fastertransformer
