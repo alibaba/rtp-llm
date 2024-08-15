@@ -31,13 +31,40 @@ genrule(
     cmd = "cp $(SRCS) $(@D)",
 )
 
+genrule(
+    name = "libfpA_intB_so",
+    srcs = ["//src/fastertransformer/cutlass:fpA_intB"],
+    outs = [
+        "libfpA_intB.so",
+    ],
+    cmd = "cp $(SRCS) $(@D)",
+)
+
+genrule(
+    name = "libmoe_so",
+    srcs = ["//src/fastertransformer/cutlass:moe"],
+    outs = [
+        "libmoe.so",
+    ],
+    cmd = "cp $(SRCS) $(@D)",
+)
+
+genrule(
+    name = "libint8_gemm_so",
+    srcs = ["//src/fastertransformer/cutlass:int8_gemm"],
+    outs = [
+        "libint8_gemm.so",
+    ],
+    cmd = "cp $(SRCS) $(@D)",
+)
+
 filegroup(
     name = "libs",
     srcs = [],
     data = [
         ":libth_transformer_so",
     ] + select({
-        "//:using_cuda": [":libmmha_so", "libfa_so"],
+        "//:using_cuda": [":libmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so"],
         "//:using_rocm": [":libmmha_so"],
         "//conditions:default":[],
     })

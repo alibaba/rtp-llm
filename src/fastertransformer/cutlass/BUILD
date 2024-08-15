@@ -30,7 +30,7 @@ cc_library(
             "cutlass_kernels/weightOnlyBatchedGemv/enabled.cc"
         ]),
     hdrs = glob([
-            "cutlass_kernels/weightOnlyBatchedGemv/*.h",         
+            "cutlass_kernels/weightOnlyBatchedGemv/*.h",
             "interface.h"
         ]),
     deps = [
@@ -63,6 +63,17 @@ cc_library(
     alwayslink = True,
 )
 
+cc_shared_library(
+    name = "fpA_intB",
+    roots = [":fpA_intB_cu"],
+    preloaded_deps = [
+    	":cutlass_kernels_common",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "int8_gemm_cu",
     srcs = glob([
@@ -79,6 +90,17 @@ cc_library(
     ],
     copts = cuda_copts(),
     alwayslink = True,
+)
+
+cc_shared_library(
+    name = "int8_gemm",
+    roots = [":int8_gemm_cu"],
+    preloaded_deps = [
+    	":cutlass_kernels_common",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -102,6 +124,16 @@ cc_library(
     alwayslink = True,
 )
 
+cc_shared_library(
+    name = "moe",
+    roots = [":moe_cu"],
+    preloaded_deps = [
+    	":cutlass_kernels_common",
+        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "group_cu",
@@ -134,12 +166,14 @@ cc_library(
 
 cc_library(
     name = "cutlass_kernels_impl",
+    srcs = [
+        ":fpA_intB",
+        ":moe",
+        ":int8_gemm"
+    ],
     deps = [
-        ":fpA_intB_cu",
         ":weight_only_gemm_cu",
         ":group_cu",
-        ":moe_cu",
-        "int8_gemm_cu"
     ],
     visibility = ["//visibility:public"],
 )
