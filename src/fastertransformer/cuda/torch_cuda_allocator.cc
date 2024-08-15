@@ -20,7 +20,9 @@ void TorchCudaAllocator::free(void** ptr) {
 }
 
 at::DataPtr TorchCudaAllocator::allocate(size_t size) const {
-    auto  device = c10::Device(at::DeviceType::CUDA, 0);
+    int device_id = 0;
+    cudaGetDevice(&device_id);
+    auto  device = c10::Device(at::DeviceType::CUDA, device_id);
     void* ptr    = allocator_->malloc(size);
     return {ptr, ptr, &local_raw_delete, device};
 }
@@ -38,6 +40,7 @@ void* TorchCudaAllocator::raw_alloc_with_stream(size_t nbytes, cudaStream_t stre
         return nullptr;
     }
     int   device = 0;
+    cudaGetDevice(&device);
     void* r      = nullptr;
     malloc(&r, device, nbytes, stream);
     return r;
@@ -45,7 +48,7 @@ void* TorchCudaAllocator::raw_alloc_with_stream(size_t nbytes, cudaStream_t stre
 
 cudaError_t TorchCudaAllocator::memcpyAsync(
     void* dst, int dstDevice, const void* src, int srcDevice, size_t count, cudaStream_t stream, bool p2p_enabled) {
-    return cudaMemcpyAsync(dst, src, count, cudaMemcpyDeviceToDevice, stream);
+    return cudaMemcpyAsync(dst, src, count, cudaMemcpyDefault, stream);
 }
 
 void TorchCudaAllocator::raw_delete(void* ptr) {
