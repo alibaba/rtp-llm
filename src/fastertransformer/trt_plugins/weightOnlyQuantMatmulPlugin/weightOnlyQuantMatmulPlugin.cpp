@@ -56,31 +56,6 @@ void WeightOnlyQuantMatmulPlugin::init(nvinfer1::DataType type, WeightTypeId wei
             TLLM_CHECK(false);
         }
     }
-    else if (mWeightTypeId == WeightTypeId::INT4)
-    {
-        if (mType == nvinfer1::DataType::kHALF)
-        {
-            m_weightOnlyGemmRunner = std::make_shared<
-                CutlassFpAIntBGemmRunner<half, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>>();
-            mCudaKernelEnabled = tensorrt_llm::kernels::weight_only::is_supported(
-                mArch, tensorrt_llm::kernels::weight_only::KernelType::FP16Int4PerChannel);
-            mCudaKernelType = tensorrt_llm::kernels::weight_only::KernelType::FP16Int4PerChannel;
-        }
-#if defined(ENABLE_BF16)
-        else if (mType == nvinfer1::DataType::kBF16)
-        {
-            m_weightOnlyGemmRunner = std::make_shared<CutlassFpAIntBGemmRunner<__nv_bfloat16, cutlass::uint4b_t,
-                cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY>>();
-            mCudaKernelEnabled = tensorrt_llm::kernels::weight_only::is_supported(
-                mArch, tensorrt_llm::kernels::weight_only::KernelType::BF16Int4PerChannel);
-            mCudaKernelType = tensorrt_llm::kernels::weight_only::KernelType::BF16Int4PerChannel;
-        }
-#endif
-        else
-        {
-            TLLM_CHECK(false);
-        }
-    }
     else
     {
         TLLM_CHECK(false);
@@ -106,27 +81,13 @@ int WeightOnlyQuantMatmulPlugin::enqueue(const void*  inputs,
 {
     const bool use_cuda_kernel = m < SMALL_M_FAST_PATH && mCudaKernelEnabled;
 
-    int real_n;
-    if (mWeightTypeId == WeightTypeId::INT8)
-    {
-        real_n = n;
-    }
-    else if (mWeightTypeId == WeightTypeId::INT4)
-    {
-        real_n = n * INT8_INT4_RATIO;
-    }
-    else
-    {
-        TLLM_CHECK_WITH_INFO(false, "weight only batched gemv only support int8/int4");
-    }
-
     if (use_cuda_kernel) {
         tensorrt_llm::kernels::weight_only::Params params(reinterpret_cast<const void*>(inputs), nullptr, reinterpret_cast<const uint8_t*>(weights),
-            reinterpret_cast<const void*>(scales), nullptr, nullptr, reinterpret_cast<void*>(outputs), 1.f, m, real_n, k, 0, mCudaKernelType);
+            reinterpret_cast<const void*>(scales), nullptr, nullptr, reinterpret_cast<void*>(outputs), 1.f, m, n, k, 0, mCudaKernelType);
         tensorrt_llm::kernels::weight_only::kernel_launcher(mArch, params, stream);
     }
     else {
-        const int  ws_size    = m_weightOnlyGemmRunner->getWorkspaceSize(m, real_n, k);
+        const int  ws_size    = m_weightOnlyGemmRunner->getWorkspaceSize(m, n, k);
         const auto bestTactic = m_weightOnlyGemmRunner->getChosenConfig(inputs,
                                                                         weights,
                                                                         scales,
@@ -134,7 +95,7 @@ int WeightOnlyQuantMatmulPlugin::enqueue(const void*  inputs,
                                                                         nullptr,
                                                                         outputs,
                                                                         m,
-                                                                        real_n,
+                                                                        n,
                                                                         k,
                                                                         k,
                                                                         reinterpret_cast<char*>(workspace),
@@ -152,7 +113,7 @@ int WeightOnlyQuantMatmulPlugin::enqueue(const void*  inputs,
                                      scales,
                                      outputs,
                                      m,
-                                     real_n,
+                                     n,
                                      k,
                                      bestTactic,
                                      reinterpret_cast<char*>(workspace),

@@ -1,5 +1,7 @@
 load("//:def.bzl", "copts", "cuda_copts")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
+load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
+
 cc_library(
     name = "cutlass_kernels_common",
     srcs = glob([
@@ -22,14 +24,37 @@ cc_library(
     alwayslink = True,
 )
 
+T = [('KernelType::BF16Int4Groupwise', 'BF16DetailsA', 'Int4DetailsW'),
+     ('KernelType::BF16Int8PerChannel', 'BF16DetailsA', 'Int8DetailsW'),
+     ('KernelType::FP16Int4Groupwise', 'FP16DetailsA', 'Int4DetailsW'),
+     ('KernelType::FP16Int8PerChannel', 'FP16DetailsA', 'Int8DetailsW')]
+
+Layout = ['ColumnMajor', 'ColumnMajorInterleaved']
+Tile = ['64']
+
+template_header = """
+#include "src/fastertransformer/cutlass/cutlass_kernels/weightOnlyBatchedGemv/kernelDispatcher.h"
+namespace tensorrt_llm {
+namespace kernels {
+namespace weight_only {
+"""
+template = """
+INSTANTIATE_WEIGHT_ONLY_CUDA_DISPATCHERS({0}, {1}, {2}, {3}, {4});
+"""
+template_tail = """
+}}}
+"""
+
+gen_cpp_code("gemv_inst", [T, Layout, Tile],
+             template_header, template, template_tail, element_per_file=4, suffix=".cu")
+
 cc_library(
     name = "weight_only_gemm_cu",
     srcs = glob([
-            "cutlass_kernels/weightOnlyBatchedGemv/*.cu",
-            "cutlass_kernels/weightOnlyBatchedGemv/*.h",
-            # "cutlass_kernels/weightOnlyBatchedGemv/kernelLauncher.cu",
-            # "cutlass_kernels/weightOnlyBatchedGemv/enabled.cc"
-        ]),
+        "decoder_masked_multihead_attention/*.cu",
+    ]) + [
+        ":gemv_inst"
+    ],
     hdrs = glob([
             "cutlass_kernels/weightOnlyBatchedGemv/*.h",
             "interface.h"

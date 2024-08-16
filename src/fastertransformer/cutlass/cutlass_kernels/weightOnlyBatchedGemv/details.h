@@ -54,6 +54,7 @@ struct ColumnMajor
     using DetailsW = TypeDetailsW;
     using AccessTypeA = float4;
     using AccessTypeW = int;
+    static constexpr bool UseInterleavedConverter = false;
     static constexpr int kAccessSize = 128;
     static constexpr int kStepK = kAccessSize / TypeDetailsA::kElemBits;
     static constexpr int kTileSize = TileSizeK;
@@ -75,6 +76,7 @@ struct ColumnMajorInterleaved
     using DetailsW = TypeDetailsW;
     using AccessTypeA = float4;
     using AccessTypeW = int4;
+    static constexpr bool UseInterleavedConverter = true;
     static constexpr int kAccessSize = 128;
     static constexpr int kStepK = kAccessSize / TypeDetailsW::kElemBits;
     static constexpr int kTileSize = TileSizeK;
@@ -96,7 +98,7 @@ struct ColumnMajorInterleaved
 };
 
 template <typename TypeDetailsA_, typename TypeDetailsW_, template <typename, typename, int> class LayoutDetails_,
-    bool UseInterleavedConverter, int TileSizeK>
+      int TileSizeK>
 struct KernelDetails
 {
     using TypeDetailsA = TypeDetailsA_;
@@ -111,7 +113,7 @@ struct KernelDetails
     static constexpr int kInterleave = LayoutDetails::kInterleave;
     static constexpr int kThreadsPerInterleavedTile = LayoutDetails::kTileSize / kStepK;
     static constexpr int kElemsPerByteW = 8 / TypeDetailsW::kElemBits;
-    static constexpr bool kUseInterleavedConverter = UseInterleavedConverter;
+    static constexpr bool kUseInterleavedConverter = LayoutDetails::UseInterleavedConverter;
 };
 
 } // namespace weight_only
