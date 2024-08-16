@@ -357,7 +357,6 @@ __device__ void weight_only_batched_gemv_sm70(const uint8_t* qweight, const ActT
     using CvtResType = typename Converter::result_type;
     using ScaleLoader = WeightOnlyScaleLoader<ActType, QType, Arch, WeightOnlyFlag, Zero, BlockSize>;
     extern __shared__ uint8_t shmem[];
-    constexpr int Interleave = Details::kInterleave;
     constexpr int WarpSize = 32;
     constexpr int Num = Batch * NPerBlock;
     const int tid = threadIdx.x;
@@ -464,8 +463,8 @@ __device__ void weight_only_batched_gemv_sm70(const uint8_t* qweight, const ActT
 #pragma unroll
         for (int i = 0; i < NPerBlock; i += 2) {
             ActType2 v = *reinterpret_cast<ActType2*>(weights_vec + i);
-            v       = reinterpret_cast<ActType2>(
-                __hfma2(v, *reinterpret_cast<ActType2*>(scale + i), *reinterpret_cast<ActType2*>(zero + i)));
+	    auto v1 = __hfma2(v, *reinterpret_cast<ActType2*>(scale + i), *reinterpret_cast<ActType2*>(zero + i));
+            v       = *reinterpret_cast<ActType2*>(&v1);
 
 #pragma unroll
             for (int b = 0; b < Batch; b++) {
