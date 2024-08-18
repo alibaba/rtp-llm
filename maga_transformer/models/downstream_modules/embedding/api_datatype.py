@@ -1,4 +1,4 @@
-from typing import Union, List, Dict, Optional
+from typing import Union, List, Dict, Optional, Any
 from enum import Enum
 from maga_transformer.config.base_model_config import PyDanticModelBase
 
@@ -6,11 +6,15 @@ class Usage(PyDanticModelBase):
     prompt_tokens: int = 0
     total_tokens: int = 0
 
+class ExtraConfigs(PyDanticModelBase):
+    tokenizer_config: Dict[str, Any] = {}
+
 class OpenAIEmbeddingRequest(PyDanticModelBase):
     input: Union[str, List[str]]
     model: str = ""
     encoding_format: str = 'float'
     user: str = ""
+    extra_configs: ExtraConfigs = ExtraConfigs()
 
 class EmbeddingResponseType(str, Enum):
     DENSE = "embedding"

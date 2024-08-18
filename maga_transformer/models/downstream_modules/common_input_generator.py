@@ -18,7 +18,8 @@ class CommonInputGenerator(object):
     def generate( # type: ignore
         self,
         prompt: Union[List[str], str, List[Tuple[str, str]]],
-        truncate: bool = True
+        truncate: bool = True,
+        tokenizer_config: Dict[str, Any] = {}
     ) -> EngineInputs:        
         if isinstance(prompt, str):
             prompt = [prompt]
@@ -30,7 +31,7 @@ class CommonInputGenerator(object):
         truncate_length = self.config_.max_seq_len
         if self.config_.position_ids_style == 1:
             truncate_length = self.config_.max_seq_len - (self.config_.special_tokens.pad_token_id + 1)
-        encoded = self.tokenizer_(prompt, max_length=truncate_length, return_attention_mask=False, padding=False, return_length=True, truncation=truncate, return_tensors='np')
+        encoded = self.tokenizer_(prompt, max_length=truncate_length, return_attention_mask=False, padding=False, return_length=True, truncation=truncate, return_tensors='np', **tokenizer_config)
 
         combo_tokens = torch.from_numpy(np.concatenate(encoded['input_ids'])).to(torch.int32)
         if 'token_type_ids' in encoded:

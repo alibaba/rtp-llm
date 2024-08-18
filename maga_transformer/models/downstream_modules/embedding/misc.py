@@ -62,7 +62,7 @@ class EmbeddingRendererBase(CustomRenderer):
 
     def create_input(self, request: Union[OpenAIEmbeddingRequest, SimilarityRequest]):
         if isinstance(request, OpenAIEmbeddingRequest):
-            engine_inputs = self.generator.generate(request.input)
+            engine_inputs = self.generator.generate(request.input, tokenizer_config=request.extra_configs.tokenizer_config)
         else:
             engine_inputs = self.generator.generate(request.left + request.right)
         return engine_inputs
