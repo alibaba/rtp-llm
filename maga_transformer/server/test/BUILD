@@ -5,7 +5,7 @@ py_test(
     ],
     deps = [
         "//maga_transformer:testlib",
-    ]    
+    ]
 )
 py_test (
     name = "inference_worker_test",
@@ -18,6 +18,7 @@ py_test (
         "//maga_transformer:_ft_pickler",
         "//maga_transformer:config",
         "//maga_transformer:testlib",
-        "//maga_transformer/test/model_test/test_util:test_util"
+        "//maga_transformer/test/model_test/test_util:test_util",
+        "//maga_transformer/test/utils:port_util",
     ],
 )

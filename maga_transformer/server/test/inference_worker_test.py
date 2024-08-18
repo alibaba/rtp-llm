@@ -2,16 +2,17 @@ import os
 import asyncio
 import logging
 from unittest import TestCase, main
-from unittest import mock
+
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
-from maga_transformer.utils.free_port_util import FreePortUtil
 from maga_transformer.config.log_config import LOGGING_CONFIG
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.server.inference_worker import InferenceWorker, BatchPipelineResponse
 from maga_transformer.pipeline.pipeline import Pipeline
-from maga_transformer.test.model_test.test_util.fake_model_loader import FakeModelLoader
 from maga_transformer.structure.request_extractor import request_id_field_name
 from maga_transformer.distribute.worker_info import DEFAULT_START_PORT, update_master_info
+
+from maga_transformer.test.model_test.test_util.fake_model_loader import FakeModelLoader
+from maga_transformer.test.utils.port_util import get_consecutive_free_ports
 
 class FakeInferenceWorker(InferenceWorker):
     def __init__(self, model, pipeline):
@@ -29,7 +30,7 @@ class InferenceWorkerTest(TestCase):
         self.inference_worker = self.create_inference_worker()
 
     def create_inference_worker(self):
-        port_list = FreePortUtil.get_consecutive_free_ports(3)
+        port_list = get_consecutive_free_ports(3)
         update_master_info('0.0.0.0', int(os.environ.get('START_PORT', port_list[0])))
         self.fake_model_loader = FakeModelLoader(model_type='llama',
                                                  tokenizer_path=self.tokenizer_path,
