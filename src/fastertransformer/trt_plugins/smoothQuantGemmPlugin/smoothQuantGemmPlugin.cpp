@@ -52,7 +52,7 @@ void SmoothQuantGemmPlugin::init(tensorrt_llm::common::QuantMode quantMode,
     }
 }
 
-bool SmoothQuantGemmPlugin::addBiasActivationEpilogueSupported(tkc::CutlassActivationType activation) {
+bool SmoothQuantGemmPlugin::addBiasActivationEpilogueSupported(tkc::CutlassActivationType activation) const {
     return CutlassInt8GemmRunnerInterface::addBiasActivationEpilogueSupported(activation);
 }
 

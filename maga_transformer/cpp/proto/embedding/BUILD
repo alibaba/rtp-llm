@@ -12,7 +12,7 @@ cc_library(
     name = "embedding_grpc_service_cc_proto",
     hdrs = glob(["*.h"]),
     srcs = glob(["*.cc"]),
-    deps = [":embedding_rpc_service_cc_impl"],
+    deps = [":embedding_grpc_service_cc_impl"],
     # include_prefix = import_prefix,
     # strip_include_prefix = strip_import_prefix,
     visibility = ["//visibility:public"],

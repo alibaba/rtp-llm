@@ -38,7 +38,7 @@ public:
     SelectOutput select(const SelectParams& params) override;
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
     LayernormOutput layernorm(const LayernormParams& params) override;
-    void activation(const ActivationParams& params) override;
+    BufferPtr activation(const ActivationParams& params) override;
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
     FfnLayerOutput moeFfnLayer(const FfnLayerParams& params);

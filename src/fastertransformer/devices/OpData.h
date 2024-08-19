@@ -224,7 +224,7 @@ enum GemmType : size_t {
 struct AddBiasParams {
     BufferPtr     input;
     const Buffer& bias;
-    bool          inplace;
+    bool          inplace = true;
 };
 
 // D = alpha * op(A) * op(B) + beta * C
@@ -517,12 +517,23 @@ struct AllGatherParams {
 // output = act(input) + bias
 struct ActivationParams {
     ActivationType atype;
-    Buffer& states;
+    // can be nullptr for fuse gemm with activation
+    BufferPtr states;
 
     const OptionalConstBufferRef bias      = std::nullopt;
     const OptionalConstBufferRef gate      = std::nullopt;
     const OptionalConstBufferRef gate_bias = std::nullopt;
     const OptionalConstBufferRef act_scale = std::nullopt;
+
+    ActivationParams(ActivationType               atype,
+                     BufferPtr                    states,
+                     const OptionalConstBufferRef bias,
+                     const OptionalConstBufferRef gate,
+                     const OptionalConstBufferRef gate_bias,
+                     const OptionalConstBufferRef act_scale):
+        atype(atype), states(states), bias(bias), gate(gate), gate_bias(gate_bias), act_scale(act_scale) {}
+
+    ActivationParams(ActivationType atype, BufferPtr states): atype(atype), states(states), bias(std::nullopt), gate(std::nullopt), gate_bias(std::nullopt), act_scale(std::nullopt) {};
 };
 
 // softmax op is inplace-update, thus output buffer is same as input
@@ -583,6 +594,11 @@ struct LoraLinearParams {
     lora::LoraOpInputPtr lora_input;
 };
 
+struct LoraLinearWithActivationParams {
+    const LoraLinearParams& lora_linear_params;
+    const ActivationParams& activation_params;
+    LoraLinearWithActivationParams(const LoraLinearParams& lora_linear_params, const ActivationParams& activation_params): lora_linear_params(lora_linear_params), activation_params(activation_params) {}
+};
 struct QuantizeParams {
     const Buffer&           input;
     DataType                qtype;

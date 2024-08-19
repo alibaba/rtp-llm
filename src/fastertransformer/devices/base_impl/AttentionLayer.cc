@@ -1,5 +1,6 @@
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 
 #include <numeric>
 
@@ -69,18 +70,13 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
     // NOTE: Cuda implementation fused adding qkv_weight->bias in invokeAddFusedQKVBiasTranspose kernel call.
     // other devices need to be careful about this.
     // maybe add a device property here.
-
-    BufferPtr qkv;
+    
     auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));
+    auto lora_linear_params = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);
+    BufferPtr qkv;
     if (!params.configs.fuse_qkv_add_bias && params.weights.qkv_weight) {
-        if (gemmSupportFuseBiasActivation(qkv_gemm_params, ActivationType::Identity)) {
-            FT_LOG_DEBUG("qkv gemm fuse add bias");
-            qkv_gemm_params.C =(OptionalConstBufferRef)(*params.weights.qkv_weight->bias);
-            qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
-        } else {
-            qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
-            qkv = addbias({qkv, *(params.weights.qkv_weight->bias)}).output;
-        }
+        ActivationParams act_params(ActivationType::Identity, nullptr, mayGetRef(params.weights.qkv_weight->bias), std::nullopt, std::nullopt, std::nullopt);
+        qkv = loraLinearWithActivation(LoraLinearWithActivationParams(lora_linear_params, act_params));
     } else {
         qkv = loraLinear(LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input)).output;
     }

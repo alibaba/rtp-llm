@@ -29,7 +29,7 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             // See https://github.com/huggingface/transformers/blob/0f67ba1d741d65b07d549daf4ee157609ce4f9c1/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py#L803
             if (params.weights.shared_expert_gate) {
                 auto shared_gate = gemm({params.input, *(params.weights.shared_expert_gate->kernel)});
-                activation({ActivationType::Sigmoid, *shared_gate});
+                activation({ActivationType::Sigmoid, shared_gate});
                 shared_expert_output = multiply({
                     shared_gate->reshape({shared_gate->size()}), *shared_expert_output});
             }
@@ -44,25 +44,21 @@ FfnLayerOutput DeviceBase::ffnLayer(const FfnLayerParams& params) {
             auto gate_output = loraLinear(LoraLinearParams(gate_gemm_params,  params.lora_input.gate_lora_input));
 
             activation({params.configs.activation_type,
-                        *(up_output),
+                        up_output,
                         mayGetRef(params.weights.up_weight->bias),
                         *(gate_output.output),
                         std::nullopt,
                         mayGetRef(params.weights.act_scale)});
         } else {
             auto up_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel));
-            if (gemmSupportFuseBiasActivation(up_gemm_params, params.configs.activation_type)) {
-                auto fuse_gemm_params = GemmParams(params.input, *(params.weights.up_weight->kernel), mayGetRef(params.weights.up_weight->bias), nullptr, DataType::TYPE_INVALID, TransposeOperation::NONE, TransposeOperation::NONE, params.configs.activation_type);
-                up_output = loraLinear({fuse_gemm_params, params.lora_input.up_lora_input}).output;
-            } else {
-                up_output = loraLinear({up_gemm_params, params.lora_input.up_lora_input}).output;
-                activation({params.configs.activation_type,
-                            *(up_output),
-                            mayGetRef(params.weights.up_weight->bias),
-                            std::nullopt,
-                            std::nullopt,
-                            mayGetRef(params.weights.act_scale)});
-            }
+            auto lora_linear_params = LoraLinearParams(up_gemm_params,  params.lora_input.up_lora_input);
+            auto activation_params  = ActivationParams(params.configs.activation_type,
+                                                      nullptr,
+                                                      mayGetRef(params.weights.up_weight->bias),
+                                                      std::nullopt,
+                                                      std::nullopt,
+                                                      mayGetRef(params.weights.act_scale));
+            up_output = loraLinearWithActivation({lora_linear_params, activation_params});
         }
 
         if (params.qscheme != QScheme::NoQuantize) {

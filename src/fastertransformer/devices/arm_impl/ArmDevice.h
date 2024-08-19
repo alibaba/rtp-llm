@@ -18,18 +18,18 @@ public:
     IAllocator* getHostAllocator() override { return allocator_.get(); }
 
 public:
-    void copy(const CopyParams& params);
-    LayernormOutput layernorm(const LayernormParams& params);
-    BufferPtr gemm(const GemmParams& params);
-    GroupedGemmOutput groupedGemm(const GroupedGemmParams& params);
-    BufferPtr embeddingLookup(const EmbeddingLookupParams& params);
-    void activation(const ActivationParams& params);
-    BufferPtr softmax(const SoftmaxParams& params);
-    AttentionModuleOutput contextAttention(const AttentionModuleParams& params);
-    AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);
-    void sampleGreedy(const GreedyParams& params);
-    void sampleBeamSearch(const BeamSearchParams& params);
-    void broadcast(const BroadcastParams& params);
+    void copy(const CopyParams& params) override;
+    LayernormOutput layernorm(const LayernormParams& params) override;
+    BufferPtr gemm(const GemmParams& params) override;
+    GroupedGemmOutput groupedGemm(const GroupedGemmParams& params) override;
+    BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
+    BufferPtr activation(const ActivationParams& params) override;
+    BufferPtr softmax(const SoftmaxParams& params) override;
+    AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
+    AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
+    void sampleGreedy(const GreedyParams& params) override;
+    void sampleBeamSearch(const BeamSearchParams& params) override;
+    void broadcast(const BroadcastParams& params) override;
     void allReduceSum(const AllReduceParams& params);
 
 private:

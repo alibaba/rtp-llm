@@ -162,7 +162,7 @@ void AttentionOpTest::contextAttentionOpTest(size_t batch_size,
     auto qkv_output = device_->allocateBuffer(
         {qkv_input_device->type(), {batch_size, seq_len, num_heads, head_dim}}
     );
-    device_->contextAttention({*qkv_input_device,
+    device_->contextAttention({0, *qkv_input_device,
                                *qkv_output,
                                 common_inputs,
                                 attention_weight,
@@ -281,7 +281,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto qkv_output = device_->allocateBuffer(
         {qkv_states_device->type(), {token_num, num_heads, head_dim}}
     );
-    device_->decoderSelfAttention({*qkv_states_device,
+    device_->decoderSelfAttention({0, *qkv_states_device,
                                     *qkv_output,
                                     common_inputs,
                                     attention_weight,

@@ -54,10 +54,11 @@ namespace fastertransformer {
         DTYPE_DISPATCH(Dtype, Atype, ARGS_DISPATCH, __VA_ARGS__);                                                      \
     } while (0)
 
-void ROCmDevice::activation(const ActivationParams& params) {
-    const auto& states = params.states;
-    size_t      m      = states.shape()[0];
-    size_t      n      = states.shape()[1];
+BufferPtr ROCmDevice::activation(const ActivationParams& params) {
+    auto states = params.states;
+    FT_CHECK_WITH_INFO(states != nullptr, "ROCmDevice::activation states should not be nullptr");
+    size_t      m      = states->shape()[0];
+    size_t      n      = states->shape()[1];
 
     void* bias      = nullptr;
     void* gate      = nullptr;
@@ -75,7 +76,8 @@ void ROCmDevice::activation(const ActivationParams& params) {
         gate_bias = params.gate_bias.value().get().data();
     }
 
-    DISPATCH(states.type(), params.atype, states.data(), bias, gate, gate_bias, m, n, stream_);
+    DISPATCH(states->type(), params.atype, states->data(), bias, gate, gate_bias, m, n, stream_);
+    return states;
 }
 
 

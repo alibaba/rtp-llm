@@ -21,7 +21,7 @@ public:
     GroupedGemmOutput groupedGemm(const GroupedGemmParams& params);
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params);
     BufferPtr multimodalEmbedding(const MultimodalEmbeddingParams& params);
-    void activation(const ActivationParams& params);
+    BufferPtr activation(const ActivationParams& params);
     BufferPtr softmax(const SoftmaxParams& params);
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params);
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params);

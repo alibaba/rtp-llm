@@ -7,10 +7,10 @@
 
 namespace fastertransformer {
 
-void ArmCpuDevice::activation(const ActivationParams& params) {
+BufferPtr ArmCpuDevice::activation(const ActivationParams& params) {
     const auto& states = params.states;
-    size_t      m      = states.shape()[0];
-    size_t      n      = states.shape()[1];
+    size_t      m      = states->shape()[0];
+    size_t      n      = states->shape()[1];
 
     arm_compute::ActivationFunction activationFunction;
     if (params.atype == ActivationType::Silu) {
@@ -39,7 +39,7 @@ void ArmCpuDevice::activation(const ActivationParams& params) {
         throw std::runtime_error("FFN gate bias not supported");
     }
 
-    arm_compute::DataType   acl_data_type = getAclDataType(states.type());
+    arm_compute::DataType   acl_data_type = getAclDataType(states->type());
     arm_compute::TensorInfo data_info     = arm_compute::TensorInfo(arm_compute::TensorShape(n, m), 1, acl_data_type);
 
     arm_compute::NEActivationLayer act;
@@ -53,8 +53,8 @@ void ArmCpuDevice::activation(const ActivationParams& params) {
         src_tensor.allocator()->import_memory(gate);
         dst_tensor.allocator()->import_memory(gate);
     } else {
-        src_tensor.allocator()->import_memory(states.data());
-        dst_tensor.allocator()->import_memory(states.data());
+        src_tensor.allocator()->import_memory(states->data());
+        dst_tensor.allocator()->import_memory(states->data());
     }
 
     act.configure(&src_tensor, &dst_tensor, arm_compute::ActivationLayerInfo(activationFunction, 1.0f));
@@ -67,22 +67,23 @@ void ArmCpuDevice::activation(const ActivationParams& params) {
     if (params.gate) {
         gate = params.gate.value().get().data();
         printBufferData(params.gate.value().get(), "ffn activation gate");
-        if (states.type() == DataType::TYPE_FP16) {
+        if (states->type() == DataType::TYPE_FP16) {
             for (size_t i = 0; i < m; i++) {
                 for (size_t j = 0; j < n; j++) {
-                    *(__fp16*)(states.dataWithOffset(i * n + j)) *= ((__fp16*)gate)[i * n + j];
+                    *(__fp16*)(states->dataWithOffset(i * n + j)) *= ((__fp16*)gate)[i * n + j];
                 }
             }
-        } else if (states.type() == DataType::TYPE_FP32) {
+        } else if (states->type() == DataType::TYPE_FP32) {
             for (size_t i = 0; i < m; i++) {
                 for (size_t j = 0; j < n; j++) {
-                    *(float*)(states.dataWithOffset(i * n + j)) *= ((float*)gate)[i * n + j];
+                    *(float*)(states->dataWithOffset(i * n + j)) *= ((float*)gate)[i * n + j];
                 }
             }
         } else {
             throw std::runtime_error("FFN gate data type not supported");
         }
     }
+    return states;
 }
 
 }  // namespace fastertransformer

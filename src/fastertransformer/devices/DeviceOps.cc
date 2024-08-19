@@ -38,6 +38,10 @@ AddBiasOutput DeviceOps::addbias(const AddBiasParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+BufferPtr DeviceOps::loraLinearWithActivation(const LoraLinearWithActivationParams& params) {
+   throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 BufferPtr DeviceOps::gemm(const GemmParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
@@ -58,7 +62,7 @@ BufferPtr DeviceOps::multimodalEmbedding(const MultimodalEmbeddingParams& params
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void DeviceOps::activation(const ActivationParams& params) {
+BufferPtr DeviceOps::activation(const ActivationParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
@@ -125,9 +129,5 @@ BufferPtr DeviceOps::quantize(const QuantizeParams& params) {
 PrepareAllReduceOutput DeviceOps::prepareAllReduce(const PrepareAllReduceParams& params) {
     return PrepareAllReduceOutput{params.buffer};
 };
-
-bool DeviceOps::gemmSupportFuseBiasActivation(GemmParams params, ActivationType activation_type) {
-    return false;
-}
 
 } // namespace fastertransformer

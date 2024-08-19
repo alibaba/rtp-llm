@@ -30,7 +30,7 @@ public:
                              ActivationType atype)
     {
         auto input = tensorToBuffer(params.input);
-        device_->activation({atype, *input});
+        device_->activation({atype, input});
         auto output = bufferToTensor(*input);
 
        return ActOpTestOutput({output});
@@ -45,10 +45,11 @@ public:
         auto gate_bias = tensorToBuffer(params.gate_bias);
 
         device_->activation({atype,
-                             *input,
+                             input,
                              std::nullopt,
                              *gate,
-                             *gate_bias});
+                             *gate_bias,
+                             std::nullopt});
         
         auto output = bufferToTensor(*input);
 

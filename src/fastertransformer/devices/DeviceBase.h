@@ -37,6 +37,7 @@ public:
     LoraLinearOutput loraLinear(const LoraLinearParams& params) override;
     LossOutput loss(const LossParams& params) override;
     MaskOutput attentionMask(const MaskParams& params) override;
+    BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
 
 protected:
     BufferStatus queryBufferStatus();

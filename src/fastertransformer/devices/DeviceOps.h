@@ -26,10 +26,11 @@ public:
     virtual MultiplyOutput multiply(const MultiplyParams& params);
     virtual BufferPtr embeddingLookup(const EmbeddingLookupParams& params);
     virtual BufferPtr multimodalEmbedding(const MultimodalEmbeddingParams& params);
-    virtual void activation(const ActivationParams& params);
+    virtual BufferPtr activation(const ActivationParams& params);
     virtual BufferPtr softmax(const SoftmaxParams& params);
     virtual LossOutput loss(const LossParams& params);
     virtual MaskOutput attentionMask(const MaskParams& params);
+    virtual BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params);
 
     // dedicated attention ops
     virtual AttentionModuleOutput contextAttention(const AttentionModuleParams& params);
@@ -50,8 +51,6 @@ public:
     virtual AllReduceOutput allReduce(const AllReduceParams& params);
     virtual void allGather(const AllGatherParams& params);
     virtual PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params);
-
-    virtual bool gemmSupportFuseBiasActivation(GemmParams params, ActivationType activation_type);
 
     virtual BufferPtr quantize(const QuantizeParams& params);
 };

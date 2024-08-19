@@ -154,7 +154,7 @@ BufferPtr CpuDevice::multimodalEmbedding(const MultimodalEmbeddingParams& params
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void CpuDevice::activation(const ActivationParams& params) {
+BufferPtr CpuDevice::activation(const ActivationParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

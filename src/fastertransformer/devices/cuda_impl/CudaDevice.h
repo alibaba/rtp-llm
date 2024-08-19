@@ -71,7 +71,8 @@ public:
     MultiplyOutput multiply(const MultiplyParams& params) override;
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
     BufferPtr multimodalEmbedding(const MultimodalEmbeddingParams& params) override;
-    void activation(const ActivationParams& params) override;
+    BufferPtr activation(const ActivationParams& params) override;
+    BufferPtr loraLinearWithActivation(const LoraLinearWithActivationParams& params) override;
     BufferPtr softmax(const SoftmaxParams& params) override;
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
@@ -81,7 +82,6 @@ public:
     AllReduceOutput allReduce(const AllReduceParams& params) override;
     void allGather(const AllGatherParams& params) override;
     PrepareAllReduceOutput prepareAllReduce(const PrepareAllReduceParams& params) override;
-    bool gemmSupportFuseBiasActivation(GemmParams params, ActivationType activation_type) override;
 
     BufferPtr quantize(const QuantizeParams& params) override;
     void preRun() override { check_cuda_error(cudaSetDevice(device_id_)); }

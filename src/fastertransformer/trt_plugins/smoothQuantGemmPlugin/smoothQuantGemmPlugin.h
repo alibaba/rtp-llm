@@ -44,7 +44,7 @@ public:
     void init(tensorrt_llm::common::QuantMode quantMode,
               nvinfer1::DataType type);
 
-    bool addBiasActivationEpilogueSupported(tkc::CutlassActivationType activation);
+    bool addBiasActivationEpilogueSupported(tkc::CutlassActivationType activation) const;
 private:
 
     void configGemm();
