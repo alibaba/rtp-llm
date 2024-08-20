@@ -1,3 +1,4 @@
+#include <pybind11/pytypes.h>
 #include "src/fastertransformer/th_op/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
@@ -10,21 +11,26 @@ namespace th = torch;
 namespace torch_ext {
 RtpEmbeddingOp::RtpEmbeddingOp() {}
 
-void RtpEmbeddingOp::init(const ft::GptInitParameter& gpt_init_params, py::object py_render, py::object py_handler,
-                          py::object py_layers_weights, py::object py_global_weights) {
-    AUTIL_ROOT_LOG_CONFIG();
-    AUTIL_ROOT_LOG_SETLEVEL(INFO);
-    auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
-    rtp_llm::EngineInitParams params(gpt_init_params,
-                                     std::move(*convert.createGptWeights(py_layers_weights, py_global_weights)));
-    if (gpt_init_params.tp_rank_ == 0) {
-        // kmon metric init
-        (void)rtp_llm::initKmonitorFactory();
-        auto kmon_tags = rtp_llm::getHippoTags();
-        params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+void RtpEmbeddingOp::init(py::object model) {
+    try {
+        AUTIL_ROOT_LOG_CONFIG();
+        AUTIL_ROOT_LOG_SETLEVEL(INFO);
+        auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(model);
+        rtp_llm::EngineInitParams params(gpt_init_params, std::move(*gpt_weight));
+        py::object py_render = model.attr("custom_module").attr("renderer");
+        py::object py_handler = model.attr("custom_module").attr("handler");
+
+        if (gpt_init_params.tp_rank_ == 0) {
+            // kmon metric init
+            (void)rtp_llm::initKmonitorFactory();
+            auto kmon_tags = rtp_llm::getHippoTags();
+            params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+        }
+        embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, py_handler));        
+        startRpcServer(gpt_init_params, py_render, params.metrics_reporter);
+    } catch (const std::exception& e) {
+        FT_FAIL("init embedding engine failed, error msg: %s", e.what());
     }
-    embedding_engine_.reset(new rtp_llm::EmbeddingEngine(params, py_handler));        
-    startRpcServer(gpt_init_params, py_render, params.metrics_reporter);
 }
 
 void RtpEmbeddingOp::stop() {

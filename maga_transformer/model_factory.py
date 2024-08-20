@@ -68,6 +68,8 @@ class ModelFactory:
             model = ProposeModel(model_config.sp_type)
         elif model_config.sp_type == "eagle":
             raise NotImplementedError
+        elif model_config.sp_type == "medusa":
+            raise NotImplementedError
         return model
 
     #TODO: remove model_config, get all info from gpt_config
@@ -181,6 +183,9 @@ class ModelFactory:
             raise NotImplementedError
         elif sp_type == "eagle":
             logging.info("use eagle speculative model")
+            raise NotImplementedError
+        elif sp_type == "medusa":
+            logging.info("use medusa speculative model")
             raise NotImplementedError
         
         return propose_model_config

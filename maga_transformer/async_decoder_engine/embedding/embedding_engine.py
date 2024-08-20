@@ -21,8 +21,7 @@ class EmbeddingCppEngine(BaseEngine):
 
     @override
     def start(self):
-        self.cpp_engine.init(self.model.config.gpt_init_params, self.model.custom_module.renderer, self.model.custom_module.handler,
-                             self.model.weight.weights, self.model.weight.global_weights)
+        self.cpp_engine.init(self.model)
         self.model.custom_module.handler.init_cpp_handler()
 
     def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):

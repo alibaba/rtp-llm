@@ -41,15 +41,9 @@ void RtpLLMOp::init(py::object model, py::object mm_process_engine, py::object p
 
 rtp_llm::EngineInitParams RtpLLMOp::initModel(py::object model) {
     try {
-        const ft::GptInitParameter& gpt_init_params = model.attr("config").attr("gpt_init_params").cast<ft::GptInitParameter>();
-        py::object                  py_layers_weights = model.attr("weight").attr("weights");
-        py::object                  py_global_weights = model.attr("weight").attr("global_weights");
-   
 
-        auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
-        // TODO(xinfei.sxf) fix py_linear_bias_slopes 传递方式
-        rtp_llm::EngineInitParams params(gpt_init_params,
-                                        std::move(*convert.createGptWeights(py_layers_weights, py_global_weights)));
+        auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(model);
+        rtp_llm::EngineInitParams params(gpt_init_params, std::move(*gpt_weight));
         if (gpt_init_params.tp_rank_ == 0) {
             // kmon metric init
             (void)rtp_llm::initKmonitorFactory();
@@ -58,8 +52,8 @@ rtp_llm::EngineInitParams RtpLLMOp::initModel(py::object model) {
             params.metrics_reporter = metric_reporter_;
         }
         return params;
-     } catch (const std::exception& e ){
-        FT_FAIL("init engine params failed, error msg: %s", e);
+     } catch (const std::exception& e){
+        FT_FAIL("init engine params failed, error msg: %s", e.what());
         return rtp_llm::EngineInitParams();
     }
 }
@@ -72,29 +66,20 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
         std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> params = nullptr;
         std::string sp_type = propose_model.attr("sp_type").cast<std::string>();
         if (sp_type == "vanilla") {
-            const ft::GptInitParameter& gpt_init_params = propose_model.attr("model").attr("config").attr("gpt_init_params").cast<ft::GptInitParameter>();
-            py::object                  py_layers_weights = propose_model.attr("model").attr("weight").attr("weights");
-            py::object                  py_global_weights = propose_model.attr("model").attr("weight").attr("global_weights");
-
-            auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
-            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type, gpt_init_params,
-                                            std::move(*convert.createGptWeights(py_layers_weights, py_global_weights)));
-            if (gpt_init_params.tp_rank_ == 0) {
-                params->metrics_reporter = metric_reporter_;
-            }
-            return params;
+            auto [gpt_init_params, gpt_weight] = rtp_llm::prepareEngineInitParams(propose_model, true);
+            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type, gpt_init_params, std::move(*gpt_weight));
         } else if (sp_type == "prompt_lookup") {
             params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type);
-            // TODO(xyz): handle prompt lookup metrics reporter
-            return params;
         } else if (sp_type == "eagle") {
+            FT_FAIL("sp_type %s not support", sp_type.c_str());
+        } else if (sp_type == "medusa") {
             FT_FAIL("sp_type %s not support", sp_type.c_str());
         } else {
             FT_FAIL("sp_type %s not support", sp_type.c_str());
         }
         return params;
      } catch (const std::exception& e ){
-        FT_FAIL("init propose engine params failed, error msg: %s", e);
+        FT_FAIL("init propose engine params failed, error msg: %s", e.what());
         return nullptr;
     }
 }

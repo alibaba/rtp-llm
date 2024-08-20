@@ -324,5 +324,19 @@ std::unique_ptr<ConstBufferPtrMap>  WeightsConverter::convertGlobalWeight_(py::o
     return convertGlobalWeight(std::move(convertGlobalWeight(py_global_weight)));
 }
 
+std::tuple<ft::GptInitParameter, std::unique_ptr<ft::Weights>> prepareEngineInitParams(py::object model, bool sp_model) {
+    if (sp_model) {
+        model = model.attr("model");
+    }
+     const ft::GptInitParameter& gpt_init_params = model.attr("config").attr("gpt_init_params").cast<ft::GptInitParameter>();
+    py::object                  py_layers_weights = model.attr("weight").attr("weights");
+    py::object                  py_global_weights = model.attr("weight").attr("global_weights");
+
+    auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
+    auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
+
+    return {gpt_init_params, std::move(gpt_weight)};
+}
+
 
 }  // namespace rtp_llm

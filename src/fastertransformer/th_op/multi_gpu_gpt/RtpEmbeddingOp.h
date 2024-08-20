@@ -1,5 +1,6 @@
 #pragma once
 
+#include <pybind11/pytypes.h>
 #include <vector>
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
@@ -23,11 +24,7 @@ class RtpEmbeddingOp: public th::jit::CustomClassHolder {
 public:
     RtpEmbeddingOp();
     ~RtpEmbeddingOp();
-    void init(const ft::GptInitParameter& gpt_init_params,
-              py::object                  py_render,
-              py::object                  py_handler,
-              const py::object            py_layer_weights,
-              const py::object            py_weights);
+    void init(py::object model);
     void stop();
     void startRpcServer(const ft::GptInitParameter& gpt_init_params, py::object py_render, kmonitor::MetricsReporterPtr reporter);
 

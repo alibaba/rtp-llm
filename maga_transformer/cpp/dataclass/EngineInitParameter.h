@@ -1,4 +1,6 @@
 #pragma once
+#include <pybind11/pytypes.h>
+#include <tuple>
 
 #include "maga_transformer/cpp/common/torch_bind.h"
 #include "src/fastertransformer/core/Buffer.h"
@@ -7,7 +9,6 @@
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
-#include <pybind11/pytypes.h>
 
 namespace th = torch;
 namespace ft = fastertransformer;
@@ -138,5 +139,7 @@ private:
     ft::DeviceBase* device_;
     bool use_linear_bias_slopes_;
 };
+
+std::tuple<ft::GptInitParameter, std::unique_ptr<ft::Weights>> prepareEngineInitParams(py::object model, bool sp_model = false);
 
 }  // namespace rtp_llm
