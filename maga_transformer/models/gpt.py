@@ -10,9 +10,8 @@ from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.models.gpt_util.rms import RMSNorm
 from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader, estimate_load_parallel_num, ModelWeightsLoader
-from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo, LoRAMap
+from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo
 from maga_transformer.utils.time_util import Timer
-from maga_transformer.utils.model_weight import LoraResource
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.task_type import TaskType
 from maga_transformer.models.downstream_modules.utils import create_custom_module
@@ -117,10 +116,7 @@ class GPT(BaseModel):
     def get_weight_cls() -> ModelDeployWeightInfo:
         raise NotImplementedError
 
-    def update(self, lora_infos: Dict[str, str]):
-        with Timer() as timer:
-            self.weight.lora_resource.update(lora_infos)
-        logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
+
 
     def load(self, device: str):
         self._load_weights()
@@ -162,19 +158,14 @@ class GPT(BaseModel):
         load_parallel_num = estimate_load_parallel_num(
             self.config, g_parallel_info.tp_size)
         weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
-        model_weights_loader = get_model_weights_loader(weights_info, self.database, compute_dtype=self.compute_dtype)
-        self.weight = model_weights_loader.load_weights_from_scratch(num_process=load_parallel_num, device=self.device)
-        self._load_custom_module_weights(model_weights_loader)
+        self.model_weights_loader = get_model_weights_loader(weights_info, self.database, compute_dtype=self.compute_dtype)
+        self.weight =  self.model_weights_loader.load_weights_from_scratch(num_process=load_parallel_num, device=self.device)
+        self._load_custom_module_weights(self.model_weights_loader)
         if self.static_lora:
             lora_name = list(self.config.lora_infos.keys())[0]
-            model_weights_loader.show_warns(lora_name=lora_name)
+            self.model_weights_loader.show_warns(lora_name=lora_name)
         else:
-            model_weights_loader.show_warns()
-
-        self.weight.lora_resource = LoraResource({}, self.database, weights_info, LoRAMap())
-        self.weight.lora_resource.model_weights_loader = model_weights_loader
-        if self.config.lora_infos is not None and len(self.config.lora_infos) > 1:
-            self.update(self.config.lora_infos)
+            self.model_weights_loader.show_warns()
 
     def _load_weights(self,
                       ref_dict: Dict[str, torch.Tensor] = {}):

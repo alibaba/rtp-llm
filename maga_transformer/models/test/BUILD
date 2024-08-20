@@ -4,6 +4,7 @@ filegroup(
         "testdata/*",
         "testdata/**",
     ]),
+    visibility = ["//visibility:public"],
 )
 
 py_test(

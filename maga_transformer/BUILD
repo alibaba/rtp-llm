@@ -277,6 +277,13 @@ py_library(
 )
 
 py_library(
+    name = "lora",
+    srcs = glob([
+        "lora/*.py",
+    ])
+)
+
+py_library(
     name = "maga_transformer_lib",
     deps = [
         ":utils",
@@ -291,6 +298,7 @@ py_library(
         ":async_model",
         ":openai_api",
         ":embedding",
+        ":lora",
         ":sdk",
         "//maga_transformer/tools:model_assistant",
         "//maga_transformer/distribute:distribute",

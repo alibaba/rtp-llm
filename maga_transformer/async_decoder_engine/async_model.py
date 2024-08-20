@@ -36,9 +36,6 @@ class AsyncModel:
     def stop(self):
         self.decoder_engine_.stop()
 
-    def update(self, lora_infos: Dict[str, str]):
-        self.decoder_engine_.update_lora(lora_infos)
-
     @torch.no_grad()
     def enqueue(self, input: GenerateInput):
         if g_parallel_info.tp_size > 1 and g_parallel_info.tp_rank > 0:

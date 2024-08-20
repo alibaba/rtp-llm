@@ -8,11 +8,10 @@ import torch.serialization
 import functools
 import copy
 from typing import Any, NamedTuple, Callable, List, Dict, Set, Tuple, Optional, Union
-from maga_transformer.utils.database import FinetuneType, TrainType, CkptFileInfo, LoraConfig
+from maga_transformer.utils.database import FinetuneType, TrainType, CkptFileInfo
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.database import BaseDatabase
-from maga_transformer.utils.RWLock import RWlock
 
 def concat_0(ts: List[torch.Tensor]) -> torch.Tensor:
     if len(ts) == 1:
@@ -1008,214 +1007,6 @@ class ModelDeployWeightInfo:
 
 
 
-class LoRAWeightInfo(NamedTuple):
-    layer_weights: List[WeightInfo]
-    weights: List[WeightInfo]
-    tp_strategy: Optional[Dict[Any, Any]]
-
-class LoRAModelWeightInfo():
-
-    def __init__(self, config: Any, tp_size: int, tp_rank: int):
-        self.config = config
-        self._num_layers = config.num_layers
-        self.tp_size = tp_size
-        self.tp_rank = tp_rank
-        self.tp_split_emb_and_lm_head = config.tp_split_emb_and_lm_head
-
-    def process_meta(self, meta_dict: Any):
-        pass
-
-    def get_weight_info(self, *args: Any, **kwargs: Any):
-       pass
-
-
-class LoRAWeights:
-
-    def __init__(self, num_layers: int) -> None:
-        self.lora_a_weights: List[Dict[str, torch.Tensor]] = []
-        self.lora_b_weights: List[Dict[str, torch.Tensor]] = []
-        self.lora_rank = 0
-        for _ in range(num_layers):
-            self.lora_a_weights.append({})
-            self.lora_b_weights.append({})
-
-    def set_lora_rank(self, lora_rank: int):
-        self.lora_rank = lora_rank
-
-    def append_layer_weight(self, int8_flag: bool, layer_id: int, name: str, tensor: torch.Tensor):
-        assert not int8_flag, "LoRA does not support int8 mode"
-        prefix_name = name[:-len(".lora_A")]
-        if name.endswith('.lora_A'):
-            self.lora_a_weights[layer_id][prefix_name] = tensor
-        elif name.endswith('.lora_B'):
-            self.lora_b_weights[layer_id][prefix_name] = tensor
-        else:
-            raise ValueError(f"Invalid lora weight name: {name}")
-
-    def apply_scale(self, scale: float):
-        logging.info(f"scale size {scale}")
-        for i, layer_weights in enumerate(self.lora_b_weights):
-            for name, weight in layer_weights.items():
-                self.lora_b_weights[i][name] = weight * scale
-
-class LoRAMap():
-
-    def __init__(self) -> None:
-        self.name_id_map: Dict[str, int] = {}
-        self.weights_map: Dict[int, LoRAWeights] = {}
-
-        self.lora_cnt = 0
-        self.max_rank = 0
-
-    def _create_id(self, name: str):
-        if name not in self.name_id_map:
-            id = self.lora_cnt
-            self.lora_cnt += 1
-            self.name_id_map[name] = id
-
-    def get_id(self, name: str) -> int:
-        if name == "":
-            return -1
-        if name not in self.name_id_map:
-            raise Exception(f"lora map has no adapter model: {name}")
-        return self.name_id_map[name]
-
-    def has_id(self, name: str) -> bool:
-        if name not in self.name_id_map:
-            return False
-        return True
-
-    def add_lora_name(self, name: str, weights: LoRAWeights) -> int:
-        self._create_id(name)
-        id = self.name_id_map[name]
-        self.weights_map[id] = weights
-        return id
-
-    def remove_lora_name(self, name: str):
-        if name in self.name_id_map:
-            id = self.name_id_map[name]
-            del self.name_id_map[name]
-            del self.weights_map[id]
-            return id
-
-    def split(self, lora_names: List[str]):
-        result = LoRAMap()
-        for lora_name in lora_names:
-            lora_id = self.name_id_map.get(lora_name)
-            if lora_id != None:
-                result.lora_cnt += 1
-                result.name_id_map[lora_name] = lora_id
-                result.weights_map[lora_id] = self.weights_map[lora_id]
-                if self.weights_map[lora_id].lora_rank > result.max_rank:
-                    result.max_rank = self.weights_map[lora_id].lora_rank
-        return result
-
-class LoraCountException(Exception):
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-
-class LoraPathException(Exception):
-    def __init__(self, *args: object) -> None:
-        super().__init__(*args)
-
-class LoraResource():
-    def __init__(self, lora_infos: Dict[str, str] = dict(), database: Optional[BaseDatabase] = None,
-                 weights_info: Optional[WeightInfo] = None,
-                 lora_map: Optional[LoRAMap] = None):
-        self.device = g_parallel_info.device
-        self.lora_infos = lora_infos
-        self.database = database
-        self.model_weights_loader = None
-        self.weights_info = weights_info
-        self.ft_op = []
-        self.lora_map = lora_map
-
-        self.max_lora_model_size = int(os.environ.get("MAX_LORA_MODEL_SIZE", "-1"))
-        self.to_add_lora_id = list()
-        self.to_remove_lora_id = list()
-        self.stream = torch.cuda.Stream()
-        self.global_lock_ = RWlock()
-
-    @property
-    def is_merge_lora(self):
-        return self.model_weights_loader and self.model_weights_loader.is_merge_lora
-
-    def clear_for_update(self):
-        self.to_add_lora_id.clear()
-        self.to_remove_lora_id.clear()
-
-    def add_lora_name(self, name: str, weights: LoRAWeights) -> int:
-        id = self.lora_map.add_lora_name(name, weights)
-        self.to_add_lora_id.append(id)
-        return id
-
-    def remove_lora_name(self, name: str):
-        id = self.lora_map.remove_lora_name(name)
-        self.to_remove_lora_id.append(id)
-
-    def check_remaining_lora(self, lora_infos: Dict[str, str]):
-        for lora_name, old_lora_path in self.lora_infos.items():
-            if lora_name in lora_infos:
-                if old_lora_path != lora_infos[lora_name]:
-                    raise LoraPathException(f'lora[{lora_name}]\'s path is changing from [{old_lora_path}] to [{lora_infos[lora_name]}]')
-
-    def remove_old_lora(self, lora_infos: Dict[str, str]):
-        remove_lora_names = list()
-        for lora_name, lora_path in self.lora_infos.items():
-            if lora_name not in lora_infos:
-                self.database.remove_lora(lora_name)
-                remove_lora_names.append(lora_name)
-            self.clear_for_update()
-            for lora_name in remove_lora_names:
-                self.remove_lora_name(lora_name)
-            for op in self.ft_op:
-                op.update_lora()
-
-    def add_new_lora(self, lora_infos: Dict[str, str]):
-        for lora_name, lora_path in lora_infos.items():
-            if lora_name not in self.lora_infos:
-                self.database.load_lora(lora_name, lora_path)
-        self.clear_for_update()
-        for lora_config in self.database.LoraCkpt.LoraFileList.keys():
-            lora_name = lora_config.name
-            if self.lora_map.has_id(lora_name):
-                continue
-            lora_weights = self.model_weights_loader.load_lora_weights_from_scratch(lora_name, 'cpu')
-            self.model_weights_loader.show_warns(lora_name=lora_name, only_dump_lora=True)
-            _ = self.add_lora_name(lora_name, lora_weights)
-        for op in self.ft_op:
-            op.update_lora()
-
-    def update(self, lora_infos: Dict[str, str]):
-        if self.max_lora_model_size != -1 and len(lora_infos) > self.max_lora_model_size:
-            raise LoraCountException(f'lora_infos[{lora_infos}]\'s size exceed MAX_LORA_MODEL_SIZE[{self.max_lora_model_size}]')
-        self.global_lock_.write_acquire()
-        try:
-            with torch.cuda.stream(self.stream):
-                self.check_remaining_lora(lora_infos)
-                self.remove_old_lora(lora_infos)
-                self.add_new_lora(lora_infos)
-
-            self.lora_infos = lora_infos
-            self.database.dump_lora_info()
-        finally:
-            self.global_lock_.write_release()
-
-    def get_id(self, name: str) -> int:
-        if self.is_merge_lora:
-            if name != self.model_weights_loader.static_lora_adapter_name:
-                raise ValueError(f"use static lora, but adpater name[{name}] not is static lora_name[{self.model_weights_loader.static_lora_adapter_name}]")
-            else:
-                return -1
-        if self.lora_map != None:
-            return self.lora_map.get_id(name)
-
-    def read_acquire(self, lora_name: str):
-        self.global_lock_.read_acquire()
-
-    def read_release(self, lora_name: str):
-        self.global_lock_.read_release()
-
 
 class ModelWeights:
     def __init__(self, num_layers: int, device: str, dtype: torch.dtype):
@@ -1223,7 +1014,6 @@ class ModelWeights:
         self.weights: List[Dict[str, torch.Tensor]] = []
         self.global_weights: Dict[str, torch.Tensor] = {}
         self._pytorch_weights: Dict[str, torch.Tensor] = {}
-        self.lora_resource: LoraResource = LoraResource()
         self._dtype = dtype
 
         for _ in range(num_layers):
@@ -1251,17 +1041,3 @@ class ModelWeights:
     @property
     def dtype(self):
         return self._dtype
-
-class LoraResourceHolder:
-    def __init__(self, lora_resource, adapter_name):
-        self._lora_resource = lora_resource
-        self._adapter_name = adapter_name
-        self._lora_resource.read_acquire(self._adapter_name)
-        self._lora_id = self._lora_resource.get_id(self._adapter_name)
-
-    @property
-    def lora_id(self):
-        return self._lora_id
-
-    def release(self):
-        self._lora_resource.read_release(self._adapter_name)

@@ -66,6 +66,7 @@ py_test(
         "//maga_transformer:utils",
         "//maga_transformer:config",
         "//maga_transformer:_ft_pickler",
+        "//maga_transformer:lora"
     ],
     data = [
         "//maga_transformer/utils/test:testdata",

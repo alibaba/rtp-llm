@@ -165,11 +165,26 @@ class InferenceApp(object):
             else:
                 return await self.inference_server.inference(req, raw_request)
 
-        # update for worker RANK != 0
-        @app.post("/update_internal")
+
+        @app.post("/add_lora_internal")
         @check_is_worker()
-        def update_internal(version_info: VersionInfo):
-            return self.inference_server.update(version_info)
+        def add_lora_internal(req: Dict[str, str]):
+            self.inference_server.add_lora(req)
+
+        @app.post("/remove_lora_internal")
+        @check_is_worker()
+        def remove_lora_internal(req: Dict[str, str]):
+            self.inference_server.remove_lora(req)
+
+        @app.post("/add_lora")
+        @check_is_master()
+        def add_lora(req: Dict[str, str]):
+            self.inference_server.add_lora(req)
+
+        @app.post("/remove_lora")
+        @check_is_master()
+        def remove_lora(req: Dict[str, str]):
+            self.inference_server.remove_lora(req)
 
         # update for worker RANK == 0
         @app.post("/update")

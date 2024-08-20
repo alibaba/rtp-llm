@@ -25,9 +25,5 @@ class BaseEngine:
         raise NotImplementedError()
 
     @abstractmethod
-    def update_lora(self, lora_infos: Dict[str, str]) -> None:
-        raise NotImplementedError()
-
-    @abstractmethod
     def get_kv_cache_info(self) -> KVCacheInfo:
         raise NotImplementedError()

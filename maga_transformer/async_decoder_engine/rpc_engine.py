@@ -23,8 +23,7 @@ class RPCEngine(BaseEngine):
         else:
             self.mm_engine = None
         self.rtp_llm_op_ = RtpLLMOp(model, self.mm_engine, propose_model)
-        self.model_rpc_client = ModelRpcClient(self.model.weight.lora_resource)
-        self.model.weight.lora_resource.ft_op = [self.rtp_llm_op_]
+        self.model_rpc_client = ModelRpcClient()
 
     @override
     def start(self) -> None:
@@ -38,12 +37,6 @@ class RPCEngine(BaseEngine):
     def decode(self,
                input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
         return self.model_rpc_client.enqueue(input)
-
-    @override
-    def update_lora(self, lora_infos: Dict[str, str]) -> None:
-        with Timer() as timer:
-            self.model.weight.lora_resource.update(lora_infos)
-        logging.info(f'update lora weights time: {timer.cost_ms() / 1000 :.2f} s')
 
     @override
     def get_kv_cache_info(self) -> KVCacheInfo:

@@ -5,7 +5,7 @@ import torch
 from typing import List, Any
 from einops import rearrange
 
-from maga_transformer.utils.model_weight import (W, WeightInfo, ModelWeightInfo, LoRAModelWeightInfo,
+from maga_transformer.utils.model_weight import (W, WeightInfo, ModelWeightInfo,
                                                  ModelDeployWeightInfo, CkptWeightInfo, concat_1,
                                                  concat_0, identity, zeros, transpose, merge_qkv_lora_A,
                                                  merge_qkv_lora_B, shift_one, pad, merge_qkv_b)

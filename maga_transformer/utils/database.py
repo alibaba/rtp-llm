@@ -8,7 +8,7 @@ import torch
 
 from maga_transformer.utils.ckpt_file_info import CkptFileInfo, FinetuneType, TrainType
 from maga_transformer.utils.megatron_util import MegatronUtil
-from maga_transformer.utils.lora_ckpt import LoraCkpt, LoraConfig
+from maga_transformer.lora.lora_file import LoraCkpt, LoraConfig
 
 class BaseDatabase:
 

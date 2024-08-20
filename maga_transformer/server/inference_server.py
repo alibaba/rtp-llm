@@ -32,6 +32,8 @@ from maga_transformer.server.misc import format_exception
 from maga_transformer.config.task_type import TaskType
 from maga_transformer.async_decoder_engine.base_engine import KVCacheInfo
 from maga_transformer.structure.request_extractor import request_id_field_name
+from maga_transformer.lora.lora_manager import LoraManager
+from maga_transformer.model_factory import AsyncModel
 
 StreamObjectType = Union[Dict[str, Any], BaseModel]
 
@@ -45,6 +47,7 @@ class InferenceServer(object):
         self._gang_server = GangServer()
         self._inference_worker = None
         self._openai_endpoint = None
+        self._lora_manager = None
         self._system_reporter = sys_reporter
         self._atomic_count = AtomicCounter()
         self._init_controller()
@@ -64,6 +67,8 @@ class InferenceServer(object):
                 self._embedding_endpoint = EmbeddingEndpoint(self._inference_worker.model)
             else:
                 self._openai_endpoint = OpenaiEndopoint(self._inference_worker.model)
+                if isinstance(self._inference_worker.model, AsyncModel):
+                    self._lora_manager = LoraManager(self._inference_worker.model)
 
     @property
     def is_embedding(self):
@@ -118,25 +123,6 @@ class InferenceServer(object):
             yield response_data_prefix + \
                 json.dumps(format_e, ensure_ascii=False) + "\r\n\r\n"
 
-    async def update(self, version_info: VersionInfo):
-        request = version_info.model_dump()
-        request[request_id_field_name] = self._atomic_count.increment()
-        try:
-            assert self._inference_worker is not None
-            with Timer() as t:
-                if g_parallel_info.is_master and g_parallel_info.world_size > 1:
-                    self._gang_server.request_workers(request, 'update_internal')
-                ret = self._inference_worker.update(version_info)
-            rep = JSONResponse(content=ret)
-            kmonitor.report(AccMetrics.UPDATE_QPS_METRIC, 1)
-            kmonitor.report(GaugeMetrics.UPDATE_LANTENCY_METRIC, t.cost_ms())
-        except Exception as e:
-            self._access_logger.log_exception_access(request, e)
-            kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
-            error_code = 500
-            rep = JSONResponse(format_exception(e), status_code=error_code)
-        return rep
-
     async def inference(self, req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
         if isinstance(req, str):
             req = json.loads(req)
@@ -180,7 +166,7 @@ class InferenceServer(object):
         request[request_id_field_name] = self._atomic_count.increment()
         kmonitor.report(AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unkown")})
         try:
-            with self._controller:            
+            with self._controller:
                 assert self._embedding_endpoint is not None, "embedding pipeline should not be None"
                 result, logable_result = await self._embedding_endpoint.handle(request)
                 # do not log result since too big
@@ -307,3 +293,44 @@ class InferenceServer(object):
         if isinstance(req, str):
             req = json.loads(req)
         return torch.ops.fastertransformer.set_debug_print_level(req['debug'])
+
+
+    async def update(self, version_info: VersionInfo):
+        request = version_info.model_dump()
+        request[request_id_field_name] = self._atomic_count.increment()
+        lora_infos: Dict[str, Any] = dict()
+        if version_info.peft_info != None:
+            lora_infos = version_info.peft_info.get("lora_info", {})
+        try:
+            assert self._lora_manager
+            with Timer() as t:
+                add_lora_map = self._lora_manager.get_add_lora_map(lora_infos)
+                remove_lora_map = self._lora_manager.get_remove_lora_map(lora_infos)
+                # must remove first
+                for key, value in remove_lora_map.items():
+                    await self.remove_lora({"adapter_name": key})
+                for key, value in add_lora_map.items():
+                    await self.add_lora({"adapter_name": key, "lora_path": value})
+            rep = JSONResponse(None)
+            kmonitor.report(AccMetrics.UPDATE_QPS_METRIC, 1)
+            kmonitor.report(GaugeMetrics.UPDATE_LANTENCY_METRIC, t.cost_ms())
+        except Exception as e:
+            self._access_logger.log_exception_access(request, e)
+            kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
+            error_code = 500
+            rep = JSONResponse(format_exception(e), status_code=error_code)
+        return rep
+
+    async def add_lora(self, req: Dict[str, str]):
+        assert self._lora_manager is not None
+        if g_parallel_info.is_master and g_parallel_info.world_size > 1:
+            self._gang_server.request_workers(req, 'add_lora_internal', True)
+        ret = self._lora_manager.add_lora(req['adapter_name'], req['lora_path'])
+        return ret
+
+    async def remove_lora(self, req: Dict[str, str]):
+        assert self._lora_manager is not None
+        ret = self._lora_manager.remove_lora(req['adapter_name'])
+        if g_parallel_info.is_master and g_parallel_info.world_size > 1:
+            self._gang_server.request_workers(req, 'remove_lora_internal', True)
+        return ret

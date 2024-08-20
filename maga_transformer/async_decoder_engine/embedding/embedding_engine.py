@@ -25,7 +25,7 @@ class EmbeddingCppEngine(BaseEngine):
         self.model.custom_module.handler.init_cpp_handler()
 
     def decode_sync(self, inputs: EngineInputs, outputs: EngineOutputs):
-        try:            
+        try:
             results = self.cpp_engine.decode(inputs.token_ids, inputs.token_type_ids, inputs.input_lengths, 0)
             outputs.outputs = results
             outputs.input_length = inputs.input_length
@@ -37,10 +37,6 @@ class EmbeddingCppEngine(BaseEngine):
         output = EngineOutputs(outputs=None, input_length=0)
         await asyncio.to_thread(self.decode_sync, input, output)
         return output
-
-    @override
-    def update_lora(self, lora_infos: Dict[str, str]) -> None:
-        raise NotImplementedError()
 
     @override
     def get_kv_cache_info(self) -> KVCacheInfo:

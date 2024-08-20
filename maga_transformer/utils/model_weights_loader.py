@@ -9,7 +9,8 @@ from typing import List, Set, Optional, Tuple, Any
 from typing_extensions import Self
 from itertools import repeat
 from maga_transformer.utils.model_weight import ModelDeployWeightInfo, ModelWeightInfo, \
-    WeightInfo, W, ModelWeights, LoRAWeights
+    WeightInfo, W, ModelWeights
+from maga_transformer.lora.lora_weights import LoRAWeights
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.database import BaseDatabase, CkptFileInfo, LoraConfig, ModuleDatabase, CkptDatabase, DictDatabase
 from maga_transformer.utils.util import get_mem_info
@@ -154,9 +155,10 @@ class ModelWeightsLoader:
             results.append((name, self.load_tensor(name)[0]))
         return results
 
-    def load_lora_weights_from_scratch(self, lora_name: str, device: str, num_process=1):
+    def load_lora_weights_from_scratch(self, lora_name: str, lora_path: str, device: str, num_process=1):
         lora_weights = LoRAWeights(self._num_layers)
         # set lora rank
+        self._database.load_lora(lora_name, lora_path)
         lora_config = self._database.get_lora_config(lora_name)
         lora_alpha = lora_config.lora_alpha
         rank = lora_config.rank
@@ -171,6 +173,7 @@ class ModelWeightsLoader:
                     int8_flag, layer_id, name, tensor)
 
         lora_weights.apply_scale(lora_alpha / rank) # apply scale
+        self._database.remove_lora(lora_name)
         return lora_weights
 
 
@@ -291,7 +294,7 @@ class ModelWeightsLoader:
         load_weight(W.sq_quant_scales, torch.float32)
         if self._weights_info._quant_algo.isOmniQuant():
             load_weight(W.sq_quant_shifts, torch.float32)
-        if self._weights_info._quant_algo.isPerTensorQuant():            
+        if self._weights_info._quant_algo.isPerTensorQuant():
             load_weight(W.static_quant_scales, torch.float32)
         return results
 

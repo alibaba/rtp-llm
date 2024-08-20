@@ -18,7 +18,6 @@ from maga_transformer.cpp.proto.model_rpc_service_pb2 import AuxInfoPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputPB, GenerateOutputsPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import ErrorDetailsPB
 from maga_transformer.distribute.worker_info import g_master_info
-from maga_transformer.utils.model_weight import LoraResource, LoraResourceHolder
 from maga_transformer.config.exceptions import FtRuntimeException, ExceptionType
 request_counter = AtomicCounter()
 
@@ -35,7 +34,6 @@ def trans_input(input_py: GenerateInput):
     # The stream id cannot use the request id because the request may contain prompt batch.
     input_pb.request_id = request_counter.increment()
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
-    input_pb.lora_id = input_py.lora_id
     input_pb.multimodal_urls.extend(input_py.urls)
 
     generate_config_pb = input_pb.generate_config
@@ -51,6 +49,7 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
+    trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(generate_config_pb, input_py.generate_config, "task_id", functools.partial(str))
 
     generate_config_pb.select_tokens_id.extend(input_py.generate_config.select_tokens_id)
@@ -119,8 +118,7 @@ def trans_output(input_py: GenerateInput, outputs_pb: GenerateOutputsPB) -> Gene
 
 class ModelRpcClient(object):
 
-    def __init__(self, lora_resource: LoraResource, address: Optional[str] = None):
-        self._lora_resource = lora_resource
+    def __init__(self, address: Optional[str] = None):
         # 创建到服务器的连接
         if not address:
             address = f'localhost:{g_master_info.model_rpc_port}'
@@ -132,10 +130,6 @@ class ModelRpcClient(object):
 
     async def enqueue(self, input: GenerateInput) -> AsyncGenerator[GenerateOutputs, None]:
         self.check_input(input)
-        lora_resource_holder = None
-        if input.generate_config.adapter_name is not None:
-            lora_resource_holder = LoraResourceHolder(self._lora_resource, input.generate_config.adapter_name)
-            input.lora_id = lora_resource_holder.lora_id
         input_pb = trans_input(input)
         response_iterator = None
         try:
@@ -163,5 +157,3 @@ class ModelRpcClient(object):
         finally:
             if response_iterator:
                 response_iterator.cancel()
-            if lora_resource_holder is not None:
-                lora_resource_holder.release()

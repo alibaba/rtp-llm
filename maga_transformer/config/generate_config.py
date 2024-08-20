@@ -48,7 +48,7 @@ class GenerateConfig(BaseModel):
     custom_prop: str = "{}"
 
     # lora
-    adapter_name: Optional[Union[str, List[str]]] = None
+    adapter_name: Optional[Union[str, List[str]]] = ""
     is_streaming: bool = False
 
     def gen_hash_value(self):

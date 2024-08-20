@@ -19,7 +19,7 @@ class Request(NamedTuple):
     input_urls: Any
     generate_configs: List[GenerateConfig]
     is_streaming: bool
-    
+
     @property
     def num_return_sequences(self) -> int:
         return self.generate_configs[0].num_return_sequences
@@ -44,7 +44,7 @@ class RequestExtractor:
             req.get('generation_config',
                     req.get('generate_config', {})
                     ).get('yield_generator', False))
-        
+
     def _format_generate_config(self, kwargs: Dict[str, Any]) -> Tuple[GenerateConfig, Dict[str, Any]]:
         config_json = kwargs.pop('generate_config', kwargs.pop('generation_config', {}))
         generate_config = copy.deepcopy(self.default_generate_config)
@@ -61,7 +61,7 @@ class RequestExtractor:
         update_optional('return_hidden_states', ['return_hidden_states', 'output_hidden_states'])
         update_optional('return_logits', ['return_logits', 'output_logits'])
         update_optional('return_input_ids', ['return_input_ids', 'output_input_ids'])
-        update_optional('max_new_tokens', ['gen_length', 'max_new_tokens'])        
+        update_optional('max_new_tokens', ['gen_length', 'max_new_tokens'])
         generate_config.is_streaming = self.is_streaming(kwargs) or kwargs.get('stream', False)
         return generate_config, remain_kwargs
 

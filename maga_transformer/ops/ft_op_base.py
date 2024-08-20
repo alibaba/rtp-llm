@@ -2,13 +2,12 @@ import torch
 from abc import abstractmethod
 from typing import Any, Optional, Dict, List, Callable, Union
 
-from maga_transformer.utils.model_weight import LoraResource, ModelWeights
+from maga_transformer.utils.model_weight import ModelWeights
 
 
 class FTWeightsBase:
     def __init__(self):
         self.weights: Union[Dict[str, torch.Tensor], List[torch.Tensor]] = []
-        self.lora_resource: LoraResource = LoraResource()
 
     @abstractmethod
     def load(self, *args: List[Any], **kwargs: Any) -> bool:
@@ -84,11 +83,3 @@ class FTOPBase:
     def device(self):
         assert self.weight is not None
         return self.weight.device
-
-    def update_lora(self):
-        if self.weight != None:
-            for id in self.weight.lora_resource.to_remove_lora_id:
-                self.ft_op.remove_lora(id)
-            for id in self.weight.lora_resource.to_add_lora_id:
-                lora_weight = self.weight.lora_resource.lora_map.weights_map[id]
-                self.ft_op.add_lora(id, lora_weight.lora_a_weights, lora_weight.lora_b_weights)
