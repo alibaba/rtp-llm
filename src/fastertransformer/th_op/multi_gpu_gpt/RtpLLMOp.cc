@@ -31,7 +31,7 @@ void RtpLLMOp::init(py::object model, py::object mm_process_engine, py::object p
 
     rtp_llm::EngineInitParams params = initModel(model);
     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);
-    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, params.gpt_init_parameter.model_rpc_port_, 
+    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, params.gpt_init_parameter.model_rpc_port_,
         std::move(params), std::move(mm_process_engine), std::move(propose_params));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
@@ -85,15 +85,15 @@ std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeMode
 }
 
 
-void RtpLLMOp::addLora(const int64_t lora_id, py::object py_lora_a_weights, py::object py_lora_b_weights) {
+void RtpLLMOp::addLora(const std::string& adapter_name, py::object py_lora_a_weights, py::object py_lora_b_weights) {
     auto convert = rtp_llm::WeightsConverter(true);
     auto lora_a_weights = convert.convertLayerWeights_(py_lora_a_weights);
     auto lora_b_weights = convert.convertLayerWeights_(py_lora_b_weights);
-    model_rpc_server_->addLora(lora_id, *lora_a_weights, *lora_b_weights);
+    model_rpc_server_->addLora(adapter_name, *lora_a_weights, *lora_b_weights);
 }
 
-void RtpLLMOp::removeLora(const int64_t lora_id) {
-    model_rpc_server_->removeLora(lora_id);
+void RtpLLMOp::removeLora(const std::string& adapter_name) {
+    model_rpc_server_->removeLora(adapter_name);
 }
 
 std::tuple<int64_t, int64_t> RtpLLMOp::getKVCacheInfo() {
@@ -101,9 +101,9 @@ std::tuple<int64_t, int64_t> RtpLLMOp::getKVCacheInfo() {
     return std::make_tuple(info.available_kv_cache, info.total_kv_cache);
 }
 
-void RtpLLMOp::_init(const int64_t model_rpc_port, 
+void RtpLLMOp::_init(const int64_t model_rpc_port,
                      const rtp_llm::EngineInitParams params,
-                     py::object mm_process_engine, 
+                     py::object mm_process_engine,
                      std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     std::unique_ptr<rtp_llm::ModelRpcServiceImpl> rpc_server = std::make_unique<rtp_llm::ModelRpcServiceImpl>();

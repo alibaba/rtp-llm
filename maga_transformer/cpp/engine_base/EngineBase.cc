@@ -33,16 +33,16 @@ void EngineBase::initDevices(const EngineInitParams& params) {
     ft::DeviceFactory::initDevices(global_params);
 }
 
-void EngineBase::addLora(int64_t lora_id,
+void EngineBase::addLora(const std::string& adapter_name,
                          ft::lora::loraLayerWeightsMap lora_a,
                          ft::lora::loraLayerWeightsMap lora_b)
 {
-    lora_manager_->addLora(lora_id, lora_a, lora_b);
+    lora_manager_->addLora(adapter_name, lora_a, lora_b);
 
 }
 
-void EngineBase::removeLora(int64_t lora_id) {
-    lora_manager_->removeLora(lora_id);
+void EngineBase::removeLora(const std::string& adapter_name) {
+    lora_manager_->removeLora(adapter_name);
 }
 
 std::shared_ptr<lora::LoraManager> EngineBase::getLoraManager() {

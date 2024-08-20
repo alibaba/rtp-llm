@@ -30,16 +30,18 @@ public:
                 if (!has_multimodal_input_ && multimodal_features_len_ > 0) {
                     has_multimodal_input_ = true;
                 }
+                adapter_names.push_back(stream->adapterName());
             } else {
                 decode_streams_.push_back(stream);
                 model_execute_token_size_ += stream->currentExecuteTokenSize();
                 total_sampler_batch_size_ += stream->tileNum();
-                total_decode_batch_size_  += stream->batchSize(); 
+                total_decode_batch_size_  += stream->batchSize();
                 max_block_size_ = std::max(max_block_size_, stream->maxBlockSize());
                 max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
                 if (!has_multimodal_input_ && stream->multimodalFeaturesLength() > 0) {
                     has_multimodal_input_ = true;
                 }
+                adapter_names.push_back(stream->adapterName());
             }
         }
     }
@@ -138,6 +140,7 @@ private:
     size_t                       cum_context_seq_len_      = 0;
     size_t                       multimodal_features_len_  = 0;
     bool                         has_multimodal_input_     = false;
+    std::list<std::string>       adapter_names;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

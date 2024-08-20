@@ -43,6 +43,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(top_p_min);
     TRANS_OPTIONAL(top_p_reset_ids);
     TRANS_OPTIONAL(task_id);
+    TRANS_OPTIONAL(adapter_name);
     return generate_config;
 }
 
@@ -53,7 +54,6 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
     }
-    generate_input->lora_id       = input->lora_id();
     auto device                   = ft::DeviceFactory::getDefaultDevice();
     generate_input->input_ids     = device->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)input->token_ids_size()}, ft::AllocationType::HOST}, {});

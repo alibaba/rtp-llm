@@ -20,7 +20,6 @@ TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
     input.add_token_ids(0);
     input.add_token_ids(1);
-    input.set_lora_id(3);
 
     auto generate_config_pb = input.mutable_generate_config();
     generate_config_pb->set_min_new_tokens(4);
@@ -47,7 +46,6 @@ TEST_F(QueryConverterTest, testTransInput) {
     auto input_ids = generate_input->input_ids.get();
     ASSERT_EQ(input_ids->size(), 2);
     ASSERT_EQ(*(int*)(input_ids->data()), 0);
-    ASSERT_EQ(generate_input->lora_id, 3);
     auto generate_config = generate_input->generate_config;
     ASSERT_EQ(generate_config->min_new_tokens, 4);
     ASSERT_EQ(generate_config->max_new_tokens, 5);

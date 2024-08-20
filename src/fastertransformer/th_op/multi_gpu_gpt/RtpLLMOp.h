@@ -14,8 +14,8 @@ public:
     RtpLLMOp();
     ~RtpLLMOp();
     void init(py::object model, py::object mm_process_engine, py::object propose_model);
-    void addLora(const int64_t lora_id, py::object lora_a_weights, py::object lora_b_weights);
-    void removeLora(const int64_t lora_id);
+    void addLora(const std::string& adapter_name, py::object lora_a_weights, py::object lora_b_weights);
+    void removeLora(const std::string& adapter_name);
     void stop();
     void _init(int64_t model_rpc_port,
                const rtp_llm::EngineInitParams maga_init_params,
@@ -34,7 +34,7 @@ private:
     std::thread                                   grpc_server_thread_;
     std::atomic<bool>                             is_server_ready_{false};
     std::atomic<bool>                             is_server_shutdown_{false};
-    kmonitor::MetricsReporterPtr                  metric_reporter_ = nullptr; 
+    kmonitor::MetricsReporterPtr                  metric_reporter_ = nullptr;
 };
 
 void registerRtpLLMOp(const py::module& m);

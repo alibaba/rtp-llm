@@ -49,13 +49,13 @@ message GenerateConfigPB {
     int32 timeout_ms = 19;
     IntMatrix stop_words_list = 20;
     repeated int32 select_tokens_id = 21;
+    google.protobuf.StringValue adapter_name = 22;
 }
 
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
     repeated string multimodal_urls = 3;
-    int64 lora_id = 4;
     GenerateConfigPB generate_config = 5;
 }
 

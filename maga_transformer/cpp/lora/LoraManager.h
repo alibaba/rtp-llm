@@ -1,5 +1,6 @@
 #pragma once
 #include "src/fastertransformer/devices/LoraWeights.h"
+#include "maga_transformer/cpp/dataclass/StreamGroups.h"
 #include <condition_variable>
 
 namespace ft = fastertransformer;
@@ -13,6 +14,8 @@ private:
     std::mutex mutex_;
     std::condition_variable cv_;
     std::unordered_map<int64_t, ft::lora::LoraModelPtr> lora_map_;
+    std::unordered_map<std::string, int64_t> adapter_map_;
+    int64_t count_ = 0;
 
 public:
 
@@ -21,15 +24,20 @@ public:
     LoraManager(LoraManager& other) = delete;
     LoraManager(LoraManager&& other) = delete;
 
-    void addLora(int64_t lora_id,
+    void addLora(const std::string& adapter_name,
                  const ft::lora::loraLayerWeightsMap& lora_a_weights,
                  const ft::lora::loraLayerWeightsMap& lora_b_weights);
 
-    void removeLora(int64_t lora_id);
+
+    void removeLora(const std::string& adapter_name);
+
+    int getLoraId(const std::string& adapter_name);
 
     ft::lora::LoraModelPtr getLora(int64_t lora_id);
 
-    bool hasLora(int64_t lora_id);
+    ft::lora::LoraModelPtr getLora(const std::string& adapter_name);
+
+    bool hasLora(const std::string& adapter_name);
 
     void releaseSignal() {
         cv_.notify_all();
@@ -46,9 +54,9 @@ struct LoraResourceGuard {
     std::shared_ptr<LoraManager> lora_manager_;
     ft::lora::LoraModelPtr lora_ptr_;
 
-    LoraResourceGuard(std::shared_ptr<LoraManager> lora_manager, int lora_id) {
+    LoraResourceGuard(std::shared_ptr<LoraManager> lora_manager, const std::string& adapter_name) {
         lora_manager_ = lora_manager;
-        lora_ptr_ = lora_manager_->getLora(lora_id);
+        lora_ptr_ = lora_manager_->getLora(adapter_name);
     }
 
     ~LoraResourceGuard() {

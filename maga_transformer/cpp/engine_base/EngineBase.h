@@ -20,9 +20,9 @@ public:
         return device_;
     }
 
-    void addLora(int64_t lora_id, ft::lora::loraLayerWeightsMap lora_a, ft::lora::loraLayerWeightsMap lora_b);
+    void addLora(const std::string& adapter_name, ft::lora::loraLayerWeightsMap lora_a, ft::lora::loraLayerWeightsMap lora_b);
 
-    void removeLora(int64_t lora_id);
+    void removeLora(const std::string& adapter_name);
 
     std::shared_ptr<lora::LoraManager> getLoraManager();
 

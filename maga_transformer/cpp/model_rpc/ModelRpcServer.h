@@ -26,11 +26,11 @@ public:
 
     KVCacheInfo getKVCacheInfo() const;
 
-    void addLora(const int64_t lora_id,
+    void addLora(const std::string& adapter_name,
                  const ft::lora::loraLayerWeightsMap& lora_a_weights,
                  const ft::lora::loraLayerWeightsMap& lora_b_weights);
 
-    void removeLora(const int64_t lora_id);
+    void removeLora(const std::string& adapter_name);
 private:
     std::unique_ptr<EngineBase> engine_ = nullptr;
     std::unique_ptr<MultimodalProcessor> mm_processor_ = nullptr;

@@ -68,6 +68,7 @@ cc_library(
         "lora/*.cc",
     ]),
     deps = torch_deps() + [
+        ":dataclass",
         ":utils",
         ":common",
         ":cache",

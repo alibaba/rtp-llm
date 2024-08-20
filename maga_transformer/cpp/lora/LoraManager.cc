@@ -6,23 +6,64 @@ namespace ft = fastertransformer;
 namespace rtp_llm {
 namespace lora {
 
-void LoraManager::addLora(int64_t lora_id,
+ft::lora::LoraModelPtr LoraManager::getLora(int64_t lora_id) {
+    std::unique_lock<std::mutex> scoped_lock(mutex_);
+    auto it = lora_map_.find(lora_id);
+    if (it == lora_map_.end()) {
+        return nullptr;
+    }
+    return it->second;
+}
+
+ft::lora::LoraModelPtr LoraManager::getLora(const std::string& adapter_name) {
+    std::unique_lock<std::mutex> scoped_lock(mutex_);
+    auto it = adapter_map_.find(adapter_name);
+    if (it != adapter_map_.end()) {
+        auto lora = lora_map_.find(it->second);
+        if (lora != lora_map_.end()) {
+            return lora->second;
+        }
+    }
+    return nullptr;
+}
+
+bool LoraManager::hasLora(const std::string& adapter_name) {
+    std::unique_lock<std::mutex> scoped_lock(mutex_);
+    auto it = adapter_map_.find(adapter_name);
+    if (it == adapter_map_.end()) {
+        return false;
+    } else {
+        return (lora_map_.find(it->second) != lora_map_.end());
+    }
+}
+
+void LoraManager::addLora(const std::string& adapter_name,
                           const ft::lora::loraLayerWeightsMap& lora_a_weights,
                           const ft::lora::loraLayerWeightsMap& lora_b_weights)
 {
-    FT_CHECK_WITH_INFO((lora_id >= 0), "add lora need lora id[%ld] be greater than 0", lora_id);
-    FT_CHECK_WITH_INFO(!hasLora(lora_id),
-        "Lora id[%ld] is globally unique and cannot be added repeatedly", lora_id);
     std::unique_lock<std::mutex> scoped_lock(mutex_);
+    auto lora_id = count_;
+    FT_CHECK_WITH_INFO((lora_id >= 0), "add lora need lora id[%ld] be greater than 0", lora_id);
+    FT_CHECK_WITH_INFO((lora_map_.find(lora_id) == lora_map_.end()),
+        "Lora id[%ld] is globally unique and cannot be added repeatedly", lora_id);
     lora_map_[lora_id] = std::make_shared<ft::lora::LoraModel>(lora_a_weights, lora_b_weights);
+    adapter_map_[adapter_name] = lora_id;
+    count_++;
 }
 
-void LoraManager::removeLora(int64_t lora_id) {
-    FT_CHECK_WITH_INFO(hasLora(lora_id),
-        "Lora id[%ld] need exits when remove lora", lora_id);
+void LoraManager::removeLora(const std::string& adapter_name) {
+    int lora_id = -1;
     {
         std::unique_lock<std::mutex> scoped_lock(mutex_);
+        auto it = adapter_map_.find(adapter_name);
+        FT_CHECK_WITH_INFO(it != adapter_map_.end(),
+            "adapter name[%s] need exits when remove lora", adapter_name.c_str());
+        lora_id = it->second;
+        FT_CHECK_WITH_INFO((lora_map_.find(lora_id) != lora_map_.end()),
+            "Lora id[%ld] need exits when remove lora", lora_id);
         ft::lora::LoraModelPtr resource = lora_map_[lora_id];
+        // must remove adapter map before wait.
+        adapter_map_.erase(adapter_name);
         // one for var resource, another for lora_map_
         cv_.wait(scoped_lock, [&resource]{ return resource.use_count() == 2; });
     }
@@ -34,18 +75,14 @@ void LoraManager::removeLora(int64_t lora_id) {
     return;
 }
 
-ft::lora::LoraModelPtr LoraManager::getLora(int64_t lora_id) {
+int LoraManager::getLoraId(const std::string& adapter_name) {
     std::unique_lock<std::mutex> scoped_lock(mutex_);
-    auto it = lora_map_.find(lora_id);
-    if (it == lora_map_.end()) {
-        return nullptr;
+    auto it = adapter_map_.find(adapter_name);
+    if (it == adapter_map_.end()) {
+        return -1;
+    } else {
+        return it->second;
     }
-    return it->second;
-}
-
-bool LoraManager::hasLora(int64_t lora_id) {
-    std::unique_lock<std::mutex> scoped_lock(mutex_);
-    return (lora_map_.find(lora_id) != lora_map_.end());
 }
 
 

@@ -159,6 +159,11 @@ int64_t GenerateStream::streamId() const {
 int GenerateStream::loraId() const {
     return generate_input_->lora_id;
 }
+
+std::string GenerateStream::adapterName() const {
+    return generate_input_->generate_config->adapter_name;
+}
+
 ft::SpecialTokens GenerateStream::specialTokens() const {
     return special_tokens_;
 }

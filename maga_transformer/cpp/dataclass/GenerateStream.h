@@ -50,6 +50,7 @@ public:
     bool isStreaming() const;
     int64_t streamId() const;
     int loraId() const;
+    std::string adapterName() const;
     ft::SpecialTokens specialTokens() const;
 
     int tileNum() const;
