@@ -18,8 +18,8 @@ struct LoraMutex {
 
 class ModelRpcServiceImpl: public ModelRpcService::Service {
 public:
-    explicit ModelRpcServiceImpl(const EngineInitParams& maga_init_params);
-    explicit ModelRpcServiceImpl(const EngineInitParams& maga_init_params, py::object mm_process_engine);
+    ModelRpcServiceImpl() {}
+    grpc::Status init(const EngineInitParams& maga_init_params, py::object mm_process_engine, std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
     grpc::Status generate_stream(grpc::ServerContext*                   context,
                                  const GenerateInputPB*                 request,
                                  grpc::ServerWriter<GenerateOutputsPB>* writer) override;
@@ -32,7 +32,7 @@ public:
 
     void removeLora(const int64_t lora_id);
 private:
-    std::unique_ptr<NormalEngine> engine_ = nullptr;
+    std::unique_ptr<EngineBase> engine_ = nullptr;
     std::unique_ptr<MultimodalProcessor> mm_processor_ = nullptr;
 };
 

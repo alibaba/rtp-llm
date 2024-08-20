@@ -1,10 +1,7 @@
 import torch
-import logging
-from typing import Optional, List, Dict, Union, Tuple
-from PIL import Image
+from typing import Optional, Dict
 
-from maga_transformer.utils.util import get_mem_info
-from maga_transformer.utils.time_util import Timer
+from maga_transformer.models.propose_model.propose_model import ProposeModel
 from maga_transformer.models.base_model import BaseModel, GenerateInput
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.engine_creator import create_engine
@@ -13,15 +10,16 @@ from maga_transformer.config.task_type import TaskType
 from maga_transformer.async_decoder_engine.base_engine import KVCacheInfo
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 
+
 class AsyncModel:
-    def __init__(self, model: BaseModel, sp_model: Optional[BaseModel] = None) -> None:
+    def __init__(self, model: BaseModel, propose_model: Optional[ProposeModel] = None) -> None:
         self.model = model
-        self.sp_model = sp_model
+        self.propose_model = propose_model
         self.config = model.config
 
         assert self.config.max_seq_len > 0
         self.tokenizer = model.tokenizer
-        self.decoder_engine_ = create_engine(self.model, self.config, self.sp_model, self.sp_model.config if self.sp_model else None)
+        self.decoder_engine_ = create_engine(self.model, self.propose_model)
         self.decoder_engine_.start()
 
     def is_multimodal(self) -> bool:

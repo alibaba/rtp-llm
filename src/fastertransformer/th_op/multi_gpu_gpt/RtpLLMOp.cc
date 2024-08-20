@@ -7,8 +7,12 @@
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
+#include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
+#include <cstddef>
+#include <memory>
+#include <pybind11/pytypes.h>
 #include <tuple>
 
 using namespace std;
@@ -20,30 +24,81 @@ namespace torch_ext {
 
 RtpLLMOp::RtpLLMOp() {}
 
-void RtpLLMOp::init(const ft::GptInitParameter& gpt_init_params,
-                    py::object                  py_layers_weights,
-                    py::object                  py_global_weights,
-                    py::object                  mm_process_engine) {
+void RtpLLMOp::init(py::object model, py::object mm_process_engine, py::object propose_model) {
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
 
-    auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
-    // TODO(xinfei.sxf) fix py_linear_bias_slopes 传递方式
-    rtp_llm::EngineInitParams params(gpt_init_params,
-                                     std::move(*convert.createGptWeights(py_layers_weights, py_global_weights)));
-    if (gpt_init_params.tp_rank_ == 0) {
-    // kmon metric init
-        (void)rtp_llm::initKmonitorFactory();
-        auto kmon_tags = rtp_llm::getHippoTags();
-        params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
-    }
-    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, gpt_init_params.model_rpc_port_, std::move(params), std::move(mm_process_engine));
+    rtp_llm::EngineInitParams params = initModel(model);
+    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);
+    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, params.gpt_init_parameter.model_rpc_port_, 
+        std::move(params), std::move(mm_process_engine), std::move(propose_params));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
     }
 }
+
+rtp_llm::EngineInitParams RtpLLMOp::initModel(py::object model) {
+    try {
+        const ft::GptInitParameter& gpt_init_params = model.attr("config").attr("gpt_init_params").cast<ft::GptInitParameter>();
+        py::object                  py_layers_weights = model.attr("weight").attr("weights");
+        py::object                  py_global_weights = model.attr("weight").attr("global_weights");
+   
+
+        auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
+        // TODO(xinfei.sxf) fix py_linear_bias_slopes 传递方式
+        rtp_llm::EngineInitParams params(gpt_init_params,
+                                        std::move(*convert.createGptWeights(py_layers_weights, py_global_weights)));
+        if (gpt_init_params.tp_rank_ == 0) {
+            // kmon metric init
+            (void)rtp_llm::initKmonitorFactory();
+            auto kmon_tags = rtp_llm::getHippoTags();
+            metric_reporter_ = std::make_shared<kmonitor::MetricsReporter>("", "", kmon_tags);
+            params.metrics_reporter = metric_reporter_;
+        }
+        return params;
+     } catch (const std::exception& e ){
+        FT_FAIL("init engine params failed, error msg: %s", e);
+        return rtp_llm::EngineInitParams();
+    }
+}
+
+std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::object propose_model) {
+    try {
+        if (propose_model.is_none()) {
+            return nullptr;
+        }
+        std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> params = nullptr;
+        std::string sp_type = propose_model.attr("sp_type").cast<std::string>();
+        if (sp_type == "vanilla") {
+            const ft::GptInitParameter& gpt_init_params = propose_model.attr("model").attr("config").attr("gpt_init_params").cast<ft::GptInitParameter>();
+            py::object                  py_layers_weights = propose_model.attr("model").attr("weight").attr("weights");
+            py::object                  py_global_weights = propose_model.attr("model").attr("weight").attr("global_weights");
+
+            auto convert = rtp_llm::WeightsConverter(false, gpt_init_params.quant_algo_);
+            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type, gpt_init_params,
+                                            std::move(*convert.createGptWeights(py_layers_weights, py_global_weights)));
+            if (gpt_init_params.tp_rank_ == 0) {
+                params->metrics_reporter = metric_reporter_;
+            }
+            return params;
+        } else if (sp_type == "prompt_lookup") {
+            params = std::make_unique<rtp_llm::ProposeModelEngineInitParams>(sp_type);
+            // TODO(xyz): handle prompt lookup metrics reporter
+            return params;
+        } else if (sp_type == "eagle") {
+            FT_FAIL("sp_type %s not support", sp_type.c_str());
+        } else {
+            FT_FAIL("sp_type %s not support", sp_type.c_str());
+        }
+        return params;
+     } catch (const std::exception& e ){
+        FT_FAIL("init propose engine params failed, error msg: %s", e);
+        return nullptr;
+    }
+}
+
 
 void RtpLLMOp::addLora(const int64_t lora_id, py::object py_lora_a_weights, py::object py_lora_b_weights) {
     auto convert = rtp_llm::WeightsConverter(true);
@@ -61,9 +116,17 @@ std::tuple<int64_t, int64_t> RtpLLMOp::getKVCacheInfo() {
     return std::make_tuple(info.available_kv_cache, info.total_kv_cache);
 }
 
-void RtpLLMOp::_init(const int64_t model_rpc_port, const rtp_llm::EngineInitParams params, py::object mm_process_engine) {
+void RtpLLMOp::_init(const int64_t model_rpc_port, 
+                     const rtp_llm::EngineInitParams params,
+                     py::object mm_process_engine, 
+                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
-    model_rpc_server_.reset(new rtp_llm::ModelRpcServiceImpl(params, mm_process_engine));
+    std::unique_ptr<rtp_llm::ModelRpcServiceImpl> rpc_server = std::make_unique<rtp_llm::ModelRpcServiceImpl>();
+    grpc::Status grpc_status = rpc_server->init(params, std::move(mm_process_engine), std::move(propose_params));
+    if (!grpc_status.ok()) {
+        FT_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
+    }
+    model_rpc_server_ = std::move(rpc_server);
     if (model_rpc_port < 0) {
         is_server_ready_ = true;
         return;

@@ -2,6 +2,7 @@ from typing import AsyncGenerator, Optional, Dict
 import asyncio
 import logging
 from typing_extensions import override
+from maga_transformer.models.propose_model.propose_model import ProposeModel
 from maga_transformer.utils.time_util import Timer
 from maga_transformer.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from maga_transformer.models.base_model import BaseModel, GenerateInput, GenerateOutputs
@@ -12,24 +13,22 @@ from maga_transformer.utils.mm_process_engine import MMProcessEngine
 class RPCEngine(BaseEngine):
     def __init__(self,
                  model: BaseModel,
-                 sp_model: Optional[BaseModel] = None) -> None:
+                 propose_model: Optional[ProposeModel] = None) -> None:
         self.model = model
-        self.sp_model = sp_model
+        self.propose_model = propose_model
         self.tokenizer = model.tokenizer
         self.config = model.config
         if self.model.is_multimodal():
             self.mm_engine = MMProcessEngine(self.model)
         else:
             self.mm_engine = None
-        self.rtp_llm_op_ = RtpLLMOp(model.config, False, self.mm_engine)
+        self.rtp_llm_op_ = RtpLLMOp(model, self.mm_engine, propose_model)
         self.model_rpc_client = ModelRpcClient(self.model.weight.lora_resource)
         self.model.weight.lora_resource.ft_op = [self.rtp_llm_op_]
 
     @override
     def start(self) -> None:
-        # op engine init is in set_weight
-        assert self.model.weight
-        self.rtp_llm_op_.set_weight(self.model.weight)
+        self.rtp_llm_op_.start()
 
     @override
     def stop(self) -> None:

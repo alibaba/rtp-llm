@@ -7,6 +7,7 @@
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include <pybind11/pytypes.h>
 
 namespace th = torch;
 namespace ft = fastertransformer;
@@ -18,8 +19,8 @@ using TensorMaps = std::vector<TensorMap>;
 using ConstBufferPtrMap  = std::unordered_map<std::string, ft::ConstBufferPtr>;
 using ConstBufferPtrMaps = std::vector<ConstBufferPtrMap>;
 
-class EngineInitParams: public th::jit::CustomClassHolder {
-public:
+struct EngineInitParams: public th::jit::CustomClassHolder {
+    EngineInitParams() {};
    // This class is the only one that holds gpt_weights object globally.
     EngineInitParams(const ft::GptInitParameter&    gpt_init_parameter,
                      ft::Weights&&                  gpt_weights) :
@@ -27,11 +28,34 @@ public:
                      gpt_weights(std::move(gpt_weights)) {}
 
 
-public:
     ft::GptInitParameter         gpt_init_parameter;
     ft::Weights                  gpt_weights;
 
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
+};
+
+struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
+    ProposeModelEngineInitParams() {};
+
+    // Constructor for vanilla propose model
+    ProposeModelEngineInitParams(std::string sp_type,
+                     const ft::GptInitParameter&    gpt_init_parameter,
+                     ft::Weights&&                  gpt_weights) :
+                     sp_type(sp_type),
+                     vanilla_model_params(new EngineInitParams(gpt_init_parameter, std::move(gpt_weights))) {}
+
+    // Consturctor for prompt lookingup propose model
+    ProposeModelEngineInitParams(std::string sp_type) : sp_type(sp_type) {}
+    
+    bool need_kvcache() {
+        return sp_type == "vanilla";
+    }
+
+    std::string                  sp_type;
+    std::unique_ptr<EngineInitParams> vanilla_model_params = nullptr;
+    py::object                   eagle_model;
+    py::object                   medusa_model;
+    kmonitor::MetricsReporterPtr    metrics_reporter = nullptr;
 };
 
 class WeightsConverter {

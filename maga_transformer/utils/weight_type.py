@@ -30,11 +30,11 @@ def get_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
             return WEIGHT_TYPE.INT8
         return WEIGHT_TYPE.FP16
 
-def get_sp_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
-    sp_weight_type_str = env_param.get("SP_WEIGHT_TYPE", None)
-    if sp_weight_type_str:
-        sp_weight_type = WEIGHT_TYPE.from_str(sp_weight_type_str)
+def get_propose_weight_type_from_env(env_param: Dict[str, str]) -> WEIGHT_TYPE:
+    propose_weight_type_str = env_param.get("SP_WEIGHT_TYPE", None)
+    if propose_weight_type_str:
+        propose_weight_type = WEIGHT_TYPE.from_str(propose_weight_type_str)
     else:
-        sp_int8_mode = int(env_param.get('SP_INT8_MODE', '0'))
-        sp_weight_type = WEIGHT_TYPE.INT8 if sp_int8_mode == 1 else WEIGHT_TYPE.FP16
-    return sp_weight_type
+        propose_int8_mode = int(env_param.get('SP_INT8_MODE', '0'))
+        propose_weight_type = WEIGHT_TYPE.INT8 if propose_int8_mode == 1 else WEIGHT_TYPE.FP16
+    return propose_weight_type

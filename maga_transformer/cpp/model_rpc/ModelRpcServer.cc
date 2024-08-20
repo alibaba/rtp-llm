@@ -31,19 +31,19 @@ int transErrorCode(absl::StatusCode code) {
     }
 }
 
-ModelRpcServiceImpl::ModelRpcServiceImpl(
-    const EngineInitParams& maga_init_params) {
-    engine_.reset(new NormalEngine(maga_init_params));
-}
-
-ModelRpcServiceImpl::ModelRpcServiceImpl(
-    const EngineInitParams& maga_init_params, py::object mm_process_engine) {
-    engine_.reset(new NormalEngine(maga_init_params));
-    if (!mm_process_engine.is_none()) {
-        mm_processor_.reset(new MultimodalProcessor(mm_process_engine,
-            maga_init_params.gpt_init_parameter.mm_sep_tokens_,
-            maga_init_params.gpt_init_parameter.include_sep_tokens_));
+grpc::Status ModelRpcServiceImpl::init(const EngineInitParams& maga_init_params, py::object mm_process_engine, std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
+    
+    if (propose_params) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Speculative engine is not supported");
+    } else {
+        engine_.reset(new NormalEngine(maga_init_params));
+        if (!mm_process_engine.is_none()) {
+            mm_processor_.reset(new MultimodalProcessor(mm_process_engine,
+                maga_init_params.gpt_init_parameter.mm_sep_tokens_,
+                maga_init_params.gpt_init_parameter.include_sep_tokens_));
+        }
     }
+    return grpc::Status::OK;
 }
 
 grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*                  context,

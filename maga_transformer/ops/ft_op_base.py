@@ -4,6 +4,7 @@ from typing import Any, Optional, Dict, List, Callable, Union
 
 from maga_transformer.utils.model_weight import LoraResource, ModelWeights
 
+
 class FTWeightsBase:
     def __init__(self):
         self.weights: Union[Dict[str, torch.Tensor], List[torch.Tensor]] = []
@@ -56,6 +57,7 @@ class FTWeightsBase:
     def to(self, device: Optional[str]=None):
         self._map(lambda x: x.to(device))
 
+
 class FTOPBase:
     def __init__(self):
         self.weight: Optional[ModelWeights] = None
@@ -66,18 +68,12 @@ class FTOPBase:
         return cls(config)
 
     @abstractmethod
-    def _initialize_op(self, force_init: bool=False) -> None:
+    def start(self) -> None:
         raise NotImplementedError
 
     @abstractmethod
     def forward(self, *args: List[Any], **kwargs: Any) -> Any:
         raise NotImplementedError
-
-    def set_weight(self, weight: FTWeightsBase):
-        old_weight_dtype = self.weight.dtype if self.weight is not None else None
-        self.weight = weight
-        if old_weight_dtype is None or old_weight_dtype != self.weight.dtype:
-            self._initialize_op(force_init=True)
 
     @property
     def dtype(self):

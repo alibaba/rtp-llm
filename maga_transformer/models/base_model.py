@@ -123,7 +123,8 @@ class ModelConfig:
             ptuning_path: Optional[str] = None,
             lora_infos: Optional[Dict[str, str]] = None,
             ref_module: Optional[torch.nn.Module] = None,
-            ref_dict: Dict[str, torch.Tensor] = {}
+            ref_dict: Dict[str, torch.Tensor] = {},
+            sp_type: str = "",
         ):
         self.model_type: str = model_type
         self.ckpt_path: str = ckpt_path
@@ -137,6 +138,7 @@ class ModelConfig:
         self.lora_infos: Optional[Dict[str, str]] = lora_infos
         self.ref_module: Optional[torch.nn.Module] = ref_module
         self.ref_dict: Dict[str, torch.Tensor] = ref_dict
+        self.sp_type: str = sp_type
 
     @property
     def int8_mode(self):

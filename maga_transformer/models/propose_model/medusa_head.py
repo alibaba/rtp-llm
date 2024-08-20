@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
+
+
 class ResBlock(nn.Module):
     """
     A Residual Block module.

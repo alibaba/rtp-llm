@@ -1,25 +1,31 @@
-from typing import Any, Dict, Tuple
-import torch
-from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
-from maga_transformer.distribute.worker_info import g_parallel_info, g_master_info
+from typing import Optional, Tuple
+from maga_transformer.models.base_model import BaseModel
+from maga_transformer.models.propose_model.propose_model import ProposeModel
 from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.ops import RtpLLMOp as CppRtpLLMOp
+from maga_transformer.utils.mm_process_engine import MMProcessEngine
+
 
 class RtpLLMOp(FTOPBase):
-    def __init__(self, config: GptInitModelParameters, is_sp: bool, mm_engine):
+    def __init__(
+            self,
+            model: BaseModel,
+            mm_engine: Optional[MMProcessEngine] = None,
+            propose_model: Optional[ProposeModel] = None,
+        ):
         super().__init__()
-        self.config = config
-        self.is_sp = is_sp
-        self.ft_op = CppRtpLLMOp()
+        self.model = model
         self.mm_engine = mm_engine
+        self.propose_model = propose_model
+        self.ft_op = CppRtpLLMOp()
 
-    def _initialize_op(self, force_init: bool=False):
-        assert self.weight
+
+    def start(self):
+        self.weight = self.model.weight
         self.ft_op.init( # type: ignore
-            self.config.gpt_init_params,
-            self.weight.weights,
-            self.weight.global_weights,
-            self.mm_engine)
+            self.model,
+            self.mm_engine,
+            self.propose_model)
 
         for id, lora_weight in self.weight.lora_resource.lora_map.weights_map.items():
             self.ft_op.add_lora( # type: ignore
@@ -28,7 +34,7 @@ class RtpLLMOp(FTOPBase):
                 lora_weight.lora_b_weights)
 
     def update_lora(self):
-        if self.weight != None:
+        if self.model.weight != None:
             for id in self.weight.lora_resource.to_remove_lora_id:
                 self.ft_op.remove_lora(id)
             for id in self.weight.lora_resource.to_add_lora_id:
