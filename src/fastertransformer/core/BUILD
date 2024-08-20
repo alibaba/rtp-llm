@@ -120,34 +120,3 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
-
-
-cc_library(
-    name = "tensor_hdr",
-    hdrs = [
-        "Tensor.h",
-    ],
-    deps = [
-        ":types",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-
-cc_library(
-    name = "Tensor",
-    srcs = glob([
-        "Tensor.cc",
-    ]),
-    deps = [
-        ":tensor_hdr",
-        ":types",
-        # "//src/fastertransformer/cuda:cuda_utils",
-    ] + select({
-        "//:using_cuda": ["//src/fastertransformer/cuda:cuda_utils"],
-        "//:using_rocm": ["//src/fastertransformer/rocm:rocm_utils"],
-        "//conditions:default": [],
-    }),
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)

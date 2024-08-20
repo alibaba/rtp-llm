@@ -15,7 +15,6 @@
  */
 
 #pragma once
-#include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/core/allocator.h"
 
 #include "torch/extension.h"
@@ -68,18 +67,7 @@ inline T* get_ptr(const torch::Tensor& t) {
     return reinterpret_cast<T*>(t.data_ptr());
 }
 
-template<typename T>
-inline T* get_ptr(const fastertransformer::Tensor& t) {
-    return reinterpret_cast<T*>(t.data());
-}
-
 std::vector<size_t> convert_shape(torch::Tensor tensor);
-
-template<typename T>
-fastertransformer::Tensor convert_tensor(torch::Tensor tensor);
-
-template<typename T>
-fastertransformer::Tensor convert_tensor(torch::Tensor tensor, fastertransformer::MemoryType memory_type);
 
 size_t sizeBytes(torch::Tensor tensor);
 

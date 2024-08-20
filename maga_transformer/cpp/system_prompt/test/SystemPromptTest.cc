@@ -5,7 +5,6 @@
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
-#include "src/fastertransformer/core/Tensor.h"
 
 #include <memory>
 #include <thread>

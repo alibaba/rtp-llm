@@ -2743,49 +2743,4 @@ INSTANTIATEMASKEDSOFTMAXWITHRELPOSBIAS(__nv_bfloat16);
 #undef INSTANTIATEMASKEDSOFTMAXWITHRELPOSBIAS
 #endif
 
-template<typename T>
-__global__ void transpose_attentions(
-    T* attentions_out, const T* attentions_in, size_t batch_size, size_t num_layers, size_t num_heads, size_t seq_len)
-{
-    // attentions_in  shape [B, H, S, S]
-    // attentions_out shape [B, L, H, S, S].
-    // Note that we write the L dimension as if it was index 0.
-    // In reality, the pointer has already been shifted to point to the correct layer.
-
-    const auto batch_idx = blockIdx.x;
-    const auto head_idx  = blockIdx.y;
-
-    const auto dst_offset = (batch_idx * num_layers * num_heads + head_idx) * seq_len * seq_len;
-    const auto src_offset = (batch_idx * num_heads + head_idx) * seq_len * seq_len;
-
-    for (auto x = threadIdx.x; x < seq_len * seq_len; x += blockDim.x) {
-        attentions_out[dst_offset + x] = attentions_in[src_offset + x];
-    }
-}
-
-template<typename T>
-void invokeTransposeAttentions(Tensor& attentions_out, const Tensor& attentions_in, cudaStream_t stream)
-{
-    const size_t batch_size = attentions_in.shape()[0];
-    const size_t num_heads  = attentions_in.shape()[1];
-    const size_t seq_len    = attentions_in.shape()[2];
-    const size_t num_layers = attentions_out.shape()[1];
-
-    const dim3 gridSize(batch_size, num_heads);
-    const dim3 blockSize(512);
-
-    transpose_attentions<<<gridSize, blockSize, 0, stream>>>(
-        attentions_out.getPtr<T>(), attentions_in.getPtr<const T>(), batch_size, num_layers, num_heads, seq_len);
-}
-
-#define INSTANTIATETRANSPOSEATTENTIONS(T)                                                                              \
-    template void invokeTransposeAttentions<T>(                                                                        \
-        Tensor & attentions_out, const Tensor& attentions_in, cudaStream_t stream)
-INSTANTIATETRANSPOSEATTENTIONS(float);
-INSTANTIATETRANSPOSEATTENTIONS(half);
-#ifdef ENABLE_BF16
-INSTANTIATETRANSPOSEATTENTIONS(__nv_bfloat16);
-#endif
-#undef INSTANTIATETRANSPOSEATTENTIONS
-
 }  // namespace fastertransformer

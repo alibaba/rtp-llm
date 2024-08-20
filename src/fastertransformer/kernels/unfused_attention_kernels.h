@@ -16,7 +16,6 @@
 #pragma once
 
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/utils/RopeConfig.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 
@@ -214,7 +213,5 @@ void invokeMaskedSoftMaxWithRelPosBias(T*           qk_buf,
                                        const float  qk_scale,
                                        cudaStream_t stream);
 
-template<typename T>
-void invokeTransposeAttentions(Tensor& attentions_out, const Tensor& attentions_in, cudaStream_t stream = 0);
 
 }  // namespace fastertransformer

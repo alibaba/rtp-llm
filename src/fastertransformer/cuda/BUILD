@@ -96,7 +96,7 @@ cc_library(
                             "//src/fastertransformer/rocm:rocm_utils",
                             "//src/fastertransformer/kernels:gpt_kernels_rocm",]}),
 
-                            
+
     copts = copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
@@ -162,7 +162,6 @@ cc_library(
         "//src/fastertransformer/cutlass:cutlass_interface",
         ":cuda_utils",
         "//src/fastertransformer/utils:utils",
-        "//src/fastertransformer/core:Tensor",
         "//src/fastertransformer/core:allocator",
         "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
@@ -314,9 +313,7 @@ cc_library(
         "tensor_utils.h"
     ],
     copts = copts(),
-    deps = torch_deps() + [
-        "//src/fastertransformer/core:Tensor",
-    ],
+    deps = torch_deps(),
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
@@ -356,7 +353,6 @@ cc_library(
         "//src/fastertransformer/rocm:rocm_types_hdr",
         "//src/fastertransformer/core:types",
         "//src/fastertransformer/rocm:rocm_utils",
-        "//src/fastertransformer/core:tensor_hdr",
     ],
     copts = copts(),
     include_prefix = "src",

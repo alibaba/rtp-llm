@@ -27,8 +27,6 @@
 #endif
 #include <unordered_map>
 
-#include "src/fastertransformer/core/Tensor.h"
-
 namespace fastertransformer {
 
 template<typename T>
@@ -166,18 +164,6 @@ void invokeFindContextDups(int*         shared_contexts,
                            const size_t batch_size,
                            const size_t input_seq_len,
                            cudaStream_t stream = 0);
-
-template<typename T>
-void handleOptArg(TensorMap* input_tensors, const std::string& arg_name, T* d_ptr, T default_value, size_t size) {
-    if (input_tensors->isExist(arg_name)) {
-        FT_CHECK(input_tensors->at(arg_name).size() == size);
-        cudaH2Dcpy(d_ptr, input_tensors->at(arg_name).getPtr<const T>(), size);
-    } else {
-        deviceFill(d_ptr, size, default_value);
-    }
-}
-
-void setSeqLimitLen(uint32_t* seq_len_d, Tensor seq_len, int limit_len_offset, int batch_size);
 
 template<typename T>
 void invokeCompactInputs(T*           compact_input,

@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/cuda/cuda_fp8_utils.h"
 #if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"

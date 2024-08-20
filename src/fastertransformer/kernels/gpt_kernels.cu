@@ -70,7 +70,7 @@ __global__ void embedding_lookup_kernel(T*                    from_tensor,
         }
 
         embedding = embedding_table[input_id * hidden_units + col_index];
-        
+
         // embedding *= input_embedding_scalar;
         if constexpr (std::is_same<T, __nv_bfloat16>::value) {
             embedding *= __double2bfloat16(input_embedding_scalar);
@@ -850,15 +850,6 @@ void invokeTileGptInputs(int*         tiled_input_ids,
 }
 
 #if USING_CUDA
-void setSeqLimitLen(uint32_t* seq_len_d, Tensor seq_len, int limit_len_offset, int batch_size)
-{
-    std::vector<uint32_t> seq_len_h(batch_size);
-    for (int i = 0; i < batch_size; i++) {
-        seq_len_h[i] = seq_len.getPtr<uint32_t>()[i] + limit_len_offset;
-    }
-    cudaH2Dcpy(seq_len_d, seq_len_h.data(), batch_size);
-}
-
 
 template<int TB_SIZE>
 __global__ void
@@ -1504,12 +1495,12 @@ __global__ void getPaddingOffsetAndCuSeqLensKernel(int*       padding_offset,
     }
 }
 
-__global__ void getCuSeqLensKernel(int* cu_seqlens, 
-                                   const int* sequence_length, 
-                                   const int* prefix_length, 
+__global__ void getCuSeqLensKernel(int* cu_seqlens,
+                                   const int* sequence_length,
+                                   const int* prefix_length,
                                    const int batch_size) {
     // do cumulated sum
-    int        total_seq_len        = 0;    
+    int        total_seq_len        = 0;
     const bool has_prefix_length  = prefix_length != nullptr;
     for (int i = 0; i < batch_size; i++) {
         int seq_len = sequence_length[i];
@@ -1518,7 +1509,7 @@ __global__ void getCuSeqLensKernel(int* cu_seqlens,
         }
         cu_seqlens[i] = total_seq_len;
         total_seq_len += seq_len;
-    }    
+    }
     cu_seqlens[batch_size] = total_seq_len;
 }
 
@@ -1533,10 +1524,10 @@ void invokeGetPaddingOffsetAndCuSeqLens(int*         padding_offset,
     sync_check_cuda_error();
 }
 
-void invokeGetCuSeqLens(int* cu_seqlens, 
-                        const int* sequence_length, 
-                        const int* prefix_length, 
-                        const int batch_size, 
+void invokeGetCuSeqLens(int* cu_seqlens,
+                        const int* sequence_length,
+                        const int* prefix_length,
+                        const int batch_size,
                         cudaStream_t stream) {
     getCuSeqLensKernel<<<1, 1, 0, stream>>>(
         cu_seqlens, sequence_length, prefix_length, batch_size);

@@ -4,7 +4,7 @@ cc_library(
     name = "rocm_types_hdr",
     hdrs = [
         "cuda_shims.h",
-        "amd_bfloat16.h",        
+        "amd_bfloat16.h",
     ],
     visibility = ["//visibility:public"],
 )
@@ -58,7 +58,6 @@ cc_library(
     deps=[
         ":rocm_utils",
         "//src/fastertransformer/utils:utils",
-        "//src/fastertransformer/core:Tensor",
         "//src/fastertransformer/core:allocator",
         "@local_config_rocm//rocm:rocm_headers",
         "@local_config_rocm//rocm:rocm",

@@ -15,7 +15,6 @@
  */
 
 #include "src/fastertransformer/cutlass/interface.h"
-#include "src/fastertransformer/core/Tensor.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/cuda/memory_utils.h"

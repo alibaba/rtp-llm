@@ -6,7 +6,6 @@
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
 #include "maga_transformer/cpp/normal_engine/test/MockEngine.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
-#include "src/fastertransformer/core/Tensor.h"
 #include <cuda_runtime.h>
 
 #include <cstdlib>
