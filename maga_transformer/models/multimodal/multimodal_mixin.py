@@ -209,8 +209,8 @@ class MultiModalMixin:
     def load_mm_weight(self, ctype: str, device: str):
         # reserve mem for runtime mm part
         device_reserve_mem_bytes = int(os.environ.get("DEVICE_RESERVE_MEMORY_BYTES", "-1"))
-        if device_reserve_mem_bytes > -2048000000:
-            os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = "-2048000000"
+        if device_reserve_mem_bytes > -1024000000 and device_reserve_mem_bytes < 0:
+            os.environ["DEVICE_RESERVE_MEMORY_BYTES"] = "-1024000000"
 
         # wait rank0 finish loading weight, otherwise gang_server will die
         nccl_op_ = NcclOp()
