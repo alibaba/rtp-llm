@@ -233,7 +233,6 @@ cc_library(
     name = "cuda",
     srcs = ["gemm.cc"],
     hdrs = [
-        "custom_ar_comm.h",
         "gemm.h",
         "Dispatch.h"],
     deps = [
