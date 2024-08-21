@@ -26,7 +26,6 @@ cc_library(
     name = "kernels_cu",
     srcs = glob([
         "*.cu",
-        "online_softmax_beamsearch/*.cu",
     ], exclude = [
         "layernorm_fp8_kernels.cu",
         "activation_fp8_kernels.cu",
@@ -38,8 +37,6 @@ cc_library(
     hdrs = glob([
         "*.h",
         "*.cuh",
-        "online_softmax_beamsearch/*.h",
-        "online_softmax_beamsearch/*.hpp"
     ], exclude=[
         "AttentionFP8Weight.h",
         "moe_kernels.h",
