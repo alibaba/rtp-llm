@@ -52,7 +52,6 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
     FT_LOG_DEBUG("receive request %ld", request->request_id());
     auto input = QueryConverter::transQuery(request);
 
-    // todo: catch python exception, such as download timeout
     if (mm_processor_ != nullptr && input->multimodal_urls) {
         auto mm_res = mm_processor_->update_mm_features(input);
         if (!mm_res.ok()) {

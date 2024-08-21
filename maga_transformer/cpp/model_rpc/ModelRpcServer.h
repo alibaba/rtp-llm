@@ -23,7 +23,6 @@ public:
     grpc::Status generate_stream(grpc::ServerContext*                   context,
                                  const GenerateInputPB*                 request,
                                  grpc::ServerWriter<GenerateOutputsPB>* writer) override;
-    void initMultimodal(const py::object mm_process_engine);
 
     KVCacheInfo getKVCacheInfo() const;
 
@@ -34,7 +33,6 @@ public:
     void removeLora(const int64_t lora_id);
 private:
     std::unique_ptr<NormalEngine> engine_ = nullptr;
-    py::object mm_process_engine_;
     std::unique_ptr<MultimodalProcessor> mm_processor_ = nullptr;
 };
 
