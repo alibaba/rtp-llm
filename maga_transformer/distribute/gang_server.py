@@ -7,7 +7,7 @@ import datetime
 import logging
 import uvicorn
 from typing import Dict, Any, List
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from threading import Thread
 from fastapi import FastAPI
 from datetime import timedelta
@@ -136,15 +136,17 @@ class GangServer:
             if resposne.status_code != 200:
                 raise Exception(f"member {member.ip}:{member.server_port} /health status_code: {resposne.status_code}, is not ready")
 
-    def request_workers(self, req: Dict[str, Any], uri: str = 'inference_internal', wait: bool = False):
+    def request_workers(self, req: Dict[str, Any], uri: str = 'inference_internal', is_wait: bool = False):
         req = copy.deepcopy(req)
         def curl_impl(url: str):
             _ = requests.post(url, json=req)
+        future_list = []
         for member in self._gang_info.workers():
             url = f'http://{member.ip}:{member.server_port}/{uri}'
-            self._request_threadpool.submit(curl_impl, url)
-        if wait:
-            self._request_threadpool.shutdown()
+            future_ = self._request_threadpool.submit(curl_impl, url)
+            future_list.append(future_)
+        if is_wait:
+            wait(future_list)
 
     def _health_check_impl(self):
         for member in self._gang_info.members:

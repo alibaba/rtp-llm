@@ -12,6 +12,7 @@ from fastapi import Request
 import torch
 import asyncio
 import functools
+import threading
 
 from fastapi import Request as RawRequest
 
@@ -50,6 +51,7 @@ class InferenceServer(object):
         self._lora_manager = None
         self._system_reporter = sys_reporter
         self._atomic_count = AtomicCounter()
+        self.thread_lock_ = threading.Lock()
         self._init_controller()
 
     def start(self):
@@ -303,14 +305,14 @@ class InferenceServer(object):
             lora_infos = version_info.peft_info.get("lora_info", {})
         try:
             assert self._lora_manager
-            with Timer() as t:
+            with Timer() as t, self.thread_lock_:
                 add_lora_map = self._lora_manager.get_add_lora_map(lora_infos)
                 remove_lora_map = self._lora_manager.get_remove_lora_map(lora_infos)
                 # must remove first
                 for key, value in remove_lora_map.items():
-                    await self.remove_lora({"adapter_name": key})
+                    self.remove_lora({"adapter_name": key})
                 for key, value in add_lora_map.items():
-                    await self.add_lora({"adapter_name": key, "lora_path": value})
+                    self.add_lora({"adapter_name": key, "lora_path": value})
             rep = JSONResponse(None)
             kmonitor.report(AccMetrics.UPDATE_QPS_METRIC, 1)
             kmonitor.report(GaugeMetrics.UPDATE_LANTENCY_METRIC, t.cost_ms())
@@ -321,16 +323,14 @@ class InferenceServer(object):
             rep = JSONResponse(format_exception(e), status_code=error_code)
         return rep
 
-    async def add_lora(self, req: Dict[str, str]):
+    def add_lora(self, req: Dict[str, str]):
         assert self._lora_manager is not None
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
             self._gang_server.request_workers(req, 'add_lora_internal', True)
-        ret = self._lora_manager.add_lora(req['adapter_name'], req['lora_path'])
-        return ret
+        self._lora_manager.add_lora(req['adapter_name'], req['lora_path'])
 
-    async def remove_lora(self, req: Dict[str, str]):
+    def remove_lora(self, req: Dict[str, str]):
         assert self._lora_manager is not None
-        ret = self._lora_manager.remove_lora(req['adapter_name'])
+        self._lora_manager.remove_lora(req['adapter_name'])
         if g_parallel_info.is_master and g_parallel_info.world_size > 1:
             self._gang_server.request_workers(req, 'remove_lora_internal', True)
-        return ret
