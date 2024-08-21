@@ -20,9 +20,7 @@ void TorchCudaAllocator::free(void** ptr) {
 }
 
 at::DataPtr TorchCudaAllocator::allocate(size_t size) const {
-    int device_id = 0;
-    cudaGetDevice(&device_id);
-    auto  device = c10::Device(at::DeviceType::CUDA, device_id);
+    auto  device = c10::Device(at::DeviceType::CUDA, device_id_);
     void* ptr    = allocator_->malloc(size);
     return {ptr, ptr, &local_raw_delete, device};
 }
@@ -39,10 +37,8 @@ void* TorchCudaAllocator::raw_alloc_with_stream(size_t nbytes, cudaStream_t stre
     if (nbytes == 0) {
         return nullptr;
     }
-    int   device = 0;
-    cudaGetDevice(&device);
     void* r      = nullptr;
-    malloc(&r, device, nbytes, stream);
+    malloc(&r, device_id_, nbytes, stream);
     return r;
 }
 
@@ -59,8 +55,8 @@ c10::cuda::CUDACachingAllocator::CUDAAllocator* getTorchCUDAAllocator() {
     return &torch_cuda_allocator;
 }
 
-void initTorchCUDAAllocator(IAllocator* allocator) {
-    torch_cuda_allocator.init(allocator);
+void initTorchCUDAAllocator(IAllocator* allocator, int device_id) {
+    torch_cuda_allocator.init(allocator, device_id);
 }
 
 }  // namespace fastertransformer

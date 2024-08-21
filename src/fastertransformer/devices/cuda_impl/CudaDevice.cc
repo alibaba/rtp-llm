@@ -112,7 +112,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
     }
 
     origin_torch_cuda_allocator_ = at::cuda::CUDACachingAllocator::allocator;
-    initTorchCUDAAllocator(allocator_.get());
+    initTorchCUDAAllocator(allocator_.get(), device_id_);
     // change torch cuda gpu allocate
     at::cuda::CUDACachingAllocator::allocator.store(getTorchCUDAAllocator());
 

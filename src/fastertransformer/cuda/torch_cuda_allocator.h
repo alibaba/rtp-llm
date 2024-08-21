@@ -10,11 +10,13 @@ private:
     IAllocator*                                 allocator_;
     at::cuda::CUDACachingAllocator::DeviceStats stats;
 
+    int        device_id_;
     std::mutex mutex;
 
 public:
-    void init(IAllocator* allocator) {
+    void init(IAllocator* allocator, int device_id) {
         allocator_ = allocator;
+        device_id_ = device_id;
     }
 
     void init(int device_count) override {}
@@ -145,6 +147,6 @@ public:
 
 c10::cuda::CUDACachingAllocator::CUDAAllocator* getTorchCUDAAllocator();
 
-void initTorchCUDAAllocator(IAllocator* allocator);
+void initTorchCUDAAllocator(IAllocator* allocator, int device_id);
 
 }  // namespace fastertransformer
