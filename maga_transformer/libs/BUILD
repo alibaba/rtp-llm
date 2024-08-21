@@ -1,5 +1,5 @@
 load("//bazel:defs.bzl", "copy_target_to")
-load("//bazel:arch_select.bzl", "th_transformer_so")
+load("//bazel:arch_select.bzl", "th_transformer_so", "kernel_so_deps")
 package(default_visibility = ["//maga_transformer:__subpackages__"])
 
 th_transformer_so()
@@ -63,9 +63,5 @@ filegroup(
     srcs = [],
     data = [
         ":libth_transformer_so",
-    ] + select({
-        "//:using_cuda": [":libmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so"],
-        "//:using_rocm": [":libmmha_so"],
-        "//conditions:default":[],
-    })
+    ] + kernel_so_deps()
 )

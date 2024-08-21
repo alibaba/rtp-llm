@@ -83,3 +83,10 @@ def fa_deps():
         name = "fa_hdrs",
         actual = "@flash_attention//:fa2_hdrs",
     )
+
+def kernel_so_deps():
+    return select({
+        "//:using_cuda": [":libmmha_so", ":libfa_so", ":libfpA_intB_so", ":libint8_gemm_so", ":libmoe_so"],
+        "//:using_rocm": [":libmmha_so"],
+        "//conditions:default":[],
+    })
