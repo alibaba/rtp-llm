@@ -176,16 +176,6 @@ class InferenceApp(object):
         def remove_lora_internal(req: Dict[str, str]):
             self.inference_server.remove_lora(req)
 
-        @app.post("/add_lora")
-        @check_is_master()
-        def add_lora(req: Dict[str, str]):
-            self.inference_server.add_lora(req)
-
-        @app.post("/remove_lora")
-        @check_is_master()
-        def remove_lora(req: Dict[str, str]):
-            self.inference_server.remove_lora(req)
-
         # update for worker RANK == 0
         @app.post("/update")
         @check_is_master()
