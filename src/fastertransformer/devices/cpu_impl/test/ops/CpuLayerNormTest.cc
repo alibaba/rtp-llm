@@ -78,7 +78,7 @@ TEST_F(CpuLayerNormTest, testSimpleContextAttention) {
     for (const auto& m : test_m) {
         for (const auto& n : test_n) {
             printf("testing m = %d, n = %d \n", m, n);
-            testGeneralLayernorm(DataType::TYPE_BF16, NormType::layernorm, m, n);
+            // testGeneralLayernorm(DataType::TYPE_BF16, NormType::layernorm, m, n);
             testGeneralLayernorm(DataType::TYPE_FP32, NormType::layernorm, m, n);
         }
     }

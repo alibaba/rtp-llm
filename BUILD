@@ -28,6 +28,10 @@ config_setting(
     values = {"define": "using_arm=true"},
 )
 
+config_setting(
+    name = "xft_use_icx",
+    values = {"define": "xft_use_icx=true"},
+)
 
 cc_library(
     name = "gpt_init_params_hdr",

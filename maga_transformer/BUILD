@@ -19,6 +19,15 @@ tensorrt = [
     "tensorrt-cu12-libs",
 ]
 
+xft_dep = select({
+    "//:xft_use_icx": [
+        "xfastertransformer_devel_icx",
+    ],
+    "//conditions:default": [
+        "xfastertransformer_devel",
+    ],
+})
+
 requirement([
     "sentencepiece",
     "transformers",
@@ -43,6 +52,7 @@ requirement([
     "sentence-transformers",
     "orjson",
     "xfastertransformer_devel",
+    "xfastertransformer_devel_icx",
     "decord",
     # add qwen agent package
     "pydantic",
@@ -137,12 +147,18 @@ py_library(
         ":ops",
         ":timm",
         ":onnx",
-        ":xfastertransformer_devel",
         ":decord",
         ":nest_asyncio"
     ] + select({
         "//:using_cuda12": tensorrt,
         "//conditions:default": []
+    }) + select({
+        "//:xft_use_icx": [
+            "xfastertransformer_devel_icx",
+        ],
+        "//conditions:default": [
+            "xfastertransformer_devel",
+        ],
     }),
 )
 
@@ -339,7 +355,6 @@ py_wheel(
         "timm==0.9.12",
         "sentence-transformers==2.7.0",
         "grpcio==1.62.0",
-        "xfastertransformer_devel==1.8.1.1",
         "decord==0.6.0",
         "oss2",
         "json5",
@@ -347,7 +362,7 @@ py_wheel(
         "jieba",
         "openai",
         "nest_asyncio",
-    ] + whl_deps(),
+    ] + whl_deps() + xft_dep,
 )
 
 py_wheel(
@@ -389,12 +404,11 @@ py_wheel(
         "pydantic==2.5.3",
         "sentence-transformers==2.7.0",
         "grpcio==1.62.0",
-        "xfastertransformer_devel==1.8.1.1",
         "decord==0.6.0",
         "timm==0.9.12",
         "kserve",
         "nest_asyncio",
-    ] + whl_deps(),
+    ] + whl_deps() + xft_dep,
 )
 
 rename_wheel(
