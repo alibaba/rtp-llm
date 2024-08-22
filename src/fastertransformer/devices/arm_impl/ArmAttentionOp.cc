@@ -233,7 +233,7 @@ void ArmCpuDevice::logTime(std::chrono::microseconds diff, size_t index) {
     a_cnt_[index] += 1;
 }
 
-#define USING_THREADED_MHA 1
+#define USING_THREADED_MHA 0
 void ArmCpuDevice::contextAttentionFallback(const AttentionModuleParams& params) {
     auto datatype      = params.input.type();
     auto batch_size    = params.common.context_batch_size;
@@ -341,7 +341,7 @@ void ArmCpuDevice::contextAttentionFallback(const AttentionModuleParams& params)
                 throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
             }
         } else {
-            throw std::runtime_error("SelfAttention RoPE type is not supported");
+            throw std::runtime_error(fmtstr("SelfAttention RoPE type is not supported %d", params.configs.rope_config.style));
         }
     }
     tEnd = std::chrono::steady_clock::now();

@@ -50,7 +50,7 @@ class InferenceWorker():
         copy_gemm_config()
         logging.info("starting InferenceWorker")
         if not torch.cuda.is_available():
-            raise Exception("GPU not found")
+            logging.info("GPU not found: using CPU")
 
         self.model: AsyncModel = ModelFactory.create_from_env()
         self.pipeline = Pipeline(self.model, self.model.tokenizer)

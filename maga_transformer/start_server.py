@@ -69,6 +69,8 @@ def multi_rank_start():
 
 def main():
     os.makedirs('logs', exist_ok=True)
+    if not torch.cuda.is_available():
+        return local_rank_start()
 
     if g_parallel_info.world_size % torch.cuda.device_count() != 0 and g_parallel_info.world_size > torch.cuda.device_count():
         raise Exception(f'result: {g_parallel_info.world_size % torch.cuda.device_count()} \

@@ -17,5 +17,6 @@ cc_library(
         "@arm_compute//support",
     ],
     visibility = ["//visibility:public"],
-    copts = copts(),
+    copts = copts() + ["-fopenmp"],
+    alwayslink = 1,
 )

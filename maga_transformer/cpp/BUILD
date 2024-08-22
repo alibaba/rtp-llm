@@ -254,6 +254,9 @@ cc_library(
         "//:using_cuda": [
             "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         ],
+        "//:using_arm": [
+            "//src/fastertransformer/devices/arm_impl:arm_cpu_impl",
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"]

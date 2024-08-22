@@ -2,12 +2,46 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/core/cpu_allocator.h"
+#include "src/fastertransformer/core/TrackerAllocator.h"
 #include <cstring>
+#include <sys/sysinfo.h>
 
 namespace fastertransformer {
 
+int getMemoryInfo(unsigned long *free_bytes, unsigned long *total_bytes) {
+    struct sysinfo info;
+
+    if (sysinfo(&info) != 0) {
+        // sysinfo call failed
+        return -1;
+    }
+
+    *free_bytes = info.freeram * info.mem_unit;
+    *total_bytes = info.totalram * info.mem_unit;
+
+    return 0;
+}
+
 ArmCpuDevice::ArmCpuDevice(const DeviceInitParams& params): DeviceBase(params) {
-    allocator_.reset(new Allocator<AllocatorType::CPU>());
+
+    auto allocator_ptr     = new Allocator<AllocatorType::CPU>();
+    if (params.device_reserve_memory_bytes) {
+        size_t free_bytes, total_bytes;
+        FT_CHECK(getMemoryInfo(&free_bytes, &total_bytes) == 0);
+        TrackerAllocatorParams tracker_params;
+        tracker_params.real_allocator     = allocator_ptr;
+        tracker_params.target_track_bytes = params.device_reserve_memory_bytes > 0 ?
+                                                params.device_reserve_memory_bytes :
+                                                free_bytes + params.device_reserve_memory_bytes;
+        tracker_params.align_size         = 16;
+        FT_LOG_INFO("Arm device %d has %lu bytes free memory, trying to reserve %lu bytes.",
+                    device_id_,
+                    free_bytes,
+                    tracker_params.target_track_bytes);
+        allocator_.reset(new TrackerAllocator(tracker_params));
+    } else {
+        allocator_.reset(allocator_ptr);
+    }
 }
 
 ArmCpuDevice::~ArmCpuDevice() {}
@@ -53,10 +87,6 @@ GroupedGemmOutput ArmCpuDevice::groupedGemm(const GroupedGemmParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
-void ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
-    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
-}
-
 void ArmCpuDevice::sampleBeamSearch(const BeamSearchParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
@@ -67,6 +97,23 @@ void ArmCpuDevice::broadcast(const BroadcastParams& params) {
 
 void ArmCpuDevice::allReduceSum(const AllReduceParams& params) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
+DeviceStatus ArmCpuDevice::getDeviceStatus() {
+    DeviceStatus status;
+
+    size_t total_bytes;
+    auto error = getMemoryInfo(&status.device_memory_status.free_bytes, &total_bytes);
+    FT_CHECK(error == 0);
+    status.device_memory_status.used_bytes = total_bytes - status.device_memory_status.free_bytes;
+
+    const auto buffer_status = queryBufferStatus();
+    status.device_memory_status.allocated_bytes = buffer_status.device_allocated_bytes;
+    status.device_memory_status.preserved_bytes = buffer_status.device_preserved_bytes;
+    status.host_memory_status.allocated_bytes = buffer_status.host_allocated_bytes;
+    status.device_memory_status.available_bytes = status.device_memory_status.free_bytes + status.device_memory_status.preserved_bytes;
+
+    return status;
 }
 
 RTP_LLM_REGISTER_DEVICE(ArmCpu);

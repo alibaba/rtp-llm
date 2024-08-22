@@ -37,3 +37,10 @@ def pip_deps():
         python_interpreter = "/opt/conda310/bin/python3",
         timeout=12000,
     )
+
+    pip_install(
+        name = "pip_cpu_arm_torch",
+        requirements = ["//open_source/deps:requirements_cpu_arm.txt", "//open_source/deps:requirements_base.txt"],
+        python_interpreter = "/opt/conda310/bin/python3",
+        timeout=12000,
+    )
