@@ -37,7 +37,7 @@ cc_library(
     ]),
     deps = torch_deps() + [
         "//src/fastertransformer/kernels:kernels",
-	    "//:th_utils",
+	"//:th_utils",
         "cutlass_kernels_interface",
     ],
     copts = cuda_copts(),
@@ -62,6 +62,7 @@ py_test(
     ],
     deps = [
         "//maga_transformer:torch",
+        "//maga_transformer:transformers",
     ],
 )
 
@@ -76,6 +77,7 @@ py_test(
     ],
     deps = [
         "//maga_transformer:torch",
+        "//maga_transformer:transformers",
         "//maga_transformer:einops"
     ],
     tags = ["exclusive"]
@@ -106,6 +108,7 @@ py_test(
     ],
     deps = [
         "//maga_transformer:torch",
+        "//maga_transformer:numpy",
     ],
 )
 
@@ -120,5 +123,6 @@ py_test(
     ],
     deps = [
         "//maga_transformer:torch",
+        "//maga_transformer:numpy",
     ],
 )

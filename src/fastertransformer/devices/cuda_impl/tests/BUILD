@@ -56,7 +56,8 @@ py_test(
         "FT_DISABLE_CUSTOM_AR": "1"
     },
     deps = [
-        "//maga_transformer/test/utils:device_resource"
+        "//maga_transformer/test/utils:device_resource",
+        "//maga_transformer:torch",
     ],
     data = [":cuda_dist_test_binary"],
     args = ["$(location :cuda_dist_test_binary)"],
