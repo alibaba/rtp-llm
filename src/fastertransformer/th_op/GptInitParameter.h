@@ -203,6 +203,7 @@ public:
     bool     reuse_cache_                      = false;
     bool     enable_partial_fallback_          = false;
     bool     enable_fast_gen_                  = false;
+    bool     warm_up_                          = false;
     int64_t  fast_gen_max_context_len_         = 0;
 
     bool use_medusa_ = false;

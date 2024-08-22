@@ -252,7 +252,7 @@ class GptInitModelParameters:
                 prompt: str = info['prompt']
                 tokens_id = tokenizer.encode(prompt)
                 self.insertMultiTaskPromptTokens(task_id, tokens_id)
-        
+
     def update_task_prompt_config(self):
         prompt_file_path =  os.environ.get('MULTI_TASK_PROMPT', None)
         if not prompt_file_path:
@@ -291,7 +291,7 @@ class GptInitModelParameters:
             if 'prefix_projection' in content:
                 self.prefix_projection = content['prefix_projection']
         logging.info(f"read ptuning config, pre_seq_len:{self.pre_seq_len}, prefix_projection:{self.prefix_projection}")
-        
+
     def update_task_type_use_kvcache(self):
         self.task_type = check_task_type(self.ckpt_path)
         self.setTaskType(self.task_type.value)
@@ -343,18 +343,18 @@ class GptInitModelParameters:
         logging.info(f'max_generate_batch_size: {self.max_generate_batch_size}')
         self.max_context_batch_size = int(os.environ.get('MAX_CONTEXT_BATCH_SIZE', 1))
         logging.info(f'max_context_batch_size: {self.max_context_batch_size}')
-        self.reserve_runtime_mem_mb = int(os.environ.get('RESERVER_RUNTIME_MEM_MB', 1 * 1024))
+        self.reserve_runtime_mem_mb = int(os.environ.get('RESERVER_RUNTIME_MEM_MB', 128))
         logging.info(f'reserve_runtime_mem_mb: {self.reserve_runtime_mem_mb}')
         self.kv_cache_mem_mb = int(os.environ.get('KV_CACHE_MEM_MB', -1))
         logging.info(f'kv_cache_mem_mb: {self.kv_cache_mem_mb}')
         self.block_nums = int(os.environ.get('TEST_BLOCK_NUM', 0))
         logging.info(f'block_nums: {self.block_nums}')
-        
         self.enable_partial_fallback = bool(int(os.environ.get('ENABLE_PARTIAL_FALLBACK', 0)))
         logging.info(f'enable_partial_fallback: {self.enable_partial_fallback}')
-
         self.enable_fast_gen = bool(int(os.environ.get('ENABLE_FAST_GEN', 0)))
         logging.info(f'enable_fast_gen: {self.enable_fast_gen}')
+        self.warm_up = bool(int(os.environ.get('WARM_UP', 0)))
+        logging.info(f'warm up: {self.warm_up}')
         # TODO(xinfei.sxf) fix name
         self.fast_gen_max_context_len = int(os.environ.get('FAST_GEN_MAX_CONTEXT_LEN', 1024))
         logging.info(f'fast_gen_max_context_len: {self.fast_gen_max_context_len}')
@@ -402,7 +402,7 @@ class GptInitModelParameters:
 
     @property
     def model_param_count(self):
-        return self.word_emb_param_count*2 + self.layer_weight_param_count + self.gpt_init_params.hidden_size 
+        return self.word_emb_param_count*2 + self.layer_weight_param_count + self.gpt_init_params.hidden_size
 
     @property
     def word_emb_param_count(self):
@@ -449,10 +449,9 @@ class GptInitModelParameters:
                 layer_weight_param_count = layer_weight_param_count + self.layer_num * self.inter_size * hidden_size * ffn_w_count
                 if self.moe_style == 2:
                     layer_weight_param_count = layer_weight_param_count + len(self.moe_layer_index) * self.moe_inter_padding_size * hidden_size * ffn_w_count * ffn_export_num
-                
+
         if ffn_export_num > 1:
             layer_weight_param_count = layer_weight_param_count + len(self.moe_layer_index) * hidden_size * ffn_export_num
         # other small tensor
         layer_weight_param_count = layer_weight_param_count + self.layer_num * hidden_size * 11
         return layer_weight_param_count
-

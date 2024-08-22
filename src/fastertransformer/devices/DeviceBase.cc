@@ -24,6 +24,10 @@ void DeviceBase::init() {
     buffer_manager_.reset(new BufferManager(getAllocator(), getHostAllocator()));
 }
 
+void DeviceBase::setTraceMemory(bool trace_memory) {
+    buffer_manager_->setTraceMemory(trace_memory);
+}
+
 DeviceStatus DeviceBase::getDeviceStatus() {
     return DeviceStatus();
 }

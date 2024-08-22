@@ -30,7 +30,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     seq_length_ = generate_input_->inputLength();
     last_output_pos_ = seq_length_;
     common_len_ = seq_length_;
-    adjusted_common_len_ = tileNum() == 1 ? seq_length_ : seq_length_ / seqSizePerBlock() * seqSizePerBlock();
     max_chunk_len_ = seq_length_;
 
     begin_time_us_      = input->begin_time_ms;
@@ -228,7 +227,7 @@ int GenerateStream::commonLen() const {
 }
 
 int GenerateStream::adjustedCommonLen() const {
-    return adjusted_common_len_;
+    return tileNum() == 1 ? seq_length_ : inputLength() / seqSizePerBlock() * seqSizePerBlock();
 }
 
 int GenerateStream::seqSizePerBlock() const {
@@ -680,13 +679,16 @@ std::string GenerateStream::debugString() const {
 void GenerateStream::resetCommonLen() {
     if (tileNum() == 1) {
         common_len_ = seq_length_;
-        adjusted_common_len_ = seq_length_;
     }
 }
 
 void GenerateStream::setSeqLength(int seq_length) {
     seq_length_ = seq_length;
     resetCommonLen();
+}
+
+void GenerateStream::setPerfTest(bool perf_test) {
+    perf_test_ = perf_test;
 }
 
 void GenerateStream::setIsContextStream(bool is_context_stream) {

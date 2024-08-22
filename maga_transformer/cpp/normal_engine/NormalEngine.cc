@@ -8,6 +8,7 @@
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "autil/TimeUtility.h"
+#include <memory>
 
 using namespace std;
 namespace rtp_llm {
@@ -18,7 +19,21 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
     metrics_reporter_(params.metrics_reporter)
 {
     FT_LOG_INFO(__PRETTY_FUNCTION__);
-    initCacheManager();
+    size_t max_left_free_bytes = 0;
+    if (params_.warm_up_) {
+        // warm up
+        FT_LOG_INFO("warm up max_context_batch_size %d, max_seq_len %d  query begin", params_.max_context_batch_size_, params_.max_seq_len_);
+        max_left_free_bytes = warmUp(params);
+        if (max_left_free_bytes > 1024L * 1024 * 1024) {
+            if (params_.is_multimodal_) {
+                max_left_free_bytes -= 1024L * 1024 * 1024; // just reserve 1024M for vit
+            } else {
+                max_left_free_bytes -= 128L * 1024 * 1024; // just reserve 128M for other, maybe can rm
+            }
+        }
+        FT_LOG_INFO("warm up done, max left free bytes: %ld, max runtime buffer bytes %ld", max_left_free_bytes, device_->getDeviceStatus().device_memory_status.preserved_bytes - max_left_free_bytes);
+    }
+    initCacheManager(max_left_free_bytes);
     FT_LOG_INFO("create cache manager done");
     executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, device_, getLoraManager()));
     FT_LOG_INFO("create normal executor done");
@@ -32,9 +47,33 @@ NormalEngine::~NormalEngine() {
     (void)stop();
 }
 
-void NormalEngine::initCacheManager() {
+size_t NormalEngine::warmUp(const EngineInitParams& params) {
+    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
+    fake_input->input_ids                     = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
+    std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
+    fake_input->generate_config               = make_shared<GenerateConfig>();
+    fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
+    device_->setTraceMemory(true);
+    std::shared_ptr<GenerateStream> stream = std::make_shared<GenerateStream>(fake_input, params_, resource_context_, nullptr);
+    stream->setPerfTest(true);
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream);
+    executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
+    THROW_IF_STATUS_ERROR(executor_->process(streams));
+    size_t min_preserved_bytes = device_->getDeviceStatus().device_memory_status.min_preserved_bytes;
+    device_->setTraceMemory(false);
+    (void)executor_.reset(nullptr);
+    return min_preserved_bytes;
+}
+
+void NormalEngine::initCacheManager(size_t kv_cache_mem_size) {
     auto result = CacheConfigCreator::createConfig(params_);
     THROW_IF_STATUS_ERROR(result.status());
+    if (kv_cache_mem_size) {
+        uint32_t new_block_nums = kv_cache_mem_size / result.value().block_size;
+        FT_LOG_INFO("try adjust block num %d to %d for warm up test result", result.value().block_nums, new_block_nums);
+        result.value().block_nums = std::min(new_block_nums, result.value().block_nums); // choose min when both warm up and set reserve_runtime_mem_mb
+    }
     resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device_, metrics_reporter_);
 }
 

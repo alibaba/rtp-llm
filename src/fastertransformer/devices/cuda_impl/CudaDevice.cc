@@ -319,7 +319,7 @@ DeviceStatus CudaDevice::getDeviceStatus() {
     status.device_memory_status.preserved_bytes = buffer_status.device_preserved_bytes;
     status.host_memory_status.allocated_bytes = buffer_status.host_allocated_bytes;
     status.device_memory_status.available_bytes = status.device_memory_status.free_bytes + status.device_memory_status.preserved_bytes;
-
+    status.device_memory_status.min_preserved_bytes = buffer_status.device_min_preserved_bytes;
     nvmlUtilization_t utilization;
     auto ret = nvmlDeviceGetUtilizationRates(nvml_device_, &utilization);
     FT_CHECK(ret == NVML_SUCCESS);

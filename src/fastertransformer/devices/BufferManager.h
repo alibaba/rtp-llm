@@ -26,10 +26,12 @@ struct BufferParams {
 };
 
 struct BufferStatus {
-    size_t host_allocated_bytes = 0;
-    size_t device_allocated_bytes = 0;
-    size_t device_preserved_bytes = 0;
-    size_t device_fragmented_bytes = 0;
+    size_t device_free_bytes          = 0;
+    size_t host_allocated_bytes       = 0;
+    size_t device_allocated_bytes     = 0;
+    size_t device_preserved_bytes     = 0;
+    size_t device_fragmented_bytes    = 0;
+    size_t device_min_preserved_bytes = 0;
 };
 
 struct AllocationRecord {
@@ -47,6 +49,7 @@ public:
 public:
     BufferPtr allocate(const BufferParams& params, const BufferHints& hints);
     void recycle(Buffer* buffer, IAllocator* allocator);
+    void setTraceMemory(bool trace_memory);
     virtual BufferStatus queryStatus();
     std::string printAllocationRecords(IAllocator* allocator);
 
@@ -63,10 +66,10 @@ private:
     std::unordered_map<void*, AllocationRecord> allocation_records_;
     std::shared_mutex mutex_;
 
-    size_t device_max_allocated_bytes_;
-    const bool trace_memory_;
+    size_t device_max_allocated_bytes_ = 0;
+    size_t device_min_preserved_bytes_ = 0;
+    bool trace_memory_;
     const bool trace_malloc_stack_;
 };
 
 } // namespace fastertransformer
-

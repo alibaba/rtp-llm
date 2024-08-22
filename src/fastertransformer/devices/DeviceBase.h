@@ -19,6 +19,7 @@ public:
     virtual DeviceProperties getDeviceProperties() = 0;
     virtual DeviceStatus getDeviceStatus();
     void traceMemoryUsage();
+    void setTraceMemory(bool trace_memory);
     BufferPtr allocateBuffer(const BufferParams& params, const BufferHints& hints = {});
     BufferPtr allocateBufferLike(const Buffer& buffer,
                                  const AllocationType atype = AllocationType::DEVICE,

@@ -56,6 +56,13 @@ void BufferManager::doRecycle(Buffer* buffer, IAllocator* allocator) {
     allocator->free(&data);
 }
 
+void BufferManager::setTraceMemory(bool trace_memory) {
+    trace_memory_ = trace_memory;
+    if (!trace_memory) {
+        device_min_preserved_bytes_ = 0;
+    }
+}
+
 void BufferManager::recordAllcation(const BufferParams& params, const BufferHints& hints, const BufferPtr& buffer) {
     auto stack_trace_id = trace_malloc_stack_ ? autil::StackTracer::getInstance()->getTraceId() : 0;
     {
@@ -67,6 +74,7 @@ void BufferManager::recordAllcation(const BufferParams& params, const BufferHint
         FT_LOG_DEBUG("record allocation: %p, size: %zu, tag: [%s], trace id [%lu]",
                      buffer->data(), buffer->sizeBytes(), hints.tag.c_str(), stack_trace_id);
         auto status = queryStatus();
+        device_min_preserved_bytes_ = device_min_preserved_bytes_ ? std::min(device_min_preserved_bytes_, status.device_free_bytes) : status.device_free_bytes;
         if (status.device_allocated_bytes > device_max_allocated_bytes_) {
             FT_LOG_INFO("Device allocated size or fragmented size reached new maximum %zu, \n"
                         "previous is %zu bytes, current stack trace id[%lu]\n  %s",
@@ -76,7 +84,6 @@ void BufferManager::recordAllcation(const BufferParams& params, const BufferHint
             device_max_allocated_bytes_ = status.device_allocated_bytes;
         }
     }
-
 }
 
 void BufferManager::recordRecycle(Buffer* buffer) {
@@ -104,6 +111,10 @@ BufferStatus BufferManager::queryStatus() {
         const auto tracker_status = tracker_allocator_->getTrackerStatus();
         status.device_preserved_bytes = tracker_status.available_size;
         status.device_fragmented_bytes = tracker_status.fragmented_size;
+        status.device_free_bytes = tracker_status.free_size;
+        if (trace_memory_) {
+            status.device_min_preserved_bytes = device_min_preserved_bytes_;
+        }
     }
     return status;
 }
@@ -147,4 +158,3 @@ string BufferManager::printAllocationRecords(IAllocator* allocator) {
 }
 
 } // namespace fastertransformer
-

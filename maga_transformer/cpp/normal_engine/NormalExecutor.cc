@@ -15,14 +15,14 @@ namespace rtp_llm {
 NormalExecutor::NormalExecutor(const EngineInitParams& params,
                                const std::shared_ptr<CacheManager>& cache_manager,
                                ft::DeviceBase* device,
-                               const std::shared_ptr<lora::LoraManager>& lora_manager = nullptr):
+                               const std::shared_ptr<lora::LoraManager>& lora_manager,
+                               bool warm_up):
     Executor(device),
     cache_manager_(cache_manager),
     lora_manager_(lora_manager),
+    warm_up_(warm_up),
     metrics_reporter_(params.metrics_reporter),
-    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)),
-    dtype_(ft::getDataType(params.gpt_init_parameter.data_type_)),
-    is_causal_(params.gpt_init_parameter.is_causal_)
+    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_))
 {
     int eos_id = params.gpt_init_parameter.special_tokens_.eos_token_id_;
     SamplerInitParams sampler_params{device_, eos_id, 1024}; // set static max batch size to avoid sampler reset memory
@@ -39,21 +39,23 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     CHECK_AND_RETURN_REF(model_input, batch_stream_processor_->gatherModelInput(stream_groups));
     tpSyncModelInputs(model_input, device_);
     // get lora input
-    if (lora_manager_ != nullptr) {
+    if (lora_manager_) {
         model_input.lora_model_input = lora_manager_->makeLoraModelInput(model_input.lora_ids,
                                                                          model_input.lora_input_lengths);
     }
-    auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
-    model_input.k_cache_buffer = kv_cache_buffer.k_blocks;
-    model_input.v_cache_buffer = kv_cache_buffer.v_blocks;
-    model_input.k_scale_buffer = kv_cache_buffer.k_scale;
-    model_input.v_scale_buffer = kv_cache_buffer.v_scale;
+    if (!warm_up_) {
+        auto kv_cache_buffer = cache_manager_->kvCacheBuffer();
+        model_input.k_cache_buffer = kv_cache_buffer.k_blocks;
+        model_input.v_cache_buffer = kv_cache_buffer.v_blocks;
+        model_input.k_scale_buffer = kv_cache_buffer.k_scale;
+        model_input.v_scale_buffer = kv_cache_buffer.v_scale;
+    }
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
     auto            merged_output = std::make_unique<MergedOutput>();
     GptModelOutputs model_output;
     model_output = std::move(model_->forward(model_input));
     FT_LOG_DEBUG("model forward done");
-    if (device_->getDeviceProperties().tp_rank > 0) {
+    if (device_->getDeviceProperties().tp_rank > 0 || warm_up_) {
         return absl::OkStatus();
     }
     CHECK_AND_RETURN_REF(sampler_input, batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));

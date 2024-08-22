@@ -144,6 +144,7 @@ public:
     void setIsContextStream(bool is_context_stream);
     ft::BufferPtr getLoss();
     StreamCacheResource& streamCacheResource();
+    void setPerfTest(bool perf_test_);
 
 protected:
     ft::DeviceBase* device_;
@@ -182,7 +183,6 @@ protected:
     int                                 max_chunk_len_          = 0;
 
     int                                 common_len_             = 0;
-    int                                 adjusted_common_len_    = 0;
 
     kmonitor::MetricsReporterPtr        metrics_reporter_       = nullptr;
     ft::SpecialTokens                   special_tokens_;
