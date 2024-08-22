@@ -45,7 +45,7 @@ private:
     size_t warmUp(const EngineInitParams& params);
     absl::Status trySaveStepError() const;
     void         loop();
-    bool         initCacheManager(size_t kv_cache_mem_size);
+    void         initCacheManager(size_t kv_cache_mem_size);
     void         initSystemPrompt();
 
 private:
