@@ -85,25 +85,31 @@ void writeContextKvCache(
 }
 
 AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& params) {
-    auto datatype            = params.input.type();
-    auto token_num           = params.input.shape()[0];
-    auto batch_size          = params.common.context_batch_size;
-    auto seq_len             = params.common.context_max_seq_len;
+    auto datatype       = params.input.type();
+    auto token_num      = params.input.shape()[0];
+    auto batch_size     = params.common.context_batch_size;
+    auto decoder_batch_size = params.common.decoder_batch_size;
+    auto seq_len        = params.common.context_max_seq_len;
     auto seq_len_with_prefix = seq_len + params.common.max_prefix_length;
-    auto head_num            = params.configs.head_num;
-    auto kv_head_num         = params.configs.kv_head_num;
-    auto size_per_head       = params.configs.size_per_head;
+    // auto context_token_num   = params.common.context_token_num;
+    auto head_num       = params.configs.head_num;
+    auto kv_head_num    = params.configs.kv_head_num;
+    auto size_per_head  = params.configs.size_per_head;
 
-    auto q_output = allocateBuffer(
-        {params.input.type(), {batch_size, head_num, seq_len, size_per_head}, AllocationType::DEVICE}, {"q_output"});
+    auto q_output = allocateBuffer({params.input.type(),
+                                    {batch_size, head_num, seq_len, size_per_head},
+                                    AllocationType::DEVICE},
+                                    {"q_output"});
 
-    auto k_output = allocateBuffer(
-        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
-        {"k_output"});
+    auto k_output = allocateBuffer({params.input.type(),
+                                    {batch_size, kv_head_num, seq_len_with_prefix, size_per_head},
+                                    AllocationType::DEVICE},
+                                    {"k_output"});
 
-    auto v_output = allocateBuffer(
-        {params.input.type(), {batch_size, kv_head_num, seq_len_with_prefix, size_per_head}, AllocationType::DEVICE},
-        {"v_output"});
+    auto v_output = allocateBuffer({params.input.type(),
+                                    {batch_size, kv_head_num, seq_len_with_prefix, size_per_head},
+                                    AllocationType::DEVICE},
+                                    {"v_output"});
 
     KVBlockArray                  kv_block_array;
     BufferPtr                     block_pointers, block_scale_pointers;
@@ -126,35 +132,41 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
             prefix_prompt_param.kv_block_array           = kv_block_array;
         }
     }
+    printBufferData(params.common.input_lengths, "input_lengths");
+    if (params.common.cu_seqlens) {
+        printBufferData(*params.common.cu_seqlens, "cu_seqlens");
+        printBufferData(*params.common.cu_kv_seqlens, "cu_kv_seqlens");
+    }
+    printBufferData(params.input, "fa_input");
 
     // int8
     float* scale_out_ptr = nullptr;
     int    int8_mode     = 0;
 
-    DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
-                                     invokeAddFusedQKVBiasTranspose,
-                                     q_output->data(),
-                                     k_output->data(),
-                                     v_output->data(),
-                                     &prefix_prompt_param,
-                                     params.input.data(),
-                                     params.common.position_ids ? params.common.position_ids->data<int>() : nullptr,
-                                     params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() :
-                                                                       nullptr,
-                                     params.common.padding_offset->data<int>(),
-                                     params.common.cu_seqlens->data<int>(),
-                                     batch_size,
-                                     seq_len,
-                                     token_num,
-                                     head_num,
-                                     kv_head_num,
-                                     size_per_head,
-                                     params.configs.rope_config,
-                                     params.configs.use_logn_attn,
-                                     scale_out_ptr,
-                                     int8_mode,
-                                     false,
-                                     stream_);
+    DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype, invokeAddFusedQKVBiasTranspose,
+        q_output->data(),
+        k_output->data(),
+        v_output->data(),
+        &prefix_prompt_param,
+        params.input.data(),
+        params.common.position_ids ? params.common.position_ids->dataWithOffset<int>(decoder_batch_size): nullptr,
+        params.configs.fuse_qkv_add_bias && params.weights.qkv_weight->bias ? params.weights.qkv_weight->bias->data() : nullptr,
+        params.common.padding_offset->data<int>(),
+        params.common.cu_seqlens->data<int>(),
+        batch_size,
+        seq_len,
+        token_num,
+        head_num,
+        kv_head_num,
+        size_per_head,
+        params.configs.rope_config,
+        params.configs.use_logn_attn,
+        scale_out_ptr,
+        int8_mode,
+        false,
+        stream_
+    );
+    sync_check_cuda_error();
 
     if (params.common.kv_cache) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
@@ -173,21 +185,34 @@ AttentionModuleOutput ROCmDevice::contextAttention(const AttentionModuleParams& 
                         kv_head_num,
                         size_per_head,
                         params.configs.q_scaling);
-    auto seq_len_round_32 = (seq_len + 31) / 32 * 32;
-    auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32, // params.output.type(),
-                                        {batch_size, head_num, seq_len_round_32},
-                                        AllocationType::DEVICE},
-                                        {"softmax_lse"});
+    // auto seq_len_round_32 = (seq_len + 31) / 32 * 32;
+    // auto softmax_lse_ = allocateBuffer({DataType::TYPE_FP32, // params.output.type(),
+    //                                     {batch_size, head_num, seq_len_round_32},
+    //                                     AllocationType::DEVICE},
+    //                                     {"softmax_lse"});
     printBufferData(*q_output, "q_output");
-    printBufferData(*k_output, "k_output");
-    printBufferData(*v_output, "v_output");
-    if (fmha_runner_->runCKFmha(q_output->data(),
-                                k_output->data(),
-                                v_output->data(),
+    // printBufferData(*k_output, "k_output");
+    // printBufferData(*v_output, "v_output");
+    // if (v_output->shape()[0]>1) {
+    //     printBufferData(*(v_output->index(1)), "v_output_batch1");
+    // }
+
+
+    const size_t hidden_units    = head_num * size_per_head;
+    const size_t hidden_units_kv = kv_head_num * size_per_head;
+    if (fmha_runner_->runCKFmha(params.input.data(),
+                                params.input.dataWithOffset(hidden_units),
+                                params.input.dataWithOffset(hidden_units + hidden_units_kv),
                                 params.output.data(),
-                                softmax_lse_->data(), // nullptr
+                                nullptr,  // buffer for store out softmax_lse, looks like not used by RTP
                                 batch_size,
-                                seq_len)) {
+                                seq_len,
+                                // context_token_num,
+                                params.common.cu_seqlens->data(),
+                                params.common.cu_kv_seqlens->data(),
+                                params.common.linear_bias_slopes ? params.common.linear_bias_slopes->data() : nullptr,
+                                nullptr)) {
+
         return;
     } else {
         // TODO(lidongjin): Only support float32 gemm output.

@@ -214,7 +214,7 @@ def git_deps():
     new_git_repository(
         name = "composable_kernel_archive",
         remote = "https://github.com/ROCm/composable_kernel.git",
-        commit = "497ccb872b6a9a921c01df4dca49dac7cb242c72",
+        commit = "79a5d9c10c45a4290ba916695dce4625022c89df", # CommitTag: [CK_TILE] FA bwd kernels optimization (#1397)
         patches = ["//3rdparty/composable_kernel:ck.patch"],
         build_file = "//3rdparty/composable_kernel:ck.BUILD",
         shallow_since = "1719582646 -0700",

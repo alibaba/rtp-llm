@@ -13,6 +13,7 @@ private:
     size_t kv_head_num_;
     size_t size_per_head_;
     float  q_scaling_;
+
     hipStream_t stream_;
 
 public:
@@ -42,6 +43,8 @@ public:
                    void*  softmax_lse_,
                    size_t batch_size,
                    size_t seq_len,
+                   void*  seqstart_q,
+                   void*  seqstart_k,
                    void*  linear_bias_slopes = nullptr,
                    void*  biasBuffer         = nullptr);
 };

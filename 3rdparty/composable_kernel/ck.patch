@@ -11,14 +11,14 @@
  }
  
  MASK_IMPL = {
-@@ -55,20 +55,20 @@
+@@ -55,13 +55,13 @@
  
  BIAS_MAP = {
      "no" : "ck_tile::BlockAttentionBiasEnum::NO_BIAS",
 -    "bias"  : "ck_tile::BlockAttentionBiasEnum::ELEMENTWISE_BIAS",
 -    "alibi" : "ck_tile::BlockAttentionBiasEnum::ALIBI"
 +    # "bias"  : "ck_tile::BlockAttentionBiasEnum::ELEMENTWISE_BIAS",
-+    # "alibi" : "ck_tile::BlockAttentionBiasEnum::ALIBI"
++     "alibi" : "ck_tile::BlockAttentionBiasEnum::ALIBI"
  }
  
  # TODO: this is ugly
@@ -27,13 +27,12 @@
 -    "bias"  : "bias_enum::elementwise_bias",
 -    "alibi" : "bias_enum::alibi"
 +    # "bias"  : "bias_enum::elementwise_bias",
-+    # "alibi" : "bias_enum::alibi"
++     "alibi" : "bias_enum::alibi"
  }
- 
+@@ -84,5 +84,5 @@
+
  MODE_MAP = {
-     "batch" : "false",
--    "group" : "true"
-+    # "group" : "true"
+-    "batch" : "false",
++    # "batch" : "false",
+     "group" : "true"
  }
- 
- LAYOUT_MAP = {

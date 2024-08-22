@@ -15,12 +15,13 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
                                 void*  softmax_lse_,
                                 size_t batch_size,
                                 size_t seq_len,
+                                void*  seqstart_q,
+                                void*  seqstart_k,
                                 void*  linear_bias_slopes,
                                 void*  biasBuffer) {
 
-    // TODO: for batch mode only
     // map parms from FT to CK
-    mode_enum mode         = mode_enum::batch;
+    mode_enum mode         = mode_enum::group;
     auto      data_type    = getDataTypeStr(dtype_);
     auto      batch        = static_cast<ck_tile::index_t>(batch_size);
     auto      nhead        = static_cast<ck_tile::index_t>(head_num_);
@@ -37,11 +38,11 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
     ck_tile::index_t seqlen_k = seq_len;
     if (seqlen_k < 0)
         seqlen_k = seqlen_q;
-    auto [seqlen_qs, seqlen_ks, seqlen_kpads] = decode_seqlen(mode,
-                                                              batch,
-                                                              std::to_string(seqlen_q),
-                                                              std::to_string(seqlen_k),
-                                                              "-1");
+    // auto [seqlen_qs, seqlen_ks, seqlen_kpads] = decode_seqlen(mode_enum::batch,
+    //                                                           batch,
+    //                                                           std::to_string(seqlen_q),
+    //                                                           std::to_string(seqlen_k),
+    //                                                           "-1");
 
     ck_tile::index_t hdim_q = size_per_head_;
     ck_tile::index_t hdim_v = size_per_head_;
@@ -49,9 +50,10 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
         hdim_v = hdim_q;
 
     // the output of add_fusedQKV_bias_transpose_kernel:
-    // shape of q is same ([batch_size, head_num, seq_len, size_per_head]), but
-    // shapes of key and values become [batch_size, head_num, max_prefix_prompt_length + seq_len, size_per_head].
-    bool  i_perm        = true;  // if true, will be batch * nhead * seqlen * hdim
+    // This kernel add bias to QKV, which has shape [batch_size, seq_len, 3, head_num, size_per_head], and
+    // QKV split to 3 split buffer q, k, v and transpose them to [batch_size, head_num, seq_len, size_per_head].
+    // For q and k, also apply the rotary embedding.
+    bool  i_perm        = false;   // if true, will be batch * nhead * seqlen * hdim
     bool  o_perm        = false;  // if false, will be batch * seqlen * nhead * hdim
     float scale_s       = 0.f;
     if (scale_s == .0f)
@@ -88,7 +90,7 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
     
 
     bias_info bias = bias_info::decode(linear_bias_slopes ? "a" : "n");
-    mask_info mask = mask_info::decode(msk_str, seqlen_qs[0], seqlen_ks[0]);  // TODO: we don't need x/y anymore
+    mask_info mask = mask_info::decode(msk_str, seqlen_q, seqlen_k);  // TODO: we don't need x/y anymore
 
     float    p_drop      = 0.;
     uint64_t drop_seed   = 1.;
@@ -105,17 +107,19 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
     }
 
     int num_splits = 1;
-    const ck_tile::index_t max_seqlen_q = seq_len;
+    const ck_tile::index_t max_seqlen_q = seq_len; // max of all batch
     const ck_tile::index_t max_seqlen_k = seq_len;
 
     // host memory for storing all the tensor elements
     const ck_tile::index_t shape_batch     = (mode == mode_enum::batch ? batch : 1);
-    const ck_tile::index_t shape_seqlen_q  = seqlen_qs[0];
-    const ck_tile::index_t shape_seqlen_k  = seqlen_ks[0];
-    const auto seqstart_q_host = generate_seqstarts(mode, batch, seqlen_q);
-    const auto seqstart_k_host = generate_seqstarts(mode, batch, seqlen_k);
-    ck_tile::DeviceMem     seqstart_q(seqstart_q_host.size() * sizeof(int32_t));
-    ck_tile::DeviceMem     seqstart_k(seqstart_k_host.size() * sizeof(int32_t));
+    const ck_tile::index_t shape_seqlen_q  = (mode == mode_enum::batch ? seq_len : seq_len);
+    const ck_tile::index_t shape_seqlen_k  = (mode == mode_enum::batch ? seq_len : seq_len);
+
+    ck_tile::HostTensor<ck_tile::half_t> lse_acc_host(
+        1 < num_splits ? std::array<ck_tile::index_t, 4>{num_splits, batch, nhead, max_seqlen_q} :
+                         std::array<ck_tile::index_t, 4>{1, 1, 1, 1});
+    ck_tile::DeviceMem lse_acc_buf(lse_acc_host.get_element_space_size_in_bytes());
+
 
     auto fmha_traits = fmha_fwd_traits{hdim_q,
                                        hdim_v,
@@ -130,17 +134,14 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
 
     auto fmha_args = [&]() {
         assert(nhead % nhead_k == 0);
-        /// NOTE: we broadcast bias from [1, 1, seqlen_q, seqlen_k] to [batch, nhead, seqlen_q,
-        ///       seqlen_k] in this example, hence both the 'batch_stride_bias' &
-        ///       'nhead_stride_bias' are 0.
-        // setup stride_* arguments
-        const ck_tile::index_t stride_q = (i_perm ? hdim_q : nhead * hdim_q);
-        const ck_tile::index_t stride_k = (i_perm ? hdim_q : nhead_k * hdim_q);
+        // QKV, which has shape [batch_size, seq_len, 3, head_num, size_per_head]
+        const ck_tile::index_t stride_q = (i_perm ? hdim_q : (nhead + 2 * nhead_k) * hdim_q);
+        const ck_tile::index_t stride_k = (i_perm ? hdim_q : (nhead + 2 * nhead_k) * hdim_q);
         const ck_tile::index_t stride_v = [&]() {
             if(is_v_rowmajor)
-                return i_perm ? hdim_v : nhead_k * hdim_v;
+                return i_perm ? hdim_v : (nhead + 2 * nhead_k) * hdim_v;
             else
-                return i_perm ? shape_seqlen_k : nhead_k * shape_seqlen_k;
+                return i_perm ? shape_seqlen_k : (nhead + 2 * nhead_k) * shape_seqlen_k;
         }();
         const ck_tile::index_t stride_bias    = (i_perm ? shape_seqlen_k : 1 * shape_seqlen_k);
         const ck_tile::index_t stride_randval = (max_seqlen_k);
@@ -158,8 +159,8 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
         const ck_tile::index_t nhead_stride_bias =
             (i_perm ? 0 * shape_seqlen_q * shape_seqlen_k : 0 * shape_seqlen_k);
         const ck_tile::index_t nhead_stride_randval = (shape_seqlen_q * max_seqlen_k);
-        const ck_tile::index_t nhead_stride_lse     = max_seqlen_q;
-        const ck_tile::index_t nhead_stride_lse_acc = max_seqlen_q;
+        const ck_tile::index_t nhead_stride_lse     = shape_seqlen_q;
+        const ck_tile::index_t nhead_stride_lse_acc = shape_seqlen_q;
         const ck_tile::index_t nhead_stride_o_acc   = (max_seqlen_q * hdim_v);
         const ck_tile::index_t nhead_stride_o       = (o_perm ? shape_seqlen_q * hdim_v : hdim_v);
         // setup batch_stride_* arguments
@@ -168,26 +169,26 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
         const ck_tile::index_t batch_stride_v       = (nhead_k * hdim_v * shape_seqlen_k);
         const ck_tile::index_t batch_stride_bias    = (0 * nhead * shape_seqlen_q * shape_seqlen_k);
         const ck_tile::index_t batch_stride_randval = (nhead * shape_seqlen_q * max_seqlen_k);
-        const ck_tile::index_t batch_stride_lse     = (nhead * max_seqlen_q);
-        const ck_tile::index_t batch_stride_lse_acc = (nhead * max_seqlen_q);
+        const ck_tile::index_t batch_stride_lse     = (nhead * shape_seqlen_q);
+        const ck_tile::index_t batch_stride_lse_acc = (nhead * shape_seqlen_q);
         const ck_tile::index_t batch_stride_o_acc   = (nhead * max_seqlen_q * hdim_v);
         const ck_tile::index_t batch_stride_o       = (nhead * shape_seqlen_q * hdim_v);
         // setup split_stride_* arguments (only used in split-kv kernel)
-        const ck_tile::index_t split_stride_lse_acc = (batch * nhead * max_seqlen_q);
+        const ck_tile::index_t split_stride_lse_acc = (shape_batch * nhead * shape_seqlen_q);
         const ck_tile::index_t split_stride_o_acc   = (batch * nhead * max_seqlen_q * hdim_v);
 
         return fmha_fwd_args{q,
                              k,
                              v,
                              bias.type == bias_enum::alibi ? linear_bias_slopes : biasBuffer,
-                             nullptr,  // randval_buf.GetDeviceBuffer(),
-                             nullptr,  // lse_acc_buf.GetDeviceBuffer(),
-                             nullptr,  // o_acc_buf.GetDeviceBuffer(),
+                             nullptr,                        // randval_buf.GetDeviceBuffer(),
+                             lse_acc_buf.GetDeviceBuffer(),  // lse_acc_buf.GetDeviceBuffer(),
+                             nullptr,                        // o_acc_buf.GetDeviceBuffer(),
                              softmax_lse_,
                              output,
-                             seqstart_q.GetDeviceBuffer(),
-                             seqstart_k.GetDeviceBuffer(),
-                             nullptr,
+                             seqstart_q,
+                             seqstart_k,
+                             nullptr,  // seqlen_kpads
                              shape_seqlen_q,
                              shape_seqlen_k,
                              batch,
@@ -252,6 +253,5 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
         return true;
     }
 }
-
 
 }  // namespace fastertransformer
