@@ -8,6 +8,7 @@ test_copts = [
 test_linkopts = [
     "-lpython3.10",
     "-ltorch",
+    "-lstdc++",
 ]
 
 test_deps = [
@@ -22,6 +23,7 @@ cc_test(
         "ops/CpuFFnOpTest.cc",
     ],
     data = [],
+    tags = ["cpu", ],
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps,
@@ -33,6 +35,7 @@ cc_test(
         "ops/CpuAttentionLayerTest.cc",
     ],
     data = [],
+    tags = ["cpu", ],
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps,
@@ -44,7 +47,7 @@ cc_test(
         "ops/CpuLayerNormTest.cc",
     ],
     data = [],
-    tags = [],
+    tags = ["cpu", ],
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps,
@@ -56,7 +59,7 @@ cc_test(
         "ops/CpuEmbeddingTest.cc",
     ],
     data = [],
-    tags = [],
+    tags = ["cpu", ],
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps,
@@ -68,7 +71,7 @@ cc_test(
         "ops/CpuGemmTest.cc",
     ],
     data = [],
-    tags = ["manual"],
+    tags = ["cpu", "manual"],
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps,
@@ -80,6 +83,7 @@ cc_test(
         "CpuOpsTest.cc",
     ],
     data = [],
+    tags = ["cpu", ],
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps,
