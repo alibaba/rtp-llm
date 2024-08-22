@@ -238,7 +238,7 @@ bool rocmFmhaWrapper::runCKFmha(void*  q,
     ck_tile::stream_config stream_config{
         nullptr,  // stream_id_
         false,    // time_kernel_
-        1,        // log_level_
+        0,        // log_level_
         0,        // cold_niters_
         1,        // nrepeat_
         // false     // 

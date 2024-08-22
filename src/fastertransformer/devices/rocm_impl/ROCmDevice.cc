@@ -30,7 +30,7 @@ extern "C" half __truncdfhf2(double a) {
 namespace fastertransformer {
 using namespace rocm;
 
-#define PINCPU_MEM 1
+#define PINCPU_MEM 0
 
 ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     RUNTIME_ASSERT_OP_ARG(params.tp_rank == 0, "rocm device doesn't support nccl");

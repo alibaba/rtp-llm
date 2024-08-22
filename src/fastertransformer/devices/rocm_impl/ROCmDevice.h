@@ -36,21 +36,21 @@ public:
     void syncAndCheck() override;
     BufferPtr gemm(const GemmParams& params) override;
     SelectOutput select(const SelectParams& params) override;
-    MultiplyOutput multiply(const MultiplyParams& params);
+    MultiplyOutput multiply(const MultiplyParams& params) override;
     BufferPtr embeddingLookup(const EmbeddingLookupParams& params) override;
     LayernormOutput layernorm(const LayernormParams& params) override;
     BufferPtr activation(const ActivationParams& params) override;
     AttentionModuleOutput contextAttention(const AttentionModuleParams& params) override;
     AttentionModuleOutput decoderSelfAttention(const AttentionModuleParams& params) override;
-    FfnLayerOutput moeFfnLayer(const FfnLayerParams& params);
+    FfnLayerOutput moeFfnLayer(const FfnLayerParams& params) override;
     BufferPtr softmax(const SoftmaxParams& params) override;
-    void sampleGreedy(const GreedyParams& params);
+    void sampleGreedy(const GreedyParams& params) override;
     DeviceStatus getDeviceStatus() override;
     
     void syncCommunication(bool timeout = true) override;
-    void broadcast(const BroadcastParams& params);
-    AllReduceOutput allReduce(const AllReduceParams& params);
-    void allGather(const AllGatherParams& params);
+    void broadcast(const BroadcastParams& params) override;
+    AllReduceOutput allReduce(const AllReduceParams& params) override;
+    void allGather(const AllGatherParams& params) override;
 
     BufferPtr quantize(const QuantizeParams& params) override;
     BufferPtr dequantize(const QuantizeParams& params);
