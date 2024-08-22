@@ -11,7 +11,12 @@ BufferPtr DeviceBase::mhaQKVGemm(const AttentionLayerParams& params) {
     // typically local_head_num * size_per_head + 2 * local_head_num_kv * size_per_head
     const auto qkv_merged_size = qkv_weight->kernel->shape()[1];
 
+#if defined(__aarch64__)
+    // Arm attention op only support fp32 data type
+    auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel), std::nullopt, nullptr, DataType::TYPE_FP32);
+#else
     auto qkv_gemm_params = GemmParams(input, *(qkv_weight->kernel));
+#endif
 
     auto lora_linear_params = LoraLinearParams(qkv_gemm_params, params.common.lora_input.qkv_lora_input);
     BufferPtr qkv;

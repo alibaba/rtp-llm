@@ -76,7 +76,12 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
                 : allocateBuffer({dtype, {h_token_num, output_weight->kernel->shape()[1]}},
                                  {"attn_layer_out"});
 
+#if defined(__aarch64__)
+    // Arm attention op only support fp32 data type
+    auto qkv_output = allocateBuffer({DataType::TYPE_FP32, {h_token_num, qkv_hidden_size}}, {"qkv_output"});
+#else
     auto qkv_output = allocateBuffer({dtype, {h_token_num, qkv_hidden_size}}, {"qkv_output"});
+#endif 
 
     auto kv_cache_offset = layer_kv_cache ? layer_kv_cache->kv_cache_offset : nullptr;
     if (generate_batch_size) {
@@ -131,7 +136,7 @@ AttentionLayerOutput DeviceBase::attentionLayer(const AttentionLayerParams& para
         auto output_gemm_params = GemmParams(*quantized_attention_output, *(output_weight->kernel), nullopt, output);
         loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     } else {
-        auto output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, output);
+        auto output_gemm_params = GemmParams(*qkv_output, *(output_weight->kernel), nullopt, output, dtype);
         loraLinear(LoraLinearParams(output_gemm_params, params.common.lora_input.out_lora_input)).output;
     }
 

@@ -442,13 +442,6 @@ decorator==5.1.1 \
     --hash=sha256:637996211036b6385ef91435e4fae22989472f9d571faba8927ba8253acbc330 \
     --hash=sha256:b8c3f85900b9dc423225913c5aace94729fe1fa9763b38939a95226f02d37186
     # via librosa
-decord==0.6.0 ; platform_machine == "x86_64" \
-    --hash=sha256:02665d7c4f1193a330205a791bc128f7e108eb6ae5b67144437a02f700943bad \
-    --hash=sha256:51997f20be8958e23b7c4061ba45d0efcd86bffd5fe81c695d0befee0d442976 \
-    --hash=sha256:85ef90d2f872384657d7774cc486c237c5b12df62d4ac5cb5c8d6001fa611323 \
-    --hash=sha256:9c20674964fb1490c677bd911d2023d2a09fec7a58a4bb0b7ddf1ccc269f107a \
-    --hash=sha256:a0eb1258beade34dceb29d97856a7764d179db1b5182899b61874f3418a1abc8
-    # via -r open_source/deps/requirements_base.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
     --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
@@ -1325,7 +1318,6 @@ numpy==1.24.1 \
     #   -r open_source/deps/requirements_base.txt
     #   accelerate
     #   contourpy
-    #   decord
     #   librosa
     #   matplotlib
     #   numba
@@ -2447,8 +2439,8 @@ tokenizers==0.15.2 \
     --hash=sha256:f86593c18d2e6248e72fb91c77d413a815153b8ea4e31f7cd443bdf28e467670 \
     --hash=sha256:fb16ba563d59003028b678d2361a27f7e4ae0ab29c7a80690efa20d829c81fdb
     # via transformers
-torch @ https://download.pytorch.org/whl/cpu/torch-2.1.2%2Bcpu-cp310-cp310-linux_x86_64.whl#sha256=bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd ; platform_machine == "x86_64" \
-    --hash=sha256:bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd
+torch @ https://download.pytorch.org/whl/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076 ; platform_machine == "aarch64" \
+    --hash=sha256:bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076
     # via
     #   -r open_source/deps/requirements_torch_cpu.txt
     #   accelerate
@@ -2521,12 +2513,6 @@ websocket-client==1.8.0 \
     --hash=sha256:17b44cc997f5c498e809b22cdf2d9c7a9e71c02c8cc2b6c56e7c2d1239bfa526 \
     --hash=sha256:3239df9f44da632f96012472805d40a23281a991027ce11d2f45a6f24ac4c3da
     # via dashscope
-xfastertransformer-devel==1.8.1.1 ; platform_machine == "x86_64" \
-    --hash=sha256:2344c92cbec175602895bfc76db862a7f724ab9ae0e4aa89bc1b462dfa25b2e9
-    # via -r open_source/deps/requirements_base.txt
-xfastertransformer-devel-icx==1.8.1.1 ; platform_machine == "x86_64" \
-    --hash=sha256:dfd1714815d38dfea89532365fbe36d502f0bb3baf37c0b472c16743a8cbe352
-    # via -r open_source/deps/requirements_base.txt
 yarl==1.9.7 \
     --hash=sha256:03e917cc44a01e1be60a83ee1a17550b929490aaa5df2a109adc02137bddf06b \
     --hash=sha256:050f3e4d886be55728fef268587d061c5ce6f79a82baba71840801b63441c301 \

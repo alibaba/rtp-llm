@@ -13,7 +13,7 @@ namespace fastertransformer {
 ///          A [b, ..., m, k]
 ///          B [b, ..., k, n]
 ///          C [b, ..., m, n]
-BufferPtr ArmCpuDevice::gemm(const GemmParams& params) {
+BufferPtr ArmCpuDevice::gemm_acl(const GemmParams& params) {
 
     params.check();
 

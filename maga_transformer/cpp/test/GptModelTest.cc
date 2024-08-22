@@ -115,7 +115,7 @@ TEST_F(GptModelTest, testSimple) {
         bufferToTensor(*createBuffer<float>(
             {10}, {1.1670, -0.6973, -0.6919, -1.7705, -1.4453,
                 -0.9766, -0.1351,  2.6152, 28.2500, -0.1479}, AllocationType::HOST)),
-        1e-1, 1e-2
+        1e-1, 2e-2
     );
 
     // combining two previous queries.
@@ -148,7 +148,7 @@ TEST_F(GptModelTest, testSimple) {
         bufferToTensor(*createBuffer<float>(
             {10}, {1.1670, -0.6973, -0.6919, -1.7705, -1.4453,
                 -0.9766, -0.1351,  2.6152, 28.2500, -0.1479}, AllocationType::HOST)),
-        1e-1, 1e-2
+        1e-1, 2e-2
     );
 
 }

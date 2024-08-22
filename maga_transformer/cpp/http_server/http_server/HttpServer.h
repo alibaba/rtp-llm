@@ -6,6 +6,7 @@
 #include "http_server/HttpResponseWriter.h"
 #include "autil/Log.h"
 #include "http_server/ANetApp.h"
+#include <functional>
 
 namespace http_server {
 

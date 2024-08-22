@@ -20,15 +20,8 @@ class ParallelInfo(object):
         self.world_size = world_size
         self.world_rank = world_rank
         self.local_world_size = local_world_size
-        #self.device = 'cuda:' + str(self.world_rank % self.local_world_size)
 
         if torch.cuda.is_available():
-        #if torch.cuda.is_available():
-        #    if bool(os.environ.get("SP_CHECKPOINT_PATH", "") != ""):
-        #        self.device = 'cuda:0'
-        #    else:
-        #        self.device = self.world_rank % self.local_world_size
-        #     self.device = 'cuda:' + str(self.world_rank % self.local_world_size)
             self.device = 'cuda:' + str(self.world_rank % self.local_world_size)
         else:
             self.device = 'cpu'

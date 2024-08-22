@@ -21,7 +21,7 @@ BufferPtr ArmCpuDevice::embeddingLookup(const EmbeddingLookupParams& params) {
         int src_offset = row_index * copy_size;
         int dst_offset = index * copy_size;
 
-        std::memcpy((char*)(embeddings->data()) + dst_offset, (char*)embedding_table.data() + src_offset, copy_size);
+        std::memcpy(static_cast<char*>(embeddings->data()) + dst_offset, static_cast<char*>(embedding_table.data()) + src_offset, copy_size);
     }
 
     return embeddings;

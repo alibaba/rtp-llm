@@ -6,7 +6,11 @@ import threading
 from enum import IntEnum
 from io import BytesIO
 from typing import Any, Callable, Optional
-from decord import VideoReader, cpu
+try:
+    from decord import VideoReader, cpu
+except ModuleNotFoundError:
+    VideoReader = None
+    cpu = None
 from PIL import Image
 
 from maga_transformer.utils.lru_dict import LruDict

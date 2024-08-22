@@ -231,6 +231,11 @@ void ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
 
     auto default_top_k = top_k.data<uint32_t>()[0];
     auto default_top_p = top_p.data<float>()[0];
+    
+    if (default_top_k == 0) {
+        default_top_k = 1;
+    }
+
     auto max_top_k = *std::max_element(top_k.data<uint32_t>(), top_k.dataWithOffset<uint32_t>(top_k.size()));
     if (max_top_k == 0) {
         // for safety. TopKSamplingLayer handles a case of top_k=0 and top_p=0 as
@@ -332,7 +337,6 @@ void ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
                max_top_k,
                top_k.data<uint32_t>());
 
-    printBufferData(tokens, "before topk_sampling", nullptr, true);
 
     topk_sampling(batch_size, topk_logs_indices, topk_logs, generator_lists,
                   tokens.data<int32_t>(),
@@ -349,8 +353,6 @@ void ArmCpuDevice::sampleGreedy(const GreedyParams& params) {
                   vocab_size_padded,
                   skip_top_k_decode_buf->data<bool>(),
                   step + 1);
-
-    // printBufferData(tokens, "output_token_ids", nullptr, true);
 
     return;
 }

@@ -117,6 +117,9 @@ build:arm --linkopt -ldl
 build:arm --copt="-DUSING_CUDA=0"
 build:arm --define=xft_use_icx=false
 build:arm --copt=-Wno-tautological-compare
+build:arm --copt=-Wno-array-bounds # aios
+build:arm --copt=-Wno-unused-result # grpc
+build:arm --copt=-Wno-array-parameter # boringssl
 
 build:debug --copt -g --copt -O0 --copt -U_FORTIFY_SOURCE
 build:trace --copt="-DCUTLASS_DEBUG_TRACE_LEVEL=1"
