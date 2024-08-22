@@ -57,7 +57,12 @@ cc_library(
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:device_utils",
         "//src/fastertransformer/models:weights_define",
-    ],
+    ] + select({
+        "//:using_arm": [
+            "//src/fastertransformer/devices/arm_impl:arm_cpu_impl",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
@@ -256,7 +261,7 @@ cc_library(
         "//:using_cuda": [
             "//src/fastertransformer/devices/cuda_impl:cuda_impl",
         ],
-	"//:using_arm": [
+        "//:using_arm": [
             "//src/fastertransformer/devices/arm_impl:arm_cpu_impl",
         ],
         "//conditions:default": [],

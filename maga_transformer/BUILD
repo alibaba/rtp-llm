@@ -165,7 +165,7 @@ py_library(
         ":onnx",
         #":decord",
         ":nest_asyncio",
-	":matplotlib",
+        ":matplotlib",
     ] + arch_dep + select({
         "//:using_cuda12": tensorrt,
         "//conditions:default": []

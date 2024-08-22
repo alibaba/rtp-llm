@@ -3,6 +3,8 @@
 
 #include <functional>
 #include <shared_mutex>
+#include <optional>
+#include <mutex>
 
 #include "autil/Log.h"
 #include "http_server/HttpRequest.h"

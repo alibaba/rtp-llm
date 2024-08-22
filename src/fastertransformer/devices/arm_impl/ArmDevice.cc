@@ -116,6 +116,45 @@ DeviceStatus ArmCpuDevice::getDeviceStatus() {
     return status;
 }
 
+#define MAX_PRE_CALC_SEQ_LEN 1024 // TODO: get it from model config
+DevicePrepOutput ArmCpuDevice::prepareModelRun(const DevicePrepParams& params) {
+    auto output = DevicePrepOutput();
+    /* Prepare cos/sin values used in RoPE. */
+    auto base = params.configs.rope_config.base;
+    auto dim = params.configs.rope_config.dim;
+
+    auto it = ropeCosSin.find(base);
+    if (it == ropeCosSin.end()) {
+        size_t inv_freq_size = (dim + 1) / 2;
+        float *inv_freq = (float *)malloc(inv_freq_size * sizeof(float));
+
+        for (size_t i = 0; i < inv_freq_size; i++) {
+            inv_freq[i] = 1.0f / powf(base, (float)(i * 2) / dim);
+        }
+        float *emb_cos = (float *)malloc(MAX_PRE_CALC_SEQ_LEN * inv_freq_size * sizeof(float));
+        float *emb_sin = (float *)malloc(MAX_PRE_CALC_SEQ_LEN * inv_freq_size * sizeof(float));
+
+        ropeCosSin[base] = std::make_tuple(MAX_PRE_CALC_SEQ_LEN, emb_cos, emb_sin);
+
+        for (size_t i = 0; i < MAX_PRE_CALC_SEQ_LEN; i++) {
+            float *pcos = emb_cos + i * inv_freq_size;
+            float *psin = emb_sin + i * inv_freq_size;
+
+            for (size_t j = 0; j < inv_freq_size; j++) {
+                float val = i * inv_freq[j];
+                float cos_tmp = cosf(val);
+                float sin_tmp = sinf(val);
+
+                pcos[j] = cos_tmp;
+                psin[j] = sin_tmp;
+            }
+        }
+        free(inv_freq);
+    }
+
+    return output;
+}
+
 RTP_LLM_REGISTER_DEVICE(ArmCpu);
 
 }  // namespace fastertransformer

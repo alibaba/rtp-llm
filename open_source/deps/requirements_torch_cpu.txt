@@ -1,3 +1,3 @@
 https://download.pytorch.org/whl/cpu/torch-2.1.2%2Bcpu-cp310-cp310-linux_x86_64.whl#sha256=bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd ; platform_machine == "x86_64"
-https://download.pytorch.org/whl/cpu/torch-2.3.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=7e24c138c3bacc8c511c6b8211f09c3bf547d3cbe3756321acec1bdce40fec6b ; platform_machine == "aarch64"
+https://download.pytorch.org/whl/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076 ; platform_machine == "aarch64"
 -r requirements_base.txt

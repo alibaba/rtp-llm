@@ -1,6 +1,6 @@
-https://download.pytorch.org/whl/cu121/torch-2.1.2%2Bcu121-cp310-cp310-linux_x86_64.whl#sha256=b2184b7729ef3b9b10065c074a37c1e603fd99f91e38376e25cb7ed6e1d54696
-torchvision
-tensorrt==10.3.0
-tensorrt-cu12-bindings==10.3.0
-tensorrt-cu12-libs==10.3.0
--r requirements_base.txt
+# https://download.pytorch.org/whl/cu121/torch-2.1.2%2Bcu121-cp310-cp310-linux_x86_64.whl#sha256=b2184b7729ef3b9b10065c074a37c1e603fd99f91e38376e25cb7ed6e1d54696
+# torchvision
+# tensorrt==10.3.0
+# tensorrt-cu12-bindings==10.3.0
+# tensorrt-cu12-libs==10.3.0
+# -r requirements_base.txt

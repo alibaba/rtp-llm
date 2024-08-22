@@ -126,3 +126,16 @@ cc_test(
     env = test_envs,
     tags = test_tags,
 )
+
+cc_test(
+    name = "arm_gemm_opt_op_test",
+    srcs = [
+        "ops/GemmOptOpTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps = test_deps,
+    env = test_envs,
+    tags = test_tags,
+)

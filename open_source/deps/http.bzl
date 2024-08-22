@@ -82,10 +82,9 @@ def http_deps():
 
     http_archive(
         name = "torch_2.3_py310_cpu_aarch64",
-        sha256 = "ad89e5a7dfaa96a3c054aaf644003b3e72cd34260b1288fdf4fb638eb9b15795",
+        sha256 = "bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076",
         urls = [
-            # This is a custom build of torch 2.3.0 for aarch64 with ACL 24.04 to workaround FP16 issue with ACL 23.08
-            "https://github.com/TianyuLi0/rtp-llm/raw/pytorch_2.3.0_aarch64_acl_24.04/3rdparty/acl/torch-2.3.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
+            "https://download.pytorch.org/whl/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076"
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),

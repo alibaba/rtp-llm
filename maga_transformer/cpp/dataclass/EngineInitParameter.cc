@@ -5,7 +5,9 @@
 #include "src/fastertransformer/models/W.h"
 #include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include <memory>
-
+#if defined(__aarch64__)
+#include "src/fastertransformer/devices/arm_impl/gemm_opt/ArmGemmKernel.h"
+#endif
 using namespace std;
 using namespace fastertransformer;
 
@@ -30,6 +32,9 @@ WeightsConverter::mayFindBuffer(const ConstBufferPtrMap& map,
 {
     auto it = map.find(key);
     if (it != map.end()) {
+#if defined(__aarch64__)
+        return prepareGemmWeight(key, it->second);
+#endif
         return it->second;
     }
     return nullptr;

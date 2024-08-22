@@ -2,52 +2,27 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/core/cpu_allocator.h"
-#include <cstring>
 
 namespace fastertransformer {
 
 /* Apply mask to input.
     Different heads share the same mask. */
-template<typename T>
+template<typename T, typename T_mask>
 void context_mask(BufferPtr input, const Buffer& mask) {
-#if 0
-    for (size_t dim0 = 0; dim0 < input->shape()[0]; dim0++) {
-        for (size_t dim1 = 0; dim1 < input->shape()[1]; dim1++) {
-            for (size_t dim2 = 0; dim2 < input->shape()[2]; dim2++) {
-                for (size_t dim3 = 0; dim3 < input->shape()[3]; dim3++) {
-                    auto v = input->dataWithOffset(
-                        ((dim0 * input->shape()[1] + dim1) * input->shape()[2] + dim2) * input->shape()[3] + dim3);
-                    auto m = mask.dataWithOffset((dim0 * input->shape()[2] + dim2) * input->shape()[3] + dim3);
-                    *(T*)v += (1.0f - *(T*)m) * -10000.0f;
-                }
-            }
-        }
-    }
-#else
     const int dim0 = input->shape()[0];
     const int dim1 = input->shape()[1];
     const int dim2 = input->shape()[2];
     const int dim3 = input->shape()[3];
-#if 0
-    const int N = dim0 * dim1 * dim2 * dim3;
-    parallel_for(N, [&](int tid) {
-        int b = tid / (dim1 * dim2 * dim3);
-        auto v = input->dataWithOffset(tid);
-        auto m = mask.dataWithOffset(b * dim2 * dim3 + tid % (dim2 * dim3));
-        *(float*)v += (1.0f - *(float*)m) * -10000.0f;
-    });
-#else
+
     const int N = dim0 * dim1;
     parallel_for(N, [&](int tid) {
         int b = tid / dim1;
         for (int i = 0; i < dim2 * dim3; i++) {
             auto v = input->dataWithOffset(tid * dim2 * dim3 + i);
             auto m = mask.dataWithOffset(b * dim2 * dim3 + i);
-            *(T*)v += (1.0f - *(T*)m) * -10000.0f;
+            *(T*)v += (1.0f - *(T_mask*)m) * -10000.0f;
         }
     });
-#endif
-#endif
 }
 
 BufferPtr ArmCpuDevice::softmax(const SoftmaxParams& params) {
@@ -68,13 +43,12 @@ BufferPtr ArmCpuDevice::softmax(const SoftmaxParams& params) {
     if (params.mask.has_value()) {
         /* Apply mask. */
         auto mask_type = params.mask.value().get().type();
-        if (mask_type != type) {
-            throw std::runtime_error("Inconsistent softmax input type and mask type is not supported");
-        }
-        if (type == DataType::TYPE_FP32) {
-            context_mask<float>(params.input, params.mask.value().get());
+        if (type == DataType::TYPE_FP32 && mask_type == DataType::TYPE_FP16) {
+            context_mask<float, __fp16>(params.input, params.mask.value().get());
+        } else if (type == DataType::TYPE_FP32 && mask_type == DataType::TYPE_FP32) {
+            context_mask<float, float>(params.input, params.mask.value().get());
         } else if (type == DataType::TYPE_FP16) {
-            context_mask<__fp16>(params.input, params.mask.value().get());
+            context_mask<__fp16, __fp16>(params.input, params.mask.value().get());
         } else {
             throw std::runtime_error("Softmax data type is not supported");
         }

@@ -22,6 +22,7 @@ cc_library(
         "//:using_rocm": ["@local_config_rocm//rocm:rocm_headers",
                           "@local_config_rocm//rocm:rocm",
                           "//src/fastertransformer/rocm:rocm_types_hdr"],
+        "//:using_arm": ["//src/fastertransformer/devices/arm_impl/type_bf16:hie_bfloat16"],
         "//conditions:default": [],
     }),
     copts = copts(),
