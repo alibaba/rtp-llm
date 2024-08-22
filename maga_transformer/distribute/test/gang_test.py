@@ -6,11 +6,15 @@ import signal
 import logging
 import unittest
 import requests
+import torch
 from unittest import mock
 from threading import Thread
 import multiprocessing
 from multiprocessing import Process
 from typing import List
+
+torch.cuda.set_device = lambda x:None
+
 from maga_transformer.distribute.gang_info import get_c2_members
 from maga_transformer.distribute.gang_info import get_gang_info
 from maga_transformer.distribute.worker_info import WorkerInfo, g_parallel_info, g_worker_info
