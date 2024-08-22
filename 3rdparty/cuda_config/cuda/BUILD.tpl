@@ -54,6 +54,7 @@ cuda_header_library(
 cc_library(
     name = "cuda_driver",
     srcs = ["cuda/lib/%{cuda_driver_lib}"],
+    tags = ["no-remote"],
 )
 
 cc_library(
@@ -61,6 +62,7 @@ cc_library(
     srcs = ["cuda/lib/%{cudart_lib}"],
     data = ["cuda/lib/%{cudart_lib}"],
     linkstatic = 1,
+    tags = ["no-remote"],
 )
 
 cuda_header_library(
@@ -122,6 +124,7 @@ cc_library(
     srcs = ["cuda/lib/%{cublas_lib}"],
     data = ["cuda/lib/%{cublas_lib}"],
     linkstatic = 1,
+    tags = ["no-remote"],
 )
 
 cc_library(
@@ -129,6 +132,7 @@ cc_library(
     srcs = ["cuda/lib/%{cublasLt_lib}"],
     data = ["cuda/lib/%{cublasLt_lib}"],
     linkstatic = 1,
+    tags = ["no-remote"],
 )
 
 cc_library(
@@ -137,6 +141,7 @@ cc_library(
     data = ["cuda/lib/%{cusolver_lib}"],
     linkopts = ["-lgomp"],
     linkstatic = 1,
+    tags = ["no-remote"],
 )
 
 cc_library(
@@ -144,6 +149,7 @@ cc_library(
     srcs = ["cuda/lib/%{cudnn_lib}"],
     data = ["cuda/lib/%{cudnn_lib}"],
     linkstatic = 1,
+    tags = ["no-remote"],
 )
 
 cc_library(
@@ -152,6 +158,7 @@ cc_library(
     include_prefix = "third_party/gpus/cudnn",
     strip_include_prefix = "cudnn/include",
     deps = [":cuda_headers"],
+    tags = ["no-remote"],
 )
 
 cc_library(
@@ -159,6 +166,7 @@ cc_library(
     srcs = ["cuda/lib/%{cufft_lib}"],
     data = ["cuda/lib/%{cufft_lib}"],
     linkstatic = 1,
+    tags = ["no-remote"],
 )
 
 cc_library(
@@ -166,6 +174,7 @@ cc_library(
     srcs = ["cuda/lib/%{nvml_lib}"],
     data = ["cuda/lib/%{nvml_lib}"],
     linkstatic = 1,
+    tags = ["no-remote"],
 )
 
 cc_library(
@@ -173,6 +182,7 @@ cc_library(
     srcs = ["cuda/lib/%{curand_lib}"],
     data = ["cuda/lib/%{curand_lib}"],
     linkstatic = 1,
+    tags = ["no-remote"],
 )
 
 cc_library(
@@ -180,6 +190,7 @@ cc_library(
     srcs = ["cuda/lib/%{nccl_lib}"],
     data = ["cuda/lib/%{nccl_lib}"],
     linkstatic = 1,
+    tags = ["no-remote"],
 )
 
 cc_library(
@@ -194,6 +205,7 @@ cc_library(
         ":curand",
         ":nvml",
     ],
+    tags = ["no-remote"],
 )
 
 alias(
@@ -212,6 +224,7 @@ cuda_header_library(
 cc_library(
     name = "cupti_dsos",
     data = ["cuda/lib/%{cupti_lib}"],
+    tags = ["no-remote"],
 )
 
 cc_library(
@@ -220,11 +233,13 @@ cc_library(
     data = ["cuda/lib/%{cusparse_lib}"],
     linkopts = ["-lgomp"],
     linkstatic = 1,
+    tags = ["no-remote"],
 )
 
 cc_library(
     name = "libdevice_root",
     data = [":cuda-nvvm"],
+    tags = ["no-remote"],
 )
 
 filegroup(
@@ -249,4 +264,3 @@ py_library(
 )
 
 %{copy_rules}
-

@@ -93,12 +93,14 @@ def cuda_header_library(
         strip_include_prefix = strip_include_prefix,
         deps = deps,
         visibility = ["//visibility:private"],
+        tags = ["no-remote"],
     )
 
     native.cc_library(
         name = name,
         textual_hdrs = hdrs,
         deps = deps + [":%s_virtual" % name],
+        tags = ["no-remote"],
         **kwargs
     )
 

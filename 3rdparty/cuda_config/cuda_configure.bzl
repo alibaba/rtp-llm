@@ -865,6 +865,7 @@ def make_copy_files_rule(repository_ctx, name, srcs, outs):
 %s
     ],
     cmd = \"""%s \""",
+    tags = ["no-remote"],
 )""" % (name, "\n".join(outs), " && \\\n".join(cmds))
 
 def make_copy_dir_rule(repository_ctx, name, src_dir, out_dir, exceptions = None):
@@ -895,6 +896,7 @@ def make_copy_dir_rule(repository_ctx, name, src_dir, out_dir, exceptions = None
 %s
     ],
     cmd = \"""cp -rLf "%s/." "%s/" %s\""",
+    tags = ["no-remote"],
 )""" % (name, "\n".join(outs), src_dir, out_dir, post_cmd)
 
 def _flag_enabled(repository_ctx, flag_name):
