@@ -10,6 +10,7 @@ namespace fastertransformer {
     Different heads share the same mask. */
 template<typename T>
 void context_mask(BufferPtr input, const Buffer& mask) {
+#if 0
     for (size_t dim0 = 0; dim0 < input->shape()[0]; dim0++) {
         for (size_t dim1 = 0; dim1 < input->shape()[1]; dim1++) {
             for (size_t dim2 = 0; dim2 < input->shape()[2]; dim2++) {
@@ -22,6 +23,31 @@ void context_mask(BufferPtr input, const Buffer& mask) {
             }
         }
     }
+#else
+    const int dim0 = input->shape()[0];
+    const int dim1 = input->shape()[1];
+    const int dim2 = input->shape()[2];
+    const int dim3 = input->shape()[3];
+#if 0
+    const int N = dim0 * dim1 * dim2 * dim3;
+    parallel_for(N, [&](int tid) {
+        int b = tid / (dim1 * dim2 * dim3);
+        auto v = input->dataWithOffset(tid);
+        auto m = mask.dataWithOffset(b * dim2 * dim3 + tid % (dim2 * dim3));
+        *(float*)v += (1.0f - *(float*)m) * -10000.0f;
+    });
+#else
+    const int N = dim0 * dim1;
+    parallel_for(N, [&](int tid) {
+        int b = tid / dim1;
+        for (int i = 0; i < dim2 * dim3; i++) {
+            auto v = input->dataWithOffset(tid * dim2 * dim3 + i);
+            auto m = mask.dataWithOffset(b * dim2 * dim3 + i);
+            *(float*)v += (1.0f - *(float*)m) * -10000.0f;
+        }
+    });
+#endif
+#endif
 }
 
 BufferPtr ArmCpuDevice::softmax(const SoftmaxParams& params) {
