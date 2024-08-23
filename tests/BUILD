@@ -69,7 +69,8 @@ py_test(
 py_test(
     name = "rotary_position_embedding",
     srcs = [
-        "rotary_embedding/rotary_position_embedding.py"
+        "rotary_embedding/rotary_position_embedding.py",
+        "rotary_embedding/yarn_rotary_embedding.py",
     ],
     data = [
         "//:th_transformer",
@@ -80,7 +81,6 @@ py_test(
         "//maga_transformer:transformers",
         "//maga_transformer:einops"
     ],
-    tags = ["exclusive"]
 )
 
 py_test(
