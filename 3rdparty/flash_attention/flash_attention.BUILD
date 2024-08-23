@@ -1,5 +1,6 @@
 load("@//:def.bzl", "cuda_copts", "copts")
 load("@//bazel:arch_select.bzl", "torch_deps")
+load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 package(default_visibility = ["//visibility:public"])
 
 config_setting(

@@ -1,5 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts")
-
+load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 cc_library(
     name = "cutlass_kernels_common",
     srcs = glob([
