@@ -31,8 +31,8 @@ def embedding_arpc_deps():
 
 def whl_deps():
     return select({
-        "//:using_cuda12": ["torch==2.1.0+cu121"],
-        "//:using_cuda11": ["torch==2.1.0+cu118"],
+        "//:using_cuda12": ["torch==2.1.2+cu121"],
+        "//:using_cuda11": ["torch==2.1.2+cu118"],
         "//:using_rocm": ["torch==2.1.2"],
         "//conditions:default": ["torch==2.1.2"],
     })
