@@ -125,12 +125,10 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     hipblasCreate(&hipblas_handle_);
     hipblasLtCreate(&hipblaslt_handle_);
 
-    hipblas_algo_map_.reset(new hipblasAlgoMap(GEMM_CONFIG));
+    //hipblas_algo_map_.reset(new hipblasAlgoMap(GEMM_CONFIG));
     hipblas_mm_wrapper_.reset(new hipblasMMWrapper(hipblas_handle_,
                                                    hipblaslt_handle_,
                                                    stream_,
-                                                   hipblas_algo_map_.get(),
-                                                   &hipblas_wrapper_mutex_,
                                                    allocator_.get()));
     hipblas_mm_wrapper_->setGemmConfig(hipblasDatatype_t::HIPBLAS_R_16F,
                                        hipblasDatatype_t::HIPBLAS_R_16F,

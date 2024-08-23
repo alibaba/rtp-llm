@@ -75,11 +75,9 @@ private:
         return hipblas_mm_wrapper_.get();
     }
 
-    std::mutex        hipblas_wrapper_mutex_;
     hipblasHandle_t   hipblas_handle_;
     hipblasLtHandle_t hipblaslt_handle_;
 
-    std::unique_ptr<rocm::hipblasAlgoMap>   hipblas_algo_map_;
     std::unique_ptr<rocm::hipblasMMWrapper> hipblas_mm_wrapper_;
 
     // fmha

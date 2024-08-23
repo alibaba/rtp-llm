@@ -28,7 +28,11 @@ cc_library(
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/core:allocator",
         "//src/fastertransformer/core:types",
-        "@composable_kernel//:ck_fmha_example"
+        "@composable_kernel//:ck_fmha_example",
+        "@com_google_absl//absl/container:node_hash_map",
+        "@com_google_absl//absl/container:inlined_vector",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
     ],
     copts = rocm_copts(),
     include_prefix = "src",

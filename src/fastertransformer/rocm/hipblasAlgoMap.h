@@ -1,85 +1,81 @@
 #pragma once
 
-#include "hip_utils.h"
+#include "rocm/include/hipblaslt/hipblaslt.h"
+#include "absl/container/node_hash_map.h"
 
-#include <map>
 #include <string>
-#include <unordered_map>
 #include <utility>
 
 namespace fastertransformer {
 namespace rocm {
 
-#define GEMM_NUM 6
-#define GEMM_CONFIG "gemm_config.in"
-#define IGEMM_CONFIG "igemm_config.in"
-#define SPGEMM_CONFIG "spgemm_config.in"
-#define SPIGEMM_CONFIG "spigemm_config.in"
-
-enum HipblasDataType {
-    FLOAT_DATATYPE    = 0,
-    HALF_DATATYPE     = 1,
-    BFLOAT16_DATATYPE = 2,
-    INT8_DATATYPE     = 3,
-    FP8_DATATYPE      = 4
-};
-
-typedef struct {
-    int   algoId, customOption, tile, splitK_val;
-    int   swizzle, reductionScheme, workspaceSize;
-    float exec_time;
-} hipblasLtMatmulAlgo_info;
-
-/* Structure to store information about different run trials */
-typedef struct {
-    hipblasLtMatmulAlgo_t algo;
-    hipblasStatus_t       status;
-    float                 time;
-    size_t                workspaceSize;  // actual memory workspace needed
-    int                   customOption;
-    float                 wavesCount;
-} customMatmulPerf_t;
-
-struct hipblasAlgoConfig_t {
-    int               batch_count;
-    int               m;
-    int               n;
-    int               k;
-    hipblasDatatype_t data_type;
-    bool              operator==(hipblasAlgoConfig_t const& config) const {
-        return (batch_count == config.batch_count) && (m == config.m) && (n == config.n) && (k == config.k)
-               && (data_type == config.data_type);
+template<typename T, hipblasStatus_t (*Destroy)(T)>
+struct Deleter {
+    void operator()(T ptr) const {
+        (void)Destroy(ptr);
     }
 };
 
-class hipblasAlgoConfig_hasher {
-public:
-    std::size_t operator()(hipblasAlgoConfig_t const& config) const {
-        return config.batch_count * 98317ull ^ config.m * 49157ull ^ config.n * 24593ull ^ config.k * 196613ull
-               ^ static_cast<int>(config.data_type) * 6151ull;
+template<typename T, hipblasStatus_t (*Destroy)(T)>
+using Ptr = std::unique_ptr<std::remove_pointer_t<T>, Deleter<T, Destroy>>;
+
+struct hipblasLtMatmulInfo {
+    hipblasLtMatmulAlgo_t                                      algo;
+    Ptr<hipblasLtMatmulDesc_t, hipblasLtMatmulDescDestroy>     opDesc;
+    Ptr<hipblasLtMatrixLayout_t, hipblasLtMatrixLayoutDestroy> ADesc, BDesc, CDesc;
+};
+
+struct hipblasLtAlgoConfig {
+    hipblasOperation_t   trans_a;
+    hipblasOperation_t   trans_b;
+    int32_t              m;
+    int32_t              n;
+    int32_t              k;
+    hipDataType          A_data_type;
+    int32_t              lda;
+    int64_t              stride_a;
+    hipDataType          B_data_type;
+    int32_t              ldb;
+    int64_t              stride_b;
+    hipDataType          C_data_type;
+    int32_t              ldc;
+    int64_t              stride_c;
+    hipblasComputeType_t compute_type;
+    int32_t              batch_count;
+
+    friend bool operator==(const hipblasLtAlgoConfig& a, const hipblasLtAlgoConfig& b) {
+        return std::memcmp(&a, &b, sizeof a) == 0;
+    }
+
+    template<typename H>
+    friend H AbslHashValue(H h, const hipblasLtAlgoConfig& c) {
+        return H::combine_contiguous(std::move(h), reinterpret_cast<const char*>(&c), sizeof c);
     }
 };
 
 class hipblasAlgoMap {
 private:
-    std::unordered_map<hipblasAlgoConfig_t, hipblasLtMatmulAlgo_info, hipblasAlgoConfig_hasher> algo_map_;
-    std::string                                                                                 config_filename_;
-    std::string                                                                                 sp_config_filename_;
-    std::map<std::string, int>                                                                  sp_algo_map_;
+    absl::node_hash_map<hipblasLtAlgoConfig, hipblasLtMatmulInfo> algo_map_;
 
 public:
-    explicit hipblasAlgoMap(const std::string filename, const std::string sp_config_filename = "");
-    hipblasAlgoMap(const hipblasAlgoMap& map);
-    ~hipblasAlgoMap();
-    void loadGemmConfig();
-    void loadSpGemmConfig();
-    int  getSpAlgo(const int batch_count, const int m, const int n, const int k);
-    bool isUseSparse(const int batch_count, const int m, const int n, const int k);
+    void loadGemmConfig(const std::string& filename, hipblasLtHandle_t handle);
 
-    bool isExist(const int batch_count, const int m, const int n, const int k, const hipblasDatatype_t data_type);
-
-    hipblasLtMatmulAlgo_info
-    getAlgo(const int batch_count, const int m, const int n, const int k, const hipblasDatatype_t data_type);
+    const hipblasLtMatmulInfo* getAlgo(const hipblasOperation_t   trans_a,
+                                       const hipblasOperation_t   trans_b,
+                                       const int32_t              m,
+                                       const int32_t              n,
+                                       const int32_t              k,
+                                       const hipDataType          A_data_type,
+                                       const int32_t              lda,
+                                       const int64_t              stride_a,
+                                       const hipDataType          B_data_type,
+                                       const int32_t              ldb,
+                                       const int64_t              stride_b,
+                                       const hipDataType          C_data_type,
+                                       const int32_t              ldc,
+                                       const int64_t              stride_c,
+                                       const hipblasComputeType_t compute_type,
+                                       const int32_t              batch_count);
 };
 
 }  // namespace rocm
