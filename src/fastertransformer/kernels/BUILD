@@ -110,9 +110,8 @@ cc_library(
         "sampling_topp_kernels.cu",
         "sampling_penalty_kernels.cu",
         "custom_ar_kernels.cu",
-        ":mmha",
         "rocm/quantization_rocm.cu",
-        ":mmha",
+	":mmha",
     ],
     hdrs = [
         "hello_world.h",
