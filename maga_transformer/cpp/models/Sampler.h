@@ -15,6 +15,21 @@ struct SamplerInitParams {
 
 struct SamplerInputs {
 public:
+    std::string debugString() const {
+        std::stringstream debug_string;
+        debug_string << "SamplerInputs { "
+                     << "batch_size: " << batch_size
+                     << ", step: " << step 
+                     << ", logits: " << logits->debugStringWithData<int32_t>()
+                     << ", token_ids: " << token_ids->debugStringWithData<int32_t>()
+                     << ", input_lengths: " << input_lengths->debugStringWithData<int32_t>()
+                     << ", sequence_lengths: " << sequence_lengths->debugStringWithData<int32_t>()
+                     << ", cum_log_probs: " << cum_log_probs->debugStringWithData<float>()
+                     << "}";
+        return debug_string.str();
+    }
+
+public:
     ft::BufferPtr logits;            // shape: [batch_size * num_beams, vocab_size]
     mutable ft::BufferPtr token_ids; // shape: [batch_size * num_beams, max_length]
     ft::BufferPtr input_lengths;     // shape: [batch_size]
@@ -30,7 +45,6 @@ public:
     ft::BufferPtr repetition_penalty;  // shape: [batch_size]
     ft::BufferPtr min_lengths;         // shape: [batch_size]
 
-    ft::BufferPtr kv_cache_blocks;     // shape: [batch_size * num_beams, block_length], int64 block pointers
     mutable ft::BufferPtr cum_log_probs;       // shape: [batch_size * num_beams]
     mutable ft::BufferPtr index_log_prob;
 };

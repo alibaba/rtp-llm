@@ -1,4 +1,3 @@
-#include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"
@@ -34,8 +33,8 @@ absl::StatusOr<CacheConfig> CacheConfigCreator::createConfig(const ft::GptInitPa
     if (param.block_nums_ > 0) {
         block_nums = param.block_nums_;
     } else {
-        CHECK_AND_RETURN_REF(result, CacheConfigCreator::getKVCacheMemorySize(param));
-        block_nums = result / config.block_size;
+        CHECK_AND_RETURN_REF(kv_cache_mem_size, CacheConfigCreator::getKVCacheMemorySize(param));
+        block_nums = kv_cache_mem_size / config.block_size;
     }
     if (block_nums == 0) {
         return absl::InternalError("kv cache block nums is 0");
@@ -44,6 +43,27 @@ absl::StatusOr<CacheConfig> CacheConfigCreator::createConfig(const ft::GptInitPa
     config.reserve_runtime_mem_mb = param.reserve_runtime_mem_mb_;
     FT_LOG_INFO("kv cache block nums is %u", block_nums);
     return config;
+}
+
+absl::StatusOr<std::tuple<CacheConfig, CacheConfig>> CacheConfigCreator::createSpConfig(const ft::GptInitParameter& score_param, const ft::GptInitParameter& propose_param) {
+    CacheConfig  score_config         = CacheConfigCreator::createBasicConfig(score_param);
+    CacheConfig  propose_config         = CacheConfigCreator::createBasicConfig(propose_param);
+    size_t     block_nums     = 0;
+    if (score_param.block_nums_ > 0) {
+        block_nums = score_param.block_nums_;
+    } else {
+        CHECK_AND_RETURN_REF(kv_cache_mem_size, CacheConfigCreator::getKVCacheMemorySize(score_param));
+        block_nums = kv_cache_mem_size / (score_config.block_size + propose_config.block_size);
+    }
+    if (block_nums == 0) {
+        return absl::InternalError("kv cache block nums is 0");
+    }
+    score_config.block_nums = block_nums;
+    propose_config.block_nums = block_nums;
+    score_config.reserve_runtime_mem_mb = score_param.reserve_runtime_mem_mb_;
+    propose_config.reserve_runtime_mem_mb = 0;
+    FT_LOG_INFO("kv cache block nums is %u", block_nums);
+    return std::make_tuple(score_config, propose_config);
 }
 
 }  // namespace rtp_llm

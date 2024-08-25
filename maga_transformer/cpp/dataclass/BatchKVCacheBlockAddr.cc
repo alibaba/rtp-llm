@@ -1,4 +1,5 @@
 #include "maga_transformer/cpp/dataclass/BatchKVCacheBlockAddr.h"
+#include "maga_transformer/cpp/cache/CacheManager.h"
 #include <memory>
 #include <sstream>
 #include <cassert>
@@ -60,6 +61,12 @@ const std::vector<int>& BatchKVCacheBlockAddr::blocks(int batch_id) const {
 
 void BatchKVCacheBlockAddr::clear() {
     batch_offset.clear();
+}
+
+void BatchKVCacheBlockAddr::incRef(std::shared_ptr<CacheManager>& cache_manager) {
+    for (const auto& blocks : batch_offset) {
+        cache_manager->incrBlockRefCounter(blocks);
+    }
 }
 
 std::string BatchKVCacheBlockAddr::debugString() const {

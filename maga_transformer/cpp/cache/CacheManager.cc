@@ -2,14 +2,12 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
-#include <stdexcept>
 #include <unistd.h>
 #include "maga_transformer/cpp/cache/CacheManager.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "maga_transformer/cpp/common/fatal_util.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/core/Types.h"
-#include "maga_transformer/cpp/utils/StringUtil.h"
 
 using namespace std;
 using namespace fastertransformer;

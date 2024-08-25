@@ -260,30 +260,43 @@ cc_library(
     visibility = ["//visibility:public"]
 )
 
-# cc_library(
-#     name = "speculative_engine",
-#     hdrs = glob([
-#         "speculative_engine/*.h",
-#     ]),
-#     srcs = glob([
-#         "speculative_engine/*.cc",
-#     ]),
-#     deps = torch_deps() + [
-#         ":dataclass",
-#         ":models",
-#         ":schedulers",
-#         ":engine_base",
-#         ":normal_engine",
-#         ":model_wrapper",
-#         ":common",
-#         ":system_prompt",
-#         ":system_prompt_constructor",
-#         "//src/fastertransformer/cuda:allocator_cuda",
-#         "@com_google_absl//absl/status",
-#         "@com_google_absl//absl/status:statusor",
-#     ],
-#     visibility = ["//visibility:public"]
-# )
+cc_library(
+    name = "speculative_engine",
+    hdrs = glob([
+        "speculative_engine/*.h",
+        "speculative_engine/propose_executor/*.h",
+        "speculative_engine/score_executor/*.h",
+        "speculative_engine/speculative_sampler/*.h",
+        "speculative_engine/speculative_updater/*.h"
+    ]),
+    srcs = glob([
+        "speculative_engine/*.cc",
+        "speculative_engine/propose_executor/*.cc",
+        "speculative_engine/score_executor/*.cc",
+        "speculative_engine/speculative_sampler/*.cc",
+        "speculative_engine/speculative_updater/*.cc"
+    ]),
+    deps = torch_deps() + [
+        ":dataclass",
+        ":metrics",
+        ":models",
+        ":schedulers",
+        ":engine_base",
+        ":normal_engine",
+        ":common",
+        ":system_prompt",
+        ":system_prompt_constructor",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "//src/fastertransformer/devices:devices_base_impl",
+    ] + select({
+        "//:using_cuda": [
+            "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"]
+)
 
 cc_library(
     name = "metrics",
@@ -342,7 +355,7 @@ cc_library(
         "//maga_transformer/cpp:normal_engine",
         "//maga_transformer/cpp/embedding_engine:embedding_engine",
         ":embedding_arpc_deps",
-        # "//maga_transformer/cpp:speculative_engine",
+        "//maga_transformer/cpp:speculative_engine",
         "//src/fastertransformer/devices:devices_base",
         "//maga_transformer/cpp:multimodal_processor",
     ],

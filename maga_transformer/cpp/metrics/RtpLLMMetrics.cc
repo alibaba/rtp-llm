@@ -15,6 +15,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMKernelMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
@@ -139,6 +140,18 @@ void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExec
     REPORT_MUTABLE_METRIC(generate_batch_size_metric, collector->generate_batch_size);
     REPORT_MUTABLE_METRIC(execute_token_size_metric, collector->execute_token_size);
     REPORT_MUTABLE_METRIC(max_seq_len, collector->max_seq_len);
+}
+
+bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager *manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(step_latency_us_metric, "step_latency_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(propose_step_latency_us_metric, "propose_step_latency_us");
+    return true;
+}
+
+
+void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSpeculativeEngineMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(step_latency_us_metric, collector->step_latency_us);
+    REPORT_MUTABLE_METRIC(propose_step_latency_us_metric, collector->propose_step_latency_us);
 }
 
 bool RtpLLMTokenPSMetrics::init(kmonitor::MetricsGroupManager* manager) {

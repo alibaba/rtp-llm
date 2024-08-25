@@ -291,6 +291,40 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMSpeculativeEngineMetricsCollector final {
+public:
+    void merge(const RtpLLMSpeculativeEngineMetricsCollector* collector) {
+        if (collector) {
+            step_latency_us += collector->step_latency_us;
+            propose_step_latency_us += collector->propose_step_latency_us;
+            score_step_latency_us += collector->score_step_latency_us;
+            speculative_sampler_latency_us += collector->speculative_sampler_latency_us;
+            updater_step_latency_us += collector->updater_step_latency_us;
+        }
+    }
+public:
+    int64_t step_latency_us = 0;
+    int64_t propose_step_latency_us = 0;
+    int64_t score_step_latency_us = 0;
+    int64_t speculative_sampler_latency_us = 0;
+    int64_t updater_step_latency_us = 0;
+};
+
+class RtpLLMSpeculativeEngineMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMSpeculativeEngineMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* step_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* propose_step_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* score_step_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* speculative_sampler_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* updater_step_latency_us_metric = nullptr;
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 bool initKmonitorFactory();
 
 kmonitor::MetricsTags getHippoTags();

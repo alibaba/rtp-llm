@@ -10,7 +10,6 @@
 #include "src/fastertransformer/kernels/unfused_attention_kernels.h"
 #include "src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention.h"
 #include "src/fastertransformer/kernels/kv_cache_utils.h"
-#include <iostream>
 
 
 using namespace std;

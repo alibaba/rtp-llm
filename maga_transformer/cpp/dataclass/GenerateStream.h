@@ -1,5 +1,7 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <optional>
@@ -16,6 +18,7 @@
 #include "absl/status/statusor.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "src/fastertransformer/utils/assert_utils.h"
 
 namespace ft = fastertransformer;
 
@@ -28,20 +31,36 @@ public:
                    const ResourceContext& resource_context, kmonitor::MetricsReporterPtr metrics_reporter);
     virtual ~GenerateStream() {
         reportMetric();
-        generate_outputs_queue_.wakeup();
     }
 
 public:
     // Exported to python world.
     void                                cancel();
-    absl::StatusOr<GenerateOutputs>     nextOutput();
+
+    virtual absl::StatusOr<GenerateOutputs>     nextOutput() = 0;
+    virtual void updateOutput(
+                      const ft::BufferPtr& new_tokens,
+                      const ft::BufferPtr& hidden_states,
+                      const ft::BufferPtr& logits,
+                      const ft::BufferPtr& cum_log_probs) = 0;
+
+    void update(const ft::BufferPtr&    new_tokens,
+                int   num_new_tokens,
+                const ft::BufferPtr& hidden_states,
+                const ft::BufferPtr& logits,
+                const ft::BufferPtr& cum_log_probs);
+
+
+    virtual size_t scoreLen() const {
+        return 0;
+    }
 
     // Only used in C++ world.
-    virtual absl::StatusOr<int> initKVBlock(int token_capacity);
-    virtual absl::StatusOr<int> incrKVBlock(int token_capacity);
+    virtual absl::StatusOr<int> initKVBlock(int token_capacity, size_t reserve_step = 0);
+    virtual absl::StatusOr<int> incrKVBlock(int token_capacity, size_t reserve_step = 0);
     virtual int tryReleaseKVBlock(int nums);
     virtual void releaseResource();
-    int nextNeedBlockNums() const;
+    int nextNeedBlockNums(size_t reserve_step) const;
     void incrFallbackBlock(int fallback_blocks);
 
     std::shared_ptr<GenerateInput> generateInput() const;
@@ -63,6 +82,8 @@ public:
     size_t maxSeqLen() const;
     int inputLength() const;
     int seqLength() const;
+    // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_
+    // for checking EOS and stop words
     void setSeqLength(int seq_length);
     int commonLen() const;
     int adjustedCommonLen() const;
@@ -125,16 +146,6 @@ public:
     void matchStopWordsList();
     void matchStopWordsList(int batch_id);
 
-    void update(ft::BufferPtr& new_tokens,
-                int num_new_tokens,
-                const ft::Buffer& hidden_states,
-                const ft::Buffer& logits,
-                const ft::Buffer& cum_log_probs,
-                bool not_update_output = false);
-    void updateOutput(const ft::Buffer& hidden_states,
-                      const ft::Buffer& logits,
-                      const ft::Buffer& cum_log_probs);
-
     void setMetricsReporter(kmonitor::MetricsReporterPtr metrics_reporter);
     void reportMetric();
     std::string debugString() const;
@@ -145,14 +156,20 @@ public:
     StreamCacheResource& streamCacheResource();
     void setPerfTest(bool perf_test_);
 
+    absl::Status releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
+        return stream_cache_resource_.releaseSequenceKVCache(total_seq_len, release_seq_len);
+    }
+
+    void CopyOnWrite(const GenerateStream& other_stream);
+
 protected:
     ft::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;
-    std::shared_ptr<GenerateOutputs>    generate_outputs_;
     GenerateStatus                      generate_status_;
     std::vector<GenerateStatus>         sub_generate_status_;
     int                                 max_seq_len_;
     int                                 seq_length_;
+    int                                 start_check_seq_length_ = 0;
     int64_t                             vocab_size_;
     ft::BufferPtr                       complete_token_ids_;
     int64_t                             begin_time_us_;
@@ -160,8 +177,6 @@ protected:
     int64_t                             pause_time_us_ = 0;
     int64_t                             wait_time_us_ = 0;
     int64_t                             first_token_time_us_ = 0;
-    std::mutex                          output_mutex_;
-    std::condition_variable             update_cv_;
     StreamCacheResource                 stream_cache_resource_;
     SystemPromptParams                  prompt_param_;
     bool                                is_context_stream_      = true;
@@ -188,7 +203,8 @@ protected:
     ft::BufferPtr                       cum_log_probs_;
     ft::BufferPtr                       loss_;
     int                                 loss_index_ = 0;
-    autil::SynchronizedQueue<GenerateOutputs>  generate_outputs_queue_;
+    std::shared_ptr<std::mutex>         output_mutex_;
+    std::shared_ptr<autil::SynchronizedQueue<GenerateOutputs>>  generate_outputs_queue_;
 
     // just for bool test
     bool perf_test_ = false;
@@ -196,4 +212,5 @@ protected:
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;
+
 } // namespace rtp_llm

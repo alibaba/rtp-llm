@@ -7,6 +7,7 @@
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
+#include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 
@@ -42,7 +43,7 @@ protected:
         generate_input->generate_config = generate_config;
         ft::GptInitParameter params;
         params.max_seq_len_ = 2048;
-        stream_ = std::make_shared<GenerateStream>(generate_input, params, resource_context, nullptr);
+        stream_ = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
         stream_->setRunning();
     }
 
@@ -323,7 +324,7 @@ TEST_F(StreamCacheResourceTest, testReuseCache) {
     resource_context.cache_manager = cache_manager_;
     ft::GptInitParameter params;
     params.max_seq_len_ = 2048;
-    stream_ = std::make_shared<GenerateStream>(generate_input, params, resource_context, nullptr);
+    stream_ = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
     stream_->setRunning();
 
     auto& resource2 = stream_->streamCacheResource();
@@ -384,7 +385,7 @@ TEST_F(StreamCacheResourceTest, testReuseCacheWithFastGen) {
     resource_context.cache_manager = cache_manager_;
     ft::GptInitParameter params;
     params.max_seq_len_ = 2048;
-    stream_ = std::make_shared<GenerateStream>(generate_input, params, resource_context, nullptr);
+    stream_ = std::make_shared<NormalGenerateStream>(generate_input, params, resource_context, nullptr);
     stream_->setRunning();
     stream_->enable_fast_gen_ = true;
 

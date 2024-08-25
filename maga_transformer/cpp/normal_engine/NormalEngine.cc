@@ -1,11 +1,11 @@
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
+#include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/schedulers/FIFOScheduler.h"
 #include "maga_transformer/cpp/cache/CacheConfigCreator.h"
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
-#include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/utils/logger.h"
 #include "autil/TimeUtility.h"
 #include <memory>
@@ -55,7 +55,7 @@ size_t NormalEngine::warmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
     fake_input->generate_config->calculate_loss = int(params_.warm_up_with_loss_);
     device_->setTraceMemory(true);
-    std::shared_ptr<GenerateStream> stream = std::make_shared<GenerateStream>(fake_input, params_, resource_context_, nullptr);
+    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(fake_input, params_, resource_context_, nullptr);
     stream->setPerfTest(true);
     std::list<GenerateStreamPtr> streams;
     streams.emplace_back(stream);
@@ -133,7 +133,7 @@ absl::Status NormalEngine::trySaveStepError() const {
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
-    std::shared_ptr<GenerateStream> stream = std::make_shared<GenerateStream>(input, params_, resource_context_, metrics_reporter_);
+    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(input, params_, resource_context_, metrics_reporter_);
     (void)scheduler_->enqueue(stream);
     return stream;
 }

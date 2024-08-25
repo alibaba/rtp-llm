@@ -1,9 +1,5 @@
 #include "maga_transformer/cpp/dataclass/StreamCacheResource.h"
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
-#include "src/fastertransformer/core/Types.h"
-#include "src/fastertransformer/core/BufferHelper.h"
-#include <atomic>
-#include "maga_transformer/cpp/utils/StringUtil.h"
 
 using namespace std;
 namespace ft = fastertransformer;
@@ -56,16 +52,34 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     return release_blocks_num;
 }
 
+absl::Status StreamCacheResource::releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len) {
+    FT_LOG_DEBUG("stream [%ld] max block size is [%lu] total seq_len is [%lu], release [%lu] seq_len KVCache", stream_->streamId(), maxBlockSize(), total_seq_len, release_seq_len);
+    size_t last_block_occupied_seq_len = (total_seq_len - 1) % seqSizePerBlock();
+    if (release_seq_len < last_block_occupied_seq_len) {
+        return absl::OkStatus();
+    }
+    size_t release_block_num = release_seq_len / seqSizePerBlock() + 1;
+    size_t succ_release_blocks_num = tryReleaseKVBlock(release_block_num);
+    if (release_block_num != succ_release_blocks_num) {
+        return absl::InternalError("Release KVCache failed");
+    }
+    return absl::OkStatus();
+}
+
 int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
     return std::max((seq_len + seqSizePerBlock() - 1) / seqSizePerBlock() - maxBlockSize(), 0);
 }
 
+void StreamCacheResource::incBlockRef() {
+    batch_block_addr_.incRef(resource_context_.cache_manager);
+}
+
 // TODO(xinfei.sxf) 保证这个函数的原子性
-absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity) {
+absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t reserve_step) {
     auto current_block_size = maxBlockSize();
     if (current_block_size) {
         // partial fallback
-        return incrKVBlock(token_capacity);
+        return incrKVBlock(token_capacity, reserve_step);
     }
 
     if (resource_context_.reuse_cache) {
@@ -84,10 +98,10 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity) {
         }
     }
 
-    return incrKVBlock(token_capacity);
+    return incrKVBlock(token_capacity, reserve_step);
 }
 
-absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity) {
+absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity, size_t reserve_step) {
     // TODO(xinfei.sxf) rollback token_capacity
     // TODO(xinfei.sxf) add reserver_blocks
     int real_occupy = 0;
@@ -100,7 +114,7 @@ absl::StatusOr<int> StreamCacheResource::incrKVBlock(int token_capacity) {
             real_occupy = result.value();
         }
     }
-    auto seq_len = stream_->isChunkStream() ? stream_->currentChunkLen() : stream_->seqLength();
+    auto seq_len = stream_->isChunkStream() ? stream_->currentChunkLen() : (stream_->seqLength() + (int)reserve_step);
     auto common_seq_len = std::min(seq_len, stream_->adjustedCommonLen());
     auto common_blocks_nums = singleBatchNeedBlocks(common_seq_len);
 

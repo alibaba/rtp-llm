@@ -53,13 +53,15 @@ class ModelFactory:
         return model
 
     @staticmethod
-    def _create_sp_model(model_config: ModelConfig):
+    def _create_sp_model(score_model_gpt_config: GptInitModelParameters, model_config: ModelConfig):
         model = None
         if model_config.sp_type == "vanilla":
             global _model_factory
             if model_config.model_type not in _model_factory:
                 raise Exception(f"model type {model_config.model_type} not registered!")
             model_cls = _model_factory[model_config.model_type]
+            # propose model's max seq len must be equal to score model's max seq len
+            model_config.max_seq_len = score_model_gpt_config.max_seq_len
             config: GptInitModelParameters = model_cls.create_config(model_config)
             gpt_model = model_cls.from_config(config)
             dump_model_to_table(ModelFactory.model_config_json(model_cls, model_config, config))
@@ -90,7 +92,7 @@ class ModelFactory:
     def from_model_config(model_config: ModelConfig, propose_model_config: Optional[ModelConfig] = None) -> Union[AsyncModel, BaseModel]:
         model = ModelFactory._create_model(model_config)
         if model_config.model_type != 'fake_model': # for test
-            propose_model = None if propose_model_config is None else ModelFactory._create_sp_model(propose_model_config)
+            propose_model = None if propose_model_config is None else ModelFactory._create_sp_model(model.config, propose_model_config)
             model = AsyncModel(model, propose_model)
             if propose_model:
                 logging.info("create propose model done")

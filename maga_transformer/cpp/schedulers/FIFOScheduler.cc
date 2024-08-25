@@ -57,20 +57,20 @@ absl::Status FIFOScheduler::enqueue(const GenerateStreamPtr& stream) {
     return absl::OkStatus();
 }
 
-int FIFOScheduler::runningNextBlockNum() const {
+int FIFOScheduler::runningNextBlockNum(size_t reserve_step) const {
     int total_need_block_nums = 0;
     for (auto& stream : running_streams_) {
-        total_need_block_nums += stream->nextNeedBlockNums();
+        total_need_block_nums += stream->nextNeedBlockNums(reserve_step);
     }
     return total_need_block_nums;
 }
 
 // TODO(xinfei.sxf) Is there any situation where the request cannot be ended?
-void FIFOScheduler::evaluateRunningNext() {
+void FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
     // Only in the case of partial fallback, the stream in the waiting queue may hold blocks resources.
     if (enable_partial_fallback_) {
         for (auto& stream : waiting_streams_) {
-            int need_block_num = (int)runningNextBlockNum() - (int)cache_manager_->availableBlockNums();
+            int need_block_num = (int)runningNextBlockNum(reserve_step) - (int)cache_manager_->availableBlockNums();
             if (need_block_num <= 0) {
                 break;
             }
@@ -84,7 +84,7 @@ void FIFOScheduler::evaluateRunningNext() {
     }
 
     while (!running_streams_.empty()) {
-        int need_block_num = (int)runningNextBlockNum() - (int)cache_manager_->availableBlockNums();
+        int need_block_num = (int)runningNextBlockNum(reserve_step) - (int)cache_manager_->availableBlockNums();
         if (need_block_num <= 0) {
             break;
         }
@@ -104,7 +104,7 @@ void FIFOScheduler::evaluateRunningNext() {
     }
 
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
-        auto result = (*it)->incrKVBlock(token_capacity_);
+        auto result = (*it)->incrKVBlock(token_capacity_, reserve_step);
         if (!result.ok()) {
             (*it)->setStop("incrKVBlock failed");
             (*it)->releaseResource();
@@ -134,12 +134,13 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
 }
 
 bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
-                                      const GenerateStreamPtr&       new_stream) {
+                                      const GenerateStreamPtr&       new_stream,
+                                      size_t reserve_step) {
     if (!evaluateRunningMemory(streams, new_stream)) {
         return false;
     }
 
-    auto result = new_stream->initKVBlock(token_capacity_);
+    auto result = new_stream->initKVBlock(token_capacity_, reserve_step);
     if (result.ok() && enable_fast_gen_) {
         token_capacity_ -= result.value();
         FT_LOG_DEBUG("after stream [%d] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
@@ -147,11 +148,11 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
     return result.ok() && cache_manager_->availableBlockNums() >= reserve_block_num_; 
 }
 
-list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
+list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
     list<GenerateStreamPtr> new_streams;
     for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
         // TODO(xinfei.sxf) set detail stop reason to stream
-        if (evaluateNewStream(new_streams, *it)) {
+        if (evaluateNewStream(new_streams, *it, reserve_step)) {
             FT_LOG_DEBUG("stream [%ld %p] add to new queue", (*it)->streamId(), (*it).get());
             // if setRunning fails, it must be in stopped state, evict it in next iteration
             if ((*it)->setRunning()) {
@@ -173,7 +174,7 @@ list<GenerateStreamPtr> FIFOScheduler::scheduleNew() {
     return new_streams;
 }
 
-absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
+absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_step) {
     unique_lock<mutex> lock(lock_);
     cond_.wait(lock, [this]{
         return stop_ || !waiting_streams_.empty() || !running_streams_.empty();
@@ -182,9 +183,9 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     evictDoneStreams(running_streams_);
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     auto running_stream_size = running_streams_.size();
-    evaluateRunningNext();
+    evaluateRunningNext(reserve_step);
     auto fallback_stream_size = running_stream_size - running_streams_.size();
-    auto new_stream = scheduleNew();
+    auto new_stream = scheduleNew(reserve_step);
     running_streams_.insert(running_streams_.end(), new_stream.begin(), new_stream.end());
     reportMetrics(fallback_stream_size);
     return running_streams_;

@@ -20,6 +20,11 @@ public:
                             bool warm_up = false);
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
     void         reportMetrics(const StreamGroups& stream_groups);
+
+    void setBatchProcessor(std::unique_ptr<NormalBatchStreamProcessor> processor) {
+        batch_stream_processor_ = std::move(processor);
+    }
+
 private:
     std::unique_ptr<GptModel>                   model_;
     std::unique_ptr<Sampler>                    sampler_;

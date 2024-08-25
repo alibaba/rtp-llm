@@ -18,7 +18,7 @@ public:
     ~FIFOScheduler();
 
     absl::Status enqueue(const GenerateStreamPtr& stream) override;
-    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+    absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) override;
     absl::Status stop() override;
 
     void reportMetrics(size_t fallback_stream_size);
@@ -30,11 +30,11 @@ public:
 
 private:
     void evictDoneStreams(std::list<GenerateStreamPtr>& streams) const;
-    bool evaluateNewStream(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream);
-    void evaluateRunningNext();
-    int  runningNextBlockNum() const;
+    bool evaluateNewStream(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream, size_t reserve_step);
+    void evaluateRunningNext(size_t reserve_step);
+    int  runningNextBlockNum(size_t reserve_step) const;
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
-    std::list<GenerateStreamPtr> scheduleNew();
+    std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
 
 private:
     std::list<GenerateStreamPtr>        waiting_streams_;

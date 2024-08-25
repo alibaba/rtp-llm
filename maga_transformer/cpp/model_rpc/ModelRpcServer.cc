@@ -1,6 +1,7 @@
 #include "maga_transformer/cpp/model_rpc/ModelRpcServer.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
+#include "maga_transformer/cpp/speculative_engine/SpeculativeEngine.h"
 #include "maga_transformer/cpp/model_rpc/QueryConverter.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
 #include "autil/TimeUtility.h"
@@ -34,8 +35,18 @@ int transErrorCode(absl::StatusCode code) {
 grpc::Status ModelRpcServiceImpl::init(const EngineInitParams& maga_init_params, py::object mm_process_engine, std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
     
     if (propose_params) {
-        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Speculative engine is not supported");
+        FT_LOG_INFO("init speculative engine");
+        if (!mm_process_engine.is_none()) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "Multimodal processing is not supported for speculative engine");
+        }
+        std::unique_ptr<SpeculativeEngine> sp_engine = std::make_unique<SpeculativeEngine>(maga_init_params, std::move(propose_params));
+        auto status = sp_engine->init();
+        if (!status.ok()) {
+            return grpc::Status(grpc::StatusCode::INTERNAL, status.ToString());
+        }
+        engine_ = std::move(sp_engine);
     } else {
+        FT_LOG_INFO("init normal engine");
         engine_.reset(new NormalEngine(maga_init_params));
         if (!mm_process_engine.is_none()) {
             mm_processor_.reset(new MultimodalProcessor(mm_process_engine,

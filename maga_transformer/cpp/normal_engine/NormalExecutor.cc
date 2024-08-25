@@ -3,9 +3,6 @@
 #include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/models/GptModel.h"
 #include "maga_transformer/cpp/models/Sampler.h"
-#include "src/fastertransformer/devices/DeviceFactory.h"
-#include "src/fastertransformer/devices/Weights.h"
-#include "maga_transformer/cpp/dataclass/MergedQuery.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 
 using namespace std;
@@ -51,18 +48,15 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         model_input.v_scale_buffer = kv_cache_buffer.v_scale;
     }
     FT_LOG_DEBUG("model_input: %s", model_input.debugString().c_str());
-    auto            merged_output = std::make_unique<MergedOutput>();
-    GptModelOutputs model_output;
-    model_output = std::move(model_->forward(model_input));
+    GptModelOutputs model_output = std::move(model_->forward(model_input));
     FT_LOG_DEBUG("model forward done");
     if (device_->getDeviceProperties().tp_rank > 0 || warm_up_) {
         return absl::OkStatus();
     }
     CHECK_AND_RETURN_REF(sampler_input, batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
-    merged_output->model_output   = std::move(model_output);
-    merged_output->sampler_output = std::move(sampler_->forward(sampler_input));
+    SamplerOutput sampler_output = std::move(sampler_->forward(sampler_input));
     FT_LOG_DEBUG("sampler forward done");
-    return batch_stream_processor_->dispatch(stream_groups, sampler_input, merged_output);
+    return batch_stream_processor_->dispatch(stream_groups, {std::move(model_output), std::move(sampler_output)});
 }
 
 void NormalExecutor::reportMetrics(const StreamGroups& stream_groups) {

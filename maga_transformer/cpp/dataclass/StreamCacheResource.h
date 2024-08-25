@@ -12,8 +12,9 @@ namespace rtp_llm {
 class GenerateStream;
 
 struct ResourceContext {
-    std::shared_ptr<CacheManager>   cache_manager;
-    std::shared_ptr<SystemPrompt>   system_prompt;
+    std::shared_ptr<CacheManager>   cache_manager = nullptr;
+    std::shared_ptr<CacheManager>   propose_cache_manager = nullptr;
+    std::shared_ptr<SystemPrompt>   system_prompt = nullptr;
     bool                            reuse_cache{false};
 };
 
@@ -30,9 +31,11 @@ public:
         releaseResource();
     }
     void init(int batch_size);
-    absl::StatusOr<int> initKVBlock(int token_capacity);
-    absl::StatusOr<int> incrKVBlock(int token_capacity);
+    absl::StatusOr<int> initKVBlock(int token_capacity, size_t reserve_step);
+    absl::StatusOr<int> incrKVBlock(int token_capacity, size_t reserve_step);
+    void incBlockRef();
     int  tryReleaseKVBlock(size_t nums);
+    absl::Status releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len);
     void freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void releaseResource();
     int  singleBatchNeedBlocks(int seq_len) const;
@@ -49,11 +52,27 @@ public:
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     }
 
+    std::string debugString() const {
+        std::stringstream debug_string;
+        debug_string << "StreamCacheResource {"
+                     << ", batch_block_addr_: [";
+
+        for (size_t i = 0; i < batch_block_addr_.batchSize(); i++) {
+            debug_string << " [";
+            for (size_t j = 0; j < batch_block_addr_.batch_offset[i].size(); j++) {
+                debug_string << batch_block_addr_.batch_offset[i][j] << " ";
+            }
+            debug_string << "],";
+        }
+
+        debug_string << "}";
+        return debug_string.str();
+    }    
+
 private:
     BatchKVCacheBlockAddr           batch_block_addr_;
     GenerateStream*                 stream_;
     ResourceContext                 resource_context_;
-    int                             seq_size_per_block_    = 0;
     bool                            need_release_resource_ = true;
 };
 

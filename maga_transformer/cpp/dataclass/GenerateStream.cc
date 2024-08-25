@@ -1,4 +1,4 @@
-#include <atomic>
+#include <cstddef>
 #include <memory>
 #include "autil/EnvUtil.h"
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
@@ -27,9 +27,13 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     , enable_fast_gen_(params.enable_fast_gen_)
     , metrics_reporter_(metrics_reporter)
     , special_tokens_(params.special_tokens_)
+    , output_mutex_(std::make_shared<std::mutex>())
+    , generate_outputs_queue_(std::make_shared<autil::SynchronizedQueue<GenerateOutputs>>())
+
 {
     updatePrefix(resource_context.system_prompt);
     seq_length_ = generate_input_->inputLength();
+    start_check_seq_length_ = seq_length_;
     last_output_pos_ = seq_length_;
     common_len_ = seq_length_;
     max_chunk_len_ = seq_length_;
@@ -49,13 +53,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                generate_input_->input_ids->sizeBytes());
     }
 
-    generate_outputs_queue_.setCapacity(1000);
     cum_log_probs_ =
         device_->allocateBuffer({ft::DataType::TYPE_FP32, {(size_t)tileNum()}, ft::AllocationType::HOST}, {});
     memset(cum_log_probs_->data(), 0, cum_log_probs_->sizeBytes());
 
-    generate_outputs_             = make_shared<GenerateOutputs>();
-    generate_outputs_->request_id = generate_input_->request_id;
 
     generate_status_.status = GenerateState::WAITING;
     sub_generate_status_.clear();
@@ -101,32 +102,17 @@ void GenerateStream::cancel() {
     setStop("cancel stream");
 }
 
-absl::StatusOr<GenerateOutputs> GenerateStream::nextOutput() {
-    // TODO(xinfei.sxf) 某些case下会出现1s的等待
-    while ((!stopped()) && !finished() && generate_outputs_queue_.isEmpty()) {
-        generate_outputs_queue_.waitNotEmpty();
-    }
-    if (stopped()) {
-        std::lock_guard<std::mutex> lock(output_mutex_);
-        return absl::Status(generate_status_.error_code, generate_status_.error_info);
-    }
-    if (generate_outputs_queue_.isEmpty()) {
-        return absl::InternalError("no output any more");
-    }
-    return generate_outputs_queue_.getAndPopFront();
-}
-
-absl::StatusOr<int> GenerateStream::initKVBlock(int token_capacity) {
+absl::StatusOr<int> GenerateStream::initKVBlock(int token_capacity, size_t reserve_step) {
     if (generate_status_.status == GenerateState::WAITING) {
         wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     } else if (generate_status_.status == GenerateState::PAUSED) {
         pause_time_us_ += autil::TimeUtility::currentTimeInMicroSeconds() - last_pause_us_;
     }
-    return stream_cache_resource_.initKVBlock(token_capacity);
+    return stream_cache_resource_.initKVBlock(token_capacity, reserve_step);
 }
 
-absl::StatusOr<int>GenerateStream::incrKVBlock(int token_capacity) {
-    return stream_cache_resource_.incrKVBlock(token_capacity);
+absl::StatusOr<int>GenerateStream::incrKVBlock(int token_capacity, size_t reserve_step) {
+    return stream_cache_resource_.incrKVBlock(token_capacity, reserve_step);
 }
 
 int GenerateStream::tryReleaseKVBlock(int nums) {
@@ -134,14 +120,15 @@ int GenerateStream::tryReleaseKVBlock(int nums) {
     incrFallbackBlock(release_blocks);
     return release_blocks;
 }
+
 void GenerateStream::releaseResource() {
     if (need_release_resource_) {
         stream_cache_resource_.releaseResource();
     }
 }
-int GenerateStream::nextNeedBlockNums() const {
+int GenerateStream::nextNeedBlockNums(size_t reserve_step) const {
     // TODO: maybe need fix when context and reuse
-    return stream_cache_resource_.singleBatchNeedBlocks(seq_length_) * batchSize();
+    return stream_cache_resource_.singleBatchNeedBlocks(seq_length_ + reserve_step) * batchSize();
 }
 
 void GenerateStream::incrFallbackBlock(int fallback_blocks) {
@@ -241,6 +228,7 @@ int GenerateStream::contextLength() const {
     int end_pos = isChunkStream() ? currentChunkLen() : seq_length_;
     return end_pos - begin_pos;
 }
+
 int GenerateStream::inputPrefixLength() const {
     return generate_input_->prefix_length;
 }
@@ -369,7 +357,7 @@ bool GenerateStream::checkTokenId(int token_id) {
 }
 
 void GenerateStream::setStop(const std::string& err_msg, absl::StatusCode err_code) {
-    std::lock_guard<std::mutex> lock(output_mutex_);
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     FT_LOG_WARNING("stop stream: %d %s", streamId(), err_msg.c_str());
     generate_status_.status     = GenerateState::STOPPED;
     generate_status_.error_code = err_code;
@@ -382,7 +370,7 @@ void GenerateStream::stopAndRelease(const std::string& err_msg, absl::StatusCode
 }
 
 void GenerateStream::setPaused() {
-    std::lock_guard<std::mutex> lock(output_mutex_);
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     if (stoppedWithoutLock()) {
         return;
     }
@@ -392,7 +380,7 @@ void GenerateStream::setPaused() {
 }
 
 bool GenerateStream::setRunning() {
-    std::lock_guard<std::mutex> lock(output_mutex_);
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     if (stoppedWithoutLock()) {
         return false;
     }
@@ -412,22 +400,22 @@ bool GenerateStream::stoppedWithoutLock() {
 }
 
 bool GenerateStream::stopped() {
-    std::lock_guard<std::mutex> lock(output_mutex_);
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     return generate_status_.status == GenerateState::STOPPED;
 }
 
 bool GenerateStream::paused() {
-    std::lock_guard<std::mutex> lock(output_mutex_);
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     return generate_status_.status == GenerateState::PAUSED;
 }
 
 std::string GenerateStream::stopReason() {
-    std::lock_guard<std::mutex> lock(output_mutex_);
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     return generate_status_.error_info;
 }
 
 bool GenerateStream::finished() {
-    std::lock_guard<std::mutex> lock(output_mutex_);
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     return generate_status_.status == GenerateState::FINISHED;
 }
 
@@ -478,8 +466,11 @@ void GenerateStream::matchEosToken() {
 
 void GenerateStream::matchEosToken(int batch_id) {
     int* token_ids_ = (int*)complete_token_ids_->view(batch_id, 1).data();
-    if (special_tokens_.eos_token_id_ == token_ids_[seq_length_ - 1]) {
-        sub_generate_status_[batch_id].status = GenerateState::FINISHED;
+    for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
+        if (special_tokens_.eos_token_id_ == token_ids_[i - 1]) {
+            sub_generate_status_[batch_id].status = GenerateState::FINISHED;
+            seq_length_ = i;
+        }
     }
 }
 void GenerateStream::matchStopWordsList() {
@@ -499,15 +490,23 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     // note: stop_words_list in generate_config contains stop_words_list in special_tokens
     bool match = false;
     for (auto& stop_words : generate_input_->generate_config->stop_words_list) {
-        bool   match_one   = true;
-        size_t begin_index = seq_length_ - stop_words.size();
-        for (auto& token : stop_words) {
-            if (token != token_ids_[begin_index++]) {
-                match_one = false;
+        for (size_t i = start_check_seq_length_; i <= seq_length_; ++i) {
+            bool match_one   = true;
+            size_t begin_index = i - stop_words.size();
+            for (auto& token : stop_words) {
+                if (token != token_ids_[begin_index++]) {
+                    match_one = false;
+                    break;
+                }
+            }
+
+            if (match_one) {
+                match = match_one;
+                seq_length_ = i;
                 break;
             }
         }
-        match = match_one;
+
         if (match) {
             break;
         }
@@ -517,12 +516,11 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
-void GenerateStream::update(ft::BufferPtr&    new_tokens,
+void GenerateStream::update(const ft::BufferPtr&    new_tokens,
                             int               num_new_tokens,
-                            const ft::Buffer& hidden_states,
-                            const ft::Buffer& logits,
-                            const ft::Buffer& cum_log_probs,
-                            bool              not_update_output) {
+                            const ft::BufferPtr& hidden_states,
+                            const ft::BufferPtr& logits,
+                            const ft::BufferPtr& cum_log_probs) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     is_context_stream_ = false;
     if (stoppedWithoutLock()) {
@@ -536,105 +534,20 @@ void GenerateStream::update(ft::BufferPtr&    new_tokens,
     // # This differs from new_tokens.shape[-1] under beam search case,
     // # which needs to update all the generated tokens each update.
     FT_CHECK(new_tokens->dim() == 2);
-    for (int i = 0; i < tileNum(); ++i) {
-        auto current_token_id = ((int*)new_tokens->data())[i];
-        if (!checkTokenId(current_token_id)) {
-            setStop("output token id:" + to_string(current_token_id) + " out of vocab size: " + to_string(vocab_size_));
-            return;
+    for (size_t i = 0; i < tileNum(); ++i) {
+        for (size_t j = 0; j < num_new_tokens; ++j) {
+            auto current_token_id = *(*new_tokens)[i].dataWithOffset<int>(j);
+            if (!checkTokenId(current_token_id)) {
+                setStop("output token id:" + to_string(current_token_id) + " out of vocab size: " + to_string(vocab_size_));
+                return;
+            }
         }
-        *(*complete_token_ids_)[i].dataWithOffset<int>(seq_length_) = ((int*)new_tokens->data())[i];
+        
+        device_->copy({(*complete_token_ids_)[i].view(seq_length_, num_new_tokens), (*new_tokens)[i].view(0, num_new_tokens)});
     }
     setSeqLength(seq_length_ + num_new_tokens);
-    bool finished = needFinish();
-    if (finished) {
-        setFinishedWithoutLock();
-    }
-    if (not_update_output) {
-        return;
-    }
 
-    if (isStreaming() || finished) {
-        updateOutput(hidden_states, logits, cum_log_probs);
-    }
-}
-
-void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
-                                  const ft::Buffer& logits,
-                                  const ft::Buffer& cum_log_probs) {
-    device_->copy({*cum_log_probs_, cum_log_probs});
-
-    FT_LOG_DEBUG(__PRETTY_FUNCTION__);
-    size_t output_len = seq_length_ - last_output_pos_;
-    generate_outputs_->generate_outputs.clear();
-    for (int i = 0; i < tileNum(); i++) {
-        GenerateOutput generate_output;
-        generate_output.aux_info.iter_count = iter_count_;
-        generate_output.aux_info.fallback_tokens = fallback_blocks_ * seqSizePerBlock();
-        generate_output.aux_info.fallback_times = fallback_times_;
-
-        generate_output.output_ids =
-            device_->allocateBuffer({ft::DataType::TYPE_INT32, {1lu, output_len}, ft::AllocationType::HOST}, {});
-        // TODO(xinfei.sxf) optimize this copy : only copy last token
-        memcpy(generate_output.output_ids->data(),
-               complete_token_ids_->view(i, 1).dataWithOffset<int32_t>(last_output_pos_),
-               sizeof(int32_t) * output_len);
-        if (generate_input_->generate_config->return_logits) {
-            ft::BufferPtr host_logits;
-            if (logits.shape()[0] == 1) {
-                host_logits = device_->clone({logits, ft::AllocationType::HOST});
-            } else {
-                host_logits = device_->clone({logits.view(i, 1), ft::AllocationType::HOST});
-            }
-            if (!generate_input_->generate_config->select_tokens_id.empty()) {
-                auto select_buf        = ft::vector2Buffer(generate_input_->generate_config->select_tokens_id);
-                generate_output.logits = device_->select({*host_logits, *select_buf, 1});
-            } else {
-                // TODO(xinfei.sxf) not set logits in middle step for streaming
-                generate_output.logits = host_logits;
-            }
-        }
-
-        if (generate_input_->generate_config->return_hidden_states) {
-            if (hidden_states.shape()[0] == 1) {
-                generate_output.hidden_states = device_->clone({hidden_states, ft::AllocationType::HOST});
-            } else {
-                generate_output.hidden_states = device_->clone({hidden_states.view(i, 1), ft::AllocationType::HOST});
-            }
-        }
-        if (loss_) {
-            FT_CHECK_WITH_INFO(loss_index_ == inputLength() - 1, "loss index should be input len [%d] - 1 but is [%d]", inputLength(), loss_index_);
-            auto loss = loss_;
-            if (generate_input_->generate_config->calculate_loss == 1) {
-                loss = device_->clone({*ft::torchTensor2Buffer(torch::mean(ft::Buffer2torchTensor(*loss_)).exp()), ft::AllocationType::HOST});
-            }
-            generate_output.loss = loss;
-        }
-
-        generate_output.finished              = sub_generate_status_[i].status == GenerateState::FINISHED;
-        generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-        generate_output.aux_info.input_len    = generate_input_->promptLength();
-        generate_output.aux_info.prefix_len   = generate_input_->prefix_length;
-        // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-        generate_output.aux_info.output_len   = seq_length_ - generate_input_->inputLength();
-        generate_output.aux_info.reuse_len    = reuse_length_;
-
-        generate_output.aux_info.cum_log_probs =
-            device_->allocateBuffer({ft::DataType::TYPE_FP32, {1lu}, ft::AllocationType::HOST}, {});
-        memcpy(generate_output.aux_info.cum_log_probs.value()->data(),
-               cum_log_probs_->dataWithOffset<float>(i),
-               sizeof(float));
-
-        generate_outputs_->generate_outputs.push_back(generate_output);
-    }
-    if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
-        /* No matter if the queue is full for any reason,
-           the stream will be set to stop directly to prevent the push to queue from getting stuck. */
-        setStop("queue is full");
-        return;
-    } else {
-        generate_outputs_queue_.push(*generate_outputs_);
-    }
-    last_output_pos_ = seq_length_;
+    updateOutput(new_tokens, hidden_states, logits, cum_log_probs);
 }
 
 void GenerateStream::setLoss(const ft::Buffer& loss) {
@@ -681,7 +594,16 @@ std::string GenerateStream::debugString() const {
                  << ", reuse_length:" << reuse_length_ << ", current_chunk_len:" << current_chunk_len_
                  << ", last_chunk_len_:" << last_chunk_len_ << ", max_chunk_len_:" << max_chunk_len_
                  << ", batch_size:" << batchSize()
-                 << ", tile_num:" << tileNum() << "}";
+                 << ", tile_num:" << tileNum();
+
+    debug_string << ", complete_token_ids: [";
+    for (size_t i = 0; i < tileNum(); i++) {
+        debug_string << (*complete_token_ids_)[i].view(0, seq_length_).debugStringWithData<int32_t>() << ",";
+    }
+
+    debug_string << ", stream_cache_resource_: "<< stream_cache_resource_.debugString();
+         
+    debug_string << "}";
     return debug_string.str();
 }
 
@@ -692,6 +614,11 @@ void GenerateStream::resetCommonLen() {
 }
 
 void GenerateStream::setSeqLength(int seq_length) {
+    if (seq_length > seq_length_) {
+        start_check_seq_length_ = seq_length_ + 1;
+    } else {
+        start_check_seq_length_ = seq_length;
+    }
     seq_length_ = seq_length;
     resetCommonLen();
 }
@@ -706,6 +633,15 @@ void GenerateStream::setIsContextStream(bool is_context_stream) {
 
 StreamCacheResource& GenerateStream::streamCacheResource() {
     return stream_cache_resource_;
+}
+
+void GenerateStream::CopyOnWrite(const GenerateStream& other_stream) {
+    complete_token_ids_ = device_->clone({*other_stream.complete_token_ids_, ft::AllocationType::HOST});
+    cum_log_probs_ = device_->clone({*other_stream.cum_log_probs_, ft::AllocationType::HOST});
+    if (hasLoss()) {
+        loss_ = device_->clone({*other_stream.loss_, ft::AllocationType::HOST});
+    }
+    stream_cache_resource_.incBlockRef();
 }
 
 }  // namespace rtp_llm

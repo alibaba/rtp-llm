@@ -3,6 +3,7 @@
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
 #include "src/fastertransformer/core/Buffer.h"
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -30,6 +31,7 @@ public:
                 if (!has_multimodal_input_ && multimodal_features_len_ > 0) {
                     has_multimodal_input_ = true;
                 }
+                total_score_batch_size_   += stream->scoreLen();
                 adapter_names.push_back(stream->adapterName());
             } else {
                 decode_streams_.push_back(stream);
@@ -41,10 +43,12 @@ public:
                 if (!has_multimodal_input_ && stream->multimodalFeaturesLength() > 0) {
                     has_multimodal_input_ = true;
                 }
+                total_score_batch_size_   += stream->scoreLen();
                 adapter_names.push_back(stream->adapterName());
             }
         }
     }
+
 
     size_t totalDecodeBatchSize() const {
         return total_decode_batch_size_;
@@ -81,6 +85,9 @@ public:
     }
     bool has_multimodal_input() const {
         return has_multimodal_input_;
+    }
+    size_t totalScoreBatchSize() const {
+        return total_score_batch_size_;
     }
 
     bool empty() const {
@@ -139,6 +146,7 @@ private:
     size_t                       max_reuse_length_         = 0;
     size_t                       cum_context_seq_len_      = 0;
     size_t                       multimodal_features_len_  = 0;
+    size_t                       total_score_batch_size_   = 0;
     bool                         has_multimodal_input_     = false;
     std::list<std::string>       adapter_names;
 };

@@ -27,17 +27,21 @@ public:
         is_multimodal_(params.is_multimodal_),
         cal_mm_tokens_in_rotary_emb_(params.cal_mm_tokens_in_rotary_emb_),
         device_(ft::DeviceFactory::getDefaultDevice()) {}
-    absl::Status                   dispatch(const StreamGroups&                  stream_groups,
-                                            const SamplerInputs&                 sampler_inputs,
-                                            const std::unique_ptr<MergedOutput>& merge_outputs) const;
-    absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
-    absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
+    virtual absl::Status                   dispatch(const StreamGroups&                  stream_groups,
+                                            const MergedOutput& merge_outputs) const;
+    virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups) const;
+    virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,
                                                       const GptModelInputs&  model_inputs,
                                                       const GptModelOutputs& model_output) const;
 
     static ft::BufferPtr createAttentionMask(const MaskParams& params);
 
-private:
+
+protected:
+    SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups, size_t total_batch_size, const ft::BufferPtr& sequence_length) const;
+    void    setCommonSamplerInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams, bool score_batch = false) const;
+
+protected:
     size_t          num_layers_;
     bool            use_int8_kv_cache_;
     bool            has_positional_encoding_;
