@@ -20,6 +20,7 @@ py_test(
         "//maga_transformer:config",
         "//maga_transformer:_ft_pickler",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(

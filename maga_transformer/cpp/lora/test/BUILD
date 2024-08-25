@@ -29,6 +29,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -42,6 +43,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -55,6 +57,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(

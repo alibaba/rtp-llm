@@ -100,6 +100,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -111,6 +112,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -122,6 +124,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -133,6 +136,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -144,6 +148,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -155,6 +160,7 @@ cc_test(
     env = test_envs,
     copts = copts() + ["-fno-access-control"],
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -166,6 +172,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -177,6 +184,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -188,6 +196,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -199,6 +208,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -210,4 +220,5 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )

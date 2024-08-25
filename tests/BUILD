@@ -64,6 +64,7 @@ py_test(
         "//maga_transformer:torch",
         "//maga_transformer:transformers",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -81,6 +82,7 @@ py_test(
         "//maga_transformer:transformers",
         "//maga_transformer:einops"
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -95,6 +97,7 @@ py_test(
     deps = [
         "//maga_transformer:torch",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -110,6 +113,7 @@ py_test(
         "//maga_transformer:torch",
         "//maga_transformer:numpy",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -125,4 +129,5 @@ py_test(
         "//maga_transformer:torch",
         "//maga_transformer:numpy",
     ],
+    exec_properties = {'gpu':'A10'},
 )

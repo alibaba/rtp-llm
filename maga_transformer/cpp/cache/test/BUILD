@@ -26,7 +26,8 @@ cc_test(
     deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
-    }
+    },
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
