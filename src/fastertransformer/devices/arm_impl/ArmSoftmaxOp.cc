@@ -102,7 +102,7 @@ BufferPtr ArmCpuDevice::softmax(const SoftmaxParams& params) {
     src_tensor.allocator()->free();
     dst_tensor.allocator()->free();
 
-    return std::move(output);
+    return output;
 }
 
 }  // namespace fastertransformer
