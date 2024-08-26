@@ -3,20 +3,24 @@
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include <torch/torch.h>
 
+#include <chrono>
+#include <omp.h>
+
 using namespace std;
 using namespace fastertransformer;
 
 class ArmAttentionOpTest: public DeviceTestBase {
 public:
     void contextAttentionOpTest(
-        size_t batch_size, size_t seq_len, size_t num_heads, size_t num_key_value_heads, size_t head_dim);
+        size_t batch_size, size_t seq_len, size_t num_heads, size_t num_key_value_heads, size_t head_dim, std::chrono::microseconds *diff);
 
     void selfAttentionOpTest(size_t batch_size,
                              size_t seq_len,
                              size_t kv_seq_len,
                              size_t num_heads,
                              size_t num_key_value_heads,
-                             size_t head_dim);
+                             size_t head_dim,
+                             std::chrono::microseconds *diff);
 };
 
 struct AttentionImpl: torch::nn::Module {
@@ -32,6 +36,7 @@ struct AttentionImpl: torch::nn::Module {
         auto batch_size  = query_states.size(0);
         auto seq_len     = query_states.size(1);
         auto head_num    = query_states.size(2);
+        auto head_kv_num = key_states.size(2);
         auto head_dim    = query_states.size(3);
 
         auto q = query_states.transpose(1, 2);
@@ -64,7 +69,7 @@ struct AttentionImpl: torch::nn::Module {
 TORCH_MODULE(Attention);
 
 void ArmAttentionOpTest::contextAttentionOpTest(
-    size_t batch_size, size_t seq_len, size_t num_heads, size_t num_key_value_heads, size_t head_dim) {
+    size_t batch_size, size_t seq_len, size_t num_heads, size_t num_key_value_heads, size_t head_dim, std::chrono::microseconds *diff) {
     Attention attention = Attention();
     attention.ptr()->to(torch::Device(torch::kCPU));
     auto               state_dict = attention.ptr()->named_parameters();
@@ -110,7 +115,7 @@ void ArmAttentionOpTest::contextAttentionOpTest(
     auto padding_offset_device = createDeviceBuffer<int>(padding_offset_host);
     auto cu_seqlens_device     = createDeviceBuffer<int>(cu_seqlens_host);
     auto attention_mask_device = createDeviceBuffer<float>(attention_mask_);
-    auto rope_config           = RopeConfig({RopeType::NOROPE, head_dim, 10000, 1, 2048, 1, 1});
+    auto rope_config           = RopeConfig({RopeStyle::No, head_dim, 10000, 1, 2048, 1, 1});
 
     AttentionCommonInputs common_inputs({*input_lengths, *sequence_lengths});
     common_inputs.cu_seqlens          = move(cu_seqlens_device);
@@ -131,7 +136,13 @@ void ArmAttentionOpTest::contextAttentionOpTest(
     auto qkv_output = device_->allocateBuffer({qkv_input_device->type(), {batch_size, seq_len, num_heads, head_dim}});
     auto result_ref = attention->forward(query_states_host, key_states_host, value_states_host, attention_mask_host);
 
-    device_->contextAttention({*qkv_input_device, *qkv_output, common_inputs, attention_weight, attention_config});
+    std::chrono::steady_clock::time_point tStart, tEnd;
+    // std::chrono::microseconds diff;
+    tStart = std::chrono::steady_clock::now();
+    device_->contextAttention({0, *qkv_input_device, *qkv_output, common_inputs, attention_weight, attention_config});
+    tEnd = std::chrono::steady_clock::now();
+    *diff = std::chrono::duration_cast<std::chrono::microseconds>(tEnd - tStart);
+    // std::cout << "$$$ contextAttention time taken (us) = " << diff.count() << std::endl;
 
     auto result = bufferToTensor(*qkv_output);
     assertTensorClose(result_ref[6], result.to(result_ref[6].dtype()));
@@ -142,7 +153,8 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
                                              size_t kv_seq_len,
                                              size_t num_heads,
                                              size_t num_key_value_heads,
-                                             size_t head_dim) {
+                                             size_t head_dim,
+                                             std::chrono::microseconds *diff) {
     Attention attention = Attention();
     attention.ptr()->to(torch::Device(torch::kCPU));
     auto               state_dict = attention.ptr()->named_parameters();
@@ -206,7 +218,7 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto sequence_lengths_device = createDeviceBuffer<int>(sequence_lengths_host);
     auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
 
-    auto rope_config = RopeConfig({RopeType::NOROPE, head_dim, 10000, 1, 2048, 1, 1});
+    auto rope_config = RopeConfig({RopeStyle::No, head_dim, 10000, 1, 2048, 1, 1});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
@@ -228,43 +240,75 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
 
+    auto token_num = batch_size * seq_len;
+
     auto attention_config = AttentionConfigs({num_heads, num_key_value_heads, head_dim, rope_config, tokensPerBlock});
 
     auto qkv_output = device_->allocateBuffer({qkv_states_device->type(), {batch_size, seq_len, num_heads, head_dim}});
     auto result_ref = attention->forward(
         query_states_host, key_states_host, value_states_host, attention_mask_host, k_cache_host, v_cache_host);
 
-    device_->decoderSelfAttention({*qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config});
+    std::chrono::steady_clock::time_point tStart, tEnd;
+    // std::chrono::microseconds diff;
+    tStart = std::chrono::steady_clock::now();
+    device_->decoderSelfAttention({0, *qkv_states_device, *qkv_output, common_inputs, attention_weight, attention_config});
+    tEnd = std::chrono::steady_clock::now();
+    *diff = std::chrono::duration_cast<std::chrono::microseconds>(tEnd - tStart);
+    // std::cout << "$$$ decoderAttention time taken (us) = " << diff.count() << std::endl;
 
     auto result = bufferToTensor(*qkv_output);
     assertTensorClose(result_ref[6].to(result.dtype()), result, 1e-2, 1e-2);
 }
 
-TEST_F(ArmAttentionOpTest, SelfAttentionOpTest) {
-    std::vector<size_t> batch  = {1, 2};
-    std::vector<size_t> seq    = {1};
-    std::vector<size_t> kv_seq = {16};
+TEST_F(ArmAttentionOpTest, ContextAttentionOpTest) {
+    std::vector<size_t> batch = {1};// {1, 2};  //, 4, 8};
+    std::vector<size_t> seq   = {50};// {1, 2};  //, 10, 100};
+    std::cout << "$$$ Using OMP_NUM_THREADS = " << omp_get_max_threads() << std::endl;
+    std::chrono::microseconds diff;
+    uint64_t tmin = 99999999, tmax = 0, tave = 0;
+    int loops = 1000;
     for (auto batch_size : batch) {
         for (auto seq_len : seq) {
-            for (auto kv_seq_len : kv_seq) {
-                size_t num_heads           = 64;
-                size_t num_key_value_heads = num_heads;
-                size_t head_dim            = 64;
-                selfAttentionOpTest(batch_size, seq_len, kv_seq_len, num_heads, num_key_value_heads, head_dim);
+            size_t num_heads           = 16;
+            size_t num_key_value_heads = num_heads;
+            size_t head_dim            = 128;
+            size_t dim                 = head_dim;
+            for (int i = 0; i < loops; i++) {
+                contextAttentionOpTest(batch_size, seq_len, num_heads, num_key_value_heads, head_dim, &diff);
+                if (diff.count() < tmin)
+                    tmin = diff.count();
+                if (diff.count() > tmax)
+                    tmax = diff.count();
+                tave += diff.count();
             }
+            std::cout << "$$$ contextAttention time (us) - min: " << tmin << " ; max: " << tmax << " ; ave: " << tave / loops << std::endl;
         }
     }
 }
 
-TEST_F(ArmAttentionOpTest, ContextAttentionOpTest) {
-    std::vector<size_t> batch = {1, 2};  //, 4, 8};
-    std::vector<size_t> seq   = {1, 2};  //, 10, 100};
+TEST_F(ArmAttentionOpTest, SelfAttentionOpTest) {
+    std::vector<size_t> batch  = {1};// , 2};
+    std::vector<size_t> seq    = {1};
+    std::vector<size_t> kv_seq = {50};// 16};
+    std::chrono::microseconds diff;
+    uint64_t tmin = 99999999, tmax = 0, tave = 0;
+    int loops = 1000;
     for (auto batch_size : batch) {
         for (auto seq_len : seq) {
-            size_t num_heads           = 4;
-            size_t num_key_value_heads = num_heads;
-            size_t head_dim            = 4;
-            contextAttentionOpTest(batch_size, seq_len, num_heads, num_key_value_heads, head_dim);
+            for (auto kv_seq_len : kv_seq) {
+                size_t num_heads           = 16;
+                size_t num_key_value_heads = num_heads;
+                size_t head_dim            = 128;
+                for (int i = 0; i < loops; i++) {
+                    selfAttentionOpTest(batch_size, seq_len, kv_seq_len, num_heads, num_key_value_heads, head_dim, &diff);
+                    if (diff.count() < tmin)
+                        tmin = diff.count();
+                    if (diff.count() > tmax)
+                        tmax = diff.count();
+                    tave += diff.count();
+                }
+                std::cout << "$$$ decoderAttention time (us) - min: " << tmin << " ; max: " << tmax << " ; ave: " << tave / loops << std::endl;
+            }
         }
     }
 }
