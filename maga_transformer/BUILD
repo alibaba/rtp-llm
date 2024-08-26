@@ -1,5 +1,5 @@
 package(default_visibility = ["//visibility:public"])
-load("@rules_python//experimental/python:wheel.bzl", "py_package", "py_wheel")
+load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel")
 load("//bazel:arch_select.bzl", "requirement", "whl_deps")

@@ -1,0 +1,40 @@
+From 7961fdc98b20e9271385f5ef1b94020712d57dc3 Mon Sep 17 00:00:00 2001
+From: "shuoshu.yh" <shuoshu.yh@alibaba-inc.com>
+Date: Fri, 23 Aug 2024 00:01:50 +0800
+Subject: [PATCH 1/2] add extra data
+
+---
+ python/private/pypi/pip_compile.bzl | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git python/private/pypi/pip_compile.bzl python/private/pypi/pip_compile.bzl
+index 7389e72..0ca3180 100644
+--- python/private/pypi/pip_compile.bzl
++++ python/private/pypi/pip_compile.bzl
+@@ -27,6 +27,7 @@ def pip_compile(
+         src = None,
+         extra_args = [],
+         extra_deps = [],
++        extra_data = [],
+         generate_hashes = True,
+         py_binary = _py_binary,
+         py_test = _py_test,
+@@ -61,6 +62,7 @@ def pip_compile(
+               [PEP621](https://peps.python.org/pep-0621/).
+         extra_args: passed to pip-compile.
+         extra_deps: extra dependencies passed to pip-compile.
++        extra_data: extra data passed to py_binary.
+         generate_hashes: whether to put hashes in the requirements_txt file.
+         py_binary: the py_binary rule to be used.
+         py_test: the py_test rule to be used.
+@@ -90,6 +92,7 @@ def pip_compile(
+     )
+ 
+     data = [name, requirements_txt, src] + [f for f in (requirements_linux, requirements_darwin, requirements_windows) if f != None]
++    data += extra_data
+ 
+     # Use the Label constructor so this is expanded in the context of the file
+     # where it appears, which is to say, in @rules_python
+-- 
+2.32.0.3.g01195cf9f
+
