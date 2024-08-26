@@ -14,6 +14,7 @@ CONDA_URL=${CONDA_URL:-"https://repo.anaconda.com/miniconda/Miniconda3-py310_23.
 # alternative:
 # BAZEL_URL=https://mirrors.huaweicloud.com/bazel/5.2.0/bazel-5.2.0-installer-linux-x86_64.sh
 BAZEL_URL=${BAZEL_URL:-"https://github.com/bazelbuild/bazel/releases/download/5.2.0/bazel-5.2.0-installer-linux-x86_64.sh"}
+BAZELISK_URL=${BAZELISK_URL:-https://github.com/bazelbuild/bazelisk/releases/download/v1.20.0/bazelisk-linux-amd64}
 PYPI_URL=${PYPI_URL:-"https://mirrors.aliyun.com/pypi/simple"}
 
 mkdir deps && cp ../deps/requirements*.txt $DIR/deps/
@@ -24,6 +25,7 @@ docker build \
     --build-arg BAZEL_URL=$BAZEL_URL \
     --build-arg PYPI_URL=$PYPI_URL \
     --build-arg AMD_BKC_URL=$AMD_BKC_URL \
+    --build-arg BAZELISK_URL=$BAZELISK_URL \
     -f rocm.Dockerfile \
     --network=host \
     -t $IMAGE_NAME:$IMAGE_TAG \

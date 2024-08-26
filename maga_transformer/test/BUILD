@@ -64,12 +64,13 @@ py_test(
     deps = [
         "//maga_transformer:sdk",
         "//maga_transformer:testlib",
-        # qwen agent 
+        # qwen agent
         "//maga_transformer:pydantic",
         "//maga_transformer:json5",
         "//maga_transformer:dashscope",
         "//maga_transformer:jieba",
         "//maga_transformer:openai",
+        "//maga_transformer:Pillow",
     ],
     data = [
         "//maga_transformer/test/model_test/fake_test/testdata:testdata",

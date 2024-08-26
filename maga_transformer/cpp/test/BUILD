@@ -61,6 +61,7 @@ cc_test(
         "//src/fastertransformer/utils:utils",
     ],
     env = device_test_envs(),
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -80,4 +81,5 @@ cc_test(
         "//:using_rocm": {"TEST_USING_DEVICE": "ROCM",},
         "//conditions:default": {"TEST_USING_DEVICE": "CUDA",},
     }),
+    exec_properties = {'gpu':'A10'},
 )

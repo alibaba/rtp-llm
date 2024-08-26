@@ -56,7 +56,8 @@ py_test(
         "FT_DISABLE_CUSTOM_AR": "1"
     },
     deps = [
-        "//maga_transformer/test/utils:device_resource"
+        "//maga_transformer/test/utils:device_resource",
+        "//maga_transformer:torch",
     ],
     data = [":cuda_dist_test_binary"],
     args = ["$(location :cuda_dist_test_binary)"],
@@ -99,6 +100,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -110,6 +112,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -121,6 +124,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -132,6 +136,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -143,6 +148,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -154,6 +160,7 @@ cc_test(
     env = test_envs,
     copts = copts() + ["-fno-access-control"],
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -165,6 +172,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -176,6 +184,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -187,6 +196,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -198,6 +208,7 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -209,4 +220,5 @@ cc_test(
     env = test_envs,
     copts = copts(),
     deps = test_deps,
+    exec_properties = {'gpu':'A10'},
 )

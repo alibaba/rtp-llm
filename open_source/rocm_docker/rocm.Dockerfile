@@ -3,7 +3,7 @@ FROM $BASE_OS_IMAGE
 
 MAINTAINER wangyin.yx
 
-ADD /etc/rc.d/init.d/functions /etc/rc.d/init.d/functions
+ADD functions /etc/rc.d/init.d/functions
 
 RUN echo "%sdev ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
     groupadd sdev
@@ -43,3 +43,6 @@ RUN /opt/conda310/bin/pip install -r /tmp/deps/requirements_rocm.txt -i $PYPI_UR
     rm -rf /tmp/deps && pip cache purge
 
 ENV PATH $PATH:/opt/conda310/bin
+
+ARG BAZELISK_URL
+RUN wget -q $BAZELISK_URL -O /usr/local/bin/bazelisk && chmod a+x /usr/local/bin/bazelisk

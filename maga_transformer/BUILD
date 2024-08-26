@@ -44,6 +44,8 @@ requirement([
     "thrift",
     "torch",
     "torchvision",
+    "numpy",
+    "safetensors",
     "einops",
     "prettytable",
     "timm",
@@ -80,7 +82,8 @@ py_library(
     data = [":cutlass_config"],
     deps = [
         ":torch",
-        "decord",
+        ":safetensors",
+        ":decord",
         ":lru-dict",
         ":cpm_kernels",
         ":prettytable",

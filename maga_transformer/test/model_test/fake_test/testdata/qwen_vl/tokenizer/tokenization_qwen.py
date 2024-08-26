@@ -15,13 +15,8 @@ from typing import Collection, Dict, List, Set, Tuple, Union, Any, Callable, Opt
 import tiktoken
 import numpy as np
 from PIL import Image
-from PIL import ImageFont
-from PIL import ImageDraw
 from transformers import PreTrainedTokenizer, AddedToken
 from transformers.utils import try_to_load_from_cache
-
-import matplotlib.colors as mcolors
-from matplotlib.font_manager import FontProperties
 
 logger = logging.getLogger(__name__)
 
@@ -473,12 +468,7 @@ import colorsys
 import logging
 import math
 import numpy as np
-import matplotlib as mpl
-import matplotlib.colors as mplc
-import matplotlib.figure as mplfigure
 import torch
-from matplotlib.backends.backend_agg import FigureCanvasAgg
-from PIL import Image
 import random
 
 logger = logging.getLogger(__name__)

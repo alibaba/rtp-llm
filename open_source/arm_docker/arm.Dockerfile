@@ -28,3 +28,7 @@ ARG PYPI_URL
 ADD deps /tmp/deps
 RUN /opt/conda310/bin/pip install -r /tmp/deps/requirements_base.txt -i $PYPI_URL && \
     rm -rf /tmp/deps && /opt/conda310/bin/pip cache purge
+
+ARG BAZELISK_URL
+RUN wget -q $BAZELISK_URL -O /usr/local/bin/bazelisk && chmod a+x /usr/local/bin/bazelisk
+

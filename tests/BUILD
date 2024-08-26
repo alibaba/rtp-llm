@@ -37,7 +37,7 @@ cc_library(
     ]),
     deps = torch_deps() + [
         "//src/fastertransformer/kernels:kernels",
-	    "//:th_utils",
+	"//:th_utils",
         "cutlass_kernels_interface",
     ],
     copts = cuda_copts(),
@@ -62,13 +62,16 @@ py_test(
     ],
     deps = [
         "//maga_transformer:torch",
+        "//maga_transformer:transformers",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
     name = "rotary_position_embedding",
     srcs = [
-        "rotary_embedding/rotary_position_embedding.py"
+        "rotary_embedding/rotary_position_embedding.py",
+        "rotary_embedding/yarn_rotary_embedding.py",
     ],
     data = [
         "//:th_transformer",
@@ -76,9 +79,10 @@ py_test(
     ],
     deps = [
         "//maga_transformer:torch",
+        "//maga_transformer:transformers",
         "//maga_transformer:einops"
     ],
-    tags = ["exclusive"]
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -93,6 +97,7 @@ py_test(
     deps = [
         "//maga_transformer:torch",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -106,7 +111,9 @@ py_test(
     ],
     deps = [
         "//maga_transformer:torch",
+        "//maga_transformer:numpy",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -120,5 +127,7 @@ py_test(
     ],
     deps = [
         "//maga_transformer:torch",
+        "//maga_transformer:numpy",
     ],
+    exec_properties = {'gpu':'A10'},
 )

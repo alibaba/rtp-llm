@@ -93,4 +93,5 @@ cc_test(
         "@com_google_googletest//:gtest"
     ],
     copts = copts(),
+    exec_properties = {'gpu':'A10'},
 )
