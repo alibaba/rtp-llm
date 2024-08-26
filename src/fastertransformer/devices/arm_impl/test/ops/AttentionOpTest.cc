@@ -35,8 +35,6 @@ struct AttentionImpl: torch::nn::Module {
 
         auto batch_size  = query_states.size(0);
         auto seq_len     = query_states.size(1);
-        auto head_num    = query_states.size(2);
-        auto head_kv_num = key_states.size(2);
         auto head_dim    = query_states.size(3);
 
         auto q = query_states.transpose(1, 2);
@@ -115,7 +113,7 @@ void ArmAttentionOpTest::contextAttentionOpTest(
     auto padding_offset_device = createDeviceBuffer<int>(padding_offset_host);
     auto cu_seqlens_device     = createDeviceBuffer<int>(cu_seqlens_host);
     auto attention_mask_device = createDeviceBuffer<float>(attention_mask_);
-    auto rope_config           = RopeConfig({RopeStyle::No, head_dim, 10000, 1, 2048, 1, 1});
+    auto rope_config           = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
 
     AttentionCommonInputs common_inputs({*input_lengths, *sequence_lengths});
     common_inputs.cu_seqlens          = move(cu_seqlens_device);
@@ -218,7 +216,7 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto sequence_lengths_device = createDeviceBuffer<int>(sequence_lengths_host);
     auto input_lengths_device    = createDeviceBuffer<int>(input_lengths_host);
 
-    auto rope_config = RopeConfig({RopeStyle::No, head_dim, 10000, 1, 2048, 1, 1});
+    auto rope_config = RopeConfig({RopeStyle::No, (int)head_dim, 10000, 1, 2048, 1, 1});
 
     // cache manager need one block for preserve and every seq need one block for preserve.
     auto block_num = 2 * batch_size * ((kv_seq_len + tokensPerBlock - 1) / tokensPerBlock + 1) + 1;
@@ -239,8 +237,6 @@ void ArmAttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto buffer_nullptr         = BufferPtr(nullptr);
     auto attention_weight       = AttentionLayerWeights();
     attention_weight.qkv_weight = make_shared<const DenseWeights>(DenseWeights(buffer_nullptr, bias_device));
-
-    auto token_num = batch_size * seq_len;
 
     auto attention_config = AttentionConfigs({num_heads, num_key_value_heads, head_dim, rope_config, tokensPerBlock});
 
@@ -272,7 +268,6 @@ TEST_F(ArmAttentionOpTest, ContextAttentionOpTest) {
             size_t num_heads           = 16;
             size_t num_key_value_heads = num_heads;
             size_t head_dim            = 128;
-            size_t dim                 = head_dim;
             for (int i = 0; i < loops; i++) {
                 contextAttentionOpTest(batch_size, seq_len, num_heads, num_key_value_heads, head_dim, &diff);
                 if (diff.count() < tmin)

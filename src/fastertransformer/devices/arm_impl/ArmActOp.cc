@@ -23,21 +23,7 @@ BufferPtr ArmCpuDevice::activation(const ActivationParams& params) {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
 
-    void* bias      = nullptr;
     void* gate      = nullptr;
-    void* gate_bias = nullptr;
-
-    if (params.bias) {
-        bias = params.bias.value().get().data();
-        printBufferData(params.bias.value().get(), "ffn activation bias");
-        throw std::runtime_error("FFN input bias not supported");
-    }
-
-    if (params.gate_bias) {
-        gate_bias = params.gate_bias.value().get().data();
-        printBufferData(params.gate_bias.value().get(), "ffn activation gate_bias");
-        throw std::runtime_error("FFN gate bias not supported");
-    }
 
     arm_compute::DataType   acl_data_type = getAclDataType(states->type());
     arm_compute::TensorInfo data_info     = arm_compute::TensorInfo(arm_compute::TensorShape(n, m), 1, acl_data_type);

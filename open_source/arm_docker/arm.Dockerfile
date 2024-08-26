@@ -10,7 +10,7 @@ RUN dnf install -y \
         unzip wget which findutils rsync tar \
         gcc gcc-c++ libstdc++-static gdb coreutils \
         binutils bash glibc-devel libdb glibc glibc-langpack-en bison lld \
-        emacs-nox git git-lfs
+        emacs-nox git git-lfs openblas-devel
 
 
 ARG CONDA_URL

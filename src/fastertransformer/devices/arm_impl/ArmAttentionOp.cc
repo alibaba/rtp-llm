@@ -4,7 +4,7 @@
 #include "src/fastertransformer/core/cpu_allocator.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include <cstring>
-#include <cblas.h>
+#include <openblas/cblas.h>
 
 namespace fastertransformer {
 
@@ -32,8 +32,8 @@ void getCacheAddrFromIndex(const KvCacheInfo& kv_cache, size_t batch, size_t blo
     size_t block_size = k_cache[0].sizeBytes();
     int    *index = (int *)kv_blocks_offset.data();
 
-    *k_addr = k_cache.data() + index[batch * max_blocks_per_batch + block_idx] * block_size;
-    *v_addr = v_cache.data() + index[batch * max_blocks_per_batch + block_idx] * block_size;
+    *k_addr = (char*)k_cache.data() + index[batch * max_blocks_per_batch + block_idx] * block_size;
+    *v_addr = (char*)v_cache.data() + index[batch * max_blocks_per_batch + block_idx] * block_size;
 }
 
 void assemCache(const AttentionModuleParams& params, BufferPtr k_out, BufferPtr v_out, size_t tokens_per_block) {
@@ -735,7 +735,6 @@ void writeContextKVCacheArray(const AttentionModuleParams& params, float **k_arr
     const auto batch_size = params.common.context_batch_size;
     const auto seq_len    = params.common.context_max_seq_len;
 
-    auto head_num      = params.configs.head_num;
     auto kv_head_num   = params.configs.kv_head_num;
     auto size_per_head = params.configs.size_per_head;
     auto block_tokens  = params.configs.tokens_per_block;
@@ -754,10 +753,10 @@ void writeContextKVCacheArray(const AttentionModuleParams& params, float **k_arr
             getCacheAddrFromIndex(params.common.kv_cache.value(), batch, i, &k_block_addr, &v_block_addr);
 
             parallel_for(len, [&](int tid) {
-                memcpy(k_block_addr + tid * elem_sz * kv_head_num * size_per_head,
+                memcpy((char*)k_block_addr + tid * elem_sz * kv_head_num * size_per_head,
                        k_array[batch * seq_len + i * block_tokens + tid],
                        elem_sz * 1 * kv_head_num * size_per_head);
-                memcpy(v_block_addr + tid * elem_sz * kv_head_num * size_per_head,
+                memcpy((char*)v_block_addr + tid * elem_sz * kv_head_num * size_per_head,
                        v_array[batch * seq_len + i * block_tokens + tid],
                        elem_sz * 1 * kv_head_num * size_per_head);
             });
