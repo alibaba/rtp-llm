@@ -162,10 +162,12 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]}, ft::AllocationType::HOST});
         inputs.prefix_lengths = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths]}, ft::AllocationType::HOST});
-        inputs.kv_cache_offset = device->allocateBuffer(
-            {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths],
-                                         (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]},
-                                         ft::AllocationType::HOST});
+        if (shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]) {
+            inputs.kv_cache_offset = device->allocateBuffer(
+                    {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths],
+                         (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]},
+                     ft::AllocationType::HOST});
+        }
         inputs.lm_output_indexes = device->allocateBuffer(
             {ft::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]}, ft::AllocationType::HOST});
         if (shape_hints_ptr[GptModelInputIndex::comboPositionIds]) {
@@ -205,7 +207,9 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     buffers.emplace_back(inputs.input_lengths);
     buffers.emplace_back(inputs.sequence_lengths);
     buffers.emplace_back(inputs.prefix_lengths);
-    buffers.emplace_back(inputs.kv_cache_offset);
+    if (shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]) {
+        buffers.emplace_back(inputs.kv_cache_offset);
+    }
     buffers.emplace_back(inputs.lm_output_indexes);
     if (shape_hints_ptr[GptModelInputIndex::comboPositionIds]) {
         buffers.emplace_back(inputs.combo_position_ids);
