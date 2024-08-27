@@ -64,7 +64,8 @@ requirement([
     "openai",
     "oss2",
     "pyOpenSSL",
-    "nest_asyncio"
+    "nest_asyncio",
+    "librosa"
 ] + tensorrt)
 
 
@@ -242,7 +243,8 @@ py_library(
         ":json5",
         ":dashscope",
         ":jieba",
-        ":openai"
+        ":openai",
+        ":librosa",
     ],
     imports = ["."],
 )
@@ -373,6 +375,7 @@ py_wheel(
         "jieba",
         "openai",
         "nest_asyncio",
+        "librosa",
     ] + whl_deps() + xft_dep,
 )
 

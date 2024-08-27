@@ -139,3 +139,7 @@ def to_cuda(tensor: torch.Tensor) -> torch.Tensor:
 
 def to_cpu(tensor: torch.Tensor) -> torch.Tensor:
     return torch.ops.fastertransformer.async_copy_to_cpu(tensor)
+
+def check_with_info(condition: bool, error_msg: str):
+    if not condition:
+        raise Exception(error_msg)

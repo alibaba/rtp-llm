@@ -38,13 +38,7 @@ private:
         } else if (!mm_process_engine_.is_none()) {
             try {
                 py::gil_scoped_acquire acquire;
-                auto futures = mm_process_engine_.attr("submit")(urls);
-                auto coro = mm_process_engine_.attr("get")(futures);
-
-                auto loop = py::module::import("asyncio").attr("get_event_loop")();
-                auto future = loop.attr("create_task")(coro);
-                loop.attr("run_until_complete")(future);
-                py::handle res = future.attr("result")();
+                auto res = mm_process_engine_.attr("submit")(urls);
 
                 auto mm_embedding_vec = ft::convertPyObjectToVec(res);
                 std::vector<torch::Tensor> embedding_res;

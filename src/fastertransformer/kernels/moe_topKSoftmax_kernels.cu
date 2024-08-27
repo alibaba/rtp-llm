@@ -709,7 +709,6 @@ __global__ void finalizeMoeRoutingKernel(const T*       expanded_permuted_rows,
                                          const int      k,
                                          const int64_t* num_valid_ptr) {
     const int  original_row    = blockIdx.x;
-    const int  num_rows        = gridDim.x;
     const auto offset          = original_row * cols;
     T*         reduced_row_ptr = reduced_unpermuted_output + offset;
     const T*   skip_1_row_ptr{};

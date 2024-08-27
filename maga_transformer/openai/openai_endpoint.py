@@ -58,7 +58,7 @@ class OpenaiEndopoint():
         self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)
         logging.info(f"Finally openai endpoint uses renderer: {self.chat_renderer} ")
         self.template_renderer: CustomChatRenderer = self.chat_renderer \
-            if (type(self.chat_renderer) == BasicRenderer) \
+            if isinstance(self.chat_renderer,BasicRenderer) \
             else BasicRenderer(self.tokenizer, render_params)
         logging.info(f"chat_renderer [{self.chat_renderer}] is created.")
         extra_stop_word_ids_list = self.chat_renderer.get_all_extra_stop_word_ids_list()

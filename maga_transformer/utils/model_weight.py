@@ -1005,6 +1005,12 @@ class ModelDeployWeightInfo:
         else:
             return W.gpt_style_tp_strategy
 
+    @staticmethod
+    def _contains(keys: List[str], val: str):
+        for key in keys:
+            if val in key:
+                return True
+        return False
 
 
 

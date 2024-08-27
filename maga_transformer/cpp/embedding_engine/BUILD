@@ -69,7 +69,6 @@ cc_library(
     ]),
     deps = [
         "@havenask//aios/network/arpc:arpc",
-#        "@havenask//aios/network/gig/multi_call/rpc:rpc",
         ":embedding_engine"
     ],
     visibility = ["//visibility:public"]
@@ -83,7 +82,6 @@ cc_library(
     ]),
     deps = [
         "@havenask//aios/network/arpc:arpc",
-#        "@havenask//aios/network/gig/multi_call/rpc:rpc",
         ":embedding_engine",
         ":embedding_engine_arpc_server_header"
     ],

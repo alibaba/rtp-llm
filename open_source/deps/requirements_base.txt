@@ -42,3 +42,4 @@ openai
 oss2
 pyOpenSSL==24.1.0
 nest_asyncio
+librosa

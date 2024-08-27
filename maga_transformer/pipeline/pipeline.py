@@ -132,7 +132,6 @@ class Pipeline(object):
                                                       self.model.config.special_tokens, self.tokenizer, **kwargs)
         # for delete stop word from output
         prompt = self.piple_funcs.modify_prompt_func(prompt, generate_config=generate_config.model_dump(), **kwargs)
-
         if self.model.is_multimodal():
             prompt, urls = self.piple_funcs.multimodal_modify_prompt_func(prompt, urls, self._mm_token,
                                                                             generate_config=generate_config.model_dump(), **kwargs)

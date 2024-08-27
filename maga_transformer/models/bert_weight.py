@@ -114,13 +114,6 @@ class BertWeightInfo(ModelDeployWeightInfo):
         self._smooth_quant_names = SmoothQuantWeightNames()
         self._pertensor_quant_names = PerTensorQuantWeightNames()
 
-    @staticmethod
-    def _contains(keys: List[str], val: str):
-        for key in keys:
-            if val in key:
-                return True
-        return False
-
     def _append_name_prefix(self, names: Union[HfWeightNames, SmoothQuantWeightNames], weight_keys: List[str]):
         prefix = self.model_name + '.'
         if self._contains(weight_keys, prefix):

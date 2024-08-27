@@ -23,6 +23,7 @@ from .jina_bert.jina_bert import JinaBert
 from .megatron_bert import MegatronBert
 from .qwen_v2_moe import Qwen2Moe
 from .cogvlm2 import CogVLM2
+from .qwen_v2_audio.qwen_v2_audio import QWenV2Audio
 
 import logging
 try:

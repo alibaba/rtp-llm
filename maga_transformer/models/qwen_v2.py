@@ -1,12 +1,7 @@
-
-
-import torch
-import unicodedata
-import types
-import functools
 import os
+import functools
 import json
-from typing import List, Any
+from typing import List, Any, Dict
 
 from maga_transformer.utils.model_weight import (W, WeightInfo, ModelWeightInfo, ModelDeployWeightInfo,
                                                  CkptWeightInfo, identity, zeros, transpose, transpose_pad,
@@ -19,37 +14,46 @@ from maga_transformer.model_factory_register import register_model
 from maga_transformer.utils.group_quant_weight_util import get_layer_group_quant_weight_info
 
 class QWenV2Weight(ModelDeployWeightInfo):
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.prefix: str = ""
+        
+    def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
+        # compat for qwen_v2_video
+        if self._contains(weight_keys, 'language_model.'):
+            self.prefix = 'language_model.'
+    
     def _get_weight_info(self):
         return self._get_hf_weight_info()
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         inter_padding_size = self._layer_inter_padding_size[layer_id] if self._layer_inter_padding_size else self._inter_padding_size
-        return [WeightInfo(W.ffn_w1, [CkptWeightInfo('model.layers.{i}.mlp.gate_proj.weight', identity)],
+        return [WeightInfo(W.ffn_w1, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.gate_proj.weight', identity)],
             functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
-        WeightInfo(W.ffn_w3, [CkptWeightInfo('model.layers.{i}.mlp.up_proj.weight', identity)],
+        WeightInfo(W.ffn_w3, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.up_proj.weight', identity)],
             functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=0)),
-        WeightInfo(W.ffn_w2, [CkptWeightInfo('model.layers.{i}.mlp.down_proj.weight', identity)],
+        WeightInfo(W.ffn_w2, [CkptWeightInfo(self.prefix + 'model.layers.{i}.mlp.down_proj.weight', identity)],
             functools.partial(transpose_pad, inter_padding_size=inter_padding_size, dim=1))]
 
     def _get_hf_layer_weight_info(self, layer_id: int):
         layer_weights = [
-            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo('model.layers.{i}.input_layernorm.weight', identity)],
+            WeightInfo(W.pre_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.input_layernorm.weight', identity)],
                        identity),
             WeightInfo(W.attn_qkv_b, [
-                    CkptWeightInfo('model.layers.{i}.self_attn.q_proj.bias', identity),
-                    CkptWeightInfo('model.layers.{i}.self_attn.k_proj.bias', identity),
-                    CkptWeightInfo('model.layers.{i}.self_attn.v_proj.bias', identity)
+                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.bias', identity),
+                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_proj.bias', identity),
+                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.v_proj.bias', identity)
                 ],
                 functools.partial(merge_qkv_b)),
             WeightInfo(W.attn_qkv_w, [
-                    CkptWeightInfo('model.layers.{i}.self_attn.q_proj.weight', identity),
-                    CkptWeightInfo('model.layers.{i}.self_attn.k_proj.weight', identity),
-                    CkptWeightInfo('model.layers.{i}.self_attn.v_proj.weight', identity)
+                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.q_proj.weight', identity),
+                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.k_proj.weight', identity),
+                    CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.v_proj.weight', identity)
                 ],
                 functools.partial(merge_qkv_hf)),
-            WeightInfo(W.attn_o_w, [CkptWeightInfo('model.layers.{i}.self_attn.o_proj.weight', identity)],
+            WeightInfo(W.attn_o_w, [CkptWeightInfo(self.prefix + 'model.layers.{i}.self_attn.o_proj.weight', identity)],
                        transpose),
-            WeightInfo(W.post_ln_gamma, [CkptWeightInfo('model.layers.{i}.post_attention_layernorm.weight', identity)],
+            WeightInfo(W.post_ln_gamma, [CkptWeightInfo(self.prefix + 'model.layers.{i}.post_attention_layernorm.weight', identity)],
                        identity),
         ]
         layer_weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
@@ -57,9 +61,9 @@ class QWenV2Weight(ModelDeployWeightInfo):
 
     def _get_hf_weight_info(self):
         weights = [
-            WeightInfo(W.embedding, [CkptWeightInfo('model.embed_tokens.weight', identity)], identity),
-            WeightInfo(W.lm_head, [CkptWeightInfo('lm_head.weight', identity)], identity),
-            WeightInfo(W.final_ln_gamma, [CkptWeightInfo('model.norm.weight', identity)], identity),
+            WeightInfo(W.embedding, [CkptWeightInfo(self.prefix + 'model.embed_tokens.weight', identity)], identity),
+            WeightInfo(W.lm_head, [CkptWeightInfo(self.prefix + 'lm_head.weight', identity)], identity),
+            WeightInfo(W.final_ln_gamma, [CkptWeightInfo(self.prefix + 'model.norm.weight', identity)], identity),
             WeightInfo(W.final_ln_beta, [], functools.partial(zeros, shape=[self._hidden_size])),
         ]
 
@@ -104,12 +108,12 @@ class QWenV2(QWen):
         config.special_tokens.assistant.token_ids = [151644, 77091, 198] # '<|im_start|>assistant\n'
         config.special_tokens.assistant.eos_token_ids = [151645, 198] # '<|im_end|>\n'
 
-        QWenV2._from_hf(config, ckpt_path)
+        cls._from_hf(config, ckpt_path)
         assert config.head_num > 0 and config.head_num_kv > 0 and config.size_per_head > 0 and config.layer_num > 0 and config.inter_size > 0, "error config"
         return config
 
-    @staticmethod
-    def _from_hf(config: GptInitModelParameters, ckpt_path: str):
+    @classmethod
+    def _from_hf(cls, config: GptInitModelParameters, ckpt_path: str):
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
             return
