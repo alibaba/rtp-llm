@@ -5341,7 +5341,7 @@ public:
         const CUfunction func           = findIter->second.mDeviceFunction;
         void*            kernelParams[] = {&params, nullptr};
         if (!forceUnroll) {
-            cuErrCheck(mDriver.cuLaunchKernel(func,
+            cuErrCheck(mDriver->cuLaunchKernel(func,
                                               params.h,
                                               params.b,
                                               1,
@@ -5361,7 +5361,7 @@ public:
             if (flash_attention) {
                 unroll = (params.s + kernelMeta.mUnrollStep - 1) / kernelMeta.mUnrollStep;
             }
-            cuErrCheck(mDriver.cuLaunchKernel(func,
+            cuErrCheck(mDriver->cuLaunchKernel(func,
                                               params.h,
                                               params.b,
                                               unroll,

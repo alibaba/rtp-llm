@@ -18,7 +18,6 @@
 #include "cubin/fmha_cubin.h"
 #include "cuda_runtime_api.h"
 #include "fused_multihead_attention_common.h"
-#include "pagedKVCubin/fmha_cubin.h"
 #include "3rdparty/common/cudaDriverWrapper.h"
 #include "tmaDescriptor.h"
 #include <assert.h>
@@ -50,26 +49,28 @@ static const struct TmaKernelMetaInfo
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Base Class
 
-template <typename TKernelMeta, typename TKernelParam>
+template <typename TKernelMeta, typename TKernelParam, typename TPagedKVKernelParam>
 class TFusedMultiHeadAttentionXMMAKernel
 {
 public:
     using KernelMeta = TKernelMeta;
     using KernelParam = TKernelParam;
+    using PagedKVKernelParam = TPagedKVKernelParam;
 
     inline uint64_t hashID(unsigned int s, unsigned int d) const
     {
         return (uint64_t) s << 32 | d;
     }
 
-    virtual uint64_t hashID(const KernelMeta& kernelMeta) const
+    virtual uint64_t hashID(KernelMeta const& kernelMeta) const
     {
         return hashID(kernelMeta.mS, kernelMeta.mD);
     }
 
     TFusedMultiHeadAttentionXMMAKernel(
-        const TKernelMeta* pMetaStart, unsigned int nMetaCount, Data_type type, unsigned int sm)
-        : mDataType(type)
+        TKernelMeta const* pMetaStart, unsigned int nMetaCount, Data_type type, unsigned int sm)
+        : mDriver(CUDADriverWrapper::getInstance())
+        , mDataType(type)
         , mKernelMeta(pMetaStart)
         , mKernelMetaCount(nMetaCount)
         , mSM(sm)
@@ -85,7 +86,7 @@ public:
 
         for (unsigned int i = 0; i < mKernelMetaCount; ++i)
         {
-            const auto& kernelMeta = mKernelMeta[i];
+            auto const& kernelMeta = mKernelMeta[i];
             if (kernelMeta.mSM == mSM && kernelMeta.mDataType == mDataType)
             {
                 CUmodule hmod{0};
@@ -96,16 +97,17 @@ public:
                 }
                 else
                 {
-                    cuErrCheck(mDriver.cuModuleLoadData(&hmod, kernelMeta.mCubin), mDriver);
+                    cuErrCheck(mDriver->cuModuleLoadData(&hmod, kernelMeta.mCubin), mDriver);
                     mModules.insert(std::make_pair(kernelMeta.mCubin, hmod));
                 }
 
                 FusedMultiHeadAttentionKernelInfo funcInfo;
                 funcInfo.mMetaInfoIndex = i;
-                cuErrCheck(mDriver.cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod, kernelMeta.mFuncName), mDriver);
+                cuErrCheck(
+                    mDriver->cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod, kernelMeta.mFuncName), mDriver);
                 if (kernelMeta.mSharedMemBytes >= 48 * 1024)
                 {
-                    cuErrCheck(mDriver.cuFuncSetAttribute(funcInfo.mDeviceFunction,
+                    cuErrCheck(mDriver->cuFuncSetAttribute(funcInfo.mDeviceFunction,
                                    CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, kernelMeta.mSharedMemBytes),
                         mDriver);
                 }
@@ -122,34 +124,44 @@ public:
         return (mValidSequences.find(s) != mValidSequences.end());
     }
 
-    virtual void run(TKernelParam& params, Launch_params& launch_params, cudaStream_t ss) const
+    virtual void run(TKernelParam& params, Launch_params& launch_params, cudaStream_t stream) const
     {
-        const auto findIter = mFunctions.find(hashID(params.s, params.d));
+        auto const findIter = mFunctions.find(hashID(params.s, params.d));
 
-        const auto& kernelMeta = mKernelMeta[findIter->second.mMetaInfoIndex];
+        auto const& kernelMeta = mKernelMeta[findIter->second.mMetaInfoIndex];
         const CUfunction func = findIter->second.mDeviceFunction;
 
         void* kernelParams[] = {&params, nullptr};
-        cuErrCheck(mDriver.cuLaunchKernel(func, params.h, params.b, 1, kernelMeta.mThreadsPerCTA, 1, 1,
-                       kernelMeta.mSharedMemBytes, ss, kernelParams, nullptr),
+        cuErrCheck(mDriver->cuLaunchKernel(func, params.h, params.b, 1, kernelMeta.mThreadsPerCTA, 1, 1,
+                       kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
             mDriver);
     }
+
+    virtual void getStepSize(uint32_t& out_step_q, uint32_t& out_step_kv,
+        Fused_multihead_attention_paged_kv_params_v2 const& params, Launch_params const& launch_params) const
+        = 0;
+
+    virtual void getStepSize(uint32_t& out_step_q, uint32_t& out_step_kv,
+        Fused_multihead_attention_params_v2 const& params, Launch_params const& launch_params) const
+        = 0;
+
+    virtual void run(PagedKVKernelParam& params, Launch_params& launch_params, cudaStream_t stream) const = 0;
 
     virtual ~TFusedMultiHeadAttentionXMMAKernel() = default;
 
 protected:
-    CUDADriverWrapper mDriver;
+    std::shared_ptr<CUDADriverWrapper> mDriver;
 
     Data_type mDataType;
-    const TKernelMeta* mKernelMeta;
+    TKernelMeta const* mKernelMeta;
     unsigned int mKernelMetaCount;
     unsigned int mSM;
-    std::unordered_map<const unsigned char*, CUmodule> mModules;
+    std::unordered_map<unsigned char const*, CUmodule> mModules;
 
     struct FusedMultiHeadAttentionKernelInfo
     {
-        unsigned int mMetaInfoIndex = 0;
-        CUfunction mDeviceFunction = 0;
+        unsigned int mMetaInfoIndex;
+        CUfunction mDeviceFunction;
     };
 
     std::unordered_map<uint64_t, FusedMultiHeadAttentionKernelInfo> mFunctions;
@@ -160,14 +172,14 @@ template <typename TFusedMHAKernelList>
 class TFusedMHAKernelFactory
 {
 public:
-    const TFusedMHAKernelList* getXMMAKernels(const typename TFusedMHAKernelList::KernelMeta* pKernelList,
+    TFusedMHAKernelList const* getXMMAKernels(const typename TFusedMHAKernelList::KernelMeta* pKernelList,
         unsigned int nbKernels, Data_type type, unsigned int sm)
     {
         static std::mutex s_mutex;
         std::lock_guard<std::mutex> lg(s_mutex);
 
-        const auto id = hashID(type, sm);
-        const auto findIter = mKernels.find(id);
+        auto const id = hashID(type, sm);
+        auto const findIter = mKernels.find(id);
         if (findIter == mKernels.end())
         {
             TFusedMHAKernelList* newKernel = new TFusedMHAKernelList{pKernelList, nbKernels, type, sm};
@@ -207,39 +219,203 @@ private:
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // FMHA kernels that support Contiguous QKV input.
-
+// TODO: merge contiguous_qkv_fmha and paged_kv_fmha kernel selection into one.
 class FusedMultiHeadAttentionXMMAKernelV2
     : public TFusedMultiHeadAttentionXMMAKernel<FusedMultiHeadAttentionKernelMetaInfoV2,
-          Fused_multihead_attention_params_v2>
+          Fused_multihead_attention_params_v2, Fused_multihead_attention_paged_kv_params_v2>
 {
 public:
-    FusedMultiHeadAttentionXMMAKernelV2(const FusedMultiHeadAttentionKernelMetaInfoV2* pMetaStart,
+    FusedMultiHeadAttentionXMMAKernelV2(FusedMultiHeadAttentionKernelMetaInfoV2 const* pMetaStart,
         unsigned int nMetaCount, Data_type type, unsigned int sm)
         : TFusedMultiHeadAttentionXMMAKernel<FusedMultiHeadAttentionKernelMetaInfoV2,
-            Fused_multihead_attention_params_v2>(pMetaStart, nMetaCount, type, sm)
+            Fused_multihead_attention_params_v2, Fused_multihead_attention_paged_kv_params_v2>(
+            pMetaStart, nMetaCount, type, sm)
     {
     }
 
     inline uint64_t hashID(unsigned int s, unsigned int d, bool interleaved, bool unroll, bool force_fp32_acc,
-        bool flash_attention, bool is_alibi_supported, int attention_mask_type, bool tiled) const
+        bool flash_attention, bool warp_specialization, bool is_alibi_supported, int attention_mask_type, bool tiled,
+        bool paged_kv_input, bool has_qk_tanh_scale) const
     {
         s = flash_attention ? 0 : s;
         // D <= 2048
-        return (uint64_t) s << 32 | d << 16 | (attention_mask_type << 6) | (is_alibi_supported ? 32ull : 0ull)
-            | (tiled ? 16ull : 0ull) | (force_fp32_acc ? 8ull : 0ull) | (flash_attention ? 4ull : 0ull)
-            | (interleaved ? 2ull : 0ull) | (unroll ? 1ull : 0ull);
+        return (uint64_t) s << 32 | d << 16 | (attention_mask_type << 9) | (has_qk_tanh_scale ? 256ull : 0ull)
+            | (paged_kv_input ? 128ull : 0ull) | (is_alibi_supported ? 64ull : 0ull)
+            | (warp_specialization ? 32ull : 0ull) | (tiled ? 16ull : 0ull) | (force_fp32_acc ? 8ull : 0ull)
+            | (flash_attention ? 4ull : 0ull) | (interleaved ? 2ull : 0ull) | (unroll ? 1ull : 0ull);
     }
 
-    virtual uint64_t hashID(const KernelMeta& kernelMeta) const
+    uint64_t hashID(KernelMeta const& kernelMeta) const override
     {
 
         return hashID(kernelMeta.mS, kernelMeta.mD, kernelMeta.mInterleaved, kernelMeta.mUnrollStep,
-            kernelMeta.mFP32Accumulation, kernelMeta.mFlashAttention, kernelMeta.mAlibiSupported,
-            kernelMeta.mAttentionMaskType, kernelMeta.mTiled);
+            kernelMeta.mFP32Accumulation, kernelMeta.mFlashAttention, kernelMeta.mWarpSpecialization,
+            kernelMeta.mAlibiSupported, kernelMeta.mAttentionMaskType, kernelMeta.mTiled, kernelMeta.mPagedKV,
+            kernelMeta.mEnableQKTanhScale);
     }
 
-    virtual void run(
-        Fused_multihead_attention_params_v2& params, Launch_params& launch_params, cudaStream_t stream) const
+
+
+    // Unified Contiguous QKV and Paged KV FMHA runner.
+    template <typename Kernel_params>
+    void run_template(Kernel_params& params, Launch_params& launch_params, cudaStream_t stream) const
+    {
+        bool forceUnroll = useForceUnroll(params, launch_params);
+        auto const findIter = mFunctions.find(hashFromParams(params, launch_params));
+        // Add debug info when kernels are not found.
+        FT_CHECK_WITH_INFO(findIter != mFunctions.end(),
+            "FMHA kernels are not found (kernel meta info: %d %d %d %d %d %d %d %d %d %d %d %d) !",
+            launch_params.kernel_s, params.d, launch_params.interleaved, forceUnroll, launch_params.force_fp32_acc,
+            launch_params.flash_attention, launch_params.warp_specialization, !launch_params.useKernelWithoutAlibi,
+            static_cast<int>(launch_params.attention_mask_type), launch_params.granular_tiling,
+            launch_params.paged_kv_input, launch_params.enableQKTanhScale);
+
+        auto const& kernelMeta = mKernelMeta[findIter->second.mMetaInfoIndex];
+        const CUfunction func = findIter->second.mDeviceFunction;
+
+        void* kernelParams[] = {&params, nullptr};
+
+        if (!forceUnroll)
+        {
+            cuErrCheck(mDriver->cuLaunchKernel(func, params.h, params.b, 1, kernelMeta.mThreadsPerCTA, 1, 1,
+                           kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
+                mDriver);
+        } // forceunroll = true for flash attention kernels
+        else if (mSM == kSM_90 && launch_params.flash_attention && launch_params.warp_specialization)
+        {
+            dim3 block_size;
+
+            if (launch_params.dynamic_scheduler)
+            {
+                // Get the max total M steps
+                size_t m_steps = size_t((params.s + kernelMeta.mUnrollStep - 1) / kernelMeta.mUnrollStep);
+                m_steps = size_t((m_steps + NUM_COMPUTE_GROUPS - 1) / NUM_COMPUTE_GROUPS);
+                params.num_tiles_per_head = static_cast<uint32_t>(m_steps);
+                params.num_tiles = static_cast<uint32_t>(m_steps * params.b * params.h);
+
+                block_size.y = std::min(static_cast<int>(params.num_tiles), launch_params.multi_processor_count);
+                // 2 * bytes_per_elt stands for kv cache and bytes_per_elt bytes per element.
+                size_t size_in_bytes = params.b * params.h * params.s * params.d * 2 * get_size_in_bytes(mDataType);
+                params.use_balanced_scheduling = launch_params.attention_mask_type == ContextAttentionMaskType::CAUSAL
+                    && size_in_bytes <= launch_params.device_l2_cache_size;
+
+                block_size.x = 1;
+                block_size.y = std::min(static_cast<int>(params.num_tiles), launch_params.multi_processor_count);
+            }
+            else
+            {
+                // Note that this path won't be used. will be dropped later.
+                // tricks for launching warp-specialized flash attention kernels on Hopper
+                block_size.y = std::min(params.b * params.h, launch_params.multi_processor_count);
+
+                // distribute m steps to multiple blocks (fully utilize SMs)
+                // block.x = blocks that handle single head, block.y = blocks that handle different heads
+                size_t sms_per_head = (launch_params.multi_processor_count) / block_size.y;
+                size_t m_steps = size_t((params.s + kernelMeta.mUnrollStep * NUM_COMPUTE_GROUPS - 1)
+                    / kernelMeta.mUnrollStep * NUM_COMPUTE_GROUPS);
+
+                // 2 * size_per_element stands for kv cache.
+                size_t size_in_bytes = block_size.y * params.s * params.d * 2 * get_size_in_bytes(mDataType);
+                if (size_in_bytes <= launch_params.device_l2_cache_size)
+                {
+                    // strategy 1: limit to only 1 wave
+                    block_size.x = std::min(m_steps / NUM_COMPUTE_GROUPS, sms_per_head);
+                }
+                else
+                {
+                    // strategy 2: fully unroll the q loops (contiguous blocks handle all q loops)
+                    block_size.x = m_steps / NUM_COMPUTE_GROUPS;
+                }
+            }
+
+            cuErrCheck(mDriver->cuLaunchKernel(func, block_size.x, block_size.y, block_size.z,
+                           kernelMeta.mThreadsPerCTA, 1, 1, kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
+                mDriver);
+        }
+        else
+        { // forceunroll = true for flash attention kernels
+            int unroll = kernelMeta.mS / kernelMeta.mUnrollStep;
+            FT_CHECK_WITH_INFO(kernelMeta.mS == kernelMeta.mUnrollStep * unroll, "Wrong launching sequence length");
+            // flash attention supports any sequence length, so we runtime s here
+            if (launch_params.flash_attention)
+            {
+                unroll = (params.s + kernelMeta.mUnrollStep - 1) / kernelMeta.mUnrollStep;
+            }
+
+            if (mSM == kSM_70)
+            {
+                if (kernelMeta.mSharedMemBytes >= 48 * 1024)
+                {
+                    cuErrCheck(mDriver->cuFuncSetAttribute(func,
+                                                          CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, kernelMeta.mSharedMemBytes),
+                               mDriver);
+                }
+                cuErrCheck(mDriver->cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
+                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
+                    mDriver);
+            }
+            // on Hopper non-flash-attention, we still launch blocks (h, b, steps)
+            else if (mSM == kSM_90 && !launch_params.flash_attention)
+            {
+                cuErrCheck(mDriver->cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
+                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
+                    mDriver);
+            } // on Ampere/Ada/Volta flash attention, we launch blocks (steps, h, b)
+            else
+            {
+                cuErrCheck(mDriver->cuLaunchKernel(func, unroll, params.h, params.b, kernelMeta.mThreadsPerCTA, 1, 1,
+                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
+                    mDriver);
+            }
+        }
+    }
+
+    // Dispatch contiguous qkv fmha.
+    void run(
+        Fused_multihead_attention_params_v2& params, Launch_params& launch_params, cudaStream_t stream) const override
+    {
+        run_template(params, launch_params, stream);
+    }
+
+    // Dispatch paged kv fmha.
+    void run(Fused_multihead_attention_paged_kv_params_v2& params, Launch_params& launch_params,
+        cudaStream_t stream) const override
+    {
+        run_template(params, launch_params, stream);
+    }
+
+    void getStepSize(uint32_t& out_step_q, uint32_t& out_step_kv,
+        Fused_multihead_attention_paged_kv_params_v2 const& params, Launch_params const& launch_params) const override
+    {
+        getStepSizeImpl(out_step_q, out_step_kv, params, launch_params);
+    }
+
+    void getStepSize(uint32_t& out_step_q, uint32_t& out_step_kv, Fused_multihead_attention_params_v2 const& params,
+        Launch_params const& launch_params) const override
+    {
+        getStepSizeImpl(out_step_q, out_step_kv, params, launch_params);
+    }
+
+private:
+    template <typename Kernel_params>
+    void getStepSizeImpl(uint32_t& out_step_q, uint32_t& out_step_kv, Kernel_params const& params,
+        Launch_params const& launch_params) const
+    {
+        auto const findIter = mFunctions.find(hashFromParams(params, launch_params));
+        FT_CHECK_WITH_INFO(findIter != mFunctions.end(),
+            "FMHA kernels are not found (kernel meta info: %d %d %d %d %d %d %d %d %d %d) !", launch_params.kernel_s,
+            params.d, launch_params.interleaved, launch_params.force_fp32_acc, launch_params.flash_attention,
+            launch_params.warp_specialization, !launch_params.useKernelWithoutAlibi,
+            static_cast<int>(launch_params.attention_mask_type), launch_params.granular_tiling,
+            launch_params.paged_kv_input);
+
+        auto const& kernelMeta = mKernelMeta[findIter->second.mMetaInfoIndex];
+        out_step_q = kernelMeta.mStepQ;
+        out_step_kv = kernelMeta.mStepKV;
+    }
+
+    template <typename Kernel_params>
+    bool useForceUnroll(Kernel_params const& params, Launch_params const& launch_params) const
     {
         bool forceUnroll = launch_params.force_unroll;
         if (!forceUnroll && !launch_params.ignore_b1opt && mSM >= kSM_80)
@@ -277,222 +453,26 @@ public:
             }
         }
 
-        const auto findIter
-            = mFunctions.find(hashID(launch_params.kernel_s, params.d, launch_params.interleaved, forceUnroll,
-                launch_params.force_fp32_acc, launch_params.flash_attention, !launch_params.useKernelWithoutAlibi,
-                static_cast<int>(launch_params.attention_mask_type), launch_params.granular_tiling));
+        return forceUnroll;
+    }
 
-        // Add debug info when kernels are not found.
-        FT_CHECK_WITH_INFO(findIter != mFunctions.end(),
-            "FMHA kernels are not found (kernel meta info: %d %d %d %d %d %d %d %d %d) !", launch_params.kernel_s,
-            params.d, launch_params.interleaved, forceUnroll, launch_params.force_fp32_acc,
-            launch_params.flash_attention, !launch_params.useKernelWithoutAlibi,
-            static_cast<int>(launch_params.attention_mask_type), launch_params.granular_tiling);
-
-        const auto& kernelMeta = mKernelMeta[findIter->second.mMetaInfoIndex];
-        const CUfunction func = findIter->second.mDeviceFunction;
-
-        void* kernelParams[] = {&params, nullptr};
-
-        if (!forceUnroll)
-        {
-            cuErrCheck(mDriver.cuLaunchKernel(func, params.h, params.b, 1, kernelMeta.mThreadsPerCTA, 1, 1,
-                           kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                mDriver);
-        } // forceunroll = true for flash attention kernels
-        else if (mSM == kSM_90 && launch_params.flash_attention && launch_params.warp_specialization)
-        {
-            // tricks for launching warp-specialized flash attention kernels on Hopper
-            dim3 block_size(1, std::min(params.b * params.h, launch_params.multi_processor_count));
-
-            // distribute m steps to multiple blocks (fully utilize SMs)
-            // block.x = blocks that handle single head, block.y = blocks that handle different heads
-            size_t sms_per_head = (launch_params.multi_processor_count) / block_size.y;
-            size_t m_steps = size_t((params.s + kernelMeta.mUnrollStep - 1) / kernelMeta.mUnrollStep);
-            m_steps = size_t((m_steps + NUM_COMPUTE_GROUPS - 1) / NUM_COMPUTE_GROUPS) * NUM_COMPUTE_GROUPS;
-
-            // 2 * 2 stands for kv cache and 2 bytes per element.
-            size_t size_in_bytes = block_size.y * params.s * params.d * 2 * 2;
-            // Take uGPU into consideration.
-            if (size_in_bytes <= launch_params.device_l2_cache_size / 2)
-            {
-                // strategy 1: limit to only 1 wave
-                block_size.x = std::min(m_steps / NUM_COMPUTE_GROUPS, sms_per_head);
-            }
-            else
-            {
-                // strategy 2: fully unroll the q loops (contiguous blocks handle all q loops)
-                block_size.x = m_steps / NUM_COMPUTE_GROUPS;
-            }
-
-            cuErrCheck(mDriver.cuLaunchKernel(func, block_size.x, block_size.y, block_size.z, kernelMeta.mThreadsPerCTA,
-                           1, 1, kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                mDriver);
-        }
-        else
-        { // forceunroll = true for flash attention kernels
-            int unroll = kernelMeta.mS / kernelMeta.mUnrollStep;
-            FT_CHECK_WITH_INFO(kernelMeta.mS == kernelMeta.mUnrollStep * unroll, "Wrong launching sequence length");
-            // flash attention supports any sequence length, so we runtime s here
-            if (launch_params.flash_attention)
-            {
-                unroll = (params.s + kernelMeta.mUnrollStep - 1) / kernelMeta.mUnrollStep;
-            }
-
-            if (mSM == kSM_70)
-            {
-                if (kernelMeta.mSharedMemBytes >= 48 * 1024)
-                {
-                    cuErrCheck(mDriver.cuFuncSetAttribute(func,
-                                                          CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, kernelMeta.mSharedMemBytes),
-                               mDriver);
-                }
-                cuErrCheck(mDriver.cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
-                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                    mDriver);
-            }
-            // on Hopper non-flash-attention, we still launch blocks (h, b, steps)
-            else if (mSM == kSM_90 && !launch_params.flash_attention)
-            {
-                cuErrCheck(mDriver.cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
-                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                    mDriver);
-            } // on Ampere/Ada flash attention, we launch blocks (steps, h, b)
-            else
-            {
-                cuErrCheck(mDriver.cuLaunchKernel(func, unroll, params.h, params.b, kernelMeta.mThreadsPerCTA, 1, 1,
-                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                    mDriver);
-            }
-        }
+    template <typename Kernel_params>
+    uint64_t hashFromParams(Kernel_params const& params, Launch_params const& launch_params) const
+    {
+        bool forceUnroll = useForceUnroll(params, launch_params);
+        return hashID(launch_params.kernel_s, params.d, launch_params.interleaved, forceUnroll,
+            launch_params.force_fp32_acc, launch_params.flash_attention, launch_params.warp_specialization,
+            !launch_params.useKernelWithoutAlibi, static_cast<int>(launch_params.attention_mask_type),
+            launch_params.granular_tiling, launch_params.paged_kv_input, launch_params.enableQKTanhScale);
     }
 };
 
 using FusedMHAKernelFactoryV2 = TFusedMHAKernelFactory<FusedMultiHeadAttentionXMMAKernelV2>;
 
-inline const FusedMultiHeadAttentionXMMAKernelV2* getXMMAKernelsV2(Data_type type, unsigned int sm)
+inline FusedMultiHeadAttentionXMMAKernelV2 const* getXMMAKernelsV2(Data_type type, unsigned int sm)
 {
     return FusedMHAKernelFactoryV2::Get().getXMMAKernels(
         sMhaKernelMetaInfosV2, sizeof(sMhaKernelMetaInfosV2) / sizeof(sMhaKernelMetaInfosV2[0]), type, sm);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-// FMHA kernels that support Paged KV Cache and Chunked Attention.
-
-class FusedMultiHeadAttentionPagedKVXMMAKernelV2
-    : public TFusedMultiHeadAttentionXMMAKernel<FusedMultiHeadAttentionPagedKVKernelMetaInfoV2,
-          Fused_multihead_attention_paged_kv_params_v2>
-{
-public:
-    FusedMultiHeadAttentionPagedKVXMMAKernelV2(const FusedMultiHeadAttentionPagedKVKernelMetaInfoV2* pMetaStart,
-        unsigned int nMetaCount, Data_type type, unsigned int sm)
-        : TFusedMultiHeadAttentionXMMAKernel<FusedMultiHeadAttentionPagedKVKernelMetaInfoV2,
-            Fused_multihead_attention_paged_kv_params_v2>(pMetaStart, nMetaCount, type, sm)
-    {
-    }
-
-    inline uint64_t hashID(unsigned int s, unsigned int d, bool interleaved, bool unroll, bool force_fp32_acc,
-        bool flash_attention, bool warp_specialization, bool is_alibi_supported, int attention_mask_type,
-        bool tiled) const
-    {
-        s = flash_attention ? 0 : s;
-        // D <= 2048
-        return (uint64_t) s << 32 | d << 16 | (attention_mask_type << 7) | (is_alibi_supported ? 64ull : 0ull)
-            | (warp_specialization ? 32ull : 0ull) | (tiled ? 16ull : 0ull) | (force_fp32_acc ? 8ull : 0ull)
-            | (flash_attention ? 4ull : 0ull) | (interleaved ? 2ull : 0ull) | (unroll ? 1ull : 0ull);
-    }
-
-    virtual uint64_t hashID(const KernelMeta& kernelMeta) const
-    {
-        return hashID(kernelMeta.mS, kernelMeta.mD, kernelMeta.mInterleaved, kernelMeta.mUnrollStep,
-            kernelMeta.mFP32Accumulation, kernelMeta.mFlashAttention, kernelMeta.mWarpSpecialization,
-            kernelMeta.mAlibiSupported, kernelMeta.mAttentionMaskType, kernelMeta.mTiled);
-    }
-
-    virtual void run(
-        Fused_multihead_attention_paged_kv_params_v2& params, Launch_params& launch_params, cudaStream_t stream) const
-    {
-
-        const auto findIter = mFunctions.find(hashID(launch_params.kernel_s, params.d, launch_params.interleaved,
-            launch_params.force_unroll, launch_params.force_fp32_acc, launch_params.flash_attention,
-            launch_params.warp_specialization, !launch_params.useKernelWithoutAlibi,
-            static_cast<int>(launch_params.attention_mask_type), launch_params.granular_tiling));
-
-        // Add debug info when kernels are not found.
-        FT_CHECK_WITH_INFO(findIter != mFunctions.end(),
-            "Paged KV FMHA kernels are not found (kernel meta info: %d %d %d %d %d %d %d %d %d %d) !",
-            launch_params.kernel_s, params.d, launch_params.interleaved, launch_params.force_unroll,
-            launch_params.force_fp32_acc, launch_params.flash_attention, launch_params.warp_specialization,
-            !launch_params.useKernelWithoutAlibi, static_cast<int>(launch_params.attention_mask_type),
-            launch_params.granular_tiling);
-
-        const auto& kernelMeta = mKernelMeta[findIter->second.mMetaInfoIndex];
-        const CUfunction func = findIter->second.mDeviceFunction;
-
-        void* kernelParams[] = {&params, nullptr};
-
-        if (mSM == kSM_90 && launch_params.flash_attention && launch_params.warp_specialization)
-        {
-            // tricks for launching warp-specialized flash attention kernels on Hopper
-            dim3 block_size(1, std::min(params.b * params.h, launch_params.multi_processor_count));
-
-            // distribute m steps to multiple blocks (fully utilize SMs)
-            // block.x = blocks that handle single head, block.y = blocks that handle different heads
-            size_t sms_per_head = (launch_params.multi_processor_count) / block_size.y;
-            size_t m_steps = size_t((params.s + kernelMeta.mUnrollStep - 1) / kernelMeta.mUnrollStep);
-            m_steps = size_t((m_steps + NUM_COMPUTE_GROUPS - 1) / NUM_COMPUTE_GROUPS) * NUM_COMPUTE_GROUPS;
-
-            // 2 * 2 stands for kv cache and 2 bytes per element.
-            size_t size_in_bytes = block_size.y * launch_params.kernel_kv_s * params.d * 2 * 2;
-            // Take uGPU into consideration.
-            if (size_in_bytes <= launch_params.device_l2_cache_size / 2)
-            {
-                // strategy 1: limit to only 1 wave
-                block_size.x = std::min(m_steps / NUM_COMPUTE_GROUPS, sms_per_head);
-            }
-            else
-            {
-                // strategy 2: fully unroll the q loops (contiguous blocks handle all q loops)
-                block_size.x = m_steps / NUM_COMPUTE_GROUPS;
-            }
-
-            cuErrCheck(mDriver.cuLaunchKernel(func, block_size.x, block_size.y, block_size.z, kernelMeta.mThreadsPerCTA,
-                           1, 1, kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                mDriver);
-        }
-        else
-        { // forceunroll = true for flash attention kernels
-            int unroll = kernelMeta.mS / kernelMeta.mUnrollStep;
-            FT_CHECK_WITH_INFO(kernelMeta.mS == kernelMeta.mUnrollStep * unroll, "Wrong launching sequence length");
-            // flash attention supports any sequence length, so we runtime s here
-            if (launch_params.flash_attention)
-            {
-                unroll = (params.s + kernelMeta.mUnrollStep - 1) / kernelMeta.mUnrollStep;
-            }
-            // on Hopper non-flash-attention, we still launch blocks (h, b, steps)
-            if (mSM == kSM_90 && !launch_params.flash_attention)
-            {
-                cuErrCheck(mDriver.cuLaunchKernel(func, params.h, params.b, unroll, kernelMeta.mThreadsPerCTA, 1, 1,
-                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                    mDriver);
-            } // on Ampere/Ada flash attention, we launch blocks (steps, h, b)
-            else
-            {
-                cuErrCheck(mDriver.cuLaunchKernel(func, unroll, params.h, params.b, kernelMeta.mThreadsPerCTA, 1, 1,
-                               kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr),
-                    mDriver);
-            }
-        }
-    }
-};
-
-using FusedMHAPagedKVKernelFactoryV2 = TFusedMHAKernelFactory<FusedMultiHeadAttentionPagedKVXMMAKernelV2>;
-
-inline const FusedMultiHeadAttentionPagedKVXMMAKernelV2* getPagedKVXMMAKernelsV2(Data_type type, unsigned int sm)
-{
-    return FusedMHAPagedKVKernelFactoryV2::Get().getXMMAKernels(sMhaPagedKVKernelMetaInfosV2,
-        sizeof(sMhaPagedKVKernelMetaInfosV2) / sizeof(sMhaPagedKVKernelMetaInfosV2[0]), type, sm);
 }
 
 } // namespace kernels

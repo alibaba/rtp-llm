@@ -57,6 +57,10 @@ static inline size_t get_size_in_bytes(size_t n, Data_type dtype)
     }
 }
 
+static inline size_t get_size_in_bytes(Data_type dtype)
+{
+    return get_size_in_bytes(1, dtype);
+}
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct Fused_multihead_attention_params {
@@ -317,7 +321,7 @@ public:
                                        unsigned int nMetaCount,
                                        Data_type type,
                                        unsigned int sm):
-        mDataType(type), mKernelMeta(pMetaStart), mKernelMetaCount(nMetaCount), mSM(sm)
+        mDriver(CUDADriverWrapper::getInstance()), mDataType(type), mKernelMeta(pMetaStart), mKernelMetaCount(nMetaCount), mSM(sm)
     {
     }
 
@@ -336,17 +340,17 @@ public:
                     hmod = findModuleIter->second;
                 }
                 else {
-                    cuErrCheck(mDriver.cuModuleLoadData(&hmod, kernelMeta.mCubin), mDriver);
+                    cuErrCheck(mDriver->cuModuleLoadData(&hmod, kernelMeta.mCubin), mDriver);
                     mModules.insert(std::make_pair(kernelMeta.mCubin, hmod));
                 }
 
                 FusedMultiHeadAttentionKernelInfo funcInfo;
                 funcInfo.mMetaInfoIndex = i;
-                cuErrCheck(mDriver.cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod, kernelMeta.mFuncName), mDriver);
+                cuErrCheck(mDriver->cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod, kernelMeta.mFuncName), mDriver);
                 if (kernelMeta.mSharedMemBytes >= 48 * 1024) {
-                    cuErrCheck(mDriver.cuFuncSetAttribute(funcInfo.mDeviceFunction,
-                                                          CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                                                          kernelMeta.mSharedMemBytes),
+                    cuErrCheck(mDriver->cuFuncSetAttribute(funcInfo.mDeviceFunction,
+                                                           CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                                                           kernelMeta.mSharedMemBytes),
                                mDriver);
                 }
                 mFunctions.insert(std::make_pair(hashID(kernelMeta), funcInfo));
@@ -371,7 +375,7 @@ public:
         const CUfunction func = findIter->second.mDeviceFunction;
 
         void* kernelParams[] = {&params, nullptr};
-        cuErrCheck(mDriver.cuLaunchKernel(func,
+        cuErrCheck(mDriver->cuLaunchKernel(func,
                                           params.h,
                                           params.b,
                                           1,
@@ -389,7 +393,7 @@ public:
 
 protected:
     // nvinfer1::CUDADriverWrapper mDriver;
-    CUDADriverWrapper mDriver;
+    std::shared_ptr<CUDADriverWrapper> mDriver;
 
     Data_type mDataType;
     const TKernelMeta* mKernelMeta;
