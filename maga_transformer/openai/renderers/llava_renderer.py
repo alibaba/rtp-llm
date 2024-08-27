@@ -73,7 +73,8 @@ class Conversation:
                     elif content_part.type == ContentPartTypeEnum.image_url:
                         assert (content_part.image_url != None)
                         images.append(content_part.image_url.url)
-                        now_prompt = f"<image>\n" + now_prompt
+                        now_prompt = "<image>\n" + now_prompt if len(message.content) == 2 \
+                                        else now_prompt + "<image>\n"
                 prompt += f"{self.roles[message.role]}" + self.connector[0] + now_prompt
             if self.sep_style == SeparatorStyle.TWO:
                 prompt += self.seps[index % 2]
