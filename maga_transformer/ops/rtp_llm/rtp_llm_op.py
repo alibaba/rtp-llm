@@ -4,6 +4,7 @@ from maga_transformer.models.propose_model.propose_model import ProposeModel
 from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.ops import RtpLLMOp as CppRtpLLMOp
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
+from maga_transformer.utils.token_processor import TokenProcessor
 
 
 class RtpLLMOp(FTOPBase):
@@ -12,20 +13,22 @@ class RtpLLMOp(FTOPBase):
             model: BaseModel,
             mm_engine: Optional[MMProcessEngine] = None,
             propose_model: Optional[ProposeModel] = None,
+            token_processor: Optional[TokenProcessor] = None
         ):
         super().__init__()
         self.model = model
         self.mm_engine = mm_engine
         self.propose_model = propose_model
         self.ft_op = CppRtpLLMOp()
-
+        self.token_processor = token_processor
 
     def start(self):
         self.weight = self.model.weight
         self.ft_op.init( # type: ignore
             self.model,
             self.mm_engine,
-            self.propose_model)
+            self.propose_model,
+            self.token_processor)
 
     def stop(self):
         self.ft_op.stop() # type: ignore

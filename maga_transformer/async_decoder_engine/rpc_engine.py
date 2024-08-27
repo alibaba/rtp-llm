@@ -9,6 +9,7 @@ from maga_transformer.models.base_model import BaseModel, GenerateInput, Generat
 from maga_transformer.async_decoder_engine.base_engine import BaseEngine, KVCacheInfo
 from maga_transformer.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
+from maga_transformer.utils.token_processor import TokenProcessor
 
 class RPCEngine(BaseEngine):
     def __init__(self,
@@ -18,11 +19,12 @@ class RPCEngine(BaseEngine):
         self.propose_model = propose_model
         self.tokenizer = model.tokenizer
         self.config = model.config
+        self.token_processor = TokenProcessor(self.tokenizer, self.model.config.special_tokens)
         if self.model.is_multimodal():
             self.mm_engine = MMProcessEngine(self.model)
         else:
             self.mm_engine = None
-        self.rtp_llm_op_ = RtpLLMOp(model, self.mm_engine, propose_model)
+        self.rtp_llm_op_ = RtpLLMOp(model, self.mm_engine, propose_model, self.token_processor)
         self.model_rpc_client = ModelRpcClient()
 
     @override
