@@ -201,7 +201,7 @@ void CacheManager::decrQueryRefCounter(const std::vector<int>& blocks) {
 
 CacheManager::MatchInfo CacheManager::mallocWithCacheImpl(const std::vector<int>& token_ids, bool need_loss) {
     auto match_info = matchImpl(token_ids);
-    if ((match_info.loss.empty() && need_loss) || !match_info.reuse_length) {
+    if (match_info.loss.empty() && need_loss) {
         return {0, {}, {}};
     }
     block_ref_counter_.incrementRefCounter(match_info.cache_blocks);
