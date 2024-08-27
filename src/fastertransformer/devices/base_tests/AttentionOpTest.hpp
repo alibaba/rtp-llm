@@ -259,7 +259,7 @@ void AttentionOpTest::selfAttentionOpTest(size_t batch_size,
     auto common_inputs = AttentionCommonInputs({*input_lengths_device, *sequence_lengths_device});
     auto layer_k_cache_buffer = kv_cache_buffer.k_blocks->index(0);
     auto layer_v_cache_buffer = kv_cache_buffer.v_blocks->index(0);
-    common_inputs.kv_cache = KvCacheInfo({kv_cache_offset, layer_k_cache_buffer, layer_v_cache_buffer});
+    common_inputs.kv_cache = KvCacheInfo({(int)kv_cache_buffer.k_blocks->shape()[0], kv_cache_offset, layer_k_cache_buffer, layer_v_cache_buffer});
     common_inputs.context_batch_size = 0;
     common_inputs.context_max_seq_len = 0;
     common_inputs.decoder_batch_size = batch_size;

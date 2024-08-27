@@ -203,6 +203,7 @@ cc_library(
         "decoder_masked_multihead_attention_utils.h",
         "rotary_position_embedding.h",
         "kv_cache_utils.h",
+        "kv_cache_index.h"
     ],
     deps = any_cuda_deps,
     copts = any_cuda_copts(),

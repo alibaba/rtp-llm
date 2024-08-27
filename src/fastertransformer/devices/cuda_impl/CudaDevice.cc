@@ -189,22 +189,25 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         return output;
     }
     if (params.context_batch_size) {
+        bool paged_kv_fmha = params.diff_qkv_len && params.has_kv_cache && !params.int8_kv_cache && !params.sprase_head;
         cufmha_runner_->setup(params.dtype,
-                            params.configs.mask_type,
-                            params.configs.head_num,
-                            params.configs.kv_head_num,
-                            params.configs.size_per_head,
-                            params.configs.q_scaling,
-                            params.has_alibi_slopes);
-        if (params.diff_qkv_len && params.has_kv_cache && !params.int8_kv_cache && !params.sprase_head) {
-            if (use_trtv2_fmha_paged && cufmha_runner_->trtV2FmhaSupport()) {
+                              params.configs.mask_type,
+                              params.configs.head_num,
+                              params.configs.kv_head_num,
+                              params.configs.size_per_head,
+                              params.configs.q_scaling,
+                              params.has_alibi_slopes,
+                              paged_kv_fmha);
+        bool trt_v2_fmha_support = cufmha_runner_->trtV2FmhaSupport();                      
+        if (paged_kv_fmha) {
+            if (use_trtv2_fmha_paged && trt_v2_fmha_support) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;
             } else if (use_open_source_fmha_paged && cufmha_runner_->openSourceFmhaSupport()
                     && params.configs.tokens_per_block % 256 == 0) {
                 fmha_type_ = FMHAType::PAGED_OPEN_SOURCE;
             }
         } else if (!params.diff_qkv_len) {
-            if (use_trtv2_fmha && cufmha_runner_->trtV2FmhaSupport()) {
+            if (use_trtv2_fmha && trt_v2_fmha_support) {
                 fmha_type_ = FMHAType::TRT_V2;
             } else if (use_open_source_fmha && cufmha_runner_->openSourceFmhaSupport()) {
                 fmha_type_ = FMHAType::OPEN_SOURCE;

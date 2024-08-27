@@ -76,7 +76,7 @@ void cufmha::runTrtV1Fmha(void* input,
 bool cufmha::trtV2FmhaSupport() {
     trtv2_fmha_runner_.reset(
         new tensorrt_llm::kernels::FusedMHARunnerV2(
-            trtDtypeConvert(dtype_), head_num_, size_per_head_, q_scaling_));
+            trtDtypeConvert(dtype_), paged_kv_fmha_, head_num_, size_per_head_, q_scaling_));
 
     return trtv2_fmha_runner_->fmha_supported() &&
            (mtype_ == AttentionMaskType::causalMask ||
@@ -86,7 +86,7 @@ bool cufmha::trtV2FmhaSupport() {
 
 bool cufmha::openSourceFmhaSupport()
 {
-    return (head_num_ % kv_head_num_ == 0) &&
+    return (kv_head_num_ != 0 && head_num_ % kv_head_num_ == 0) &&
            (mtype_ == AttentionMaskType::causalMask ||
             mtype_ == AttentionMaskType::noMask) &&
            ((size_per_head_ == 64) || (size_per_head_ == 96) || (size_per_head_ == 128));
@@ -96,6 +96,8 @@ void cufmha::runTrtV2FmhaPaged(void*  input,
                                void*  cu_q_seqlens,
                                void*  cu_kv_seqlens,
                                void*  output,
+                               uint32_t* tile_counter_ptr,
+                               const void* paged_kv_block_offsets_on_host,
                                size_t batch_size,
                                size_t input_seq_len,
                                size_t max_past_kv_len,
@@ -112,36 +114,39 @@ void cufmha::runTrtV2FmhaPaged(void*  input,
     // By default, max_kv_cache_length == cyclic_kv_cache_length
     // unless each layer has different cyclic kv cache length.
     // Max cache capacity (used to allocate KV cache)
-    // Cyclic kv cache capacity (used to get the cyclic kv cache position for new tokens)
-    trtv2_fmha_runner_->setup_paged_kv(batch_size,
-                                       input_seq_len,
-                                       max_past_kv_len,
-                                       kv_block_array.mMaxBlocksPerSeq,
-                                       kv_block_array.mTokensPerBlock,
-                                       max_past_kv_len, //  cyclic_kv_cache_length
-                                       token_num,
-                                       is_alibi,
-                                       is_alibi_with_sacle,
-                                       1,
-                                       0);
 
-    trtv2_fmha_runner_->run_paged_kv(input,
-                                     nullptr,
-                                     nullptr,
-                                     kv_block_array,
-                                     cu_q_seqlens,
-                                     cu_kv_seqlens,
-                                     output,
-                                     stream_);
+    trtv2_fmha_runner_->setup(batch_size,
+                              input_seq_len,
+                              max_past_kv_len,
+                              kv_block_array.mMaxBlocksPerSeq,
+                              kv_block_array.mTokensPerBlock,
+                              max_past_kv_len, //  cyclic_kv_cache_length
+                              token_num,
+                              is_alibi,
+                              is_alibi_with_sacle,
+                              1,
+                              0);
+
+    trtv2_fmha_runner_->run(input,
+                            paged_kv_block_offsets_on_host,
+                            kv_block_array,
+                            cu_q_seqlens,
+                            cu_kv_seqlens,
+                            tile_counter_ptr,
+                            nullptr,
+                            output,
+                            stream_);
     sync_check_cuda_error();
 }
 
 void cufmha::runTrtV2Fmha(void* input,
                           void* cu_seqlens,
                           void* output,
+                          uint32_t* tile_counter_ptr,
                           size_t batch_size,
                           size_t seq_len,
                           size_t token_num,
+                          KVBlockArray kv_block_array,
                           bool mFMHAForceFP32Acc,
                           bool mRemovePadding,
                           bool is_alibi,
@@ -151,19 +156,28 @@ void cufmha::runTrtV2Fmha(void* input,
                                     mRemovePadding,
                                     (mtype_ == AttentionMaskType::causalMask),
                                     kv_head_num_);
-
     trtv2_fmha_runner_->setup(batch_size,
                               seq_len,
                               seq_len,
+                              kv_block_array.mMaxBlocksPerSeq,
+                              kv_block_array.mTokensPerBlock,
+                              seq_len, //  cyclic_kv_cache_length
                               token_num,
                               is_alibi,
                               is_alibi_with_sacle,
                               1,
                               0);
+
+
     trtv2_fmha_runner_->run(input,
-                            cu_seqlens,
-                            output,
-                            stream_);
+                        nullptr,
+                        kv_block_array,
+                        cu_seqlens,
+                        cu_seqlens,
+                        tile_counter_ptr,
+                        nullptr,
+                        output,
+                        stream_);
 
     sync_check_cuda_error();
 }

@@ -2027,8 +2027,8 @@ void invokeTranspose4dBatchMajor(const T*              kSrc,
                                               cudaStream_t          stream)
 
 #define INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR(T)                                                                        \
-    INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR_KV_CACHE_TYPE(T, KVBlockArray);                                               \
-    INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR_KV_CACHE_TYPE(T, KVLinearBuffer);
+    INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR_KV_CACHE_TYPE(T, KVBlockArray);                                               
+
 
 INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR(float)
 INSTANTIATE_TRANSPOSE_4D_BATCH_MAJOR(half)

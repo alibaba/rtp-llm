@@ -116,7 +116,7 @@ struct PrefixPromptBatchWeightsParam {
     const int*              d_prefix_prompt_lengths  = nullptr;
     int                     max_prefix_prompt_length = 0;
     bool                    count_length             = false;
-    KVBlockArray            kv_block_array           = KVBlockArray(0, 0, 0, 0);
+    KVBlockArray            kv_block_array           = KVBlockArray();
 };
 
 void float_to_half(const void* input, void* output, int size);

@@ -107,6 +107,7 @@ void AttentionLayerTest<T>::testAttentionLayer(
     auto layer_k_cache_buffer = model_inputs.k_cache_buffer->index(0);
     auto layer_v_cache_buffer = model_inputs.v_cache_buffer->index(0);
     common_inputs.kv_cache = KvCacheInfo({
+        (int)model_inputs.k_cache_buffer->shape()[0],
         model_inputs.kv_cache_offset,
         layer_k_cache_buffer,
         layer_v_cache_buffer,

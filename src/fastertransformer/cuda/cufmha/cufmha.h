@@ -23,8 +23,9 @@ public:
                size_t head_num,
                size_t kv_head_num,
                size_t size_per_head,
-               float q_scaling,
-               bool  use_linear_bias_slopes)
+               float  q_scaling,
+               bool   use_linear_bias_slopes,
+               bool   paged_kv_fmha)
     {
         dtype_ = dtype;
         mtype_ = mtype;
@@ -33,6 +34,7 @@ public:
         size_per_head_ = size_per_head;
         q_scaling_ = q_scaling;
         use_linear_bias_slopes_ = use_linear_bias_slopes;
+        paged_kv_fmha_ = paged_kv_fmha;
     }
 
 
@@ -53,9 +55,11 @@ public:
     void runTrtV2Fmha(void* input,
                       void* cu_seqlens,
                       void* output,
+                      uint32_t* tile_counter_ptr,
                       size_t batch_size,
                       size_t seq_len,
                       size_t token_num,
+                      KVBlockArray kv_block_array,
                       bool mFMHAForceFP32Acc    = false,
                       bool mRemovePadding       = false,
                       bool is_alibi             = false,
@@ -65,6 +69,8 @@ public:
                            void*  cu_q_seqlens,
                            void*  cu_kv_seqlens,
                            void*  output,
+                           uint32_t* tile_counter_ptr,
+                           const void* paged_kv_block_offsets_on_host,
                            size_t batch_size,
                            size_t input_seq_len,
                            size_t max_past_kv_len,
@@ -137,6 +143,7 @@ private:
     size_t size_per_head_;
     float q_scaling_;
     bool use_linear_bias_slopes_;
+    bool paged_kv_fmha_;
 
     cudaStream_t stream_;
 };

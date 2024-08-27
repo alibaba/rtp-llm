@@ -18,65 +18,73 @@ using namespace std;
 namespace fastertransformer {
 
 KVBlockArray getKVBlockArray(const AttentionModuleParams& params,
-                             const Buffer& block_pointers,
-                             const Buffer& block_scale_pointers,
-                             int batch_size, cudaStream_t stream) {
-    const auto& kv_cache = params.common.kv_cache;
+                             const Buffer&                kv_cache_offset_pointers,
+                             const Buffer&                kv_cache_scale_offset_pointers,
+                             int                          batch_size,
+                             cudaStream_t                 stream) {
+    const auto& kv_cache         = params.common.kv_cache;
     const auto& kv_blocks_offset = *(kv_cache->kv_cache_offset);
-    RUNTIME_ASSERT_OP_ARG(
-        kv_blocks_offset.shape()[0] == batch_size,
-        "context attention kv blocks batch size expected [%d] but buffer[%s]",
-        (int)batch_size, kv_blocks_offset.debugString().c_str());
-    const auto max_blocks_per_batch = kv_blocks_offset.shape()[1];
-    KVBlockArray kv_block_array(
-        batch_size, max_blocks_per_batch, params.configs.tokens_per_block, 0);
-    RUNTIME_ASSERT_OP_ARG(
-            kv_cache->k_cache_buffer && kv_cache->v_cache_buffer,
-            "kv cache buffer should has value when use kv_cache_offset");
-    const auto& k_cache = *(kv_cache->k_cache_buffer);
-    const auto& v_cache = *(kv_cache->v_cache_buffer);
-
-    invokeConvertOffsetToAddrOneLayer(
-            (uint64_t *)block_pointers.data(),
-            (uint64_t)k_cache.data(),
-            (uint64_t)v_cache.data(),
-            (int *)kv_blocks_offset.data(),
-            batch_size,
-            max_blocks_per_batch,
-            k_cache[0].sizeBytes(),
-            stream);
-
-    kv_block_array.data        = (int64_t *)block_pointers.data();
+    const auto& kv_block_offset = (kv_cache->k_cache_buffer)->shape()[0] * kv_cache->layer_num;
+    RUNTIME_ASSERT_OP_ARG(kv_blocks_offset.shape()[0] == batch_size,
+                          "context attention kv blocks batch size expected [%d] but buffer[%s]",
+                          (int)batch_size,
+                          kv_blocks_offset.debugString().c_str());
+    const auto  max_blocks_per_batch = kv_blocks_offset.shape()[1];
+    const auto& k_cache              = *(kv_cache->k_cache_buffer);
+    const auto& v_cache              = *(kv_cache->v_cache_buffer);
+    auto const  elemSize             = kv_cache->k_scale_buffer ? sizeof(int8_t) : 2;  // 2 for kv cache fp16
+    // FT_LOG_INFO("kv_cache[0].typeSize():%d", kv_cache[0].typeSize());
+    FT_LOG_DEBUG(
+        "kv_blocks_offset size:%d, k_cache:%p, v_cache:%p, k_cache[0].sizeBytes():%d, params.configs.tokens_per_block:%d, kv_block_offset:%d",
+        kv_blocks_offset.size(),
+        (uint64_t*)k_cache.data(),
+        (uint64_t)v_cache.data(),
+        k_cache[0].sizeBytes(),
+        params.configs.tokens_per_block,
+        kv_block_offset);
+    auto const   sizePerToken = params.configs.kv_head_num * params.configs.size_per_head * elemSize;
+    KVBlockArray kv_cache_buffer =
+        KVBlockArray(batch_size,
+                     max_blocks_per_batch,
+                     params.configs.tokens_per_block,
+                     sizePerToken,
+                     0,
+                     0,
+                     (uint64_t*)k_cache.data(),
+                     nullptr,
+                     (fastertransformer::KVBlockArrayForContextFMHA::DataType*)kv_cache_offset_pointers.data());
+    invokeConvertOffsetToBlockArrayData((int32_t*)kv_cache_offset_pointers.data(),
+                                        (int*)kv_blocks_offset.data(),
+                                        batch_size,
+                                        max_blocks_per_batch,
+                                        kv_block_offset,
+                                        stream);
+    sync_check_cuda_error();
     if (kv_cache->k_scale_buffer) {
-        RUNTIME_ASSERT_OP_ARG(
-                kv_cache->v_scale_buffer,
-                "v scale buffer should has value when use k scale buffer has value");
+        RUNTIME_ASSERT_OP_ARG(kv_cache->v_scale_buffer,
+                              "v scale buffer should has value when use k scale buffer has value");
+        invokeConvertOffsetToBlockArrayData((int32_t*)kv_cache_scale_offset_pointers.data(),
+                                            (int*)kv_blocks_offset.data(),
+                                            batch_size,
+                                            max_blocks_per_batch,
+                                            kv_block_offset,
+                                            stream);
+        kv_cache_buffer.scale =
+            (fastertransformer::KVBlockArrayForContextFMHA::DataType*)(kv_cache_scale_offset_pointers.data());
+        kv_cache_buffer.int8_mode = true;
         const auto& k_scale = *(kv_cache->k_scale_buffer);
-        const auto& v_scale = *(kv_cache->v_scale_buffer);
-
-        invokeConvertOffsetToAddrOneLayer(
-                (uint64_t*)block_scale_pointers.data(),
-                (uint64_t)k_scale.data(),
-                (uint64_t)v_scale.data(),
-                (int*)kv_blocks_offset.data(),
-                batch_size,
-                max_blocks_per_batch,
-                k_scale[0].sizeBytes(),
-                stream);
-        kv_block_array.scale     = (int64_t *)(block_scale_pointers.data());
-        kv_block_array.int8_mode = true;
+        kv_cache_buffer.mScaleBytesPerBlock = k_scale[0].sizeBytes();
     }
     sync_check_cuda_error();
-    return kv_block_array;
+    return kv_cache_buffer;
 }
 
-template <typename T>
-void writeContextKvCache(
-        const AttentionModuleParams& params,
-        const Buffer& k, const Buffer& v,
-        KVBlockArray kv_block_array,
-        cudaStream_t stream)
-{
+template<typename T>
+void writeContextKvCache(const AttentionModuleParams& params,
+                         const Buffer&                k,
+                         const Buffer&                v,
+                         KVBlockArray                 kv_block_array,
+                         cudaStream_t                 stream) {
     invokeTranspose4dBatchMajor<T, KVBlockArray>(
         k.data<T>(),
         v.data<T>(),
@@ -96,6 +104,7 @@ void MHA(const AttentionModuleParams& params,
          FMHAType                     fmha_type,
          cufmha*                      cufmha_runner,
          KVBlockArray                 kv_block_array,
+         const BufferPtr&             kv_cache_offset_host,
          const BufferPtr&             q_output,
          const BufferPtr&             k_output,
          const BufferPtr&             v_output,
@@ -110,12 +119,20 @@ void MHA(const AttentionModuleParams& params,
     auto head_num            = params.configs.head_num;
     auto kv_head_num         = params.configs.kv_head_num;
     auto size_per_head       = params.configs.size_per_head;
+    BufferPtr tiled_counter_ptr;
+    if (FMHAType::PAGED_TRT_V2 == fmha_type || FMHAType::TRT_V2 == fmha_type) {
+        tiled_counter_ptr =
+            device->allocateBuffer({DataType::TYPE_UINT32, {1}, AllocationType::DEVICE}, {"tiled_counter_pointer"});
+        cudaMemsetAsync(tiled_counter_ptr->data(), 0, sizeof(uint32_t), stream);
+    }
     switch (fmha_type) {
         case FMHAType::PAGED_TRT_V2: {
             cufmha_runner->runTrtV2FmhaPaged(q_output->data(),
                                              params.common.cu_seqlens->data(),
                                              params.common.cu_kv_seqlens->data(),
                                              params.output.data(),
+                                             reinterpret_cast<uint32_t*>(tiled_counter_ptr->data()),
+                                             kv_cache_offset_host->data(),
                                              batch_size,
                                              seq_len,
                                              seq_len_with_prefix,
@@ -131,9 +148,11 @@ void MHA(const AttentionModuleParams& params,
             cufmha_runner->runTrtV2Fmha(params.input.data(),
                                         params.common.cu_seqlens->data(),
                                         params.output.data(),
+                                        reinterpret_cast<uint32_t*>(tiled_counter_ptr->data()),
                                         batch_size,
                                         seq_len,
                                         token_num,
+                                        kv_block_array,
                                         false,
                                         false,
                                         params.common.linear_bias_slopes != nullptr,
@@ -259,12 +278,12 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     auto k_output = allocateBuffer({params.input.type(),
                                     {batch_size, kv_head_num, seq_len_with_prefix, size_per_head},
                                     AllocationType::DEVICE},
-                                    {"k_output"});
+        {"k_output"});
 
     auto v_output = allocateBuffer({params.input.type(),
                                     {batch_size, kv_head_num, seq_len_with_prefix, size_per_head},
                                     AllocationType::DEVICE},
-                                    {"v_output"});
+        {"v_output"});
 
     // allocate qkv should be better
     if (fmha_type_ == FMHAType::NONE) {
@@ -273,26 +292,36 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         cudaMemsetAsync(v_output->data(), 0, v_output->sizeBytes(), stream_);
     }
 
-    KVBlockArray kv_block_array;
-    BufferPtr block_pointers, block_scale_pointers;
+    BufferPtr kv_cache_offset = nullptr;
+
+    BufferPtr kv_cache_offset_host = nullptr;
+    BufferPtr kv_cache_scale_pointers = nullptr;
+
+    KVBlockArray                  kv_block_array;
     PrefixPromptBatchWeightsParam prefix_prompt_param;
     if (params.common.kv_cache) {
         const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
-        block_pointers = allocateBuffer({DataType::TYPE_INT64,
-                                         {batch_size, 1, 2, max_blocks_per_batch},
-                                         AllocationType::DEVICE},
-            {"kv_block_pointers"});
-        block_scale_pointers = allocateBuffer({DataType::TYPE_INT64,
-                                               {batch_size, 1, 2, max_blocks_per_batch},
-                                               AllocationType::DEVICE},
-            {"kv_scale_pointers"});
-        kv_block_array = getKVBlockArray(params, *block_pointers, *block_scale_pointers, batch_size, stream_);
+        kv_cache_offset =  allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
+                                         {"kv_cache_offset"});
+
+        kv_cache_offset_host = allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::HOST},
+                                               {"kv_cache_offset_host"});
+        if (params.common.kv_cache->k_scale_buffer) {
+
+            kv_cache_scale_pointers = allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
+                                                 {"kv_cache_scale_pointers"});
+
+        }
+        kv_block_array = getKVBlockArray(params, *kv_cache_offset, *kv_cache_scale_pointers, batch_size, stream_);
+
+        this->copy({*kv_cache_offset_host, *kv_cache_offset});
+        this->syncAndCheck();
 
         if (params.common.prefix_prompt_lengths) {
-            prefix_prompt_param.d_prefix_prompt_lengths = params.common.prefix_prompt_lengths->data<int>();
+            prefix_prompt_param.d_prefix_prompt_lengths  = params.common.prefix_prompt_lengths->data<int>();
             prefix_prompt_param.max_prefix_prompt_length = params.common.max_prefix_length;
-            prefix_prompt_param.count_length = 1;
-            prefix_prompt_param.kv_block_array = kv_block_array;
+            prefix_prompt_param.count_length             = 1;
+            prefix_prompt_param.kv_block_array           = kv_block_array;
         }
     }
 
@@ -333,14 +362,14 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
     if (params.common.kv_cache) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
                 datatype, writeContextKvCache,
-                std::cref(params),
-                std::cref(*k_output),
-                std::cref(*v_output),
-                kv_block_array,
-                stream_);
+                                         std::cref(params),
+                                         std::cref(*k_output),
+                                         std::cref(*v_output),
+                                         kv_block_array,
+                                         stream_);
         sync_check_cuda_error();
     }
-    MHA(params, fmha_type_, cufmha_runner_.get(), kv_block_array, q_output, k_output, v_output, stream_, this);
+    MHA(params, fmha_type_, cufmha_runner_.get(), kv_block_array, kv_cache_offset_host, q_output, k_output, v_output, stream_, this);
 }
 
 template<typename T>
@@ -365,8 +394,8 @@ void selfAttentionwrapper(const AttentionModuleParams params,
     T* qkv_buf_2_ = output.data<T>();
 
     const T* bias_ptr = (params.weights.qkv_weight->bias == nullptr || !params.configs.fuse_qkv_add_bias) ?
-                         nullptr :
-                         params.weights.qkv_weight->bias->data<T>();
+                            nullptr :
+                            params.weights.qkv_weight->bias->data<T>();
 
     // TODO(lidongjin) support relative attention
     const T* relative_attention_bias_ptr = nullptr;
@@ -446,19 +475,19 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
         partial_out = allocateBuffer({datatype,
                                      {batch_size, max_seq_len_tile, local_head_num, size_per_head},
                                      AllocationType::DEVICE},
-                                     {"partial_out"});
+            {"partial_out"});
         partial_sum = allocateBuffer({DataType::TYPE_FP32,
                                      {batch_size, max_seq_len_tile, local_head_num},
                                      AllocationType::DEVICE},
-                                     {"partial_sum"});
+            {"partial_sum"});
         partial_max = allocateBuffer({DataType::TYPE_FP32,
                                      {batch_size, max_seq_len_tile, local_head_num},
                                      AllocationType::DEVICE},
-                                     {"partial_max"});
+            {"partial_max"});
         block_counter = allocateBuffer({DataType::TYPE_INT32,
                                       {batch_size, local_head_num},
                                       AllocationType::DEVICE},
-                                      {"block_counter"});
+                                       {"block_counter"});
         // TODO(lidongjin) use fill op to set zeros.
         cudaMemsetAsync(block_counter->data(), 0, sizeof(int) * batch_size * local_head_num, stream_);
     }
@@ -470,15 +499,14 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
     RUNTIME_ASSERT_OP_ARG(
         params.common.kv_cache, "kv cache can not be null for decoder self-attention");
     const auto max_blocks_per_batch = params.common.kv_cache->kv_cache_offset->shape()[1];
-    auto block_pointers = allocateBuffer({DataType::TYPE_INT64,
-                                          {batch_size, 1, 2, max_blocks_per_batch},
-                                          AllocationType::DEVICE},
-        {"kv_block_pointers"});
-    auto block_scale_pointers = allocateBuffer({DataType::TYPE_INT64,
-                                                {batch_size, 1, 2, max_blocks_per_batch},
-                                                AllocationType::DEVICE},
-        {"kv_scale_pointers"});
-    KVBlockArray kv_block_array = getKVBlockArray(params, *block_pointers, *block_scale_pointers, batch_size, stream_);
+    auto       kv_cache_offset      = allocateBuffer(
+        {DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE}, {"kv_cache_offset"});
+    BufferPtr kv_cache_scale_pointers = nullptr;
+    if (params.common.kv_cache->k_scale_buffer) {
+        kv_cache_scale_pointers = allocateBuffer({DataType::TYPE_INT32, {batch_size, 1, 2, max_blocks_per_batch}, AllocationType::DEVICE},
+                                                 {"kv_cache_scale_pointers"});
+    }
+    KVBlockArray kv_block_array = getKVBlockArray(params, *kv_cache_offset, *kv_cache_scale_pointers, batch_size, stream_);
     DISPATCH_CUDA_FUNCTION_DATA_TYPE(datatype,
                                      selfAttentionwrapper,
                                      params,
@@ -492,4 +520,4 @@ AttentionModuleOutput CudaDevice::decoderSelfAttention(const AttentionModulePara
                                      stream_);
 }
 
-} // namespace fastertransformer
+}  // namespace fastertransformer

@@ -1433,6 +1433,25 @@ __global__ void ConvertOffsetToAddrOneLayer(uint64_t* block_addr, // [b, 2, m]
     }
 }
 
+
+__global__ void ConvertOffsetToBlockArrayData(int32_t*       offset_addr,
+                                              const int*     offset, // [b, m]
+                                              int            batch_size,
+                                              int            max_block_num,
+                                              int            kv_block_offset)
+{
+    const int batch_stride = 2 * max_block_num;
+    for (size_t index = blockIdx.x * blockDim.x + threadIdx.x; index < batch_size * max_block_num;
+         index += blockDim.x * gridDim.x) {
+        const int batch_index     = index / max_block_num;
+        const int col_index       = index % max_block_num;
+        const int32_t block_offset = (int32_t)offset[batch_index * max_block_num + col_index];
+        const int32_t block_addr_index = (int32_t)batch_index * batch_stride + col_index;
+        offset_addr[block_addr_index] = block_offset;
+        offset_addr[block_addr_index + max_block_num] = block_offset + kv_block_offset;
+    }
+}
+
 void invokeConvertOffsetToAddrOneLayer(uint64_t*      block_addr, // [b, 2, m]
                                        const uint64_t k_cache_base_addr,
                                        const uint64_t v_cache_base_addr,
@@ -1452,6 +1471,20 @@ void invokeConvertOffsetToAddrOneLayer(uint64_t*      block_addr, // [b, 2, m]
                                                             block_size);
 }
 
+void invokeConvertOffsetToBlockArrayData(int32_t*      offset_addr, // [b, 2, m]
+                        const int*     offset, // [b, m]
+                        int            batch_size,
+                        int            max_block_num,
+                        int            kv_block_offset,
+                        cudaStream_t   stream) {
+    dim3       grid(min(batch_size, 65536));
+    dim3       block(min(max_block_num, 1024));
+    ConvertOffsetToBlockArrayData<<<grid, block, 0, stream>>>(offset_addr, // [b, 2, m]
+                                                              offset, // [b, m]
+                                                              batch_size,
+                                                              max_block_num,
+                                                              kv_block_offset);
+                        }
 
 #define INSTANTIATE_INVOKE_SUM_LENGTH_DIMENSION(T)                                                                     \
     template void invokeSumLengthDimension(float*       out_buf,                                                       \

@@ -1385,7 +1385,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     bool      count_prefix_length = params.count_prefix_length;
     // We will use cyclic kv cache when it exceeds the limit.
     // The length position for storing new key and value.
-    const int cyclic_tlength = tlength % cyclic_kv_cache_len;
+    int const cyclic_tlength = tlength % cyclic_kv_cache_len;
     // The actual kv cache length.
     // tlength is the past length actually.
     const int kv_loop_length = min(tlength, cyclic_kv_cache_len);
@@ -1634,7 +1634,6 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     constexpr unsigned UNROLLED_K_PER_ITER = K_PER_ITER * K_LOOP_UNROLL;
 
     // Base pointer for the row of pointers to k cache blocks
-    void** k_cache_base_row_ptr = reinterpret_cast<void**>(kvCacheBuffer.getRowPtr(KVIdxType::K_IDX, batch_beam_idx));
 
     const auto timesteps_per_block = static_cast<unsigned>(params.timesteps_per_block);
 
@@ -2079,12 +2078,6 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
     const auto vo = v_idx.x;
     // The hidden dimensions computed by this particular thread.
     const auto vi = v_idx.y;
-    // Base pointer for the row of pointers to v cache blocks
-    void** v_cache_base_row_ptr = reinterpret_cast<void**>(kvCacheBuffer.getRowPtr(KVIdxType::V_IDX, batch_beam_idx));
-    // Base pointer for the row of pointers to v cache blocks for beam's batch, before offsetting with indirection
-    // buffer
-    void** v_cache_batch_row_ptr =
-        reinterpret_cast<void**>(kvCacheBuffer.getRowPtr(KVIdxType::V_IDX, batch_idx * beam_width));
 
     // The number of values processed per iteration of the loop.
     constexpr unsigned V_PER_ITER{THREADS_PER_BLOCK / THREADS_PER_VALUE};
@@ -2223,7 +2216,7 @@ __global__ void masked_multihead_attention_kernel(Multihead_attention_params<T, 
         const int tokenIdx   = cyclic_tlength;
         const int inBlockIdx = kvCacheBuffer.getKVLocalIdx(tokenIdx, hi_kv, Dh, vi);
         // The base pointer for the value in the cache buffer.
-        Tcache* v_cache_base = reinterpret_cast<Tcache*>(kvCacheBuffer.getBlockPtr(v_cache_base_row_ptr, tokenIdx));
+        Tcache* v_cache_base = reinterpret_cast<Tcache*>(kvCacheBuffer.getVBlockPtr(batch_beam_idx, cyclic_tlength));
 
         V_vec_k v;
         if (DO_CROSS_ATTENTION) {

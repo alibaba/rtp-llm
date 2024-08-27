@@ -16,6 +16,7 @@
 #pragma once
 #include <assert.h>
 #include <cmath>
+#include "src/fastertransformer/kernels/kv_cache_index.h"
 
 #if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
@@ -27,23 +28,26 @@
 #include "src/fastertransformer/rocm/hip_utils.h"
 #endif
 
-namespace fastertransformer {
+namespace fastertransformer
+{
 
 // Internal for K and V cache indexing
-enum class KVIdxType : int32_t {
+enum class KVIdxType : int32_t
+{
     K_IDX = 0,
     V_IDX = 1
 };
 
-struct KVBlockArray {
-    // Struct operates on paged kv cache providing
-    // functions for accessing blocks of in K and V caches
-    // and elements inside these blocks
-    bool int8_mode = false;
-    // Max number of blocks per sequence
-    int32_t mMaxBlocksPerSeq;
+// Struct operates on paged kv cache providing
+// only the fields necessary for context FMHA
+struct KVBlockArrayForContextFMHA
+{
+    using DataType = KVCacheIndex const;
+
     // Current number of sequences
     int32_t mMaxSeqs;
+    // Max number of blocks per sequence
+    int32_t mMaxBlocksPerSeq;
     // Number of tokens. It must be power of 2.
     int32_t mTokensPerBlock;
     // Exponent of number of tokens with base 2.
@@ -54,62 +58,155 @@ struct KVBlockArray {
     // B is current number of sequences
     // W is beam width
     // M is Max number of blocks per sequence
-    // int64_t reinterpred to void* pointing to the KV cache data
-    int64_t* data = nullptr;
-    int64_t* scale = nullptr;
 
-    KVBlockArray() {}
+    // Size of KV cache blocks in bytes (H*D*T*sizeof(DataType))
+    int32_t mBytesPerBlock;
+    // Pointer to beginning of pool.
+    void* mPrimaryPoolPtr;
+    // Pointer to block offsets.
+    DataType* data;
 
-    KVBlockArray(int32_t batchSize, int32_t maxBlocksPerSeq, int32_t tokensPerBlock, int32_t sizePerToken):
-        mMaxBlocksPerSeq(maxBlocksPerSeq), mMaxSeqs(batchSize), mTokensPerBlock(tokensPerBlock) {
-        const float tokensPerBlockSeqLog2 = std::log2(mTokensPerBlock);
-        FT_CHECK(ceil(tokensPerBlockSeqLog2) == floor(tokensPerBlockSeqLog2) && "tokensPerBlock must be power of 2");
+    KVBlockArrayForContextFMHA() = default;
+
+    KVBlockArrayForContextFMHA(int32_t batchSize, int32_t maxBlocksPerSeq, int32_t tokensPerBlock,
+        int32_t bytesPerToken, void* primaryPoolPtr, DataType* data)
+        : mMaxSeqs(batchSize)
+        , mMaxBlocksPerSeq(maxBlocksPerSeq)
+        , mTokensPerBlock(tokensPerBlock)
+        , mBytesPerBlock{tokensPerBlock * bytesPerToken}
+        , mPrimaryPoolPtr{primaryPoolPtr}
+        , data{data}
+    {
+        float const tokensPerBlockSeqLog2 = log2(mTokensPerBlock);
+        FT_CHECK_WITH_INFO(
+            ceil(tokensPerBlockSeqLog2) == floor(tokensPerBlockSeqLog2), "tokensPerBlock must be power of 2");
+        // NOTE: pointer offset arithmetic offset is performed on int32_t (see this.getRowPtr).
+        // If needed, we could do it on uint32_t or even uint64_t, but that might have performance implications
+        FT_CHECK_WITH_INFO(static_cast<int64_t>(mMaxSeqs - 1) * mMaxBlocksPerSeq * 2 + maxBlocksPerSeq
+                <= std::numeric_limits<int32_t>::max(),
+            "kv cache is too large for gpt_attention_plugin");
         mTokensPerBlockLog2 = static_cast<int>(tokensPerBlockSeqLog2);
     }
+};
 
-    KVBlockArray(KVBlockArray const& kv):
-        int8_mode(kv.int8_mode),
-        mMaxBlocksPerSeq(kv.mMaxBlocksPerSeq),
-        mMaxSeqs(kv.mMaxSeqs),
-        mTokensPerBlock(kv.mTokensPerBlock),
-        mTokensPerBlockLog2(kv.mTokensPerBlockLog2),
-        data(kv.data),
-        scale(kv.scale) {}
+// Struct operates on paged kv cache providing
+// functions for accessing blocks of in K and V caches
+// and elements inside these blocks
+struct KVBlockArray : public KVBlockArrayForContextFMHA
+{
+    // Pointer to beginning of pool.
+    void* mSecondaryPoolPtr;
+    // Maximum kv cache length per sequence
+    int32_t mMaxAttentionWindow;
+    // Number of sink tokens.
+    int32_t mSinkTokens;
+    // Cyclic cache length.
+    int32_t mCyclicCacheLen;
+    // Bubble length.
+    int32_t mBubbleLen;
+    // Enable one more block to save the kv tokens
+    bool mEnableOneMoreBlock;
+    bool int8_mode = false;
+    DataType* scale = nullptr;
+    int mScaleBytesPerBlock = 1;
 
-    __host__ __device__ inline void** getRowPtr(KVIdxType kvIdx, int32_t seqIdx) {
-        // Returns pointer to array of pointers to K or V cache for one specific sequence seqIdx.
+    KVBlockArray() = default;
+
+    KVBlockArray(int32_t batchSize, int32_t maxBlocksPerSeq, int32_t tokensPerBlock, int32_t bytesPerToken,
+        int32_t maxAttentionWindow, int32_t sinkTokenLen, void* primaryPoolPtr, void* secondaryPoolPtr, DataType* data)
+        : KVBlockArrayForContextFMHA(batchSize, maxBlocksPerSeq, tokensPerBlock, bytesPerToken, primaryPoolPtr, data)
+        , mSecondaryPoolPtr{secondaryPoolPtr}
+        , mMaxAttentionWindow(maxAttentionWindow)
+        , mSinkTokens(sinkTokenLen)
+    {
+        auto sinkTokensInLastBlock = mSinkTokens % mTokensPerBlock;
+        mBubbleLen = sinkTokensInLastBlock == 0 ? 0 : mTokensPerBlock - sinkTokensInLastBlock;
+        mEnableOneMoreBlock = (maxBlocksPerSeq - 1) * tokensPerBlock >= mMaxAttentionWindow + mBubbleLen;
+        mCyclicCacheLen = (mEnableOneMoreBlock) ? mMaxAttentionWindow + mTokensPerBlock - mSinkTokens
+                                                : mMaxAttentionWindow - mSinkTokens;
+    }
+
+    [[nodiscard]] KVBlockArrayForContextFMHA copyKVBlockArrayForContextFMHA() const
+    {
+        return KVBlockArrayForContextFMHA{
+            mMaxSeqs, mMaxBlocksPerSeq, mTokensPerBlock, mBytesPerBlock / mTokensPerBlock, mPrimaryPoolPtr, data};
+    }
+
+    __host__ __device__ [[nodiscard]] inline bool isSinkToken(int32_t tokenIdx) const
+    {
+        return tokenIdx < mSinkTokens;
+    }
+
+    __host__ __device__ [[nodiscard]] inline int32_t getKVTokenIdx(int32_t tokenIdx) const
+    {
+        if (!isSinkToken(tokenIdx))
+        {
+            // Apply cyclic kv cache if tokenIdx >= max_attention_window_size.
+            return mSinkTokens + mBubbleLen + (tokenIdx - mSinkTokens) % mCyclicCacheLen;
+        }
+        return tokenIdx;
+    }
+
+    __host__ __device__ [[nodiscard]] inline DataType const* getRowPtr(KVIdxType kvIdx, int32_t seqIdx) const
+    {
+        // Returns pointer to array of offsets to K or V cache for one specific sequence seqIdx.
         // seqIdx is in range [0; B]
-        return reinterpret_cast<void**>(data + seqIdx * mMaxBlocksPerSeq * 2
-                                        + static_cast<int32_t>(kvIdx) * mMaxBlocksPerSeq);
+        return data + (seqIdx * mMaxBlocksPerSeq * 2 + static_cast<int32_t>(kvIdx) * mMaxBlocksPerSeq);
     }
 
-    __host__ __device__ inline void** getScaleRowPtr(KVIdxType kvIdx, int32_t seqIdx) {
-        // Returns pointer to array of pointers to K or V cache for one specific sequence seqIdx.
-        // seqIdx is in range [0; B]
-        return reinterpret_cast<void**>(scale + seqIdx * mMaxBlocksPerSeq * 2
-                                        + static_cast<int32_t>(kvIdx) * mMaxBlocksPerSeq);
+    __host__ __device__ inline void* getBlockPtr(DataType const* offsets, int32_t tokenIdx) const
+    {
+        auto const offset = offsets[tokenIdx >> mTokensPerBlockLog2];
+        return reinterpret_cast<void*>(
+            reinterpret_cast<char*>(getPoolPtr(offset)) + offset.get() * static_cast<uint64_t>(mBytesPerBlock));
     }
 
-    __host__ __device__ inline void* getBlockPtr(void** pointer, int32_t tokenIdx) {
-        return pointer[tokenIdx >> mTokensPerBlockLog2];
-    }
-
-    __host__ __device__ inline void* getBlockPtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) {
+    __host__ __device__ [[nodiscard]] inline void* getBlockPtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) const
+    {
         return getBlockPtr(getRowPtr(kvIdx, seqIdx), tokenIdx);
     }
 
-    __host__ __device__ inline void* getScalePtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) {
-        return getBlockPtr(getScaleRowPtr(kvIdx, seqIdx), tokenIdx);
-    }
-
-    __host__ __device__ inline void* getKBlockPtr(int32_t seqIdx, int32_t tokenIdx) {
+    __host__ __device__ [[nodiscard]] inline void* getKBlockPtr(int32_t seqIdx, int32_t tokenIdx) const
+    {
         return getBlockPtr(seqIdx, tokenIdx, KVIdxType::K_IDX);
     }
 
-    __host__ __device__ inline void* getVBlockPtr(int32_t seqIdx, int32_t tokenIdx) {
+    __host__ __device__ [[nodiscard]] inline void* getVBlockPtr(int32_t seqIdx, int32_t tokenIdx) const
+    {
         return getBlockPtr(seqIdx, tokenIdx, KVIdxType::V_IDX);
     }
 
+    __host__ __device__ [[nodiscard]] inline int32_t getLocalIdx(int32_t globalIdx) const
+    {
+        return globalIdx & ((1 << mTokensPerBlockLog2) - 1);
+    }
+
+    __host__ __device__ [[nodiscard]] inline int32_t getKVLocalIdx(
+        int32_t globalTokenIdx, int32_t headIdx, int32_t dimsPerHead, int32_t channelIdx) const
+    {
+        // For K or V, the hidden dimension per head is *not* decomposed. The layout of each block of K or V is:
+        // [numHeads, tokensPerBlock, hiddenSizePerHead].
+        // This member function computes the corresponding linear index.
+        // NOTE: we have remapped K layout as the same of V.
+        return headIdx * mTokensPerBlock * dimsPerHead + getLocalIdx(globalTokenIdx) * dimsPerHead + channelIdx;
+    }
+    
+    __host__ __device__ [[nodiscard]] inline DataType const* getScaleRowPtr(KVIdxType kvIdx, int32_t seqIdx) {
+        // Returns pointer to array of pointers to K or V cache for one specific sequence seqIdx.
+        // seqIdx is in range [0; B]
+        return scale + seqIdx * mMaxBlocksPerSeq * 2 + static_cast<int32_t>(kvIdx) * mMaxBlocksPerSeq;
+    }
+
+    __host__ __device__ inline void* getScaleBlockPtr(DataType const* offsets, int32_t tokenIdx) const
+    {
+        auto const offset = offsets[tokenIdx >> mTokensPerBlockLog2];
+        return reinterpret_cast<void*>(
+            reinterpret_cast<char*>(getPoolPtr(offset)) + offset.get() * static_cast<uint64_t>(mScaleBytesPerBlock));
+    }
+
+    __host__ __device__ inline void* getScalePtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) {
+        return getScaleBlockPtr(getScaleRowPtr(kvIdx, seqIdx), tokenIdx);
+    }
     __host__ __device__ inline void* getKScalePtr(int32_t seqIdx, int32_t tokenIdx) {
         return getScalePtr(seqIdx, tokenIdx, KVIdxType::K_IDX);
     }
@@ -118,172 +215,19 @@ struct KVBlockArray {
         return getScalePtr(seqIdx, tokenIdx, KVIdxType::V_IDX);
     }
 
-    __host__ __device__ inline int32_t getLocalIdx(int32_t globalIdx) {
-        return globalIdx & ((1 << mTokensPerBlockLog2) - 1);
-    }
 
-    __host__ __device__ inline int32_t getKVScaleLocalIdx(int32_t globalTokenIdx, int32_t headIdx) {
+        __host__ __device__ inline int32_t getKVScaleLocalIdx(int32_t globalTokenIdx, int32_t headIdx) {
         // For K or V, the hidden dimension per head is *not* decomposed. The layout of each block of K or V is:
         // [numHeads, tokensPerBlock, hiddenSizePerHead].
         // This member function computes the corresponding linear index.
         // NOTE: we have remapped K layout as the same of V.
         return headIdx * mTokensPerBlock + getLocalIdx(globalTokenIdx);
     }
-
-    __host__ __device__ inline int32_t
-    getKVLocalIdx(int32_t globalTokenIdx, int32_t headIdx, int32_t dimsPerHead, int32_t channelIdx) {
-        // For K or V, the hidden dimension per head is *not* decomposed. The layout of each block of K or V is:
-        // [numHeads, tokensPerBlock, hiddenSizePerHead].
-        // This member function computes the corresponding linear index.
-        // NOTE: we have remapped K layout as the same of V.
-        return headIdx * mTokensPerBlock * dimsPerHead + getLocalIdx(globalTokenIdx) * dimsPerHead + channelIdx;
+private:
+    __host__ __device__ [[nodiscard]] void* getPoolPtr(DataType offset) const
+    {
+        return offset.isPrimary() ? mPrimaryPoolPtr : mSecondaryPoolPtr;
     }
 };
 
-struct KVBlockArrayForContextFMHA {
-    // Struct operates on paged kv cache providing
-    // functions for accessing blocks of in K and V caches
-    // and elements inside these blocks
-
-    // Max number of blocks per sequence
-    int32_t mMaxBlocksPerSeq;
-    // Current number of sequences
-    int32_t mMaxSeqs;
-    // Number of tokens. It must be power of 2.
-    int32_t mTokensPerBlock;
-    // Exponent of number of tokens with base 2.
-    // E.g. for mTokensPerBlock 64, mTokensPerBlockLog2 equals to 6
-    int32_t mTokensPerBlockLog2;
-    // Table maps logical block idx to the data pointer of k/v cache block pool
-    // Shape [B, W, 2, M], where 2 is table for K and V,
-    // B is current number of sequences
-    // W is beam width
-    // M is Max number of blocks per sequence
-    // int64_t reinterpred to void* pointing to the KV cache data
-    int64_t* data;
-
-    KVBlockArrayForContextFMHA() {}
-
-    KVBlockArrayForContextFMHA(int32_t batchSize,
-                               int32_t maxBlocksPerSeq,
-                               int32_t tokensPerBlock,
-                               int32_t sizePerToken):
-        mMaxBlocksPerSeq(maxBlocksPerSeq), mMaxSeqs(batchSize), mTokensPerBlock(tokensPerBlock), data(nullptr) {
-        const float tokensPerBlockSeqLog2 = log2(mTokensPerBlock);
-        FT_CHECK_WITH_INFO(ceil(tokensPerBlockSeqLog2) == floor(tokensPerBlockSeqLog2),
-                           "tokensPerBlock must be power of 2");
-        // NOTE: pointer offset arithmetic offset is performed on int32_t (see this.getRowPtr).
-        // If needed, we could do it on uint32_t or even uint64_t, but that might have performance implications
-        FT_CHECK_WITH_INFO(static_cast<int64_t>(mMaxSeqs - 1) * mMaxBlocksPerSeq * 2 + maxBlocksPerSeq
-                               <= std::numeric_limits<int32_t>::max(),
-                           "kv cache is too large for gpt_attention_plugin");
-        mTokensPerBlockLog2 = static_cast<int>(tokensPerBlockSeqLog2);
-    }
-
-    __host__ __device__ inline void** getRowPtr(KVIdxType kvIdx, int32_t seqIdx) {
-        // Returns pointer to array of pointers to K or V cache for one specific sequence seqIdx.
-        // seqIdx is in range [0; B]
-        return reinterpret_cast<void**>(data + seqIdx * mMaxBlocksPerSeq * 2
-                                        + static_cast<int32_t>(kvIdx) * mMaxBlocksPerSeq);
-    }
-
-    __host__ __device__ inline void* getBlockPtr(void** pointer, int32_t tokenIdx) {
-        return pointer[tokenIdx >> mTokensPerBlockLog2];
-    }
-
-    __host__ __device__ inline void* getBlockPtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) {
-        return getBlockPtr(getRowPtr(kvIdx, seqIdx), tokenIdx);
-    }
-
-    __host__ __device__ inline void* getKBlockPtr(int32_t seqIdx, int32_t tokenIdx) {
-        return getBlockPtr(seqIdx, tokenIdx, KVIdxType::K_IDX);
-    }
-
-    __host__ __device__ inline void* getVBlockPtr(int32_t seqIdx, int32_t tokenIdx) {
-        return getBlockPtr(seqIdx, tokenIdx, KVIdxType::V_IDX);
-    }
-
-    __host__ __device__ inline int32_t getLocalIdx(int32_t globalIdx) {
-        return globalIdx & ((1 << mTokensPerBlockLog2) - 1);
-    }
-
-    __host__ __device__ inline int32_t
-    getKVLocalIdx(int32_t globalTokenIdx, int32_t headIdx, int32_t dimsPerHead, int32_t channelIdx) {
-        // For K or V, the hidden dimension per head is *not* decomposed. The layout of each block of K or V is:
-        // [numHeads, tokensPerBlock, hiddenSizePerHead].
-        // This member function computes the corresponding linear index.
-        // NOTE: we have remapped K layout as the same of V.
-        return headIdx * mTokensPerBlock * dimsPerHead + getLocalIdx(globalTokenIdx) * dimsPerHead + channelIdx;
-    }
-};
-
-struct KVLinearBuffer {
-    // Struct operates on contiguous kv cache providing
-    // functions for accessing specific elements in K and V caches
-    bool int8_mode = false;
-    // Current number of sequences
-    int32_t mMaxSeqs;
-    // Max sequence length
-    int32_t mMaxSeqLen;
-    // Bytes per sequence (H*D*M_S*sizeof(DataType))
-    int32_t mBytesPerSeq;
-    // Pointer to the of K/V cache data
-    // Shape [B, 2, S*H*D], where 2 is for K and V,
-    // B is current number of sequences and
-    // H is number of heads
-    // S is maximum sequence length
-    // D is dimension per head
-    // K shape is [B, 1, H, S, D]
-    // V shape is [B, 1, H, S, D]
-    // NOTE: we have remapped K layout as the same of V.
-    int8_t* data;
-    int8_t* k_data;
-    int8_t* v_data;
-
-    KVLinearBuffer() {}
-
-    KVLinearBuffer(int32_t batchSize, int32_t maxBlocksPerSeq, int32_t tokensPerBlock, int32_t sizePerToken):
-        mMaxSeqs(batchSize), mMaxSeqLen(tokensPerBlock), mBytesPerSeq(tokensPerBlock * sizePerToken) {}
-
-    __host__ __device__ inline void** getRowPtr(KVIdxType kvIdx, int32_t seqIdx) {
-        if (kvIdx == KVIdxType::K_IDX) {
-            return reinterpret_cast<void**>(k_data + seqIdx * mBytesPerSeq);
-        } else {
-            return reinterpret_cast<void**>(v_data + seqIdx * mBytesPerSeq);
-        }
-
-        /* return reinterpret_cast<void**>(data + seqIdx * mBytesPerSeq * 2 + static_cast<int32_t>(kvIdx) *
-         * mBytesPerSeq); */
-    }
-
-    __host__ __device__ inline void* getBlockPtr(void** pointer, int32_t tokenIdx) {
-        return reinterpret_cast<void*>(pointer);
-    }
-
-    __host__ __device__ inline void* getKBlockPtr(int32_t seqIdx, int32_t /*tokenIdx*/) {
-        return reinterpret_cast<void*>(getRowPtr(KVIdxType::K_IDX, seqIdx));
-    }
-
-    __host__ __device__ inline void* getVBlockPtr(int32_t seqIdx, int32_t /*tokenIdx*/) {
-        return reinterpret_cast<void*>(getRowPtr(KVIdxType::V_IDX, seqIdx));
-    }
-
-    __host__ __device__ inline int32_t
-    getKVLocalIdx(int32_t tokenIdx, int32_t headIdx, int32_t dimsPerHead, int32_t channelIdx) {
-        return headIdx * mMaxSeqLen * dimsPerHead + tokenIdx * dimsPerHead + channelIdx;
-    }
-
-    __host__ __device__ inline void* getKScalePtr(int32_t seqIdx, int32_t tokenIdx) {
-        return nullptr;
-    }
-
-    __host__ __device__ inline void* getVScalePtr(int32_t seqIdx, int32_t tokenIdx) {
-        return nullptr;
-    }
-
-    __host__ __device__ inline int32_t getKVScaleLocalIdx(int32_t tokenIdx, int32_t headIdx) {
-        return headIdx * mMaxSeqLen + tokenIdx;
-    }
-};
-
-}  // namespace fastertransformer
+} // namespace tensorrt_llm::kernels

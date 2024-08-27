@@ -82,6 +82,7 @@ void GptModel::prepareAttentionInputs(
     if (inputs.kv_cache_offset) {
         checkKvBlocksShape(inputs.kv_cache_offset);
         KvCacheInfo kv_cache;
+        kv_cache.layer_num = weights_.layers.size();
         kv_cache.kv_cache_offset = device_->clone({*inputs.kv_cache_offset, AllocationType::DEVICE, {"kv_cache_offset"}});
         attention_inputs.kv_cache = kv_cache;
     }
@@ -276,11 +277,11 @@ GptModelOutputs GptModel::forward(const GptModelInputs& inputs) {
     });
 
     prepareAttentionInputs(inputs, dtype, attention_common_inputs);
+    const int layer_num = weights_.layers.size();
     attention_common_inputs.position_ids = combo_position_ids;
 
     printBufferData(*hidden, "input_hidden");
     // layers
-    const int layer_num = weights_.layers.size();
     for (int i = 0; i < layer_num; ++i) {
         const auto& layer = weights_.layers[i];
 

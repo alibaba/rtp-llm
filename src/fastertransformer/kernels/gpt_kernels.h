@@ -279,6 +279,13 @@ void invokeConvertOffsetToAddrOneLayer(uint64_t*      block_addr, // [b, 2, m]
                                        int            block_size,
                                        cudaStream_t   stream);
 
+void invokeConvertOffsetToBlockArrayData(int32_t*       offset_addr, // [b, 2, m]
+                                         const int*     offset, // [b, m]
+                                         int            batch_size,
+                                         int            max_block_num,
+                                         int            kv_block_offset,
+                                         cudaStream_t   stream);
+
 void invokeGetPaddingOffsetAndCuSeqLens(int*         tmp_mask_offset,
                                         int*         cu_seqlens,
                                         const int*   sequence_length,
