@@ -13,32 +13,3 @@ cc_library(
         "@havenask//aios/network/anet",
     ],
 )
-
-cc_library(
-    name = "http_server_example_lib",
-    srcs = glob(["http_server/example/*.cpp"]),
-    hdrs = glob(["http_server/example/*.h"]),
-    include_prefix = "http_server",
-    deps = [":http_server"],
-)
-
-cc_binary(
-    name = "http_server_example",
-    deps = [":http_server_example_lib"],
-)
-
-cc_test(
-    name = "http_server_unittest",
-    srcs = glob([
-        "http_server/unittest/*.cpp",
-        "http_server/unittest/*.h",
-        "http_server/unittest/mock/*.cpp",
-        "http_server/unittest/mock/*.h",
-    ]),
-    copts = ["-fno-access-control"],
-    deps = [
-        ":http_server",
-        "@havenask//aios/autil:net",
-        "@havenask//aios/unittest_framework",
-    ],
-)
