@@ -40,10 +40,9 @@ public:
     };
 
     struct MatchInfo {
+        size_t reuse_length = 0;
         std::vector<int> cache_blocks;
-        int cache_block_num;
-        int reuse_length;
-        int reuse_block_num;
+        std::vector<float> loss;
     };
 
 public:
@@ -60,15 +59,15 @@ public:
     size_t                 cacheItemNum() const;
     const KVCacheBuffer&   kvCacheBuffer() const;
 
-    std::tuple<bool, KVCacheBlockAddr>      malloc(int nums = 1);
-    std::tuple<bool, KVCacheBlockAddr, int> mallocWithCache(int want_block_nums, const std::vector<int>& token_ids);
-    int                                     match(const std::vector<int>& token_ids);
-    void                                    reserveBlocks(int nums);
-    void                                    incrBlockRefCounter(const std::vector<int>& indices);
+    std::tuple<bool, KVCacheBlockAddr> malloc(int nums = 1);
+    MatchInfo                          mallocWithCache(const std::vector<int>& token_ids);
+    int                                match(const std::vector<int>& token_ids);
+    void                               reserveBlocks(int nums);
+    void                               incrBlockRefCounter(const std::vector<int>& indices);
 
     void free(const std::vector<KVCacheBlockAddr>& resource);
     void free(const std::vector<int>& indice);
-    void freeWithCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
+    void freeWithCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids, const std::vector<float>& loss = {});
     void insertResidentCache(const std::vector<int>& block_indices, const std::vector<int>& token_ids);
 
     // TODO(xinfei.sxf) fix this two index?
@@ -86,13 +85,14 @@ private:
     MatchInfo                               matchImpl(const std::vector<int>& token_ids);
     std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     std::tuple<bool, std::vector<int>>      mallocImpl(int nums);
-    std::tuple<bool, std::vector<int>, int> mallocWithCacheImpl(int want_block_nums, const std::vector<int>& token_ids);
+    MatchInfo mallocWithCacheImpl(const std::vector<int>& token_ids);
     void                                    maybeFreeBlockFromCache(int nums);
 
     void freeImpl(const std::vector<int>& indice);
-    void insertIntoCache(const std::vector<int>& block_indices,
-                         const std::vector<int>&              token_ids,
-                         bool                                 is_resident);
+    void insertIntoCache(const std::vector<int>&   block_indices,
+                         const std::vector<int>&   token_ids,
+                         const std::vector<float>& loss,
+                         bool                      is_resident);
 
     void copyKvCacheFromSeqIdxs(const std::vector<int>& block_indice_list, const std::vector<int>& src_index, const std::vector<int>& tgt_index);
     SeqPosition getSeqPosition(const std::vector<int>& block_indice_list, int idx);

@@ -174,17 +174,7 @@ LossOutput DeviceBase::loss(const LossParams& params) {
     torch::Tensor logits = Buffer2torchTensor(params.logits, false);
     torch::Tensor labels = Buffer2torchTensor(params.labels, false).toType(torch::kInt64);
     torch::Tensor output;
-    switch (params.calculate_loss) {
-    case 1:
-        output = torch::cross_entropy_loss(logits, labels, torch::nullopt, at::Reduction::Mean);
-        output = output.exp();
-        break;
-    case 2:
-        output = torch::cross_entropy_loss(logits, labels, torch::nullopt, at::Reduction::None);
-        break;
-    default:
-        RUNTIME_ASSERT_OP_ARG(false, "calculate_loss not support %d.", params.calculate_loss);
-    }
+    output = torch::cross_entropy_loss(logits, labels, torch::nullopt, at::Reduction::None).to(torch::TensorOptions(torch::kFloat32));
     return clone({*torchTensor2Buffer(output)});
 }
 

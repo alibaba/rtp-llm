@@ -188,6 +188,7 @@ protected:
     ft::SpecialTokens                   special_tokens_;
     ft::BufferPtr                       cum_log_probs_;
     ft::BufferPtr                       loss_;
+    int                                 loss_index_ = 0;
     autil::SynchronizedQueue<GenerateOutputs>  generate_outputs_queue_;
 
     // just for bool test

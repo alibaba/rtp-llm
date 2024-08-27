@@ -6,6 +6,7 @@
 #include "maga_transformer/cpp/utils/StringUtil.h"
 
 using namespace std;
+namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
@@ -16,7 +17,11 @@ void StreamCacheResource::init(int batch_size) {
 void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) {
     if (blocks.size() == batch_block_addr_.blockSize(batch_id) && resource_context_.reuse_cache) {
         auto tokens_id = stream_->completeTokenIdsVec(batch_id);
-        resource_context_.cache_manager->freeWithCache(blocks, tokens_id);
+        vector<float> loss;
+        if (stream_->hasLoss()) {
+            loss = ft::buffer2vector<float>(*(stream_->getLoss()));
+        }
+        resource_context_.cache_manager->freeWithCache(blocks, tokens_id, loss);
     } else {
         resource_context_.cache_manager->free(blocks);
     }
@@ -64,21 +69,18 @@ absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity) {
     }
 
     if (resource_context_.reuse_cache) {
-        KVCacheBlockAddr kv_cache_block_addr;
-        int              reuse_length;
-        bool             success = true;
-
         auto common_tokens_vec = stream_->commonCompleteTokenIdsVec();
-        reuse_length = resource_context_.cache_manager->match(common_tokens_vec);
-        stream_->setReuseLength(reuse_length);
-
-        auto reuse_block_num = reuse_length / seqSizePerBlock();
-        std::tie(success, kv_cache_block_addr, reuse_length) =
-            resource_context_.cache_manager->mallocWithCache(reuse_block_num, common_tokens_vec);
-        if (success) {
-            batch_block_addr_.appendClone(kv_cache_block_addr, resource_context_.cache_manager);
-        } else {
-            return absl::InternalError("malloc with cache failed");
+        auto match_info = resource_context_.cache_manager->mallocWithCache(common_tokens_vec);
+        if (stream_->calculateLoss() && match_info.loss.empty()) {
+            match_info = CacheManager::MatchInfo{0, {}, {}};
+        }
+        stream_->setReuseLength(match_info.reuse_length);
+        if (!match_info.loss.empty()) {
+            auto loss = ft::vector2Buffer<float>(match_info.loss);
+            stream_->setLoss(*loss);
+        }
+        if (match_info.reuse_length) {
+            batch_block_addr_.appendClone({match_info.cache_blocks}, resource_context_.cache_manager);
         }
     }
 

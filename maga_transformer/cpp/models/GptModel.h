@@ -108,6 +108,7 @@ enum GptModelInputIndex : size_t{
     mmFeaturesNum, // number of mm features
     mmFeaturesSize, // hidden_size of mm features
     mmFeaturesDtype,
+    needAllLogits,
     gptModelInputLength
 };
 
@@ -132,6 +133,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] = inputs.multimodal_features.has_value() ? inputs.multimodal_features.value().size() : 0;
     shape_hints_ptr[GptModelInputIndex::mmFeaturesSize] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? inputs.multimodal_features.value()[0]->shape()[1] : 0;
     shape_hints_ptr[GptModelInputIndex::mmFeaturesDtype] = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum] ? (std::uint8_t)inputs.multimodal_features.value()[0]->type() : 0;
+    shape_hints_ptr[GptModelInputIndex::needAllLogits] = inputs.need_all_logits;
 
     device->broadcast({{shape_hints}, 0});
     device->syncCommunication(false);
@@ -140,6 +142,7 @@ inline void tpSyncModelInputs(GptModelInputs &inputs, ft::DeviceBase* device) {
     // multimodal features shape broadcast
     ft::BufferPtr mm_features_shape;
     int32_t* mm_features_shape_ptr = nullptr;
+    inputs.need_all_logits = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
     if (mm_features_num) {
         mm_features_shape =

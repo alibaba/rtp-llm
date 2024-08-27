@@ -8,6 +8,7 @@
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 using namespace std;
 
@@ -36,6 +37,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     device_             = ft::DeviceFactory::getDefaultDevice();
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
+    loss_ = device_->allocateBuffer(
+        {ft::DataType::TYPE_FP32, {(size_t)seq_length_ - 1}, ft::AllocationType::HOST}, {});
     memset(complete_token_ids_->data(), 0, complete_token_ids_->sizeBytes());
     for (int i = 0; i < tileNum(); ++i) {
         memcpy(complete_token_ids_->dataWithOffset<int32_t>(i * max_seq_len_),
@@ -184,11 +187,11 @@ int GenerateStream::numReturnSequences() const {
 }
 
 int GenerateStream::calculateLoss() const {
-    return inputLength() > 1 ? generate_input_->generate_config->calculate_loss: 0;
+    return inputLength() > 1 && loss_index_ < inputLength() - 1 ? generate_input_->generate_config->calculate_loss: 0;
 }
 
 bool GenerateStream::hasLoss() const {
-    return calculateLoss() && loss_.get();
+    return generate_input_->generate_config->calculate_loss && loss_index_ == inputLength() - 1;
 }
 
 void GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {
@@ -600,7 +603,11 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
             }
         }
         if (hasLoss()) {
-            generate_output.loss = loss_;
+            auto loss = loss_;
+            if (generate_input_->generate_config->calculate_loss == 1) {
+                loss = device_->clone({*ft::torchTensor2Buffer(torch::mean(ft::Buffer2torchTensor(*loss_)).exp()), ft::AllocationType::HOST});
+            }
+            generate_output.loss = loss;
         }
 
         generate_output.finished              = sub_generate_status_[i].status == GenerateState::FINISHED;
@@ -631,7 +638,9 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
 }
 
 void GenerateStream::setLoss(const ft::Buffer& loss) {
-    loss_ = device_->clone({loss, ft::AllocationType::HOST});
+    FT_CHECK(loss_index_ + loss.size() < inputLength());
+    device_->copy({loss_->view(loss_index_, loss.size()), loss});
+    loss_index_ += loss.size();
 }
 
 ft::BufferPtr GenerateStream::getLoss() {

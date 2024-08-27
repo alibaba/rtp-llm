@@ -15,6 +15,7 @@ namespace rtp_llm {
 struct CacheItem {
     std::vector<int> token_list;
     std::vector<int> block_indices;
+    std::vector<float> loss;
     size_t           cache_key;
     bool             is_resident = false;
 };
@@ -23,13 +24,20 @@ const size_t kCacheMaxCapacity = 1000000;
 
 class BlockCache {
 public:
+    struct MatchResult {
+        size_t matched_len = 0;
+        std::vector<int> block_indices;
+        std::vector<float> loss;
+    };
+
+public:
     BlockCache(): lru_cache_(kCacheMaxCapacity) {}
 
     static size_t prefixLength(const std::vector<int>& left, const std::vector<int>& right);
 
-    std::pair<std::vector<int>, size_t> match(const std::vector<int>& token_list);
+    MatchResult match(const std::vector<int>& token_list);
 
-    std::vector<int> put(const std::vector<int>& token_list, const std::vector<int>& block_indices, bool is_resident);
+    std::vector<int> put(const std::vector<int>& token_list, const std::vector<int>& block_indices, const std::vector<float>& loss, bool is_resident);
 
     std::vector<int> pop();
 

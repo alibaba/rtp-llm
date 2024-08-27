@@ -549,7 +549,6 @@ struct SoftmaxParams {
 struct LossParams {
     const Buffer& logits;
     const Buffer& labels;
-    int calculate_loss = 0;
 };
 
 using LossOutput = BufferPtr;

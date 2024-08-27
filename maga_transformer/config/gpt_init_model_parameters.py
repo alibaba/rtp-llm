@@ -354,7 +354,10 @@ class GptInitModelParameters:
         self.enable_fast_gen = bool(int(os.environ.get('ENABLE_FAST_GEN', 0)))
         logging.info(f'enable_fast_gen: {self.enable_fast_gen}')
         self.warm_up = bool(int(os.environ.get('WARM_UP', 0)))
-        logging.info(f'warm up: {self.warm_up}')
+        logging.info(f'warm_up: {self.warm_up}')
+        self.warm_up_with_loss = bool(int(os.environ.get('WARM_UP_WITH_LOSS', 0)))
+        logging.info(f'warm_up_with_loss: {self.warm_up_with_loss}')
+
         # TODO(xinfei.sxf) fix name
         self.fast_gen_max_context_len = int(os.environ.get('FAST_GEN_MAX_CONTEXT_LEN', 1024))
         logging.info(f'fast_gen_max_context_len: {self.fast_gen_max_context_len}')

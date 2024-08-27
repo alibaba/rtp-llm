@@ -28,7 +28,7 @@ size_t BlockCache::prefixLength(const std::vector<int>& left, const std::vector<
     return max_common_length;
 }
 
-std::pair<std::vector<int>, size_t> BlockCache::match(const std::vector<int>& token_list) {
+BlockCache::MatchResult BlockCache::match(const std::vector<int>& token_list) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     CacheItem matched_item;
@@ -46,18 +46,17 @@ std::pair<std::vector<int>, size_t> BlockCache::match(const std::vector<int>& to
     if (matched_len > 0) {
         lru_cache_.get(matched_item.cache_key);
     }
-
-    return {matched_item.block_indices, matched_len};
+    return {matched_len, matched_item.block_indices, matched_item.loss};
 }
 
 std::vector<int>
-BlockCache::put(const std::vector<int>& token_list, const std::vector<int>& block_indices, bool is_resident) {
+BlockCache::put(const std::vector<int>& token_list, const std::vector<int>& block_indices, const std::vector<float>& loss, bool is_resident) {
     if (token_list.empty() || block_indices.empty()) {
         return {};
     }
-    
+
     size_t    cache_key = hashVector(token_list);
-    CacheItem item{token_list, block_indices, cache_key, is_resident};
+    CacheItem item{token_list, block_indices, loss, cache_key, is_resident};
 
     std::lock_guard<std::mutex> lock(mutex_);
 
