@@ -143,7 +143,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(const float* inputs_after_softmax
             topk_scales[idx]   = result_kvp.value;
             topk_expertID[idx] = should_process_row ? (expert - start_expert) : num_experts;
             assert(topk_expertID[idx] >= 0);
-            topk_rowColID[idx] = col_idx * num_rows + block_row;
+            topk_rowColID[idx] = idx;
         }
         __syncthreads();
     }

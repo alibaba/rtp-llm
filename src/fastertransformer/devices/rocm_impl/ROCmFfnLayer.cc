@@ -61,9 +61,13 @@ FfnLayerOutput ROCmDevice::moeFfnLayer(const FfnLayerParams& params) {
 
     const auto expanded_source_row_to_expanded_dest_row = allocateBuffer({DataType::TYPE_INT32, {num_token, top_k}});
 
+    const auto softmax_out = allocateBuffer(
+        {DataType::TYPE_FP32,
+         {((num_experts_per_node & (num_experts_per_node - 1)) == 0) ? 0 : num_token * num_experts_per_node}});
+    printBufferData(*gate, "moe_gate");
     topkGatingSoftmax_KL(gate->data<float>(),
-                         nullptr,  // finished
-                         nullptr,  // softmax_out
+                         nullptr,                     // finished
+                         softmax_out->data<float>(),  // softmax_out
                          topk_scales->data<float>(),
                          topk_expertID->data<int>(),
                          topk_rowColID->data<int>(),
