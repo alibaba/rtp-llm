@@ -118,6 +118,7 @@ cc_library(
         ":gpt_init_params_hdr",
     	":th_op_hdrs",
         "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:http_api_server",
         "//maga_transformer/cpp:model_rpc_server",
         "@grpc//:grpc++",
     ] + select({

@@ -3,6 +3,7 @@
 #include "grpc++/grpc++.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
 #include "maga_transformer/cpp/model_rpc/ModelRpcServer.h"
+#include "maga_transformer/cpp/HttpApiServer.h"
 
 namespace ft = fastertransformer;
 namespace th = torch;
@@ -13,14 +14,15 @@ class RtpLLMOp: public th::jit::CustomClassHolder {
 public:
     RtpLLMOp();
     ~RtpLLMOp();
-    void init(py::object model, py::object mm_process_engine, py::object propose_model);
+    void init(py::object model, py::object mm_process_engine, py::object propose_model, py::object token_processor);
     void addLora(const std::string& adapter_name, py::object lora_a_weights, py::object lora_b_weights);
     void removeLora(const std::string& adapter_name);
     void stop();
     void _init(int64_t model_rpc_port,
                const rtp_llm::EngineInitParams maga_init_params,
                py::object mm_process_engine,
-               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
+               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+               py::object token_processor);
     std::tuple<int64_t, int64_t> getKVCacheInfo();
     // std::shared_ptr<rtp_llm::GenerateStream> forward(std::shared_ptr<rtp_llm::GenerateInput> query);
 
@@ -29,6 +31,7 @@ private:
     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> initProposeModel(py::object propose_model);
 
 private:
+    std::unique_ptr<rtp_llm::HttpApiServer>       http_server_;
     std::unique_ptr<rtp_llm::ModelRpcServiceImpl> model_rpc_server_ = nullptr;
     std::unique_ptr<grpc::Server>                 grpc_server_ = nullptr;
     std::thread                                   grpc_server_thread_;

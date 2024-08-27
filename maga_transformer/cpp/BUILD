@@ -51,6 +51,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@havenask//aios/autil:synchronized_queue",
+        "@havenask//aios/autil:json",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/devices:device_utils",
@@ -310,6 +311,23 @@ cc_library(
     deps = [
         "//src/fastertransformer/devices:devices_base",
         "//src/fastertransformer/utils:py_utils",
+    ],
+    visibility = ["//visibility:public"]
+)
+
+cc_library(
+    name = "http_api_server",
+    srcs = ["HttpApiServer.cc"],
+    hdrs = ["HttpApiServer.h"],
+    deps = [
+        "//maga_transformer/cpp/http_server:http_server",
+        "//maga_transformer/cpp:dataclass",
+        "//maga_transformer/cpp:normal_engine",
+        "//maga_transformer/cpp/embedding_engine:embedding_engine",
+        ":embedding_arpc_deps",
+        # "//maga_transformer/cpp:speculative_engine",
+        "//src/fastertransformer/devices:devices_base",
+        "//maga_transformer/cpp:multimodal_processor",
     ],
     visibility = ["//visibility:public"]
 )

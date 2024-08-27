@@ -31,8 +31,9 @@ public:
                  const ft::lora::loraLayerWeightsMap& lora_b_weights);
 
     void removeLora(const std::string& adapter_name);
+    std::shared_ptr<EngineBase> getEngine() const { return engine_; }
 private:
-    std::unique_ptr<EngineBase> engine_ = nullptr;
+    std::shared_ptr<EngineBase> engine_ = nullptr;
     std::unique_ptr<MultimodalProcessor> mm_processor_ = nullptr;
 };
 

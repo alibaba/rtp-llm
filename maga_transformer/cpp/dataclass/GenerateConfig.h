@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "maga_transformer/cpp/utils/StringUtil.h"
+#include "autil/legacy/jsonizable.h"
 
 namespace rtp_llm {
 
@@ -17,7 +18,7 @@ namespace rtp_llm {
 //       For the second part, different samplers should be created for different params.
 //       So they can not be batched together for now.
 
-class GenerateConfig {
+class GenerateConfig : public autil::legacy::Jsonizable {
 public:
     int max_new_tokens     = 8192;
     int min_new_tokens     = 0;
@@ -25,10 +26,10 @@ public:
 
     int                  num_beams            = 1;
     int                  num_return_sequences = 1;
-    int                  top_k;
-    float                top_p;
-    float                temperature;
-    float                repetition_penalty;
+    int                  top_k = 0;
+    float                top_p = 0.95;
+    float                temperature = 1.0;
+    float                repetition_penalty = 1.0;
     std::optional<int>   random_seed;
     std::optional<float> top_p_decay;
     std::optional<float> top_p_min;
@@ -37,17 +38,17 @@ public:
     std::string          adapter_name = "";
 
     std::vector<int>    select_tokens_id;
-    int                 calculate_loss;
-    bool                return_logits;
-    bool                return_incremental;
-    bool                return_hidden_states;
-    bool                is_streaming;
-    int                 timeout_ms;
+    int                 calculate_loss = 0;
+    bool                return_logits = false;
+    bool                return_incremental = false;
+    bool                return_hidden_states = false;
+    bool                is_streaming = false;
+    int                 timeout_ms = -1;
     std::vector<std::vector<int>> stop_words_list;
 
     std::string debugString() const {
         std::stringstream debug_string;
-        debug_string << "GenerateInput {"
+        debug_string << "GenerateConfig {"
                      << "max_new_tokens:" << max_new_tokens
                      << ", min_new_tokens:" << min_new_tokens << ", num_beams:" << num_beams
                      << ", num_return_sequences:" << num_return_sequences << ", calculate_loss:" << calculate_loss
@@ -58,6 +59,35 @@ public:
                      << ", stop_words_list:" << vectorsToString(stop_words_list) << "}";
         return debug_string.str();
     }
+
+    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
+#define JSONIZE(field) json.Jsonize(#field, field, field)
+        JSONIZE(max_new_tokens);
+        JSONIZE(min_new_tokens);
+        JSONIZE(num_validate_token);
+        JSONIZE(num_beams);
+        JSONIZE(num_return_sequences);
+        JSONIZE(top_k);
+        JSONIZE(top_p);
+        JSONIZE(temperature);
+        JSONIZE(repetition_penalty);
+        //JSONIZE(random_seed);
+        //JSONIZE(top_p_decay);
+        //JSONIZE(top_p_min);
+        //JSONIZE(top_p_reset_ids);
+        //JSONIZE(task_id);
+        //JSONIZE(adapter_name);
+        //JSONIZE(select_tokens_id);
+        JSONIZE(calculate_loss);
+        JSONIZE(return_logits);
+        JSONIZE(return_incremental);
+        JSONIZE(return_hidden_states);
+        JSONIZE(is_streaming);
+        JSONIZE(timeout_ms);
+        JSONIZE(stop_words_list);
+#undef JSONIZE
+    }
+
 };
 
 }  // namespace rtp_llm

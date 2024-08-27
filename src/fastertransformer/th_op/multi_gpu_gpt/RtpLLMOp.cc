@@ -24,7 +24,7 @@ namespace torch_ext {
 
 RtpLLMOp::RtpLLMOp() {}
 
-void RtpLLMOp::init(py::object model, py::object mm_process_engine, py::object propose_model) {
+void RtpLLMOp::init(py::object model, py::object mm_process_engine, py::object propose_model, py::object token_processor) {
     AUTIL_ROOT_LOG_CONFIG();
     AUTIL_ROOT_LOG_SETLEVEL(INFO);
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -32,7 +32,7 @@ void RtpLLMOp::init(py::object model, py::object mm_process_engine, py::object p
     rtp_llm::EngineInitParams params = initModel(model);
     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);
     grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, params.gpt_init_parameter.model_rpc_port_,
-        std::move(params), std::move(mm_process_engine), std::move(propose_params));
+        std::move(params), std::move(mm_process_engine), std::move(propose_params), std::move(token_processor));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
@@ -104,7 +104,8 @@ std::tuple<int64_t, int64_t> RtpLLMOp::getKVCacheInfo() {
 void RtpLLMOp::_init(const int64_t model_rpc_port,
                      const rtp_llm::EngineInitParams params,
                      py::object mm_process_engine,
-                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
+                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params, 
+                     py::object token_processor) {
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     std::unique_ptr<rtp_llm::ModelRpcServiceImpl> rpc_server = std::make_unique<rtp_llm::ModelRpcServiceImpl>();
     grpc::Status grpc_status = rpc_server->init(params, std::move(mm_process_engine), std::move(propose_params));
@@ -123,6 +124,15 @@ void RtpLLMOp::_init(const int64_t model_rpc_port,
 
     FT_LOG_INFO("Server listening on %s", server_address.c_str());
     is_server_ready_ = true;
+    {
+        http_server_.reset(new rtp_llm::HttpApiServer(model_rpc_server_->getEngine(), params.gpt_init_parameter, token_processor));
+        http_server_->registerResponses();
+        if (http_server_->start("tcp:0.0.0.0:9999")) {
+            FT_LOG_INFO("HTTP Server listening on 0.0.0.0:9999");
+        } else {
+            FT_LOG_ERROR("HTTP Server start fail.");
+        }
+    }
     grpc_server_->Wait();
     is_server_shutdown_ = true;
 }
@@ -133,6 +143,7 @@ void RtpLLMOp::stop() {
             grpc_server_->Shutdown();
         }
         model_rpc_server_.reset();
+        http_server_->stop();
     }
 }
 
