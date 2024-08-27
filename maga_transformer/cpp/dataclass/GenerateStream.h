@@ -57,8 +57,7 @@ public:
     int batchSize() const;
     int numBeams() const;
     int numReturnSequences() const;
-    int calculateLoss() const;
-    bool hasLoss() const;
+    bool calculateLoss() const;
 
     void updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt);
     size_t maxSeqLen() const;

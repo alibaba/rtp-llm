@@ -18,7 +18,7 @@ void StreamCacheResource::freeBatchBlocks(size_t batch_id, vector<int>& blocks) 
     if (blocks.size() == batch_block_addr_.blockSize(batch_id) && resource_context_.reuse_cache) {
         auto tokens_id = stream_->completeTokenIdsVec(batch_id);
         vector<float> loss;
-        if (stream_->hasLoss()) {
+        if (stream_->getLoss()) {
             loss = ft::buffer2vector<float>(*(stream_->getLoss()));
         }
         resource_context_.cache_manager->freeWithCache(blocks, tokens_id, loss);

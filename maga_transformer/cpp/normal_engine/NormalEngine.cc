@@ -22,7 +22,7 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
     size_t max_left_free_bytes = 0;
     if (params_.warm_up_) {
         // warm up
-        FT_LOG_INFO("warm up max_context_batch_size %d, max_seq_len %d calculate_loss %d query begin", params_.max_context_batch_size_, params_.max_seq_len_, int(params_.warm_up_with_loss_));
+        FT_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin", params_.max_context_batch_size_, params_.max_seq_len_, int(params_.warm_up_with_loss_));
         max_left_free_bytes = warmUp(params);
         if (max_left_free_bytes > 1024L * 1024 * 1024) {
             if (params_.is_multimodal_) {

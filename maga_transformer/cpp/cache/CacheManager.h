@@ -60,7 +60,7 @@ public:
     const KVCacheBuffer&   kvCacheBuffer() const;
 
     std::tuple<bool, KVCacheBlockAddr> malloc(int nums = 1);
-    MatchInfo                          mallocWithCache(const std::vector<int>& token_ids);
+    MatchInfo                          mallocWithCache(const std::vector<int>& token_ids, bool need_loss = false);
     int                                match(const std::vector<int>& token_ids);
     void                               reserveBlocks(int nums);
     void                               incrBlockRefCounter(const std::vector<int>& indices);
@@ -85,7 +85,7 @@ private:
     MatchInfo                               matchImpl(const std::vector<int>& token_ids);
     std::tuple<bool, std::vector<int>>      mallocIndex(int nums = 1);
     std::tuple<bool, std::vector<int>>      mallocImpl(int nums);
-    MatchInfo mallocWithCacheImpl(const std::vector<int>& token_ids);
+    MatchInfo mallocWithCacheImpl(const std::vector<int>& token_ids, bool need_loss = false);
     void                                    maybeFreeBlockFromCache(int nums);
 
     void freeImpl(const std::vector<int>& indice);

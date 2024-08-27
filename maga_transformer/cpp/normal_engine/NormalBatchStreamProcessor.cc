@@ -356,7 +356,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         auto batch_logits = model_output.logits->view(offset, batch);
         auto batch_hidden_states = model_output.hidden_states->view(offset, batch);
         auto batch_cum_log_probs = sampler_output.cum_log_probs->view(batch_idx, current_batch_size);
-        if (stream->calculateLoss() && !stream->hasLoss() && model_output.all_logits) {
+        if (stream->calculateLoss()) {
             auto all_logits = model_output.all_logits->view(token_offset, token_size - 1);
             auto tokens = stream->currentExecuteTokens(0);
             ft::BufferPtr label = device_->clone({{ft::MemoryType::MEMORY_CPU, ft::DataType::TYPE_INT32, {tokens.size() - 1}, tokens.data() + 1}});

@@ -9,6 +9,7 @@
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
 #include "src/fastertransformer/th_op/GptInitParameter.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
+#include "src/fastertransformer/utils/assert_utils.h"
 
 using namespace std;
 
@@ -37,8 +38,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     device_             = ft::DeviceFactory::getDefaultDevice();
     complete_token_ids_ = device_->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)tileNum(), (size_t)max_seq_len_}, ft::AllocationType::HOST}, {});
-    loss_ = device_->allocateBuffer(
-        {ft::DataType::TYPE_FP32, {(size_t)seq_length_ - 1}, ft::AllocationType::HOST}, {});
+    if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
+        loss_ = device_->allocateBuffer(
+                {ft::DataType::TYPE_FP32, {(size_t)inputLength() - 1}, ft::AllocationType::HOST}, {});
+    }
     memset(complete_token_ids_->data(), 0, complete_token_ids_->sizeBytes());
     for (int i = 0; i < tileNum(); ++i) {
         memcpy(complete_token_ids_->dataWithOffset<int32_t>(i * max_seq_len_),
@@ -186,12 +189,8 @@ int GenerateStream::numReturnSequences() const {
     return generate_input_->generate_config->num_return_sequences;
 }
 
-int GenerateStream::calculateLoss() const {
-    return inputLength() > 1 && loss_index_ < inputLength() - 1 ? generate_input_->generate_config->calculate_loss: 0;
-}
-
-bool GenerateStream::hasLoss() const {
-    return generate_input_->generate_config->calculate_loss && loss_index_ == inputLength() - 1;
+bool GenerateStream::calculateLoss() const {
+    return loss_ && loss_index_ < inputLength() - 1;
 }
 
 void GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_prompt) {
@@ -602,7 +601,8 @@ void GenerateStream::updateOutput(const ft::Buffer& hidden_states,
                 generate_output.hidden_states = device_->clone({hidden_states.view(i, 1), ft::AllocationType::HOST});
             }
         }
-        if (hasLoss()) {
+        if (loss_) {
+            FT_CHECK_WITH_INFO(loss_index_ == inputLength() - 1, "loss index should be input len [%d] - 1 but is [%d]", inputLength(), loss_index_);
             auto loss = loss_;
             if (generate_input_->generate_config->calculate_loss == 1) {
                 loss = device_->clone({*ft::torchTensor2Buffer(torch::mean(ft::Buffer2torchTensor(*loss_)).exp()), ft::AllocationType::HOST});
