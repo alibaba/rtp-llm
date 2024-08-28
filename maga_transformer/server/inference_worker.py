@@ -42,6 +42,7 @@ class BatchPipelineResponse(BaseModel):
 
 class TokenizerEncodeResponse(BaseModel):
     token_ids: List[int] = []
+    offset_mapping: Optional[List[Any]] = None
     tokens: List[str] = []
     error: str = ""
 
@@ -55,6 +56,9 @@ class InferenceWorker():
         self.model: AsyncModel = ModelFactory.create_from_env()
         self.pipeline = Pipeline(self.model, self.model.tokenizer)
         logging.info("Load model done.")
+        
+    def tokenizer_offset_mapping(self, prompt: str) -> Any:
+        return self.pipeline.tokenizer(prompt, return_offsets_mapping=True, return_attention_mask=False)
 
     def tokenizer_encode(self, prompt: str) -> Tuple[List[int], List[str]]:
         token_ids = self.pipeline.encode(prompt)

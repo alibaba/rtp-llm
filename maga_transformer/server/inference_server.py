@@ -273,8 +273,12 @@ class InferenceServer(object):
             assert isinstance(req, dict)
             prompt = req.pop('prompt')
             assert self._inference_worker is not None
-            token_ids, tokens = self._inference_worker.tokenizer_encode(prompt)
-            response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
+            if req.get("return_offsets_mapping", None) == True: 
+                mapping = self._inference_worker.tokenizer_offset_mapping(prompt)
+                response = TokenizerEncodeResponse(offset_mapping=mapping['offset_mapping'], token_ids=mapping['input_ids'])
+            else:
+                token_ids, tokens = self._inference_worker.tokenizer_encode(prompt)            
+                response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
             return JSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
             return JSONResponse(format_exception(e), status_code=500)
