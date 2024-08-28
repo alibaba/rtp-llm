@@ -15,7 +15,7 @@ cc_library(
         ":trt_fmha_header",
         "//3rdparty:cuda_driver",
         "//src/fastertransformer/kernels:kernels",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),
@@ -31,7 +31,7 @@ cc_library(
         "**/*.h"
     ]),
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),

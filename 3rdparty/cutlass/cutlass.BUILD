@@ -7,7 +7,7 @@ cc_library(
         "include/**/*.hpp",
     ]),
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     strip_include_prefix = "include",
@@ -22,7 +22,7 @@ cc_library(
         "tools/util/include/cutlass/util/*.cuh"
     ]),
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     strip_include_prefix = "tools/util/include/",

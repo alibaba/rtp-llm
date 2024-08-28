@@ -11,7 +11,7 @@ cc_library(
         "common/*.h",
     ]),
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),
@@ -32,7 +32,7 @@ cc_library(
         "cub/**/*.cu",
     ]),
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),

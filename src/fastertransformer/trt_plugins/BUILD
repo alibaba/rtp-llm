@@ -26,7 +26,7 @@ cc_library(
         "//src/fastertransformer/kernels:kernels",
         "cutlass_kernels_interface",
         "cutlass_headers_interface",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),

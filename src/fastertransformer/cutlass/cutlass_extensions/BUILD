@@ -9,7 +9,7 @@ cc_library(
         "//src/fastertransformer/cutlass:cutlass_interface",
         "@cutlass//:cutlass",
         "@cutlass//:cutlass_utils",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),

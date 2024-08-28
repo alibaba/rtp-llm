@@ -23,7 +23,7 @@ test_deps = [
     ":test_headers",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
-    "@local_config_cuda//cuda:cuda",
+    "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
 

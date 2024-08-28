@@ -11,7 +11,7 @@ cc_library(
     ]),
     deps = [
         "@cutlass//:cutlass",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//src/fastertransformer/cuda:cuda_utils",
         "//3rdparty:cuda_driver",
@@ -27,7 +27,7 @@ cc_library(
         "qkvToContext.h",
     ]),
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),

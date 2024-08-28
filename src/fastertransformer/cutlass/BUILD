@@ -12,7 +12,7 @@ cc_library(
         "//src/fastertransformer/cutlass/cutlass_extensions:cutlass_extensions",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/cuda:cuda",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//src/fastertransformer/kernels:kernels",
     ],
@@ -35,7 +35,7 @@ cc_library(
         ]),
     deps = [
     	":cutlass_kernels_common",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
@@ -56,7 +56,7 @@ cc_library(
     ]),
     deps = [
     	":cutlass_kernels_common",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
@@ -68,7 +68,7 @@ cc_shared_library(
     roots = [":fpA_intB_cu"],
     preloaded_deps = [
     	":cutlass_kernels_common",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     visibility = ["//visibility:public"],
@@ -85,7 +85,7 @@ cc_library(
     ]),
     deps = [
     	":cutlass_kernels_common",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
@@ -97,7 +97,7 @@ cc_shared_library(
     roots = [":int8_gemm_cu"],
     preloaded_deps = [
     	":cutlass_kernels_common",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     visibility = ["//visibility:public"],
@@ -117,7 +117,7 @@ cc_library(
     include_prefix = "src",
     deps = [
     	":cutlass_kernels_common",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
@@ -129,7 +129,7 @@ cc_shared_library(
     roots = [":moe_cu"],
     preloaded_deps = [
     	":cutlass_kernels_common",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     visibility = ["//visibility:public"],
@@ -148,7 +148,7 @@ cc_library(
     include_prefix = "src",
     deps = [
     	":cutlass_kernels_common",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),

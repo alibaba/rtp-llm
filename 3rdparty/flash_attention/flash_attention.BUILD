@@ -15,7 +15,7 @@ cc_library(
         "csrc/flash_attn/src/flash.h",
     ],
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
     copts = cuda_copts(),
@@ -46,7 +46,7 @@ cc_library(
     deps = [
         "@cutlass//:cutlass",
         ":flash_attention2_header",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
     copts = cuda_copts(),
@@ -63,7 +63,7 @@ cc_library(
     deps = torch_deps() + [
         "@cutlass//:cutlass",
         ":flash_attention2_header",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = cuda_copts(),
@@ -76,7 +76,7 @@ cc_shared_library(
     preloaded_deps = torch_deps() + [
         "@cutlass//:cutlass",
         ":flash_attention2_header",
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],
 )
