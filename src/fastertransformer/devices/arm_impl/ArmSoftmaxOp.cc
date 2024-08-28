@@ -34,7 +34,7 @@ void context_mask(BufferPtr input, const Buffer& mask) {
         int b = tid / (dim1 * dim2 * dim3);
         auto v = input->dataWithOffset(tid);
         auto m = mask.dataWithOffset(b * dim2 * dim3 + tid % (dim2 * dim3));
-        *(float*)v += (1.0f - *(float*)m) * -10000.0f;
+        *(T*)v += (1.0f - *(T*)m) * -10000.0f;
     });
 #else
     const int N = dim0 * dim1;
@@ -43,7 +43,7 @@ void context_mask(BufferPtr input, const Buffer& mask) {
         for (int i = 0; i < dim2 * dim3; i++) {
             auto v = input->dataWithOffset(tid * dim2 * dim3 + i);
             auto m = mask.dataWithOffset(b * dim2 * dim3 + i);
-            *(float*)v += (1.0f - *(float*)m) * -10000.0f;
+            *(T*)v += (1.0f - *(T*)m) * -10000.0f;
         }
     });
 #endif

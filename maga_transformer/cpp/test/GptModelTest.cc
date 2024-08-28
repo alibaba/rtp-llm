@@ -59,6 +59,7 @@ TEST_F(GptModelTest, testSimple) {
     GptModelInputs inputs = {
         std::move(combo_tokens), std::move(input_lengths), std::move(sequence_lengths)
     };
+    inputs.prefix_lengths = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
     inputs.lm_output_indexes = createBuffer<int32_t>({1}, {2}, AllocationType::HOST);
     inputs.attention_mask = mask_buf;
     inputs.kv_cache_offset = kv_cache_offset;
@@ -101,6 +102,7 @@ TEST_F(GptModelTest, testSimple) {
     inputs.combo_tokens = createBuffer<int32_t>({1}, {151645}, AllocationType::HOST);
     inputs.input_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
     inputs.sequence_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
+    inputs.prefix_lengths = createBuffer<int32_t>({0}, {}, AllocationType::HOST);
     inputs.lm_output_indexes = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
     device_->syncAndCheck();
     outputs = model->forward(inputs);
@@ -120,6 +122,7 @@ TEST_F(GptModelTest, testSimple) {
     inputs.combo_tokens = createBuffer<int32_t>({4}, {151645, 13048, 11, 220}, AllocationType::HOST);
     inputs.input_lengths = createBuffer<int32_t>({2}, {3, 3}, AllocationType::HOST);
     inputs.sequence_lengths = createBuffer<int32_t>({1}, {3}, AllocationType::HOST);
+    inputs.prefix_lengths = createBuffer<int32_t>({1}, {0}, AllocationType::HOST);
     inputs.lm_output_indexes = createBuffer<int32_t>({2}, {0, 3}, AllocationType::HOST);
 
     inputs.kv_cache_offset = allocateKVBlocks(cache_config, {3, 3}, kv_cache);
