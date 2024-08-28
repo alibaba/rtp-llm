@@ -26,10 +26,10 @@ public:
 
     int                  num_beams            = 1;
     int                  num_return_sequences = 1;
-    int                  top_k = 0;
-    float                top_p = 0.95;
-    float                temperature = 1.0;
-    float                repetition_penalty = 1.0;
+    int                  top_k                = 1;
+    float                top_p                = 0.0;
+    float                temperature          = 1.0;
+    float                repetition_penalty   = 1.0;
     std::optional<int>   random_seed;
     std::optional<float> top_p_decay;
     std::optional<float> top_p_min;
@@ -38,12 +38,12 @@ public:
     std::string          adapter_name = "";
 
     std::vector<int>    select_tokens_id;
-    int                 calculate_loss = 0;
-    bool                return_logits = false;
-    bool                return_incremental = false;
+    int                 calculate_loss       = 0;
+    bool                return_logits        = false;
+    bool                return_incremental   = false;
     bool                return_hidden_states = false;
-    bool                is_streaming = false;
-    int                 timeout_ms = -1;
+    bool                is_streaming         = false;
+    int                 timeout_ms           = -1;
     std::vector<std::vector<int>> stop_words_list;
 
     std::string debugString() const {
