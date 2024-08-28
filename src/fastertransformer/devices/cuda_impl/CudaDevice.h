@@ -13,8 +13,6 @@
 #include "src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 #include "src/fastertransformer/cutlass/interface.h"
 
-#include <nvml.h>
-
 namespace trt_plugins = tensorrt_llm::plugins;
 
 namespace fastertransformer {
@@ -117,7 +115,6 @@ private:
     std::unique_ptr<trt_plugins::WeightOnlyGroupwiseQuantMatmulPlugin> weight_only_groupwise_matmul_plugin_;
     std::unique_ptr<trt_plugins::MixtureOfExpertsPlugin> moe_plugin_;
 
-    nvmlDevice_t nvml_device_;
     NcclParam nccl_param_;
 
     BufferPtr curandstate_buf_; // for sampler use.

@@ -23,7 +23,6 @@ cc_library(
         "cutlass_kernels_interface",
         "//src/fastertransformer/trt_plugins:trt_plugins",
         "@havenask//aios/autil:string_helper",
-        "@local_config_cuda//cuda:nvml",
         "@local_config_cuda//cuda:cuda_headers",
     ],
     visibility = ["//visibility:public"],

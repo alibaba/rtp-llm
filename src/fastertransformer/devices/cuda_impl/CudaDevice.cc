@@ -36,11 +36,6 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
 
     moe_plugin_ = std::make_unique<trt_plugins::MixtureOfExpertsPlugin>();
 
-    auto ret = nvmlInit();
-    FT_CHECK(ret == NVML_SUCCESS);
-    ret = nvmlDeviceGetHandleByIndex(device_id_, &nvml_device_);
-    FT_CHECK(ret == NVML_SUCCESS);
-
     if (params.tp_size > 1) {
         const auto rank = params.tp_rank;
         const auto world_size = params.tp_size;
@@ -323,10 +318,6 @@ DeviceStatus CudaDevice::getDeviceStatus() {
     status.host_memory_status.allocated_bytes = buffer_status.host_allocated_bytes;
     status.device_memory_status.available_bytes = status.device_memory_status.free_bytes + status.device_memory_status.preserved_bytes;
     status.device_memory_status.min_preserved_bytes = buffer_status.device_min_preserved_bytes;
-    nvmlUtilization_t utilization;
-    auto ret = nvmlDeviceGetUtilizationRates(nvml_device_, &utilization);
-    FT_CHECK(ret == NVML_SUCCESS);
-    status.device_utilization = (float)utilization.gpu;
 
     return status;
 }
