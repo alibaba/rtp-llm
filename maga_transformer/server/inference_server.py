@@ -152,7 +152,7 @@ class InferenceServer(object):
             response = self._openai_endpoint.chat_completion(request_id, request, raw_request)
             assert (isinstance(response, CompleteResponseAsyncGenerator)), f"error type: {type(response)}"
             return response
-        request_dict = request.model_dump()
+        request_dict = request.model_dump(exclude_none=True)
         request_dict[request_id_field_name] = request_id
         return await self._infer_wrap(request_dict, raw_request, generate_call)
 
