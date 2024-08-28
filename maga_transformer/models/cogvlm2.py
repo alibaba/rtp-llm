@@ -24,12 +24,13 @@ class CogVLM2(Llama, MultiModalMixin):
         quant_algo = config.quant_algo
         if quant_algo.isGptq() or quant_algo.isAwq() or quant_algo.isSmoothQuant() or quant_algo.isOmniQuant():
             raise Exception("CogVLM2 only support FP32, BF16, FP16, INT8, not support other quant algorithm")
-        if g_parallel_info.tp_rank == 0:
-            self.mm_part = EVA2CLIPImageEmbedding(config)
-            config.mm_related_params.vit_weights = CogVLM2VitWeights(
-                {"vit": self.mm_part.vit}
-            )
-        Llama.__init__(self, config)
+        super().__init__(config)
+        
+    def init_multimodal(self, config: GptInitModelParameters):        
+        self.mm_part = EVA2CLIPImageEmbedding(config)
+        config.mm_related_params.vit_weights = CogVLM2VitWeights(
+            {"vit": self.mm_part.vit}
+        )
 
     def load(self, device: str):
         if os.environ.get("VIT_TRT", "0") == "1":
@@ -39,10 +40,6 @@ class CogVLM2(Llama, MultiModalMixin):
                 self.config.mm_related_params, device, to_torch_dtype(self.config.data_type)
             )
         super().load(device=device)
-
-    @classmethod
-    def is_multimodal(cls) -> bool:
-        return True
 
     @staticmethod
     def _create_config(ckpt_path):
@@ -58,8 +55,7 @@ class CogVLM2(Llama, MultiModalMixin):
             rotary_embedding_dim=128,
             rotary_embedding_style=1,
             rotary_embedding_base=500000,
-            has_post_decoder_layernorm=True,
-            is_multimodal=True,
+            has_post_decoder_layernorm=True
         )
         # hugggingface
         config_path = os.path.join(ckpt_path, "config.json")
@@ -110,11 +106,11 @@ class CogVLM2(Llama, MultiModalMixin):
         config.special_tokens.bos_token_id = config_json["bos_token_id"]
         config.special_tokens.pad_token_id = config_json["pad_token_id"]
 
-        if isinstance(config_json['eos_token_id'], list):            
+        if isinstance(config_json['eos_token_id'], list):
             config.special_tokens.eos_token_id = config_json['eos_token_id'][0]
             config.special_tokens.stop_words_list = [[x] for x in config_json['eos_token_id']]
         else:
-            config.special_tokens.eos_token_id = config_json['eos_token_id']      
+            config.special_tokens.eos_token_id = config_json['eos_token_id']
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):

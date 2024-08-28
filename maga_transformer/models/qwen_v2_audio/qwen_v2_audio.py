@@ -21,12 +21,13 @@ class QWenV2AudioWeightinfo(QWenV2Weight, BaseMultiModalWeightInfo):
 
 class QWenV2Audio(QWenV2, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
-        if g_parallel_info.tp_rank == 0:
-            with torch.device(g_parallel_info.device):
-                self.mm_part = Processor(config.ckpt_path, to_torch_dtype(config.data_type))
-            config.mm_related_params.vit_weights = BaseVitWeights({"multi_modal_projector": self.mm_part.multi_modal_projector, "audio_tower": self.mm_part.audio_tower}, with_prefix=True)
-            config.mm_related_params.vit_weights._ckpt_prefix = "" 
         super().__init__(config)
+
+    def init_multimodal(self, config: GptInitModelParameters):        
+        with torch.device(g_parallel_info.device):
+            self.mm_part = Processor(config.ckpt_path, to_torch_dtype(config.data_type))
+        config.mm_related_params.vit_weights = BaseVitWeights({"multi_modal_projector": self.mm_part.multi_modal_projector, "audio_tower": self.mm_part.audio_tower}, with_prefix=True)
+        config.mm_related_params.vit_weights._ckpt_prefix = "" 
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
@@ -36,10 +37,6 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
     @staticmethod
     def get_weight_cls():
         return QWenV2AudioWeightinfo
-    
-    @classmethod
-    def is_multimodal(cls) -> bool:
-        return True
 
     @classmethod
     def _from_hf(cls, config: GptInitModelParameters, ckpt_path: str):
@@ -60,7 +57,6 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
         config.rotary_embedding_dim = config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
-        config.is_multimodal = True
         
         config.mm_sep_tokens = [sep_token] # image_token_index 
 

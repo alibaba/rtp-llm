@@ -12,6 +12,7 @@ from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLin
 from maga_transformer.utils.model_weights_loader import get_model_weights_loader, estimate_load_parallel_num, ModelWeightsLoader
 from maga_transformer.utils.model_weight import W, ModelDeployWeightInfo
 from maga_transformer.utils.time_util import Timer
+from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.config.task_type import TaskType
 from maga_transformer.models.downstream_modules.utils import create_custom_module
@@ -43,8 +44,16 @@ class GPT(BaseModel):
         self.load_tokenizer()
         self.init_misc()
         self.init_pipeline_param()
+        self.may_init_multimodal()
         self.load(self.device)
         self.init_linear_bias()
+        
+    def may_init_multimodal(self):
+        if self.is_multimodal():
+            assert isinstance(self, MultiModalMixin) # for syntax check
+            self.config.is_multimodal = True
+            if g_parallel_info.tp_rank == 0:
+                self.init_multimodal(self.config)
 
     def init_misc(self):
         self.task_type = self.config.task_type
@@ -62,8 +71,6 @@ class GPT(BaseModel):
             slopes = self.split_slopes_tp(slopes)
             self.linear_bias_slopes = slopes.to(torch.float).cuda()
             self.weight.append_global_weight(W.linear_bias_slopes, self.linear_bias_slopes)
-
-
 
     def init_pipeline_param(self):
         # Embeddings to encode or decode tokens.
@@ -115,8 +122,6 @@ class GPT(BaseModel):
     @staticmethod
     def get_weight_cls() -> ModelDeployWeightInfo:
         raise NotImplementedError
-
-
 
     def load(self, device: str):
         self._load_weights()
@@ -242,6 +247,9 @@ class GPT(BaseModel):
                 self._safe_load_from_module(self.post_decoder_layernorm.bias, W.final_ln_beta)
                 self.weight.append_global_weight(W.final_ln_gamma, self.post_decoder_layernorm.weight.data)
                 self.weight.append_global_weight(W.final_ln_beta, self.post_decoder_layernorm.bias.data)
+
+    def is_multimodal(self) -> bool:
+        return isinstance(self, MultiModalMixin)
 
     def _initialize_from_weight(self):
         self.init_word_embedding_weight()

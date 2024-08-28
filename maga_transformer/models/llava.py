@@ -71,22 +71,18 @@ class LlavaTokenizer(object):
         return self.tokenizer.apply_chat_template(messages, **kwargs)
 
 class Llava(Llama, MultiModalMixin):
-    def __init__(self, config: GptInitModelParameters):
-        if g_parallel_info.tp_rank == 0:
-            with torch.device(g_parallel_info.device):
-                self.mm_part = LlavaImageEmbedding(config.mm_related_params.config, g_parallel_info.device)
-            vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
-            if config.mm_related_params.config["unfreeze_mm_vision_tower"] or \
-                "mm_vision_tower" in config.mm_related_params.config["mm_tunable_parts"]:
-                vit_weight_dict["vision_tower"] = self.mm_part.vision_tower
-            if "unpad" in config.mm_related_params.config.get("mm_patch_merge_type", "flat"):
-                vit_weight_dict["image_newline"] = self.mm_part.image_newline
-            config.mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
-        Llama.__init__(self, config)
-
-    @classmethod
-    def is_multimodal(cls) -> bool:
-        return True
+    def init_multimodal(self, config: GptInitModelParameters):        
+        if g_parallel_info.tp_rank > 0:
+            return
+        with torch.device(g_parallel_info.device):
+            self.mm_part = LlavaImageEmbedding(config.mm_related_params.config, g_parallel_info.device)
+        vit_weight_dict: Dict[str, Any] = {"mm_projector": self.mm_part.mm_projector}
+        if config.mm_related_params.config["unfreeze_mm_vision_tower"] or \
+            "mm_vision_tower" in config.mm_related_params.config["mm_tunable_parts"]:
+            vit_weight_dict["vision_tower"] = self.mm_part.vision_tower
+        if "unpad" in config.mm_related_params.config.get("mm_patch_merge_type", "flat"):
+            vit_weight_dict["image_newline"] = self.mm_part.image_newline
+        config.mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)        
 
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str], 
@@ -110,8 +106,7 @@ class Llava(Llama, MultiModalMixin):
             norm_type="rmsnorm",
             rotary_embedding_dim=128,
             rotary_embedding_style=1,
-            has_post_decoder_layernorm=True,
-            is_multimodal=True
+            has_post_decoder_layernorm=True
         )
         # hugggingface
         config_path = os.path.join(ckpt_path, "config.json")

@@ -48,10 +48,6 @@ class Whisper(GPT, MultiModalMixin):
             config.mm_related_params.vit_weights = BaseVitWeights({}, False)
         GPT.__init__(self, config)
 
-    @classmethod
-    def is_multimodal(cls) -> bool:
-        return True
-
     @staticmethod
     def get_weight_cls():
         return WhisperWeightInfo

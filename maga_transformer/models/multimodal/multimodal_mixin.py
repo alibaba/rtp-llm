@@ -71,8 +71,12 @@ class BaseMultiModalWeightInfo:
                 llm_weights.tp_strategy[w_name] = sp_id
 
 
+# 继承MultiModalMixin时，需要把声明写在GPT前以正确顺序构造，详情看super().__init__含义
 class MultiModalMixin:
     mm_part: MultiModalEmbeddingInterface
+        
+    def init_multimodal(self, config: GptInitModelParameters) -> None:
+        raise NotImplementedError
 
     @staticmethod
     def process_encode_plugin(prompt: str, generate_config: Dict[str, Any], tokenizer: Any, add_special_tokens: bool, **kwargs: Any) -> List[int]:

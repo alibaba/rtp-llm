@@ -19,24 +19,18 @@ from maga_transformer.utils.util import to_torch_dtype
 class QwenVLImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config: Dict[str, Any]):
         self.vit = QWen_VL_ViT(**config).cuda().half()
-    
+
     @torch.no_grad()
     def image_embedding(self, images: List[Any], device) -> torch.Tensor:
         images = self.vit.encode(images, device, self.vit.dtype)
         return images.to(device=device)
 
 class QWen_VL(QWen, MultiModalMixin):
-    def __init__(self, config: GptInitModelParameters):
-        if g_parallel_info.tp_rank == 0:
-            with torch.device(g_parallel_info.device):
-                self.mm_part = QwenVLImageEmbedding(config.mm_related_params.config)
-            config.mm_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})
-        QWen.__init__(self, config)
+    def init_multimodal(self, config: GptInitModelParameters):
+        with torch.device(g_parallel_info.device):
+            self.mm_part = QwenVLImageEmbedding(config.mm_related_params.config)
+        config.mm_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})        
 
-    @classmethod
-    def is_multimodal(cls) -> bool:
-        return True
-    
     def load(self, device: str):
         if os.environ.get("VIT_TRT", "0") == "1":
             weights_info = self.get_weight_cls()(self.config, g_parallel_info.tp_size, g_parallel_info.tp_rank)
@@ -45,7 +39,7 @@ class QWen_VL(QWen, MultiModalMixin):
                 self.config.mm_related_params, device, to_torch_dtype(self.config.data_type)
             )
         super().load(device=device)
-    
+
     @staticmethod
     def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str],
                                         img_token: str, **kwargs: Any) -> Tuple[str, List[str]]:
@@ -67,7 +61,7 @@ class QWen_VL(QWen, MultiModalMixin):
             if len(images) > 0:
                 for i in range(len(images)):
                     prefix_prompt += 'Picture {i}:'.format(i = i + 1) + start_str + images[i] + end_str + '\n'
-            
+
             tmp_prompt = prompt
             while start_str in tmp_prompt:
                 start_idx = tmp_prompt.find(start_str)
@@ -78,7 +72,7 @@ class QWen_VL(QWen, MultiModalMixin):
                 tmp_prompt = tmp_prompt[end_idx + len(end_str):]
 
             return prefix_prompt + prompt, images
-    
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = GptInitModelParameters(
@@ -86,8 +80,7 @@ class QWen_VL(QWen, MultiModalMixin):
             size_per_head=0,
             layer_num=0,
             max_seq_len=0,
-            vocab_size=0,
-            is_multimodal=True
+            vocab_size=0
         )
         QWen_VL._common_config(config, ckpt_path)
         return config
@@ -98,7 +91,7 @@ class QWen_VL(QWen, MultiModalMixin):
         QWen._from_hf(config, ckpt_path)
         QWen_VL._load_vit_param(config, ckpt_path)
         return config
-    
+
     @staticmethod
     def _load_vit_param(config: GptInitModelParameters, ckpt_path: str):
         config_path = os.path.join(ckpt_path, "config.json")
@@ -120,7 +113,7 @@ class QWen_VL(QWen, MultiModalMixin):
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
         return AutoTokenizer.from_pretrained(config.tokenizer_path, trust_remote_code=True)
-    
+
     @staticmethod
     def get_weight_cls():
         return QWenVLWeightInfo
@@ -128,11 +121,11 @@ class QWen_VL(QWen, MultiModalMixin):
     @staticmethod
     def eval_model_size(config: GptInitModelParameters):
         llm_size = BaseModel.eval_model_size(config)
-        
+
         data_width = 4
         llm_size += QWen_VL.eval_vit_param_count(config) * data_width
         return llm_size
-    
+
     @staticmethod
     def eval_vit_param_count(config: GptInitModelParameters):
         vit_config = config.mm_related_params.config
@@ -142,7 +135,7 @@ class QWen_VL(QWen, MultiModalMixin):
         patch_size = vit_config["patch_size"]
         mlp_ratio = vit_config["mlp_ratio"]
         mlp_width = int(mlp_ratio * width)
-        
+
         llm_size = (3 * width * patch_size ** 2 + width * 2)
         llm_size += (layers * (width * 2 * 2 + width ** 2 * 4 + width * 4 + mlp_width * width * 2 + mlp_width + width))
         llm_size += (width * embed_dim + embed_dim ** 2 + embed_dim + embed_dim * 2 * 3)

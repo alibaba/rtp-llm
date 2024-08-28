@@ -41,6 +41,10 @@ async def fake_output_generator(
 
 MAX_SEQ_LEN=1024
 
+class FakeModel(BaseModel):
+    def is_multimodal(self) -> bool:
+        return False
+
 class OpenaiResponseTest(IsolatedAsyncioTestCase):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
@@ -54,7 +58,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             max_seq_len = 1024,
             vocab_size = 1024,
         )
-        self.model = BaseModel()
+        self.model = FakeModel()
         self.model.config = model_params
 
     async def test_parse_qwen_function_call(self):

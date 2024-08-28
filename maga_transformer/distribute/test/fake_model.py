@@ -22,6 +22,9 @@ class FakeModel(BaseModel):
         super().__init__()
         self.tokenizer = FakeTokenizer()
         self.config = config
+        
+    def is_multimodal(self) -> bool:
+        return False
 
     @staticmethod
     def create_config(ckpt_path: str, **kwargs: Any) -> Any:

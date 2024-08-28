@@ -9,6 +9,7 @@ from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.task_type import TaskType
 from maga_transformer.async_decoder_engine.base_engine import KVCacheInfo
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
+from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
 
 
 class AsyncModel:

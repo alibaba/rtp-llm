@@ -3,15 +3,14 @@ import torch
 from dataclasses import dataclass, field
 from pydantic import BaseModel as PyBaseModel
 from typing import Any, Dict, List, Optional, Tuple, Union, NamedTuple
-
 from transformers import PreTrainedTokenizerBase
 
+from maga_transformer.config.task_type import TaskType
 from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.utils.weight_type import WEIGHT_TYPE
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.models.downstream_modules.custom_module import CustomModule
-from maga_transformer.config.task_type import TaskType
 from maga_transformer.config.gpt_init_model_parameters import GptInitModelParameters
 from maga_transformer.ops.comm.parallel_op import ParallelEmbedding, ParallelLinear
 
@@ -194,9 +193,8 @@ class BaseModel(object):
     def get_tokenizer(cls, config: GptInitModelParameters) -> PreTrainedTokenizerBase:
         raise NotImplementedError()
 
-    @classmethod
-    def is_multimodal(cls) -> bool:
-        return False
+    def is_multimodal(self) -> bool:
+        raise NotImplementedError()
 
     def __init__(self) -> None:
         self.weight = None

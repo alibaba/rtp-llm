@@ -16,17 +16,12 @@ from maga_transformer.utils.util import get_config_from_path, to_torch_dtype
 
 
 class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
-    def __init__(self, config: GptInitModelParameters):
+    def init_multimodal(self, config: GptInitModelParameters):
         if g_parallel_info.tp_rank == 0:
             self.mm_part = EVA2CLIPImageEmbedding(config)
             config.mm_related_params.vit_weights = ChatGlmV4VisionVitWeights(
                 {"vit": self.mm_part.vit}
-            )
-        ChatGlmV4.__init__(self, config)
-
-    @classmethod
-    def is_multimodal(cls) -> bool:
-        return True
+            )        
 
     def load(self, device: str):
         if os.environ.get("VIT_TRT", "0") == "1":
@@ -48,8 +43,7 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         config.mm_related_params.config['use_vision_hidden_size'] = False
         config.mm_related_params.config["boi_token_id"] = config_dict.get("boi_token_id", 0)
         config.mm_related_params.config["eoi_token_id"] = config_dict.get("eoi_token_id", 0)
-        config.mm_sep_tokens = [config_dict.get("boi_token_id", 0), config_dict.get("eoi_token_id", 0)]
-        config.is_multimodal = True
+        config.mm_sep_tokens = [config_dict.get("boi_token_id", 0), config_dict.get("eoi_token_id", 0)]        
         config.cal_mm_tokens_in_rotary_emb = False
         config.include_sep_tokens = True
         return config
