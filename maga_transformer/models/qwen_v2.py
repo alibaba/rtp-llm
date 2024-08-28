@@ -115,12 +115,18 @@ class QWenV2(QWen):
     @classmethod
     def _from_hf(cls, config: GptInitModelParameters, ckpt_path: str):
         config_path = os.path.join(ckpt_path, "config.json")
+
         if not os.path.exists(config_path):
             return
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
+        QWenV2._from_config_json(config, config_json)
+        GPT._load_quant_config(ckpt_path, config_json, config)
+        return config
 
+    @staticmethod
+    def _from_config_json(config: GptInitModelParameters, config_json: Dict[str, Any]):
         # config.activation_type = config_json["hidden_act"]
         config.inter_size = config_json["intermediate_size"]
         config.head_num = config_json["num_attention_heads"]
@@ -132,8 +138,6 @@ class QWenV2(QWen):
         config.rotary_embedding_dim = config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
-
-        GPT._load_quant_config(ckpt_path, config_json, config)
 
     @staticmethod
     def get_weight_cls():

@@ -67,7 +67,9 @@ private:
 
         int mm_num = mm_embedding.size();
         if (locs.size() != mm_num) {
-            return absl::InternalError("number of multimodal tags and multimodal input not matched");
+            std::stringstream exception_str;
+            exception_str << "number of multimodal tags and multimodal input not matched, expect " << locs.size() << ", get " << mm_num;
+            return absl::InternalError(exception_str.str());
         }
 
         for (int i = 0;i < mm_num;i++) {
