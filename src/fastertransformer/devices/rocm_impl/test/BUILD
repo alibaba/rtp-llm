@@ -98,7 +98,7 @@ cc_test(
     copts=test_copts + copts(),
     linkopts=test_linkopts,
     deps=test_deps,
-    tags = ["rocm"],
+    tags = ["rocm", "manual"],
 )
 
 cc_test(
