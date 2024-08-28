@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-#include "checkMacrosPlugin.h"
+#include "trt_plugins/common/checkMacrosPlugin.h"
 
 #include "src/fastertransformer/utils/logger.h"
 

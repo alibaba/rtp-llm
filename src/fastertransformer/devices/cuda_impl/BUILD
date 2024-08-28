@@ -1,7 +1,7 @@
 load("//:def.bzl", "copts")
-load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
+load("//bazel:arch_select.bzl", "trt_plugins")
 
-cutlass_kernels_interface()
+trt_plugins()
 
 cc_library(
     name = "cuda_impl",
@@ -20,8 +20,7 @@ cc_library(
         "//src/fastertransformer/cuda:allocator_cuda",
         "//src/fastertransformer/cuda:torch_cuda_allocator",
         "//src/fastertransformer/kernels:kernels",
-        "cutlass_kernels_interface",
-        "//src/fastertransformer/trt_plugins:trt_plugins",
+        ":trt_plugins",
         "@havenask//aios/autil:string_helper",
         "@local_config_cuda//cuda:cuda_headers",
     ],

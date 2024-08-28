@@ -13,7 +13,7 @@
 
 
 namespace tk = tensorrt_llm::common;
-namespace tkc = tensorrt_llm::cutlass_extensions;
+namespace tc = tensorrt_llm::cutlass_extensions;
 //namespace ft = fastertransformer;
 using namespace fastertransformer;
 

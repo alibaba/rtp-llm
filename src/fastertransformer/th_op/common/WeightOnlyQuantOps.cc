@@ -15,7 +15,7 @@
  */
 
 #if USING_CUDA
-#include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_preprocessors.h"
+#include "trt_plugins/common/trtPluginsInterface.h"
 #include "src/fastertransformer/th_op/th_utils.h"
 #endif
 

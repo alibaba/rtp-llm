@@ -1,7 +1,5 @@
 load("//:def.bzl", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps", "th_transformer_so", "cutlass_kernels_interface")
-
-cutlass_kernels_interface()
+load("//bazel:arch_select.bzl", "torch_deps", "th_transformer_so")
 
 config_setting(
     name = "using_cuda",
@@ -96,7 +94,6 @@ filegroup(
     ] + select({
         "//:using_cuda": [
             "src/fastertransformer/th_op/th_utils.cc",
-            "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
             "src/fastertransformer/th_op/common/FusedEmbeddingOp.cc",
             "src/fastertransformer/th_op/common/NcclOp.cc",
             "src/fastertransformer/th_op/common/WeightOnlyQuantOps.cc",
@@ -104,6 +101,16 @@ filegroup(
         "//:using_rocm": [
             "src/fastertransformer/th_op/th_utils.cc",
             "src/fastertransformer/th_op/common/WeightOnlyQuantOps.cc",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+filegroup(
+    name = "th_transformer_gpu_files",
+    srcs = select({
+        "//:using_cuda": [
+            "src/fastertransformer/th_op/common/CutlassConfigOps.cc",
         ],
         "//conditions:default": [],
     }),
@@ -132,6 +139,28 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "th_transformer_gpu",
+    srcs = [
+        ":th_transformer_gpu_files"
+    ],
+    deps = [
+        ":gpt_init_params_hdr",
+    	":th_op_hdrs",
+        "//src/fastertransformer/utils:utils",
+        "//maga_transformer/cpp:model_rpc_server",
+        "@grpc//:grpc++",
+    ] + select({
+        "//:using_cuda": [
+            "//src/fastertransformer/cuda:allocator_torch",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = copts(),
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+)
+
 cc_binary(
     name = "th_transformer",
     deps = [
@@ -139,7 +168,7 @@ cc_binary(
         ":gpt_init_params_hdr",
     ] + select({
         "//:using_cuda": [
-            "cutlass_kernels_interface",
+            ":th_transformer_gpu",
         ],
         "//conditions:default": [],
     }),

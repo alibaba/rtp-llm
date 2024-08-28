@@ -2,10 +2,8 @@
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
-#include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/utils/ShapeCheck.h"
-#include "src/fastertransformer/cuda/cutlass_utils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "autil/StringUtil.h"
 
@@ -145,7 +143,8 @@ void CudaDevice::InvokeSmoothQaunt(const GemmParams& params,
     smooth_quant_plugin_->init(quant_mode, nvinfer1DtypeConvert(output->type()));
 
     FT_LOG_DEBUG("use int8 soomth gemm.");
-    FT_CHECK_WITH_INFO(smooth_quant_plugin_->addBiasActivationEpilogueSupported(CutlassUtils::ActivationToCutlassType(params.activationType)), "activation type not supported: %d", int(params.activationType));
+    FT_CHECK_WITH_INFO(smooth_quant_plugin_->addBiasActivationEpilogueSupported(params.activationType),
+     "activation type not supported: %d", int(params.activationType));
     BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_QINT8});
     BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});    
     size_t ws_size   = smooth_quant_plugin_->getWorkspaceSize(arguments.m, arguments.n, arguments.k);
@@ -158,7 +157,7 @@ void CudaDevice::InvokeSmoothQaunt(const GemmParams& params,
                                   output->data(),
                                   workspace->data<char>(),
                                   params.C ? params.C.value().get().data() : nullptr,
-                                  CutlassUtils::ActivationToCutlassType(params.activationType),
+                                  params.activationType,
                                   arguments.m,
                                   arguments.n,
                                   arguments.k,

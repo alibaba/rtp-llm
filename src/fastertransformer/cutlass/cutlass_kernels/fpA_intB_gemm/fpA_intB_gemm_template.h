@@ -42,7 +42,7 @@
 
 #include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
 
-namespace tkc = tensorrt_llm::cutlass_extensions;
+namespace tc = tensorrt_llm::cutlass_extensions;
 
 namespace tensorrt_llm
 {
@@ -55,7 +55,7 @@ template <typename T, typename WeightType, typename arch, cutlass::WeightOnlyQua
     typename ThreadblockShape, typename WarpShape, int Stages>
 void generic_mixed_gemm_kernelLauncher(const T* A, const WeightType* B, const T* weight_scales,
     const T* weight_zero_points, const T* biases, T* C, int m, int n, int k, const int group_size,
-    tkc::CutlassGemmConfig gemm_config, char* workspace, size_t workspace_bytes, cudaStream_t stream,
+    tc::CutlassGemmConfig gemm_config, char* workspace, size_t workspace_bytes, cudaStream_t stream,
     int* occupancy = nullptr)
 {
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
@@ -101,7 +101,7 @@ void generic_mixed_gemm_kernelLauncher(const T* A, const WeightType* B, const T*
     using MixedGemmArchTraits = cutlass::gemm::kernel::MixedGemmArchTraits<ElementType, CutlassWeightType, arch>;
     using ElementAccumulator = typename MixedGemmArchTraits::AccType;
 
-    using EpilogueOp = typename tkc::Epilogue<ElementType, MixedGemmArchTraits::ElementsPerAccessC, ElementAccumulator,
+    using EpilogueOp = typename tc::Epilogue<ElementType, MixedGemmArchTraits::ElementsPerAccessC, ElementAccumulator,
         EpilogueTag>::Op;
 
     // useless, just for compiler
@@ -233,7 +233,7 @@ void generic_mixed_gemm_kernelLauncher(const T* A, const WeightType* B, const T*
 template <typename T, typename WeightType, typename arch, cutlass::WeightOnlyQuantOp QuantOp, typename EpilogueTag,
     typename ThreadblockShape, typename WarpShape, int Stages>
 void filter_and_run_mixed_gemm(const T* A, const WeightType* B, const T* weight_scales, const T* weight_zero_points,
-    const T* biases, T* C, int m, int n, int k, const int group_size, tkc::CutlassGemmConfig gemm_config,
+    const T* biases, T* C, int m, int n, int k, const int group_size, tc::CutlassGemmConfig gemm_config,
     char* workspace, size_t workspace_bytes, cudaStream_t stream, int* occupancy = nullptr)
 {
 
@@ -268,7 +268,7 @@ void filter_and_run_mixed_gemm(const T* A, const WeightType* B, const T* weight_
 template <typename T, typename WeightType, typename arch, cutlass::WeightOnlyQuantOp QuantOp, typename EpilogueTag,
     typename ThreadblockShape, typename WarpShape>
 void dispatch_gemm_config(const T* A, const WeightType* B, const T* weight_scales, const T* weight_zero_points,
-    const T* biases, T* C, int m, int n, int k, const int group_size, tkc::CutlassGemmConfig gemm_config,
+    const T* biases, T* C, int m, int n, int k, const int group_size, tc::CutlassGemmConfig gemm_config,
     char* workspace, size_t workspace_bytes, cudaStream_t stream, int* occupancy = nullptr)
 {
 
@@ -300,7 +300,7 @@ void dispatch_gemm_config(const T* A, const WeightType* B, const T* weight_scale
 template <typename T, typename WeightType, typename arch, cutlass::WeightOnlyQuantOp QuantOp, typename EpilogueTag>
 void dispatch_gemm_to_cutlass(const T* A, const WeightType* B, const T* weight_scales, const T* weight_zero_points,
     const T* biases, T* C, int m, int n, int k, const int group_size, char* workspace, size_t workspace_bytes,
-    tkc::CutlassGemmConfig gemm_config, cudaStream_t stream, int* occupancy = nullptr)
+    tc::CutlassGemmConfig gemm_config, cudaStream_t stream, int* occupancy = nullptr)
 {
 
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
@@ -310,7 +310,7 @@ void dispatch_gemm_to_cutlass(const T* A, const WeightType* B, const T* weight_s
     // for mixed type gemms.
     switch (gemm_config.tile_config)
     {
-    case tkc::CutlassTileConfig::CtaShape16x128x64_WarpShape16x32x64:
+    case tc::CutlassTileConfig::CtaShape16x128x64_WarpShape16x32x64:
         FT_CHECK_WITH_INFO(arch::kMinComputeCapability >= 75, "Invalid config on Volta");
         if constexpr (arch::kMinComputeCapability >= 75)
         {
@@ -319,7 +319,7 @@ void dispatch_gemm_to_cutlass(const T* A, const WeightType* B, const T* weight_s
             group_size, gemm_config, workspace, workspace_bytes, stream, occupancy);
         }
         break;
-    case tkc::CutlassTileConfig::CtaShape16x256x64_WarpShape16x64x64:
+    case tc::CutlassTileConfig::CtaShape16x256x64_WarpShape16x64x64:
         FT_CHECK_WITH_INFO(arch::kMinComputeCapability >= 75, "Invalid config on Volta");
         if constexpr (arch::kMinComputeCapability >= 75)
         {
@@ -328,17 +328,17 @@ void dispatch_gemm_to_cutlass(const T* A, const WeightType* B, const T* weight_s
             group_size, gemm_config, workspace, workspace_bytes, stream, occupancy);
         }
         break;
-    case tkc::CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64:
+    case tc::CutlassTileConfig::CtaShape32x128x64_WarpShape32x32x64:
         dispatch_gemm_config<T, WeightType, arch, QuantOp, EpilogueTag, cutlass::gemm::GemmShape<32, 128, 64>,
             cutlass::gemm::GemmShape<32, 32, 64>>(A, B, weight_scales, weight_zero_points, biases, C, m, n, k,
             group_size, gemm_config, workspace, workspace_bytes, stream, occupancy);
         break;
-    case tkc::CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64:
+    case tc::CutlassTileConfig::CtaShape64x128x64_WarpShape64x32x64:
         dispatch_gemm_config<T, WeightType, arch, QuantOp, EpilogueTag, cutlass::gemm::GemmShape<64, 128, 64>,
             cutlass::gemm::GemmShape<64, 32, 64>>(A, B, weight_scales, weight_zero_points, biases, C, m, n, k,
             group_size, gemm_config, workspace, workspace_bytes, stream, occupancy);
         break;
-    case tkc::CutlassTileConfig::CtaShape128x128x64_WarpShape128x32x64:
+    case tc::CutlassTileConfig::CtaShape128x128x64_WarpShape128x32x64:
         FT_CHECK_WITH_INFO(arch::kMinComputeCapability >= 75, "Invalid config on Volta");
         if constexpr (arch::kMinComputeCapability >= 75)
         {
@@ -347,10 +347,10 @@ void dispatch_gemm_to_cutlass(const T* A, const WeightType* B, const T* weight_s
                 group_size, gemm_config, workspace, workspace_bytes, stream, occupancy);
         }
         break;
-    case tkc::CutlassTileConfig::Undefined:
+    case tc::CutlassTileConfig::Undefined:
         throw std::runtime_error("[TensorRT-LLm Error][fpA_intB][dispatch_gemm_to_cutlass] gemm config undefined.");
         break;
-    case tkc::CutlassTileConfig::ChooseWithHeuristic:
+    case tc::CutlassTileConfig::ChooseWithHeuristic:
         throw std::runtime_error(
             "[TensorRT-LLm Error][fpA_intB][dispatch_gemm_to_cutlass] gemm config should have already been set by "
             "heuristic.");
@@ -383,7 +383,7 @@ template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
 template <typename EpilogueTag>
 void CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::dispatch_to_arch<EpilogueTag>(const T* A, const WeightType* B,
     const T* weight_scales, const T* weight_zero_points, const T* biases, T* C, int m, int n, int k,
-    const int group_size, tkc::CutlassGemmConfig gemm_config, char* workspace_ptr, const size_t workspace_bytes,
+    const int group_size, tc::CutlassGemmConfig gemm_config, char* workspace_ptr, const size_t workspace_bytes,
     cudaStream_t stream, int* occupancy)
 {
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
@@ -417,13 +417,13 @@ void CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::dispatch_to_arch<Epilogue
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
 void CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::gemm(const void* A, const void* B, const void* weight_scales,
     const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
-    tkc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
+    tc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
 {
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
     if constexpr ((QuantOp == cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS)
         || (QuantOp == cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY))
     {
-        dispatch_to_arch<tkc::EpilogueOpBias>((const T*) A, (const WeightType*) B, (const T*) weight_scales,
+        dispatch_to_arch<tc::EpilogueOpBias>((const T*) A, (const WeightType*) B, (const T*) weight_scales,
             (const T*) weight_zero_points, (const T*) biases, (T*) C, m, n, k, group_size, gemmConfig, workspace_ptr,
             workspace_bytes, stream, nullptr);
     }
@@ -436,14 +436,14 @@ void CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::gemm(const void* A, const
 
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
 void CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::gemm(const void* A, const void* B, const void* weight_scales,
-    void* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes,
+    void* C, int m, int n, int k, tc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes,
     cudaStream_t stream)
 {
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
 
     if constexpr (QuantOp == cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY)
     {
-        dispatch_to_arch<tkc::EpilogueOpDefault>((const T*) A, (const WeightType*) B, (const T*) weight_scales, nullptr,
+        dispatch_to_arch<tc::EpilogueOpDefault>((const T*) A, (const WeightType*) B, (const T*) weight_scales, nullptr,
             nullptr, (T*) C, m, n, k, k, gemmConfig, workspace_ptr, workspace_bytes, stream, nullptr);
     }
     else
@@ -456,25 +456,25 @@ void CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::gemm(const void* A, const
 
 
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
-std::vector<tkc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getConfigs() const
+std::vector<tc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getConfigs() const
 {
     static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
-    std::vector<tkc::CutlassGemmConfig> candidateConfigs = get_candidate_configs(sm_, is_weight_only, false, false, SPLIT_K_LIMIT);
+    std::vector<tc::CutlassGemmConfig> candidateConfigs = get_candidate_configs(sm_, is_weight_only, false, false, SPLIT_K_LIMIT);
     return candidateConfigs;
 }
 
 
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
-std::vector<tkc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getValidConfigs(const void* A, const void* B,
+std::vector<tc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getValidConfigs(const void* A, const void* B,
     const void* weight_scales, const void* weight_zero_points, const void* biases, void* C, int m, int n, int k,
     const int group_size, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
 {
 
     static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
 
-    std::vector<tkc::CutlassGemmConfig> candidate_configs
+    std::vector<tc::CutlassGemmConfig> candidate_configs
         = get_candidate_configs(sm_, is_weight_only, false, false, SPLIT_K_LIMIT);
-    std::vector<tkc::CutlassGemmConfig> valid_splitk_configs;
+    std::vector<tc::CutlassGemmConfig> valid_splitk_configs;
     for (int i = 0; i < candidate_configs.size(); i++)
     {
         if (is_valid_split_k_factor(m, n, k, candidate_configs[i], workspace_bytes, is_weight_only))
@@ -486,11 +486,11 @@ std::vector<tkc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<T, WeightType, Quan
 
     for (size_t ii = 0; ii < valid_splitk_configs.size(); ++ii)
     {
-        dispatch_to_arch<tkc::EpilogueOpDefault>((const T*) A, (const WeightType*) B, (const T*) weight_scales,
+        dispatch_to_arch<tc::EpilogueOpDefault>((const T*) A, (const WeightType*) B, (const T*) weight_scales,
             (const T*) weight_zero_points, (const T*) biases, (T*) C, m, n, k, group_size, valid_splitk_configs[ii],
             workspace_ptr, workspace_bytes, stream, &(occupancies[ii]));
     }
-    std::vector<tkc::CutlassGemmConfig> valid_configs
+    std::vector<tc::CutlassGemmConfig> valid_configs
         = get_valid_config_from_occupancies(valid_splitk_configs, occupancies);
 
     return valid_configs;
@@ -498,7 +498,7 @@ std::vector<tkc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<T, WeightType, Quan
 }
 
 template <typename T, typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
-tkc::CutlassGemmConfig CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChosenConfig(const void* A, const void* B,
+tc::CutlassGemmConfig CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChosenConfig(const void* A, const void* B,
     const void* weight_scales, const void* weight_zero_points, const void* biases, void* C, int m, int n, int k,
     const int group_size, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
 {
@@ -518,9 +518,9 @@ tkc::CutlassGemmConfig CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChos
 
     static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
 
-    std::vector<tkc::CutlassGemmConfig> candidate_configs
+    std::vector<tc::CutlassGemmConfig> candidate_configs
         = get_candidate_configs(sm_, is_weight_only, false, false, SPLIT_K_LIMIT);
-    std::vector<tkc::CutlassGemmConfig> valid_configs;
+    std::vector<tc::CutlassGemmConfig> valid_configs;
     for (int i = 0; i < candidate_configs.size(); i++)
     {
         if (is_valid_split_k_factor(m, n, k, candidate_configs[i], workspace_bytes, is_weight_only))
@@ -532,11 +532,11 @@ tkc::CutlassGemmConfig CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getChos
 
     for (size_t ii = 0; ii < valid_configs.size(); ++ii)
     {
-        dispatch_to_arch<tkc::EpilogueOpDefault>((const T*) A, (const WeightType*) B, (const T*) weight_scales,
+        dispatch_to_arch<tc::EpilogueOpDefault>((const T*) A, (const WeightType*) B, (const T*) weight_scales,
             (const T*) weight_zero_points, (const T*) biases, (T*) C, m, n, k, group_size, valid_configs[ii],
             workspace_ptr, workspace_bytes, stream, &(occupancies[ii]));
     }
-    tkc::CutlassGemmConfig chosen_config
+    tc::CutlassGemmConfig chosen_config
         = estimate_best_config_from_occupancies(valid_configs, occupancies, m, n, k, multi_processor_count_);
 
     return chosen_config;
@@ -556,14 +556,14 @@ size_t CutlassFpAIntBGemmRunner<T, WeightType, QuantOp>::getWorkspaceSize(const 
 template <typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
 void CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::gemm(const void* A, const void* B, const void* weight_scales,
     const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
-    tkc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
+    tc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
 {
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
 }
 
 template <typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
 void CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::gemm(const void* A, const void* B, const void* weight_scales,
-    void* C, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes,
+    void* C, int m, int n, int k, tc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes,
     cudaStream_t stream)
 {
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
@@ -577,21 +577,21 @@ size_t CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::getWorkspaceSize(co
 }
 
 template <typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
-std::vector<tkc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::getConfigs() const
+std::vector<tc::CutlassGemmConfig> CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::getConfigs() const
 {
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
-    std::vector<tkc::CutlassGemmConfig> configs={};
+    std::vector<tc::CutlassGemmConfig> configs={};
     return configs;
 }
 
 template<typename WeightType, cutlass::WeightOnlyQuantOp QuantOp>
-tkc::CutlassGemmConfig
+tc::CutlassGemmConfig
 CutlassFpAIntBGemmRunner<float, WeightType, QuantOp>::getChosenConfig(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points,
         const void* biases, void* C, int m, int n, int k, const int group_size,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
 {
     FT_LOG_TRACE(__PRETTY_FUNCTION__);
-    tkc::CutlassGemmConfig config;
+    tc::CutlassGemmConfig config;
     return config;
   
 }

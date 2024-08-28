@@ -20,7 +20,7 @@
 #include "src/fastertransformer/cutlass/cutlass_kernels/gemm_lut.h"
 #include <cuda_runtime_api.h>
 
-namespace tkc = tensorrt_llm::cutlass_extensions;
+namespace tc = tensorrt_llm::cutlass_extensions;
 namespace tensorrt_llm
 {
 namespace kernels
@@ -48,25 +48,25 @@ public:
     virtual ~CutlassFpAIntBGemmRunnerInterface() {}
 
     virtual void gemm(const void* A, const void* B, const void* weight_scales, void* C, int m, int n, int k,
-        tkc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
+        tc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
         = 0;
 
     virtual void gemm(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points,
-        const void* biases, void* C, int m, int n, int k, const int group_size, tkc::CutlassGemmConfig gemmConfig,
+        const void* biases, void* C, int m, int n, int k, const int group_size, tc::CutlassGemmConfig gemmConfig,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
         = 0;
 
     // Returns desired workspace size in bytes.
     virtual size_t getWorkspaceSize(const int m, const int n, const int k) = 0;
 
-    virtual std::vector<tkc::CutlassGemmConfig> getConfigs() const = 0;
+    virtual std::vector<tc::CutlassGemmConfig> getConfigs() const = 0;
 
-    virtual tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, const void* weight_scales,
+    virtual tc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, const void* weight_scales,
         const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
         = 0;
 
-    virtual std::vector<tkc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, const void* weight_scales,
+    virtual std::vector<tc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, const void* weight_scales,
         const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream)
         = 0;
@@ -85,11 +85,11 @@ public:
     ~CutlassFpAIntBGemmRunner();
 
     void gemm(const void* A, const void* B, const void* weight_scales, void* C, int m, int n, int k,
-        tkc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes,
+        tc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes,
         cudaStream_t stream) override;
 
     void gemm(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points,
-        const void* biases, void* C, int m, int n, int k, const int group_size, tkc::CutlassGemmConfig gemmConfig,
+        const void* biases, void* C, int m, int n, int k, const int group_size, tc::CutlassGemmConfig gemmConfig,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream) override;
 
     // Disabled since the fused GEMM, activation kernels will not be used in v1.
@@ -101,20 +101,20 @@ public:
     // Returns desired workspace size in bytes.
     size_t getWorkspaceSize(const int m, const int n, const int k) override;
 
-    std::vector<tkc::CutlassGemmConfig> getConfigs() const override;
+    std::vector<tc::CutlassGemmConfig> getConfigs() const override;
 
-    tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, const void* weight_scales,
+    tc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, const void* weight_scales,
         const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream) override;
 
-    std::vector<tkc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, const void* weight_scales,
+    std::vector<tc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, const void* weight_scales,
         const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream) override;
 
 private:
     template <typename EpilogueTag>
     void dispatch_to_arch(const T* A, const WeightType* B, const T* weight_scales, const T* weight_zero_points,
-        const T* biases, T* C, int m, int n, int k, const int group_size, tkc::CutlassGemmConfig gemm_config,
+        const T* biases, T* C, int m, int n, int k, const int group_size, tc::CutlassGemmConfig gemm_config,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream, int* occupancy = nullptr);
 
 private:
@@ -132,19 +132,19 @@ public:
     ~CutlassFpAIntBGemmRunner() = default;
 
     void gemm(const void* A, const void* B, const void* weight_scales, void* C, int m, int n, int k,
-        tkc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes,
+        tc::CutlassGemmConfig gemmConfig, char* workspace_ptr, const size_t workspace_bytes,
         cudaStream_t stream) override;
 
     void gemm(const void* A, const void* B, const void* weight_scales, const void* weight_zero_points,
-        const void* biases, void* C, int m, int n, int k, const int group_size, tkc::CutlassGemmConfig gemmConfig,
+        const void* biases, void* C, int m, int n, int k, const int group_size, tc::CutlassGemmConfig gemmConfig,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream);
 
     // Returns desired workspace size in bytes.
     size_t getWorkspaceSize(const int m, const int n, const int k);
 
-    std::vector<tkc::CutlassGemmConfig> getConfigs() const;
+    std::vector<tc::CutlassGemmConfig> getConfigs() const;
 
-    tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, const void* weight_scales,
+    tc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, const void* weight_scales,
         const void* weight_zero_points, const void* biases, void* C, int m, int n, int k, const int group_size,
         char* workspace_ptr, const size_t workspace_bytes, cudaStream_t stream);
 };

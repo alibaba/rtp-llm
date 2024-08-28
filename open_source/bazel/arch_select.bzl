@@ -62,16 +62,6 @@ def torch_deps():
     })
     return deps
 
-def cutlass_kernels_interface():
-    native.alias(
-        name = "cutlass_kernels_interface",
-        actual = "//src/fastertransformer/cutlass:cutlass_kernels_impl",
-    )
-
-    native.alias(
-        name = "cutlass_headers_interface",
-        actual = "//src/fastertransformer/cutlass:cutlass_headers",
-    )
 
 def fa_deps():
     native.alias(

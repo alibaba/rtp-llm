@@ -1,7 +1,4 @@
 load("//:def.bzl", "cuda_copts", "copts")
-load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
-
-cutlass_kernels_interface()
 
 cc_binary(
     name = "long_seq_perf",
@@ -9,7 +6,7 @@ cc_binary(
         "long_seq.cu",
     ],
     deps = [
-        "cutlass_kernels_interface",
+        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/cuda:allocator_cuda",
@@ -26,7 +23,7 @@ cc_binary(
         "int4_perf.cu"
     ],
     deps = [
-        "cutlass_kernels_interface",
+        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/cuda:allocator_cuda",
@@ -43,7 +40,7 @@ cc_binary(
         "int8_gemm_perf.cu",
     ],
     deps = [
-        "cutlass_kernels_interface",
+        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/cuda:allocator_cuda",
@@ -60,7 +57,7 @@ cc_binary(
         "int8_gemm_test.cu",
     ],
     deps = [
-        "cutlass_kernels_interface",
+        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/cuda:cuda",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/cuda:allocator_cuda",

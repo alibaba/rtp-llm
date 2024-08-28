@@ -1,7 +1,6 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
 #include "src/fastertransformer/devices/utils/DebugUtils.h"
 #include "src/fastertransformer/core/BufferHelper.h"
-#include "src/fastertransformer/cuda/cutlass_utils.h"
 
 using namespace std;
 
@@ -21,7 +20,7 @@ bool smoothQuantGemmSupportFuseBiasActivation(const LoraLinearWithActivationPara
         return false;
     }
     // check activation type supported;
-    return plugin.addBiasActivationEpilogueSupported(CutlassUtils::ActivationToCutlassType(params.activation_params.atype));
+    return plugin.addBiasActivationEpilogueSupported(params.activation_params.atype);
 }
 
 

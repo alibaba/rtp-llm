@@ -14,12 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "smoothQuantGemmPlugin.h"
+#include "trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
 #include <numeric>
 
 using namespace nvinfer1;
 using namespace tensorrt_llm::common;
-using namespace tensorrt_llm::kernels::cutlass_kernels;
 using tensorrt_llm::plugins::SmoothQuantGemmPlugin;
 
 SmoothQuantGemmPlugin::SmoothQuantGemmPlugin(QuantMode quantMode, nvinfer1::DataType type)
@@ -52,9 +51,33 @@ void SmoothQuantGemmPlugin::init(tensorrt_llm::common::QuantMode quantMode,
     }
 }
 
-bool SmoothQuantGemmPlugin::addBiasActivationEpilogueSupported(tkc::CutlassActivationType activation) const {
-    return CutlassInt8GemmRunnerInterface::addBiasActivationEpilogueSupported(activation);
+bool SmoothQuantGemmPlugin::addBiasActivationEpilogueSupported(fastertransformer::ActivationType activation) const {
+    CutlassActivationType cutlass_activation_type = ActivationToCutlassType(activation);
+    return CutlassInt8GemmRunnerInterface::addBiasActivationEpilogueSupported(cutlass_activation_type);
 }
+
+CutlassActivationType SmoothQuantGemmPlugin::ActivationToCutlassType(fastertransformer::ActivationType act_type) const {
+        switch(act_type) {
+            case fastertransformer::ActivationType::Identity:
+                return CutlassActivationType::IDENTITY;
+            case fastertransformer::ActivationType::Geglu:
+            case fastertransformer::ActivationType::Gelu:
+                return CutlassActivationType::GELU_FAST;
+            case fastertransformer::ActivationType::GeluNoneApproximate:
+            case fastertransformer::ActivationType::GeGluNoneApproximate:
+                return CutlassActivationType::GELU;
+            case fastertransformer::ActivationType::Relu:
+                return CutlassActivationType::RELU;
+            case fastertransformer::ActivationType::Sigmoid:
+                return CutlassActivationType::SIGMOID;
+                case fastertransformer::ActivationType::Silu:
+            case fastertransformer::ActivationType::Swiglu:
+                return CutlassActivationType::SILU;
+            default:
+                FT_CHECK_WITH_INFO(false, "ERROR ACTIVATION TYPE");            
+        }
+        return CutlassActivationType::INVALID;
+    }
 
 size_t SmoothQuantGemmPlugin::getWorkspaceSize(const int m, const int n, const int k) noexcept
 {
@@ -63,7 +86,7 @@ size_t SmoothQuantGemmPlugin::getWorkspaceSize(const int m, const int n, const i
 }
 
 int SmoothQuantGemmPlugin::enqueue(const void* A, const void* B, const float* alphaCol, const float* alphaRow, void* C,
-    char* workspace, void* bias, tkc::CutlassActivationType activation, const int m, const int n, const int k, cudaStream_t stream) noexcept
+    char* workspace, void* bias, fastertransformer::ActivationType activation, const int m, const int n, const int k, cudaStream_t stream) noexcept
 {
     // inputs
     //     mat1           [M(*), K]
@@ -82,7 +105,8 @@ int SmoothQuantGemmPlugin::enqueue(const void* A, const void* B, const float* al
         "configurations of the CUTLASS kernel, please pay attention to the warning information when building the "
         "engine.)");
 
-    m_sqGemmRunner->gemm(A, B, mQuantMode, alphaCol, alphaRow, C, bias, activation, m, n, k, bestTactic, workspace, wsSize, stream);
+    CutlassActivationType cutlass_activation_type = ActivationToCutlassType(activation);
+    m_sqGemmRunner->gemm(A, B, mQuantMode, alphaCol, alphaRow, C, bias, cutlass_activation_type, m, n, k, bestTactic, workspace, wsSize, stream);
 
     return 0;
 }

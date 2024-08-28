@@ -5,7 +5,6 @@
 #include "src/fastertransformer/kernels/layernorm_kernels.h"
 #include "src/fastertransformer/kernels/activation_kernels.h"
 #include "src/fastertransformer/kernels/gpt_kernels.h"
-#include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/utils/compiler_config.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils_torch.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"

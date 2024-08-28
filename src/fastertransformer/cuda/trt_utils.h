@@ -1,5 +1,6 @@
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/utils/exception.h"
+#include "src/fastertransformer/utils/assert_utils.h"
 
 #pragma once
 #define TLLM_LOG_TRACE FT_LOG_TRACE

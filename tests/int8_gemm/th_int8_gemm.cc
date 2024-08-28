@@ -66,7 +66,7 @@ Tensor int8_gemm_helper(Tensor input_activations, Tensor weight, Tensor alphaCol
 
             auto runner_operation = [&](cudaStream_t stream)
             {
-                runner->gemm(input_act_ptr, weight_ptr, quant_mode, alpha_col_ptr, alpha_row_ptr, output_tensor_ptr, bias_ptr, tc::CutlassActivationType::IDENTITY, m,
+                runner->gemm(input_act_ptr, weight_ptr, quant_mode, alpha_col_ptr, alpha_row_ptr, output_tensor_ptr, bias_ptr, tkc::CutlassActivationType::IDENTITY, m,
                     n, k, configs[i], ws_ptr, ws_bytes, stream);
             };
             float cur_avg_time = ft::timing_function(runner_operation, timing_iterations, stream);
@@ -87,7 +87,7 @@ Tensor int8_gemm_helper(Tensor input_activations, Tensor weight, Tensor alphaCol
 
         auto runner_operation = [&](cudaStream_t stream)
         {
-            runner->gemm(input_act_ptr, weight_ptr, quant_mode, alpha_col_ptr, alpha_row_ptr, output_tensor_ptr, bias_ptr, tc::CutlassActivationType::IDENTITY, m, n, k,
+            runner->gemm(input_act_ptr, weight_ptr, quant_mode, alpha_col_ptr, alpha_row_ptr, output_tensor_ptr, bias_ptr, tkc::CutlassActivationType::IDENTITY, m, n, k,
                 config, ws_ptr, ws_bytes, stream);
         };
         avg_time = ft::timing_function(runner_operation, timing_iterations, stream);

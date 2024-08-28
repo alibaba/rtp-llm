@@ -429,7 +429,7 @@ void MoeGemmRunner<T, WeightType, QuantOp>::runGemm<EpilogueTag>(T const* A, Wei
         static constexpr bool is_weight_only = !std::is_same<T, WeightType>::value;
 
         auto candidate_configs = getConfigs();
-        std::vector<tkc::CutlassGemmConfig> valid_configs;
+        std::vector<tc::CutlassGemmConfig> valid_configs;
         for (int i = 0; i < candidate_configs.size(); i++)
         {
             if (tensorrt_llm::kernels::cutlass_kernels::is_valid_split_k_factor(

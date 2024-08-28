@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
+#include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 #include "src/fastertransformer/cuda/trt_utils.h"
 #include "src/fastertransformer/utils/utils.h"
 #include <numeric>

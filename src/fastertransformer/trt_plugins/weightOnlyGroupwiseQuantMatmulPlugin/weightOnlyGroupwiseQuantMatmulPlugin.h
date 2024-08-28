@@ -17,7 +17,7 @@
 #pragma once
 
 #include "src/fastertransformer/utils/quantization.h"
-#include "src/fastertransformer/trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
+#include "trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
 
 #include <cassert>
 #include <memory>

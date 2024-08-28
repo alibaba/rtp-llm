@@ -59,13 +59,6 @@ int loadWeightFromBin(T*                  ptr,
                       std::vector<size_t> shape,
                       std::string         filename,
                       FtCudaDataType      model_file_type = FtCudaDataType::FP32);
-
-template<typename T>
-int loadWeightFromBinAndQuantizeForWeightOnly(int8_t*             quantized_weight_ptr,
-                                              T*                  scale_ptr,
-                                              std::vector<size_t> shape,
-                                              std::string         filename,
-                                              FtCudaDataType      model_file_type = FtCudaDataType::FP32);
 #endif
 
 void invokeCudaD2DcpyHalf2Float(float* dst, half* src, const size_t size, cudaStream_t stream);

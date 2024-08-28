@@ -1,6 +1,8 @@
 load("//:def.bzl", "rpm_library", "copts", "cuda_copts")
-load("//bazel:arch_select.bzl", "torch_deps", "fa_deps")
+load("//bazel:arch_select.bzl", "torch_deps", "fa_deps", "trt_plugins")
 package(default_visibility=["//maga_transformer:__subpackages__"])
+
+trt_plugins()
 
 cc_library(
     name = "cublas",
@@ -70,7 +72,7 @@ cc_library(
         "//src/fastertransformer/core:types",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        "//src/fastertransformer/cutlass:cutlass_interface",
+        ":trt_plugins",
         # TODO(lidongjin) cutlass_interface dependece gpt_init_params_hdr is not good.
         "//:gpt_init_params_hdr",
     ],
@@ -163,7 +165,6 @@ cc_library(
     ],
     deps = [
         "//:gpt_init_params_hdr",
-        "//src/fastertransformer/cutlass:cutlass_interface",
         ":cuda_utils",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/core:allocator",
@@ -217,7 +218,6 @@ cc_library(
     ],
     hdrs = [
         "cuda_utils.h",
-        "cutlass_utils.h",
         "Dispatch.h",
         "trt_utils.h"
     ],

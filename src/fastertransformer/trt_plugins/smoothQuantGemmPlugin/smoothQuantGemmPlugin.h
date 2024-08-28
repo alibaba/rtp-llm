@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+using namespace tensorrt_llm::kernels::cutlass_kernels;
 namespace tensorrt_llm::plugins
 {
 using SqGemmRunnerPtr = std::shared_ptr<tensorrt_llm::kernels::cutlass_kernels::CutlassInt8GemmRunnerInterface>;
@@ -39,12 +40,15 @@ public:
 
     size_t getWorkspaceSize(const int m, const int n, const int k) noexcept;
     int enqueue(const void* A, const void* B, const float* alphaCol, const float* alphaRow, void* C, char* workspace,
-        void* bias, tkc::CutlassActivationType activation, const int m, const int n, const int k, cudaStream_t stream) noexcept;
+        void* bias, fastertransformer::ActivationType activation, const int m, const int n, const int k, cudaStream_t stream) noexcept;
 
     void init(tensorrt_llm::common::QuantMode quantMode,
               nvinfer1::DataType type);
 
-    bool addBiasActivationEpilogueSupported(tkc::CutlassActivationType activation) const;
+    bool addBiasActivationEpilogueSupported(fastertransformer::ActivationType activation) const;
+
+    CutlassActivationType ActivationToCutlassType(fastertransformer::ActivationType act_type) const;
+
 private:
 
     void configGemm();

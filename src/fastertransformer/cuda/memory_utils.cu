@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-#include "src/fastertransformer/cutlass/interface.h"
 #include "src/fastertransformer/cuda/cuda_type_utils.cuh"
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/cuda/memory_utils.h"
@@ -450,84 +449,6 @@ loadWeightFromBin(__nv_fp8_e4m3* ptr, std::vector<size_t> shape, std::string fil
 #endif
 template int
 loadWeightFromBin(int* ptr, std::vector<size_t> shape, std::string filename, FtCudaDataType model_file_type);
-
-template<typename T, typename T_IN>
-int loadWeightFromBinAndQuantizeForWeightOnlyFunc(int8_t*             ptr,
-                                                  T*                  scales_ptr,
-                                                  std::vector<size_t> shape,
-                                                  std::string         filename)
-{
-    FT_LOG_INFO(std::string("Loading and quantizing weight from file: ") + filename);
-    FT_CHECK_WITH_INFO(shape.size() == 2, "We can only use this function to dequantize a weight matrix.");
-    std::vector<T_IN> host_array = loadWeightFromBinHelper<T_IN>(shape, filename);
-
-    if (host_array.empty()) {
-        return 0;
-    }
-
-    const size_t        num_elts = shape[0] * shape[1];
-    std::vector<int8_t> host_quantized_weight_buf(num_elts);
-    std::vector<T>      host_scales_buf(shape[1]);
-
-    // Note: This function preprocesses the weights to a special format for weight only quant!
-    tensorrt_llm::kernels::cutlass_kernels::symmetric_quantize<T, T_IN>(host_quantized_weight_buf.data(),
-                                host_scales_buf.data(),
-                                host_array.data(),
-                                shape,
-                                tensorrt_llm::kernels::cutlass_kernels::QuantType::INT8_WEIGHT_ONLY);
-
-    cudaH2Dcpy(ptr, (int8_t*)host_quantized_weight_buf.data(), host_quantized_weight_buf.size());
-    cudaH2Dcpy(scales_ptr, (T*)host_scales_buf.data(), host_scales_buf.size());
-
-    return 0;
-}
-
-template<typename T>
-int loadWeightFromBinAndQuantizeForWeightOnly(int8_t*             quantized_weight_ptr,
-                                              T*                  scale_ptr,
-                                              std::vector<size_t> shape,
-                                              std::string         filename,
-                                              FtCudaDataType      model_file_type)
-{
-    switch (model_file_type) {
-        case FtCudaDataType::FP32:
-            loadWeightFromBinAndQuantizeForWeightOnlyFunc<T, float>(quantized_weight_ptr, scale_ptr, shape, filename);
-            break;
-        case FtCudaDataType::FP16:
-            loadWeightFromBinAndQuantizeForWeightOnlyFunc<T, half>(quantized_weight_ptr, scale_ptr, shape, filename);
-            break;
-#ifdef ENABLE_BF16
-        case FtCudaDataType::BF16:
-            loadWeightFromBinAndQuantizeForWeightOnlyFunc<T, __nv_bfloat16>(
-                quantized_weight_ptr, scale_ptr, shape, filename);
-            break;
-#endif
-        default:
-            FT_LOG_ERROR("Does not support FtCudaDataType=%d", model_file_type);
-            FT_CHECK(false);
-    }
-    return 0;
-}
-
-template<>
-int loadWeightFromBinAndQuantizeForWeightOnly(int8_t*             quantized_weight_ptr,
-                                              float*              scale_ptr,
-                                              std::vector<size_t> shape,
-                                              std::string         filename,
-                                              FtCudaDataType      model_file_type)
-{
-    FT_FAIL("Weight only quant not supported with FP32 compute.");
-    return 0;
-}
-
-template int
-loadWeightFromBinAndQuantizeForWeightOnly(int8_t*, float*, std::vector<size_t>, std::string, FtCudaDataType);
-template int
-loadWeightFromBinAndQuantizeForWeightOnly(int8_t*, half*, std::vector<size_t>, std::string, FtCudaDataType);
-#ifdef ENABLE_BF16
-template int
-loadWeightFromBinAndQuantizeForWeightOnly(int8_t*, __nv_bfloat16*, std::vector<size_t>, std::string, FtCudaDataType);
-#endif
 
 template<typename T_IN, typename T_OUT>
 __global__ void cudaD2DcpyConvert(T_OUT* dst, const T_IN* src, const size_t size)

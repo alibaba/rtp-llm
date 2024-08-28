@@ -7,11 +7,10 @@
 #include "src/fastertransformer/cuda/cuggemm/cuggemm.h"
 #include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
 #include "src/fastertransformer/cuda/nccl/nccl_utils.h"
-#include "src/fastertransformer/trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
-#include "src/fastertransformer/trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
-#include "src/fastertransformer/trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
-#include "src/fastertransformer/trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
-#include "src/fastertransformer/cutlass/interface.h"
+#include "trt_plugins/weightOnlyQuantMatmulPlugin/weightOnlyQuantMatmulPlugin.h"
+#include "trt_plugins/smoothQuantGemmPlugin/smoothQuantGemmPlugin.h"
+#include "trt_plugins/weightOnlyGroupwiseQuantMatmulPlugin/weightOnlyGroupwiseQuantMatmulPlugin.h"
+#include "trt_plugins/mixtureOfExperts/mixtureOfExpertsPlugin.h"
 
 namespace trt_plugins = tensorrt_llm::plugins;
 

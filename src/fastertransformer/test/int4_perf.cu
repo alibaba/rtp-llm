@@ -13,8 +13,8 @@
 #include "src/fastertransformer/cuda/cublas/cublas.h"
 
 using namespace fastertransformer;
-namespace tkc = tensorrt_llm::cutlass_extensions;
-namespace tkk = tensorrt_llm::kernels::cutlass_kernels;
+namespace tc = tensorrt_llm::cutlass_extensions;
+namespace tkc = tensorrt_llm::kernels::cutlass_kernels;
 
 struct Dim2 {
     int k;
@@ -58,14 +58,14 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
     deviceMalloc(&out_ptr2, m * n, false);
     check_cuda_error(cudaMemset(out_ptr2, 0xdc, m * n * sizeof(half)));
 
-    tkk::CutlassFpAIntBGemmRunner<half, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>
+    tkc::CutlassFpAIntBGemmRunner<half, cutlass::uint4b_t, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS>
         int4_runner;
 
     char*     ws_ptr2  = nullptr;
     const int ws_size2 = int4_runner.getWorkspaceSize(m, n, k);
     deviceMalloc(&ws_ptr2, ws_size2);
 
-    tkc::CutlassGemmConfig int4_config = int4_runner.getChosenConfig(
+    tc::CutlassGemmConfig int4_config = int4_runner.getChosenConfig(
         in_ptr2, w_ptr2, s_ptr2, z_ptr2, nullptr, out_ptr2, m, n, k, group_size, ws_ptr2, ws_size2, stream);
 
     int  mArch              = fastertransformer::getSMVersion();
@@ -97,7 +97,7 @@ void gemm_test(int m, Dim2 dim2, cudaStream_t stream) {
 
     float int4_time = timing_function(int4_runner_operation, timing_iterations, stream);
     // printf("m=%d n=%d k=%d fpa_int8_time=%.6f\n", m, n, k, int4_time);
-    // tkk::print_config(int4_config);
+    // tkc::print_config(int4_config);
 
     auto int4_gemv = [&](cudaStream_t stream) {
         tensorrt_llm::kernels::weight_only::kernel_launcher(mArch, params, stream);

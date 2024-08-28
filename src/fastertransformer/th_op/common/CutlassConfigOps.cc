@@ -1,5 +1,5 @@
 #include "src/fastertransformer/cuda/cuda_utils.h"
-#include "src/fastertransformer/cutlass/interface.h"
+#include "trt_plugins/common/trtPluginsInterface.h"
 #include "src/fastertransformer/th_op/th_utils.h"
 
 namespace torch_ext {

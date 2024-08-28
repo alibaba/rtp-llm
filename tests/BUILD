@@ -1,15 +1,13 @@
 load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
-load("//bazel:arch_select.bzl", "cutlass_kernels_interface")
 
-cutlass_kernels_interface()
 
 cc_library(
     name = "test_lib",
     deps = torch_deps() + [
         "//src/fastertransformer/cuda:allocator_cuda",
         "//src/fastertransformer/devices:devices_base_impl",
-        "cutlass_kernels_interface",
+        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
         "//src/fastertransformer/kernels:kernels",
         "//src/fastertransformer/utils:utils",
         "//src/fastertransformer/cuda:cuda",
@@ -38,7 +36,7 @@ cc_library(
     deps = torch_deps() + [
         "//src/fastertransformer/kernels:kernels",
 	"//:th_utils",
-        "cutlass_kernels_interface",
+        "//src/fastertransformer/cutlass:cutlass_kernels_impl",
     ],
     copts = cuda_copts(),
     alwayslink = True,

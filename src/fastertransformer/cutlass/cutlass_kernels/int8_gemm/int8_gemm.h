@@ -22,7 +22,7 @@
 #include <cuda_runtime_api.h>
 
 namespace tk = tensorrt_llm::common;
-namespace tkc = tensorrt_llm::cutlass_extensions;
+namespace tc = tensorrt_llm::cutlass_extensions;
 
 namespace tensorrt_llm
 {
@@ -31,6 +31,15 @@ namespace kernels
 namespace cutlass_kernels
 {
 
+enum class CutlassActivationType {
+    INVALID,
+    IDENTITY,
+    GELU_FAST,
+    GELU,
+    SIGMOID,
+    RELU,
+    SILU
+};
 /*
   This runner supports:
   int8_t inputs (A and B)
@@ -49,25 +58,25 @@ public:
     virtual ~CutlassInt8GemmRunnerInterface() {}
 
     virtual void gemm(const void* A, const void* B, tk::QuantMode quantOption, const float* alphaCol,
-        const float* alphaRow, void* C, void* bias, tkc::CutlassActivationType activation_type, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
+        const float* alphaRow, void* C, void* bias, CutlassActivationType activation_type, int m, int n, int k, tc::CutlassGemmConfig gemmConfig, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream)
         = 0;
 
-    static bool addBiasActivationEpilogueSupported(tkc::CutlassActivationType activation) {
+    static bool addBiasActivationEpilogueSupported(CutlassActivationType activation) {
         return activation == CutlassActivationType::IDENTITY || activation == CutlassActivationType::GELU_FAST;
     }
 
     // Returns desired workspace size in bytes.
     virtual size_t getWorkspaceSize(const int m, const int n, const int k) = 0;
 
-    virtual std::vector<tkc::CutlassGemmConfig> getConfigs() const = 0;
+    virtual std::vector<tc::CutlassGemmConfig> getConfigs() const = 0;
 
-    virtual tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, tk::QuantMode quantOption,
+    virtual tc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, tk::QuantMode quantOption,
         const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream)
         = 0;
 
-    virtual std::vector<tkc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, tk::QuantMode quantOption,
+    virtual std::vector<tc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, tk::QuantMode quantOption,
         const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream) = 0;
 
@@ -86,25 +95,25 @@ public:
     ~CutlassInt8GemmRunner();
 
     void gemm(const void* A, const void* B, tk::QuantMode quantOption, const float* alphaCol, const float* alphaRow,
-        void* C, void* bias, tkc::CutlassActivationType activation_type, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
+        void* C, void* bias, CutlassActivationType activation_type, int m, int n, int k, tc::CutlassGemmConfig gemmConfig, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream) override;
 
     // Returns desired workspace size in bytes.
     size_t getWorkspaceSize(const int m, const int n, const int k) override;
 
-    std::vector<tkc::CutlassGemmConfig> getConfigs() const override;
+    std::vector<tc::CutlassGemmConfig> getConfigs() const override;
 
-    tkc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, tk::QuantMode quantOption,
+    tc::CutlassGemmConfig getChosenConfig(const void* A, const void* B, tk::QuantMode quantOption,
         const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream);
 
-    std::vector<tkc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, tk::QuantMode quantOption,
+    std::vector<tc::CutlassGemmConfig> getValidConfigs(const void* A, const void* B, tk::QuantMode quantOption,
         const float* alphaCol, const float* alphaRow, void* C, int m, int n, int k, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream);
 
 private:
     void dispatchToArch(const int8_t* A, const int8_t* B, tk::QuantMode quantOption, const float* alphaCol,
-        const float* alphaRow, T* C, T* Bias, tkc::CutlassActivationType activation, int m, int n, int k, tkc::CutlassGemmConfig gemmConfig, char* workspacePtr,
+        const float* alphaRow, T* C, T* Bias, CutlassActivationType activation, int m, int n, int k, tc::CutlassGemmConfig gemmConfig, char* workspacePtr,
         const size_t workspaceBytes, cudaStream_t stream, int* occupancy = nullptr);
 
     int mSm;
