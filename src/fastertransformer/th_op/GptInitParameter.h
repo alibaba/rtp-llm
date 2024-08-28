@@ -212,6 +212,7 @@ public:
 
     std::string nccl_ip_        = "";
     int64_t     nccl_port_      = 0;
+    int64_t     http_port_      = 0;
     int64_t     model_rpc_port_ = 0;
     int64_t     tp_size_        = 1;
     int64_t     tp_rank_        = 0;

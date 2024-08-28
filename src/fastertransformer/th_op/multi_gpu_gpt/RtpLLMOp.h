@@ -19,6 +19,7 @@ public:
     void removeLora(const std::string& adapter_name);
     void stop();
     void _init(int64_t model_rpc_port,
+               int64_t http_port,
                const rtp_llm::EngineInitParams maga_init_params,
                py::object mm_process_engine,
                std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,

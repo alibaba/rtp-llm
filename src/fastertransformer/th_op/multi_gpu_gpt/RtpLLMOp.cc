@@ -31,7 +31,7 @@ void RtpLLMOp::init(py::object model, py::object mm_process_engine, py::object p
 
     rtp_llm::EngineInitParams params = initModel(model);
     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model);
-    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, params.gpt_init_parameter.model_rpc_port_,
+    grpc_server_thread_ = std::thread(&RtpLLMOp::_init, this, params.gpt_init_parameter.model_rpc_port_, params.gpt_init_parameter.http_port_,
         std::move(params), std::move(mm_process_engine), std::move(propose_params), std::move(token_processor));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
@@ -102,6 +102,7 @@ std::tuple<int64_t, int64_t> RtpLLMOp::getKVCacheInfo() {
 }
 
 void RtpLLMOp::_init(const int64_t model_rpc_port,
+                     const int64_t http_port,
                      const rtp_llm::EngineInitParams params,
                      py::object mm_process_engine,
                      std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params, 
@@ -125,10 +126,13 @@ void RtpLLMOp::_init(const int64_t model_rpc_port,
     FT_LOG_INFO("Server listening on %s", server_address.c_str());
     is_server_ready_ = true;
     {
-        http_server_.reset(new rtp_llm::HttpApiServer(model_rpc_server_->getEngine(), params.gpt_init_parameter, token_processor));
+        http_server_.reset(new rtp_llm::HttpApiServer(model_rpc_server_->getEngine(),
+                                                      params.gpt_init_parameter,
+                                                      token_processor));
         http_server_->registerResponses();
-        if (http_server_->start("tcp:0.0.0.0:9999")) {
-            FT_LOG_INFO("HTTP Server listening on 0.0.0.0:9999");
+        std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
+        if (http_server_->start(http_server_address)) {
+            FT_LOG_INFO("HTTP Server listening on %s", http_server_address.c_str());
         } else {
             FT_LOG_ERROR("HTTP Server start fail.");
         }

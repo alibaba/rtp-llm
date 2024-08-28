@@ -111,7 +111,7 @@ class WorkerInfo(object):
             base_port = server_port
         else:
             base_port = WorkerInfo.self_server_port()
-        return base_port + local_rank * 3
+        return base_port + local_rank * 4
 
     @staticmethod
     def gang_hb_port_offset(local_rank: int, server_port: int = -1) -> int:
@@ -119,7 +119,7 @@ class WorkerInfo(object):
             base_port = server_port
         else:
             base_port = WorkerInfo.self_server_port()
-        return base_port + local_rank * 3 + 2
+        return base_port + local_rank * 4 + 3
 
     # used for ut
     def reload(self):
@@ -143,6 +143,7 @@ class MasterInfo:
     dynamic_decoder_nccl_port: int
     nccl_op_port: int
     sp_gpt_nccl_port: int
+    http_port: int
     model_rpc_port: int
 
 g_master_info = MasterInfo(
@@ -152,10 +153,12 @@ g_master_info = MasterInfo(
     dynamic_decoder_nccl_port=0,
     nccl_op_port=0,
     sp_gpt_nccl_port=0,
+    http_port=0,
     model_rpc_port=0)
 
 def update_master_info(ip: str, base_port: int):
     g_master_info.ip = ip
+    g_master_info.http_port = base_port + 2
     g_master_info.model_rpc_port = base_port + 1    
     g_master_info.th_nccl_port = base_port - 1
     g_master_info.gpt_nccl_port = base_port - 2

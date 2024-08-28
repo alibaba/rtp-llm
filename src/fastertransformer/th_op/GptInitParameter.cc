@@ -263,6 +263,7 @@ void registerGptInitParameter(py::module m) {
     DEF_PROPERTY(nccl_ip, nccl_ip_)                                     \
     DEF_PROPERTY(nccl_port, nccl_port_)                                 \
     DEF_PROPERTY(model_rpc_port, model_rpc_port_)                       \
+    DEF_PROPERTY(http_port, http_port_)                                 \
     DEF_PROPERTY(tp_size, tp_size_)                                     \
     DEF_PROPERTY(tp_rank, tp_rank_)                                     \
     DEF_PROPERTY(use_kvcache, use_kvcache_)                             \

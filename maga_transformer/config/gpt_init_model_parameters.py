@@ -157,6 +157,7 @@ class GptInitModelParameters:
         self.nccl_ip = g_master_info.ip
         self.nccl_port = g_master_info.gpt_nccl_port
         self.model_rpc_port = g_master_info.model_rpc_port if g_parallel_info.tp_rank == 0 else -1
+        self.http_port = g_master_info.http_port if g_parallel_info.tp_rank == 0 else -1
         self.tp_size = g_parallel_info.tp_size
         self.tp_rank = g_parallel_info.tp_rank
         self.add_special_tokens = True
