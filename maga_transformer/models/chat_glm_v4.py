@@ -19,4 +19,4 @@ class ChatGlmV4(ChatGlmV3):
         else:
             config.special_tokens.eos_token_id = config_json['eos_token_id']
     
-register_model('chatglm4', ChatGlmV4, [], ["THUDM/glm4-9b-chat"])
+register_model('chatglm4', ChatGlmV4, [], ["THUDM/glm4-9b-chat", "THUDM/glm-4-9b-chat"])
