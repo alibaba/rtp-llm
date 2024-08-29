@@ -19,7 +19,7 @@ from fastapi import Request as RawRequest
 from maga_transformer.utils.time_util import Timer, current_time_ms
 from maga_transformer.utils.util import AtomicCounter
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
-from maga_transformer.metrics import sys_reporter, kmonitor, AccMetrics, GaugeMetrics
+from maga_transformer.metrics import kmonitor, AccMetrics, GaugeMetrics
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.distribute.gang_server import GangServer
 from maga_transformer.utils.concurrency_controller import ConcurrencyController, ConcurrencyException
@@ -49,13 +49,11 @@ class InferenceServer(object):
         self._inference_worker = None
         self._openai_endpoint = None
         self._lora_manager = None
-        self._system_reporter = sys_reporter
         self._atomic_count = AtomicCounter()
         self.thread_lock_ = threading.Lock()
         self._init_controller()
 
     def start(self):
-        self._system_reporter.start()
         self._gang_server.start()
         if os.environ.get('DEBUG_START_FAKE_PROCESS', None) is not None:
             # for debug online
