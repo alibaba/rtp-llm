@@ -37,12 +37,12 @@ public:
         FT_CHECK_WITH_INFO(value >= 0, "value < 0 is not allowed.");
     }
 
-    __host__ __device__ [[nodiscard]] UnderlyingType get() const
+    __host__ __device__ UnderlyingType get() const
     {
         return value & (~kSecondaryPoolFlag);
     }
 
-    __host__ __device__ [[nodiscard]] bool isPrimary() const
+    __host__ __device__ bool isPrimary() const
     {
         return (value & kSecondaryPoolFlag) == 0;
     }

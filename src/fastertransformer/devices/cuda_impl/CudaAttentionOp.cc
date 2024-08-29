@@ -315,7 +315,6 @@ AttentionModuleOutput CudaDevice::contextAttention(const AttentionModuleParams& 
         kv_block_array = getKVBlockArray(params, *kv_cache_offset, *kv_cache_scale_pointers, batch_size, stream_);
 
         this->copy({*kv_cache_offset_host, *kv_cache_offset});
-        this->syncAndCheck();
 
         if (params.common.prefix_prompt_lengths) {
             prefix_prompt_param.d_prefix_prompt_lengths  = params.common.prefix_prompt_lengths->data<int>();

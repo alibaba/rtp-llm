@@ -126,18 +126,18 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
                                                 : mMaxAttentionWindow - mSinkTokens;
     }
 
-    [[nodiscard]] KVBlockArrayForContextFMHA copyKVBlockArrayForContextFMHA() const
+    KVBlockArrayForContextFMHA copyKVBlockArrayForContextFMHA() const
     {
         return KVBlockArrayForContextFMHA{
             mMaxSeqs, mMaxBlocksPerSeq, mTokensPerBlock, mBytesPerBlock / mTokensPerBlock, mPrimaryPoolPtr, data};
     }
 
-    __host__ __device__ [[nodiscard]] inline bool isSinkToken(int32_t tokenIdx) const
+    __host__ __device__ inline bool isSinkToken(int32_t tokenIdx) const
     {
         return tokenIdx < mSinkTokens;
     }
 
-    __host__ __device__ [[nodiscard]] inline int32_t getKVTokenIdx(int32_t tokenIdx) const
+    __host__ __device__ inline int32_t getKVTokenIdx(int32_t tokenIdx) const
     {
         if (!isSinkToken(tokenIdx))
         {
@@ -147,7 +147,7 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
         return tokenIdx;
     }
 
-    __host__ __device__ [[nodiscard]] inline DataType const* getRowPtr(KVIdxType kvIdx, int32_t seqIdx) const
+    __host__ __device__ inline DataType const* getRowPtr(KVIdxType kvIdx, int32_t seqIdx) const
     {
         // Returns pointer to array of offsets to K or V cache for one specific sequence seqIdx.
         // seqIdx is in range [0; B]
@@ -161,27 +161,27 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
             reinterpret_cast<char*>(getPoolPtr(offset)) + offset.get() * static_cast<uint64_t>(mBytesPerBlock));
     }
 
-    __host__ __device__ [[nodiscard]] inline void* getBlockPtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) const
+    __host__ __device__ inline void* getBlockPtr(int32_t seqIdx, int32_t tokenIdx, KVIdxType kvIdx) const
     {
         return getBlockPtr(getRowPtr(kvIdx, seqIdx), tokenIdx);
     }
 
-    __host__ __device__ [[nodiscard]] inline void* getKBlockPtr(int32_t seqIdx, int32_t tokenIdx) const
+    __host__ __device__ inline void* getKBlockPtr(int32_t seqIdx, int32_t tokenIdx) const
     {
         return getBlockPtr(seqIdx, tokenIdx, KVIdxType::K_IDX);
     }
 
-    __host__ __device__ [[nodiscard]] inline void* getVBlockPtr(int32_t seqIdx, int32_t tokenIdx) const
+    __host__ __device__ inline void* getVBlockPtr(int32_t seqIdx, int32_t tokenIdx) const
     {
         return getBlockPtr(seqIdx, tokenIdx, KVIdxType::V_IDX);
     }
 
-    __host__ __device__ [[nodiscard]] inline int32_t getLocalIdx(int32_t globalIdx) const
+    __host__ __device__ inline int32_t getLocalIdx(int32_t globalIdx) const
     {
         return globalIdx & ((1 << mTokensPerBlockLog2) - 1);
     }
 
-    __host__ __device__ [[nodiscard]] inline int32_t getKVLocalIdx(
+    __host__ __device__ inline int32_t getKVLocalIdx(
         int32_t globalTokenIdx, int32_t headIdx, int32_t dimsPerHead, int32_t channelIdx) const
     {
         // For K or V, the hidden dimension per head is *not* decomposed. The layout of each block of K or V is:
@@ -191,7 +191,7 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
         return headIdx * mTokensPerBlock * dimsPerHead + getLocalIdx(globalTokenIdx) * dimsPerHead + channelIdx;
     }
     
-    __host__ __device__ [[nodiscard]] inline DataType const* getScaleRowPtr(KVIdxType kvIdx, int32_t seqIdx) {
+    __host__ __device__ inline DataType const* getScaleRowPtr(KVIdxType kvIdx, int32_t seqIdx) {
         // Returns pointer to array of pointers to K or V cache for one specific sequence seqIdx.
         // seqIdx is in range [0; B]
         return scale + seqIdx * mMaxBlocksPerSeq * 2 + static_cast<int32_t>(kvIdx) * mMaxBlocksPerSeq;
@@ -224,7 +224,7 @@ struct KVBlockArray : public KVBlockArrayForContextFMHA
         return headIdx * mTokensPerBlock + getLocalIdx(globalTokenIdx);
     }
 private:
-    __host__ __device__ [[nodiscard]] void* getPoolPtr(DataType offset) const
+    __host__ __device__ void* getPoolPtr(DataType offset) const
     {
         return offset.isPrimary() ? mPrimaryPoolPtr : mSecondaryPoolPtr;
     }
