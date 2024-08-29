@@ -106,16 +106,6 @@ class InferenceApp(object):
         async def startup():
             RunVar("_default_thread_limiter").set(CapacityLimiter(self.inference_server._controller.max_concurrency * 2))
 
-        @app.middleware("http")
-        async def count_requests(request: RawRequest, call_next):
-            global active_requests
-            active_requests.increment()
-            try:
-                response = await call_next(request)
-                return response
-            finally:
-                active_requests.decrement()
-
         @app.get("/health")
         @app.post("/health")
         @app.get("/GraphService/cm2_status")
@@ -149,21 +139,28 @@ class InferenceApp(object):
         @app.post("/inference_internal")
         @check_is_worker()
         async def inference_internal(req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
-            return await self.inference_server.inference(req, raw_request)
+            global active_requests
+            active_requests.increment()
+            try:
+                return await self.inference_server.inference(req, raw_request)
+            finally:
+                active_requests.decrement()
 
         # entry for worker RANK == 0
         @app.post("/")
         @check_is_master()
         async def inference(req: Union[str,Dict[Any, Any]], raw_request: RawRequest):
             # compat for huggingface-pipeline request endpoint
-            if self.inference_server.is_embedding:
-                start_time = time.time()
-                res = await self.inference_server.embedding(req, raw_request)
-                end_time = time.time()
-                # print("total: ", end_time - start_time)
-                return res
-            else:
-                return await self.inference_server.inference(req, raw_request)
+            global active_requests
+            active_requests.increment()
+            try:
+                if self.inference_server.is_embedding:
+                    res = await self.inference_server.embedding(req, raw_request)
+                    return res
+                else:
+                    return await self.inference_server.inference(req, raw_request)
+            finally:
+                active_requests.decrement()
 
 
         @app.post("/add_lora_internal")
@@ -192,14 +189,24 @@ class InferenceApp(object):
         @app.post("/v1/chat/completions")
         @check_is_master()
         async def chat_completion(request: ChatCompletionRequest, raw_request: RawRequest):
-            return await self.inference_server.chat_completion(request, raw_request)
+            global active_requests
+            active_requests.increment()
+            try:
+                return await self.inference_server.chat_completion(request, raw_request)
+            finally:
+                active_requests.decrement()
 
         # entry for worker RANK == 0
         @app.post("/chat/render")
         @app.post("/v1/chat/render")
         @check_is_master()
         async def chat_render(request: ChatCompletionRequest, raw_request: RawRequest):
-            return await self.inference_server.chat_render(request, raw_request)
+            global active_requests
+            active_requests.increment()
+            try:
+                return await self.inference_server.chat_render(request, raw_request)
+            finally:
+                active_requests.decrement()
 
         # entry for worker RANK == 0
         @app.post("/tokenizer/encode")
