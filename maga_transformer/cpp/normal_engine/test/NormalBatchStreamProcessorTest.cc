@@ -6,6 +6,7 @@
 
 #define private public
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 #include "src/fastertransformer/core/BufferHelper.h"
@@ -28,7 +29,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
     query1->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
     query1->generate_config               = make_shared<GenerateConfig>();
-    GenerateStreamPtr stream1             = make_shared<GenerateStream>(query1, param, resource_context, nullptr);
+    GenerateStreamPtr stream1             = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
     query1->input_ids                     = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
     BatchKVCacheBlockAddr addr1;
     addr1.batch_offset = {{1, 2, 3, 4}};
@@ -38,7 +39,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
     query2->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
     query2->generate_config               = make_shared<GenerateConfig>();
-    GenerateStreamPtr stream2             = make_shared<GenerateStream>(query2, param, resource_context, nullptr);
+    GenerateStreamPtr stream2             = make_shared<NormalGenerateStream>(query2, param, resource_context, nullptr);
     query2->input_ids                     = createBuffer<int32_t>({2}, {1, 2}, AllocationType::HOST);
     BatchKVCacheBlockAddr addr2;
     addr2.batch_offset = {{5, 6, 7, 8}};
@@ -48,7 +49,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     std::shared_ptr<GenerateInput> query3 = make_shared<GenerateInput>();
     query3->input_ids                     = createBuffer<int32_t>({3}, {1, 2, 3}, AllocationType::HOST);
     query3->generate_config               = make_shared<GenerateConfig>();
-    GenerateStreamPtr     stream3         = make_shared<GenerateStream>(query3, param, resource_context, nullptr);
+    GenerateStreamPtr     stream3         = make_shared<NormalGenerateStream>(query3, param, resource_context, nullptr);
     BatchKVCacheBlockAddr addr3;
     addr3.batch_offset = {{9, 10}};
     stream3->setKVCache(addr3);
@@ -56,7 +57,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     std::shared_ptr<GenerateInput> query4 = make_shared<GenerateInput>();
     query4->input_ids                     = createBuffer<int32_t>({4}, {1, 2, 3, 4}, AllocationType::HOST);
     query4->generate_config               = make_shared<GenerateConfig>();
-    GenerateStreamPtr     stream4         = make_shared<GenerateStream>(query4, param, resource_context, nullptr);
+    GenerateStreamPtr     stream4         = make_shared<NormalGenerateStream>(query4, param, resource_context, nullptr);
     BatchKVCacheBlockAddr addr4;
     addr4.batch_offset = {{11, 12, 13, 14}};
     stream4->setKVCache(addr4);
@@ -117,7 +118,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     query1->input_ids                       = createBuffer<int32_t>({1}, {1}, AllocationType::HOST);
     query1->generate_config                 = make_shared<GenerateConfig>();
     query1->generate_config->calculate_loss = 1;
-    GenerateStreamPtr     stream1           = make_shared<GenerateStream>(query1, param, resource_context, nullptr);
+    GenerateStreamPtr     stream1           = make_shared<NormalGenerateStream>(query1, param, resource_context, nullptr);
     BatchKVCacheBlockAddr addr1;
     addr1.batch_offset = {{1}};
     stream1->setKVCache(addr1);
@@ -126,7 +127,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     query3->input_ids                       = createBuffer<int32_t>({2}, {0, 1}, AllocationType::HOST);
     query3->generate_config                 = make_shared<GenerateConfig>();
     query3->generate_config->calculate_loss = 2;
-    GenerateStreamPtr     stream3           = make_shared<GenerateStream>(query3, param, resource_context, nullptr);
+    GenerateStreamPtr     stream3           = make_shared<NormalGenerateStream>(query3, param, resource_context, nullptr);
     BatchKVCacheBlockAddr addr3;
     addr3.batch_offset = {{9}};
     stream3->setKVCache(addr3);
@@ -135,7 +136,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     query4->input_ids                       = createBuffer<int32_t>({3}, {0, 1, 0}, AllocationType::HOST);
     query4->generate_config                 = make_shared<GenerateConfig>();
     query4->generate_config->calculate_loss = 1;
-    GenerateStreamPtr     stream4           = make_shared<GenerateStream>(query4, param, resource_context, nullptr);
+    GenerateStreamPtr     stream4           = make_shared<NormalGenerateStream>(query4, param, resource_context, nullptr);
     BatchKVCacheBlockAddr addr4;
     addr4.batch_offset = {{11, 12}};
     stream4->setKVCache(addr4);
@@ -155,14 +156,14 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     EXPECT_TRUE(merge_input_status.value().need_all_logits);
 
     SamplerInputs                 sampler_inputs;
-    std::unique_ptr<MergedOutput> merge_outputs = make_unique<MergedOutput>();
-    merge_outputs->model_output.hidden_states   = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
-    merge_outputs->model_output.logits          = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
-    merge_outputs->model_output.all_logits      = createBuffer<float>({6, 2}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12});
-    merge_outputs->sampler_output.token_ids =
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.hidden_states   = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
+    merge_outputs.model_output.logits          = createBuffer<float>({3, 2}, {1, 2, 3, 4, 5, 6});
+    merge_outputs.model_output.all_logits      = createBuffer<float>({6, 2}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12});
+    merge_outputs.sampler_output.token_ids =
         createBuffer<int>({3, 4}, {0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1}, AllocationType::HOST);
-    merge_outputs->sampler_output.cum_log_probs = createBuffer<float>({3}, {1, 2, 3});
-    auto status                                 = processor.dispatch(stream_groups, sampler_inputs, merge_outputs);
+    merge_outputs.sampler_output.cum_log_probs = createBuffer<float>({3}, {1, 2, 3});
+    auto status                                 = processor.dispatch(stream_groups, merge_outputs);
     EXPECT_TRUE(status.ok());
     EXPECT_FALSE(stream1->getLoss());
     EXPECT_TRUE(stream3->getLoss());

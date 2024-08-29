@@ -8,6 +8,7 @@ test_copts = [
 test_deps = [
     "//src/fastertransformer/devices/testing:device_test_utils",
     "//src/fastertransformer/devices/cuda_impl:cuda_impl",
+    "//maga_transformer/cpp:normal_engine",
     "//maga_transformer/cpp:dataclass",
     "//:gpt_init_params",
     "@com_google_googletest//:gtest",

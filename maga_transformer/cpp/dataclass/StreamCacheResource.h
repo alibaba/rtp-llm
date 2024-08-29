@@ -31,8 +31,8 @@ public:
         releaseResource();
     }
     void init(int batch_size);
-    absl::StatusOr<int> initKVBlock(int token_capacity, size_t reserve_step);
-    absl::StatusOr<int> incrKVBlock(int token_capacity, size_t reserve_step);
+    absl::StatusOr<int> initKVBlock(int token_capacity, size_t reserve_step = 0);
+    absl::StatusOr<int> incrKVBlock(int token_capacity, size_t reserve_step = 0);
     void incBlockRef();
     int  tryReleaseKVBlock(size_t nums);
     absl::Status releaseSequenceKVCache(size_t total_seq_len, size_t release_seq_len);
@@ -67,7 +67,7 @@ public:
 
         debug_string << "}";
         return debug_string.str();
-    }    
+    }
 
 private:
     BatchKVCacheBlockAddr           batch_block_addr_;

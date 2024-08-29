@@ -638,7 +638,7 @@ StreamCacheResource& GenerateStream::streamCacheResource() {
 void GenerateStream::CopyOnWrite(const GenerateStream& other_stream) {
     complete_token_ids_ = device_->clone({*other_stream.complete_token_ids_, ft::AllocationType::HOST});
     cum_log_probs_ = device_->clone({*other_stream.cum_log_probs_, ft::AllocationType::HOST});
-    if (hasLoss()) {
+    if (other_stream.calculateLoss()) {
         loss_ = device_->clone({*other_stream.loss_, ft::AllocationType::HOST});
     }
     stream_cache_resource_.incBlockRef();

@@ -3,6 +3,7 @@
 
 #define private public
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
 #include "src/fastertransformer/devices/testing/TestBase.h"
 
 #include <chrono>
@@ -29,7 +30,7 @@ TEST_F(GenerateStreamTest, testConstruct) {
     ft::GptInitParameter params;
     params.max_seq_len_ = 2048;
 
-    GenerateStream stream(generate_input, params, resource_context, nullptr);
+    NormalGenerateStream stream(generate_input, params, resource_context, nullptr);
 }
 
 }  // namespace rtp_llm

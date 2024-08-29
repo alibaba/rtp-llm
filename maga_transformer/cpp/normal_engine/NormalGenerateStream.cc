@@ -1,4 +1,5 @@
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
+#include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
 
 namespace ft = fastertransformer;
 

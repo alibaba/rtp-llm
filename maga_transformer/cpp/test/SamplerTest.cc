@@ -51,8 +51,6 @@ TEST_F(SamplerTest, testGeneralSampling) {
     BufferPtr repetition_penalty = createBuffer<float>({batch_size}, {1.0f, 1.0f, 1.0f, 10000.0f, 1.0f}, AllocationType::HOST);
     BufferPtr min_length = createBuffer<int32_t>({batch_size}, {0, 0, 0, 0, 10}, AllocationType::HOST);
 
-    auto kv_blocks = createBuffer<int64_t>({batch_size, 1}, {0, 0, 0, 0, 0}, AllocationType::HOST);
-
     auto top_k = createBuffer<uint32_t>({batch_size}, {1, 4, 0, 0, 8}, AllocationType::HOST);
     auto top_p = createBuffer<float>({batch_size}, {0.0, 0.0, 0.001, 0.99, 0.9}, AllocationType::HOST);
     auto temperature = createBuffer<float>({batch_size}, {0.1, 0.001, 0.2, 1.0, 100.0f}, AllocationType::HOST);
@@ -71,7 +69,6 @@ TEST_F(SamplerTest, testGeneralSampling) {
         rand_seed,
         repetition_penalty,
         min_length,
-        move(kv_blocks),
         device_->clone({*cum_log_probs}),
     };
 
