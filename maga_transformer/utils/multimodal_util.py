@@ -3,6 +3,7 @@ import torch
 import json
 import requests
 import threading
+from enum import IntEnum
 from io import BytesIO
 from typing import Any, Callable, Optional
 from maga_transformer.utils.lru_dict import LruDict
@@ -15,6 +16,12 @@ else:
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
     }
+
+class MMUrlType(IntEnum):
+    DEFAULT = 0
+    IMAGE = 1
+    VIDEO = 2
+    AUDIO = 3
     
 def get_bytes_io_from_url(url: str):    
     if url.startswith("http") or url.startswith("https"):

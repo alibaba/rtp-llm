@@ -36,6 +36,7 @@ class GenerateInput(PyBaseModel):
     request_id: int
     token_ids: torch.Tensor
     urls: List[str] = []
+    mm_types: List[int] = []
     generate_config: GenerateConfig
     tokenizer: Any = None # TODO: remove this
     prefix_length: int = 0

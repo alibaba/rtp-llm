@@ -7,8 +7,8 @@ from torchvision import transforms
 
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.utils.multimodal_util import (data_cache_,
-                                                    get_bytes_io_from_url)
-
+                                                    get_bytes_io_from_url,
+                                                    MMUrlType)
 
 class ImageTransform:
 
@@ -31,23 +31,23 @@ class ImageTransform:
 
 class MultiModalEmbeddingInterface:
     @torch.inference_mode()
-    def mm_embedding(self, url: str, device, dtype, **kwargs):
+    def mm_embedding(self, url: str, mm_type: MMUrlType, device, dtype, **kwargs):
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
         cached_res = data_cache_.check_cache(url)
         if cached_res is None:
             try:
                 bytes_io = get_bytes_io_from_url(url)
-                mm_input = self._mm_preprocess(bytes_io)
+                mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type)
             except Exception as e:
                 raise Exception(f"cannot download image from {url}, exception {e}")
-            features = self.mm_process(mm_input, device, **kwargs).to(dtype).contiguous()
+            features = self.mm_process(mm_input, device, mm_type=mm_type, **kwargs).to(dtype).contiguous()
             data_cache_.insert_cache(url, features)
             return features
         else:
             return cached_res
 
-    def _mm_preprocess(self, data):
+    def _mm_preprocess(self, data, **kwargs):
         raise NotImplementedError
 
     @torch.inference_mode()
@@ -56,7 +56,7 @@ class MultiModalEmbeddingInterface:
 
 
 class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
-    def _mm_preprocess(self, data):
+    def _mm_preprocess(self, data, **kwargs):
         return Image.open(data).convert("RGB")
 
     @torch.inference_mode()
@@ -69,7 +69,7 @@ class ImageEmbeddingInterface(MultiModalEmbeddingInterface):
 
 
 class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
-    def _mm_preprocess(self, data):
+    def _mm_preprocess(self, data, **kwargs):
         # temporary
         import torchaudio
         return torchaudio.load(data)
@@ -83,7 +83,7 @@ class AudioEmbeddingInterface(MultiModalEmbeddingInterface):
         raise NotImplementedError()
 
 class VideoEmbeddingInterface(MultiModalEmbeddingInterface):
-    def _mm_preprocess(self, data):
+    def _mm_preprocess(self, data, **kwargs):
         return VideoReader(data, ctx=cpu(0))
 
     @torch.inference_mode()

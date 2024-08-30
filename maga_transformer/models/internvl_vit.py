@@ -1,9 +1,12 @@
 from typing import List, Optional, Tuple, Union, Dict, Any
 
-from PIL.Image import Image
+from PIL import Image
+from decord import VideoReader, cpu
 
 import os
+import copy
 import warnings
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -20,7 +23,8 @@ from transformers.configuration_utils import PretrainedConfig
 from torchvision.transforms.functional import InterpolationMode
 import torchvision.transforms as T
 
-from maga_transformer.models.multimodal.multimodal_common import ImageEmbeddingInterface
+from maga_transformer.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
+from maga_transformer.utils.multimodal_util import MMUrlType
 
 try:
     from flash_attn.bert_padding import pad_input, unpad_input
@@ -115,7 +119,33 @@ def pixel_shuffle(ps_version, x, scale_factor=0.5):
         x = x.permute(0, 2, 1, 3).contiguous()
     return x
 
-class InternVLImageEmbedding(ImageEmbeddingInterface):
+def get_index(bound, fps, max_frame, first_idx=0, num_segments=32):
+    if bound:
+        start, end = bound[0], bound[1]
+    else:
+        start, end = -100000, 100000
+    start_idx = max(first_idx, round(start * fps))
+    end_idx = min(round(end * fps), max_frame)
+    seg_size = float(end_idx - start_idx) / num_segments
+    frame_indices = np.array([
+        int(start_idx + (seg_size / 2) + np.round(seg_size * idx))
+        for idx in range(num_segments)
+    ])
+    return frame_indices
+
+def load_video(video_path, bound=None, input_size=448, max_num=1, num_segments=32):
+    vr = VideoReader(video_path, ctx=cpu(0), num_threads=1)
+    max_frame = len(vr) - 1
+    fps = float(vr.get_avg_fps())
+
+    img_list = []
+    frame_indices = get_index(bound, fps, max_frame, first_idx=0, num_segments=num_segments)
+    for frame_index in frame_indices:
+        img = Image.fromarray(vr[frame_index].asnumpy()).convert('RGB')
+        img_list.append(img)
+    return img_list
+
+class InternVLImageEmbedding(MultiModalEmbeddingInterface):
     def __init__(self, config: Dict[str, Any]):
         self.select_layer = config["select_layer"]
         self.vision_model = InternVisionModel(InternVisionConfig(**config)).cuda().half()
@@ -131,35 +161,75 @@ class InternVLImageEmbedding(ImageEmbeddingInterface):
             nn.Linear(llm_hidden_size, llm_hidden_size)
         ).cuda().half()
         self.config = config
-    
+
+    @torch.inference_mode()
+    def mm_process(self, mm_input, device, **kwargs):
+        mm_type = kwargs.get("mm_type")
+        if mm_type == MMUrlType.DEFAULT:
+            if isinstance(mm_input, list):
+                return self.image_embedding(mm_input, device)
+            else:
+                return self.image_embedding([mm_input], device)[0]
+        elif mm_type == MMUrlType.IMAGE:
+            if isinstance(mm_input, list):
+                raise Exception("expect single image input, but get a list")
+            return self.image_embedding([mm_input], device)[0]
+        elif mm_type == MMUrlType.VIDEO:
+            if not isinstance(mm_input, list):
+                raise Exception("expect video input, but get a single image")
+            return self.image_embedding(mm_input, device)
+        else:
+            raise Exception("unknown mm url type")
+
+    def _mm_preprocess(self, data, **kwargs):
+        mm_type = kwargs.get("mm_type")
+        if mm_type == MMUrlType.DEFAULT:
+            origin_data = copy.copy(data)
+            try:
+                return Image.open(data).convert("RGB")
+            except Exception as e:
+                try:
+                    return load_video(origin_data, num_segments=8, max_num=1)
+                except Exception as e:
+                    raise Exception(str(e))
+        elif mm_type == MMUrlType.IMAGE:
+            return Image.open(data).convert("RGB")
+        elif mm_type == MMUrlType.VIDEO:
+            return load_video(origin_data, num_segments=8, max_num=1)
+        else:
+            raise Exception("unknown mm url type")
+
     @torch.no_grad()
-    def image_embedding(self, images: List[Image], device):
+    def image_embedding(self, images: List[Image.Image], device):
         # hugging face default value
         max_num = 12
         input_size = self.config["image_size"]
         transform = build_transform(input_size=self.config["image_size"])
-        images = dynamic_preprocess(images[0], image_size=input_size, use_thumbnail=True, max_num=max_num)
-        pixel_values = [transform(image) for image in images]
-        pixel_values = torch.stack(pixel_values).to(device=device).half()
+        res = []
+        for image in images:
+            now_images = dynamic_preprocess(image, image_size=input_size, use_thumbnail=True, max_num=max_num)
+            pixel_values = [transform(now_image) for now_image in now_images]
+            pixel_values = torch.stack(pixel_values).to(device=device).half()
 
-        if self.select_layer == -1:
-            vit_embeds = self.vision_model(
-                pixel_values=pixel_values,
-                output_hidden_states=False,
-                return_dict=True).last_hidden_state
-        else:
-            vit_embeds = self.vision_model(
-                pixel_values=pixel_values,
-                output_hidden_states=True,
-                return_dict=True).hidden_states[self.select_layer]
-        vit_embeds = vit_embeds[:, 1:, :]
+            if self.select_layer == -1:
+                vit_embeds = self.vision_model(
+                    pixel_values=pixel_values,
+                    output_hidden_states=False,
+                    return_dict=True).last_hidden_state
+            else:
+                vit_embeds = self.vision_model(
+                    pixel_values=pixel_values,
+                    output_hidden_states=True,
+                    return_dict=True).hidden_states[self.select_layer]
+            vit_embeds = vit_embeds[:, 1:, :]
 
-        h = w = int(vit_embeds.shape[1] ** 0.5)
-        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
-        vit_embeds = pixel_shuffle(self.ps_version, vit_embeds, scale_factor=self.downsample_ratio)
-        vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
-        vit_embeds = self.mlp1(vit_embeds)
-        return vit_embeds
+            h = w = int(vit_embeds.shape[1] ** 0.5)
+            vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
+            vit_embeds = pixel_shuffle(self.ps_version, vit_embeds, scale_factor=self.downsample_ratio)
+            vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1, vit_embeds.shape[-1])
+            vit_embeds = self.mlp1(vit_embeds)
+            res.append(vit_embeds.reshape(-1, vit_embeds.shape[-1]))
+        return torch.stack(res)
 
 class InternVisionConfig(PretrainedConfig):
     r"""

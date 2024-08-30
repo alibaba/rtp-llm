@@ -1,22 +1,28 @@
 import os
 import torch
 import asyncio
-from typing import List
+from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor, Future
 
 from maga_transformer.utils.util import to_torch_dtype
+from maga_transformer.utils.multimodal_util import MMUrlType
 
 class MMProcessEngine:
     def __init__(self, model):
-        mm_concurrency = int(os.environ.get('MM_CONCURRENCY', '0'))
         self.model = model
-        if mm_concurrency != 0:
-            self.executor = ThreadPoolExecutor(max_workers = mm_concurrency)
-        else:
-            self.executor = ThreadPoolExecutor()
 
-    def submit(self, urls: List[str]):
-        if os.environ.get('EXTRA_INPUT_IN_MM_EMBEDDING', '') == 'INDEX':
-            return [self.model.mm_part.mm_embedding(urls[index], self.model.device, to_torch_dtype(self.model.config.data_type), index=index) for index in range(len(urls))]
-        else:
-            return [self.model.mm_part.mm_embedding(url, self.model.device, to_torch_dtype(self.model.config.data_type)) for url in urls]
+    def submit(self, urls: List[str], types: Optional[List[MMUrlType]] = None):
+        if types is None:
+            types = [MMUrlType.DEFAULT] * len(urls)
+        res = []
+        for index in range(len(urls)):
+            if os.environ.get('EXTRA_INPUT_IN_MM_EMBEDDING', '') == 'INDEX':
+                embedding = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type), index=index)
+            else:
+                embedding = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type))
+            if len(embedding.shape) > 2:
+                res.extend(list(embedding))
+            else:
+                res.append(embedding)
+        return res
+                

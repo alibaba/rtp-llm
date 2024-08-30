@@ -198,8 +198,10 @@ class OpenaiEndopoint():
 
         if self.model.is_multimodal():
             urls = rendered_input.input_urls
+            mm_types = rendered_input.input_urls_type
         else:
             urls = []
+            mm_types = []
 
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config) \
             if chat_request.debug_info else None
@@ -207,6 +209,7 @@ class OpenaiEndopoint():
             request_id,
             input_ids,
             urls,
+            mm_types,
             generate_config,
             self.model,
             chat_request

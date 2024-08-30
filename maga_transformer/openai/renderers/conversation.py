@@ -38,6 +38,8 @@ class SeparatorStyle(IntEnum):
     CHATGLM3 = auto()
     DEEPSEEK_CHAT = auto()
     METAMATH = auto()
+    INTERNVL_ZH = auto()
+    MPT = auto()
 
 
 @dataclasses.dataclass
@@ -251,6 +253,25 @@ class Conversation:
                     ret += role + ": " + message + seps[i % 2]
                 else:
                     ret += role + ":"
+            return ret
+        elif self.sep_style == SeparatorStyle.INTERNVL_ZH:
+            seps = [self.sep, self.sep2]
+            ret = self.system_message + seps[0]
+            for i, (role, message) in enumerate(self.messages):
+                if message:
+                    ret += role + ': ' + message + seps[i % 2]
+                else:
+                    ret += role + ':'
+            return ret
+        elif self.sep_style == SeparatorStyle.MPT:
+            ret = system_prompt + self.sep
+            for role, message in self.messages:
+                if message:
+                    if type(message) is tuple:
+                        message, _, _ = message
+                    ret += role + message + self.sep
+                else:
+                    ret += role
             return ret
         else:
             raise ValueError(f"Invalid style: {self.sep_style}")

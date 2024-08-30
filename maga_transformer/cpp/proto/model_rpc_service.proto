@@ -56,6 +56,7 @@ message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
     repeated string multimodal_urls = 3;
+    repeated int32 multimodal_types = 4;
     GenerateConfigPB generate_config = 5;
 }
 

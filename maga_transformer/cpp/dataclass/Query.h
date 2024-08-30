@@ -48,6 +48,7 @@ public:
     // For multi-modality models
     std::optional<std::vector<torch::Tensor>> multimodal_features;
     std::optional<std::vector<std::string>>   multimodal_urls;
+    std::optional<std::vector<int32_t>>       multimodal_types;
     std::optional<ft::BufferPtr>              text_tokens_mask; // text part for 1 and multimodal part for 0
     std::optional<ft::BufferPtr>              mm_locs; // multimodal input locations
 

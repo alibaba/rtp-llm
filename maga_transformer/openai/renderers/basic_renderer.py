@@ -7,7 +7,7 @@ from packaging import version
 import json
 
 from transformers import PreTrainedTokenizerBase
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import jinja2
 from jinja2.exceptions import TemplateError
@@ -18,6 +18,7 @@ from maga_transformer.openai.renderers.custom_renderer import CustomChatRenderer
 from maga_transformer.models.base_model import GenerateOutput
 from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinition, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponseStreamChoice, DeltaMessage, FinisheReason, UsageInfo
+from maga_transformer.utils.multimodal_util import MMUrlType
 
 
 DEFAULT_CHAT_API_TEMPLATE = (
@@ -33,6 +34,7 @@ DEFAULT_CHAT_API_TEMPLATE = (
 class PromptWithMMInput:
     prompt: str
     urls: List[str]
+    mm_types: List[MMUrlType] = field(default_factory=list)
 
 # This class is designed to replace `PreTrainedTokenizerBase.apply_chat_template` functionality,
 # providing more capability to customize the template.

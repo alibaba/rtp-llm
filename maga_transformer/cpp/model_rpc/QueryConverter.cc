@@ -65,6 +65,11 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         }
         generate_input->multimodal_urls = std::move(mm_urls);
     }
+    if (input->multimodal_types_size() > 0) {
+        std::vector<int32_t> mm_types = std::vector<int32_t>(input->token_ids_size());
+        memcpy(mm_types.data(), input->multimodal_types().data(), sizeof(int32_t) * input->token_ids_size());
+        generate_input->multimodal_types = std::move(mm_types);
+    }
     return generate_input;
 }
 
