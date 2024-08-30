@@ -35,11 +35,6 @@ inline void kernel_launcher(int arch, Params& params, cudaStream_t s)
         select_gs<kernel_type_traits<KType>::isGroupwise, KernelDetails<A, B, Layout, 64>>(params, s);                 \
         return;                                                                                                        \
     }
-#define EXEC_W4A8(KType, A, B, Layout)                                                                                 \
-    if (params.type == KType && params.apply_alpha_in_advance) {                                                       \
-        select_gs<kernel_type_traits<KType>::isGroupwise, KernelDetails<A, B, Layout, 128>>(params, s);                \
-        return;                                                                                                        \
-    }
     if (arch >= 70 && arch < 75)
     {
         EXEC(KernelType::FP16Int8PerChannel, FP16DetailsA, Int8DetailsW, ColumnMajor);
@@ -51,10 +46,6 @@ inline void kernel_launcher(int arch, Params& params, cudaStream_t s)
     }
     else if (arch >= 80 && arch < 90)
     {
-        if (arch >= 89)
-        {
-            EXEC_W4A8(KernelType::FP16Int4Groupwise, FP16DetailsA, Int4DetailsW, ColumnMajorInterleaved);
-        }
         EXEC(KernelType::FP16Int4Groupwise, FP16DetailsA, Int4DetailsW, ColumnMajorInterleaved);
         EXEC(KernelType::BF16Int4Groupwise, BF16DetailsA, Int4DetailsW, ColumnMajorInterleaved);
         EXEC(KernelType::FP16Int8PerChannel, FP16DetailsA, Int8DetailsW, ColumnMajorInterleaved);
