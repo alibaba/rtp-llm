@@ -44,12 +44,32 @@ struct hipblasLtAlgoConfig {
     int32_t              batch_count;
 
     friend bool operator==(const hipblasLtAlgoConfig& a, const hipblasLtAlgoConfig& b) {
-        return std::memcmp(&a, &b, sizeof a) == 0;
+        return a.trans_a == b.trans_a && a.trans_b == b.trans_b && a.m == b.m && a.n == b.n && a.k == b.k
+               && a.A_data_type == b.A_data_type && a.lda == b.lda && a.stride_a == b.stride_a
+               && a.B_data_type == b.B_data_type && a.ldb == b.ldb && a.stride_b == b.stride_b
+               && a.C_data_type == b.C_data_type && a.ldc == b.ldc && a.stride_c == b.stride_c
+               && a.compute_type == b.compute_type && a.batch_count == b.batch_count;
     }
 
     template<typename H>
     friend H AbslHashValue(H h, const hipblasLtAlgoConfig& c) {
-        return H::combine_contiguous(std::move(h), reinterpret_cast<const char*>(&c), sizeof c);
+        return H::combine(std::move(h),
+                          c.trans_a,
+                          c.trans_b,
+                          c.m,
+                          c.n,
+                          c.k,
+                          c.A_data_type,
+                          c.lda,
+                          c.stride_a,
+                          c.B_data_type,
+                          c.ldb,
+                          c.stride_b,
+                          c.C_data_type,
+                          c.ldc,
+                          c.stride_c,
+                          c.compute_type,
+                          c.batch_count);
     }
 };
 

@@ -97,14 +97,58 @@ static absl::StatusOr<std::pair<hipblasLtAlgoConfig, int32_t>> parseRow(const st
     return std::make_pair(config, algoIndex);
 }
 
+static const char* hipblasGetErrorEnum(hipblasStatus_t error)
+{
+    switch (error) {
+        case HIPBLAS_STATUS_SUCCESS:
+            return "HIPBLAS_STATUS_SUCCESS";
+
+        case HIPBLAS_STATUS_NOT_INITIALIZED:
+            return "HIPBLAS_STATUS_NOT_INITIALIZED";
+
+        case HIPBLAS_STATUS_ALLOC_FAILED:
+            return "HIPBLAS_STATUS_ALLOC_FAILED";
+
+        case HIPBLAS_STATUS_INVALID_VALUE:
+            return "HIPBLAS_STATUS_INVALID_VALUE";
+
+        case HIPBLAS_STATUS_ARCH_MISMATCH:
+            return "HIPBLAS_STATUS_ARCH_MISMATCH";
+
+        case HIPBLAS_STATUS_MAPPING_ERROR:
+            return "HIPBLAS_STATUS_MAPPING_ERROR";
+
+        case HIPBLAS_STATUS_EXECUTION_FAILED:
+            return "HIPBLAS_STATUS_EXECUTION_FAILED";
+
+        case HIPBLAS_STATUS_INTERNAL_ERROR:
+            return "HIPBLAS_STATUS_INTERNAL_ERROR";
+
+        case HIPBLAS_STATUS_NOT_SUPPORTED:
+            return "HIPBLAS_STATUS_NOT_SUPPORTED";
+
+        case HIPBLAS_STATUS_UNKNOWN:
+            return "HIPBLAS_STATUS_LICENSE_ERROR";
+
+        case HIPBLAS_STATUS_HANDLE_IS_NULLPTR:
+            return "HIPBLAS_STATUS_HANDLE_IS_NULLPTR";
+
+        case HIPBLAS_STATUS_INVALID_ENUM:
+            return "HIPBLAS_STATUS_INVALID_ENUM";
+    }
+    return "<unknown>";
+} 
 void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle_t handle) {
     std::ifstream file;
     std::string   line;
 
-    line.reserve(256);
+    line.reserve(1024);
     file.open(filename);
 
-    if (!std::getline(file, line)) {}
+    if (!std::getline(file, line)) {
+        std::printf("Gemm config not find: %s \n", filename.c_str());
+        return ;
+    }
 
     if (line != COLUMN_HEADER) {
         std::printf("MISMATCH %s | %s\n", line.c_str(), std::string(COLUMN_HEADER).c_str());
@@ -120,6 +164,7 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
             continue;
 
         auto config_and_algoIndex = parseRow(line);
+        
         if (!config_and_algoIndex.ok()) {
             FT_LOG_ERROR(config_and_algoIndex.status().ToString().c_str());
             fflush(stderr);
@@ -150,15 +195,19 @@ void hipblasAlgoMap::loadGemmConfig(const std::string& filename, hipblasLtHandle
 
         algoIndices[0] = algoIndex;
         algos.clear();
-        hipblaslt_ext::getAlgosFromIndex(handle, algoIndices, algos);
+        hipblasStatus_t sts = hipblaslt_ext::getAlgosFromIndex(handle, algoIndices, algos);
+        printf("status = %s, algoIndex = %d, line = %s\n", hipblasGetErrorEnum(sts), algoIndices[0], line.c_str());
 
-        hipblasLtMatmulInfo i;
-        i.algo = algos.at(0).algo;
-        i.opDesc.reset(opDesc);
-        i.ADesc.reset(ADesc);
-        i.CDesc.reset(CDesc);
-        i.BDesc.reset(BDesc);
-        algo_map_.emplace(config, std::move(i));
+        if(algos.size() > 0)
+        {
+            hipblasLtMatmulInfo i;
+            i.algo = algos.at(0).algo;
+            i.opDesc.reset(opDesc);
+            i.ADesc.reset(ADesc);
+            i.CDesc.reset(CDesc);
+            i.BDesc.reset(BDesc);
+            algo_map_.emplace(config, std::move(i));
+        }
     }
 }
 
@@ -233,6 +282,29 @@ const hipblasLtMatmulInfo* hipblasAlgoMap::getAlgo(const hipblasOperation_t   tr
         }
     };
 
+
+    for (auto it = algo_map_.begin(); it != algo_map_.end(); it++)
+    {
+        auto cfg = it->first;
+
+        printf("cfg: %s,%s,%d,%d,%d,%s,%d,%lld,%s,%d,%lld,%s,%d,%lld,%s,%d\n",
+                   opToString(cfg.trans_a),
+                   opToString(cfg.trans_b),
+                   cfg.m,
+                   cfg.n,
+                   cfg.k,
+                   dataTypeToString(cfg.A_data_type),
+                   cfg.lda,
+                   cfg.stride_a,
+                   dataTypeToString(cfg.B_data_type),
+                   cfg.ldb,
+                   cfg.stride_b,
+                   dataTypeToString(cfg.C_data_type),
+                   cfg.ldc,
+                   cfg.stride_c,
+                   computeTypeToString(cfg.compute_type),
+                   cfg.batch_count);
+    }
     FT_LOG_WARNING("MISSING HIPBLASLT CONFIG:\n %s,%s,%d,%d,%d,%s,%d,%lld,%s,%d,%lld,%s,%d,%lld,%s,%d\n",
                    opToString(trans_a),
                    opToString(trans_b),

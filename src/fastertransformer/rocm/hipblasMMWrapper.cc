@@ -129,7 +129,7 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
     int   workspaceSize = HIPBLAS_WORKSPACE_SIZE;
 
     if (info && !disable_hipblasLt) {
-        printf("DEBUG -> Calling the hipblasLtMatmul\n");
+        //printf("DEBUG -> Calling the hipblasLtMatmul\n");
         hipblasLtMatmul(hipblaslt_handle_,
                         info->opDesc.get(),
                         alpha,
