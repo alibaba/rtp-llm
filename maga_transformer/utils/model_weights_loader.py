@@ -183,7 +183,7 @@ class ModelWeightsLoader:
         layer_weights = self._model_weights_info.lora_weights
         for weight in layer_weights:
             try:
-                tensor = self._load_and_convert_lora_tensor(weight, lora_name, layer_id)
+                tensor = self._load_and_convert_lora_tensor(weight, lora_name, layer_id, self._data_type)
                 if tensor is None:
                     continue
                 tensor = self._split_and_sanitize_tensor(tensor, weight).to(device)
@@ -560,7 +560,7 @@ class ModelWeightsLoader:
         self._lora_log.record_accessed_tensor(tensor_name)
         return self._database.load_lora_tensor(lora_name, tensor_name)
 
-    def _load_and_convert_lora_tensor(self, weight_info: WeightInfo, lora_name:str, layer_id: Optional[int] = None):
+    def _load_and_convert_lora_tensor(self, weight_info: WeightInfo, lora_name:str, layer_id: Optional[int] = None, datatype: torch.dtype = torch.float16):
         before_merge_tensors = []
         self._lora_log.record_loaded_tensor(weight_info.name)
         for ckpt_weight in weight_info.weights:
@@ -610,7 +610,7 @@ class ModelWeightsLoader:
 
         after_merge_tensor = weight_info.process_fun(before_merge_tensors)
 
-        return after_merge_tensor
+        return after_merge_tensor.to(datatype)
 
     def _load_and_convert_tensor(self, weight_info: WeightInfo, layer_id: Optional[int] = None, datatype: torch.dtype = torch.float16):
         convert_type = datatype if weight_info.data_type is None else weight_info.data_type
