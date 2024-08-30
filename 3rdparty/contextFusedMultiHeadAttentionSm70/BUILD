@@ -3,7 +3,7 @@ load("//bazel:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
-    name = "trt_fmha_impl",
+    name = "trt_sm70_fmha_impl",
     srcs = glob([
         "fmhaRunner.cpp",
         "**/*.cpp"
@@ -12,7 +12,8 @@ cc_library(
         "*.h",
     ]),
     deps = [
-        ":trt_fmha_header",
+        ":trt_sm70_fmha_header",
+        "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_common_define_header",
         "//3rdparty:cuda_driver",
         "//src/fastertransformer/kernels:kernels",
         "@local_config_cuda//cuda:cuda_headers",
@@ -25,27 +26,13 @@ cc_library(
 
 
 cc_library(
-    name = "trt_fmha_header",
+    name = "trt_sm70_fmha_header",
     hdrs = glob([
         "*.h",
         "**/*.h"
-    ], exclude=["multiHeadAttentionCommon.h"]),
-    deps = [
-        "@local_config_cuda//cuda:cuda",
-        "@local_config_cuda//cuda:cudart",
-        ":trt_fmha_common_define_header"
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "trt_fmha_common_define_header",
-    hdrs = glob([
-        "multiHeadAttentionCommon.h",
     ]),
     deps = [
-        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cuda",
         "@local_config_cuda//cuda:cudart",
     ],
     copts = copts(),

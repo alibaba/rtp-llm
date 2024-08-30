@@ -771,7 +771,7 @@ bool FusedMHARunnerV2::isValid(int s) const
 bool MHARunner::fmha_supported(int const headSize, int const sm)
 {
     // Check if the gpu architecture is supported or not.
-    if (sm == 70 || sm == 80 || sm == 86 || sm == 89 || sm == 90)
+    if (sm == 80 || sm == 86 || sm == 89 || sm == 90)
     {
         // Check if the head size is supported or not.
         return (headSize == 32 || headSize == 40 || headSize == 64 || headSize == 80 || headSize == 96

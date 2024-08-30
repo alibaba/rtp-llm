@@ -2,6 +2,7 @@
 
 #include "3rdparty/flash_attention/flash_api.h"
 #include "3rdparty/contextFusedMultiHeadAttention/fmhaRunner.h"
+#include "3rdparty/contextFusedMultiHeadAttentionSm70/fmhaRunner.h"
 #include "3rdparty/contextFusedMultiHeadAttention/fused_multihead_attention_common.h"
 #include "3rdparty/trt_fused_multihead_attention/qkvToContext.h"
 #include "src/fastertransformer/core/Types.h"
@@ -80,7 +81,7 @@ public:
                            bool mRemovePadding       = false,
                            bool is_alibi             = false,
                            bool is_alibi_with_sacle  = false);
-
+    
     void runOpenSourceFmha(void*  q,
                            void*  k,
                            void*  v,
@@ -132,6 +133,7 @@ private:
 private:
 
     std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2> trtv2_fmha_runner_;
+    std::unique_ptr<tensorrt_llm::kernels::FusedMHARunnerV2Sm70> trtv2_sm70_fmha_runner_;
 #ifdef USE_OLD_TRT_FMHA
     std::unique_ptr<FusedMHARunnerFP16v2> trtv1_fmha_runner_;
 #endif

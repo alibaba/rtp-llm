@@ -18,7 +18,6 @@ tensorrt_llm::kernels::Data_type trtDtypeConvert(DataType dtype)
 }
 
 
-
 bool cufmha::trtV1FmhaSupport() {
 #ifdef USE_OLD_TRT_FMHA
     trtv1_fmha_runner_.reset(
@@ -74,9 +73,19 @@ void cufmha::runTrtV1Fmha(void* input,
 
 
 bool cufmha::trtV2FmhaSupport() {
+    if (get_sm() == tensorrt_llm::kernels::kSM_70) {
+        trtv2_sm70_fmha_runner_.reset(
+            new tensorrt_llm::kernels::FusedMHARunnerV2Sm70(
+                trtDtypeConvert(dtype_), head_num_, size_per_head_, q_scaling_));
+        return trtv2_sm70_fmha_runner_->fmha_supported() &&
+           (mtype_ == AttentionMaskType::causalMask ||
+            mtype_ == AttentionMaskType::noMask) &&
+        !(mtype_ == AttentionMaskType::noMask && use_linear_bias_slopes_);
+    }
     trtv2_fmha_runner_.reset(
         new tensorrt_llm::kernels::FusedMHARunnerV2(
             trtDtypeConvert(dtype_), paged_kv_fmha_, head_num_, size_per_head_, q_scaling_));
+
 
     return trtv2_fmha_runner_->fmha_supported() &&
            (mtype_ == AttentionMaskType::causalMask ||
@@ -151,36 +160,58 @@ void cufmha::runTrtV2Fmha(void* input,
                           bool mRemovePadding,
                           bool is_alibi,
                           bool is_alibi_with_sacle) {
+    if (trtv2_fmha_runner_) {
+        trtv2_fmha_runner_->setup_flags(mFMHAForceFP32Acc,
+                                        mRemovePadding,
+                                        (mtype_ == AttentionMaskType::causalMask),
+                                        kv_head_num_);
+        trtv2_fmha_runner_->setup(batch_size,
+                                seq_len,
+                                seq_len,
+                                kv_block_array.mMaxBlocksPerSeq,
+                                kv_block_array.mTokensPerBlock,
+                                seq_len, //  cyclic_kv_cache_length
+                                token_num,
+                                is_alibi,
+                                is_alibi_with_sacle,
+                                1,
+                                0);
 
-    trtv2_fmha_runner_->setup_flags(mFMHAForceFP32Acc,
-                                    mRemovePadding,
-                                    (mtype_ == AttentionMaskType::causalMask),
-                                    kv_head_num_);
-    trtv2_fmha_runner_->setup(batch_size,
-                              seq_len,
-                              seq_len,
-                              kv_block_array.mMaxBlocksPerSeq,
-                              kv_block_array.mTokensPerBlock,
-                              seq_len, //  cyclic_kv_cache_length
-                              token_num,
-                              is_alibi,
-                              is_alibi_with_sacle,
-                              1,
-                              0);
 
+        trtv2_fmha_runner_->run(input,
+                            nullptr,
+                            kv_block_array,
+                            cu_seqlens,
+                            cu_seqlens,
+                            tile_counter_ptr,
+                            nullptr,
+                            output,
+                            stream_);
 
-    trtv2_fmha_runner_->run(input,
-                        nullptr,
-                        kv_block_array,
-                        cu_seqlens,
-                        cu_seqlens,
-                        tile_counter_ptr,
-                        nullptr,
-                        output,
-                        stream_);
+        sync_check_cuda_error();
+    } else {
+        trtv2_sm70_fmha_runner_->setup_flags(mFMHAForceFP32Acc,
+                                        mRemovePadding,
+                                        (mtype_ == AttentionMaskType::causalMask),
+                                        kv_head_num_);
 
-    sync_check_cuda_error();
+        trtv2_sm70_fmha_runner_->setup(batch_size,
+                                    seq_len,
+                                    seq_len,
+                                    token_num,
+                                    is_alibi,
+                                    is_alibi_with_sacle,
+                                    1,
+                                    0);
+        trtv2_sm70_fmha_runner_->run(input,
+                                    cu_seqlens,
+                                    output,
+                                    stream_);
+
+        sync_check_cuda_error();        
+    }
 }
+
 
 void cufmha::runOpenSourceFmhaPaged(void*  q,
                                     void*  k,

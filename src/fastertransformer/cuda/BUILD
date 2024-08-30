@@ -52,6 +52,7 @@ cc_library(
         ":memory_utils",
         "//src/fastertransformer/kernels:kernels",
         "//3rdparty/contextFusedMultiHeadAttention:trt_fmha_impl",
+        "//3rdparty/contextFusedMultiHeadAttentionSm70:trt_sm70_fmha_impl",
         "//3rdparty/trt_fused_multihead_attention:trt_fused_multihead_attention_impl",
     ],
     copts = copts(),

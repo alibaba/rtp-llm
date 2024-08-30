@@ -18,6 +18,7 @@
 
 #include <limits.h>
 #include <stdint.h>
+#include "src/fastertransformer/utils/assert_utils.h"
 
 namespace tensorrt_llm
 {
