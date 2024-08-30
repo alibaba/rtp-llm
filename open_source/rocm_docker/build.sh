@@ -7,9 +7,10 @@ DIR=$(dirname $(readlink -f "$0"))
 echo $DIR
 
 # These variables are to replace by your own values
-BASE_IMAGE="alibaba-cloud-linux-3-registry.cn-hangzhou.cr.aliyuncs.com/alinux3/alinux3:x86-3.220822.1"
+# BASE_IMAGE="alibaba-cloud-linux-3-registry.cn-hangzhou.cr.aliyuncs.com/alinux3/alinux3:x86-3.220822.1"
+BASE_IMAGE="hub.docker.alibaba-inc.com/ali/os:8u"
 IMAGE_NAME=${IMAGE_NAME:-"reg.docker.alibaba-inc.com/isearch/maga_transformer_rocm_open_source_base"}
-IMAGE_TAG=${IMAGE_TAG:-"0.0.1"}
+IMAGE_TAG=${IMAGE_TAG:-"0.0.2"}
 CONDA_URL=${CONDA_URL:-"https://repo.anaconda.com/miniconda/Miniconda3-py310_23.1.0-1-Linux-x86_64.sh"}
 # alternative:
 # BAZEL_URL=https://mirrors.huaweicloud.com/bazel/5.2.0/bazel-5.2.0-installer-linux-x86_64.sh

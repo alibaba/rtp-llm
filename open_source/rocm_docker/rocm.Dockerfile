@@ -5,7 +5,7 @@ MAINTAINER wangyin.yx
 
 ADD functions /etc/rc.d/init.d/functions
 
-RUN echo "%sdev ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
+RUN echo "ALL ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
     groupadd sdev
 
 RUN dnf install -y \
@@ -37,12 +37,12 @@ RUN wget $AMD_BKC_URL -O /tmp/bkc.tar && \
     yum config-manager --disable amdgpu-local-rpmpackages && \
     yum config-manager --disable local-rocm
 
+ENV PATH $PATH:/opt/conda310/bin
+
 ARG PYPI_URL
 ADD deps /tmp/deps
 RUN /opt/conda310/bin/pip install -r /tmp/deps/requirements_rocm.txt -i $PYPI_URL && \
     rm -rf /tmp/deps && pip cache purge
-
-ENV PATH $PATH:/opt/conda310/bin
 
 ARG BAZELISK_URL
 RUN wget -q $BAZELISK_URL -O /usr/local/bin/bazelisk && chmod a+x /usr/local/bin/bazelisk
