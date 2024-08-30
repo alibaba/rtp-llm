@@ -59,7 +59,7 @@ cc_test(
     copts = test_copts + copts(),
     linkopts = test_linkopts,
     deps = test_deps,
-    tags = ["rocm", "manual"],
+    tags = ["rocm"],
 )
 
 cc_test(
@@ -85,7 +85,7 @@ cc_test(
     copts = test_copts + copts(),
     linkopts = test_linkopts,
     deps = test_deps,
-    tags = ["rocm", "manual"],
+    tags = ["rocm"],
 )
 
 cc_test(
@@ -98,7 +98,7 @@ cc_test(
     copts=test_copts + copts(),
     linkopts=test_linkopts,
     deps=test_deps,
-    tags = ["rocm", "manual"],
+    tags = ["rocm"],
 )
 
 cc_test(
@@ -164,5 +164,5 @@ cc_test(
     copts = test_copts,
     linkopts = test_linkopts,
     deps = test_deps,
-    tags = ["rocm", "manual"],
+    tags = ["rocm"],
 )
