@@ -193,7 +193,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
                               params.configs.q_scaling,
                               params.has_alibi_slopes,
                               paged_kv_fmha);
-        bool trt_v2_fmha_support = cufmha_runner_->trtV2FmhaSupport();                      
+        bool trt_v2_fmha_support = !use_trtv2_fmha_paged && !use_trtv2_fmha ? false : cufmha_runner_->trtV2FmhaSupport();  
         if (paged_kv_fmha) {
             if (use_trtv2_fmha_paged && trt_v2_fmha_support) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;
