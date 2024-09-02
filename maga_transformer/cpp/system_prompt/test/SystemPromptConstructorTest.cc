@@ -31,7 +31,9 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
     auto gpt_init_params = GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
-    auto result = constructor.construct(params, engine.get(), engine->resourceContext().cache_manager.get());
+    auto result_status = constructor.construct(params, engine.get(), engine->resourceContext().cache_manager.get());
+    ASSERT_EQ(result_status.ok(), true);
+    auto result = result_status.value();
     ASSERT_EQ(result.size(), 2);
     ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 97);
 

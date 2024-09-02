@@ -1,5 +1,8 @@
 #pragma once
 
+#include <c10/core/ScalarType.h>
+#include <c10/util/Half.h>
+#include <cstring>
 #include <memory>
 #include <cuda_fp16.h>
 #include "c10/util/intrusive_ptr.h"
@@ -23,7 +26,7 @@ struct CustomConfig {
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
 };
 
-std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomConfig& config, GptInitParameter& params) {
+rtp_llm::EngineInitParams createEngineInitParams(DeviceBase* device, const CustomConfig& config, GptInitParameter& params) {
     params.head_num_ = 2;
     params.size_per_head_ = 64;
     params.num_layers_ = 2;
@@ -47,8 +50,12 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
     const ft::DataType   data_type    = getTensorType<T>();
     auto                 mem_type     = ft::MemoryType::MEMORY_GPU;
     const size_t         hidden_units = 128;
+    
+    const auto tensor = torch::ones({inter_size * inter_size}, torch::kHalf) * 0.001;
+    auto buf_host = torchTensor2Buffer(tensor);
     auto data = device->allocateBuffer({data_type, {inter_size, inter_size}, AllocationType::DEVICE}, {});
-
+    device->copy({*data, *buf_host});
+    
     auto word_embeddings =
         make_unique<const ft::Buffer>(mem_type, data_type, vector<size_t>{(size_t)20, hidden_units}, data->data());
     auto lm_head =
@@ -114,6 +121,11 @@ std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomC
     rtp_llm::EngineInitParams rtp_llm_params(params,
                                              std::move(*convert.createGptWeights(std::make_unique<ConstBufferPtrMaps>(layer_weights),
                                                                                  std::make_unique<ConstBufferPtrMap>(global_weights))));
+    return rtp_llm_params;
+}
+
+std::shared_ptr<NormalEngine> createMockEngine(DeviceBase* device, const CustomConfig& config, GptInitParameter& params) {
+    EngineInitParams rtp_llm_params = createEngineInitParams(device, config, params);
     std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params);
     return engine;
 }

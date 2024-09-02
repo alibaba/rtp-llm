@@ -29,7 +29,7 @@ public:
             std::move(std::make_unique<ScoreBatchStreamProcessor>(params.gpt_init_parameter)));
     }
 
-    absl::Status process(const std::list<GenerateStreamPtr>& streams) {
+    absl::Status normalProcess(const std::list<GenerateStreamPtr>& streams) {
         return normal_executor_.process(streams);
     }
 

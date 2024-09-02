@@ -52,7 +52,7 @@ public:
 
 
     virtual size_t scoreLen() const {
-        return 0;
+        return 1;
     }
 
     // Only used in C++ world.

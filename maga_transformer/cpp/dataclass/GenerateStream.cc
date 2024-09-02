@@ -603,7 +603,8 @@ std::string GenerateStream::debugString() const {
         debug_string << (*complete_token_ids_)[i].view(0, seq_length_).debugStringWithData<int32_t>() << ",";
     }
 
-    debug_string << ", stream_cache_resource_: "<< stream_cache_resource_.debugString();
+    debug_string << ", cum_log_probs: " << cum_log_probs_->debugStringWithData<float>();
+    debug_string << ", stream_cache_resource: "<< stream_cache_resource_.debugString();
          
     debug_string << "}";
     return debug_string.str();

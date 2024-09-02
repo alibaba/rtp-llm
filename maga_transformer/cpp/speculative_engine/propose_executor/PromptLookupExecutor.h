@@ -18,7 +18,7 @@ public:
         return absl::OkStatus();
     }
 
-    absl::Status process(const std::list<GenerateStreamPtr>& streams) override {
+    absl::Status normalProcess(const std::list<GenerateStreamPtr>& streams) override {
         return absl::OkStatus();
     }
 

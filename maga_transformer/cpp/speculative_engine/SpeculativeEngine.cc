@@ -73,10 +73,10 @@ absl::StatusOr<GenerateStreamPtr> SpeculativeEngine::preRun(const std::shared_pt
     }
 
     std::list<GenerateStreamPtr> score_streams{score_stream};
-    THROW_IF_STATUS_ERROR(score_executor_->process(score_streams));
+    THROW_IF_STATUS_ERROR(score_executor_->normalProcess(score_streams));
 
     if (propose_model_params_->gpt_model()) {
-        THROW_IF_STATUS_ERROR(propose_executor_->process({propose_stream}));
+        THROW_IF_STATUS_ERROR(propose_executor_->normalProcess({propose_stream}));
     }
 
     return score_streams.front();

@@ -9,6 +9,8 @@ class NormalGenerateStream: public GenerateStream {
 public:
     NormalGenerateStream(const GenerateStream&  stream): GenerateStream(stream) {
         CopyOnWrite(stream);
+        generate_outputs_ = std::make_shared<GenerateOutputs>();
+        generate_outputs_queue_.setCapacity(1000);
     }
 
     NormalGenerateStream(const std::shared_ptr<GenerateInput>& query,

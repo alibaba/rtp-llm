@@ -21,7 +21,7 @@ public:
 
     ~VanillaExecutor() {}
 
-    absl::Status process(const std::list<GenerateStreamPtr>& streams) override {
+    absl::Status normalProcess(const std::list<GenerateStreamPtr>& streams) override {
         return normal_executor_.process(streams);
     }
 

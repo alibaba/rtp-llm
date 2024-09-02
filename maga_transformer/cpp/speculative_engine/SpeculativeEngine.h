@@ -24,6 +24,10 @@ public:
     absl::Status                      stop() override;
     KVCacheInfo                       getKVCacheInfo() const override;
 
+    const ResourceContext& resourceContext() const {
+        return resource_context_;
+    }
+
 private:
     size_t       warmUp();
     absl::Status step();
