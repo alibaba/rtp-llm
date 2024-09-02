@@ -13,8 +13,10 @@ using namespace std;
 namespace fastertransformer {
 
 template<typename In, typename Out>
-void mixedTypeSoftmaxWrapper(const SoftmaxParams& params, const Buffer& output, hipStream_t stream) {
-    std::cout << "successful!";
+void mixedTypeSoftmaxWrapper(const SoftmaxParams& params,
+                             const Buffer& output,
+                             hipStream_t stream)
+{
     MaskedSoftmaxParam<Out, In> param;
     auto&                       input = params.input;
 

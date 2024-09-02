@@ -52,8 +52,8 @@ TEST_F(CudaSamplerTest, testTopK) {
     device_->sampleGreedy(params);
     sync_check_cuda_error();
 
-    printBuffer<int32_t>(*output_token_ids, "output_token_ids");
-    printBuffer<float>(*cum_log_probs, "cum_log_probs");
+    //printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+    //printBuffer<float>(*cum_log_probs, "cum_log_probs");
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
     auto cum_log_probs_host = getBufferValues<float>(*cum_log_probs);
     ASSERT_EQ(output_token_ids_host[5], 5);
@@ -103,8 +103,8 @@ TEST_F(CudaSamplerTest, testTopP) {
     device_->sampleGreedy(params);
     sync_check_cuda_error();
 
-    printBuffer<int32_t>(*output_token_ids, "output_token_ids");
-    printBuffer<float>(*cum_log_probs, "cum_log_probs");
+    //printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+    //printBuffer<float>(*cum_log_probs, "cum_log_probs");
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
     auto cum_log_probs_host = getBufferValues<float>(*cum_log_probs);
 
@@ -120,7 +120,7 @@ TEST_F(CudaSamplerTest, testTopP) {
     params.random_seed = nullopt;
     for (int i = 0; i < 100; i++) {
         device_->sampleGreedy(params);
-        printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+        //printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     }
 }
 
@@ -155,19 +155,19 @@ TEST_F(CudaSamplerTest, testRandom) {
     device_->sampleGreedy(params);
     sync_check_cuda_error();
 
-    printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+    //printBuffer<int32_t>(*output_token_ids, "output_token_ids");
     auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
 
     std::vector<size_t> counts(vocab_size, 0);
     for (int i = 0; i < 10000; i++) {
         rand_seed->data<uint64_t>()[0] = i * 100;
         device_->sampleGreedy(params);
-        printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+        //printBuffer<int32_t>(*output_token_ids, "output_token_ids");
         output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
         counts[output_token_ids_host[5]]++;
     }
     for (int i = 0; i < vocab_size; i++) {
-        cout << i << ": " << counts[i] << endl;
+        //cout << i << ": " << counts[i] << endl;
     }
     EXPECT_GE(counts[0], 1000);
     EXPECT_GE(counts[1], 1000);
@@ -181,13 +181,13 @@ TEST_F(CudaSamplerTest, testRandom) {
     for (int i = 0; i < 10000; i++) {
         rand_seed->data<uint64_t>()[0] += i * 100;
         device_->sampleGreedy(params);
-        printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+        //printBuffer<int32_t>(*output_token_ids, "output_token_ids");
         output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
         counts[output_token_ids_host[5]]++;
     }
     std::unordered_set<size_t> expected = {1, 2, 8, 9};
     for (int i = 0; i < vocab_size; i++) {
-        cout << i << ": " << counts[i] << endl;
+        //cout << i << ": " << counts[i] << endl;
         if (expected.find(i) != expected.end()) {
             EXPECT_GE(counts[i], 1000);
         } else {
