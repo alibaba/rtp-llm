@@ -70,10 +70,6 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len) const {
     return std::max((seq_len + seqSizePerBlock() - 1) / seqSizePerBlock() - maxBlockSize(), 0);
 }
 
-void StreamCacheResource::incBlockRef() {
-    batch_block_addr_.incRef(resource_context_.cache_manager);
-}
-
 // TODO(xinfei.sxf) 保证这个函数的原子性
 absl::StatusOr<int> StreamCacheResource::initKVBlock(int token_capacity, size_t reserve_step) {
     auto current_block_size = maxBlockSize();

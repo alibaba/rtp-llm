@@ -162,6 +162,11 @@ public:
 
     void CopyOnWrite(const GenerateStream& other_stream);
 
+    void setNeedReleaseResource(bool need_release_resource) {
+        need_release_resource_ = need_release_resource;
+        stream_cache_resource_.setNeedReleaseResource(need_release_resource);
+    }
+
 protected:
     ft::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;

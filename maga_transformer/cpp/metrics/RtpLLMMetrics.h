@@ -3,6 +3,7 @@
 #include "autil/Log.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include <chrono>
+#include <cstdint>
 #include <thread>
 #include <unistd.h>
 
@@ -293,21 +294,13 @@ private:
 
 class RtpLLMSpeculativeEngineMetricsCollector final {
 public:
-    void merge(const RtpLLMSpeculativeEngineMetricsCollector* collector) {
-        if (collector) {
-            step_latency_us += collector->step_latency_us;
-            propose_step_latency_us += collector->propose_step_latency_us;
-            score_step_latency_us += collector->score_step_latency_us;
-            speculative_sampler_latency_us += collector->speculative_sampler_latency_us;
-            updater_step_latency_us += collector->updater_step_latency_us;
-        }
-    }
-public:
     int64_t step_latency_us = 0;
     int64_t propose_step_latency_us = 0;
     int64_t score_step_latency_us = 0;
     int64_t speculative_sampler_latency_us = 0;
     int64_t updater_step_latency_us = 0;
+    int64_t total_propose_token_num = 0;
+    int64_t total_accepted_token_num = 0;
 };
 
 class RtpLLMSpeculativeEngineMetrics: public kmonitor::MetricsGroup {
@@ -321,6 +314,8 @@ public:
     kmonitor::MutableMetric* score_step_latency_us_metric = nullptr;
     kmonitor::MutableMetric* speculative_sampler_latency_us_metric = nullptr;
     kmonitor::MutableMetric* updater_step_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* total_propose_token_num_metric = nullptr;
+    kmonitor::MutableMetric* total_accepted_token_num_metric = nullptr;
 private:
     AUTIL_LOG_DECLARE();
 };

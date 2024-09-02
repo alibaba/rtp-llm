@@ -40,6 +40,7 @@ absl::Status SpeculativeUpdater::dispatch(const GenerateStreamPtr& stream, const
     const ft::BufferPtr& cum_log_probs = stream_output.cum_log_probs;
     stream->update(accepted_tokens, num_accepted_tokens, logits, hidden_states, cum_log_probs);
     stream->setReuseLength(stream->seqLength() - 1);
+    stream->setFallbackPrefixLength(stream->reuseLength());
     stream->step();
     return absl::OkStatus();
 }

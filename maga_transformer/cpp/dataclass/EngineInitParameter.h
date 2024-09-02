@@ -48,7 +48,7 @@ struct ProposeModelEngineInitParams: public th::jit::CustomClassHolder {
     // Consturctor for prompt lookingup propose model
     ProposeModelEngineInitParams(std::string sp_type) : sp_type(sp_type) {}
     
-    bool need_kvcache() {
+    bool gpt_model() {
         return sp_type == "vanilla";
     }
 

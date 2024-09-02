@@ -63,12 +63,6 @@ void BatchKVCacheBlockAddr::clear() {
     batch_offset.clear();
 }
 
-void BatchKVCacheBlockAddr::incRef(std::shared_ptr<CacheManager>& cache_manager) {
-    for (const auto& blocks : batch_offset) {
-        cache_manager->incrBlockRefCounter(blocks);
-    }
-}
-
 std::string BatchKVCacheBlockAddr::debugString() const {
     std::stringstream debug_string, batch_offset_string;
     for (size_t i = 0; i < batch_offset.size(); i++) {

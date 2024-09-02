@@ -18,6 +18,7 @@ public:
         CopyOnWrite(stream);
         setMetricsReporter(nullptr);
         allocateOutputBuffer(propose_step);
+        setNeedReleaseResource(false);
     }
 
     ~VanillaStream() {}

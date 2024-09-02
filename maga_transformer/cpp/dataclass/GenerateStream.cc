@@ -594,7 +594,9 @@ std::string GenerateStream::debugString() const {
                  << ", reuse_length:" << reuse_length_ << ", current_chunk_len:" << current_chunk_len_
                  << ", last_chunk_len_:" << last_chunk_len_ << ", max_chunk_len_:" << max_chunk_len_
                  << ", batch_size:" << batchSize()
-                 << ", tile_num:" << tileNum();
+                 << ", tile_num:" << tileNum()
+                 << ", need_release_resource: " << need_release_resource_
+                 << ", fallback_prefix_length: " << fallback_prefix_length_;
 
     debug_string << ", complete_token_ids: [";
     for (size_t i = 0; i < tileNum(); i++) {
@@ -641,7 +643,7 @@ void GenerateStream::CopyOnWrite(const GenerateStream& other_stream) {
     if (other_stream.calculateLoss()) {
         loss_ = device_->clone({*other_stream.loss_, ft::AllocationType::HOST});
     }
-    stream_cache_resource_.incBlockRef();
+    stream_cache_resource_.setStream(this);
 }
 
 }  // namespace rtp_llm

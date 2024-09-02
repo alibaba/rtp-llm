@@ -23,6 +23,7 @@ public:
         CopyOnWrite(stream);
         updateProposeTokens(stream_input);
         allocateOutputBuffer(propose_step);
+        setNeedReleaseResource(false);
     }
 
     ~ScoreStream() {}
