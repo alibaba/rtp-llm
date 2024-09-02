@@ -167,17 +167,17 @@ class InternVLImageEmbedding(MultiModalEmbeddingInterface):
         mm_type = kwargs.get("mm_type")
         if mm_type == MMUrlType.DEFAULT:
             if isinstance(mm_input, list):
-                return self.image_embedding(mm_input, device)
+                return self.image_embedding(mm_input, 12, device)
             else:
-                return self.image_embedding([mm_input], device)[0]
+                return self.image_embedding([mm_input], 12, device)[0]
         elif mm_type == MMUrlType.IMAGE:
             if isinstance(mm_input, list):
                 raise Exception("expect single image input, but get a list")
-            return self.image_embedding([mm_input], device)[0]
+            return self.image_embedding([mm_input], 12, device)[0]
         elif mm_type == MMUrlType.VIDEO:
             if not isinstance(mm_input, list):
                 raise Exception("expect video input, but get a single image")
-            return self.image_embedding(mm_input, device)
+            return self.image_embedding(mm_input, 1, device)
         else:
             raise Exception("unknown mm url type")
 
@@ -195,14 +195,13 @@ class InternVLImageEmbedding(MultiModalEmbeddingInterface):
         elif mm_type == MMUrlType.IMAGE:
             return Image.open(data).convert("RGB")
         elif mm_type == MMUrlType.VIDEO:
-            return load_video(origin_data, num_segments=8, max_num=1)
+            return load_video(data, num_segments=8, max_num=1)
         else:
             raise Exception("unknown mm url type")
 
     @torch.no_grad()
-    def image_embedding(self, images: List[Image.Image], device):
+    def image_embedding(self, images: List[Image.Image], max_num, device):
         # hugging face default value
-        max_num = 12
         input_size = self.config["image_size"]
         transform = build_transform(input_size=self.config["image_size"])
         res = []

@@ -3,6 +3,7 @@
 #include "autil/legacy/json.h"
 #include "autil/legacy/jsonizable.h"
 #include "src/fastertransformer/utils/py_utils/pybind_utils.h"
+#include "maga_transformer/cpp/dataclass/Query.h"
 
 namespace rtp_llm {
 
@@ -105,22 +106,22 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
     if (it != bodyMap.end()) {
         auto listListUrls = AnyCast<JsonArray>(it->second);
         auto listUrls = AnyCast<JsonArray>(listListUrls[0]);
-        std::vector<std::string> mm_urls;
+        std::vector<MultimodalInput> mm_inputs;
         for (auto url : listUrls) {
-            mm_urls.emplace_back(AnyCast<std::string>(url));
+            mm_inputs.emplace_back(AnyCast<std::string>(url));
         }
-        input->multimodal_urls = std::move(mm_urls);
+        input->multimodal_inputs = std::move(mm_inputs);
     } else {
         FT_LOG_INFO("no urls in http request.");
         it = bodyMap.find("images");
         if (it != bodyMap.end()) {
             auto listListUrls = AnyCast<JsonArray>(it->second);
             auto listUrls = AnyCast<JsonArray>(listListUrls[0]);
-            std::vector<std::string> mm_urls;
+            std::vector<MultimodalInput> mm_inputs;
             for (auto url : listUrls) {
-                mm_urls.emplace_back(AnyCast<std::string>(url));
+                mm_inputs.emplace_back(AnyCast<std::string>(url));
             }
-            input->multimodal_urls = std::move(mm_urls);
+            input->multimodal_inputs = std::move(mm_inputs);
         } else {
             FT_LOG_INFO("no images in http request." );
         }

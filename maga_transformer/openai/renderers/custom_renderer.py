@@ -9,7 +9,7 @@ from concurrent.futures import Future
 
 from transformers import PreTrainedTokenizerBase
 
-from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, GenerateOutputs, AuxInfo
+from maga_transformer.models.base_model import GenerateOutput, BaseModel, GenerateInput, GenerateOutputs, AuxInfo, MultimodalInput
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.config.gpt_init_model_parameters import TemplateType
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
@@ -18,6 +18,7 @@ from maga_transformer.openai.api_datatype import ChatMessage, GPTFunctionDefinit
     RoleEnum, RendererInfo
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.utils.word_util import get_stop_word_slices, truncate_response_with_stop_words
+from maga_transformer.utils.multimodal_util import MMUrlType
 
 @dataclass
 class StreamResponseObject:
@@ -33,12 +34,21 @@ class RendererParams:
     stop_word_ids_list: List[List[int]]
     template_type: TemplateType = TemplateType.chat
 
-@dataclass
 class RenderedInputs:
-    input_ids: List[int] = field(default_factory=list)
-    input_urls: List[str] = field(default_factory=list)
-    input_urls_type: List[int] = field(default_factory=list)
-    rendered_prompt: str = field(default_factory=str)
+    input_ids: List[int] = []
+    multimodal_inputs: List[MultimodalInput] = []
+    rendered_prompt: str = ""
+
+    def __init__(self, input_ids: List[int], rendered_prompt: str = "", input_urls: List[str] = [], input_urls_type: List[MMUrlType] = []):
+        self.input_ids = input_ids
+        self.rendered_prompt = rendered_prompt
+        self.multimodal_inputs = []
+        if len(input_urls_type) == 0:
+            input_urls_type = [MMUrlType.DEFAULT] * len(input_urls)
+        elif len(input_urls_type) != len(input_urls):
+            raise Exception(f"the number of multimodal input types must match url, now types {len(input_urls_type)} urls {len(input_urls)}")
+        for url, type in zip(input_urls, input_urls_type):
+            self.multimodal_inputs.append(MultimodalInput(url, type))
 
 class CustomChatRenderer():
     def __init__(self,
@@ -110,8 +120,7 @@ class CustomChatRenderer():
             self,
             request_id: int,
             input_ids: List[int],
-            urls: List[str],
-            mm_types: List[int],
+            mm_inputs: List[MultimodalInput],
             generate_config: GenerateConfig,
             model: Union[AsyncModel, BaseModel],
             request: ChatCompletionRequest
@@ -125,8 +134,7 @@ class CustomChatRenderer():
             GenerateInput(
                 request_id=request_id,
                 token_ids=input_id_tensor,
-                urls=urls,
-                mm_types=mm_types,
+                mm_inputs=mm_inputs,
                 generate_config=generate_config,
                 tokenizer=self.tokenizer,
                 token_type_ids=token_type_ids

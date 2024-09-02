@@ -52,12 +52,16 @@ message GenerateConfigPB {
     google.protobuf.StringValue adapter_name = 22;
 }
 
+message MulitmodalInputPB {
+    string multimodal_url = 1;
+    int32 multimodal_type = 2;
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
-    repeated string multimodal_urls = 3;
-    repeated int32 multimodal_types = 4;
-    GenerateConfigPB generate_config = 5;
+    repeated MulitmodalInputPB multimodal_inputs = 3;
+    GenerateConfigPB generate_config = 4;
 }
 
 message AuxInfoPB {

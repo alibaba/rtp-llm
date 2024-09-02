@@ -16,7 +16,7 @@ from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.metrics import kmonitor, GaugeMetrics
 
-from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateOutputs, GenerateResponse, GenerateInput
+from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateOutputs, GenerateResponse, GenerateInput, MultimodalInput
 from maga_transformer.model_factory import ModelFactory, AsyncModel, ModelConfig
 from maga_transformer.pipeline.pipeline_custom_func import PipelineCustomFunc, get_piple_custom_func
 from maga_transformer.utils.word_util import remove_padding_eos, get_stop_word_slices, \
@@ -250,14 +250,15 @@ class Pipeline(object):
         return texts, output_lens, decoding_states, token_buffers, ouput_tokens_list
 
     @torch.inference_mode()
-    async def generate_stream(self, request_id: int, token_ids: List[int], urls: List[Future[torch.Tensor]],
+    async def generate_stream(self, request_id: int, token_ids: List[int], urls: List[str],
                             generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
         token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
 
+        mm_inputs = [MultimodalInput(url) for url in urls]
         input = GenerateInput(request_id=request_id,
                               token_ids=token_ids,
-                              urls=urls,
+                              mm_inputs=mm_inputs,
                               generate_config=generate_config,
                               tokenizer=self.tokenizer,
                               token_type_ids=token_type_ids)

@@ -21,7 +21,7 @@ class Processor(AudioEmbeddingInterface):
         model_config = Qwen2AudioConfig.from_dict(config_json)
         self.multi_modal_projector = Qwen2AudioMultiModalProjector(model_config).to(dtype).eval()
 
-    def _mm_preprocess(self, data: BytesIO) -> Dict[str, torch.Tensor]:
+    def _mm_preprocess(self, data: BytesIO, **kwargs) -> Dict[str, torch.Tensor]:
         audio = librosa.load(data, sr=self.feature_extractor.sampling_rate)[0]
         features_dict = self.feature_extractor([audio], sampling_rate=self.feature_extractor.sampling_rate, return_tensors="pt", return_attention_mask=True)
         return features_dict

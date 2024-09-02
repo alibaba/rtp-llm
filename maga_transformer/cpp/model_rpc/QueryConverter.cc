@@ -58,17 +58,13 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     generate_input->input_ids     = device->allocateBuffer(
         {ft::DataType::TYPE_INT32, {(size_t)input->token_ids_size()}, ft::AllocationType::HOST}, {});
     memcpy(generate_input->input_ids->data(), input->token_ids().data(), generate_input->input_ids->sizeBytes());
-    if (input->multimodal_urls_size() > 0) {
-        std::vector<std::string> mm_urls;
-        for (auto i = 0;i < input->multimodal_urls_size();i++) {
-            mm_urls.emplace_back(input->multimodal_urls(i));
+    if (input->multimodal_inputs_size() > 0) {
+        std::vector<MultimodalInput> mm_inputs;
+        for (int i = 0;i < input->multimodal_inputs_size();i++) {
+            auto mm_input = &input->multimodal_inputs(i);
+            mm_inputs.emplace_back(mm_input->multimodal_url(), mm_input->multimodal_type());
         }
-        generate_input->multimodal_urls = std::move(mm_urls);
-    }
-    if (input->multimodal_types_size() > 0) {
-        std::vector<int32_t> mm_types = std::vector<int32_t>(input->token_ids_size());
-        memcpy(mm_types.data(), input->multimodal_types().data(), sizeof(int32_t) * input->token_ids_size());
-        generate_input->multimodal_types = std::move(mm_types);
+        generate_input->multimodal_inputs = move(mm_inputs);
     }
     return generate_input;
 }

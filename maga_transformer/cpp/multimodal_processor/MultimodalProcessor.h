@@ -32,14 +32,19 @@ private:
     std::vector<int64_t> sep_token_ids_;
     bool include_sep_tokens_;
 
-    absl::StatusOr<std::vector<torch::Tensor>> mm_embedding(const std::vector<std::string>& urls, std::optional<std::vector<int32_t>> types) {
-        if (urls.size() == 0) {
+    absl::StatusOr<std::vector<torch::Tensor>> mm_embedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
+        if (mm_inputs.size() == 0) {
             return std::vector<torch::Tensor>();
         } else if (!mm_process_engine_.is_none()) {
+            std::vector<std::string> urls;
+            std::vector<int32_t> types;
+            for (auto& mm_input: mm_inputs) {
+                urls.push_back(mm_input.url);
+                types.push_back(mm_input.mm_type);
+            }
             try {
                 py::gil_scoped_acquire acquire;
-                auto res = types ? mm_process_engine_.attr("submit")(urls, types.value()):
-                                   mm_process_engine_.attr("submit")(urls);
+                auto res = mm_process_engine_.attr("submit")(urls, types);
                 auto mm_embedding_vec = ft::convertPyObjectToVec(res);
                 std::vector<torch::Tensor> embedding_res;
                 for (auto& emb: mm_embedding_vec) {
@@ -160,7 +165,7 @@ private:
 
 public:
     absl::Status update_mm_features(std::shared_ptr<rtp_llm::GenerateInput>& input) {
-        CHECK_AND_RETURN_REF(mm_features, mm_embedding(input->multimodal_urls.value(), input->multimodal_types));
+        CHECK_AND_RETURN_REF(mm_features, mm_embedding(input->multimodal_inputs.value()));
         input->multimodal_features = std::move(mm_features);
         CHECK_AND_RETURN_REF(expanded_ids, expand_token_ids(input->multimodal_features.value(), input->input_ids));
         input->input_ids = expanded_ids.expanded_ids;

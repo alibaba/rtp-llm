@@ -11,7 +11,7 @@ from transformers.generation.stopping_criteria import StoppingCriteria
 
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
 from transformers import PreTrainedTokenizerBase
-from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateResponse, GenerateInput
+from maga_transformer.models.base_model import BaseModel, GenerateOutput, GenerateResponse, GenerateInput, MultimodalInput
 from maga_transformer.async_decoder_engine.async_model import AsyncModel
 from maga_transformer.openai.api_datatype import ModelCard, ModelList, ChatMessage, RoleEnum, \
     ChatCompletionRequest, ChatCompletionResponse, ChatCompletionResponseChoice, UsageInfo, \
@@ -177,7 +177,7 @@ class OpenaiEndopoint():
         return DebugInfo(
             input_prompt=prompt,
             input_ids=renderered_input.input_ids,
-            input_urls=renderered_input.input_urls,
+            input_urls=[mm_input.url for mm_input in renderered_input.multimodal_inputs],
             tokenizer_info=str(self.tokenizer),
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
@@ -197,19 +197,16 @@ class OpenaiEndopoint():
         generate_config = self._extract_generation_config(chat_request)
 
         if self.model.is_multimodal():
-            urls = rendered_input.input_urls
-            mm_types = rendered_input.input_urls_type
+            mm_inputs = rendered_input.multimodal_inputs
         else:
-            urls = []
-            mm_types = []
+            mm_inputs = []
 
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config) \
             if chat_request.debug_info else None
         choice_generator = renderer.generate_choice(
             request_id,
             input_ids,
-            urls,
-            mm_types,
+            mm_inputs,
             generate_config,
             self.model,
             chat_request

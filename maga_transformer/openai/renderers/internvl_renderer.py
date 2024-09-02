@@ -50,8 +50,9 @@ class InternVLConversation(Conversation):
                         urls.append(content_part.image_url.url)
                         mm_prefix += "<image>\n"
                         types.append(MMUrlType.IMAGE)
-                    elif content_part == ContentPartTypeEnum.video_url:
+                    elif content_part.type == ContentPartTypeEnum.video_url:
                         assert (content_part.video_url != None)
+                        urls.append(content_part.video_url.url)
                         mm_prefix += "".join([f"Frame{i+1}: <image>\n" for i in range(video_frame_num)])
                         types.append(MMUrlType.VIDEO)
 

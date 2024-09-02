@@ -14,6 +14,13 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
+class MultimodalInput {
+public:
+    std::string url;
+    int32_t     mm_type;
+    MultimodalInput(std::string url, int32_t mm_type = 0): url(url), mm_type(mm_type) {}
+};
+
 class GenerateInput {
 public:
     int inputLength() {
@@ -46,11 +53,10 @@ public:
     ft::BufferPtr                   input_ids;
 
     // For multi-modality models
-    std::optional<std::vector<torch::Tensor>> multimodal_features;
-    std::optional<std::vector<std::string>>   multimodal_urls;
-    std::optional<std::vector<int32_t>>       multimodal_types;
-    std::optional<ft::BufferPtr>              text_tokens_mask; // text part for 1 and multimodal part for 0
-    std::optional<ft::BufferPtr>              mm_locs; // multimodal input locations
+    std::optional<std::vector<torch::Tensor>>   multimodal_features;
+    std::optional<std::vector<MultimodalInput>> multimodal_inputs;
+    std::optional<ft::BufferPtr>                text_tokens_mask; // text part for 1 and multimodal part for 0
+    std::optional<ft::BufferPtr>                mm_locs; // multimodal input locations
 
     int                             lora_id       = -1;
     int                             prefix_length = 0;

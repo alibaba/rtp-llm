@@ -40,7 +40,7 @@ class MultiModalEmbeddingInterface:
                 bytes_io = get_bytes_io_from_url(url)
                 mm_input = self._mm_preprocess(bytes_io, mm_type=mm_type)
             except Exception as e:
-                raise Exception(f"cannot download image from {url}, exception {e}")
+                raise Exception(f"multimodal process for {url} error, exception {e}")
             features = self.mm_process(mm_input, device, mm_type=mm_type, **kwargs).to(dtype).contiguous()
             data_cache_.insert_cache(url, features)
             return features

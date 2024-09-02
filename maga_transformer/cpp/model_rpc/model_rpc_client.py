@@ -13,6 +13,7 @@ from maga_transformer.cpp.proto.model_rpc_service_pb2_grpc import ModelRpcServic
 from maga_transformer.models.base_model import GenerateInput, GenerateOutput, GenerateOutputs, AuxInfo
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import TensorPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateConfigPB
+from maga_transformer.cpp.proto.model_rpc_service_pb2 import MulitmodalInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateInputPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import AuxInfoPB
 from maga_transformer.cpp.proto.model_rpc_service_pb2 import GenerateOutputPB, GenerateOutputsPB
@@ -34,8 +35,8 @@ def trans_input(input_py: GenerateInput):
     # The stream id cannot use the request id because the request may contain prompt batch.
     input_pb.request_id = request_counter.increment()
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
-    input_pb.multimodal_urls.extend(input_py.urls)
-    input_pb.multimodal_types.extend(input_py.mm_types)
+
+    trans_multimodal_input(input_py, input_pb)
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens
@@ -69,6 +70,12 @@ def trans_input(input_py: GenerateInput):
 
     return input_pb
 
+def trans_multimodal_input(input_py: GenerateInput, input_pb: GenerateInputPB):
+    for mm_input in input_py.mm_inputs:
+        mm_input_pb = MulitmodalInputPB()
+        mm_input_pb.multimodal_url = mm_input.url
+        mm_input_pb.multimodal_type = mm_input.mm_type
+        input_pb.multimodal_inputs.append(mm_input_pb)
 
 def trans_tensor(t: TensorPB):
     if t.data_type == TensorPB.DataType.FP32:
