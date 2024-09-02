@@ -40,6 +40,7 @@ public:
     void broadcast(const BroadcastParams& params) override;
     void allReduceSum(const AllReduceParams& params);
     void printStat();
+    DeviceStatus getDeviceStatus();
 
 private:
     std::unique_ptr<IAllocator> allocator_;

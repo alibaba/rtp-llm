@@ -42,7 +42,10 @@ class InferenceServer(object):
     def __init__(self):
         if 'LOAD_CKPT_NUM_PROCESS' not in os.environ:
             os.environ['LOAD_CKPT_NUM_PROCESS'] = '0'
-        if 'NCCL_P2P_DISABLE' not in os.environ and 'RTX' in torch.cuda.get_device_name(0):
+        if torch.cuda.is_available():
+            if 'NCCL_P2P_DISABLE' not in os.environ and 'RTX' in torch.cuda.get_device_name(0):
+                os.environ['NCCL_P2P_DISABLE'] = '1'
+        else:
             os.environ['NCCL_P2P_DISABLE'] = '1'
         self._access_logger = AccessLogger()
         self._gang_server = GangServer()

@@ -3,6 +3,7 @@ load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
 load("@pip_gpu_torch//:requirements.bzl", requirement_gpu="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
+load("@pip_cpu_arm_torch//:requirements.bzl", requirement_cpu_arm="requirement")
 
 def requirement(names):
     for name in names:
@@ -12,6 +13,7 @@ def requirement(names):
                 "//:using_cuda12": [requirement_gpu_cuda12(name)],
                 "//:using_cuda11": [requirement_gpu(name)],
                 "//:using_rocm": [requirement_gpu_rocm(name)],
+                "//:using_arm": [requirement_cpu_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
             }),
             visibility = ["//visibility:public"],

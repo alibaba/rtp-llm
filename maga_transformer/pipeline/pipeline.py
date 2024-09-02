@@ -3,6 +3,7 @@ import logging
 import torch
 import asyncio
 import threading
+import platform
 import queue
 import json
 from typing import Any, List, Union, Iterator, Tuple, Callable, Optional, Dict, Generator, AsyncGenerator
@@ -253,7 +254,10 @@ class Pipeline(object):
     async def generate_stream(self, request_id: int, token_ids: List[int], urls: List[str],
                             generate_config: GenerateConfig, **kwargs: Any) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
-        token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
+        if platform.processor() == 'aarch64':
+            token_ids = torch.tensor(token_ids, dtype=torch.int)
+        else:
+            token_ids = torch.tensor(token_ids, dtype=torch.int, pin_memory=True)
 
         mm_inputs = [MultimodalInput(url) for url in urls]
         input = GenerateInput(request_id=request_id,

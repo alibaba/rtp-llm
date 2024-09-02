@@ -20,12 +20,23 @@ tensorrt = [
 ]
 
 xft_dep = select({
+    "//:using_arm": [],
     "//:xft_use_icx": [
         "xfastertransformer_devel_icx",
     ],
     "//conditions:default": [
         "xfastertransformer_devel",
     ],
+})
+
+arch_dep = select({
+    "//:using_arm": [],
+    "//conditions:default": [":decord"],
+})
+
+arch_with_version_dep = select({
+    "//:using_arm": [],
+    "//conditions:default": ["decord==0.6.0"],
 })
 
 requirement([
@@ -84,11 +95,11 @@ py_library(
     deps = [
         ":torch",
         ":safetensors",
-        ":decord",
+        #":decord",
         ":lru-dict",
         ":cpm_kernels",
         ":prettytable",
-    ]
+    ] + arch_dep
 )
 
 py_library(
@@ -151,12 +162,14 @@ py_library(
         ":ops",
         ":timm",
         ":onnx",
-        ":decord",
-        ":nest_asyncio"
-    ] + select({
+        #":decord",
+        ":nest_asyncio",
+	":matplotlib",
+    ] + arch_dep + select({
         "//:using_cuda12": tensorrt,
         "//conditions:default": []
     }) + select({
+        "//:using_arm": [],
         "//:xft_use_icx": [
             "xfastertransformer_devel_icx",
         ],
@@ -421,8 +434,7 @@ py_wheel(
         "decord==0.6.0",
         "timm==0.9.12",
         "kserve",
-        "nest_asyncio",
-    ] + whl_deps() + xft_dep,
+    ] + xft_dep + arch_with_version_dep,
 )
 
 rename_wheel(
