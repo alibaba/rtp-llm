@@ -1,21 +1,19 @@
-#include <cstdint>
 #include <string>
 #include <vector>
-#include <map>
+#include "maga_transformer/cpp/common/status_util.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
-#include "maga_transformer/cpp/dataclass/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/GenerateConfig.h"
 #include "maga_transformer/cpp/cache/CacheManager.h"
+#include "maga_transformer/cpp/engine_base/EngineBase.h"
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "maga_transformer/cpp/system_prompt/SystemPromptConstructor.h"
 #include "src/fastertransformer/core/Buffer.h"
-#include "maga_transformer/cpp/common/fatal_util.h"
 
 namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
-std::unordered_map<std::string, SystemPromptParams> SystemPromptConstructor::construct(const ft::GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager) {
+absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPromptConstructor::construct(const ft::GptInitParameter& params, EngineBase* engine, CacheManager* cache_manager) {
     std::unordered_map<std::string, SystemPromptParams> multi_task_prompt_args;
     for (const auto& item: params.multi_task_prompt_tokens_) {
         const auto& task_id = item.first;
@@ -29,10 +27,8 @@ std::unordered_map<std::string, SystemPromptParams> SystemPromptConstructor::con
         generate_input->generate_config = generate_config;
         generate_input->need_release_resource = false;
 
-        GenerateStreamPtr stream = engine->enqueue(generate_input);
-        if (!stream->nextOutput().ok()) {
-            RAISE_FATAL_ERROR(std::string("stream run failed: ") + stream->stopReason());
-        }
+        CHECK_AND_RETURN_REF(stream, engine->preRun(generate_input, preRunMode::build_system_prompt));
+       
         const auto& kv_cache = stream->kvCache();
         FT_CHECK(kv_cache.batch_offset.size() == 1);
         FT_CHECK(kv_cache.batch_offset[0].size() > 0);

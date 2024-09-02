@@ -22,10 +22,15 @@ public:
     explicit ScoreExecutor(const EngineInitParams&                   params,
                            ft::DeviceBase*                           device,
                            const std::shared_ptr<CacheManager>&      cache_manager,
-                           const std::shared_ptr<lora::LoraManager>& lora_manager):
-        device_(device), normal_executor_(params, cache_manager, device_, lora_manager, false) {
+                           const std::shared_ptr<lora::LoraManager>& lora_manager,
+                           bool                                      warm_up = false):
+        device_(device), normal_executor_(params, cache_manager, device_, lora_manager, warm_up) {
         normal_executor_.setBatchProcessor(
             std::move(std::make_unique<ScoreBatchStreamProcessor>(params.gpt_init_parameter)));
+    }
+
+    absl::Status process(const std::list<GenerateStreamPtr>& streams) {
+        return normal_executor_.process(streams);
     }
 
     absl::StatusOr<ScoreOutput> score(const std::list<GenerateStreamPtr>& streams,

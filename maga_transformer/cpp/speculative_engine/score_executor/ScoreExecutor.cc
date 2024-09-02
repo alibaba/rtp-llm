@@ -18,7 +18,15 @@ absl::StatusOr<ScoreOutput> ScoreExecutor::score(const std::list<GenerateStreamP
         stream_index++;
     }
 
+    for (auto& stream: score_streams) {
+        FT_LOG_DEBUG("before score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+    }
+
     RETURN_IF_STATUS_ERROR(normal_executor_.process(score_streams));
+
+    for (auto& stream: score_streams) {
+        FT_LOG_DEBUG("post score stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
+    }
 
     FT_LOG_DEBUG("score done");
     return score_output;

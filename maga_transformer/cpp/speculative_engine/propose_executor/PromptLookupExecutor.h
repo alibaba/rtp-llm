@@ -18,6 +18,10 @@ public:
         return absl::OkStatus();
     }
 
+    absl::Status process(const std::list<GenerateStreamPtr>& streams) override {
+        return absl::OkStatus();
+    }
+
     void dynamicUpdateConfig(const ProposeDynamicConfig& config) override {
         return;
     }

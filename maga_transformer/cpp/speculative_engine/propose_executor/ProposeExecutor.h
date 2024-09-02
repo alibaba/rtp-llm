@@ -21,6 +21,7 @@ public:
     virtual absl::StatusOr<ProposeOutput> propose(const std::list<GenerateStreamPtr>& streams)    = 0;
     virtual void                          dynamicUpdateConfig(const ProposeDynamicConfig& config) = 0;
     virtual size_t                        reserveStep() const                                     = 0;
+    virtual absl::Status                  process(const std::list<GenerateStreamPtr>& streams)    = 0;
 
 protected:
     ft::DeviceBase* device_;

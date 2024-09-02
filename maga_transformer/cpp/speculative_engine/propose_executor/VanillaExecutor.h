@@ -12,13 +12,18 @@ public:
     explicit VanillaExecutor(std::unique_ptr<ProposeModelEngineInitParams>& propose_model_engine_init_params,
                              ft::DeviceBase*                                device,
                              const std::shared_ptr<CacheManager>&           cache_manager,
-                             const std::shared_ptr<lora::LoraManager>&      lora_manager):
+                             const std::shared_ptr<lora::LoraManager>&      lora_manager,
+                             bool                                           warm_up = false):
         ProposeExecutor(device),
         propose_step_(propose_model_engine_init_params->vanilla_model_params->gpt_init_parameter.gen_num_per_circle_),
         normal_executor_(
-            *propose_model_engine_init_params->vanilla_model_params, cache_manager, device_, lora_manager, false) {}
+            *propose_model_engine_init_params->vanilla_model_params, cache_manager, device_, lora_manager, warm_up) {}
 
     ~VanillaExecutor() {}
+
+    absl::Status process(const std::list<GenerateStreamPtr>& streams) override {
+        return normal_executor_.process(streams);
+    }
 
     absl::StatusOr<ProposeOutput> propose(const std::list<GenerateStreamPtr>& streams) override;
 

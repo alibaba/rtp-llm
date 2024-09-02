@@ -8,11 +8,8 @@ namespace rtp_llm {
 
 class SpeculativeOnlineAdaptor {
 public:
-    void dynamicUpdateProposerConfig(
-        std::unique_ptr<ProposeExecutor>&     proposer,
-        const std::unique_ptr<SchedulerBase>& scheduler,
-        const MetricsLoopReporter<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>&
-            engine_metrics) const {
+    void dynamicUpdateProposerConfig(std::unique_ptr<ProposeExecutor>&     proposer,
+                                     const std::unique_ptr<SchedulerBase>& scheduler) const {
         FT_LOG_DEBUG(__PRETTY_FUNCTION__);
         // TODO(xyz): update proposer config based on the status of metrics and scheduler
     }

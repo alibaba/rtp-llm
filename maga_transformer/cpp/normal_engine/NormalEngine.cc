@@ -1,4 +1,5 @@
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "maga_transformer/cpp/engine_base/EngineBase.h"
 #include "maga_transformer/cpp/normal_engine/NormalExecutor.h"
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/normal_engine/NormalGenerateStream.h"
@@ -47,6 +48,18 @@ NormalEngine::~NormalEngine() {
     (void)stop();
 }
 
+absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) {
+    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(generate_input, params_, resource_context_, nullptr);
+    if (mode == preRunMode::warm_up) {
+        stream->setPerfTest(true);
+    } else if (mode == preRunMode::build_system_prompt) {
+        THROW_IF_STATUSOR_ERROR(stream->initKVBlock(0, 0));
+    };
+    std::list<GenerateStreamPtr> streams{stream};
+    THROW_IF_STATUS_ERROR(executor_->process(streams));
+    return streams.front();
+}
+
 size_t NormalEngine::warmUp(const EngineInitParams& params) {
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
     fake_input->input_ids                     = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)params_.max_seq_len_ - 1}, ft::AllocationType::HOST});
@@ -55,12 +68,8 @@ size_t NormalEngine::warmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = params_.max_context_batch_size_;
     fake_input->generate_config->calculate_loss = int(params_.warm_up_with_loss_);
     device_->setTraceMemory(true);
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(fake_input, params_, resource_context_, nullptr);
-    stream->setPerfTest(true);
-    std::list<GenerateStreamPtr> streams;
-    streams.emplace_back(stream);
     executor_.reset(new NormalExecutor(params, nullptr, device_, nullptr, true));
-    THROW_IF_STATUS_ERROR(executor_->process(streams));
+    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::warm_up));
     size_t min_preserved_bytes = device_->getDeviceStatus().device_memory_status.min_preserved_bytes;
     device_->setTraceMemory(false);
     (void)executor_.reset(nullptr);
@@ -78,16 +87,17 @@ void NormalEngine::initCacheManager(size_t kv_cache_mem_size) {
     resource_context_.cache_manager = make_shared<CacheManager>(result.value(), device_, metrics_reporter_);
 }
 
-void NormalEngine::initSystemPrompt() {
+absl::Status NormalEngine::initSystemPrompt() {
     if (device_->getDeviceProperties().tp_rank != 0) {
-        return;
+        return absl::OkStatus();
     }
     resource_context_.reuse_cache = params_.reuse_cache_;
-    auto system_prompt_param = SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get());
+    CHECK_AND_RETURN_REF(system_prompt_param, SystemPromptConstructor::construct(params_, this, resource_context_.cache_manager.get()));
     if (!system_prompt_param.empty()) {
         resource_context_.reuse_cache = true;
         resource_context_.system_prompt.reset(new SystemPrompt(system_prompt_param));
     }
+    return absl::OkStatus();
 }
 
 KVCacheInfo NormalEngine::getKVCacheInfo() const {
@@ -99,7 +109,7 @@ absl::Status NormalEngine::startLoop() {
     running_ = true;
     loop_thread_ = std::thread(&NormalEngine::loop, this);
     FT_LOG_INFO("start init system prompt");
-    initSystemPrompt(); // system prompt constructor depends on engine startup
+    THROW_IF_STATUS_ERROR(initSystemPrompt()); // system prompt constructor depends on engine startup
     FT_LOG_INFO("init system prompt done");
     return absl::OkStatus();
 }

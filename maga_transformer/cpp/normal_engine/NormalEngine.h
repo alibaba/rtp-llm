@@ -24,6 +24,7 @@ public:
     ~NormalEngine();
 
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) override;
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) override;
     absl::Status                    stop() override;
 
     KVCacheInfo getKVCacheInfo() const override;
@@ -46,7 +47,7 @@ private:
     absl::Status trySaveStepError() const;
     void         loop();
     void         initCacheManager(size_t kv_cache_mem_size);
-    void         initSystemPrompt();
+    absl::Status initSystemPrompt();
 
 private:
     std::thread                    loop_thread_;

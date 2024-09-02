@@ -17,18 +17,21 @@ public:
     explicit SpeculativeEngine(const EngineInitParams&                       engine_init_params,
                                std::unique_ptr<ProposeModelEngineInitParams> propose_model_engine_init_params);
     ~SpeculativeEngine();
-    absl::Status                    init();
-    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) override;
-    absl::Status                    stop() override;
-    KVCacheInfo                     getKVCacheInfo() const override;
+    absl::Status                      init();
+    std::shared_ptr<GenerateStream>   enqueue(const std::shared_ptr<GenerateInput>& input) override;
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
+                                             preRunMode                            mode) override;
+    absl::Status                      stop() override;
+    KVCacheInfo                       getKVCacheInfo() const override;
 
 private:
+    size_t       warmUp();
     absl::Status step();
     absl::Status startLoop();
     void         loop();
     absl::Status trySaveStepError() const;
     absl::Status initCacheManager();
-    void         initSystemPrompt();
+    absl::Status initSystemPrompt();
     void         reportMetrics(const SpeculativeSamplerOutput& sampler_output,
                                int64_t                         propose_begin_time_us,
                                int64_t                         score_begin_time_us,
@@ -36,9 +39,7 @@ private:
                                int64_t                         update_begin_time_us);
 
 private:
-    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
-    MetricsLoopReporter<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>
-                                                  speculative_engine_reporter_;
+    kmonitor::MetricsReporterPtr                  metrics_reporter_ = nullptr;
     std::unique_ptr<ProposeModelEngineInitParams> propose_model_params_;
     const EngineInitParams                        score_model_params_;
 

@@ -10,6 +10,11 @@ namespace ft = fastertransformer;
 
 namespace rtp_llm {
 
+enum preRunMode {
+    warm_up = 0,
+    build_system_prompt = 1
+};
+
 class EngineBase {
 public:
     EngineBase(const EngineInitParams& params);
@@ -29,6 +34,8 @@ public:
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
 
     virtual absl::Status stop() = 0;
+
+    virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) = 0;
 
     virtual KVCacheInfo getKVCacheInfo() const {
         return {0, 0};
