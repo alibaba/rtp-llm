@@ -210,7 +210,6 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
                                              QB.scales().data<half>(),
                                              QB.zeros().data<half>(),
                                              stream_);
-            sync_check_cuda_error();
 
             const auto A = params.A.data();
             const auto B = fpB.get()->data();
@@ -245,8 +244,6 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
                                                     arguments.stride_c,
                                                     arguments.batch_size,
                                                     computeType);
-
-            sync_check_cuda_error();
             return move(output);
         } else {
             FT_FAIL("[GEMM]: Other weight quantization not implemented");
@@ -276,7 +273,6 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
 
         hipblas_mm_wrapper_->Gemm(
             b_op, a_op, arguments.n, arguments.m, arguments.k, B, arguments.ldb, A, arguments.lda, D, arguments.ldc);
-        sync_check_hip_error();
 
         return std::move(output);
     } else if (ROCmGemmDispatch::dispatch(params) == GemmImplementType::hipblas_batch_gemm) {
@@ -315,7 +311,6 @@ BufferPtr ROCmDevice::gemm(const GemmParams& params) {
                                                 arguments.stride_c,
                                                 arguments.batch_size,
                                                 computeType);
-        sync_check_hip_error();
         return std::move(output);
     } else {
         FT_FAIL("[GEMM]:other dispatch not implemented");

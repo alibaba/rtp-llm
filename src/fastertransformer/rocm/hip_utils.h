@@ -3,6 +3,7 @@
 
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/utils/assert_utils.h"
+#include "src/fastertransformer/utils/string_utils.h"
 
 #include <hip/hip_runtime.h>
 #include "cuda_shims.h"
@@ -19,9 +20,8 @@
 
 namespace fastertransformer {
 
-#define HIP_CHECK(val) rocm::check((val), #val, __FILE__, __LINE__)
 #define check_hip_error(val) rocm::check((val), #val, __FILE__, __LINE__)
-#define sync_check_hip_error() rocm::syncAndCheck(__FILE__, __LINE__)
+#define sync_check_hip_error() rocm::sync_and_check(__FILE__, __LINE__)
 
 #define MAX_CONFIG_NUM 20
 #define COL32_ 32
@@ -101,7 +101,6 @@ static const char* _hipGetErrorEnum(hipError_t error)
 {
     return hipGetErrorString(error);
 }
-
 static const char* _hipGetErrorEnum(hipblasStatus_t error)
 {
     switch (error) {
@@ -144,77 +143,39 @@ static const char* _hipGetErrorEnum(hipblasStatus_t error)
     return "<unknown>";
 }
 
+inline void throwRuntimeError(const char* const file, int const line, std::string const& info = "") {
+    auto error_msg = std::string("[ROCm][ERROR] ") + info + " Assertion fail: " + file + ":" + std::to_string(line) + " \n";
+    std::printf("%s", error_msg.c_str());
+    fflush(stdout);
+    fflush(stderr);
+    abort();
+    throw std::exception();
+}
+
 template<typename T>
 void check(T result, char const* const func, const char* const file, int const line)
 {
     if (result) {
-        throw std::runtime_error(std::string("[FT][ERROR] ROCM runtime error: ") + (_hipGetErrorEnum(result)) + " "
-                                 + file + ":" + std::to_string(line) + " \n");
+        throwRuntimeError(file, line, _hipGetErrorEnum(result));
     }
 }
-
-inline void syncAndCheck(const char* const file, int const line) {
-    // When FT_DEBUG_LEVEL=DEBUG, must check error
-    if (Logger::getLogger().getLevel() == Logger::DEBUG) {
-        check_hip_error(hipDeviceSynchronize());
-        hipError_t result = hipGetLastError();
-        if (result) {
-            throw std::runtime_error(std::string("[FT][ERROR] ROCM runtime error: ") + (_hipGetErrorEnum(result)) + " "
-                                     + file + ":" + std::to_string(line) + " \n");
-        }
-        FT_LOG_DEBUG(fmtstr("run syncAndCheck at %s:%d", file, line));
-    }
-}
-
-#ifndef NDEBUG
-    check_hip_error(hipDeviceSynchronize());
+inline void sync_and_check(const char* const file, int const line) {
+    hipDeviceSynchronize();
     hipError_t result = hipGetLastError();
-    if (result) {
-        throw std::runtime_error(std::string("[FT][ERROR] ROCM runtime error: ") + (_hipGetErrorEnum(result)) + " "
-                                 + file + ":" + std::to_string(line) + " \n");
+    if(result) {
+        throwRuntimeError(file, line, _hipGetErrorEnum(result));;
     }
-#endif
+}
 
-
-template<typename T>
-void print_to_file(const T*           result,
-                   const int          size,
-                   const char*        file,
-                   hipStream_t       stream    = 0,
-                   std::ios::openmode open_mode = std::ios::out);
-
-template<typename T>
-void print_abs_mean(const T* buf, uint size, hipStream_t stream, std::string name = "");
-
-template<typename T>
-void print_to_screen(const T* result, const int size);
-
-template<typename T>
-void printMatrix(T* ptr, int m, int k, int stride, bool is_device_ptr);
-
-void printMatrix(unsigned long long* ptr, int m, int k, int stride, bool is_device_ptr);
-void printMatrix(int* ptr, int m, int k, int stride, bool is_device_ptr);
-void printMatrix(size_t* ptr, int m, int k, int stride, bool is_device_ptr);
-
-template<typename T>
-void check_max_val(const T* result, const int size);
-
-template<typename T>
-void check_abs_mean_val(const T* result, const int size);
-
-#define PRINT_FUNC_NAME_()                                                                                             \
-    do {                                                                                                               \
-        std::cout << "[FT][CALL] " << __FUNCTION__ << " " << std::endl;                                                \
+#define FT_CHECK_WITH_INFO(val, info, ...)                              \
+    do {                                                                \
+        bool is_valid_val = (val);                                      \
+	    if (!is_valid_val) {						                    \
+  	        fastertransformer::throwRuntimeError(__FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__)); \
+	    }								                                \
     } while (0)
-
-#define FT_CHECK_WITH_INFO(val, info, ...)                                                                             \
-    do {                                                                                                               \
-        bool is_valid_val = (val);                                                                                     \
-        if (!is_valid_val) {                                                                                           \
-            fastertransformer::myAssert(                                                                               \
-                __FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__));                     \
-        }                                                                                                              \
-    } while (0)
+#define FT_CHECK(val) FT_CHECK_WITH_INFO(val, "")
+#define FT_FAIL(info, ...) rocm::throwRuntimeError(__FILE__, __LINE__, fastertransformer::fmtstr(info, ##__VA_ARGS__))
 
 /*************Time Handling**************/
 class HipTimer {
@@ -314,9 +275,6 @@ inline int getDeviceCount()
     return count;
 }
 
-
-
-FtHipDataType getModelFileType(std::string ini_file, std::string section_name);
 
 // clang-format off
 template<typename T> struct packed_type_2;

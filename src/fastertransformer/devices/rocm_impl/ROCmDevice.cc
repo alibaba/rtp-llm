@@ -34,9 +34,9 @@ using namespace rocm;
 
 ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
     RUNTIME_ASSERT_OP_ARG(params.tp_rank == 0, "rocm device doesn't support nccl");
-    HIP_CHECK(hipInit(0));
-    HIP_CHECK(hipSetDevice(params.device_id));  // TODO(rocm): ensure this is setup every op
-    HIP_CHECK(hipStreamCreate(&stream_));
+    check_hip_error(hipInit(0));
+    check_hip_error(hipSetDevice(params.device_id));  // TODO(rocm): ensure this is setup every op
+    check_hip_error(hipStreamCreate(&stream_));
     check_hip_error(hipGetDeviceProperties(&rocmDevProp, device_id_));
 
     if (params.tp_size > 1) {
@@ -82,7 +82,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
 #endif
     if (params.device_reserve_memory_bytes) {
         size_t free_bytes, total_bytes;
-        HIP_CHECK(hipMemGetInfo(&free_bytes, &total_bytes));
+        check_hip_error(hipMemGetInfo(&free_bytes, &total_bytes));
         TrackerAllocatorParams tracker_params;
 #if PINCPU_MEM
         tracker_params.real_allocator     = allocator_.get();  // TODO(rocm): leak?
@@ -98,6 +98,7 @@ ROCmDevice::ROCmDevice(const DeviceInitParams& params): DeviceBase(params) {
                     free_bytes,
                     tracker_params.target_track_bytes);
         allocator_.reset(new TrackerAllocator(tracker_params));
+        syncAndCheck();
 #if PINCPU_MEM
     }
 #else
@@ -157,7 +158,7 @@ ROCmDevice::~ROCmDevice() {
     curandstate_buf_.reset();
 
     if (stream_ != nullptr) {
-        HIP_CHECK(hipStreamDestroy(stream_));
+        check_hip_error(hipStreamDestroy(stream_));
     }
 
     if (nccl_param_.nccl_comm_) {
@@ -245,7 +246,7 @@ TransposeOutput ROCmDevice::transpose(const TransposeParams& params) {
 }
 
 void ROCmDevice::syncAndCheck() {
-    (void)hipDeviceSynchronize();
+    sync_check_hip_error();
 }
 
 void ROCmDevice::syncCommunication(bool timeout) {

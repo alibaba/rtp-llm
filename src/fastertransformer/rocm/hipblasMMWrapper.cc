@@ -142,7 +142,6 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                                   ldc,
                                   computeType,
                                   algo));
-    sync_check_hip_error();
     mu_->unlock();
 }
 
@@ -249,7 +248,6 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
         hipblasLtMatrixLayoutDestroy(Adesc);
         hipblasLtMatrixLayoutDestroy(Bdesc);
         hipblasLtMatrixLayoutDestroy(Cdesc);
-        sync_check_hip_error();
     } else {
         int hipblasAlgo = info.algoId;
         check_hip_error(hipblasGemmEx(hipblas_handle_,
@@ -271,7 +269,6 @@ void hipblasMMWrapper::Gemm(hipblasOperation_t transa,
                                       ldc,
                                       computeType_,
                                       static_cast<hipblasGemmAlgo_t>(hipblasAlgo)));
-        sync_check_hip_error();
     }
     mu_->unlock();
 }
@@ -767,7 +764,6 @@ void hipblasMMWrapper::_Int8Gemm(const int     m,
     void*                workSpace     = hipblas_workspace_;
     int                  workspaceSize = hipblas_workspace_ == NULL ? 0 : HIPBLAS_WORKSPACE_SIZE;
 
-    sync_check_hip_error();
     auto ret = cublasLtMatmulWrapper(hipblaslt_handle_,
                                      operationDesc,
                                      alpha,
@@ -785,13 +781,11 @@ void hipblasMMWrapper::_Int8Gemm(const int     m,
                                      workspaceSize,
                                      stream_);
     check_hip_error(ret);
-    sync_check_hip_error();
 
     cublasLtMatmulDescDestroy(operationDesc);
     cublasLtMatrixLayoutDestroy(Adesc);
     cublasLtMatrixLayoutDestroy(Bdesc);
     cublasLtMatrixLayoutDestroy(Cdesc);
-    sync_check_hip_error();
     mu_->unlock();
 #endif
 }
