@@ -130,7 +130,7 @@ PrepareAllReduceOutput DeviceOps::prepareAllReduce(const PrepareAllReduceParams&
     return PrepareAllReduceOutput{params.buffer};
 };
 
-void DeviceOps::memset(Buffer& buf) {
+void DeviceOps::bufMemset(Buffer& buf, int val) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 

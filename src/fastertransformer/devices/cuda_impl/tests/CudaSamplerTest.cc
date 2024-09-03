@@ -39,6 +39,7 @@ TEST_F(CudaSamplerTest, testTopK) {
     auto temperture = createBuffer<float>({4}, {1.0, 1.0, 10.0, 10.0}, AllocationType::HOST);
 
     BufferPtr output_all_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {4, 10}, ft::AllocationType::DEVICE});
+    device_->bufMemset(*output_all_probs, 0);
 
     GreedyParams params({
         *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
@@ -99,7 +100,7 @@ TEST_F(CudaSamplerTest, testTopP) {
     auto temperture = createBuffer<float>({4}, {0.01, 0.5, 0.9, 0.9}, AllocationType::HOST);
 
     BufferPtr output_all_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {4, 10}, ft::AllocationType::DEVICE});
-    device_->memset(*output_all_probs);
+    device_->bufMemset(*output_all_probs, 0);
 
     GreedyParams params({
         *logits, *sequence_lengths, *input_lengths, *output_token_ids, step,

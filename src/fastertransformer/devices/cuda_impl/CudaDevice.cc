@@ -218,11 +218,11 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
     return output;
 }
 
-void CudaDevice::memset(Buffer& buf) {
+void CudaDevice::bufMemset(Buffer& buf, int val) {
     if (buf.where() == MemoryType::MEMORY_CPU || buf.where() == MemoryType::MEMORY_CPU_PINNED) {
-        std::memset(buf.data(), 0, buf.sizeBytes());
+        std::memset(buf.data(), val, buf.sizeBytes());
     } else {
-        cudaMemset(buf.data(), 0, buf.sizeBytes());
+        cudaMemset(buf.data(), val, buf.sizeBytes());
     }
 }
 
