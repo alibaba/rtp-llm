@@ -1,4 +1,4 @@
-#include "src/fastertransformer/devices/rocm_impl/ROCmDevice.h"
+    #include "src/fastertransformer/devices/rocm_impl/ROCmDevice.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/kernels/sampling_topk_kernels.h"
 #include "src/fastertransformer/kernels/sampling_topp_kernels.h"
@@ -70,11 +70,10 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
                                 nullptr,
                                 nullptr,
                                 nullptr,
-                                nullptr,
-                                nullptr,
                                 max_top_k,
                                 max_top_p,
                                 vocab_size_padded,
+                                nullptr,
                                 nullptr,
                                 stream_,
                                 batch_size,
@@ -97,6 +96,7 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
                                 vocab_size_padded,
                                 nullptr,
                                 max_top_p,
+                                nullptr,
                                 stream_,
                                 &device_prop_,
                                 nullptr);
@@ -230,8 +230,6 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
         nullptr, // finished
         cum_log_probs,
         output_log_probs,
-        nullptr, // output_index_logits
-        nullptr, // token_id_for_index_prob,
         (curandState_t *)curandstate_buf_->data(),
         max_top_k,  // useless because runtime_top_k_buf_ is never nullptr. Keep for legacy.
         (int32_t*)runtime_top_k_buf->data<uint32_t>(),
@@ -239,6 +237,7 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
         runtime_top_p_buf->data<float>(),
         vocab_size_padded,
         nullptr, // end_id
+        nullptr,
         stream_,
         batch_size,
         skip_top_k_decode_buf->data<bool>());
@@ -302,6 +301,7 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
         nullptr, // end_id
         max_top_p,
         runtime_top_p_buf->data<float>(),
+        nullptr,
         stream_,
         &device_prop_,
         skip_top_p_decode_buf->data<bool>());
