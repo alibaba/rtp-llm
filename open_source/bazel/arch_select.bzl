@@ -3,7 +3,6 @@ load("@pip_cpu_torch//:requirements.bzl", requirement_cpu="requirement")
 load("@pip_gpu_torch//:requirements.bzl", requirement_gpu="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
-load("@pip_cpu_arm_torch//:requirements.bzl", requirement_cpu_arm="requirement")
 
 def requirement(names):
     for name in names:
@@ -13,7 +12,6 @@ def requirement(names):
                 "//:using_cuda12": [requirement_gpu_cuda12(name)],
                 "//:using_cuda11": [requirement_gpu(name)],
                 "//:using_rocm": [requirement_gpu_rocm(name)],
-                "//:using_arm": [requirement_cpu_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
             }),
             visibility = ["//visibility:public"],
@@ -33,10 +31,10 @@ def embedding_arpc_deps():
 
 def whl_deps():
     return select({
-        "//:using_cuda12": ["torch==2.1.2+cu121", "torchvision"],
-        "//:using_cuda11": ["torch==2.1.2+cu118", "torchvision"],
-        "//:using_rocm": ["torch==2.1.2", "torchvision"],
-        "//conditions:default": ["torch==2.1.2", "torchvision"],
+        "//:using_cuda12": ["torch==2.1.2+cu121"],
+        "//:using_cuda11": ["torch==2.1.2+cu118"],
+        "//:using_rocm": ["torch==2.1.2"],
+        "//conditions:default": ["torch==2.1.2"],
     })
 
 def torch_deps():
@@ -64,6 +62,16 @@ def torch_deps():
     })
     return deps
 
+def cutlass_kernels_interface():
+    native.alias(
+        name = "cutlass_kernels_interface",
+        actual = "//src/fastertransformer/cutlass:cutlass_kernels_impl",
+    )
+
+    native.alias(
+        name = "cutlass_headers_interface",
+        actual = "//src/fastertransformer/cutlass:cutlass_headers",
+    )
 
 def fa_deps():
     native.alias(
