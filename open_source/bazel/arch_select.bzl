@@ -76,12 +76,12 @@ def cutlass_kernels_interface():
 def fa_deps():
     native.alias(
         name = "fa",
-        actual = "@flash_attention//:fa2"
+        actual = "@flash_attention//:fa"
     )
 
     native.alias(
         name = "fa_hdrs",
-        actual = "@flash_attention//:fa2_hdrs",
+        actual = "@flash_attention//:fa_hdrs",
     )
 
 def kernel_so_deps():

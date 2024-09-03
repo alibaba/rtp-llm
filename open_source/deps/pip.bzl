@@ -1,39 +1,31 @@
-load("@rules_python//python:pip.bzl", "pip_install")
+load("@rules_python//python:pip.bzl", "pip_parse")
 
 def pip_deps():
-    pip_install(
+    pip_parse(
         name = "pip_cpu_torch",
-        requirements = ["//open_source/deps:requirements_torch_cpu.txt", "//open_source/deps:requirements_base.txt"],
+        requirements_lock = "//open_source/deps:requirements_lock_torch_cpu.txt",
         python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = [
-            "--index-url=https://mirrors.aliyun.com/pypi/simple/",
-        ],
-        timeout=12000,
+        timeout = 3600,
     )
 
-    pip_install(
+    pip_parse(
         name = "pip_gpu_torch",
-        requirements = ["//open_source/deps:requirements_torch_gpu.txt", "//open_source/deps:requirements_base.txt"],
+        requirements_lock = "//open_source/deps:requirements_lock_torch_gpu.txt",
         python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = [
-            "--index-url=https://mirrors.aliyun.com/pypi/simple/",
-        ],
-        timeout=12000,
+        timeout = 3600,
     )
 
-    pip_install(
+    pip_parse(
         name = "pip_gpu_cuda12_torch",
-        requirements = ["//open_source/deps:requirements_torch_gpu_cuda12.txt", "//open_source/deps:requirements_base.txt"],
+        requirements_lock = "//open_source/deps:requirements_lock_torch_gpu_cuda12.txt",
         python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = [
-            "--index-url=https://mirrors.aliyun.com/pypi/simple/",
-        ],
-        timeout=12000,
+        timeout = 3600,
+        quiet = False,
     )
 
-    pip_install(
+    pip_parse(
         name = "pip_gpu_rocm_torch",
-        requirements = ["//open_source/deps:requirements_rocm.txt", "//open_source/deps:requirements_base.txt"],
+        requirements_lock = "//open_source/deps:requirements_lock_rocm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
-        timeout=12000,
+        timeout = 12000,
     )

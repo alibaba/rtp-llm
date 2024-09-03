@@ -32,7 +32,17 @@ def http_deps():
         name = "torch_2.1_py310_cpu",
         sha256 = "bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd",
         urls = [
-            "https://artlab.alibaba-inc.com/1/pypi/rtp_diffusion_internal/torch/torch-2.1.2+cpu-cp310-cp310-linux_x86_64.whl",
+            "https://download.pytorch.org/whl/cpu/torch-2.1.2%2Bcpu-cp310-cp310-linux_x86_64.whl#sha256=bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd",
+        ],
+        type = "zip",
+        build_file = clean_dep("//:BUILD.pytorch"),
+    )
+
+    http_archive(
+        name = "torch_2.1_py310_cuda",
+        sha256 = "b2184b7729ef3b9b10065c074a37c1e603fd99f91e38376e25cb7ed6e1d54696",
+        urls = [
+            "https://download.pytorch.org/whl/cu121/torch-2.1.2%2Bcu121-cp310-cp310-linux_x86_64.whl#sha256=b2184b7729ef3b9b10065c074a37c1e603fd99f91e38376e25cb7ed6e1d54696",
         ],
         type = "zip",
         build_file = clean_dep("//:BUILD.pytorch"),

@@ -9,17 +9,25 @@ def clean_dep(dep):
 
 def git_deps():
     git_repository(
+        name = "rules_cc",
+        remote = "https://github.com/bazelbuild/rules_cc.git",
+        commit = "1477dbab59b401daa94acedbeaefe79bf9112167",
+    )
+
+    git_repository(
         name = "rules_python",
         remote = "https://github.com/bazelbuild/rules_python.git",
-        patches = ["//patches/rules_python:0001-fix-triton-and-pypi-wheel.patch"],
-        commit = "5eb0de810f76f16ab8a909953c1b235051536686",
-        shallow_since = "1611475624 +1100",
+        commit = "084b877c98b580839ceab2b071b02fc6768f3de6",
+        patches = [
+            "//patches/rules_python:0001-add-extra-data.patch",
+            "//patches/rules_python:0002-remove-import-from-rules_cc.patch",
+        ],
     )
 
     new_git_repository(
         name = "cutlass",
         remote = "https://github.com/NVIDIA/cutlass.git",
-        commit = "8783c41851cd3582490e04e69e0cd756a8c1db7f",
+        commit = "bbe579a9e3beb6ea6626d9227ec32d0dae119a49",
         build_file = str(Label("//3rdparty/cutlass:cutlass.BUILD")),
     )
 
@@ -78,7 +86,13 @@ def git_deps():
     git_repository(
         name = "com_google_absl",
         remote = "https://github.com/abseil/abseil-cpp.git",
-        patch_cmds = ["sed -i -e 's/^#define ABSL_OPTION_USE_STD_STRING_VIEW 2/#define ABSL_OPTION_USE_STD_STRING_VIEW 0/' 'absl/base/options.h'"],
+        patch_cmds = [
+            "sed -i -e 's/^#define ABSL_OPTION_USE_STD_STRING_VIEW 2/#define ABSL_OPTION_USE_STD_STRING_VIEW 0/' 'absl/base/options.h'",
+            "sed 's$@bazel_tools//platforms:(linux|osx|windows|android|freebsd|ios|os)$@platforms//os:\\1$' -E -i absl/BUILD.bazel",
+            "sed 's$@bazel_tools//platforms:(cpu|x86_32|x86_64|ppc|arm|aarch64|s390x)$@platforms//cpu:\\1$' -i -E absl/BUILD.bazel",
+            "sed 's$@bazel_tools//platforms:(linux|osx|windows|android|freebsd|ios|os)$@platforms//os:\\1$' -E -i absl/time/internal/cctz/BUILD.bazel",
+            "sed 's$@bazel_tools//platforms:(cpu|x86_32|x86_64|ppc|arm|aarch64|s390x)$@platforms//cpu:\\1$' -i -E absl/time/internal/cctz/BUILD.bazel",
+        ],
         commit = "6f9d96a1f41439ac172ee2ef7ccd8edf0e5d068c",
         shallow_since = "1678195250 +0800",
     )
