@@ -58,6 +58,7 @@ public:
 
 public:
     void copy(const CopyParams& params) override;
+    void memset(Buffer& buf) override;
     TransposeOutput transpose(const TransposeParams& params) override;
     AddBiasOutput addbias(const AddBiasParams& params) override;
     ConvertOutput convert(const ConvertParams& params) override;

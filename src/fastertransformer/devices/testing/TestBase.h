@@ -22,7 +22,19 @@ using namespace fastertransformer;
 
 static const std::string DEFAULT_DEVICE = "CPU";
 
-class DeviceTestBase : public ::testing::Test {
+#define ASSERT_VECTOR_EQUAL(x, y)                                                                                       \
+    ASSERT_EQ(x.size(), y.size()) << "Vectors x and y are of unequal length";                                          \
+    for (int i = 0; i < x.size(); ++i) {                                                                               \
+        ASSERT_EQ(x[i], y[i]) << "Vectors x and y differ at index " << i;                                              \
+    }
+
+#define ASSERT_VECTOR_NEAR(x, y, abs_error)                                                                            \
+    ASSERT_EQ(x.size(), y.size()) << "Vectors x and y are of unequal length";                                          \
+    for (int i = 0; i < x.size(); ++i) {                                                                               \
+        ASSERT_NEAR(x[i], y[i], abs_error) << "Vectors x and y differ at index " << i;                                 \
+    }
+
+class DeviceTestBase: public ::testing::Test {
 public:
     void SetUp() override {
         // Logger::getLogger().setLevel(Logger::Level::DEBUG);

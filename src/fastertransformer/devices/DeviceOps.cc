@@ -130,4 +130,8 @@ PrepareAllReduceOutput DeviceOps::prepareAllReduce(const PrepareAllReduceParams&
     return PrepareAllReduceOutput{params.buffer};
 };
 
+void DeviceOps::memset(Buffer& buf) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 } // namespace fastertransformer

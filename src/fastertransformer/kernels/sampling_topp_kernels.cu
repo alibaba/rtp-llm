@@ -884,6 +884,61 @@ struct BlockPrefixCallbackOp {
 };
 
 template<typename T, int BLOCK_SIZE>
+__global__ void set_out_prob_kernel(float* out_prob, const T* sorted_log_probs, const int* sorted_id_vals, const bool* skip_decode, const float* top_ps, const float top_p, const int batch_size, const int vocab_size) {    
+    __shared__ int   stop_shared;
+    const int tid      = threadIdx.x;
+    const int batch_id = blockIdx.x;
+    if (skip_decode != nullptr && skip_decode[batch_id]) {
+        return;
+    }
+
+    constexpr int WARP_SIZE      = 32;
+    constexpr int NUM_WARPS      = BLOCK_SIZE / WARP_SIZE;
+    const int     lane_id        = threadIdx.x % WARP_SIZE;
+    const int     warp_id        = threadIdx.x / WARP_SIZE;
+    const float   prob_threshold = (top_ps != nullptr) ? top_ps[batch_id] : top_p;
+
+    typedef cub::BlockScan<float, BLOCK_SIZE>  BlockScan;
+    __shared__ typename BlockScan::TempStorage temp_storage;
+    __shared__ uint32_t                        selected_shared[NUM_WARPS];
+    // Initialize running total
+    BlockPrefixCallbackOp prefix_op(0);
+
+    if (lane_id == 0) {
+        selected_shared[warp_id] = 0;
+    }
+
+    __syncthreads();
+
+    int   offset        = batch_id * vocab_size;
+    int   end           = ((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
+    int   total_num     = 0;
+    float thread_offset = 0;
+
+    for (int i = tid; i < end; i += BLOCK_SIZE) {
+        total_num += BLOCK_SIZE;
+        float thread_count = (i < vocab_size) ? (float)sorted_log_probs[offset + i] : 0.f;
+        BlockScan(temp_storage).InclusiveSum(thread_count, thread_offset, prefix_op);
+
+        uint32_t active_mask = __ballot_sync(0xFFFFFFFF, prob_threshold <= thread_offset);
+
+        if (active_mask != 0) {
+            if (lane_id == 0) {
+                atomicAdd(&stop_shared, 1);
+            }
+        }
+        if (i < vocab_size) {
+            int token_idx = sorted_id_vals[offset + i];
+            out_prob[offset + token_idx] =  max(0.0, thread_count - max(0.0, thread_offset - prob_threshold)) / prob_threshold;
+        }
+        __syncthreads();
+        if (stop_shared > 0) {
+            break;
+        }
+    }
+}
+
+template<typename T, int BLOCK_SIZE>
 __global__ void topp_sampling(T*             sorted_log_probs,
                               int*           sorted_id_vals,
                               int*           ids,
@@ -1031,6 +1086,7 @@ void invokeBatchTopPSampling(void*           workspace,
                              const int*      end_ids,
                              const float     max_top_p,
                              const float*    top_ps,
+                             float*          output_all_probs,
                              cudaStream_t    stream,
                              cudaDeviceProp* cuda_device_prop,
                              const bool*     skip_decode)
@@ -1102,15 +1158,18 @@ void invokeBatchTopPSampling(void*           workspace,
             return;
         }
 
-        topp_beam_topk_kernel<T, 1, block_size><<<batch_size, block_size, 0, stream>>>(log_probs,
-                                                                                       sorted_id_vals,
-                                                                                       sorted_log_probs,
-                                                                                       vocab_size,
-                                                                                       offset_buf,
-                                                                                       begin_offset_buf,
-                                                                                       max_top_p,
-                                                                                       top_ps,
-                                                                                       skip_decode);
+        //
+        if (!output_all_probs) {
+            topp_beam_topk_kernel<T, 1, block_size><<<batch_size, block_size, 0, stream>>>(log_probs,
+                                                                                sorted_id_vals,
+                                                                                sorted_log_probs,
+                                                                                vocab_size,
+                                                                                offset_buf,
+                                                                                begin_offset_buf,
+                                                                                max_top_p,
+                                                                                top_ps,
+                                                                                skip_decode);
+        }
 
         check_cuda_error(
             cub::DeviceSegmentedRadixSort::SortPairsDescending(cub_temp_storage,
@@ -1135,18 +1194,31 @@ void invokeBatchTopPSampling(void*           workspace,
             return;
         }
         else {
-            topp_beam_topk_kernel<T, 1, block_size><<<batch_size, block_size, 0, stream>>>(log_probs,
-                                                                                           sorted_id_vals,
-                                                                                           sorted_log_probs,
-                                                                                           vocab_size,
-                                                                                           offset_buf,
-                                                                                           begin_offset_buf,
-                                                                                           max_top_p,
-                                                                                           top_ps,
-                                                                                           skip_decode);
+            if (!output_all_probs) {
+                topp_beam_topk_kernel<T, 1, block_size><<<batch_size, block_size, 0, stream>>>(log_probs,
+                                                                                            sorted_id_vals,
+                                                                                            sorted_log_probs,
+                                                                                            vocab_size,
+                                                                                            offset_buf,
+                                                                                            begin_offset_buf,
+                                                                                            max_top_p,
+                                                                                            top_ps,
+                                                                                            skip_decode);
+            }
             segmented_topp_impl::topPPerSegment(
                 context, params, dataTypeKind, cub_temp_storage, cub_temp_storage_size, stream);
         }
+    }
+
+    if (output_all_probs) {
+        set_out_prob_kernel<T, 256><<<batch_size, 256, 0, stream>>>(output_all_probs,
+                                                                    sorted_log_probs,
+                                                                    sorted_id_vals,
+                                                                    skip_decode,
+                                                                    top_ps,
+                                                                    max_top_p,
+                                                                    batch_size,
+                                                                    vocab_size);
     }
 
     constexpr int SAMPLING_BLOCK_SIZE = 256;
@@ -1187,6 +1259,7 @@ template void invokeBatchTopPSampling(void*           workspace,
                                       const int*      end_ids,
                                       const float     max_top_p,
                                       const float*    top_ps,
+                                      float*          output_all_probs,
                                       cudaStream_t    stream,
                                       cudaDeviceProp* cuda_device_prop,
                                       const bool*     skip_decode);
@@ -1209,6 +1282,7 @@ template void invokeBatchTopPSampling(void*           workspace,
                                       const int*      end_ids,
                                       const float     max_top_p,
                                       const float*    top_ps,
+                                      float*          output_all_probs,
                                       cudaStream_t    stream,
                                       cudaDeviceProp* cuda_device_prop,
                                       const bool*     skip_decode);
@@ -1231,6 +1305,7 @@ void invokeTopPSampling(void*           workspace,
                         const size_t    vocab_size_padded,
                         const int*      end_ids,
                         const float     top_p,
+                        float*          output_all_probs,
                         cudaStream_t    stream,
                         cudaDeviceProp* cuda_device_prop,
                         const bool*     skip_decode)
@@ -1253,6 +1328,7 @@ void invokeTopPSampling(void*           workspace,
                             end_ids,
                             top_p,
                             nullptr,
+                            output_all_probs,
                             stream,
                             cuda_device_prop,
                             skip_decode);
@@ -1275,6 +1351,7 @@ template void invokeTopPSampling(void*           workspace,
                                  const size_t    vocab_size_padded,
                                  const int*      end_ids,
                                  const float     top_p,
+                                 float*          output_all_probs,
                                  cudaStream_t    stream,
                                  cudaDeviceProp* cuda_device_prop,
                                  const bool*     skip_decode);
@@ -1296,6 +1373,7 @@ template void invokeTopPSampling(void*           workspace,
                                  const size_t    vocab_size_padded,
                                  const int*      end_ids,
                                  const float     top_p,
+                                 float*          output_all_probs,
                                  cudaStream_t    stream,
                                  cudaDeviceProp* cuda_device_prop,
                                  const bool*     skip_decode);

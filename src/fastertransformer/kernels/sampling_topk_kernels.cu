@@ -213,7 +213,7 @@ __global__ void topk_stage1(const T* __restrict log_probs,
     }
 }
 
-template<typename T, int BLOCK_SIZE_, int BLOCKS_PER_BEAM_>
+template<typename T, int BLOCK_SIZE_, int BLOCKS_PER_BEAM_, bool RECORD_PROB>
 __global__ void topk_stage2_sampling(const int* __restrict topk_tmp_id_buf,
                                      T*             topk_tmp_val_buf,
                                      int*           ids,
@@ -221,8 +221,7 @@ __global__ void topk_stage2_sampling(const int* __restrict topk_tmp_id_buf,
                                      bool*          finished,
                                      float*         cum_log_probs,
                                      float*         output_log_probs,
-                                     float*         index_log_probs,
-                                     int*           token_id_for_index_prob,
+                                     float*         output_all_probs,
                                      const int      max_top_k,
                                      const int*     top_ks,
                                      const float    top_p,
@@ -290,13 +289,16 @@ __global__ void topk_stage2_sampling(const int* __restrict topk_tmp_id_buf,
         __syncthreads();
     }
 
-    if (tid == 0) {
-        if (token_id_for_index_prob && index_log_probs) {
-            index_log_probs[batch_id] = -10000;
-            int token_id = token_id_for_index_prob[batch_id];
-            for (int i = 0; i < k; i++){
-                if (topk_tmp_id_buf[batch_id * stride + s_id[i]] % vocab_size == token_id) {
-                    index_log_probs[batch_id] = logf(s_val2[i]) - logf(s_sum);
+    //@miji TODO: use block sum to make it faster
+    if constexpr(RECORD_PROB) {        
+        float prob_sum = 0;
+        if (threadIdx.x == 0) {
+            for (int i = 0; i < k; i++) {
+                int token_idx = topk_tmp_id_buf[batch_id * stride + s_id[i]] % vocab_size;
+                float origin_prob = __expf(logf(s_val2[i]) - logf(s_sum));
+                prob_sum += origin_prob;
+                output_all_probs[batch_id * vocab_size + token_idx] = max(0.0, origin_prob - max(0.0, prob_sum - prob_threshold)) / prob_threshold;;
+                if (prob_sum >= prob_threshold) {
                     break;
                 }
             }
@@ -335,7 +337,7 @@ __global__ void topk_stage2_sampling(const int* __restrict topk_tmp_id_buf,
     }
 }
 
-#define CASE_K(K_MIN, K_MAX, BLOCK_SIZE_1_, BLOCK_SIZE_2_, BLOCKS_PER_BEAM_)                                           \
+#define CASE_K(K_MIN, K_MAX, BLOCK_SIZE_1_, BLOCK_SIZE_2_, BLOCKS_PER_BEAM_, RECORD_PROB)                                           \
     case K_MIN ... K_MAX:                                                                                              \
         topk_stage1<T, BLOCK_SIZE_1_, BLOCKS_PER_BEAM_>                                                                \
             <<<batch_size * BLOCKS_PER_BEAM_, BLOCK_SIZE_1_, 0, stream>>>(log_probs,                                   \
@@ -348,7 +350,7 @@ __global__ void topk_stage2_sampling(const int* __restrict topk_tmp_id_buf,
                                                                           vocab_size,                                  \
                                                                           end_ids,                                     \
                                                                           skip_decode);                                \
-        topk_stage2_sampling<T, BLOCK_SIZE_2_, BLOCKS_PER_BEAM_>                                                       \
+        topk_stage2_sampling<T, BLOCK_SIZE_2_, BLOCKS_PER_BEAM_, RECORD_PROB>                                          \
             <<<batch_size, BLOCK_SIZE_2_, K_MAX * sizeof(int) + K_MAX * sizeof(float), stream>>>(topk_tmp_id_buf,      \
                                                                                                  topk_tmp_val_buf,     \
                                                                                                  ids,                  \
@@ -356,8 +358,7 @@ __global__ void topk_stage2_sampling(const int* __restrict topk_tmp_id_buf,
                                                                                                  finished,             \
                                                                                                  cum_log_probs,        \
                                                                                                  output_log_probs,     \
-                                                                                                 index_log_probs,    \
-                                                                                                 token_id_for_index_prob,    \
+                                                                                                 output_all_probs,     \
                                                                                                  max_top_k,            \
                                                                                                  top_ks,               \
                                                                                                  top_p,                \
@@ -377,8 +378,6 @@ void invokeBatchTopKSampling(void*          workspace,
                              bool*          finished,
                              float*         cum_log_probs,
                              float*         output_log_probs,
-                             float*         index_log_probs,
-                             int*           token_id_for_index_prob,
                              curandState_t* curandstate,
                              const int      max_top_k,
                              const int*     top_ks,
@@ -386,6 +385,7 @@ void invokeBatchTopKSampling(void*          workspace,
                              const float*   top_ps,
                              const int      vocab_size_padded,
                              const int*     end_ids,
+                             float*         output_all_probs,
                              cudaStream_t   stream,
                              const int      batch_size,
                              const bool*    skip_decode)
@@ -412,14 +412,19 @@ void invokeBatchTopKSampling(void*          workspace,
     T*   temp_log_probs   = (T*)workspace;
     int* topk_tmp_id_buf  = (int*)(temp_log_probs + temp_log_probs_buf_size);
     T*   topk_tmp_val_buf = (T*)(topk_tmp_id_buf + topk_tmp_ids_buf_size);
-
-    switch (max_top_k) {
-        CASE_K(1, 16, 128, 128, 8);
-        CASE_K(17, 32, 256, 128, 8);
-        CASE_K(33, 64, 256, 256, 8);
-        CASE_K(65, 1024, 256, 256, 8);
-        default:
-            throw std::domain_error(fmtstr("top-k kernel supports 1<=k<=1024 but got k=%d", max_top_k));
+#define SWITCH_MAX_K(LOG_PROB)                                                                                         \
+    switch (max_top_k) {                                                                                               \
+        CASE_K(1, 16, 128, 128, 8, LOG_PROB);                                                                          \
+        CASE_K(17, 32, 256, 128, 8, LOG_PROB);                                                                         \
+        CASE_K(33, 64, 256, 256, 8, LOG_PROB);                                                                         \
+        CASE_K(65, 1024, 256, 256, 8, LOG_PROB);                                                                       \
+        default:                                                                                                       \
+            throw std::domain_error(fmtstr("top-k kernel supports 1<=k<=1024 but got k=%d", max_top_k));               \
+    }
+    if (output_all_probs) {
+        SWITCH_MAX_K(true);
+    } else {
+        SWITCH_MAX_K(false);
     }
 }
 
@@ -433,8 +438,6 @@ template void invokeBatchTopKSampling(void*          workspace,
                                       bool*          finished_buf,
                                       float*         cum_log_probs,
                                       float*         output_log_probs,
-                                      float*         index_log_probs,
-                                      int*           token_id_for_index_prob,
                                       curandState_t* curandstate,
                                       const int      max_top_k,
                                       const int*     top_ks,
@@ -442,6 +445,7 @@ template void invokeBatchTopKSampling(void*          workspace,
                                       const float*   top_ps,
                                       const int      vocab_size_padded,
                                       const int*     end_ids,
+                                      float*         output_all_probs,
                                       cudaStream_t   stream,
                                       const int      batch_size,
                                       const bool*    skip_decode);
@@ -454,8 +458,6 @@ template void invokeBatchTopKSampling(void*          workspace,
                                       bool*          finished_buf,
                                       float*         cum_log_probs,
                                       float*         output_log_probs,
-                                      float*          index_log_probs,
-                                      int*           token_id_for_index_prob,
                                       curandState_t* curandstate,
                                       const int      max_top_k,
                                       const int*     top_ks,
@@ -463,6 +465,7 @@ template void invokeBatchTopKSampling(void*          workspace,
                                       const float*   top_ps,
                                       const int      vocab_size_padded,
                                       const int*     end_ids,
+                                      float*         output_all_probs,
                                       cudaStream_t   stream,
                                       const int      batch_size,
                                       const bool*    skip_decode);
@@ -476,13 +479,12 @@ void invokeTopKSampling(void*          workspace,
                         bool*          finished_buf,
                         float*         cum_log_probs,
                         float*         output_log_probs,
-                        float*             index_log_probs,
-                        int*           token_id_for_index_prob,
                         curandState_t* curandstate,
                         const int      top_k,
                         const float    top_p,
                         const int      vocab_size_padded,
                         const int*     end_ids,
+                        float*         output_all_probs,
                         cudaStream_t   stream,
                         const int      batch_size,
                         const bool*    skip_decode)
@@ -495,8 +497,6 @@ void invokeTopKSampling(void*          workspace,
                             finished_buf,
                             cum_log_probs,
                             output_log_probs,
-                            index_log_probs,
-                            token_id_for_index_prob,
                             curandstate,
                             top_k,
                             nullptr,
@@ -504,6 +504,7 @@ void invokeTopKSampling(void*          workspace,
                             nullptr,
                             vocab_size_padded,
                             end_ids,
+                            output_all_probs,
                             stream,
                             batch_size,
                             skip_decode);
@@ -517,13 +518,12 @@ template void invokeTopKSampling(void*          workspace,
                                  bool*          finished_buf,
                                  float*         cum_log_probs,
                                  float*         output_log_probs,
-                                 float*         index_log_probs,
-                                 int*           token_id_for_index_prob,
                                  curandState_t* curandstate,
                                  const int      top_k,
                                  const float    top_p,
                                  const int      vocab_size_padded,
                                  const int*     end_ids,
+                                 float*         output_all_probs,
                                  cudaStream_t   stream,
                                  const int      batch_size,
                                  const bool*    skip_decode);
@@ -536,13 +536,12 @@ template void invokeTopKSampling(void*          workspace,
                                  bool*          finished_buf,
                                  float*         cum_log_probs,
                                  float*         output_log_probs,
-                                 float*          index_log_probs,
-                                 int*           token_id_for_index_prob,
                                  curandState_t* curandstate,
                                  const int      top_k,
                                  const float    top_p,
                                  const int      vocab_size_padded,
                                  const int*     end_ids,
+                                 float*         output_all_probs,
                                  cudaStream_t   stream,
                                  const int      batch_size,
                                  const bool*    skip_decode);

@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer//core/BufferHelper.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/kernels/sampling_topk_kernels.h"
 #include "src/fastertransformer/kernels/sampling_topp_kernels.h"
@@ -68,11 +69,8 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
     auto runtime_top_p_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
     copy({*runtime_top_p_buf, top_p});
 
-    auto cum_log_probs = params.cum_log_probs.has_value() ?
-                         params.cum_log_probs.value().get().data<float>() : nullptr;
-    auto output_log_probs = params.output_log_probs.has_value() ?
-                            params.output_log_probs.value().get().data<float>() : nullptr;
-
+    auto cum_log_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.cum_log_probs, float);
+    auto output_log_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.output_log_probs, float);
 
     // 3. prepare common inputs
 
@@ -176,20 +174,19 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
                     [](auto s) { return !s; }))
     {
         size_t topk_ws_size;
-        invokeTopKSampling<SamplerT>(nullptr,
+        invokeTopKSampling<SamplerT>(nullptr, // workspace3
                                     topk_ws_size,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
+                                    nullptr, // log_probs
+                                    nullptr, // ids
+                                    nullptr, // sequence_length
+                                    nullptr, // finished_buf
+                                    nullptr, /// cum_log_probs
+                                    nullptr, // output_log_probs
+                                    nullptr, // curandstaste
                                     max_top_k,
-                                    max_top_p,
+                                    max_top_p, 
                                     vocab_size_padded,
+                                    nullptr, // end ids
                                     nullptr,
                                     stream_,
                                     batch_size,
@@ -205,8 +202,6 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
             nullptr, // finished
             cum_log_probs,
             output_log_probs,
-            nullptr, // output_index_logits
-            nullptr, // token_id_for_index_prob,
             (curandState_t *)curandstate_buf_->data(),
             max_top_k,  // useless because runtime_top_k_buf_ is never nullptr. Keep for legacy.
             (int32_t*)runtime_top_k_buf->data<uint32_t>(),
@@ -214,6 +209,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
             runtime_top_p_buf->data<float>(),
             vocab_size_padded,
             nullptr, // end_id
+            GET_TYPED_VALUE_FROM_OPT_REF(params.output_all_probs, float),
             stream_,
             batch_size,
             skip_top_k_decode_buf->data<bool>());
@@ -266,23 +262,24 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
 
         size_t topp_ws_size;
         size_t cub_temp_storage_size;
-        invokeTopPSampling<SamplerT>(nullptr,
+        invokeTopPSampling<SamplerT>(nullptr, // workspace
                                     topp_ws_size,
                                     cub_temp_storage_size,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
+                                    nullptr, // output_ids
+                                    nullptr, // sequence_length
+                                    nullptr, // finished_buf
+                                    nullptr, // cum_log_probs
+                                    nullptr, // output_log_probs
+                                    nullptr, // log_probs
+                                    nullptr, // id_vals
+                                    nullptr, // offsets_buf
+                                    nullptr, // begin_offset_buf
+                                    nullptr, /// curandstate
                                     batch_size,
                                     vocab_size_padded,
                                     nullptr,
                                     max_top_p,
+                                    nullptr, // output_all_probs
                                     stream_,
                                     &device_prop_,
                                     nullptr);
@@ -307,6 +304,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
             nullptr, // end_id
             max_top_p,
             runtime_top_p_buf->data<float>(),
+            GET_TYPED_VALUE_FROM_OPT_REF(params.output_all_probs, float),
             stream_,
             &device_prop_,
             skip_top_p_decode_buf->data<bool>());

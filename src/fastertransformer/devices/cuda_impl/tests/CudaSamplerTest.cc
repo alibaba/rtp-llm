@@ -29,20 +29,23 @@ TEST_F(CudaSamplerTest, testTopK) {
     });
 
     // TODO: test lengths
-    BufferPtr input_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
-    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
+    BufferPtr input_lengths = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
     BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
     BufferPtr rand_seed = createBuffer<uint64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
 
     auto top_k = createBuffer<uint32_t>({4}, {1, 1, 2, 2}, AllocationType::HOST);
-    auto top_p = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.0}, AllocationType::HOST);
+    auto top_p = createBuffer<float>({4}, {0.0, 0.0, 0.0, 0.6}, AllocationType::HOST);
     auto temperture = createBuffer<float>({4}, {1.0, 1.0, 10.0, 10.0}, AllocationType::HOST);
 
+    BufferPtr output_all_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {4, 10}, ft::AllocationType::DEVICE});
+
     GreedyParams params({
-        *logits, *sequence_lengths, *input_lengths, *output_token_ids, step,
+        *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
         nullopt, nullopt, nullopt,
-        *cum_log_probs, nullopt, nullopt
+        *cum_log_probs, nullopt, nullopt,
+        *output_all_probs,
     });
     device_->sampleGreedy(params);
     sync_check_cuda_error();
@@ -57,6 +60,15 @@ TEST_F(CudaSamplerTest, testTopK) {
     ASSERT_EQ(output_token_ids_host[23], 7);
     ASSERT_NEAR(cum_log_probs_host[2], -3.693, 1e-3);
     ASSERT_NEAR(cum_log_probs_host[3], -3.693, 1e-3);
+
+    printBuffer<float>(*output_all_probs, "output_all_probs");
+
+    auto output_all_probs_host = getBufferValues<float>(*output_all_probs);
+    ASSERT_VECTOR_NEAR(
+        output_all_probs_host,
+        std::vector<float>({0, 0, 0, 0, 0, 1, 0, 0,       0,       0, 0, 0, 1, 0, 0, 0, 0, 0,       0,       0,
+                            0, 0, 0, 0, 0, 0, 0, 0.50008, 0.49992, 0, 0, 0, 0, 0, 0, 0, 0, 0.833467, 0.166533, 0}),
+        1e-3);
 }
 
 TEST_F(CudaSamplerTest, testTopP) {
@@ -86,11 +98,15 @@ TEST_F(CudaSamplerTest, testTopP) {
     auto top_p = createBuffer<float>({4}, {0.01, 0.7, 0.001, 0.9}, AllocationType::HOST);
     auto temperture = createBuffer<float>({4}, {0.01, 0.5, 0.9, 0.9}, AllocationType::HOST);
 
+    BufferPtr output_all_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {4, 10}, ft::AllocationType::DEVICE});
+    device_->memset(*output_all_probs);
+
     GreedyParams params({
         *logits, *sequence_lengths, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
         nullopt, nullopt, nullopt,
-        *cum_log_probs, nullopt, nullopt
+        *cum_log_probs, nullopt, nullopt,
+        *output_all_probs,
     });
     device_->sampleGreedy(params);
     sync_check_cuda_error();
@@ -109,11 +125,16 @@ TEST_F(CudaSamplerTest, testTopP) {
     ASSERT_NEAR(cum_log_probs_host[2], -5.02131, 1e-3);
     ASSERT_NEAR(cum_log_probs_host[3], -5.2682, 1e-3);
 
-    params.random_seed = nullopt;
-    for (int i = 0; i < 100; i++) {
-        device_->sampleGreedy(params);
-        printBuffer<int32_t>(*output_token_ids, "output_token_ids");
-    }
+    printBuffer<float>(*output_all_probs, "output_all_probs");
+    auto output_all_probs_host = getBufferValues<float>(*output_all_probs);
+    ASSERT_VECTOR_NEAR(
+        output_all_probs_host,
+        std::vector<float>({0,         0,        0,        0,        0,        0.999999, 0,        0,
+                            0,         0,        0.247309, 0,        0.254418, 0,        0,        0,
+                            0,         0,        0.249385, 0.248887, 0,        0,        0,        0,
+                            0,         0,        0,        1,        0,        0,        0.114998, 0.0899594,
+                            0.0688079, 0.100531, 0.112346, 0.128512, 0,        0.147202, 0.146679, 0.0909646}),
+        1e-3);
 }
 
 TEST_F(CudaSamplerTest, testRandom) {
@@ -156,16 +177,11 @@ TEST_F(CudaSamplerTest, testRandom) {
         rand_seed->data<uint64_t>()[0] = i * 100;
         device_->copy({*logits_input, *logits});
         device_->sampleGreedy(params);
-        printBuffer<int32_t>(*output_token_ids, "output_token_ids");
         output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
         counts[output_token_ids_host[5]]++;
     }
-    for (int i = 0; i < vocab_size; i++) {
-        cout << i << ": " << counts[i] << endl;
-    }
     std::unordered_set<size_t> expected = {2, 8, 9};
     for (int i = 0; i < vocab_size; i++) {
-        cout << i << ": " << counts[i] << endl;
         if (expected.find(i) != expected.end()) {
             EXPECT_GE(counts[i], 1000);
         } else {
@@ -180,14 +196,12 @@ TEST_F(CudaSamplerTest, testRandom) {
         rand_seed->data<uint64_t>()[0] += i * 100;
         device_->copy({*logits_input, *logits});
         device_->sampleGreedy(params);
-        printBuffer<int32_t>(*output_token_ids, "output_token_ids");
         output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
         counts[output_token_ids_host[5]]++;
     }
 
     expected = {0, 2, 8, 9};
     for (int i = 0; i < vocab_size; i++) {
-        cout << i << ": " << counts[i] << endl;
         if (expected.find(i) != expected.end()) {
             EXPECT_GE(counts[i], 1000);
         } else {

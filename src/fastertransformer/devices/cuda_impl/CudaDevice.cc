@@ -1,4 +1,5 @@
 #include "src/fastertransformer/devices/cuda_impl/CudaDevice.h"
+#include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/cuda/custom_ar/custom_ar_comm.h"
 #include "src/fastertransformer/devices/DeviceFactory.h"
 #include "src/fastertransformer/cuda/allocator_cuda.h"
@@ -215,6 +216,14 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         output.need_mask = (fmha_type_ == FMHAType::NONE);
     }
     return output;
+}
+
+void CudaDevice::memset(Buffer& buf) {
+    if (buf.where() == MemoryType::MEMORY_CPU || buf.where() == MemoryType::MEMORY_CPU_PINNED) {
+        std::memset(buf.data(), 0, buf.sizeBytes());
+    } else {
+        cudaMemset(buf.data(), 0, buf.sizeBytes());
+    }
 }
 
 void CudaDevice::checkUseOpenSourceFMHA() {

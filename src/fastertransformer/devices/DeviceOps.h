@@ -17,6 +17,7 @@ public:
     virtual ConvertOutput convert(const ConvertParams& params);
     virtual SelectOutput select(const SelectParams& params);
     virtual ConcatOutput concat(const ConcatParams& params);
+    virtual void         memset(Buffer& buf);    
 
     // basic compuation ops
     virtual LayernormOutput layernorm(const LayernormParams& params);
