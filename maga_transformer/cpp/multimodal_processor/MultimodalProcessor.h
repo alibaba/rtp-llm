@@ -23,14 +23,15 @@ struct ExpandedOutput {
 
 class MultimodalProcessor {
 public:
-    MultimodalProcessor(py::object mm_proces_engine, std::vector<int64_t> sep_token_ids, bool include_sep_tokens):
-        mm_process_engine_(mm_proces_engine), sep_token_ids_(sep_token_ids), include_sep_tokens_(include_sep_tokens)
+    MultimodalProcessor(py::object mm_proces_engine, std::vector<int64_t> sep_token_ids, bool include_sep_tokens, int64_t max_seq_len):
+        mm_process_engine_(mm_proces_engine), sep_token_ids_(sep_token_ids), include_sep_tokens_(include_sep_tokens), max_seq_len_(max_seq_len)
         {}
 
 private:
     py::object mm_process_engine_;
     std::vector<int64_t> sep_token_ids_;
     bool include_sep_tokens_;
+    int64_t max_seq_len_;
 
     absl::StatusOr<std::vector<torch::Tensor>> mm_embedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs) {
         if (mm_inputs.size() == 0) {
@@ -80,6 +81,12 @@ private:
         for (int i = 0;i < mm_num;i++) {
             // mm embedding is supposed to be a tensor of [expand_len, hidden_dim]
             expanded_len += mm_embedding[i].sizes()[0] - locs[i].second + locs[i].first;
+        }
+
+        if (expanded_len >= max_seq_len_) {
+            std::stringstream exception_str;
+            exception_str << "input after multimodal process is " << expanded_len << " > max_seq_len(" << max_seq_len_ << ")";
+            return absl::InternalError(exception_str.str());
         }
 
         auto device = ft::DeviceFactory::getDefaultDevice();

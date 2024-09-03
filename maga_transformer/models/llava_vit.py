@@ -14,13 +14,12 @@ class LlavaImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config: Dict[str, Any]):
         if config.get("vision_config", None) != None:
             raise Exception("llava-hf style config is not implemented yet")
-            # self.vision_tower = CLIPVisionModel(config["vision_config"]).cuda().half()
         else:
-            self.vision_tower = self.build_vision_tower(config).cuda().half()
-        self.mm_projector = self.build_vision_projector(config).cuda().half()
+            self.vision_tower = self.build_vision_tower(config).half()
+        self.mm_projector = self.build_vision_projector(config).half()
         if "unpad" in config.get("mm_patch_merge_type", "flat"):
             self.image_newline = nn.Parameter(
-                torch.empty(config["hidden_size"]).cuda().half()
+                torch.empty(config["hidden_size"]).half()
             )
         self.config = config
 
@@ -106,15 +105,15 @@ class LlavaImageEmbedding(ImageEmbeddingInterface):
         projector_type = config.get('mm_projector_type', 'linear')
 
         if projector_type == 'linear':
-            return torch.nn.Linear(config['mm_hidden_size'], config['hidden_size']).cuda()
+            return torch.nn.Linear(config['mm_hidden_size'], config['hidden_size'])
 
         mlp_gelu_match = re.match(r'^mlp(\d+)x_gelu$', projector_type)
         if mlp_gelu_match:
             mlp_depth = int(mlp_gelu_match.group(1))
-            modules = [torch.nn.Linear(config['mm_hidden_size'], config['hidden_size']).cuda()]
+            modules = [torch.nn.Linear(config['mm_hidden_size'], config['hidden_size'])]
             for _ in range(1, mlp_depth):
                 modules.append(torch.nn.GELU())
-                modules.append(torch.nn.Linear(config['hidden_size'], config['hidden_size']).cuda())
+                modules.append(torch.nn.Linear(config['hidden_size'], config['hidden_size']))
             return torch.nn.Sequential(*modules)
 
         if projector_type == 'identity':

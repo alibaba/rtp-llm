@@ -18,7 +18,7 @@ from maga_transformer.utils.util import to_torch_dtype
 
 class QwenVLImageEmbedding(ImageEmbeddingInterface):
     def __init__(self, config: Dict[str, Any]):
-        self.vit = QWen_VL_ViT(**config).cuda().half()
+        self.vit = QWen_VL_ViT(**config).half()
 
     @torch.no_grad()
     def image_embedding(self, images: List[Any], device) -> torch.Tensor:
