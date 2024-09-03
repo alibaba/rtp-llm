@@ -167,7 +167,7 @@ class InternVLImageEmbedding(MultiModalEmbeddingInterface):
         mm_type = kwargs.get("mm_type")
         if mm_type == MMUrlType.DEFAULT:
             if isinstance(mm_input, list):
-                return self.image_embedding(mm_input, 12, device)
+                return self.image_embedding(mm_input, 1, device)
             else:
                 return self.image_embedding([mm_input], 12, device)[0]
         elif mm_type == MMUrlType.IMAGE:

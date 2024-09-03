@@ -106,9 +106,12 @@ class InternVLRenderer(CustomChatRenderer):
                 config_json = json.loads(content)
                 template_name = config_json["template"]
                 conv_template = conv_templates[template_name]
+                prefix = "<s>" if template_name == "internlm2-chat" else ""
+                res = conv_template.render_messages(messages, 8)
+                res.prompt = prefix + res.prompt
+                return res
         else:
             raise Exception("no config.json found")
-        return conv_template.render_messages(messages, 8)
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         messages = copy.deepcopy(request.messages)
