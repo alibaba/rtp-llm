@@ -1,6 +1,7 @@
 load("//:def.bzl", "copts", "cuda_copts")
 load("@rules_cc//examples:experimental_cc_shared_library.bzl", "cc_shared_library")
 load("//:def.bzl", "copts", "cuda_copts", "gen_cpp_code")
+load(":moe.bzl", "gen_moe_kernels")
 
 cc_library(
     name = "cutlass_kernels_common",
@@ -15,7 +16,6 @@ cc_library(
         "//src/fastertransformer/utils",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-        "//src/fastertransformer/kernels:kernels",
     ],
     # include_prefix = "src",
     copts = copts(),
@@ -128,16 +128,47 @@ cc_shared_library(
     visibility = ["//visibility:public"],
 )
 
+template_header = """
+#include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels_template.h"
+
+namespace tensorrt_llm
+{
+"""
+template = """
+template class MoeGemmRunner<{0}, {1}, {2}>;
+"""
+template_tail = """
+}
+"""
+T = [
+    ('float', 'float', 'float'),
+    ('half', 'half', 'half'),
+    ('__nv_bfloat16', '__nv_bfloat16', '__nv_bfloat16'),
+    # ('__nv_bfloat16', 'cutlass::uint4b_t', '__nv_bfloat16'),
+    # ('__nv_bfloat16', 'uint8_t', '__nv_bfloat16'),
+    # ('half', 'cutlass::uint4b_t', 'half'),
+    # ('half', 'uint8_t', 'half'),
+    # ('__nv_fp8_e4m3', '__nv_fp8_e4m3', 'half'),
+    # ('__nv_fp8_e4m3', '__nv_fp8_e4m3', '__nv_bfloat16'),
+]
+
+gen_cpp_code("moe_runner", [T],
+             template_header, template, template_tail, element_per_file=1, suffix=".cu")
+
+gen_moe_kernels()
+
 cc_library(
     name = "moe_cu",
     srcs = glob([
         "cutlass_kernels/moe_gemm/*.cu",
-        "cutlass_kernels/moe_gemm/*.h",
-    ]),
+    ]) + [
+        ":moe_runner",
+        ":moe_inst",
+    ],
     hdrs = glob([
-        "cutlass_kernels/moe_gemm/moe_gemm_kernels_template.h",
-        "cutlass_kernels/moe_gemm/moe_gemm_kernels.h",
-        "cutlass_kernels/moe_gemm/moe_kernels.h",
+        "cutlass_kernels/moe_gemm/*.h",
+        "cutlass_kernels/moe_gemm/**/*.h",
+        "cutlass_kernels/moe_gemm/**/*.inl",
     ]),
     include_prefix = "src",
     deps = [
@@ -210,8 +241,8 @@ cc_library(
         "cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h",
         "cutlass_kernels/int8_gemm/int8_gemm.h",
         "cutlass_kernels/group_gemm/group_gemm.h",
-        "cutlass_kernels/moe_gemm/moe_gemm_kernels.h",
         "cutlass_kernels/moe_gemm/moe_kernels.h",
+        "cutlass_kernels/moe_gemm/moe_gemm_kernels.h",
         "cutlass_kernels/cutlass_preprocessors.h",
         "cutlass_kernels/weight_only_quant_op.h",
         "cutlass_kernels/gemm_configs.h",

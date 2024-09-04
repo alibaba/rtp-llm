@@ -2,6 +2,7 @@
 
 #include "src/fastertransformer/utils/layernorm_types.h"
 #include "src/fastertransformer/utils/activation_types.h"
+#include "src/fastertransformer/utils/quantization.h"
 #include "src/fastertransformer/utils/RopeConfig.h"
 #include "src/fastertransformer/utils/QuantInfo.h"
 #include "src/fastertransformer/core/Types.h"

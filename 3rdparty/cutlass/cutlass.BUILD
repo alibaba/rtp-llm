@@ -5,6 +5,7 @@ cc_library(
         "include/**/*.h",
         "include/**/*.cuh",
         "include/**/*.hpp",
+        "include/**/*.inl",
     ]),
     deps = [
         "@local_config_cuda//cuda:cuda_headers",
@@ -28,5 +29,3 @@ cc_library(
     strip_include_prefix = "tools/util/include/",
     visibility = ["//visibility:public"],
 )
-
-

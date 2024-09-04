@@ -4,6 +4,8 @@ cc_library(
     name = "cutlass_extensions",
     hdrs = glob([
         "include/**/*.h",
+        "include/**/*.cuh",
+        "include/**/*.hpp",
     ]),
     deps = [
         "//src/fastertransformer/cutlass:cutlass_interface",

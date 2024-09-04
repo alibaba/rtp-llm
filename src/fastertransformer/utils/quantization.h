@@ -19,6 +19,69 @@
 #include "src/fastertransformer/utils/QuantInfo.h"
 #include "stdlib.h"
 #include <cstdint>
+#include <string>
+
+namespace fastertransformer {
+
+enum QuantMethod {
+    None                = 0,
+    WeightOnlyPerCol    = 1,
+    GptQ                = 2,
+    Awq                 = 3,
+    SmoothQuant         = 4,
+    OmniQuant           = 5,
+    PerTensorQuant      = 6
+};
+
+struct QuantAlgo {
+public:
+    QuantAlgo() = default;
+    QuantAlgo(QuantMethod method, int bits, int group_size)
+        : quant_method_(method)
+        , weight_bits_(bits)
+        , group_size_(group_size)
+    {}
+    bool isWeightOnlyPerCol() const {
+        return quant_method_ == WeightOnlyPerCol;
+    }
+    bool isPerTensorQuant() const {
+        return quant_method_ == PerTensorQuant;
+    }
+    bool isGptq() const {
+        return quant_method_ == GptQ;
+    }
+    bool isAwq() const {
+        return quant_method_ == Awq;
+    }
+    bool isSmoothQuant() const {
+        return quant_method_ == SmoothQuant;
+    }
+    bool isOmniQuant() const {
+        return quant_method_ == OmniQuant;
+    }
+    bool isQuant() const {
+        return quant_method_ != None;
+    }
+    bool isGroupwise() const {
+        return group_size_ > 0;
+    }
+    QuantMethod getQuantMethod() const {
+        return quant_method_;
+    }
+    int64_t getGroupSize() const {
+        return group_size_;
+    }
+    int64_t getWeightBits() const {
+        return weight_bits_;
+    }
+    void setQuantAlgo(const std::string &method, int64_t bits, int64_t group_size);
+private:
+    QuantMethod quant_method_ = None;
+    int64_t weight_bits_ = 0;
+    int64_t group_size_ = 0;
+};
+
+}
 
 namespace tensorrt_llm {
 namespace common {
