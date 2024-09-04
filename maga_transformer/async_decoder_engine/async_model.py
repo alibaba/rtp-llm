@@ -7,9 +7,9 @@ from maga_transformer.config.generate_config import GenerateConfig
 from maga_transformer.async_decoder_engine.engine_creator import create_engine
 from maga_transformer.distribute.worker_info import g_parallel_info
 from maga_transformer.config.task_type import TaskType
-from maga_transformer.async_decoder_engine.base_engine import KVCacheInfo
 from maga_transformer.config.exceptions import ExceptionType, FtRuntimeException
 from maga_transformer.models.multimodal.multimodal_mixin import MultiModalMixin
+from maga_transformer.ops import LoadBalanceInfo
 
 
 class AsyncModel:
@@ -50,5 +50,5 @@ class AsyncModel:
                                      f"model max tokens is {self.config.max_seq_len}, request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}")
         return self.decoder_engine_.decode(input)
 
-    def get_kv_cache_info(self) -> KVCacheInfo:
-        return self.decoder_engine_.get_kv_cache_info()
+    def get_load_balance_info(self) -> LoadBalanceInfo:
+        return self.decoder_engine_.get_load_balance_info()

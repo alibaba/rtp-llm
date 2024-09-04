@@ -3,6 +3,7 @@
 #include "maga_transformer/cpp/normal_engine/NormalEngine.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.grpc.pb.h"
 #include "maga_transformer/cpp/proto/model_rpc_service.pb.h"
+#include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "maga_transformer/cpp/multimodal_processor/MultimodalProcessor.h"
 #include <iostream>
@@ -24,7 +25,7 @@ public:
                                  const GenerateInputPB*                 request,
                                  grpc::ServerWriter<GenerateOutputsPB>* writer) override;
 
-    KVCacheInfo getKVCacheInfo() const;
+    LoadBalanceInfo getLoadBalanceInfo();
 
     void addLora(const std::string& adapter_name,
                  const ft::lora::loraLayerWeightsMap& lora_a_weights,

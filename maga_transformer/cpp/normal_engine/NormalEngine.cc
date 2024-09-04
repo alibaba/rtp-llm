@@ -100,8 +100,15 @@ absl::Status NormalEngine::initSystemPrompt() {
     return absl::OkStatus();
 }
 
-KVCacheInfo NormalEngine::getKVCacheInfo() const {
-    return resource_context_.cache_manager->getKVCacheInfo();
+LoadBalanceInfo NormalEngine::getLoadBalanceInfo() {
+    auto kv_cache_info = resource_context_.cache_manager->getKVCacheInfo();
+    return LoadBalanceInfo{
+        (int64_t)step_recorder_.getStepLatency(),
+        (int64_t)step_recorder_.getStepCount(),
+        (int64_t)step_recorder_.getStepPerMin(),
+        (int64_t)kv_cache_info.available_kv_cache,
+        (int64_t)kv_cache_info.total_kv_cache
+    };
 }
 
 absl::Status NormalEngine::startLoop() {
@@ -128,13 +135,11 @@ void NormalEngine::loop() {
     FT_LOG_INFO("loop begin");
     device_->preRun();
     while (running_) {
-        int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         auto status = step();
         if (!status.ok()) {
             FT_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
-        reportMetrics({false, false, autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us});
     }
 }
 
@@ -152,12 +157,25 @@ absl::Status NormalEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0) {
+        if (scheduler_->empty()) {
+            step_recorder_.reset();
+        }
         CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         if (streams.empty()) {
             return absl::OkStatus();
         }
     }
-    return executor_->process(streams);
+    int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    auto status = executor_->process(streams);
+    auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
+    for (auto& stream: streams) {
+        if (stream->finished()) {
+            step_recorder_.addStepCount(stream->iterCount());
+        }
+    }
+    step_recorder_.addStepTime(autil::TimeUtility::currentTimeInMicroSeconds());
+    reportMetrics({false, false, step_latency});
+    return status;
 }
 
 }  // namespace rtp_llm

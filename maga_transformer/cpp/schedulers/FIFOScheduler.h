@@ -17,9 +17,10 @@ public:
 
     ~FIFOScheduler();
 
-    absl::Status enqueue(const GenerateStreamPtr& stream) override;
+    absl::Status                                 enqueue(const GenerateStreamPtr& stream) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) override;
-    absl::Status stop() override;
+    absl::Status                                 stop() override;
+    bool                                         empty() override;
 
     void reportMetrics(size_t fallback_stream_size);
 

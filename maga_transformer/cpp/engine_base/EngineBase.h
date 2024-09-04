@@ -3,6 +3,7 @@
 #include "absl/status/status.h"
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
+#include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "src/fastertransformer/devices/DeviceBase.h"
 #include "maga_transformer/cpp/lora/LoraManager.h"
 
@@ -37,9 +38,10 @@ public:
 
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) = 0;
 
-    virtual KVCacheInfo getKVCacheInfo() const {
-        return {0, 0};
+    virtual LoadBalanceInfo getLoadBalanceInfo() {
+        return LoadBalanceInfo();
     }
+
 protected:
     ft::DeviceBase* device_;
     std::shared_ptr<lora::LoraManager> lora_manager_;

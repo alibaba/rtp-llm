@@ -5,6 +5,7 @@ from maga_transformer.ops.ft_op_base import FTOPBase
 from maga_transformer.ops import RtpLLMOp as CppRtpLLMOp
 from maga_transformer.utils.mm_process_engine import MMProcessEngine
 from maga_transformer.utils.token_processor import TokenProcessor
+from maga_transformer.ops import LoadBalanceInfo
 
 
 class RtpLLMOp(FTOPBase):
@@ -33,6 +34,5 @@ class RtpLLMOp(FTOPBase):
     def stop(self):
         self.ft_op.stop() # type: ignore
 
-    def get_kv_cache_info(self) -> Tuple[int, int]:
-        available_kv_cache, total_kv_cache = self.ft_op.get_kv_cache_info() # type: ignore
-        return available_kv_cache, total_kv_cache
+    def get_load_balance_info(self) -> LoadBalanceInfo:
+        return self.ft_op.get_load_balance_info() # type: ignore

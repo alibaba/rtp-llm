@@ -127,11 +127,14 @@ class InferenceApp(object):
         @app.get("/worker_status")
         def worker_status():
             check_shutdown()
-            info = self.inference_server.get_kv_cache_info()
+            load_balance_info = self.inference_server.get_load_balance_info()
             return {
                 "available_concurrency": self.inference_server._controller.get_available_concurrency(),
-                "available_kv_cache": info.available_kv_cache,
-                "total_kv_cache": info.total_kv_cache,
+                "available_kv_cache": load_balance_info.available_kv_cache,
+                "total_kv_cache": load_balance_info.total_kv_cache,
+                "step_latency_ms": load_balance_info.step_latency_us / 1000,
+                "step_per_minute": load_balance_info.step_per_minute,
+                "iterate_count": load_balance_info.iterate_count,
                 "alive": True,
             }
 

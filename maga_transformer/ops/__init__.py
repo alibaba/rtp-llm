@@ -55,7 +55,7 @@ xft_loaded = False
 
 try:
     # CUDA GPU build
-    from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens
+    from libth_transformer import GptInitParameter, RtpEmbeddingOp, RtpLLMOp, SpecialTokens, LoadBalanceInfo
 except BaseException as e:
     import traceback
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")

@@ -4,8 +4,8 @@ from typing import Dict, AsyncGenerator
 from typing_extensions import override
 from maga_transformer.models.base_model import BaseModel
 from maga_transformer.async_decoder_engine.embedding.interface import EngineInputs, EngineOutputs
-from maga_transformer.async_decoder_engine.base_engine import BaseEngine, KVCacheInfo
-from maga_transformer.ops import RtpEmbeddingOp
+from maga_transformer.async_decoder_engine.base_engine import BaseEngine
+from maga_transformer.ops import RtpEmbeddingOp, LoadBalanceInfo
 
 class EmbeddingCppEngine(BaseEngine):
     def __init__(self, model: BaseModel):
@@ -39,5 +39,5 @@ class EmbeddingCppEngine(BaseEngine):
         return output
 
     @override
-    def get_kv_cache_info(self) -> KVCacheInfo:
-        return KVCacheInfo(available_kv_cache=0, total_kv_cache=0)
+    def get_load_balance_info(self) -> LoadBalanceInfo:
+        return LoadBalanceInfo()

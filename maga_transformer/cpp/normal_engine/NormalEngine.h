@@ -15,6 +15,7 @@
 #include "maga_transformer/cpp/system_prompt/SystemPrompt.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "maga_transformer/cpp/metrics/RtpLLMMetrics.h"
+#include "maga_transformer/cpp/dataclass/LoadBalance.h"
 
 namespace rtp_llm {
 
@@ -27,7 +28,7 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) override;
     absl::Status                    stop() override;
 
-    KVCacheInfo getKVCacheInfo() const override;
+    LoadBalanceInfo getLoadBalanceInfo() override;
     absl::Status step();
     absl::Status startLoop();
     void reportMetrics(RtpLLMEngineMetricsCollector collector) {
@@ -56,6 +57,7 @@ private:
     std::unique_ptr<SchedulerBase> scheduler_;
     const ft::GptInitParameter     params_;
     ResourceContext                resource_context_;
+    StepRecorder                   step_recorder_;
     kmonitor::MetricsReporterPtr   metrics_reporter_ = nullptr;
 };
 

@@ -2,6 +2,7 @@
 
 #include "grpc++/grpc++.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
+#include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "maga_transformer/cpp/model_rpc/ModelRpcServer.h"
 #include "maga_transformer/cpp/HttpApiServer.h"
 
@@ -24,7 +25,8 @@ public:
                py::object mm_process_engine,
                std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                py::object token_processor);
-    std::tuple<int64_t, int64_t> getKVCacheInfo();
+    rtp_llm::LoadBalanceInfo getLoadBalanceInfo();
+
     // std::shared_ptr<rtp_llm::GenerateStream> forward(std::shared_ptr<rtp_llm::GenerateInput> query);
 
 private:

@@ -3,6 +3,7 @@
 #include "c10/util/intrusive_ptr.h"
 #include "maga_transformer/cpp/common/torch_bind.h"
 #include "maga_transformer/cpp/dataclass/EngineInitParameter.h"
+#include "maga_transformer/cpp/dataclass/LoadBalance.h"
 #include "src/fastertransformer/core/Types.h"
 #include "src/fastertransformer/core/BufferHelper.h"
 #include "src/fastertransformer/core/torch_utils/BufferTorchUtils.h"
@@ -96,16 +97,15 @@ void RtpLLMOp::removeLora(const std::string& adapter_name) {
     model_rpc_server_->removeLora(adapter_name);
 }
 
-std::tuple<int64_t, int64_t> RtpLLMOp::getKVCacheInfo() {
-    auto info = model_rpc_server_->getKVCacheInfo();
-    return std::make_tuple(info.available_kv_cache, info.total_kv_cache);
+rtp_llm::LoadBalanceInfo RtpLLMOp::getLoadBalanceInfo() {
+    return model_rpc_server_->getLoadBalanceInfo();
 }
 
 void RtpLLMOp::_init(const int64_t model_rpc_port,
                      const int64_t http_port,
                      const rtp_llm::EngineInitParams params,
                      py::object mm_process_engine,
-                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params, 
+                     std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                      py::object token_processor) {
     std::string server_address("0.0.0.0:" + std::to_string(model_rpc_port));
     std::unique_ptr<rtp_llm::ModelRpcServiceImpl> rpc_server = std::make_unique<rtp_llm::ModelRpcServiceImpl>();
@@ -156,12 +156,13 @@ RtpLLMOp::~RtpLLMOp() {
 }
 
 void registerRtpLLMOp(const py::module& m) {
+    rtp_llm::registerLoadBalanceInfo(m);
     pybind11::class_<torch_ext::RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
         .def("init", &torch_ext::RtpLLMOp::init)
         .def("add_lora", &torch_ext::RtpLLMOp::addLora)
         .def("remove_lora", &torch_ext::RtpLLMOp::removeLora)
-        .def("get_kv_cache_info", &torch_ext::RtpLLMOp::getKVCacheInfo)
+        .def("get_load_balance_info", &torch_ext::RtpLLMOp::getLoadBalanceInfo)
         .def("stop", &torch_ext::RtpLLMOp::stop);
 }
 

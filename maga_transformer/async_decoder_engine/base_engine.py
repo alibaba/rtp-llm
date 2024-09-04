@@ -1,11 +1,7 @@
 from abc import abstractmethod
 from typing import AsyncGenerator, Any, Dict
 from pydantic import BaseModel
-
-
-class KVCacheInfo(BaseModel):
-    available_kv_cache: int = 0
-    total_kv_cache: int = 0
+from maga_transformer.ops import LoadBalanceInfo
 
 
 class BaseEngine:
@@ -25,5 +21,5 @@ class BaseEngine:
         raise NotImplementedError()
 
     @abstractmethod
-    def get_kv_cache_info(self) -> KVCacheInfo:
+    def get_load_balance_info(self) -> LoadBalanceInfo:
         raise NotImplementedError()

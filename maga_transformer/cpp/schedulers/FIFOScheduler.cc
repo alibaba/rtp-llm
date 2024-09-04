@@ -24,6 +24,10 @@ FIFOScheduler::~FIFOScheduler() {
     FT_LOG_INFO("destory FIFOScheduler");
 }
 
+bool FIFOScheduler::empty() {
+    return waiting_streams_.empty() && running_streams_.empty();
+}
+
 absl::Status FIFOScheduler::stop() {
     FT_LOG_INFO("stop FIFOScheduler");
     {
@@ -145,7 +149,7 @@ bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,
         token_capacity_ -= result.value();
         FT_LOG_DEBUG("after stream [%d] acquireCapacity, token_capacity is %d", new_stream->streamId(), token_capacity_);
     }
-    return result.ok() && cache_manager_->availableBlockNums() >= reserve_block_num_; 
+    return result.ok() && cache_manager_->availableBlockNums() >= reserve_block_num_;
 }
 
 list<GenerateStreamPtr> FIFOScheduler::scheduleNew(size_t reserve_step) {
@@ -181,6 +185,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule(size_t reserve_s
     });
     evictDoneStreams(waiting_streams_);
     evictDoneStreams(running_streams_);
+
     // TODO(xinfei.sxf) Those who just kicked out of running may join running again immediately.
     auto running_stream_size = running_streams_.size();
     evaluateRunningNext(reserve_step);

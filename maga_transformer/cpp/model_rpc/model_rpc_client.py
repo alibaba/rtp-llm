@@ -161,6 +161,7 @@ class ModelRpcClient(object):
             else:
                 raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
         except Exception as e:
+            logging.error(f'rpc unkown error:{str(e)}')
             raise e
         finally:
             if response_iterator:

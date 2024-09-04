@@ -15,7 +15,7 @@ import functools
 import threading
 
 from fastapi import Request as RawRequest
-
+from maga_transformer.ops import LoadBalanceInfo
 from maga_transformer.utils.time_util import Timer, current_time_ms
 from maga_transformer.utils.util import AtomicCounter
 from maga_transformer.utils.complete_response_async_generator import CompleteResponseAsyncGenerator
@@ -31,7 +31,6 @@ from maga_transformer.openai.api_datatype import ChatCompletionRequest
 from maga_transformer.server.inference_worker import InferenceWorker, TokenizerEncodeResponse
 from maga_transformer.server.misc import format_exception
 from maga_transformer.config.task_type import TaskType
-from maga_transformer.async_decoder_engine.base_engine import KVCacheInfo
 from maga_transformer.structure.request_extractor import request_id_field_name
 from maga_transformer.lora.lora_manager import LoraManager
 from maga_transformer.model_factory import AsyncModel
@@ -274,22 +273,22 @@ class InferenceServer(object):
             assert isinstance(req, dict)
             prompt = req.pop('prompt')
             assert self._inference_worker is not None
-            if req.get("return_offsets_mapping", None) == True: 
+            if req.get("return_offsets_mapping", None) == True:
                 mapping = self._inference_worker.tokenizer_offset_mapping(prompt)
                 response = TokenizerEncodeResponse(offset_mapping=mapping['offset_mapping'], token_ids=mapping['input_ids'])
             else:
-                token_ids, tokens = self._inference_worker.tokenizer_encode(prompt)            
+                token_ids, tokens = self._inference_worker.tokenizer_encode(prompt)
                 response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
             return JSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
             return JSONResponse(format_exception(e), status_code=500)
 
-    def get_kv_cache_info(self) -> KVCacheInfo:
+    def get_load_balance_info(self) -> LoadBalanceInfo:
         assert self._inference_worker
         if self._inference_worker.model:
-            return self._inference_worker.model.get_kv_cache_info()
+            return self._inference_worker.model.get_load_balance_info()
         else:
-            return KVCacheInfo(available_kv_cache=0, total_kv_cache=0)
+            return LoadBalanceInfo()
 
     def set_debug_log(self, req: Union[str,Dict[Any, Any]]) -> None:
         if isinstance(req, str):

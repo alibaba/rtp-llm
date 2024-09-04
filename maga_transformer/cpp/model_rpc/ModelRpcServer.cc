@@ -33,7 +33,7 @@ int transErrorCode(absl::StatusCode code) {
 }
 
 grpc::Status ModelRpcServiceImpl::init(const EngineInitParams& maga_init_params, py::object mm_process_engine, std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
-    
+
     if (propose_params) {
         FT_LOG_INFO("init speculative engine");
         if (!mm_process_engine.is_none()) {
@@ -119,8 +119,8 @@ grpc::Status ModelRpcServiceImpl::generate_stream(grpc::ServerContext*          
 }
 
 
-KVCacheInfo ModelRpcServiceImpl::getKVCacheInfo() const {
-    return engine_->getKVCacheInfo();
+LoadBalanceInfo ModelRpcServiceImpl::getLoadBalanceInfo() {
+    return engine_->getLoadBalanceInfo();
 }
 
 void ModelRpcServiceImpl::addLora(const std::string& adapter_name,
