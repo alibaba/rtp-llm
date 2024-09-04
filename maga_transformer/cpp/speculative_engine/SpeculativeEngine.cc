@@ -100,7 +100,7 @@ absl::Status SpeculativeEngine::initCacheManager() {
 }
 
 size_t SpeculativeEngine::warmUp() {
-    const ft::GptInitParameter& socre_gpt_params = score_model_params_.gpt_init_parameter; 
+    const ft::GptInitParameter& socre_gpt_params = score_model_params_.gpt_init_parameter;
     std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
     fake_input->input_ids                     = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)socre_gpt_params.max_seq_len_ - 1}, ft::AllocationType::HOST});
     std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
@@ -137,8 +137,16 @@ absl::Status SpeculativeEngine::initSystemPrompt() {
     return absl::OkStatus();
 }
 
-KVCacheInfo SpeculativeEngine::getKVCacheInfo() const {
-    return resource_context_.cache_manager->getKVCacheInfo();
+LoadBalanceInfo SpeculativeEngine::getLoadBalanceInfo() {
+    auto kv_cache_info = resource_context_.cache_manager->getKVCacheInfo();
+    return LoadBalanceInfo{
+        (int64_t)0,
+        (int64_t)0,
+        (int64_t)0,
+        (int64_t)kv_cache_info.available_kv_cache,
+        (int64_t)kv_cache_info.total_kv_cache
+    };
+
 }
 
 absl::Status SpeculativeEngine::startLoop() {
@@ -196,7 +204,7 @@ absl::Status SpeculativeEngine::step() {
             return absl::OkStatus();
         }
     }
-    
+
     for (auto& stream: streams) {
         FT_LOG_DEBUG("pre stream[%d]: %s", stream->streamId(), stream->debugString().c_str());
     }
@@ -204,7 +212,7 @@ absl::Status SpeculativeEngine::step() {
     int64_t propose_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     CHECK_AND_RETURN_REF(propose_output, propose_executor_->propose(streams));
     FT_LOG_DEBUG("propose_output: %s", propose_output.debugString().c_str());
-    
+
     int64_t score_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     CHECK_AND_RETURN_REF(score_output, score_executor_->score(streams, propose_output));
     FT_LOG_DEBUG("score_output: %s", score_output.debugString().c_str());

@@ -27,8 +27,7 @@ public:
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) override;
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input, preRunMode mode) override;
     absl::Status                    stop() override;
-
-    LoadBalanceInfo getLoadBalanceInfo() override;
+    LoadBalanceInfo                 getLoadBalanceInfo() override;
     absl::Status step();
     absl::Status startLoop();
     void reportMetrics(RtpLLMEngineMetricsCollector collector) {

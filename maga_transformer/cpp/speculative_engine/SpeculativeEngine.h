@@ -22,7 +22,7 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
-    KVCacheInfo                       getKVCacheInfo() const override;
+    LoadBalanceInfo                   getLoadBalanceInfo() override;
 
     const ResourceContext& resourceContext() const {
         return resource_context_;
