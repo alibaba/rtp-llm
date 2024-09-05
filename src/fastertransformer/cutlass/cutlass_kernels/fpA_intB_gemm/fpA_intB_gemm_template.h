@@ -40,8 +40,6 @@
 #include "src/fastertransformer/cutlass/cutlass_kernels/fpA_intB_gemm/fpA_intB_gemm.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 
-#include "src/fastertransformer/cuda/nvtx/nvtx_utils.h"
-
 namespace tc = tensorrt_llm::cutlass_extensions;
 
 namespace tensorrt_llm

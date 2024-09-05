@@ -42,7 +42,6 @@
 #pragma GCC diagnostic pop
 #endif // #ifndef _WIN32
 
-#include "src/fastertransformer/core/allocator.h"
 #include "src/fastertransformer/cuda/cuda_utils.h"
 #include "src/fastertransformer/cuda/trt_utils.h"
 #include "src/fastertransformer/cutlass/cutlass_kernels/cutlass_heuristic.h"
