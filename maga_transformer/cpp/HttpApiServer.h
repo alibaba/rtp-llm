@@ -13,14 +13,15 @@ namespace rtp_llm {
 class Pipeline {
 public:
     Pipeline(py::object token_processor): token_processor_(token_processor) {}
-    std::string decode(std::vector<int> token_ids);
-    std::vector<int> encode(std::string prompt);
+    std::string        decode(std::vector<int> token_ids);
+    std::vector<int>   encode(std::string prompt);
     static std::string format_response(std::string generate_texts, const GenerateOutputs* generate_outputs);
+
 private:
     py::object token_processor_;
 };
 
-class HttpApiServer {
+class HttpApiServer: public std::enable_shared_from_this<HttpApiServer> {
 public:
     HttpApiServer(std::shared_ptr<EngineBase> engine,
                   ft::GptInitParameter        params,
@@ -38,12 +39,26 @@ public:
         }
     }
 
-    bool start(std::string addrSpec) { return http_server_.Start(addrSpec); }
-    void stop() { http_server_.Stop(); }
-    void registerResponses();
+    bool start(std::string addrSpec) {
+        return http_server_.Start(addrSpec);
+    }
+    void stop() {
+        http_server_.Stop();
+    }
+    void               registerResponses();
     static std::string SseResponse(std::string& response) {
         return "data: " + response + "\n\n";
     }
+    void NotifyServerHasShutdown() {
+        is_shutdown_.store(true);
+    }
+    bool IsShutdown() const {
+        return is_shutdown_.load();
+    }
+
+private:
+    bool registerRoot();
+    bool registerHealth();
 
 private:
     http_server::HttpServer http_server_;
@@ -54,6 +69,7 @@ private:
 
     Pipeline pipeline_;
     std::shared_ptr<ConcurrencyController> controller_;
+    std::atomic<bool>           is_shutdown_{false};
 };
 
-} // namespace rtp_llm
+}  // namespace rtp_llm

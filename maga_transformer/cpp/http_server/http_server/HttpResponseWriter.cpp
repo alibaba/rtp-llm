@@ -16,7 +16,7 @@ HttpResponseWriter::~HttpResponseWriter() {
     _connection.reset();
 }
 
-bool HttpResponseWriter::Write(const std::string &data) {
+bool HttpResponseWriter::Write(const std::string& data) {
     if (_status == WriteStatus::Stream) {
         AUTIL_LOG(WARN, "write failed, already called write stream, cannot write");
         SendErrorResponse();
@@ -31,7 +31,7 @@ bool HttpResponseWriter::Write(const std::string &data) {
     return true;
 }
 
-bool HttpResponseWriter::DoWrite(const std::string &data) {
+bool HttpResponseWriter::DoWrite(const std::string& data) {
     if (_sent) {
         AUTIL_LOG(ERROR, "write failed, already write data, cannot write more than once");
         return false;
@@ -64,7 +64,7 @@ bool HttpResponseWriter::DoWrite(const std::string &data) {
     return true;
 }
 
-bool HttpResponseWriter::WriteStream(const std::string &data) {
+bool HttpResponseWriter::WriteStream(const std::string& data) {
     if (_status == WriteStatus::Normal) {
         AUTIL_LOG(WARN, "write stream failed, already called write, cannot write stream");
         SendErrorResponse();
@@ -96,7 +96,7 @@ bool HttpResponseWriter::WriteDone() {
     return true;
 }
 
-bool HttpResponseWriter::DoWriteStream(const std::string &data, bool isWriteDone) {
+bool HttpResponseWriter::DoWriteStream(const std::string& data, bool isWriteDone) {
     if (_calledDone) {
         AUTIL_LOG(WARN, "write stream failed, already called write done, cannot write data any more");
         return false;
@@ -127,7 +127,7 @@ bool HttpResponseWriter::DoWriteStream(const std::string &data, bool isWriteDone
     return true;
 }
 
-std::unique_ptr<HttpResponse> HttpResponseWriter::Chunk(const std::string &data, bool isWriteDone) {
+std::unique_ptr<HttpResponse> HttpResponseWriter::Chunk(const std::string& data, bool isWriteDone) {
     if (_firstPacket) {
         AddHeader("Transfer-Encoding", "chunked");
         std::stringstream ss;
@@ -168,4 +168,34 @@ void HttpResponseWriter::SendErrorResponse() {
     }
 }
 
-} // namespace http_server
+void HttpResponseWriter::AddHeader(const std::string& key, const std::string& value) {
+    _headers[key] = value;
+}
+
+bool HttpResponseWriter::WriteError(int errorCode, const std::string& errorMsg) const {
+    if (!_connection) {
+        AUTIL_LOG(WARN, "write error failed, connection is null");
+        return false;
+    }
+    HttpError error;
+    error.code    = errorCode;
+    error.message = errorMsg;
+    auto response = HttpResponse::make(error);
+    if (!response) {
+        AUTIL_LOG(WARN, "write error failed, genarate http response failed");
+        return false;
+    }
+    auto packet = response->encode();
+    if (!packet) {
+        AUTIL_LOG(WARN, "write error failed, http response encode failed");
+        return false;
+    }
+    if (!_connection->postPacket(packet)) {
+        AUTIL_LOG(ERROR, "write error failed, post http response packet failed");
+        packet->free();
+        return false;
+    }
+    return true;
+}
+
+}  // namespace http_server

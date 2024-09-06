@@ -21,6 +21,7 @@ public:
     bool WriteStream(const std::string &data);
     // is valid for write stream, call this method when write complete
     bool WriteDone();
+    bool WriteError(int errorCode, const std::string &errorMsg) const;
 
     void AddHeader(const std::string &key, const std::string &value) { _headers[key] = value; }
     void SetStatus(int code, const std::string message) {

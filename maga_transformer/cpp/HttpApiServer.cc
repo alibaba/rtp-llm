@@ -11,7 +11,7 @@ using namespace std::placeholders;
 using namespace autil::legacy;
 using namespace autil::legacy::json;
 
-class AuxInfoAdapter : public Jsonizable, public AuxInfo {
+class AuxInfoAdapter: public Jsonizable, public AuxInfo {
 public:
     void Jsonize(Jsonizable::JsonWrapper& json) override {
         json.Jsonize("cost_time_ms", cost_time_ms, cost_time_ms);
@@ -41,14 +41,14 @@ public:
     float cost_time_ms;
 };
 
-struct PipelineResponse : public Jsonizable {
+struct PipelineResponse: public Jsonizable {
     void Jsonize(Jsonizable::JsonWrapper& json) override {
         json.Jsonize("response", response, response);
         json.Jsonize("finished", finished, finished);
         json.Jsonize("aux_info", aux_info, aux_info);
     }
-    std::string response;
-    bool finished;
+    std::string    response;
+    bool           finished;
     AuxInfoAdapter aux_info;
 };
 
@@ -68,11 +68,11 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
     }
 
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
-    input->request_id = requestCounter.incAndReturn();
-    input->begin_time_ms = autil::TimeUtility::currentTimeInMicroSeconds();
-    input->generate_config = std::make_shared<GenerateConfig>();
+    input->request_id                    = requestCounter.incAndReturn();
+    input->begin_time_ms                 = autil::TimeUtility::currentTimeInMicroSeconds();
+    input->generate_config               = std::make_shared<GenerateConfig>();
 
-    auto body = ParseJson(request.getBody());
+    auto body    = ParseJson(request.getBody());
     auto bodyMap = AnyCast<JsonMap>(body);
 
     // generate_config
@@ -94,8 +94,8 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
 
     // merge stop_words_str
     std::vector<std::string> stop_words_str;
-    auto generate_config_map = AnyCast<JsonMap>(it->second);
-    it = generate_config_map.find("stop_words_str");
+    auto                     generate_config_map = AnyCast<JsonMap>(it->second);
+    it                                           = generate_config_map.find("stop_words_str");
     if (it == generate_config_map.end()) {
         FT_LOG_INFO("no stop_words_str in http request.");
     } else {
@@ -130,11 +130,11 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
             }
             input->multimodal_inputs = std::move(mm_inputs);
         } else {
-            FT_LOG_INFO("no images in http request." );
+            FT_LOG_INFO("no images in http request.");
         }
     }
 
-    it = bodyMap.find("prompt");
+    it                 = bodyMap.find("prompt");
     std::string prompt = "hello";
     if (it == bodyMap.end()) {
         FT_LOG_INFO("no prompt in http request.");
@@ -144,30 +144,32 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
 
     auto vec = pipeline_.encode(prompt);
 
-    auto device = ft::DeviceFactory::getDefaultDevice();
-    input->input_ids = device->allocateBuffer(
-        {ft::DataType::TYPE_INT32, {vec.size()}, ft::AllocationType::HOST}, {});
+    auto device      = ft::DeviceFactory::getDefaultDevice();
+    input->input_ids = device->allocateBuffer({ft::DataType::TYPE_INT32, {vec.size()}, ft::AllocationType::HOST}, {});
     memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
 
     auto stream = engine->enqueue(input);
     while (!stream->finished()) {
         const auto output_status = stream->nextOutput();
-        if (!output_status.ok()) { break; }
-        const GenerateOutputs *responses = &(output_status.value());
+        if (!output_status.ok()) {
+            break;
+        }
+        const GenerateOutputs* responses = &(output_status.value());
 
         for (size_t i = 0; i < responses->generate_outputs.size(); i++) {
-            const auto& response = responses->generate_outputs[i];
-            const ft::Buffer *buffer = response.output_ids.get();
-            int32_t *output_ids = reinterpret_cast<int32_t*>(buffer->data());
+            const auto&          response   = responses->generate_outputs[i];
+            const ft::Buffer*    buffer     = response.output_ids.get();
+            int32_t*             output_ids = reinterpret_cast<int32_t*>(buffer->data());
             std::vector<int32_t> tokens;
             for (size_t i = 0; i < buffer->size(); i++) {
                 tokens.emplace_back(output_ids[i]);
             }
 
             // TODO
-            //auto genenate_texts = Pipeline::decode_tokens(tokens, stop_words_str, finished, token_buffer, incremental, print_stop_words);
+            // auto genenate_texts = Pipeline::decode_tokens(tokens, stop_words_str, finished, token_buffer,
+            // incremental, print_stop_words);
             auto generate_texts = pipeline_.decode(tokens);
-            auto json_response = Pipeline::format_response(generate_texts, responses);
+            auto json_response  = Pipeline::format_response(generate_texts, responses);
             if (input->generate_config->is_streaming) {
                 auto sse_response = HttpApiServer::SseResponse(json_response);
                 writer->AddHeader("Content-Type", "text/event-stream");
@@ -185,18 +187,20 @@ void HttpApiServer::registerResponses() {
     http_server_.RegisterRoute("POST", "/inference",
             std::bind(inferResponse, _1, _2, engine_, params_, pipeline_, controller_));
     // TODO: register other routes
+    registerRoot();
+    registerHealth();
 }
 
 std::string Pipeline::decode(std::vector<int> token_ids) {
     py::gil_scoped_acquire acquire;
-    std::string res = py::cast<std::string>(token_processor_.attr("decode")(token_ids));
+    std::string            res = py::cast<std::string>(token_processor_.attr("decode")(token_ids));
     return res;
 }
 
 std::vector<int> Pipeline::encode(std::string prompt) {
     py::gil_scoped_acquire acquire;
-    auto res = token_processor_.attr("encode")(prompt);
-    std::vector<int> vecInt;
+    auto                   res = token_processor_.attr("encode")(prompt);
+    std::vector<int>       vecInt;
     if (!py::isinstance<py::list>(res)) {
         throw std::runtime_error("Expected a list, but get " + py::cast<std::string>(py::str(res)));
     }
@@ -207,8 +211,7 @@ std::vector<int> Pipeline::encode(std::string prompt) {
     return vecInt;
 }
 
-std::string Pipeline::format_response(std::string generate_texts,
-                                      const GenerateOutputs* generate_outputs) {
+std::string Pipeline::format_response(std::string generate_texts, const GenerateOutputs* generate_outputs) {
     PipelineResponse res;
     res.response = generate_texts;
     res.finished = generate_outputs->generate_outputs[0].finished;
@@ -216,4 +219,39 @@ std::string Pipeline::format_response(std::string generate_texts,
     return ToJsonString(res, /*isCompact=*/true);
 }
 
-} // namespace rtp_llm
+bool HttpApiServer::registerRoot() {
+    auto sharedThis = shared_from_this();
+    auto callback   = [sharedThis](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                 const http_server::HttpRequest&                  request) -> void {
+        if (sharedThis->IsShutdown()) {
+            writer->WriteError(503, "server has been shutdown");
+            return;
+        }
+        writer->Write(R"({"status":"home"})");
+    };
+    return http_server_.RegisterRoute("GET", "/", callback);
+}
+
+bool HttpApiServer::registerHealth() {
+    auto sharedThis = shared_from_this();
+    auto callback   = [sharedThis](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                 const http_server::HttpRequest&                  request) -> void {
+        if (sharedThis->IsShutdown()) {
+            writer->WriteError(503, "server has been shutdown");
+            return;
+        }
+        writer->Write("ok");
+    };
+
+    return http_server_.RegisterRoute("GET", "/health", callback)
+           && http_server_.RegisterRoute("POST", "/health", callback)
+           && http_server_.RegisterRoute("GET", "/GraphService/cm2_status", callback)
+           && http_server_.RegisterRoute("POST", "/GraphService/cm2_status", callback)
+           && http_server_.RegisterRoute("GET", "/SearchService/cm2_status", callback)
+           && http_server_.RegisterRoute("POST", "/SearchService/cm2_status", callback)
+           && http_server_.RegisterRoute("GET", "/status", callback)
+           && http_server_.RegisterRoute("POST", "/status", callback)
+           && http_server_.RegisterRoute("POST", "/health_check", callback);
+}
+
+}  // namespace rtp_llm
