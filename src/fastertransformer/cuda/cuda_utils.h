@@ -20,9 +20,11 @@
 #include "src/fastertransformer/utils/logger.h"
 #include "src/fastertransformer/core/Types.h"
 
+#include <cstddef>
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include <nvml.h>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -821,6 +823,123 @@ T getCudaValue(const T* ptr, int index) {
 template<typename T>
 void setCudaValue(T* ptr, int index, T value) {
     check_cuda_error(cudaMemcpy(ptr + index, &value, sizeof(T), cudaMemcpyHostToDevice));
+}
+
+
+static inline std::string getDriverVersion() {
+    nvmlReturn_t result;
+    nvmlDevice_t device;
+    size_t device_count = getDeviceCount();
+    if (device_count == 0) {
+        throw std::runtime_error("no cuda device");
+    }
+
+    result = nvmlInit();
+    if (NVML_SUCCESS != result) {
+        throw std::runtime_error("Failed to initialize NVML: " + std::to_string(result));
+    }
+    result = nvmlDeviceGetHandleByIndex(0, &device);
+    if (NVML_SUCCESS != result) {
+        throw std::runtime_error("Failed to call nvmlDeviceGetHandleByIndex() API");
+    }
+
+    char driverVersion[NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE];
+    result = nvmlSystemGetDriverVersion(driverVersion, NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE);
+    if (NVML_SUCCESS != result) {
+        throw std::runtime_error("Failed to call nvmlSystemGetDriverVersion() API");
+    }
+
+    result = nvmlShutdown();
+    if (NVML_SUCCESS != result) {
+        std::cerr << "Failed to shutdown NVML: " << std::to_string(result) << std::endl;
+    }
+    return std::string(driverVersion);
+}
+
+static inline int getCudaVersion() {
+    int cuda_driver_version;
+    check_cuda_error(cudaDriverGetVersion(&cuda_driver_version));
+    return cuda_driver_version;
+}
+
+static inline bool checkAllNVLinks(std::vector<int> device_ids) {
+    nvmlReturn_t result;
+    nvmlDevice_t deviceHandles[2];
+
+    result = nvmlInit();
+    if (NVML_SUCCESS != result) {
+        throw std::runtime_error("Failed to initialize NVML: " + std::to_string(result));
+    }
+
+    for (size_t i = 0; i < device_ids.size(); i++) {
+        for (size_t j = i + 1; j < device_ids.size(); j++) {
+            size_t device_id1 = device_ids[i];
+            size_t device_id2 = device_ids[j];
+
+            result = nvmlDeviceGetHandleByIndex(device_id1, &deviceHandles[0]);
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id1) + ": " + std::to_string(result));
+            }
+
+            result = nvmlDeviceGetHandleByIndex(device_id2, &deviceHandles[1]);
+            if (NVML_SUCCESS != result) {
+                throw std::runtime_error("Failed to get handle for device " + std::to_string(device_id2) + ": " + std::to_string(result));
+            }
+
+            nvmlGpuP2PStatus_t isActive;
+            result = nvmlDeviceGetP2PStatus(deviceHandles[0], deviceHandles[1], NVML_P2P_CAPS_INDEX_NVLINK, &isActive);
+            if (NVML_SUCCESS != result || isActive != NVML_P2P_STATUS_OK) {
+                FT_LOG_INFO("GPU %d and GPU %d are not connected via NVLink", device_id1, device_id2);
+                return false;
+            }
+        }
+    }
+    result = nvmlShutdown();
+    if (NVML_SUCCESS != result) {
+        std::cerr << "Failed to shutdown NVML: " << std::to_string(result) << std::endl;
+    }
+    FT_LOG_INFO("All GPUs are connected via NVLink");
+    return true;
+}
+
+// Note: Avoid using this function when driver version is 470.82.01, as using the domain to check if the device 
+// is on the same NUMA node is not reliable on that version
+static inline bool checkOnSameNumaNodes(std::vector<int> device_ids) {
+    unsigned int last_numa_id = INT32_MAX;
+    for (size_t i = 0; i < device_ids.size(); i++) {
+        size_t device_id = device_ids[i];
+        cudaDeviceProp device_prop;
+        check_cuda_error(cudaGetDeviceProperties(&device_prop, device_id));
+        unsigned int numa_id = device_prop.pciDomainID;
+        if (numa_id != last_numa_id && last_numa_id != INT32_MAX) {
+            return false;
+        }
+        last_numa_id = numa_id;
+    }
+    return true;
+}
+
+static std::vector<int> getVisibleCUDADevices() {
+    const char* cudadev = std::getenv("CUDA_VISIBLE_DEVICES");
+    if (cudadev == nullptr) {
+        // If CUDA_VISIBLE_DEVICES is not set, return an empty vector or handle as needed
+        return {};
+    }
+
+    std::vector<int> deviceIds;
+    std::stringstream ss(cudadev);
+    int deviceId;
+    while (ss >> deviceId) {
+        // Successfully read an integer, add it to the vector
+        deviceIds.push_back(deviceId);
+
+        // Check for a comma to skip it before reading the next number
+        if (ss.peek() == ',') {
+            ss.ignore();
+        }
+    }
+
+    return deviceIds;
 }
 
 /* ************************** end of common utils ************************** */

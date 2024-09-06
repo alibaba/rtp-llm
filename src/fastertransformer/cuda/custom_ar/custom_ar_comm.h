@@ -68,7 +68,9 @@ private:
                                                       cudaStream_t     stream);
 
     CustomAllReduceParameters       param_;
-    const int                       rank_;
+    const int                       rank_ = 0;
+    int                             rank_index_ = 0;
+    const int                       world_size_ = 0;
     std::vector<int>                tp_ranks_;
     std::vector<cudaIpcMemHandle_t> peer_comm_buffer_handles_;
 };
