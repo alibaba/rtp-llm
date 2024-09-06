@@ -59,6 +59,9 @@ public:
 private:
     bool registerRoot();
     bool registerHealth();
+    bool registerV1Model();
+    bool registerSetDebugLog();
+    bool registerSetDebugPrint();
 
 private:
     http_server::HttpServer http_server_;

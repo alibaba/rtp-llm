@@ -5,6 +5,11 @@
 #include "src/fastertransformer/utils/py_utils/pybind_utils.h"
 #include "maga_transformer/cpp/dataclass/Query.h"
 
+namespace torch_ext {
+extern void setDebugLogLevel(bool debug);
+extern void setDebugPrintLevel(bool debug);
+}  // namespace torch_ext
+
 namespace rtp_llm {
 
 using namespace std::placeholders;
@@ -189,6 +194,9 @@ void HttpApiServer::registerResponses() {
     // TODO: register other routes
     registerRoot();
     registerHealth();
+    registerV1Model();
+    registerSetDebugLog();
+    registerSetDebugPrint();
 }
 
 std::string Pipeline::decode(std::vector<int> token_ids) {
@@ -252,6 +260,44 @@ bool HttpApiServer::registerHealth() {
            && http_server_.RegisterRoute("GET", "/status", callback)
            && http_server_.RegisterRoute("POST", "/status", callback)
            && http_server_.RegisterRoute("POST", "/health_check", callback);
+}
+
+bool HttpApiServer::registerV1Model() {
+    auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                       const http_server::HttpRequest&                  request) -> void {
+        // TODO: return model list
+    };
+    return http_server_.RegisterRoute("GET", "/v1/models", callback);
+}
+
+bool HttpApiServer::registerSetDebugLog() {
+    auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                       const http_server::HttpRequest&                  request) -> void {
+        auto body    = ParseJson(request.getBody());
+        auto bodyMap = AnyCast<JsonMap>(body);
+        if (auto it = bodyMap.find("debug"); it != bodyMap.end()) {
+            torch_ext::setDebugLogLevel(AnyCast<bool>(it->second));
+            writer->Write(R"({"status":"ok"})");
+        } else {
+            writer->Write(R"({"error":"set debug log level failed"})");
+        }
+    };
+    return http_server_.RegisterRoute("POST", "/set_debug_log", callback);
+}
+
+bool HttpApiServer::registerSetDebugPrint() {
+    auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                       const http_server::HttpRequest&                  request) -> void {
+        auto body    = ParseJson(request.getBody());
+        auto bodyMap = AnyCast<JsonMap>(body);
+        if (auto it = bodyMap.find("debug"); it != bodyMap.end()) {
+            torch_ext::setDebugPrintLevel(AnyCast<bool>(it->second));
+            writer->Write(R"({"status":"ok"})");
+        } else {
+            writer->Write(R"({"error":"set debug print level failed"})");
+        }
+    };
+    return http_server_.RegisterRoute("POST", "/set_debug_print", callback);
 }
 
 }  // namespace rtp_llm
