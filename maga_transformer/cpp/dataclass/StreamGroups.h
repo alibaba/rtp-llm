@@ -102,6 +102,20 @@ public:
         return decode_streams_;
     }
 
+    bool needReturnAllProbs() const {
+        for (auto& stream : context_streams_) {
+            if (stream->getReturnAllProbs()) {
+                return true;
+            }
+        }
+        for (auto& stream : decode_streams_) {
+            if (stream->getReturnAllProbs()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::list<GenerateStreamPtr> allStreams() const {
         std::list<GenerateStreamPtr> all_streams = decode_streams_;
         all_streams.splice(all_streams.end(), std::list<GenerateStreamPtr>(context_streams_));

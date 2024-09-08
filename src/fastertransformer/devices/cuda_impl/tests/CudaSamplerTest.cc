@@ -45,7 +45,7 @@ TEST_F(CudaSamplerTest, testTopK) {
         *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
         nullopt, nullopt, nullopt,
-        *cum_log_probs, nullopt, nullopt,
+        *cum_log_probs, nullopt,
         *output_all_probs,
     });
     device_->sampleGreedy(params);
@@ -106,7 +106,7 @@ TEST_F(CudaSamplerTest, testTopP) {
         *logits, *sequence_lengths, *input_lengths, *output_token_ids, step,
         *top_k, *top_p, *temperture, *rand_seed,
         nullopt, nullopt, nullopt,
-        *cum_log_probs, nullopt, nullopt,
+        *cum_log_probs, nullopt,
         *output_all_probs,
     });
     device_->sampleGreedy(params);

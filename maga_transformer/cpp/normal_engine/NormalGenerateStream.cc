@@ -23,7 +23,8 @@ absl::StatusOr<GenerateOutputs> NormalGenerateStream::nextOutput() {
 void NormalGenerateStream::updateOutput(const ft::BufferPtr& new_tokens,
                                         const ft::BufferPtr& hidden_states,
                                         const ft::BufferPtr& logits,
-                                        const ft::BufferPtr& cum_log_probs) {
+                                        const ft::BufferPtr& cum_log_probs,
+                                        const ft::BufferPtr& all_probs) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     bool finished = needFinish();
     if (finished) {

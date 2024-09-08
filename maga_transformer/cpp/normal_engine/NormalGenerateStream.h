@@ -1,5 +1,6 @@
 #pragma once
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
+#include "src/fastertransformer/core/Buffer.h"
 
 namespace ft = fastertransformer;
 
@@ -33,7 +34,8 @@ public:
     void updateOutput(const ft::BufferPtr& new_tokens,
                       const ft::BufferPtr& hidden_states,
                       const ft::BufferPtr& logits,
-                      const ft::BufferPtr& cum_log_probs) override;
+                      const ft::BufferPtr& cum_log_probs,
+                      const ft::BufferPtr& all_probs) override;
 
 protected:
     std::shared_ptr<GenerateOutputs>          generate_outputs_;

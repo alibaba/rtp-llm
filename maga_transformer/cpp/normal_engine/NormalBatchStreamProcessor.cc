@@ -1,11 +1,13 @@
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <random>
 #include <limits>
 #include <utility>
 #include "c10/core/DeviceType.h"
 #include "c10/core/ScalarType.h"
 #include "maga_transformer/cpp/models/Sampler.h"
+#include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/assert_utils.h"
 #include "src/fastertransformer/core/Types.h"
 #include "maga_transformer/cpp/normal_engine/NormalBatchStreamProcessor.h"
@@ -240,6 +242,7 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
     size_t total_decode_batch_size = stream_groups.totalDecodeBatchSize();
     auto all_streams = stream_groups.allStreams();
     auto total_batch_size = stream_groups.totalSamplerBatchSize();
+    bool return_all_probs = stream_groups.needReturnAllProbs();
 
     SamplerInputs sampler_inputs = allocateSamplerInputs(stream_groups, total_batch_size, model_inputs.sequence_lengths);
     setCommonSamplerInputs(sampler_inputs, all_streams);
@@ -264,6 +267,10 @@ NormalBatchStreamProcessor::gatherSamplerInput(const StreamGroups&    stream_gro
 
     auto vocab_size = model_output.logits->shape()[1];
     sampler_inputs.logits = device_->allocateBuffer({model_output.logits->type(), {total_batch_size, vocab_size}, ft::AllocationType::DEVICE}, {});
+    if (return_all_probs) {
+        sampler_inputs.all_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {total_batch_size, vocab_size}, ft::AllocationType::DEVICE}, {});
+        device_->bufMemset(*sampler_inputs.all_probs, 0);
+    }
 
     batch_idx = 0;
     device_->copy({sampler_inputs.logits->view(0, total_decode_batch_size), model_output.logits->view(0, total_decode_batch_size)});
@@ -362,6 +369,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
     int batch_idx = 0;
     int offset = 0;
     int token_offset = 0;
+    bool return_all_probs = stream_groups.needReturnAllProbs();
     for (auto& stream : stream_groups.allStreams()) {
         if (stream->isChunkStream()) {
             continue;
@@ -372,6 +380,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
         auto batch_logits = model_output.logits->slice(offset, batch);
         auto batch_hidden_states = model_output.hidden_states->slice(offset, batch);
         auto batch_cum_log_probs = sampler_output.cum_log_probs->slice(batch_idx, current_batch_size);
+        auto all_probs = return_all_probs ? sampler_output.all_probs->slice(batch_idx, current_batch_size) : nullptr;
         if (stream->calculateLoss()) {
             auto all_logits = model_output.all_logits->view(token_offset, token_size - 1);
             auto tokens = stream->currentExecuteTokens(0);
@@ -385,7 +394,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups&           
             batch_idx += 1;
         }
         FT_LOG_DEBUG("stream [%d], new_tokens = [%s]", stream->streamId(), new_tokens->debugStringWithData<int32_t>().c_str());
-        stream->update(new_tokens, 1, batch_hidden_states, batch_logits, batch_cum_log_probs);
+        stream->update(new_tokens, 1, batch_hidden_states, batch_logits, batch_cum_log_probs, all_probs);
         offset += batch;
         token_offset += token_size;
     }

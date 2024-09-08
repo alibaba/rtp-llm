@@ -46,6 +46,10 @@ public:
     int                 timeout_ms           = -1;
     std::vector<std::vector<int>> stop_words_list;
 
+    bool top1() {
+        return top_k == 1;
+    }
+
     std::string debugString() const {
         std::stringstream debug_string;
         debug_string << "GenerateConfig {"

@@ -16,6 +16,9 @@ private:
     size_t top1Sample(size_t                                    propose_step,
                       const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
                       const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const;
+    size_t stochasticSample(size_t                                    propose_step,
+                            const SpeculativeExecutorStreamOutputPtr& propose_stream_output,
+                            const SpeculativeExecutorStreamOutputPtr& scorer_stream_output) const;
 };
 
 }  // namespace rtp_llm

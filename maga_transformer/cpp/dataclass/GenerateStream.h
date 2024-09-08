@@ -42,13 +42,15 @@ public:
                       const ft::BufferPtr& new_tokens,
                       const ft::BufferPtr& hidden_states,
                       const ft::BufferPtr& logits,
-                      const ft::BufferPtr& cum_log_probs) = 0;
+                      const ft::BufferPtr& cum_log_probs,
+                      const ft::BufferPtr& all_probs) = 0;
 
     void update(const ft::BufferPtr&    new_tokens,
                 int   num_new_tokens,
                 const ft::BufferPtr& hidden_states,
                 const ft::BufferPtr& logits,
-                const ft::BufferPtr& cum_log_probs);
+                const ft::BufferPtr& cum_log_probs,
+                const ft::BufferPtr& all_probs);
 
 
     virtual size_t scoreLen() const {
@@ -64,7 +66,7 @@ public:
     void incrFallbackBlock(int fallback_blocks);
 
     std::shared_ptr<GenerateInput> generateInput() const;
-    std::shared_ptr<GenerateConfig>& generateConfig();
+    std::shared_ptr<GenerateConfig>& generateConfig() const;
     std::vector<int> textTokensMask() const;
     bool isStreaming() const;
     int64_t streamId() const;
@@ -167,6 +169,14 @@ public:
         stream_cache_resource_.setNeedReleaseResource(need_release_resource);
     }
 
+    void setReturnAllProbs(bool return_all_probs) {
+        return_all_probs_ = return_all_probs;
+    }
+
+    bool getReturnAllProbs() {
+        return return_all_probs_;
+    }
+
 protected:
     ft::DeviceBase* device_;
     std::shared_ptr<GenerateInput>      generate_input_;
@@ -197,6 +207,7 @@ protected:
     bool                                need_release_resource_  = true;
 
     bool                                enable_fast_gen_        = false;
+    bool                                return_all_probs_       = false;
     int                                 current_chunk_len_      = 0;
     int                                 last_chunk_len_         = 0;
     int                                 max_chunk_len_          = 0;

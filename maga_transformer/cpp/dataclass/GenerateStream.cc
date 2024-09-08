@@ -139,7 +139,7 @@ void GenerateStream::incrFallbackBlock(int fallback_blocks) {
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
     return generate_input_;
 }
-std::shared_ptr<GenerateConfig>& GenerateStream::generateConfig() {
+std::shared_ptr<GenerateConfig>& GenerateStream::generateConfig() const {
     return generate_input_->generate_config;
 }
 bool GenerateStream::isStreaming() const {
@@ -520,7 +520,8 @@ void GenerateStream::update(const ft::BufferPtr&    new_tokens,
                             int               num_new_tokens,
                             const ft::BufferPtr& hidden_states,
                             const ft::BufferPtr& logits,
-                            const ft::BufferPtr& cum_log_probs) {
+                            const ft::BufferPtr& cum_log_probs,
+                            const ft::BufferPtr& all_probs) {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     is_context_stream_ = false;
     if (stoppedWithoutLock()) {
@@ -547,7 +548,7 @@ void GenerateStream::update(const ft::BufferPtr&    new_tokens,
     }
     setSeqLength(seq_length_ + num_new_tokens);
 
-    updateOutput(new_tokens, hidden_states, logits, cum_log_probs);
+    updateOutput(new_tokens, hidden_states, logits, cum_log_probs, all_probs);
 }
 
 void GenerateStream::setLoss(const ft::Buffer& loss) {

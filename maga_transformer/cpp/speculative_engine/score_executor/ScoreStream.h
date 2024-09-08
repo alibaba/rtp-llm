@@ -1,6 +1,7 @@
 #pragma once
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
 #include "maga_transformer/cpp/speculative_engine/score_executor/ScoreOutput.h"
+#include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/assert_utils.h"
 #include <cstddef>
 
@@ -24,6 +25,10 @@ public:
         updateProposeTokens(stream_input);
         allocateOutputBuffer(propose_step);
         setNeedReleaseResource(false);
+
+        if (!stream.generateConfig()->top1()) {
+            setReturnAllProbs(true);
+        }
     }
 
     ~ScoreStream() {}
@@ -36,8 +41,22 @@ public:
     void updateOutput(const ft::BufferPtr& new_tokens,
                       const ft::BufferPtr& hidden_states,
                       const ft::BufferPtr& logits,
-                      const ft::BufferPtr& cum_log_probs) override {
+                      const ft::BufferPtr& cum_log_probs,
+                      const ft::BufferPtr& all_probs) override {
         device_->copy({(*output_buffer_->tokens)[0], (*new_tokens)[0]});
+
+        // TODO(xyz): optimize deepclone
+        if (all_probs) {
+            output_buffer_->all_probs = device_->clone({*all_probs, ft::AllocationType::DEVICE, {"score_all_probs"}});
+        }
+
+        if (generate_input_->generate_config->return_logits) {
+            output_buffer_->logits = device_->clone({*all_probs, ft::AllocationType::DEVICE, {"logits"}});
+        }
+
+        if (generate_input_->generate_config->return_hidden_states) {
+            output_buffer_->hidden_states = device_->clone({*all_probs, ft::AllocationType::DEVICE, {"score"}});
+        }
     }
 
     size_t scoreLen() const override {

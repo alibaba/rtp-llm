@@ -62,6 +62,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto random_seeds = MAY_GET_BUFFER_VIEW(inputs.random_seeds);
             auto repetition_penalty = MAY_GET_BUFFER_VIEW(inputs.repetition_penalty);
             auto min_lengths = MAY_GET_BUFFER_VIEW(inputs.min_lengths);
+            auto all_probs = (inputs.all_probs.get() ? inputs.all_probs->view(from_batch_idx, sample_seq_num) : Buffer::emptyBuffer());
             device_->sampleGreedy({
                 sample_logits,
                 input_lengths,
@@ -77,7 +78,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 *eos_ids_,
                 *sample_cum_log_probs,
                 nullopt, // output_log_probs
-                inputs.index_log_prob.get() ? (OptionalBufferRef)*inputs.index_log_prob: nullopt
+                inputs.all_probs ? (OptionalBufferRef) all_probs: nullopt
             });
         } else {
             throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
@@ -90,7 +91,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         from_seq_idx = sample_to_seq_idx;
     } while (from_batch_idx < inputs.batch_size);
     // TODO(xinfei.sxf) 优化copy token_ids
-    return SamplerOutput({move(inputs.token_ids), move(inputs.cum_log_probs), move(inputs.index_log_prob)});
+    return SamplerOutput({move(inputs.token_ids), move(inputs.cum_log_probs), move(inputs.all_probs)});
 }
 
 } // namespace rtp_llm

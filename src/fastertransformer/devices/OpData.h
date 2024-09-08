@@ -462,7 +462,6 @@ struct GreedyParams {
 
     OptionalBufferRef cum_log_probs;
     OptionalBufferRef output_log_probs;
-    OptionalBufferRef output_index_probs;
 
     OptionalBufferRef output_all_probs;
 };

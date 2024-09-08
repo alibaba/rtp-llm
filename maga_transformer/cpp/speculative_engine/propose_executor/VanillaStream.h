@@ -1,7 +1,9 @@
 #pragma once
 #include "maga_transformer/cpp/dataclass/GenerateStream.h"
 #include "maga_transformer/cpp/speculative_engine/SpeculativeStreamOutput.h"
+#include "src/fastertransformer/core/Buffer.h"
 #include "src/fastertransformer/utils/assert_utils.h"
+#include <cstddef>
 
 namespace ft = fastertransformer;
 
@@ -12,13 +14,17 @@ public:
     VanillaStream(const GenerateStream&                     stream,
                   const SpeculativeExecutorStreamOutputPtr& stream_output,
                   size_t                                    propose_step):
-        GenerateStream(stream), output_buffer_(stream_output) {
+        GenerateStream(stream), output_buffer_(stream_output), propose_step_(propose_step) {
         // WARNING: VanillaStream currently only support batch_size = 1
         FT_CHECK(tileNum() == 1);
         CopyOnWrite(stream);
         setMetricsReporter(nullptr);
         allocateOutputBuffer(propose_step);
         setNeedReleaseResource(false);
+
+        if (!stream.generateConfig()->top1()) {
+            setReturnAllProbs(true);
+        }
     }
 
     ~VanillaStream() {}
@@ -31,7 +37,18 @@ public:
     void updateOutput(const ft::BufferPtr& new_tokens,
                       const ft::BufferPtr& hidden_states,
                       const ft::BufferPtr& logits,
-                      const ft::BufferPtr& cum_log_probs) override {
+                      const ft::BufferPtr& cum_log_probs,
+                      const ft::BufferPtr& all_probs) override {
+        // TODO(xyz): optimize deepclone
+        if (all_probs) {
+            // lazy allocate buffer
+            if (!output_buffer_->all_probs) {
+                size_t vocab_size         = all_probs->shape()[1];
+                output_buffer_->all_probs = device_->allocateBuffer(
+                    {ft::DataType::TYPE_FP32, {propose_step_, vocab_size}, ft::AllocationType::DEVICE}, {"vanilla_all_probs"});
+            }
+            device_->copy({output_buffer_->all_probs->view(current_step_, 1), *all_probs});
+        }
         *((*output_buffer_->tokens)[0].dataWithOffset<int>(current_step_)) = ((int*)new_tokens->data())[0];
         current_step_++;
     }
@@ -43,7 +60,8 @@ private:
     }
 
 protected:
-    size_t                             current_step_ = 0;
     SpeculativeExecutorStreamOutputPtr output_buffer_;
+    size_t                             current_step_ = 0;
+    size_t                             propose_step_ = 0;
 };
 }  // namespace rtp_llm

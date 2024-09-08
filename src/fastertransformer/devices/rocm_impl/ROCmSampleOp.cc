@@ -1,4 +1,4 @@
-    #include "src/fastertransformer/devices/rocm_impl/ROCmDevice.h"
+#include "src/fastertransformer/devices/rocm_impl/ROCmDevice.h"
 #include "src/fastertransformer/devices/CommonDefines.h"
 #include "src/fastertransformer/kernels/sampling_topk_kernels.h"
 #include "src/fastertransformer/kernels/sampling_topp_kernels.h"
@@ -119,11 +119,9 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
     auto runtime_top_p_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
     copy({*runtime_top_p_buf, top_p});
 
-    auto cum_log_probs = params.cum_log_probs.has_value() ?
-                         params.cum_log_probs.value().get().data<float>() : nullptr;
-    auto output_log_probs = params.output_log_probs.has_value() ?
-                            params.output_log_probs.value().get().data<float>() : nullptr;
-
+    auto cum_log_probs =  GET_TYPED_VALUE_FROM_OPT_REF(params.cum_log_probs, float);
+    auto output_log_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.output_log_probs, float);
+    auto output_all_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.output_all_probs, float);
 
     // 3. prepare common inputs
 
@@ -237,7 +235,7 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
         runtime_top_p_buf->data<float>(),
         vocab_size_padded,
         nullptr, // end_id
-        nullptr,
+        output_all_probs,
         stream_,
         batch_size,
         skip_top_k_decode_buf->data<bool>());
@@ -301,7 +299,7 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
         nullptr, // end_id
         max_top_p,
         runtime_top_p_buf->data<float>(),
-        nullptr,
+        output_all_probs,
         stream_,
         &device_prop_,
         skip_top_p_decode_buf->data<bool>());

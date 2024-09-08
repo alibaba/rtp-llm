@@ -18,10 +18,10 @@ public:
     ProposeExecutor(ft::DeviceBase* device): device_(device) {}
     virtual ~ProposeExecutor(){};
 
-    virtual absl::StatusOr<ProposeOutput> propose(const std::list<GenerateStreamPtr>& streams)    = 0;
-    virtual void                          dynamicUpdateConfig(const ProposeDynamicConfig& config) = 0;
-    virtual size_t                        reserveStep() const                                     = 0;
-    virtual absl::Status                  normalProcess(const std::list<GenerateStreamPtr>& streams)    = 0;
+    virtual absl::StatusOr<ProposeOutput> propose(const std::list<GenerateStreamPtr>& streams)       = 0;
+    virtual void                          dynamicUpdateConfig(const ProposeDynamicConfig& config)    = 0;
+    virtual size_t                        reserveStep() const                                        = 0;
+    virtual absl::Status                  normalProcess(const std::list<GenerateStreamPtr>& streams) = 0;
 
 protected:
     ft::DeviceBase* device_;

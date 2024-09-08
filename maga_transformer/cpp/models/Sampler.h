@@ -46,14 +46,14 @@ public:
     ft::BufferPtr min_lengths;         // shape: [batch_size]
 
     mutable ft::BufferPtr cum_log_probs;       // shape: [batch_size * num_beams]
-    mutable ft::BufferPtr index_log_prob;
+    mutable ft::BufferPtr all_probs;    // shape: [batch_size * num_beams, vocab_size]
 };
 
 struct SamplerOutput {
 public:
     ft::BufferPtr token_ids;
     ft::BufferPtr cum_log_probs;
-    ft::BufferPtr index_log_prob;
+    ft::BufferPtr all_probs;
 };
 
 // Sampler would split logits into appropriate groups (mostly, based on beam size)

@@ -297,7 +297,7 @@ __global__ void topk_stage2_sampling(const int* __restrict topk_tmp_id_buf,
                 int token_idx = topk_tmp_id_buf[batch_id * stride + s_id[i]] % vocab_size;
                 float origin_prob = __expf(logf(s_val2[i]) - logf(s_sum));
                 prob_sum += origin_prob;
-                output_all_probs[batch_id * vocab_size + token_idx] = max(0.0, origin_prob - max(0.0, prob_sum - prob_threshold)) / prob_threshold;;
+                output_all_probs[batch_id * vocab_size + token_idx] = max(0.0, origin_prob - max(0.0, prob_sum - prob_threshold)) / prob_threshold;
                 if (prob_sum >= prob_threshold) {
                     break;
                 }

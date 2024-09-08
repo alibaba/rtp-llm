@@ -71,7 +71,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
 
     auto cum_log_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.cum_log_probs, float);
     auto output_log_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.output_log_probs, float);
-
+    auto output_all_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.output_all_probs, float);
     // 3. prepare common inputs
 
     // 3.1. setup random seeds
@@ -209,7 +209,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
             runtime_top_p_buf->data<float>(),
             vocab_size_padded,
             nullptr, // end_id
-            GET_TYPED_VALUE_FROM_OPT_REF(params.output_all_probs, float),
+            output_all_probs,
             stream_,
             batch_size,
             skip_top_k_decode_buf->data<bool>());
@@ -304,7 +304,7 @@ void CudaDevice::sampleGreedy(const GreedyParams& params) {
             nullptr, // end_id
             max_top_p,
             runtime_top_p_buf->data<float>(),
-            GET_TYPED_VALUE_FROM_OPT_REF(params.output_all_probs, float),
+            output_all_probs,
             stream_,
             &device_prop_,
             skip_top_p_decode_buf->data<bool>());
