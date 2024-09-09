@@ -142,6 +142,7 @@ public:
         ElementA* ptr_A;
         ElementB* ptr_B;
         ElementScale* weight_scales;
+        ElementScale* weight_zeros;
         ElementC* ptr_C;
         ElementC* ptr_D;
         bool C_is_broadcast;
@@ -165,6 +166,7 @@ public:
             , ptr_A(nullptr)
             , ptr_B(nullptr)
             , weight_scales(nullptr)
+            , weight_zeros(nullptr)
             , ptr_C(nullptr)
             , ptr_D(nullptr)
             , total_tokens_including_expert(nullptr)
@@ -178,7 +180,7 @@ public:
         /// Ctor
         CUTLASS_HOST_DEVICE
         Arguments(int problem_count, int threadblock_count, int group_size, typename EpilogueOutputOp::Params output_op,
-            ElementA const* ptr_A, ElementB const* ptr_B, ElementScale const* weight_scales, ElementC const* ptr_C,
+            ElementA const* ptr_A, ElementB const* ptr_B, ElementScale const* weight_scales, ElementScale const* weight_zeros, ElementC const* ptr_C,
             bool C_is_broadcast, ElementC* ptr_D, int64_t const* total_tokens_including_expert, int64_t gemm_n,
             int64_t gemm_k, GemmCoord* host_problem_sizes = nullptr)
             : problem_count(problem_count)
@@ -188,6 +190,7 @@ public:
             , ptr_A(const_cast<ElementA*>(ptr_A))
             , ptr_B(const_cast<ElementB*>(ptr_B))
             , weight_scales(const_cast<ElementScale*>(weight_scales))
+            , weight_zeros(const_cast<ElementScale*>(weight_zeros))
             , ptr_C(const_cast<ElementC*>(ptr_C))
             , C_is_broadcast{C_is_broadcast}
             , ptr_D(ptr_D)
@@ -221,6 +224,7 @@ public:
         ElementA* ptr_A;
         ElementB* ptr_B;
         ElementScale* weight_scales;
+        ElementScale* weight_zeros;
         ElementC* ptr_C;
         ElementC* ptr_D;
 
@@ -233,6 +237,7 @@ public:
             : ptr_A(nullptr)
             , ptr_B(nullptr)
             , weight_scales(nullptr)
+            , weight_zeros(nullptr)
             , ptr_C(nullptr)
             , ptr_D(nullptr)
             , C_is_broadcast(true)
@@ -249,6 +254,7 @@ public:
             , ptr_A(args.ptr_A)
             , ptr_B(args.ptr_B)
             , weight_scales(args.weight_scales)
+            , weight_zeros(args.weight_zeros)
             , ptr_C(args.ptr_C)
             , ptr_D(args.ptr_D)
             , C_is_broadcast(args.C_is_broadcast)
@@ -266,6 +272,7 @@ public:
             ptr_A = args.ptr_A;
             ptr_B = args.ptr_B;
             weight_scales = args.weight_scales;
+            weight_zeros = args.weight_zeros;
             ptr_C = args.ptr_C;
             ptr_D = args.ptr_D;
             C_is_broadcast = args.C_is_broadcast;
@@ -310,11 +317,6 @@ public:
                 "MoeFCGemm::can_implement() - weight scales are ignored for all types except uint8_t and uint4b_t");
             return Status::kInvalid;
         }
-        else if (args.group_size != args.gemm_k)
-        {
-            CUTLASS_TRACE_HOST("MoeFCGemm::can_implement() - scale shape should be (1, gemm_n)");
-            return Status::kInvalid;
-        }
         // Handle the case the input is too short
         else if (args.gemm_n < Mma::IteratorB::AccessType::kElements)
         {
@@ -328,6 +330,26 @@ public:
     {
 
         return 0;
+    }
+
+    template <typename IteratorScale, WeightOnlyQuantOp op, std::enable_if_t<isFinegrained(op), bool> = true>
+    CUTLASS_DEVICE static IteratorScale initialize_scale(typename IteratorScale::Params const& params,
+        typename IteratorScale::Pointer pointer_scale, typename IteratorScale::Pointer pointer_zero,
+        typename IteratorScale::TensorCoord extent, int thread_id,
+        typename IteratorScale::TensorCoord const& threadblock_offset, int group_size)
+    {
+
+        return IteratorScale(params, pointer_scale, pointer_zero, extent, thread_id, threadblock_offset, group_size);
+    }
+
+    template <typename IteratorScale, WeightOnlyQuantOp op, std::enable_if_t<!isFinegrained(op), bool> = true>
+    CUTLASS_DEVICE static IteratorScale initialize_scale(typename IteratorScale::Params const& params,
+        typename IteratorScale::Pointer pointer_scale, typename IteratorScale::Pointer pointer_zero,
+        typename IteratorScale::TensorCoord extent, int thread_id,
+        typename IteratorScale::TensorCoord const& threadblock_offset, int group_size)
+    {
+
+        return IteratorScale(params, pointer_scale, extent, thread_id, threadblock_offset);
     }
 
     CUTLASS_DEVICE
@@ -434,13 +456,15 @@ public:
             __syncthreads();
 
             // Compute threadblock-scoped matrix multiply-add
-            ElementScale* weight_scale_ptr = params.weight_scales + problem_idx * problem_size.n();
-
             if constexpr (use_dq_gemm<Mma>::value)
             {
-                const MatrixCoord scale_extent = {1, problem_size.n()};
-                typename Mma::IteratorScale iterator_scale(Mma::IteratorScale::Layout(scale_extent.column()),
-                    weight_scale_ptr, scale_extent, thread_idx, tb_offset_scale);
+                ElementScale* weight_scale_ptr =  isFinegrained(Mma::QuantOp) ? params.weight_scales + problem_idx * gemm_k * gemm_n / params.group_size : params.weight_scales + problem_idx * gemm_n ;
+                ElementScale* weight_zero_ptr = hasZero(Mma::QuantOp) ? params.weight_zeros + problem_idx * gemm_n * gemm_k / params.group_size : nullptr;
+                typename MatrixCoord::Index scale_row_extent = gemm_k / 64;
+                typename MatrixCoord::Index scale_col_extent = gemm_n;
+                typename Mma::IteratorScale iterator_scale = initialize_scale<typename Mma::IteratorScale, Mma::QuantOp>(
+                        Mma::IteratorScale::Layout(scale_col_extent), weight_scale_ptr, weight_zero_ptr,
+                        {scale_row_extent, scale_col_extent}, thread_idx, tb_offset_scale, params.group_size);
 
                 mma(gemm_k_iterations, accumulators, iterator_A, iterator_B, iterator_scale, accumulators);
             }

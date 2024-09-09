@@ -130,26 +130,32 @@ cc_shared_library(
 
 template_header = """
 #include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_gemm_kernels_template.h"
+#include "src/fastertransformer/cutlass/cutlass_kernels/moe_gemm/moe_kernels.inl"
 
 namespace tensorrt_llm
 {
 """
 template = """
-template class MoeGemmRunner<{0}, {1}, {2}>;
+template class MoeGemmRunner<{0}, {1}, {3}, {2}>;
+template class CutlassMoeFCRunner<{0}, {1}, {3}>;
 """
 template_tail = """
 }
 """
 T = [
-    ('float', 'float', 'float'),
-    ('half', 'half', 'half'),
-    ('__nv_bfloat16', '__nv_bfloat16', '__nv_bfloat16'),
-    # ('__nv_bfloat16', 'cutlass::uint4b_t', '__nv_bfloat16'),
-    # ('__nv_bfloat16', 'uint8_t', '__nv_bfloat16'),
-    # ('half', 'cutlass::uint4b_t', 'half'),
-    # ('half', 'uint8_t', 'half'),
-    # ('__nv_fp8_e4m3', '__nv_fp8_e4m3', 'half'),
-    # ('__nv_fp8_e4m3', '__nv_fp8_e4m3', '__nv_bfloat16'),
+    ('float', 'float', 'float', 'cutlass::WeightOnlyQuantOp::UNDEFINED'),
+    ('half', 'half', 'half', 'cutlass::WeightOnlyQuantOp::UNDEFINED'),
+    ('half', 'cutlass::uint4b_t', 'half', 'cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS'),
+    ('half', 'cutlass::uint4b_t', 'half', 'cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY'),
+    ('half', 'uint8_t', 'half', 'cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS'),
+    ('half', 'uint8_t', 'half', 'cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY'),
+    ('__nv_bfloat16', '__nv_bfloat16', '__nv_bfloat16', 'cutlass::WeightOnlyQuantOp::UNDEFINED'),
+    ('__nv_bfloat16', 'cutlass::uint4b_t', '__nv_bfloat16', 'cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS'),
+    ('__nv_bfloat16', 'cutlass::uint4b_t', '__nv_bfloat16', 'cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY'),
+    ('__nv_bfloat16', 'uint8_t', '__nv_bfloat16', 'cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS'),
+    ('__nv_bfloat16', 'uint8_t', '__nv_bfloat16', 'cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY'),
+    # ('__nv_fp8_e4m3', '__nv_fp8_e4m3', 'half', 'cutlass::WeightOnlyQuantOp::UNDEFINED'),
+    # ('__nv_fp8_e4m3', '__nv_fp8_e4m3', '__nv_bfloat16', 'cutlass::WeightOnlyQuantOp::UNDEFINED'),
 ]
 
 gen_cpp_code("moe_runner", [T],

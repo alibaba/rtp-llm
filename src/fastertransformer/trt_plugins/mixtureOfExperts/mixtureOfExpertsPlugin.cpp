@@ -50,29 +50,28 @@ void MixtureOfExpertsPlugin::init(int number_of_experts, int top_k, bool normali
     mGroupSize = group_size;
     mNormalizationMode = normalization_mode;
     if (mWeightType == DataType::kINT8 || mWeightType == DataType::kINT4){
-        // FT_SWITCH_T(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&]{
-        //     FT_SWITCH_V(mHasZeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY, [&]{
-        //         FT_SWITCH_T(mWeightType == DataType::kINT4, WT, cutlass::uint4b_t, uint8_t, [&] {
-        //             (void)(Q);
-        //             (void)(WT)
-        //             // mMOERunner
-        //             //     = std::make_shared<CutlassMoeFCRunner<T, WT>>();
-        //         });
-        //     });
-        // });
+        FT_SWITCH_T(mType == nvinfer1::DataType::kHALF, T, half, __nv_bfloat16, [&]{
+            FT_SWITCH_V(mHasZeros, Q, cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_AND_ZEROS, cutlass::WeightOnlyQuantOp::PER_COLUMN_SCALE_ONLY, [&]{
+                FT_SWITCH_T(mWeightType == DataType::kINT4, WT, cutlass::uint4b_t, uint8_t, [&] {
+                    mMOERunner = std::make_shared<CutlassMoeFCRunner<T, WT, Q>>();
+                });
+            });
+        });
     }
     else if(mWeightType == DataType::kHALF){
-        mMOERunner = std::make_shared<CutlassMoeFCRunner<half, half>>();
+        mMOERunner = std::make_shared<CutlassMoeFCRunner<half, half, cutlass::WeightOnlyQuantOp::UNDEFINED>>();
     }
 #ifdef ENABLE_BF16
     else if(mWeightType == DataType::kBF16){
-        mMOERunner = std::make_shared<CutlassMoeFCRunner<__nv_bfloat16, __nv_bfloat16>>();
+        mMOERunner = std::make_shared<CutlassMoeFCRunner<__nv_bfloat16, __nv_bfloat16,cutlass::WeightOnlyQuantOp::UNDEFINED>>();
     }
 #endif
     else
     {
         TLLM_THROW("Could not construct the mixture of experts plugin with the requested input combination");
     }
+
+    mMOERunner->setTactic(mMOERunner->getTactics()[0], mMOERunner->getTactics()[0]);
 }
 
 size_t MixtureOfExpertsPlugin::getWorkspaceSize(int num_tokens)
@@ -132,30 +131,20 @@ int MixtureOfExpertsPlugin::enqueue(
         input,   // const void*
         moe_gates,
         fc1_expert_weight,
-        // fc1_quant_scale,
-        // fc1_quant_zeros,
         fc1_expert_bias,
         mActivationType,
         fc2_expert_weight,
-        // fc2_quant_scale,
-        // fc2_quant_zeros,
         fc2_expert_bias,
-        // fc3_expert_weight,
-        // fc3_quant_scale,
-        // fc3_quant_zeros,
-        // fc3_expert_bias,
-        QuantParams(),
+        QuantParams::Int(fc1_quant_scale, fc1_quant_zeros, fc2_quant_scale, fc2_quant_zeros, mGroupSize),
         num_rows,
         mExpertHiddenSize,
         mExpertInterSize,
         mNumExperts,
         mK,
-        // mGroupSize,
         // mNormalizeExpertScale,
         reinterpret_cast<char*>(workspace),
         // Outputs
         final_output,
-        // fc2_result,
         finished, //bool
         num_not_finished,  //const int
         expert_scale, // void*
