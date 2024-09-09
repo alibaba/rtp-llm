@@ -526,7 +526,7 @@ void compareTwoTensor(
     delete[] h_ref;
 }
 
-static std::vector<int> getVisibleCUDADevices() {
+static std::vector<int> getVisibleDevices() {
     const char* cudadev = std::getenv("CUDA_VISIBLE_DEVICES");
     if (cudadev == nullptr) {
         // If CUDA_VISIBLE_DEVICES is not set, return an empty vector or handle as needed

@@ -35,9 +35,9 @@
 using namespace std;
 
 #if USING_CUDA
-#define getVisibleDevices fastertransformer::getVisibleCUDADevices
+#define getVisibleDevices fastertransformer::getVisibleDevices
 #elif USING_ROCM
-#define getVisibleDevices fastertransformer::rocm::getVisibleCUDADevices
+#define getVisibleDevices fastertransformer::rocm::getVisibleDevices
 #endif
 
 namespace fastertransformer {

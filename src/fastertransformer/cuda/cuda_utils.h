@@ -826,7 +826,7 @@ void setCudaValue(T* ptr, int index, T value) {
 }
 
 
-static inline std::string getDriverVersion() {
+static std::string getDriverVersion() {
     nvmlReturn_t result;
     nvmlDevice_t device;
     size_t device_count = getDeviceCount();
@@ -856,13 +856,13 @@ static inline std::string getDriverVersion() {
     return std::string(driverVersion);
 }
 
-static inline int getCudaVersion() {
+static int getCudaVersion() {
     int cuda_driver_version;
     check_cuda_error(cudaDriverGetVersion(&cuda_driver_version));
     return cuda_driver_version;
 }
 
-static inline bool checkAllNVLinks(std::vector<int> device_ids) {
+static bool checkAllNVLinks(std::vector<int> device_ids) {
     nvmlReturn_t result;
     nvmlDevice_t deviceHandles[2];
 
@@ -904,7 +904,7 @@ static inline bool checkAllNVLinks(std::vector<int> device_ids) {
 
 // Note: Avoid using this function when driver version is 470.82.01, as using the domain to check if the device 
 // is on the same NUMA node is not reliable on that version
-static inline bool checkOnSameNumaNodes(std::vector<int> device_ids) {
+static bool checkOnSameNumaNodes(std::vector<int> device_ids) {
     unsigned int last_numa_id = INT32_MAX;
     for (size_t i = 0; i < device_ids.size(); i++) {
         size_t device_id = device_ids[i];
@@ -919,7 +919,7 @@ static inline bool checkOnSameNumaNodes(std::vector<int> device_ids) {
     return true;
 }
 
-static std::vector<int> getVisibleCUDADevices() {
+static std::vector<int> getVisibleDevices() {
     const char* cudadev = std::getenv("CUDA_VISIBLE_DEVICES");
     if (cudadev == nullptr) {
         // If CUDA_VISIBLE_DEVICES is not set, return an empty vector or handle as needed
