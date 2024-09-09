@@ -7,7 +7,7 @@ import logging.config
 import traceback
 from typing import Union, Any, Dict, Callable
 from pydantic import BaseModel
-from fastapi.responses import StreamingResponse, JSONResponse, ORJSONResponse
+from fastapi.responses import StreamingResponse, ORJSONResponse
 from fastapi import Request
 import torch
 import asyncio
@@ -161,7 +161,7 @@ class InferenceServer(object):
             assert (self._openai_endpoint != None)
             return self._openai_endpoint.chat_render(request)
         except Exception as e:
-            return JSONResponse(format_exception(e), status_code=500)
+            return ORJSONResponse(format_exception(e), status_code=500)
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
@@ -201,7 +201,7 @@ class InferenceServer(object):
                 "source": request.get("source", "unkown"),
                 "error_code": str(format_exception(e).get("error_code", -1))
             })
-        rep = JSONResponse(format_exception(e), status_code=error_code)
+        rep = ORJSONResponse(format_exception(e), status_code=error_code)
         return rep
 
     async def _call_generate_with_report(self, generate_call: Callable[[], CompleteResponseAsyncGenerator]):
@@ -264,7 +264,7 @@ class InferenceServer(object):
                 raise asyncio.CancelledError("client disconnects")
 
         complete_response = await self._collect_complete_response_and_record_access_log(req, res)
-        return JSONResponse(content=complete_response)
+        return ORJSONResponse(content=complete_response)
 
     def tokenizer_encode(self, req: Union[str,Dict[Any, Any]]):
         try:
@@ -279,9 +279,9 @@ class InferenceServer(object):
             else:
                 token_ids, tokens = self._inference_worker.tokenizer_encode(prompt)
                 response = TokenizerEncodeResponse(token_ids=token_ids, tokens=tokens)
-            return JSONResponse(content=response.model_dump(exclude_none=True))
+            return ORJSONResponse(content=response.model_dump(exclude_none=True))
         except Exception as e:
-            return JSONResponse(format_exception(e), status_code=500)
+            return ORJSONResponse(format_exception(e), status_code=500)
 
     def get_load_balance_info(self) -> LoadBalanceInfo:
         assert self._inference_worker
@@ -317,14 +317,14 @@ class InferenceServer(object):
                     self.remove_lora({"adapter_name": key})
                 for key, value in add_lora_map.items():
                     self.add_lora({"adapter_name": key, "lora_path": value})
-            rep = JSONResponse(None)
+            rep = ORJSONResponse(None)
             kmonitor.report(AccMetrics.UPDATE_QPS_METRIC, 1)
             kmonitor.report(GaugeMetrics.UPDATE_LANTENCY_METRIC, t.cost_ms())
         except Exception as e:
             self._access_logger.log_exception_access(request, e)
             kmonitor.report(AccMetrics.ERROR_UPDATE_QPS_METRIC, 1)
             error_code = 500
-            rep = JSONResponse(format_exception(e), status_code=error_code)
+            rep = ORJSONResponse(format_exception(e), status_code=error_code)
         return rep
 
     def add_lora(self, req: Dict[str, str]):
