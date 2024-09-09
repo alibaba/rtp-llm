@@ -13,5 +13,6 @@ py_test (
     ],
     env = {
         "DEVICE_RESERVE_MEMORY_BYTES": "0"
-    }
+    },
+    exec_properties = {'gpu':'A10'},
 )

@@ -34,6 +34,7 @@ cc_test(
     deps = test_deps + [
         "//src/fastertransformer/devices/base_tests:basic_test_cases"
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_binary(

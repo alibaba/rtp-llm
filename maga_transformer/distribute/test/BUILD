@@ -24,4 +24,5 @@ py_test(
     timeout = 'short',
     env = {"ASYNC_MODE":"0"},
     imports = ["aios/kmonitor/python_client"],
+    exec_properties = {'gpu':'A10'},
 )

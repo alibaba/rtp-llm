@@ -42,6 +42,7 @@ py_test(
         "//maga_transformer/test/model_test/test_util",
     ],
     imports = ["aios/kmonitor/python_client"],
+    exec_properties = {'gpu':'A10'},
 )
 
 
