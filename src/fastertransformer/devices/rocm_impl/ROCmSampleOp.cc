@@ -119,9 +119,13 @@ void ROCmDevice::sampleGreedy(const GreedyParams& params) {
     auto runtime_top_p_buf = allocateBuffer({DataType::TYPE_FP32, {batch_size}});
     copy({*runtime_top_p_buf, top_p});
 
-    auto cum_log_probs =  GET_TYPED_VALUE_FROM_OPT_REF(params.cum_log_probs, float);
-    auto output_log_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.output_log_probs, float);
-    auto output_all_probs = GET_TYPED_VALUE_FROM_OPT_REF(params.output_all_probs, float);
+
+    auto cum_log_probs = params.cum_log_probs.has_value() ?
+                         params.cum_log_probs.value().get().data<float>() : nullptr;
+    auto output_log_probs = params.output_log_probs.has_value() ?
+                            params.output_log_probs.value().get().data<float>() : nullptr;
+    auto output_all_probs = params.output_all_probs.has_value() ?
+                            params.output_all_probs.value().get().data<float>() : nullptr;
 
     // 3. prepare common inputs
 
