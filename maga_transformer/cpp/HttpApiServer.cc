@@ -268,7 +268,22 @@ bool HttpApiServer::registerHealth() {
 bool HttpApiServer::registerV1Model() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
                        const http_server::HttpRequest&                  request) -> void {
-        // TODO: return model list
+        std::string model_content = R"del({
+    "object": "list",
+    "data": [
+        {
+            "id": "AsyncModel",
+            "object": "model",
+            "created": 1725874765,
+            "owned_by": "owner",
+            "root": null,
+            "parent": null,
+            "permission": null
+        }
+    ]
+})del";
+        writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+        writer->Write(model_content);
     };
     return http_server_.RegisterRoute("GET", "/v1/models", callback);
 }
