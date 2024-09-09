@@ -28,10 +28,27 @@ LoraLinearOutput DeviceBase::loraLinear(const LoraLinearParams& params) {
             start = start + lora_input_lengths_ptr[i];
         }
         if (inputs.size() > 0) {
-            // M = X * A
-            auto tmp = groupedGemm({inputs, lora_as});
-            // Y = M * B + Y
-            auto result = groupedGemm({tmp.output, lora_bs, outputs});
+            if (useGroupGemm()) {
+                // M = X * A
+                auto tmp = groupedGemm({inputs, lora_as});
+                // Y = M * B + Y
+                auto result = groupedGemm({tmp.output, lora_bs, outputs});
+            } else {
+                for (int i = 0; i < inputs.size(); i++) {
+                    auto tmp = gemm({*inputs[i], *lora_as[i]});
+                    auto result = gemm({*tmp,
+                                        *lora_bs[i],
+                                        std::nullopt,
+                                        outputs[i],
+                                        DataType::TYPE_INVALID,
+                                        TransposeOperation::NONE,
+                                        TransposeOperation::NONE,
+                                        ActivationType::Identity,
+                                        1.0f,
+                                        1.0f});
+                }
+            }
+
         }
     }
     return LoraLinearOutput({std::move(output)});

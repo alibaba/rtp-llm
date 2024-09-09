@@ -27,6 +27,9 @@ public:
     virtual void syncAndCheck();
     virtual void syncCommunication(bool timeout = true);
     virtual DevicePrepOutput prepareModelRun(const DevicePrepParams& params);
+    virtual bool useGroupGemm() const {
+        return false;
+    };
 
 public:
     // device-independence op implementations

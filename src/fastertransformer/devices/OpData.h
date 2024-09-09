@@ -239,7 +239,9 @@ struct GemmParams {
                const DataType compute_type = DataType::TYPE_INVALID,
                TransposeOperation transA = TransposeOperation::NONE,
                TransposeOperation transB = TransposeOperation::NONE,
-               const ActivationType activationType = ActivationType::Identity):
+               const ActivationType activationType = ActivationType::Identity,
+               const float alpha = 1.0f,
+               const float beta  = 0.0f):
                A(A),
                B(B),
                C(C),
@@ -247,7 +249,9 @@ struct GemmParams {
                compute_type(compute_type),
                transA(transA),
                transB(transB),
-               activationType(activationType) {}
+               activationType(activationType),
+               alpha(alpha),
+               beta(beta) {}
 
 
     const Buffer& A;

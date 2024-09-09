@@ -76,6 +76,7 @@ CudaDevice::CudaDevice(const DeviceInitParams& params) : DeviceBase(params) {
         checkUseOpenSourceFMHA();
     }
     checkUseMultiBlockMode();
+    checkUseGroupGemm();
 
     // Initialize custom all reduce communicator
     // Note: custom all reduce communicator will allocate cuda mem through cudaMalloc, it must be called before allocator init
@@ -194,7 +195,7 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
                               params.configs.q_scaling,
                               params.has_alibi_slopes,
                               paged_kv_fmha);
-        bool trt_v2_fmha_support = !use_trtv2_fmha_paged && !use_trtv2_fmha ? false : cufmha_runner_->trtV2FmhaSupport();  
+        bool trt_v2_fmha_support = !use_trtv2_fmha_paged && !use_trtv2_fmha ? false : cufmha_runner_->trtV2FmhaSupport();
         if (paged_kv_fmha) {
             if (use_trtv2_fmha_paged && trt_v2_fmha_support) {
                 fmha_type_ = FMHAType::PAGED_TRT_V2;
@@ -216,6 +217,11 @@ DevicePrepOutput CudaDevice::prepareModelRun(const DevicePrepParams& params) {
         output.need_mask = (fmha_type_ == FMHAType::NONE);
     }
     return output;
+}
+
+bool CudaDevice::useGroupGemm() const {
+    return use_group_gemm;
+
 }
 
 void CudaDevice::bufMemset(Buffer& buf, int val) {
@@ -310,6 +316,14 @@ void CudaDevice::checkUseMultiBlockMode() {
         return;
     }
     use_multi_block_mode = true;
+}
+
+void CudaDevice::checkUseGroupGemm() {
+    if ((is_sm8x() || is_sm90())) {
+        use_group_gemm = true;
+    } else {
+        use_group_gemm = false;
+    }
 }
 
 // TODO(wangyin.yx): fill all memory status.

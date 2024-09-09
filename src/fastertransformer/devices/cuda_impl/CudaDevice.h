@@ -44,6 +44,7 @@ public:
     void syncAndCheck() override;
     void syncCommunication(bool timeout = true) override;
     DevicePrepOutput prepareModelRun(const DevicePrepParams& params) override;
+    bool useGroupGemm() const override;
 
 private:
     void checkUseOpenSourceFMHA();
@@ -51,6 +52,7 @@ private:
     void checkUseTrtV2FMHA();
     void checkUseMultiBlockMode();
     void initMoeRunner(const DataType compute_type, const DataType weights_type);
+    void checkUseGroupGemm();
 
 public:
     cudaStream_t getStream() {return stream_;}
@@ -130,6 +132,7 @@ private:
     bool use_open_source_fmha       = false;
     bool use_open_source_fmha_paged = false;
     bool use_multi_block_mode       = false;
+    bool use_group_gemm             = false;
 };
 
 } // namespace fastertransformer

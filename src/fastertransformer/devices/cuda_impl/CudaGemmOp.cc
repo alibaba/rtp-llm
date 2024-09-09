@@ -104,6 +104,9 @@ struct CudaGemmArguments {
         stride_b = k * n;
         ldc = n;
         stride_c = m * n;
+
+        alpha = params.alpha;
+        beta  = params.beta;
     }
 
     void dump() {
@@ -146,7 +149,7 @@ void CudaDevice::InvokeSmoothQaunt(const GemmParams& params,
     FT_CHECK_WITH_INFO(smooth_quant_plugin_->addBiasActivationEpilogueSupported(params.activationType),
      "activation type not supported: %d", int(params.activationType));
     BUFFER_DTYPE_CHECK(params.A, {DataType::TYPE_QINT8});
-    BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});    
+    BUFFER_DTYPE_CHECK(params.B, {DataType::TYPE_QINT8});
     size_t ws_size   = smooth_quant_plugin_->getWorkspaceSize(arguments.m, arguments.n, arguments.k);
     auto   workspace = allocateBuffer({DataType::TYPE_BYTES, {ws_size}, AllocationType::DEVICE}, {"workspace"});
     // TODO: support it in ppu
@@ -310,7 +313,7 @@ void CudaDevice::InvokeGeneralGemm(const GemmParams& params,
         if (params.dispatch() == GemmType::QBufferA_QBufferB_BufferC_2DGemm) {
             InvokeSmoothQaunt(params, arguments, output);
         } else if (params.dispatch() == GemmType::BufferA_QBufferB_BufferC_2DGemm) {
-            InvokeWeightOnlyGemm(params, arguments, output);   
+            InvokeWeightOnlyGemm(params, arguments, output);
         } else {
             InvokeGeneralGemm(params, arguments, output);
         }

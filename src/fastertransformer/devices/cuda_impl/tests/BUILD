@@ -218,7 +218,7 @@ cc_test(
     ],
     data = [],
     env = test_envs,
-    copts = copts(),
+    copts = copts() + ["-fno-access-control"],
     deps = test_deps,
     exec_properties = {'gpu':'A10'},
 )
