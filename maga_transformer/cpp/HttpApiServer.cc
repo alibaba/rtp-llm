@@ -229,11 +229,11 @@ std::string Pipeline::format_response(std::string generate_texts, const Generate
 }
 
 bool HttpApiServer::registerRoot() {
-    auto sharedThis = shared_from_this();
-    auto callback   = [sharedThis](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                 const http_server::HttpRequest&                  request) -> void {
+    auto shared_this = shared_from_this();
+    auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                  const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
-        if (sharedThis->IsShutdown()) {
+        if (shared_this->isShutdown()) {
             writer->Write("server has been shutdown", 503);
             return;
         }
@@ -243,11 +243,11 @@ bool HttpApiServer::registerRoot() {
 }
 
 bool HttpApiServer::registerHealth() {
-    auto sharedThis = shared_from_this();
-    auto callback   = [sharedThis](std::unique_ptr<http_server::HttpResponseWriter> writer,
-                                 const http_server::HttpRequest&                  request) -> void {
+    auto shared_this = shared_from_this();
+    auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                  const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
-        if (sharedThis->IsShutdown()) {
+        if (shared_this->isShutdown()) {
             writer->Write("server has been shutdown", 503);
             return;
         }
@@ -277,9 +277,9 @@ bool HttpApiServer::registerSetDebugLog() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
                        const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
-        auto body    = ParseJson(request.GetBody());
-        auto bodyMap = AnyCast<JsonMap>(body);
-        if (auto it = bodyMap.find("debug"); it != bodyMap.end()) {
+        auto body     = ParseJson(request.GetBody());
+        auto body_map = AnyCast<JsonMap>(body);
+        if (auto it = body_map.find("debug"); it != body_map.end()) {
             torch_ext::setDebugLogLevel(AnyCast<bool>(it->second));
             writer->Write(R"({"status":"ok"})");
         } else {
@@ -292,10 +292,10 @@ bool HttpApiServer::registerSetDebugLog() {
 bool HttpApiServer::registerSetDebugPrint() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
                        const http_server::HttpRequest&                  request) -> void {
-        auto body    = ParseJson(request.GetBody());
-        auto bodyMap = AnyCast<JsonMap>(body);
+        auto body     = ParseJson(request.GetBody());
+        auto body_map = AnyCast<JsonMap>(body);
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
-        if (auto it = bodyMap.find("debug"); it != bodyMap.end()) {
+        if (auto it = body_map.find("debug"); it != body_map.end()) {
             torch_ext::setDebugPrintLevel(AnyCast<bool>(it->second));
             writer->Write(R"({"status":"ok"})");
         } else {

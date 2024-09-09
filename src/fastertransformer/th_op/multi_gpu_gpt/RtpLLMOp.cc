@@ -138,7 +138,7 @@ void RtpLLMOp::_init(const int64_t model_rpc_port,
     }
     grpc_server_->Wait();
     is_server_shutdown_ = true;
-    http_server_->NotifyServerHasShutdown();
+    http_server_->notifyServerHasShutdown();
 }
 
 void RtpLLMOp::stop() {

@@ -49,10 +49,10 @@ public:
     static std::string SseResponse(std::string& response) {
         return "data: " + response + "\n\n";
     }
-    void NotifyServerHasShutdown() {
+    void notifyServerHasShutdown() {
         is_shutdown_.store(true);
     }
-    bool IsShutdown() const {
+    bool isShutdown() const {
         return is_shutdown_.load();
     }
 
