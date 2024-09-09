@@ -23,6 +23,7 @@
 #if USING_ROCM
 #include "src/fastertransformer/rocm/hip_utils.h"
 #include "src/fastertransformer/rocm/cuda_shims.h"
+using namespace rocm;
 #endif
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
@@ -190,6 +191,7 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<int>& tp_ranks, int r
 
     size_t world_size       = tp_ranks.size();
     size_t local_world_size = getVisibleCUDADevices().size();
+    // check whether all ranks are on same nodes
     if (world_size != local_world_size) {
         FT_LOG_INFO("Disable custom ar since TP is performanced on multi nodes, world_size=%d, local_world_size=%d",
                     world_size,
@@ -197,14 +199,12 @@ bool CustomAllReduceComm::shouldCustomAR(const std::vector<int>& tp_ranks, int r
         return false;
     }
 
-    // char*  disable_custom_ar_str = std::getenv("FT_DISABLE_CUSTOM_AR");
-    // bool   disable_custom_ar     = disable_custom_ar_str != nullptr && std::string(disable_custom_ar_str) == "1";
-    // if (disable_custom_ar) {
-    //     FT_LOG_INFO("Disable custom ar since FT_DISABLE_CUSTOM_AR is set");
-    //     return false;
-    // }
-
-    // TODO(xyz): check whether nvlink is enabled and all ranks are all same nodes
+    char*  disable_custom_ar_str = std::getenv("FT_DISABLE_CUSTOM_AR");
+    bool   disable_custom_ar     = disable_custom_ar_str != nullptr && std::string(disable_custom_ar_str) == "1";
+    if (disable_custom_ar) {
+        FT_LOG_INFO("Disable custom ar since FT_DISABLE_CUSTOM_AR is set");
+        return false;
+    }
 
     // check whether world size is valid
     std::unordered_set<int> available_world_sizes = {2, 4, 8};
