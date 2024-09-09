@@ -31,7 +31,7 @@ cc_library(
         "**/*.h"
     ], exclude=["multiHeadAttentionCommon.h"]),
     deps = [
-        "@local_config_cuda//cuda:cuda",
+        "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         ":trt_fmha_common_define_header"
     ],
