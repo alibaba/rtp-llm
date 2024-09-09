@@ -6,7 +6,7 @@ from PIL import Image
 from torchvision import transforms
 
 from maga_transformer.distribute.worker_info import g_parallel_info
-from maga_transformer.utils.multimodal_util import (data_cache_,
+from maga_transformer.utils.multimodal_util import (vit_emb_cache_,
                                                     get_bytes_io_from_url,
                                                     MMUrlType)
 
@@ -34,7 +34,7 @@ class MultiModalEmbeddingInterface:
     def mm_embedding(self, url: str, mm_type: MMUrlType, device, dtype, **kwargs):
         if g_parallel_info.tp_rank > 0:
             return torch.Tensor([])
-        cached_res = data_cache_.check_cache(url)
+        cached_res = vit_emb_cache_.check_cache(url)
         if cached_res is None:
             try:
                 bytes_io = get_bytes_io_from_url(url)
@@ -42,7 +42,7 @@ class MultiModalEmbeddingInterface:
             except Exception as e:
                 raise Exception(f"multimodal process for {url} error, exception {e}")
             features = self.mm_process(mm_input, device, mm_type=mm_type, **kwargs).to(dtype).contiguous()
-            data_cache_.insert_cache(url, features)
+            vit_emb_cache_.insert_cache(url, features)
             return features
         else:
             return cached_res

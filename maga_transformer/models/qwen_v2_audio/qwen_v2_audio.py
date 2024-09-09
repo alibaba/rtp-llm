@@ -13,7 +13,7 @@ class QWenV2AudioWeightinfo(QWenV2Weight, BaseMultiModalWeightInfo):
     def __init__(self, config: GptInitModelParameters, tp_size: int, tp_rank: int):
         QWenV2Weight.__init__(self, config, tp_size, tp_rank)
         BaseMultiModalWeightInfo.__init__(self, config)
-        
+
     def _get_weight_info(self):
         qwen_weight = super()._get_weight_info()
         self._get_vit_info(qwen_weight)
@@ -23,17 +23,17 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
     def __init__(self, config: GptInitModelParameters):
         super().__init__(config)
 
-    def init_multimodal(self, config: GptInitModelParameters):        
+    def init_multimodal(self, config: GptInitModelParameters):
         with torch.device(g_parallel_info.device):
             self.mm_part = Processor(config.ckpt_path, to_torch_dtype(config.data_type))
         config.mm_related_params.vit_weights = BaseVitWeights({"multi_modal_projector": self.mm_part.multi_modal_projector, "audio_tower": self.mm_part.audio_tower}, with_prefix=True)
-        config.mm_related_params.vit_weights._ckpt_prefix = "" 
+        config.mm_related_params.vit_weights._ckpt_prefix = ""
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
         return config
-    
+
     @staticmethod
     def get_weight_cls():
         return QWenV2AudioWeightinfo
@@ -57,11 +57,11 @@ class QWenV2Audio(QWenV2, MultiModalMixin):
         config.rotary_embedding_dim = config.size_per_head
         config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
         config.tie_word_embeddings = config_json.get('tie_word_embeddings', False)
-        
-        config.mm_sep_tokens = [sep_token] # image_token_index 
+
+        config.mm_sep_tokens = [[sep_token]] # image_token_index
 
         GPT._load_quant_config(ckpt_path, config_json, config)
-        
+
     def multimodal_modify_prompt_plugin(self, prompt: str, images: List[str],
                                     img_token: str, **kwargs: Any) -> Tuple[str, List[Any]]:
         raise Exception("qwen v2 audio only support openai format request")

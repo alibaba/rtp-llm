@@ -20,9 +20,8 @@ class MMProcessEngine:
                 embedding = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type), index=index)
             else:
                 embedding = self.model.mm_part.mm_embedding(urls[index], types[index], self.model.device, to_torch_dtype(self.model.config.data_type))
-            if len(embedding.shape) > 2:
+            if isinstance(embedding, list) or len(embedding.shape) > 2:
                 res.extend(list(embedding))
             else:
                 res.append(embedding)
         return res
-                

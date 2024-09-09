@@ -29,7 +29,7 @@ class QWen_VL(QWen, MultiModalMixin):
     def init_multimodal(self, config: GptInitModelParameters):
         with torch.device(g_parallel_info.device):
             self.mm_part = QwenVLImageEmbedding(config.mm_related_params.config)
-        config.mm_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})        
+        config.mm_related_params.vit_weights = QwenVLVitWeight({"vit": self.mm_part.vit})
 
     def load(self, device: str):
         if os.environ.get("VIT_TRT", "0") == "1":
@@ -108,7 +108,7 @@ class QWen_VL(QWen, MultiModalMixin):
             'image_end_id': vit_config['image_start_id'] + 1,
             'image_pad_id': vit_config['image_start_id'] + 2})
         config.mm_related_params.special_tokens.update({'default_mm_token': '<img/>'})
-        config.mm_sep_tokens = [vit_config['image_start_id'], vit_config['image_start_id'] + 1]
+        config.mm_sep_tokens = [[vit_config['image_start_id'], vit_config['image_start_id'] + 1]]
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):

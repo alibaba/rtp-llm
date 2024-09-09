@@ -188,7 +188,7 @@ public:
     int64_t gen_num_per_circle_      = 1;
 
     bool                 is_multimodal_ = false;
-    std::vector<int64_t> mm_sep_tokens_ = {};
+    std::vector<std::vector<int64_t>> mm_sep_tokens_ = {};
     bool                 include_sep_tokens_ = false;
     bool                 cal_mm_tokens_in_rotary_emb_ = true;
 

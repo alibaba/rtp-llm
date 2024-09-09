@@ -6,6 +6,7 @@ from .chatglm4_renderer import ChatGlm4Renderer
 from .cogvlm2_render import CogVLM2Renderer
 from .qwen_v2_audio_renderer import QwenV2AudioRenderer
 from .internvl_renderer import InternVLRenderer
+from .minicpmv_renderer import MiniCPMVRenderer
 
 import logging
 try:

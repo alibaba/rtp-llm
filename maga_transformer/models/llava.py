@@ -15,10 +15,10 @@ from maga_transformer.utils.util import to_torch_dtype
 from maga_transformer.model_factory_register import register_model
 
 class LlavaTokenizer(object):
-    def __init__(self, 
-                 tokenzier_path: str, 
+    def __init__(self,
+                 tokenzier_path: str,
                  mm_use_im_patch_token: bool,
-                 mm_use_im_start_end: bool, 
+                 mm_use_im_start_end: bool,
                  special_token_ids: Dict[str, Any],
                  special_tokens: Dict[str, Any],
                  bos_id: int = 1):
@@ -45,11 +45,11 @@ class LlavaTokenizer(object):
         if self.mm_use_im_start_end:
             replace_token = self.default_im_start_token + replace_token + self.default_im_end_token
         s = s.replace(self.default_image_token, replace_token)
-        
+
         prompt_chunks: List[List[int]] = [self.tokenizer.encode(chunk) for chunk in s.split(self.default_image_token)]
 
         images = len(prompt_chunks) - 1
-        
+
         def insert_separator(X, sep):
             return [ele for sublist in zip(X, [sep]*len(X)) for ele in sublist][:-1]
 
@@ -71,7 +71,7 @@ class LlavaTokenizer(object):
         return self.tokenizer.apply_chat_template(messages, **kwargs)
 
 class Llava(Llama, MultiModalMixin):
-    def init_multimodal(self, config: GptInitModelParameters):        
+    def init_multimodal(self, config: GptInitModelParameters):
         if g_parallel_info.tp_rank > 0:
             return
         with torch.device(g_parallel_info.device):
@@ -82,10 +82,10 @@ class Llava(Llama, MultiModalMixin):
             vit_weight_dict["vision_tower"] = self.mm_part.vision_tower
         if "unpad" in config.mm_related_params.config.get("mm_patch_merge_type", "flat"):
             vit_weight_dict["image_newline"] = self.mm_part.image_newline
-        config.mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)        
+        config.mm_related_params.vit_weights = BaseVitWeights(vit_weight_dict, True)
 
     @staticmethod
-    def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str], 
+    def multimodal_modify_prompt_plugin(prompt: Union[List[Dict[str, Any]], str], images: List[str],
                                         img_token: str, **kwargs: Any) -> Tuple[str, List[Any]]:
         prompt, images = MultiModalMixin.multimodal_modify_prompt_plugin(prompt, images, img_token, **kwargs)
         if img_token in prompt:
@@ -124,7 +124,7 @@ class Llava(Llama, MultiModalMixin):
     @staticmethod
     def get_weight_cls():
         return LlavaWeightInfo
-   
+
     @staticmethod
     def from_huggingface(config: GptInitModelParameters, config_json: Dict[str, Any]):
         if "text_config" in config_json:
@@ -160,8 +160,8 @@ class Llava(Llama, MultiModalMixin):
             config.mm_related_params.config["mm_hidden_size"] = config_json.get("mm_hidden_size", config_json["hidden_size"])
             config.mm_related_params.special_token_ids.update({"ignore_token_index": -100, "image_token_index": -200})
             config.mm_related_params.special_tokens.update({
-                "default_mm_token": "<image>", 
-                "default_im_start_token": "<im_start>", 
+                "default_mm_token": "<image>",
+                "default_im_start_token": "<im_start>",
                 "default_im_end_token": "<im_end>"
             })
 
@@ -173,7 +173,7 @@ class Llava(Llama, MultiModalMixin):
                 config.mm_related_params.config["patch_size"] = patch_size
                 config.mm_related_params.config["image_size"] = img_size
             config.mm_related_params.config["vit_tower_path"] = vis_tower_name
-            config.mm_sep_tokens = [-200] # image_token_index
+            config.mm_sep_tokens = [[-200]] # image_token_index
 
     @classmethod
     def get_tokenizer(cls, config: GptInitModelParameters):
@@ -183,5 +183,5 @@ class Llava(Llama, MultiModalMixin):
                               config.mm_related_params.special_token_ids,
                               config.mm_related_params.special_tokens,
                               config.special_tokens.bos_token_id)
-    
+
 register_model("llava", Llava, ["LlavaLlamaForCausalLM"])

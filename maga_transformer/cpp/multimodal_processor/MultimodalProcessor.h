@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <torch/python.h>
@@ -23,13 +24,13 @@ struct ExpandedOutput {
 
 class MultimodalProcessor {
 public:
-    MultimodalProcessor(py::object mm_proces_engine, std::vector<int64_t> sep_token_ids, bool include_sep_tokens, int64_t max_seq_len):
+        MultimodalProcessor(py::object mm_proces_engine, std::vector<std::vector<int64_t>> sep_token_ids, bool include_sep_tokens, int64_t max_seq_len):
         mm_process_engine_(mm_proces_engine), sep_token_ids_(sep_token_ids), include_sep_tokens_(include_sep_tokens), max_seq_len_(max_seq_len)
         {}
 
 private:
     py::object mm_process_engine_;
-    std::vector<int64_t> sep_token_ids_;
+    std::vector<std::vector<int64_t>> sep_token_ids_;
     bool include_sep_tokens_;
     int64_t max_seq_len_;
 
@@ -98,7 +99,7 @@ private:
             {ft::DataType::TYPE_INT32, {(size_t)mm_num}, ft::AllocationType::HOST}, {});
         memset(expanded_ids->data(), 0, expanded_ids->sizeBytes());
         std::fill(token_masks->data<int32_t>(), token_masks->dataWithOffset<int32_t>(token_masks->size()), 1);
-            
+
         int new_loc_idx = 0, old_loc_idx = 0;
         for (int i = 0;i < mm_num;i++) {
             auto& loc = locs[i];
@@ -109,7 +110,7 @@ private:
             new_loc_idx += copy_len + mm_embedding[i].sizes()[0];
             old_loc_idx = loc.second;
         }
-        
+
         if (expanded_ids->shape()[0] - new_loc_idx != token_ids->shape()[0] - old_loc_idx) {
             throw std::runtime_error("expanded length calculate error");
         }
@@ -122,51 +123,53 @@ private:
         // sep_tokens will split input tokens to text part and multimodal part
         int32_t* data = token_ids->data<int32_t>();
         std::vector<std::pair<int32_t, int32_t>> locs;
-        
-        // when sep token size == 1, just simply split
-        if (sep_token_ids_.size() == 1) {
-            for (int i = 0;i < token_ids->size();i++) {
-                auto now_id = *(data + i);
-                if (now_id == sep_token_ids_[0]) {
-                    locs.emplace_back(i, i + 1);
+        for (const auto& sep_token_id: sep_token_ids_) {
+            // when sep token size == 1, just simply split
+            if (sep_token_id.size() == 1) {
+                for (int i = 0;i < token_ids->size();i++) {
+                    auto now_id = *(data + i);
+                    if (now_id == sep_token_id[0]) {
+                        locs.emplace_back(i, i + 1);
+                    }
                 }
             }
-        }
-        // when sep token size == 2, multimodal part is between but not include them
-        else if (sep_token_ids_.size() == 2) {
-            std::vector<int32_t> left, right;
+            // when sep token size == 2, multimodal part is between but not include them
+            else if (sep_token_id.size() == 2) {
+                std::vector<int32_t> left, right;
 
-            for (int i = 0;i < token_ids->size();i++) {
-                auto now_id = *(data + i);
-                if (now_id == sep_token_ids_[0]) {
-                    if (right.size() != left.size()) {
-                        return absl::InternalError("unmatched multimodal tag pairs");
-                    }
-                    if (!include_sep_tokens_){
-                        left.emplace_back(i + 1);
-                    } else {
-                        left.emplace_back(i);
-                    }
-                } else if (now_id == sep_token_ids_[1]) {
-                    if (!include_sep_tokens_){
-                        right.emplace_back(i);
-                    } else {
-                        right.emplace_back(i + 1);
-                    }
-                    if (right.size() != left.size()) {
-                        return absl::InternalError("unmatched multimodal tag pairs");
+                for (int i = 0;i < token_ids->size();i++) {
+                    auto now_id = *(data + i);
+                    if (now_id == sep_token_id[0]) {
+                        if (right.size() != left.size()) {
+                            return absl::InternalError("unmatched multimodal tag pairs");
+                        }
+                        if (!include_sep_tokens_){
+                            left.emplace_back(i + 1);
+                        } else {
+                            left.emplace_back(i);
+                        }
+                    } else if (now_id == sep_token_id[1]) {
+                        if (!include_sep_tokens_){
+                            right.emplace_back(i);
+                        } else {
+                            right.emplace_back(i + 1);
+                        }
+                        if (right.size() != left.size()) {
+                            return absl::InternalError("unmatched multimodal tag pairs");
+                        }
                     }
                 }
+                if (left.size() != right.size()) {
+                    return absl::InternalError("unclosed multimodal tag pairs");
+                }
+                for (int i = 0;i < left.size();i++) {
+                    locs.emplace_back(left[i], right[i]);
+                }
+            } else {
+                return absl::InternalError("more than 2 sep tokens or no sep tokens for multimodal model is not supported");
             }
-            if (left.size() != right.size()) {
-                return absl::InternalError("unclosed multimodal tag pairs");
-            }
-            for (int i = 0;i < left.size();i++) {
-                locs.emplace_back(left[i], right[i]);
-            }
-        } else {
-            return absl::InternalError("more than 2 sep tokens or no sep tokens for multimodal model is not supported");
         }
+        std::sort(locs.begin(), locs.end());
         return locs;
     }
 

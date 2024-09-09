@@ -6,6 +6,9 @@ import threading
 from enum import IntEnum
 from io import BytesIO
 from typing import Any, Callable, Optional
+from decord import VideoReader, cpu
+from PIL import Image
+
 from maga_transformer.utils.lru_dict import LruDict
 from maga_transformer.utils.oss_util import get_bytes_io_from_oss_path
 
@@ -22,8 +25,8 @@ class MMUrlType(IntEnum):
     IMAGE = 1
     VIDEO = 2
     AUDIO = 3
-    
-def get_bytes_io_from_url(url: str):    
+
+def get_bytes_io_from_url(url: str):
     if url.startswith("http") or url.startswith("https"):
         return BytesIO(requests.get(url, stream=True, headers=HTTP_HEADS).content)
     elif url.startswith("oss"):
@@ -33,15 +36,14 @@ def get_bytes_io_from_url(url: str):
         with open(url, "rb") as fh:
             buf = BytesIO(fh.read())
         return buf
-    
+
 class MMDataCache(object):
-    def __init__(self):
+    def __init__(self, cache_size: int = 10):
         self.mm_data_cache: Optional[LruDict] = None
         self.cache_lock = threading.Lock()
-        self.cache_size = int(os.environ.get('MM_CACHE_ITEM_NUM', '10'))
-        if self.cache_size > 0:
-            self.mm_data_cache = LruDict(self.cache_size)        
-    
+        if cache_size > 0:
+            self.mm_data_cache = LruDict(cache_size)
+
     def check_cache(self, url: str):
         if self.mm_data_cache == None:
             return None
@@ -50,11 +52,43 @@ class MMDataCache(object):
                 return self.mm_data_cache[url]
             else:
                 return None
-        
+
     def insert_cache(self, url: str, features: torch.Tensor):
         if self.mm_data_cache == None:
             return
         with self.cache_lock:
             self.mm_data_cache[url] = features
 
-data_cache_ = MMDataCache()
+vit_emb_cache_ = MMDataCache(int(os.environ.get('MM_CACHE_ITEM_NUM', '10')))
+url_data_cache_ = MMDataCache(100)
+
+def encode_video(video_path, max_num_frames: int = 32):
+    def uniform_sample(l, n):
+        gap = len(l) / n
+        idxs = [int(i * gap + gap / 2) for i in range(n)]
+        return [l[i] for i in idxs]
+
+    vr = VideoReader(video_path, ctx=cpu(0))
+    sample_fps = round(vr.get_avg_fps() / 1)  # FPS
+    frame_idx = [i for i in range(0, len(vr), sample_fps)]
+    if len(frame_idx) > max_num_frames:
+        frame_idx = uniform_sample(frame_idx, max_num_frames)
+    frames = vr.get_batch(frame_idx).asnumpy()
+    frames = [Image.fromarray(v.astype('uint8')) for v in frames]
+    return frames
+
+def get_url_data_with_cache(url: str, type: MMUrlType):
+    cached_res = url_data_cache_.check_cache(url)
+    if cached_res is None:
+        try:
+            bytes_io = get_bytes_io_from_url(url)
+            if type == MMUrlType.IMAGE:
+                data = Image.open(bytes_io).convert("RGB")
+            else:
+                data = encode_video(bytes_io)
+        except Exception as e:
+            raise Exception(f"download and load {url} error, exception {e}")
+        url_data_cache_.insert_cache(url, data)
+        return data
+    else:
+        return cached_res

@@ -37,8 +37,9 @@ class InternVL(GPT, MultiModalMixin):
             self.mm_part = InternVLImageEmbedding(config.mm_related_params.config)
         config.mm_related_params.vit_weights = InternVLVitWeight({"vision_model": self.mm_part.vision_model,
                                                                     "mlp1": self.mm_part.mlp1}, True)
-        config.mm_sep_tokens = [self.tokenizer.encode("<img>")[0], self.tokenizer.encode("</img>")[0]]
+        config.mm_sep_tokens = [[self.tokenizer.encode("<img>")[0], self.tokenizer.encode("</img>")[0]]]
         config.special_tokens.stop_words_list = [self.tokenizer.encode("<|im_end|>")]
+
 
     @staticmethod
     def get_weight_cls():
@@ -66,7 +67,7 @@ class InternVL(GPT, MultiModalMixin):
             has_post_decoder_layernorm=True,
             norm_type='rmsnorm'
             )
-        
+
         config_path = os.path.join(ckpt_path, 'config.json')
         if os.path.exists(config_path):
             with open(config_path) as reader:

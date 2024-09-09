@@ -15,14 +15,15 @@ from maga_transformer.utils.group_quant_weight_util import get_layer_group_quant
 
 class QWenV2Weight(ModelDeployWeightInfo):
     def __init__(self, *args: Any, **kwargs: Any):
+        self.prefix: str = kwargs.pop('prefix', "")
         super().__init__(*args, **kwargs)
-        self.prefix: str = ""
-        
+
+
     def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
         # compat for qwen_v2_video
         if self._contains(weight_keys, 'language_model.'):
             self.prefix = 'language_model.'
-    
+
     def _get_weight_info(self):
         return self._get_hf_weight_info()
 

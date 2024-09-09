@@ -27,10 +27,11 @@ from .qwen_v2_moe import Qwen2Moe
 from .cogvlm2 import CogVLM2
 from .qwen_v2_audio.qwen_v2_audio import QWenV2Audio
 from .internvl import InternVL
+from .minicpmv.minicpmv import MiniCPMV
 
 import logging
 try:
     from internal_source.maga_transformer.models import internal_init
 except ImportError as e:
-    print("import internal source failed, error: ", str(e))    
+    print("import internal source failed, error: ", str(e))
     pass

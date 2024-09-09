@@ -52,7 +52,8 @@ class OpenaiEndopoint():
             max_seq_len=self.max_seq_len,
             eos_token_id=self.eos_token_id,
             stop_word_ids_list=self.stop_word_ids_list,
-            template_type=self.model.config.template_type
+            template_type=self.model.config.template_type,
+            ckpt_path=self.model.config.ckpt_path
         )
 
         self.chat_renderer: CustomChatRenderer = ChatRendererFactory.get_renderer(self.tokenizer, render_params)

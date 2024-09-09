@@ -21,7 +21,7 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
             self.mm_part = EVA2CLIPImageEmbedding(config)
             config.mm_related_params.vit_weights = ChatGlmV4VisionVitWeights(
                 {"vit": self.mm_part.vit}
-            )        
+            )
 
     def load(self, device: str):
         if os.environ.get("VIT_TRT", "0") == "1":
@@ -43,7 +43,7 @@ class ChatGlmV4Vision(ChatGlmV4, MultiModalMixin):
         config.mm_related_params.config['use_vision_hidden_size'] = False
         config.mm_related_params.config["boi_token_id"] = config_dict.get("boi_token_id", 0)
         config.mm_related_params.config["eoi_token_id"] = config_dict.get("eoi_token_id", 0)
-        config.mm_sep_tokens = [config_dict.get("boi_token_id", 0), config_dict.get("eoi_token_id", 0)]        
+        config.mm_sep_tokens = [[config_dict.get("boi_token_id", 0), config_dict.get("eoi_token_id", 0)]]
         config.cal_mm_tokens_in_rotary_emb = False
         config.include_sep_tokens = True
         return config

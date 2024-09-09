@@ -33,6 +33,7 @@ class RendererParams:
     eos_token_id: int
     stop_word_ids_list: List[List[int]]
     template_type: TemplateType = TemplateType.chat
+    ckpt_path: str = ""
 
 class RenderedInputs:
     input_ids: List[int] = []
@@ -63,7 +64,7 @@ class CustomChatRenderer():
         self.stop_words_list = [
             self.tokenizer.decode(stop_word_ids) for stop_word_ids in self.stop_word_ids_list
         ]
-
+        self.ckpt_path = renderer_params.ckpt_path
         # NOTE: stop words or their ids only need to be added to one of these two lists.
         self.extra_stop_words: List[str] = []
         self.extra_stop_word_ids_list: List[List[int]] = []
@@ -274,4 +275,3 @@ class CustomChatRenderer():
         # model should return output length, ids should be sliced with output length.
         output_ids = output_ids_tensor[output_ids_tensor != self.eos_token_id].tolist()
         return output_ids
-
