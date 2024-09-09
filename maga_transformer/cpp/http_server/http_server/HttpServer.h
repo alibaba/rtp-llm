@@ -2,11 +2,11 @@
 #define HTTP_SERVER_HTTPSERVER_H
 
 #include "aios/network/anet/transport.h"
-#include "http_server/HttpRequest.h"
-#include "http_server/HttpResponseWriter.h"
 #include "autil/Log.h"
 #include "http_server/ANetApp.h"
 #include <functional>
+#include "http_server/HttpRequest.h"
+#include "http_server/HttpResponseWriter.h"
 
 namespace http_server {
 
@@ -62,6 +62,7 @@ private:
     std::shared_ptr<HttpRouter> _router;
     std::shared_ptr<HttpServerAdapter> _serverAdapter;
     anet::IOComponent *_listenIoc{nullptr};
+    bool _isStopped{false};
 
 private:
     AUTIL_LOG_DECLARE();

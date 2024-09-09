@@ -18,13 +18,13 @@ public:
     ~HttpRequest();
 
 public:
-    HttpError parse(anet::HTTPPacket *request);
-    std::string getMethod() const { return _request->getMethodString(); }
-    std::string getBody() const { return std::string(_request->getBody(), _request->getBodyLen()); }
-    std::string getUri() const { return _request->getURI(); }
-    const std::string &getEndpoint() const { return _endpoint; }
-    const std::map<std::string, std::string> &getUriParams() const { return _uriParams; }
-    anet::HTTPPacket *getRawRequest() const { return _request; }
+    HttpError Parse(anet::HTTPPacket *request);
+    std::string GetMethod() const { return _request->getMethodString(); }
+    std::string GetBody() const { return std::string(_request->getBody(), _request->getBodyLen()); }
+    std::string GetUri() const { return _request->getURI(); }
+    const std::string &GetEndpoint() const { return _endpoint; }
+    const std::map<std::string, std::string> &GetUriParams() const { return _uriParams; }
+    anet::HTTPPacket *GetRawRequest() const { return _request; }
 
 private:
     std::string _endpoint;

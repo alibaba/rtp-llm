@@ -22,12 +22,12 @@ public:
 
 public:
     bool RegisterRoute(const std::string &method, const std::string &endpoint, const ResponseHandler &func);
-    std::optional<ResponseHandler> FindRoute(const std::string &method, const std::string &endpoint);
+    std::optional<ResponseHandler> FindRoute(const std::string &method, const std::string &endpoint) const;
 
 private:
     using HandlerMap = std::map<std::string, ResponseHandler>;
     std::map<std::string, HandlerMap> _registeredHandlers;
-    std::shared_mutex _handlerMutex;
+    mutable std::shared_mutex _handlerMutex;
 
     AUTIL_LOG_DECLARE();
 };

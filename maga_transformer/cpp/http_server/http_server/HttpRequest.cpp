@@ -11,7 +11,7 @@ HttpRequest::~HttpRequest() {
     }
 }
 
-HttpError HttpRequest::parse(anet::HTTPPacket *request) {
+HttpError HttpRequest::Parse(anet::HTTPPacket *request) {
     if (!request) {
         return HttpError::BadRequest("http packet is nullptr");
     }
@@ -28,7 +28,7 @@ HttpError HttpRequest::parse(anet::HTTPPacket *request) {
         std::vector<std::string> paramItems = autil::StringUtil::split(items[1], "&");
         for (size_t i = 0; i < paramItems.size(); i++) {
             std::string paramKvStr = paramItems[i];
-            std::vector<std::string> kvItems = autil::StringUtil::split(paramKvStr, "=");
+            std::vector<std::string> kvItems = autil::StringUtil::split(paramKvStr, "=", false);
             if (kvItems.size() != 2) {
                 return HttpError::BadRequest("uri has invalid param: " + uri);
             }

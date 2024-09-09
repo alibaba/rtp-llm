@@ -10,99 +10,63 @@ namespace http_server {
 AUTIL_LOG_SETUP(http_server, HttpResponseWriter);
 
 HttpResponseWriter::~HttpResponseWriter() {
-    if (_status == WriteStatus::Stream) {
+    if (_type == WriteType::Stream) {
         WriteDone();
     }
     _connection.reset();
 }
 
-bool HttpResponseWriter::Write(const std::string& data) {
-    if (_status == WriteStatus::Stream) {
-        AUTIL_LOG(WARN, "write failed, already called write stream, cannot write");
-        SendErrorResponse();
+bool HttpResponseWriter::Write(const std::string &data, int statusCode) {
+    if (_type == WriteType::Undefined) {
+        AUTIL_LOG(WARN, "write failed, write type is undefined, call SetWriteType first");
         return false;
     }
-    _status = WriteStatus::Normal;
-
-    if (!DoWrite(data)) {
-        SendErrorResponse();
-        return false;
+    if (_type == WriteType::Normal) {
+        return WriteNormal(data, statusCode);
+    } else {
+        return WriteStream(data, false);
     }
-    return true;
-}
-
-bool HttpResponseWriter::DoWrite(const std::string& data) {
-    if (_sent) {
-        AUTIL_LOG(ERROR, "write failed, already write data, cannot write more than once");
-        return false;
-    }
-    if (!_connection) {
-        AUTIL_LOG(WARN, "write failed, connection is null");
-        return false;
-    }
-
-    auto response = HttpResponse::make(data, _headers);
-    if (!response) {
-        AUTIL_LOG(WARN, "write failed, genarate http response failed");
-        return false;
-    }
-
-    response->setStatusCode(_statusCode);
-    if (_statusMessage) response->setStatusMessage(_statusMessage.value());
-    auto packet = response->encode();
-    if (!packet) {
-        AUTIL_LOG(WARN, "write failed, http response encode failed");
-        return false;
-    }
-
-    if (!_connection->postPacket(packet)) {
-        AUTIL_LOG(ERROR, "write failed, connection post http response packet failed");
-        packet->free();
-        return false;
-    }
-    _sent = true;
-    return true;
-}
-
-bool HttpResponseWriter::WriteStream(const std::string& data) {
-    if (_status == WriteStatus::Normal) {
-        AUTIL_LOG(WARN, "write stream failed, already called write, cannot write stream");
-        SendErrorResponse();
-        return false;
-    }
-    _status = WriteStatus::Stream;
-
-    if (!DoWriteStream(data, false)) {
-        AUTIL_LOG(WARN, "write stream failed");
-        SendErrorResponse();
-        return false;
-    }
-    return true;
 }
 
 bool HttpResponseWriter::WriteDone() {
-    if (_status != WriteStatus::Stream) {
+    if (_type != WriteType::Stream || _calledDone) {
         return true;
     }
-    if (_calledDone) {
-        return true;
-    }
-    if (!DoWriteStream("", true)) {
+    if (!WriteStream("", true)) {
         AUTIL_LOG(WARN, "write done failed");
-        SendErrorResponse();
         return false;
     }
     _calledDone = true;
     return true;
 }
 
-bool HttpResponseWriter::DoWriteStream(const std::string& data, bool isWriteDone) {
-    if (_calledDone) {
-        AUTIL_LOG(WARN, "write stream failed, already called write done, cannot write data any more");
+bool HttpResponseWriter::WriteNormal(const std::string &data, int statusCode) {
+    if (_alreadyWrite) {
+        AUTIL_LOG(ERROR, "write failed, already write data, cannot write more than once");
         return false;
     }
-    if (!_connection) {
-        AUTIL_LOG(WARN, "write stream failed, connection is null");
+    std::shared_ptr<HttpResponse> response;
+    if (statusCode == 200) {
+        response = std::make_shared<HttpResponse>(data);
+    } else {
+        HttpError error;
+        error.code    = statusCode;
+        error.message = data;
+        response      = std::make_shared<HttpResponse>(error);
+    }
+    response->setStatusCode(_statusCode);
+    if (_statusMessage) response->setStatusMessage(_statusMessage.value());
+    if (!PostHttpResponse(response)) {
+        AUTIL_LOG(WARN, "write normal failed, post http response failed");
+        return false;;
+    }
+    _alreadyWrite = true;
+    return true;
+}
+
+bool HttpResponseWriter::WriteStream(const std::string &data, bool isWriteDone) {
+    if (_calledDone) {
+        AUTIL_LOG(WARN, "write stream failed, already called write done, cannot write data any more");
         return false;
     }
 
@@ -111,91 +75,66 @@ bool HttpResponseWriter::DoWriteStream(const std::string& data, bool isWriteDone
         AUTIL_LOG(WARN, "write stream failed, chunk http response failed");
         return false;
     }
-
-    auto packet = chunkResponse->encode();
-    if (!packet) {
-        AUTIL_LOG(WARN, "write stream failed, http response encode failed");
-        return false;
-    }
-
-    if (!_connection->postPacket(packet)) {
-        AUTIL_LOG(ERROR, "write strem failed, post chunked response packet failed");
-        packet->free();
+    if (!PostHttpResponse(chunkResponse)) {
+        AUTIL_LOG(WARN, "write stream failed, post http response failed");
         return false;
     }
     _firstPacket = false;
     return true;
 }
 
-std::unique_ptr<HttpResponse> HttpResponseWriter::Chunk(const std::string& data, bool isWriteDone) {
-    if (_firstPacket) {
-        AddHeader("Transfer-Encoding", "chunked");
-        std::stringstream ss;
-        ss << std::hex << data.size();
-        const auto body = ss.str() + "\r\n" + data + "\r\n";
-        return HttpResponse::make(body, _headers);
-    }
-
-    if (isWriteDone) {
-        const auto body = "0\r\n\r\n";
-        return HttpResponse::makeChunkedResponseData(body);
-    } else {
-        std::stringstream ss;
-        ss << std::hex << data.size();
-        const auto body = ss.str() + "\r\n" + data + "\r\n";
-        return HttpResponse::makeChunkedResponseData(body);
-    }
-}
-
-void HttpResponseWriter::SendErrorResponse() {
-    if (!_connection) {
-        AUTIL_LOG(WARN, "send error response failed, connection is null");
-        return;
-    }
-    auto response = HttpResponse::make(HttpError::InternalError("server recvd request but send response failed"));
+bool HttpResponseWriter::PostHttpResponse(const std::shared_ptr<HttpResponse> &response) const {
     if (!response) {
-        AUTIL_LOG(WARN, "send error response failed, genarate http response failed");
-        return;
+        AUTIL_LOG(WARN, "post http response failed, http response is null");
+        return false;
     }
-    auto packet = response->encode();
-    if (!packet) {
-        AUTIL_LOG(WARN, "send error response failed, http response encode failed");
-        return;
-    }
-    if (!_connection->postPacket(packet)) {
-        AUTIL_LOG(ERROR, "send error response failed, post http response packet failed");
-        packet->free();
-    }
-}
-
-void HttpResponseWriter::AddHeader(const std::string& key, const std::string& value) {
-    _headers[key] = value;
-}
-
-bool HttpResponseWriter::WriteError(int errorCode, const std::string& errorMsg) const {
     if (!_connection) {
-        AUTIL_LOG(WARN, "write error failed, connection is null");
+        AUTIL_LOG(WARN, "post http response failed, connection is null");
         return false;
     }
-    HttpError error;
-    error.code    = errorCode;
-    error.message = errorMsg;
-    auto response = HttpResponse::make(error);
-    if (!response) {
-        AUTIL_LOG(WARN, "write error failed, genarate http response failed");
-        return false;
-    }
-    auto packet = response->encode();
+
+    auto packet = response->Encode();
     if (!packet) {
-        AUTIL_LOG(WARN, "write error failed, http response encode failed");
+        AUTIL_LOG(WARN, "post http response failed, http response encode failed");
         return false;
     }
+
     if (!_connection->postPacket(packet)) {
-        AUTIL_LOG(ERROR, "write error failed, post http response packet failed");
+        AUTIL_LOG(ERROR, "post http response failed, post chunked response packet failed");
         packet->free();
         return false;
     }
     return true;
 }
 
-}  // namespace http_server
+std::shared_ptr<HttpResponse> HttpResponseWriter::Chunk(const std::string &data, bool isWriteDone) {
+    if (_firstPacket) {
+        AddHeader("Transfer-Encoding", "chunked");
+        std::stringstream ss;
+        ss << std::hex << data.size();
+        const auto body = ss.str() + "\r\n" + data + "\r\n";
+        auto response = std::make_shared<HttpResponse>(body, _headers);
+        if (response) {
+            response->SetDisableContentLengthHeader(true);
+        }
+        return response;
+    }
+
+    std::string body;
+    if (isWriteDone) {
+        body = "0\r\n\r\n";
+    } else {
+        std::stringstream ss;
+        ss << std::hex << data.size();
+        body = ss.str() + "\r\n" + data + "\r\n";
+    }
+    auto response = std::make_shared<HttpResponse>(body);
+    if (response) {
+        response->SetIsHttpPacket(false);
+    }
+    return response;
+}
+
+void HttpResponseWriter::AddHeader(const std::string &key, const std::string &value) { _headers[key] = value; }
+
+} // namespace http_server

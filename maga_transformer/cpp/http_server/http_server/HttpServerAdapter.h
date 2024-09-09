@@ -2,8 +2,8 @@
 #define HTTP_SERVER_HTTPSERVERADAPTER_H
 
 #include "aios/network/anet/iserveradapter.h"
-#include "http_server/HttpError.h"
 #include "autil/Log.h"
+#include "http_server/HttpError.h"
 
 namespace autil {
 class LockFreeThreadPool;
@@ -25,7 +25,7 @@ private:
     anet::IPacketHandler::HPRetCode handleRegularPacket(anet::Connection *connection, anet::Packet *packet) const;
     anet::IPacketHandler::HPRetCode handleControlPacket(anet::Connection *connection, anet::Packet *packet) const;
 
-    void SendErrorResponse(anet::Connection *connection, HttpError error) const;
+    void sendErrorResponse(anet::Connection *connection, HttpError error) const;
 
 private:
     std::shared_ptr<HttpRouter> _router;

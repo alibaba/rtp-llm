@@ -1,9 +1,9 @@
 #include "http_server/HttpServerAdapter.h"
 
+#include "autil/LockFreeThreadPool.h"
 #include "http_server/HttpRequestWorkItem.h"
 #include "http_server/HttpResponse.h"
 #include "http_server/HttpRouter.h"
-#include "autil/LockFreeThreadPool.h"
 
 namespace http_server {
 
@@ -49,22 +49,22 @@ anet::IPacketHandler::HPRetCode HttpServerAdapter::handleRegularPacket(anet::Con
     }
 
     auto request = std::make_shared<HttpRequest>();
-    const auto parseError = request->parse(httpPacket); // free packet in request
+    const auto parseError = request->Parse(httpPacket); // free packet in request
     if (!parseError.IsOK()) {
         AUTIL_LOG(WARN, "parse http request failed. error: %s", parseError.ToString().c_str());
-        SendErrorResponse(connection, parseError);
+        sendErrorResponse(connection, parseError);
         return anet::IPacketHandler::KEEP_CHANNEL;
     }
 
     if (!_router) {
         AUTIL_LOG(WARN, "handle packet failed, http router is null");
         auto error = HttpError::InternalError("server http router is null");
-        SendErrorResponse(connection, error);
+        sendErrorResponse(connection, error);
         return anet::IPacketHandler::KEEP_CHANNEL;
     }
 
-    const auto method = request->getMethod();
-    const auto endpoint = request->getEndpoint();
+    const auto method = request->GetMethod();
+    const auto endpoint = request->GetEndpoint();
     const auto responseHandlerOpt = _router->FindRoute(method, endpoint);
     if (!responseHandlerOpt.has_value()) {
         AUTIL_LOG(WARN,
@@ -72,7 +72,7 @@ anet::IPacketHandler::HPRetCode HttpServerAdapter::handleRegularPacket(anet::Con
                   method.c_str(),
                   endpoint.c_str());
         auto error = HttpError::NotFound("http route not found: [" + method + ": " + endpoint + "]");
-        SendErrorResponse(connection, error);
+        sendErrorResponse(connection, error);
         return anet::IPacketHandler::KEEP_CHANNEL;
     }
     auto responseHandler = responseHandlerOpt.value();
@@ -89,8 +89,8 @@ anet::IPacketHandler::HPRetCode HttpServerAdapter::handleRegularPacket(anet::Con
                   errorCode,
                   method.c_str(),
                   endpoint.c_str());
-        delete workItem;
-        SendErrorResponse(connection, HttpError::InternalError("server push http request work item failed"));
+        workItem->destroy();
+        sendErrorResponse(connection, HttpError::InternalError("server push http request work item failed"));
         return anet::IPacketHandler::KEEP_CHANNEL;
     }
     return anet::IPacketHandler::KEEP_CHANNEL;
@@ -106,15 +106,15 @@ anet::IPacketHandler::HPRetCode HttpServerAdapter::handleControlPacket(anet::Con
     return anet::IPacketHandler::FREE_CHANNEL;
 }
 
-void HttpServerAdapter::SendErrorResponse(anet::Connection *connection, HttpError error) const {
-    auto response = HttpResponse::make(error);
+void HttpServerAdapter::sendErrorResponse(anet::Connection *connection, HttpError error) const {
+    auto response = std::make_shared<HttpResponse>(error);
     if (!response) {
         AUTIL_LOG(
             WARN, "send error response failed, create error response failed, error: %s", error.ToString().c_str());
         return;
     }
 
-    auto packet = response->encode();
+    auto packet = response->Encode();
     if (!packet) {
         AUTIL_LOG(
             WARN, "send error response failed, response encode to packet failed, error: %s", error.ToString().c_str());

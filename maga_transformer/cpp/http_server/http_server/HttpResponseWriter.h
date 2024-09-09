@@ -17,11 +17,15 @@ public:
     ~HttpResponseWriter();
 
 public:
-    bool Write(const std::string &data);
-    bool WriteStream(const std::string &data);
-    // is valid for write stream, call this method when write complete
+    enum class WriteType {
+        Undefined,
+        Normal, // 普通响应 (一问一答)
+        Stream, // 流式响应
+    };
+    void SetWriteType(WriteType type) { _type = type; }
+    // not thread safe
+    bool Write(const std::string &data, int statusCode = 200);
     bool WriteDone();
-    bool WriteError(int errorCode, const std::string &errorMsg) const;
 
     void AddHeader(const std::string &key, const std::string &value) { _headers[key] = value; }
     void SetStatus(int code, const std::string message) {
@@ -30,27 +34,20 @@ public:
     }
 
 private:
-    bool DoWrite(const std::string &data);
-    bool DoWriteStream(const std::string &data, bool isWriteDone);
-    std::unique_ptr<HttpResponse> Chunk(const std::string &data, bool isWriteDone);
-
-    void SendErrorResponse();
+    bool WriteNormal(const std::string &data, int statusCode = 200);
+    bool WriteStream(const std::string &data, bool isWriteDone);
+    std::shared_ptr<HttpResponse> Chunk(const std::string &data, bool isWriteDone);
+    bool PostHttpResponse(const std::shared_ptr<HttpResponse> &response) const;
 
 private:
-    enum class WriteStatus {
-        Undefined,
-        Normal, // 普通响应 (一问一答)
-        Stream, // 流式响应
-    };
-
     std::shared_ptr<anet::Connection> _connection;
-    WriteStatus _status{WriteStatus::Undefined};
+    WriteType _type{WriteType::Undefined};
 
     int _statusCode;
     std::optional<std::string> _statusMessage;
 
     // for normal response
-    bool _sent{false};
+    bool _alreadyWrite{false};
 
     // for stream response
     bool _firstPacket{true};

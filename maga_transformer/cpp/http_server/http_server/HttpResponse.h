@@ -15,26 +15,25 @@ namespace http_server {
 
 class HttpResponse {
 public:
-    ~HttpResponse() {}
+    HttpResponse(const std::string &body, const std::map<std::string, std::string> &headers = {})
+        : _body(body), _headers(headers) {}
+    HttpResponse(const HttpError &error) : _body(error.message), _statusCode(error.code) {}
+    ~HttpResponse() = default;
 
-    using HeadersType = std::map<std::string, std::string>;
-    static std::unique_ptr<HttpResponse> make(const std::string &body, const HeadersType &headers = {});
-    static std::unique_ptr<HttpResponse> make(const HttpError &error);
-    static std::unique_ptr<HttpResponse> makeChunkedResponseData(const std::string &body);
-
-    anet::Packet *encode() const;
+public:
+    anet::Packet *Encode() const;
+    void SetIsHttpPacket(bool isHttpPacket) { _isHttpPacket = isHttpPacket; }
+    void SetDisableContentLengthHeader(bool disable) { _disableContentLengthHeader = disable; }
     void setStatusCode(int code) { _statusCode = code; }
     void setStatusMessage(const std::string message) { _statusMessage = message; }
 
 private:
-    HttpResponse() : _isHttpPacket(true), _statusCode(200) {}
-
-private:
-    bool _isHttpPacket;
-    int _statusCode;
-    std::optional<std::string> _statusMessage;
-    HeadersType _headers;
     std::string _body;
+    std::map<std::string, std::string> _headers;
+    int32_t _statusCode{200};
+    bool _isHttpPacket{true};
+    bool _disableContentLengthHeader{false};
+    std::optional<std::string> _statusMessage;
 
     AUTIL_LOG_DECLARE();
 };

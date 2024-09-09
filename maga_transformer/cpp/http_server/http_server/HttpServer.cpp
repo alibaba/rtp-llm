@@ -13,6 +13,7 @@ HttpServer::HttpServer(anet::Transport *transport, size_t threadNum, size_t queu
 }
 
 HttpServer::~HttpServer() {
+    Stop();
     _serverAdapter.reset();
     _router.reset();
 }
@@ -38,11 +39,16 @@ bool HttpServer::Start(const std::string &address, int timeout, int maxIdleTime,
 }
 
 bool HttpServer::Stop() {
+    if (_isStopped) {
+        return true;
+    }
     if (_listenIoc) {
         _listenIoc->close();
         _listenIoc->subRef();
     }
-    return _anetApp.StopPrivateTransport();
+    _anetApp.StopPrivateTransport();
+    _isStopped = true;
+    return true;
 }
 
 } // namespace http_server

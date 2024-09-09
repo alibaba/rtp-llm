@@ -26,7 +26,7 @@ bool HttpRouter::RegisterRoute(const std::string &method, const std::string &end
     return true;
 }
 
-std::optional<ResponseHandler> HttpRouter::FindRoute(const std::string &method, const std::string &endpoint) {
+std::optional<ResponseHandler> HttpRouter::FindRoute(const std::string &method, const std::string &endpoint) const {
     std::optional<ResponseHandler> handler;
     {
         std::shared_lock<std::shared_mutex> lock(_handlerMutex);
@@ -34,14 +34,14 @@ std::optional<ResponseHandler> HttpRouter::FindRoute(const std::string &method, 
             AUTIL_LOG(WARN, "find route failed, no methdod registered for [%s: %s]", method.c_str(), endpoint.c_str());
             return std::nullopt;
         }
-        if (!_registeredHandlers[method].count(endpoint)) {
+        if (!_registeredHandlers.at(method).count(endpoint)) {
             AUTIL_LOG(WARN,
                       "find route failed, no response handler registered for [%s: %s]",
                       method.c_str(),
                       endpoint.c_str());
             return std::nullopt;
         }
-        handler = _registeredHandlers[method][endpoint];
+        handler = _registeredHandlers.at(method).at(endpoint);
     }
     return handler;
 }

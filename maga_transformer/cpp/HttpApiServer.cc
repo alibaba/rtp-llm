@@ -77,7 +77,7 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
     input->begin_time_ms                 = autil::TimeUtility::currentTimeInMicroSeconds();
     input->generate_config               = std::make_shared<GenerateConfig>();
 
-    auto body    = ParseJson(request.getBody());
+    auto body    = ParseJson(request.GetBody());
     auto bodyMap = AnyCast<JsonMap>(body);
 
     // generate_config
@@ -153,6 +153,7 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
     input->input_ids = device->allocateBuffer({ft::DataType::TYPE_INT32, {vec.size()}, ft::AllocationType::HOST}, {});
     memcpy(input->input_ids->data(), vec.data(), input->input_ids->sizeBytes());
 
+    writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Stream);
     auto stream = engine->enqueue(input);
     while (!stream->finished()) {
         const auto output_status = stream->nextOutput();
@@ -178,9 +179,9 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
             if (input->generate_config->is_streaming) {
                 auto sse_response = HttpApiServer::SseResponse(json_response);
                 writer->AddHeader("Content-Type", "text/event-stream");
-                writer->WriteStream(sse_response);
+                writer->Write(sse_response);
             } else {
-                writer->WriteStream(json_response);
+                writer->Write(json_response);
             }
         }
     }
@@ -231,8 +232,9 @@ bool HttpApiServer::registerRoot() {
     auto sharedThis = shared_from_this();
     auto callback   = [sharedThis](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                  const http_server::HttpRequest&                  request) -> void {
+        writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         if (sharedThis->IsShutdown()) {
-            writer->WriteError(503, "server has been shutdown");
+            writer->Write("server has been shutdown", 503);
             return;
         }
         writer->Write(R"({"status":"home"})");
@@ -244,8 +246,9 @@ bool HttpApiServer::registerHealth() {
     auto sharedThis = shared_from_this();
     auto callback   = [sharedThis](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                  const http_server::HttpRequest&                  request) -> void {
+        writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         if (sharedThis->IsShutdown()) {
-            writer->WriteError(503, "server has been shutdown");
+            writer->Write("server has been shutdown", 503);
             return;
         }
         writer->Write("ok");
@@ -273,7 +276,8 @@ bool HttpApiServer::registerV1Model() {
 bool HttpApiServer::registerSetDebugLog() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
                        const http_server::HttpRequest&                  request) -> void {
-        auto body    = ParseJson(request.getBody());
+        writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+        auto body    = ParseJson(request.GetBody());
         auto bodyMap = AnyCast<JsonMap>(body);
         if (auto it = bodyMap.find("debug"); it != bodyMap.end()) {
             torch_ext::setDebugLogLevel(AnyCast<bool>(it->second));
@@ -288,8 +292,9 @@ bool HttpApiServer::registerSetDebugLog() {
 bool HttpApiServer::registerSetDebugPrint() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
                        const http_server::HttpRequest&                  request) -> void {
-        auto body    = ParseJson(request.getBody());
+        auto body    = ParseJson(request.GetBody());
         auto bodyMap = AnyCast<JsonMap>(body);
+        writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         if (auto it = bodyMap.find("debug"); it != bodyMap.end()) {
             torch_ext::setDebugPrintLevel(AnyCast<bool>(it->second));
             writer->Write(R"({"status":"ok"})");
