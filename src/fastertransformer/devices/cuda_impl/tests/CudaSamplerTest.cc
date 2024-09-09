@@ -138,6 +138,72 @@ TEST_F(CudaSamplerTest, testTopP) {
         1e-3);
 }
 
+TEST_F(CudaSamplerTest, testTopKTopPBatch) {
+    size_t batch_size = 4;
+    BufferPtr logits = createBuffer<float>({batch_size, 10}, {
+        0, 0, 0, 0.1, 0.2, 0.3, 0, 0, 0, 0.01,
+        0.987, 0.887, 0.99999, 0.1, 0.2, 0.3, 0, 0, 0.99, 0.989,
+        0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+        0.221, 0, 0, 0.1, 0.2, 0.321, 0, 0.4432, 0.44, 0.01,
+    });
+    size_t step = 5; // also max_input_length
+    BufferPtr eos_token_id = createBuffer<int32_t>({1}, {2});
+    // BufferPtr finished = createBuffer<bool>({1}, {0});
+    BufferPtr output_token_ids = createBuffer<int32_t>({batch_size, step + 1}, {
+        100, 1, 1, 1, 1, 0,
+        1, 1, 0, 0, 0, 0,
+        1, 0, 1, 0, 0, 0,
+        1, 0, 0, 0, 0, 0,
+    });
+
+    // TODO: test lengths
+    BufferPtr sequence_lengths = createBuffer<int32_t>({4}, {5, 5, 5, 5});
+    BufferPtr input_lengths = createBuffer<int32_t>({4}, {-1, -1, -1, -1});
+    BufferPtr cum_log_probs = createBuffer<float>({4}, {-1.0, -2.0, -3.0, -3.0});
+    BufferPtr rand_seed = createBuffer<uint64_t>({4}, {1, 2, 3, 123}, AllocationType::HOST);
+
+    auto top_k = createBuffer<uint32_t>({4}, {0, 0, 2, 2}, AllocationType::HOST);
+    auto top_p = createBuffer<float>({4}, {0.01, 0.7, 0.0, 0.6}, AllocationType::HOST);
+    auto temperture = createBuffer<float>({4}, {0.01, 0.5, 10.0, 10.0}, AllocationType::HOST);
+
+    BufferPtr output_all_probs = device_->allocateBuffer({ft::DataType::TYPE_FP32, {4, 10}, ft::AllocationType::DEVICE});
+    device_->bufMemset(*output_all_probs, 0);
+
+    GreedyParams params({
+        *logits, *input_lengths, *sequence_lengths, *output_token_ids, step,
+        *top_k, *top_p, *temperture, *rand_seed,
+        nullopt, nullopt, nullopt,
+        *cum_log_probs, nullopt,
+        *output_all_probs,
+    });
+    device_->sampleGreedy(params);
+    sync_check_cuda_error();
+
+    printBuffer<int32_t>(*output_token_ids, "output_token_ids");
+    printBuffer<float>(*cum_log_probs, "cum_log_probs");
+    auto output_token_ids_host = getBufferValues<int32_t>(*output_token_ids);
+    auto cum_log_probs_host = getBufferValues<float>(*cum_log_probs);
+    ASSERT_EQ(output_token_ids_host[5], 5);
+    ASSERT_EQ(output_token_ids_host[11], 8);
+    ASSERT_EQ(output_token_ids_host[17], 8);
+    ASSERT_EQ(output_token_ids_host[23], 7);
+    ASSERT_NEAR(cum_log_probs_host[0], -1.0, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[1], -3.745, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[2], -3.693, 1e-3);
+    ASSERT_NEAR(cum_log_probs_host[3], -3.693, 1e-3);
+
+    printBuffer<float>(*output_all_probs, "output_all_probs");
+
+    auto output_all_probs_host = getBufferValues<float>(*output_all_probs);
+    ASSERT_VECTOR_NEAR(
+        output_all_probs_host,
+        std::vector<float>({0, 0, 0, 0, 0, 0.999999, 0, 0, 0,      0,        
+                            0.247309, 0, 0.254418, 0, 0, 0, 0, 0, 0.249385, 0.248887, 
+                            0, 0, 0, 0, 0, 0, 0, 0.50008, 0.49992, 0, 
+                            0, 0, 0, 0, 0, 0, 0, 0.833467, 0.166533, 0}),
+        1e-3);
+}
+
 TEST_F(CudaSamplerTest, testRandom) {
     size_t batch_size = 1;
     size_t vocab_size = 10;

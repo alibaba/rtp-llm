@@ -60,3 +60,19 @@ cc_test(
     },
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "sp_sampler_test",
+    srcs = glob([
+        "SpeculativeSamplerTest.cc",
+    ]),
+    data = [],
+    copts = test_copts,
+    linkopts = test_linkopts,
+    deps =  [
+        ":sp_mock_engine",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+)
