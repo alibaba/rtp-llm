@@ -19,11 +19,9 @@
 #include "src/fastertransformer/core/Types.h"
 #if USING_CUDA
 #include "src/fastertransformer/cuda/cuda_utils.h"
-#endif
-#if USING_ROCM
+#elif USING_ROCM
 #include "src/fastertransformer/rocm/hip_utils.h"
 #include "src/fastertransformer/rocm/cuda_shims.h"
-using namespace rocm;
 #endif
 #include "src/fastertransformer/cuda/memory_utils.h"
 #include "src/fastertransformer/cuda/Dispatch.h"
@@ -35,6 +33,12 @@ using namespace rocm;
 #include <unordered_set>
 #include <vector>
 using namespace std;
+
+#if USING_CUDA
+#define getVisibleDevices fastertransformer::getVisibleCUDADevices
+#elif USING_ROCM
+#define getVisibleDevices fastertransformer::rocm::getVisibleCUDADevices
+#endif
 
 namespace fastertransformer {
 
@@ -190,7 +194,7 @@ std::vector<cudaIpcMemHandle_t> CustomAllReduceComm::prepareP2PBuffer_(const Ncc
 bool CustomAllReduceComm::shouldCustomAR(const std::vector<int>& tp_ranks, int rank) {
 
     size_t world_size       = tp_ranks.size();
-    size_t local_world_size = getVisibleCUDADevices().size();
+    size_t local_world_size = getVisibleDevices().size();
     // check whether all ranks are on same nodes
     if (world_size != local_world_size) {
         FT_LOG_INFO("Disable custom ar since TP is performanced on multi nodes, world_size=%d, local_world_size=%d",
