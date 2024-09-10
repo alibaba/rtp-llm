@@ -164,7 +164,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
     ASSERT_TRUE(engine->resourceContext().cache_manager);
     ASSERT_TRUE(engine->resourceContext().system_prompt);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 96);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 95); // one block for load balance
 
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
@@ -232,7 +232,7 @@ TEST_F(NormalEngineTest, testReuseCacheOption) {
     auto gpt_init_params = ft::GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 98); // one block for load balance
 
     config.reuse_cache = false;
     auto gpt_init_params2 = ft::GptInitParameter();
@@ -246,7 +246,7 @@ TEST_F(NormalEngineTest, testReuseCache) {
     auto gpt_init_params = ft::GptInitParameter();
     auto engine = createMockEngine(device_, config, gpt_init_params);
     ASSERT_TRUE(engine->resourceContext().reuse_cache);
-    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 99);
+    ASSERT_EQ(engine->resourceContext().cache_manager->freeBlockNums(), 98); // one block for load balance
     {
         std::shared_ptr<GenerateInput> query   = make_shared<GenerateInput>();
         query->input_ids                       = createBuffer<int32_t>({7}, {1, 2, 3, 4, 5, 6, 7}, ft::AllocationType::HOST);
