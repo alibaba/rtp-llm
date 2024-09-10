@@ -233,6 +233,7 @@ bool HttpApiServer::registerRoot() {
     auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                   const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+        writer->AddHeader("Content-Type", "application/json");
         if (shared_this->isShutdown()) {
             FT_LOG_WARNING("server has been shutdown");
             writer->Write("server has been shutdown", 503);
@@ -248,6 +249,7 @@ bool HttpApiServer::registerHealth() {
     auto callback    = [shared_this](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                   const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+        writer->AddHeader("Content-Type", "application/json");
         if (shared_this->isShutdown()) {
             FT_LOG_WARNING("server has been shutdown");
             writer->Write("server has been shutdown", 503);
@@ -285,6 +287,7 @@ bool HttpApiServer::registerV1Model() {
     ]
 })del";
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+        writer->AddHeader("Content-Type", "application/json");
         writer->Write(model_content);
     };
     return http_server_.RegisterRoute("GET", "/v1/models", callback);
@@ -294,6 +297,7 @@ bool HttpApiServer::registerSetDebugLog() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
                        const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+        writer->AddHeader("Content-Type", "application/json");
         try {
             auto body     = ParseJson(request.GetBody());
             auto body_map = AnyCast<JsonMap>(body);
@@ -317,6 +321,7 @@ bool HttpApiServer::registerSetDebugPrint() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
                        const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
+        writer->AddHeader("Content-Type", "application/json");
         try {
             auto body     = ParseJson(request.GetBody());
             auto body_map = AnyCast<JsonMap>(body);
