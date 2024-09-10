@@ -47,7 +47,7 @@ bool HttpResponseWriter::WriteNormal(const std::string &data, int statusCode) {
     }
     std::shared_ptr<HttpResponse> response;
     if (statusCode == 200) {
-        response = std::make_shared<HttpResponse>(data);
+        response = std::make_shared<HttpResponse>(data, _headers);
     } else {
         HttpError error;
         error.code    = statusCode;
@@ -58,7 +58,7 @@ bool HttpResponseWriter::WriteNormal(const std::string &data, int statusCode) {
     if (_statusMessage) response->setStatusMessage(_statusMessage.value());
     if (!PostHttpResponse(response)) {
         AUTIL_LOG(WARN, "write normal failed, post http response failed");
-        return false;;
+        return false;
     }
     _alreadyWrite = true;
     return true;
