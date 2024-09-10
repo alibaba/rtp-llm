@@ -116,8 +116,8 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
     // urls/images: list[list[str]]
     it = bodyMap.find("urls");
     if (it != bodyMap.end()) {
-        auto listListUrls = AnyCast<JsonArray>(it->second);
-        auto listUrls = AnyCast<JsonArray>(listListUrls[0]);
+        auto                         listListUrls = AnyCast<JsonArray>(it->second);
+        auto                         listUrls     = AnyCast<JsonArray>(listListUrls[0]);
         std::vector<MultimodalInput> mm_inputs;
         for (auto url : listUrls) {
             mm_inputs.emplace_back(AnyCast<std::string>(url));
@@ -127,8 +127,8 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
         FT_LOG_INFO("no urls in http request.");
         it = bodyMap.find("images");
         if (it != bodyMap.end()) {
-            auto listListUrls = AnyCast<JsonArray>(it->second);
-            auto listUrls = AnyCast<JsonArray>(listListUrls[0]);
+            auto                         listListUrls = AnyCast<JsonArray>(it->second);
+            auto                         listUrls     = AnyCast<JsonArray>(listListUrls[0]);
             std::vector<MultimodalInput> mm_inputs;
             for (auto url : listUrls) {
                 mm_inputs.emplace_back(AnyCast<std::string>(url));
@@ -234,6 +234,7 @@ bool HttpApiServer::registerRoot() {
                                   const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         if (shared_this->isShutdown()) {
+            FT_LOG_WARNING("server has been shutdown");
             writer->Write("server has been shutdown", 503);
             return;
         }
@@ -248,6 +249,7 @@ bool HttpApiServer::registerHealth() {
                                   const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
         if (shared_this->isShutdown()) {
+            FT_LOG_WARNING("server has been shutdown");
             writer->Write("server has been shutdown", 503);
             return;
         }
@@ -292,14 +294,21 @@ bool HttpApiServer::registerSetDebugLog() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
                        const http_server::HttpRequest&                  request) -> void {
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
-        auto body     = ParseJson(request.GetBody());
-        auto body_map = AnyCast<JsonMap>(body);
-        if (auto it = body_map.find("debug"); it != body_map.end()) {
-            torch_ext::setDebugLogLevel(AnyCast<bool>(it->second));
-            writer->Write(R"({"status":"ok"})");
-        } else {
-            writer->Write(R"({"error":"set debug log level failed"})");
+        try {
+            auto body     = ParseJson(request.GetBody());
+            auto body_map = AnyCast<JsonMap>(body);
+            if (auto it = body_map.find("debug"); it != body_map.end()) {
+                auto value = AnyCast<bool>(it->second);
+                torch_ext::setDebugLogLevel(value);
+                writer->Write(R"({"status":"ok"})");
+                return;
+            } else {
+                FT_LOG_WARNING("set debug log level failed, request has no debug info");
+            }
+        } catch (...) {
+            FT_LOG_WARNING("set debug log level failed, exception occurred when parse request");
         }
+        writer->Write(R"({"error":"set debug log level failed"})");
     };
     return http_server_.RegisterRoute("POST", "/set_debug_log", callback);
 }
@@ -307,15 +316,22 @@ bool HttpApiServer::registerSetDebugLog() {
 bool HttpApiServer::registerSetDebugPrint() {
     auto callback = [](std::unique_ptr<http_server::HttpResponseWriter> writer,
                        const http_server::HttpRequest&                  request) -> void {
-        auto body     = ParseJson(request.GetBody());
-        auto body_map = AnyCast<JsonMap>(body);
         writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
-        if (auto it = body_map.find("debug"); it != body_map.end()) {
-            torch_ext::setDebugPrintLevel(AnyCast<bool>(it->second));
-            writer->Write(R"({"status":"ok"})");
-        } else {
-            writer->Write(R"({"error":"set debug print level failed"})");
+        try {
+            auto body     = ParseJson(request.GetBody());
+            auto body_map = AnyCast<JsonMap>(body);
+            if (auto it = body_map.find("debug"); it != body_map.end()) {
+                auto value = AnyCast<bool>(it->second);
+                torch_ext::setDebugPrintLevel(value);
+                writer->Write(R"({"status":"ok"})");
+                return;
+            } else {
+                FT_LOG_WARNING("set debug print level failed, request has no debug info");
+            }
+        } catch (...) {
+            FT_LOG_WARNING("set debug print level failed, exception occurred when parse request");
         }
+        writer->Write(R"({"error":"set debug print level failed"})");
     };
     return http_server_.RegisterRoute("POST", "/set_debug_print", callback);
 }
