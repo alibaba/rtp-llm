@@ -372,7 +372,7 @@ class VisionTransformer(nn.Module):
             num_heads=output_dim // 128,
             kv_dim=width,
             norm_layer=norm_layer,
-        )
+        ).to(self.device)
         self.ln_post = norm_layer(output_dim)
         self.proj = nn.Parameter((output_dim** -0.5) * torch.randn(output_dim, output_dim))
 
