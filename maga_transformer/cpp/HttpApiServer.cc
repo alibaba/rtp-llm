@@ -58,7 +58,14 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
                    const http_server::HttpRequest&                  request,
                    std::shared_ptr<EngineBase>                      engine,
                    ft::GptInitParameter                             params,
-                   Pipeline                                         pipeline_) {
+                   Pipeline                                         pipeline_,
+                   std::shared_ptr<ConcurrencyController>           controller_) {
+
+    if (controller_->increment() == false) {
+        // TODO: writer->setStatus(429, "Too Many Requests");
+        writer->Write("");
+        return;
+    }
 
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
     input->request_id = requestCounter.incAndReturn();
@@ -171,11 +178,12 @@ void inferResponse(std::unique_ptr<http_server::HttpResponseWriter> writer,
         }
     }
     writer->WriteDone();
+    controller_->decrement();
 }
 
 void HttpApiServer::registerResponses() {
     http_server_.RegisterRoute("POST", "/inference",
-            std::bind(inferResponse, _1, _2, engine_, params_, pipeline_));
+            std::bind(inferResponse, _1, _2, engine_, params_, pipeline_, controller_));
     // TODO: register other routes
 }
 
