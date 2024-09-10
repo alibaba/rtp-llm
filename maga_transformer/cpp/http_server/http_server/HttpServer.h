@@ -1,6 +1,8 @@
 #ifndef HTTP_SERVER_HTTPSERVER_H
 #define HTTP_SERVER_HTTPSERVER_H
 
+#include <functional>
+
 #include "aios/network/anet/transport.h"
 #include "autil/Log.h"
 #include "http_server/ANetApp.h"

@@ -22,7 +22,7 @@ import os
 import subprocess
 import re
 import sys
-import pipes
+from shlex import quote
 
 # Template values set by rocm_configure.bzl.
 CPU_COMPILER = ('%{cpu_compiler}')
@@ -167,7 +167,7 @@ def InvokeHipcc(argv, log=False):
   # Unfortunately, there are other options that have -c prefix too.
   # So allowing only those look like C/C++ files.
   src_files = [f for f in src_files if
-               re.search('\.cpp$|\.cc$|\.c$|\.cxx$|\.C$|\.cu$', f)]
+               re.search(r'\.cpp$|\.cc$|\.c$|\.cxx$|\.C$|\.cu$', f)]
   srcs = ' '.join(src_files)
   out = ' -o ' + out_file[0]
 
@@ -236,7 +236,7 @@ def main():
   if args.x and args.x[0] == 'rocm':
     # compilation for GPU objects
     if args.rocm_log: Log('-x rocm')
-    leftover = [pipes.quote(s) for s in leftover]
+    leftover = [quote(s) for s in leftover]
     if args.rocm_log: Log('using hipcc')
     return InvokeHipcc(leftover, log=args.rocm_log)
 

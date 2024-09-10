@@ -1,6 +1,7 @@
 #ifndef HTTP_SERVER_RESTFULPROCESSOR_H
 #define HTTP_SERVER_RESTFULPROCESSOR_H
 
+#include <optional>
 #include <functional>
 #include <shared_mutex>
 #include <optional>

@@ -1,3 +1,4 @@
+#include <mutex>
 #include "http_server/HttpRouter.h"
 
 namespace http_server {

@@ -105,7 +105,14 @@ build:rocm --copt="-D__HIP_PLATFORM_AMD__=1"
 build:rocm --copt="-DLEGACY_HIPBLAS_DIRECT"
 build:rocm --repo_env CK_FMHA_GEN_ARGS="--receipt 2"
 build:rocm --copt -Wno-tautological-compare # grpc
-build:rocm --action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:$LD_LIBRARY_PATH
+#build:rocm --action_env HIPBLASLT_LOG_MASK="32"
+#build:rocm --action_env ROCBLAS_LAYER="4"
+#build:rocm --copt="-DENABLE_PROF=1"
+build:rocm --copt="-Wno-array-parameter"
+build:rocm --copt="-Wno-error=array-bounds"
+build:rocm --copt="-Wno-error=unused-result"
+#build:rocm --action_env LD_LIBRARY_PATH="/lib64:/opt/conda310/lib/:$LD_LIBRARY_PATH
+build:rocm --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/"
 
 build:arm --copt="-DENABLE_BF16=1"
 build:arm --define=using_cuda=false --define=using_cuda_nvcc=false
