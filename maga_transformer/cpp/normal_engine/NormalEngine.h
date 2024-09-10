@@ -44,6 +44,7 @@ public:
 
 private:
     size_t warmUp(const EngineInitParams& params);
+    void   initLoadBalance();
     absl::Status trySaveStepError() const;
     void         loop();
     void         initCacheManager(size_t kv_cache_mem_size);

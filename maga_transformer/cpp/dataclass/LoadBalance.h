@@ -40,6 +40,8 @@ public:
 
     void reset();
 
+    bool empty();
+
 private:
     // all time is us
     const static size_t STEP_RECORDS_MAX_SIZE;

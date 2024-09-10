@@ -40,7 +40,7 @@ size_t StepRecorder::getStepPerMin() {
         return STEP_RECORDS_TIME_RANGE / min_step_latency_;
     }
     const auto range = step_time_records_.back() - step_time_records_.front();
-    return step_time_records_.size() * STEP_RECORDS_TIME_RANGE / range;
+    return (step_time_records_.size() - 1) * STEP_RECORDS_TIME_RANGE / range;
 }
 
 size_t StepRecorder::getStepLatency() {
@@ -48,7 +48,7 @@ size_t StepRecorder::getStepLatency() {
     if (step_time_records_.size() < 2) {
         return min_step_latency_;
     }
-    return (step_time_records_.back() - step_time_records_.front()) / step_time_records_.size();
+    return (step_time_records_.back() - step_time_records_.front()) / (step_time_records_.size() - 1);
 }
 
 size_t StepRecorder::getStepCount() {
@@ -87,6 +87,11 @@ void StepRecorder::reset() {
         step_time_records_.pop();
     }
     avg_latency_controller_.reset();
+}
+
+bool StepRecorder::empty() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return step_time_records_.empty();
 }
 
 void registerLoadBalanceInfo(const py::module& m) {

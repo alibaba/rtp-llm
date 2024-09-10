@@ -10,6 +10,7 @@
 #include "src/fastertransformer/utils/logger.h"
 #include "autil/TimeUtility.h"
 #include <memory>
+#include <thread>
 
 using namespace std;
 namespace rtp_llm {
@@ -41,6 +42,9 @@ NormalEngine::NormalEngine(const EngineInitParams& params) :
     scheduler_.reset(new FIFOScheduler(params_, resource_context_.cache_manager, metrics_reporter_));
     FT_LOG_INFO("create fifo scheduler done");
     (void)startLoop();
+    if (device_->getDeviceProperties().tp_rank == 0) {
+        initLoadBalance();
+    }
 }
 
 NormalEngine::~NormalEngine() {
@@ -74,6 +78,22 @@ size_t NormalEngine::warmUp(const EngineInitParams& params) {
     device_->setTraceMemory(false);
     (void)executor_.reset(nullptr);
     return min_preserved_bytes;
+}
+
+void NormalEngine::initLoadBalance() {
+    FT_LOG_INFO("init load balance start");
+    std::shared_ptr<GenerateInput> fake_input = make_shared<GenerateInput>();
+    fake_input->input_ids                     = device_->allocateBuffer({ft::DataType::TYPE_INT32, {(size_t)1}, ft::AllocationType::HOST});
+    std::memset(fake_input->input_ids->data(), 0, fake_input->input_ids->sizeBytes());
+    fake_input->generate_config               = make_shared<GenerateConfig>();
+    fake_input->generate_config->max_new_tokens = 3;
+    fake_input->generate_config->top_k = 1;
+    auto stream = enqueue(fake_input);
+    while(!stream->finished()) {
+        FT_LOG_INFO("wait load balance int run over for 1s");
+        this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    FT_LOG_INFO("init load balance done and (StepPerMin: %ld , StepLatencyUs: %ld)", step_recorder_.getStepPerMin(), step_recorder_.getStepLatency());
 }
 
 void NormalEngine::initCacheManager(size_t kv_cache_mem_size) {
@@ -157,8 +177,9 @@ absl::Status NormalEngine::step() {
     FT_LOG_DEBUG(__PRETTY_FUNCTION__);
     list<GenerateStreamPtr> streams;
     if (device_->getDeviceProperties().tp_rank == 0) {
-        if (scheduler_->empty()) {
+        if (scheduler_->empty() || step_recorder_.empty()) {
             step_recorder_.reset();
+            step_recorder_.addStepTime(autil::TimeUtility::currentTimeInMicroSeconds());
         }
         CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         if (streams.empty()) {
@@ -167,14 +188,16 @@ absl::Status NormalEngine::step() {
     }
     int64_t step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     auto status = executor_->process(streams);
-    auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
-    for (auto& stream: streams) {
-        if (stream->finished()) {
-            step_recorder_.addStepCount(stream->iterCount());
+    if (device_->getDeviceProperties().tp_rank == 0) {
+        auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
+        reportMetrics({false, false, step_latency});
+        for (auto& stream: streams) {
+            if (stream->finished()) {
+                step_recorder_.addStepCount(stream->iterCount());
+            }
         }
+        step_recorder_.addStepTime(autil::TimeUtility::currentTimeInMicroSeconds());
     }
-    step_recorder_.addStepTime(autil::TimeUtility::currentTimeInMicroSeconds());
-    reportMetrics({false, false, step_latency});
     return status;
 }
 
